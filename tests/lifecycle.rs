@@ -6,7 +6,7 @@ use simard::{
     InMemoryPromptAssetStore, LocalProcessHarnessAdapter, LocalRuntime, ManifestContract,
     MemoryPolicy, MemoryScope, MemoryStore, OperatingMode, PromptAsset, PromptAssetRef, Provenance,
     ReflectiveRuntime, RuntimePorts, RuntimeRequest, RuntimeState, RuntimeTopology, SessionPhase,
-    SimardError, capability_set,
+    SimardError, UuidSessionIdGenerator, capability_set,
 };
 
 fn manifest() -> IdentityManifest {
@@ -72,7 +72,13 @@ fn local_runtime_runs_session_and_persists_boundaries() {
     );
 
     let mut runtime = LocalRuntime::compose(
-        RuntimePorts::new(prompts, memory.clone(), evidence.clone(), base_types),
+        RuntimePorts::new(
+            prompts,
+            memory.clone(),
+            evidence.clone(),
+            base_types,
+            Arc::new(UuidSessionIdGenerator),
+        ),
         request,
     )
     .expect("composition should succeed");
@@ -180,6 +186,10 @@ fn local_runtime_runs_session_and_persists_boundaries() {
         .expect("stop should succeed when runtime is idle");
     let stopped = runtime.snapshot().expect("snapshot should still work");
     assert_eq!(stopped.runtime_state, RuntimeState::Stopped);
+    assert_eq!(
+        stopped.manifest_contract.freshness.state,
+        FreshnessState::Stale
+    );
 
     let error = runtime.run("should fail after stop").unwrap_err();
     assert_eq!(
@@ -212,7 +222,13 @@ fn stopped_runtime_surfaces_dedicated_lifecycle_errors() {
     );
 
     let mut runtime = LocalRuntime::compose(
-        RuntimePorts::new(prompts, memory, evidence, base_types),
+        RuntimePorts::new(
+            prompts,
+            memory,
+            evidence,
+            base_types,
+            Arc::new(UuidSessionIdGenerator),
+        ),
         request,
     )
     .expect("composition should succeed");
@@ -245,5 +261,52 @@ fn stopped_runtime_surfaces_dedicated_lifecycle_errors() {
         SimardError::RuntimeStopped {
             action: "stop".to_string(),
         }
+    );
+}
+
+#[test]
+fn runtime_can_stop_before_start_and_preserve_a_stale_snapshot() {
+    let prompts = Arc::new(InMemoryPromptAssetStore::new([PromptAsset::new(
+        "engineer-system",
+        "simard/engineer_system.md",
+        "You are Simard.",
+    )]));
+    let memory = Arc::new(InMemoryMemoryStore::try_default().expect("store should initialize"));
+    let evidence = Arc::new(InMemoryEvidenceStore::try_default().expect("store should initialize"));
+    let mut base_types = BaseTypeRegistry::default();
+    base_types.register(
+        LocalProcessHarnessAdapter::single_process("local-harness")
+            .expect("adapter should initialize"),
+    );
+
+    let request = RuntimeRequest::new(
+        manifest(),
+        BaseTypeId::new("local-harness"),
+        RuntimeTopology::SingleProcess,
+    );
+
+    let mut runtime = LocalRuntime::compose(
+        RuntimePorts::new(
+            prompts,
+            memory,
+            evidence,
+            base_types,
+            Arc::new(UuidSessionIdGenerator),
+        ),
+        request,
+    )
+    .expect("composition should succeed");
+
+    runtime
+        .stop()
+        .expect("stopping before start should still be a valid lifecycle boundary");
+
+    let snapshot = runtime
+        .snapshot()
+        .expect("snapshot should remain available");
+    assert_eq!(snapshot.runtime_state, RuntimeState::Stopped);
+    assert_eq!(
+        snapshot.manifest_contract.freshness.state,
+        FreshnessState::Stale
     );
 }

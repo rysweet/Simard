@@ -3,7 +3,7 @@ use std::fmt::{self, Display, Formatter};
 
 use crate::error::{SimardError, SimardResult};
 use crate::identity::OperatingMode;
-use crate::metadata::{BackendDescriptor, Freshness, Provenance};
+use crate::metadata::{BackendDescriptor, Freshness};
 use crate::prompt_assets::PromptAssetRef;
 use crate::runtime::RuntimeTopology;
 use crate::session::SessionId;
@@ -109,9 +109,9 @@ impl LocalProcessHarnessAdapter {
         supported_topologies: impl IntoIterator<Item = RuntimeTopology>,
     ) -> SimardResult<Self> {
         let id = BaseTypeId::new(id);
-        let backend = BackendDescriptor::new(
+        let backend = BackendDescriptor::for_runtime_type::<Self>(
             id.to_string(),
-            Provenance::injected(format!("base-type-registry:{}", id)),
+            format!("registered-base-type:{id}"),
             Freshness::now()?,
         );
         Ok(Self {

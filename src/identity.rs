@@ -45,19 +45,38 @@ impl ManifestContract {
         provenance: Provenance,
         freshness: Freshness,
     ) -> SimardResult<Self> {
-        let entrypoint = required_contract_field("entrypoint", entrypoint.into())?;
-        let composition = required_contract_field("composition", composition.into())?;
+        let entrypoint = required_entrypoint(entrypoint.into())?;
+        let composition = required_composition(composition.into())?;
         if precedence.is_empty() {
             return Err(SimardError::InvalidManifestContract {
                 field: "precedence".to_string(),
                 reason: "at least one precedence value is required".to_string(),
             });
         }
+        let mut seen_precedence = BTreeSet::new();
         let precedence = precedence
             .into_iter()
-            .map(|value| required_contract_field("precedence", value))
+            .map(|value| {
+                let value = required_contract_field("precedence", value)?;
+                if !value.contains(':') {
+                    return Err(SimardError::InvalidManifestContract {
+                        field: "precedence".to_string(),
+                        reason: "precedence entries must look like 'key:value'".to_string(),
+                    });
+                }
+                if !seen_precedence.insert(value.clone()) {
+                    return Err(SimardError::InvalidManifestContract {
+                        field: "precedence".to_string(),
+                        reason: format!("duplicate precedence value '{value}'"),
+                    });
+                }
+                Ok(value)
+            })
             .collect::<SimardResult<Vec<_>>>()?;
-        let provenance_source = required_contract_field("provenance.source", provenance.source)?;
+        let provenance_source = required_provenance_source(required_contract_field(
+            "provenance.source",
+            provenance.source,
+        )?)?;
         let provenance_locator = required_contract_field("provenance.locator", provenance.locator)?;
 
         Ok(Self {
@@ -67,6 +86,16 @@ impl ManifestContract {
             provenance: Provenance::new(provenance_source, provenance_locator),
             freshness,
         })
+    }
+
+    pub fn with_freshness(&self, freshness: Freshness) -> Self {
+        Self {
+            entrypoint: self.entrypoint.clone(),
+            composition: self.composition.clone(),
+            precedence: self.precedence.clone(),
+            provenance: self.provenance.clone(),
+            freshness,
+        }
     }
 }
 
@@ -79,6 +108,44 @@ fn required_contract_field(field: &str, value: String) -> SimardResult<String> {
         });
     }
     Ok(trimmed.to_string())
+}
+
+fn required_entrypoint(value: String) -> SimardResult<String> {
+    let entrypoint = required_contract_field("entrypoint", value)?;
+    if !entrypoint.contains("::") {
+        return Err(SimardError::InvalidManifestContract {
+            field: "entrypoint".to_string(),
+            reason: "expected a Rust-style module::function path".to_string(),
+        });
+    }
+    if entrypoint == "inline-manifest" {
+        return Err(SimardError::InvalidManifestContract {
+            field: "entrypoint".to_string(),
+            reason: "placeholder entrypoints are not allowed".to_string(),
+        });
+    }
+    Ok(entrypoint)
+}
+
+fn required_composition(value: String) -> SimardResult<String> {
+    let composition = required_contract_field("composition", value)?;
+    if !composition.contains("->") {
+        return Err(SimardError::InvalidManifestContract {
+            field: "composition".to_string(),
+            reason: "expected a 'component -> component' composition chain".to_string(),
+        });
+    }
+    Ok(composition)
+}
+
+fn required_provenance_source(value: String) -> SimardResult<String> {
+    if value == "inline" {
+        return Err(SimardError::InvalidManifestContract {
+            field: "provenance.source".to_string(),
+            reason: "placeholder provenance sources are not allowed".to_string(),
+        });
+    }
+    Ok(value)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

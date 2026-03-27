@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 use crate::error::{SimardError, SimardResult};
-use crate::metadata::{BackendDescriptor, Freshness, Provenance};
+use crate::metadata::{BackendDescriptor, Freshness};
 use crate::session::{SessionId, SessionPhase};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -48,9 +48,9 @@ impl InMemoryMemoryStore {
     }
 
     pub fn try_default() -> SimardResult<Self> {
-        Ok(Self::new(BackendDescriptor::new(
+        Ok(Self::new(BackendDescriptor::for_runtime_type::<Self>(
             "memory::in-memory",
-            Provenance::injected("runtime-port:memory-store"),
+            "runtime-port:memory-store",
             Freshness::now()?,
         )))
     }

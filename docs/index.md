@@ -34,7 +34,7 @@ Today Simard provides:
 
 ## Key runtime facts
 
-- `src/main.rs` is the thin CLI wrapper; `bootstrap::assemble_local_runtime` performs runtime assembly
+- `src/main.rs` is the thin CLI wrapper; `bootstrap::run_local_session` owns the run loop and `simard::bootstrap::assemble_local_runtime` remains the reflected assembly boundary
 - defaults are startup choices, never silent runtime recovery
 - reflection metadata is derived from the active runtime wiring, not placeholder labels
 - post-stop `start()`, `run()`, and repeated `stop()` surface `SimardError::RuntimeStopped`

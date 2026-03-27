@@ -7,9 +7,10 @@ use crate::error::{SimardError, SimardResult};
 use crate::evidence::{EvidenceRecord, EvidenceSource, EvidenceStore};
 use crate::identity::IdentityManifest;
 use crate::memory::{MemoryRecord, MemoryScope, MemoryStore};
+use crate::metadata::{Freshness, FreshnessState};
 use crate::prompt_assets::{PromptAssetRef, PromptAssetStore};
 use crate::reflection::{ReflectionReport, ReflectionSnapshot, ReflectiveRuntime};
-use crate::session::{SessionIdGenerator, SessionPhase, SessionRecord, UuidSessionIdGenerator};
+use crate::session::{SessionIdGenerator, SessionPhase, SessionRecord};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum RuntimeTopology {
@@ -62,14 +63,22 @@ impl RuntimeState {
         matches!(
             (self, next),
             (Self::Initializing, Self::Ready)
+                | (Self::Initializing, Self::Stopping)
                 | (Self::Ready, Self::Active)
-                | (Self::Active, Self::Reflecting)
-                | (Self::Reflecting, Self::Persisting)
-                | (Self::Persisting, Self::Ready)
                 | (Self::Ready, Self::Stopping)
+                | (Self::Active, Self::Reflecting)
+                | (Self::Active, Self::Stopping)
+                | (Self::Reflecting, Self::Persisting)
+                | (Self::Reflecting, Self::Stopping)
+                | (Self::Persisting, Self::Ready)
+                | (Self::Persisting, Self::Stopping)
                 | (Self::Failed, Self::Stopping)
                 | (Self::Stopping, Self::Stopped)
-                | (_, Self::Failed)
+                | (Self::Initializing, Self::Failed)
+                | (Self::Ready, Self::Failed)
+                | (Self::Active, Self::Failed)
+                | (Self::Reflecting, Self::Failed)
+                | (Self::Persisting, Self::Failed)
         )
     }
 }
@@ -107,13 +116,14 @@ impl RuntimePorts {
         memory_store: Arc<dyn MemoryStore>,
         evidence_store: Arc<dyn EvidenceStore>,
         base_types: BaseTypeRegistry,
+        session_ids: Arc<dyn SessionIdGenerator>,
     ) -> Self {
         Self::with_session_ids(
             prompt_store,
             memory_store,
             evidence_store,
             base_types,
-            Arc::new(UuidSessionIdGenerator),
+            session_ids,
         )
     }
 
@@ -325,8 +335,9 @@ impl LocalRuntime {
             })
         })();
 
-        if result.is_err() && self.state != RuntimeState::Stopped {
-            self.state = RuntimeState::Failed;
+        if result.is_err() && !matches!(self.state, RuntimeState::Stopped | RuntimeState::Stopping)
+        {
+            let _ = self.transition(RuntimeState::Failed);
         }
 
         result
@@ -368,6 +379,12 @@ impl LocalRuntime {
                 .count_for_session(&active_session.id)?,
             None => 0,
         };
+        let manifest_freshness = match self.state {
+            RuntimeState::Stopped | RuntimeState::Failed => {
+                Freshness::observed(FreshnessState::Stale)?
+            }
+            _ => Freshness::observed(FreshnessState::Current)?,
+        };
 
         Ok(ReflectionSnapshot {
             identity_name: self.request.manifest.name.clone(),
@@ -380,7 +397,11 @@ impl LocalRuntime {
                 .iter()
                 .map(|asset| asset.id.clone())
                 .collect(),
-            manifest_contract: self.request.manifest.contract.clone(),
+            manifest_contract: self
+                .request
+                .manifest
+                .contract
+                .with_freshness(manifest_freshness),
             evidence_records,
             memory_records,
             adapter_backend: self.adapter.descriptor().backend.clone(),

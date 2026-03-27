@@ -2,7 +2,7 @@ use std::sync::Mutex;
 
 use crate::base_types::BaseTypeId;
 use crate::error::{SimardError, SimardResult};
-use crate::metadata::{BackendDescriptor, Freshness, Provenance};
+use crate::metadata::{BackendDescriptor, Freshness};
 use crate::session::{SessionId, SessionPhase};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -45,9 +45,9 @@ impl InMemoryEvidenceStore {
     }
 
     pub fn try_default() -> SimardResult<Self> {
-        Ok(Self::new(BackendDescriptor::new(
+        Ok(Self::new(BackendDescriptor::for_runtime_type::<Self>(
             "evidence::in-memory",
-            Provenance::injected("runtime-port:evidence-store"),
+            "runtime-port:evidence-store",
             Freshness::now()?,
         )))
     }

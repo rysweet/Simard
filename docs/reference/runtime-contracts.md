@@ -64,7 +64,7 @@ pub struct ManifestContract {
 
 Notes:
 
-- the CLI bootstrap path uses `bootstrap::assemble_local_runtime` as the entrypoint
+- the CLI bootstrap path uses `simard::bootstrap::assemble_local_runtime` as the entrypoint
 - provenance and freshness stay inside the contract so reflection carries a single source of truth
 - invalid empty fields fail with `SimardError::InvalidManifestContract`
 
@@ -134,6 +134,7 @@ Rules:
 - `SessionId::parse(...)` accepts a bare UUID or a `session-<uuid>` value and canonicalizes to `session-<uuid>`
 - invalid values fail with `SimardError::InvalidSessionId`
 - custom `SessionIdGenerator` implementations must return valid `SessionId` values
+- the session ID strategy is injected through `RuntimePorts`; the local bootstrap path opts into `UuidSessionIdGenerator` explicitly
 
 ## Runtime lifecycle
 
@@ -198,6 +199,7 @@ Reflection rules:
 - `memory_backend` comes from the live memory store descriptor
 - `evidence_backend` comes from the live evidence store descriptor
 - reflection reports live wiring, not placeholder labels
+- stopped or failed snapshots mark manifest freshness as `Stale`
 
 ## Errors
 
@@ -238,7 +240,7 @@ let snapshot = runtime.snapshot()?;
 assert_eq!(snapshot.runtime_state.to_string(), "ready");
 assert_eq!(
     snapshot.manifest_contract.entrypoint,
-    "bootstrap::assemble_local_runtime"
+    "simard::bootstrap::assemble_local_runtime"
 );
 assert_eq!(snapshot.manifest_contract.provenance.source, "bootstrap");
 assert_eq!(snapshot.manifest_contract.freshness.state, FreshnessState::Current);

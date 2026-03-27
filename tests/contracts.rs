@@ -5,7 +5,7 @@ use simard::{
     InMemoryMemoryStore, InMemoryPromptAssetStore, LocalProcessHarnessAdapter, LocalRuntime,
     ManifestContract, MemoryPolicy, OperatingMode, PromptAsset, PromptAssetRef, Provenance,
     RuntimePorts, RuntimeRequest, RuntimeTopology, SessionId, SessionIdGenerator, SessionPhase,
-    SessionRecord, SimardError, capability_set,
+    SessionRecord, SimardError, UuidSessionIdGenerator, capability_set,
 };
 use uuid::Uuid;
 
@@ -75,7 +75,13 @@ fn compose_rejects_missing_capability() {
     );
 
     let error = match LocalRuntime::compose(
-        RuntimePorts::new(prompts, memory, evidence, base_types),
+        RuntimePorts::new(
+            prompts,
+            memory,
+            evidence,
+            base_types,
+            Arc::new(UuidSessionIdGenerator),
+        ),
         request,
     ) {
         Ok(_) => panic!("composition should have failed"),
@@ -109,7 +115,13 @@ fn start_rejects_missing_prompt_asset() {
     );
 
     let mut runtime = LocalRuntime::compose(
-        RuntimePorts::new(prompts, memory, evidence, base_types),
+        RuntimePorts::new(
+            prompts,
+            memory,
+            evidence,
+            base_types,
+            Arc::new(UuidSessionIdGenerator),
+        ),
         request,
     )
     .expect("composition should succeed before prompt loading");
@@ -253,6 +265,41 @@ fn freshness_model_tracks_state_and_not_just_observation_time() {
 }
 
 #[test]
+fn manifest_contract_rejects_placeholder_or_thin_fields() {
+    let entrypoint_error = ManifestContract::new(
+        "inline-manifest",
+        "bootstrap-config -> runtime",
+        vec!["mode:explicit-config".to_string()],
+        Provenance::new("bootstrap", "contracts::placeholder"),
+        simard::Freshness::now().expect("freshness should be observable"),
+    )
+    .expect_err("placeholder entrypoints should fail");
+    assert_eq!(
+        entrypoint_error,
+        SimardError::InvalidManifestContract {
+            field: "entrypoint".to_string(),
+            reason: "expected a Rust-style module::function path".to_string(),
+        }
+    );
+
+    let provenance_error = ManifestContract::new(
+        "simard::bootstrap::assemble_local_runtime",
+        "bootstrap-config -> runtime",
+        vec!["mode:explicit-config".to_string()],
+        Provenance::new("inline", "contracts::placeholder"),
+        simard::Freshness::now().expect("freshness should be observable"),
+    )
+    .expect_err("placeholder provenance should fail");
+    assert_eq!(
+        provenance_error,
+        SimardError::InvalidManifestContract {
+            field: "provenance.source".to_string(),
+            reason: "placeholder provenance sources are not allowed".to_string(),
+        }
+    );
+}
+
+#[test]
 fn session_ids_can_be_canonicalized_from_uuid_strings() {
     let uuid = Uuid::parse_str("018f1f85-86f4-7ef8-9d4d-69a79d7ddf85").expect("uuid should parse");
 
@@ -260,5 +307,20 @@ fn session_ids_can_be_canonicalized_from_uuid_strings() {
         SessionId::parse("018f1f85-86f4-7ef8-9d4d-69a79d7ddf85")
             .expect("bare uuid should be accepted"),
         SessionId::from_uuid(uuid)
+    );
+}
+
+#[test]
+fn session_id_generator_is_not_hidden_inside_runtime_ports() {
+    let runtime_rs = include_str!("../src/runtime.rs");
+    let bootstrap_rs = include_str!("../src/bootstrap.rs");
+
+    assert!(
+        !runtime_rs.contains("Arc::new(UuidSessionIdGenerator)"),
+        "runtime ports should not silently create a process-local session id generator"
+    );
+    assert!(
+        bootstrap_rs.contains("Arc::new(UuidSessionIdGenerator)"),
+        "the local bootstrap path should opt in explicitly to the local UUID session id strategy"
     );
 }

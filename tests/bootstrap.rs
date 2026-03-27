@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use simard::{
     BootstrapConfig, BootstrapInputs, BootstrapMode, BuiltinIdentityLoader, ConfigValueSource,
     IdentityLoadRequest, IdentityLoader, ManifestContract, Provenance, ReflectiveRuntime,
-    RuntimeState, assemble_local_runtime, bootstrap_entrypoint,
+    RuntimeState, assemble_local_runtime, bootstrap_entrypoint, run_local_session,
 };
 
 #[test]
@@ -132,6 +132,10 @@ fn main_is_thin_and_bootstrap_owns_identity_and_runtime_assembly() {
         "IdentityLoadRequest",
         "RuntimeRequest::new",
         "LocalRuntime::compose",
+        "assemble_local_runtime",
+        ".start()",
+        ".run(",
+        ".stop()",
     ] {
         assert!(
             !main_rs.contains(forbidden),
@@ -144,10 +148,34 @@ fn main_is_thin_and_bootstrap_owns_identity_and_runtime_assembly() {
         "IdentityLoadRequest",
         "RuntimeRequest::new",
         "LocalRuntime::compose",
+        "run_local_session",
     ] {
         assert!(
             bootstrap_rs.contains(required),
             "bootstrap.rs should own {required} after identity/runtime extraction"
         );
     }
+}
+
+#[test]
+fn bootstrap_run_local_session_executes_the_cli_lifecycle() {
+    let config = BootstrapConfig::resolve(BootstrapInputs {
+        prompt_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")),
+        objective: Some("exercise the bootstrap run loop".to_string()),
+        identity: Some("simard-engineer".to_string()),
+        ..BootstrapInputs::default()
+    })
+    .expect("explicit bootstrap config should resolve");
+
+    let execution = run_local_session(&config).expect("bootstrap run loop should succeed");
+
+    assert_eq!(execution.snapshot.runtime_state, RuntimeState::Ready);
+    assert_eq!(
+        execution.stopped_snapshot.runtime_state,
+        RuntimeState::Stopped
+    );
+    assert_eq!(
+        execution.stopped_snapshot.manifest_contract.freshness.state,
+        simard::FreshnessState::Stale
+    );
 }

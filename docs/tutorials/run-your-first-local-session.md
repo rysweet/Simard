@@ -50,7 +50,7 @@ Snapshot: state=ready, topology=single-process, base_type=local-harness
 Shutdown: stopped
 ```
 
-**Checkpoint**: this is the real CLI path. `src/main.rs` is the thin wrapper; `bootstrap::assemble_local_runtime` performs runtime assembly, then the binary runs once, prints the snapshot, and stops cleanly.
+**Checkpoint**: this is the real CLI path. `src/main.rs` is the thin wrapper; `bootstrap::run_local_session` owns the run loop, and `simard::bootstrap::assemble_local_runtime` remains the reflected assembly boundary.
 
 ## Step 2: Opt in to builtin defaults
 
@@ -93,6 +93,8 @@ assert_eq!(
 
 **Checkpoint**: stop is an observable lifecycle boundary. Snapshot inspection still works, but execution does not resume.
 
+After shutdown, the reflected manifest freshness becomes `Stale` so callers can tell they are looking at post-stop metadata instead of a live runtime.
+
 ## Step 4: Inspect truthful reflection metadata
 
 After a successful run, reflection reports the assembled contract and backend descriptors:
@@ -104,7 +106,7 @@ let snapshot = runtime.snapshot()?;
 
 assert_eq!(
     snapshot.manifest_contract.entrypoint,
-    "bootstrap::assemble_local_runtime"
+    "simard::bootstrap::assemble_local_runtime"
 );
 assert_eq!(snapshot.manifest_contract.provenance.source, "bootstrap");
 assert_eq!(snapshot.manifest_contract.freshness.state, FreshnessState::Current);

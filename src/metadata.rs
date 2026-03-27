@@ -1,3 +1,4 @@
+use std::any::type_name;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{SimardError, SimardResult};
@@ -27,6 +28,16 @@ impl Provenance {
     pub fn runtime(locator: impl Into<String>) -> Self {
         Self::new("runtime", locator)
     }
+
+    pub fn runtime_type<T>(detail: impl AsRef<str>) -> Self {
+        let detail = detail.as_ref().trim();
+        let locator = if detail.is_empty() {
+            type_name::<T>().to_string()
+        } else {
+            format!("{}::{detail}", type_name::<T>())
+        };
+        Self::runtime(locator)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -52,6 +63,10 @@ impl Freshness {
 
     pub fn stale() -> SimardResult<Self> {
         Self::from_system_time(FreshnessState::Stale, SystemTime::now())
+    }
+
+    pub fn observed(state: FreshnessState) -> SimardResult<Self> {
+        Self::from_system_time(state, SystemTime::now())
     }
 
     pub fn from_system_time(state: FreshnessState, observed_at: SystemTime) -> SimardResult<Self> {
@@ -82,6 +97,14 @@ impl BackendDescriptor {
             provenance,
             freshness,
         }
+    }
+
+    pub fn for_runtime_type<T>(
+        identity: impl Into<String>,
+        detail: impl AsRef<str>,
+        freshness: Freshness,
+    ) -> Self {
+        Self::new(identity, Provenance::runtime_type::<T>(detail), freshness)
     }
 }
 

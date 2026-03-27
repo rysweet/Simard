@@ -12,14 +12,15 @@ use crate::identity::{
 use crate::memory::InMemoryMemoryStore;
 use crate::metadata::{Freshness, Provenance};
 use crate::prompt_assets::FilePromptAssetStore;
+use crate::reflection::{ReflectionSnapshot, ReflectiveRuntime};
 use crate::runtime::{
-    BaseTypeRegistry, LocalRuntime, RuntimePorts, RuntimeRequest, RuntimeTopology,
+    BaseTypeRegistry, LocalRuntime, RuntimePorts, RuntimeRequest, RuntimeTopology, SessionOutcome,
 };
+use crate::session::UuidSessionIdGenerator;
 
 const DEFAULT_IDENTITY: &str = "simard-engineer";
 const DEFAULT_OBJECTIVE: &str = "bootstrap the Simard engineer loop";
 const LOCAL_BASE_TYPE: &str = "local-harness";
-const BOOTSTRAP_ENTRYPOINT: &str = "bootstrap::assemble_local_runtime";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BootstrapMode {
@@ -98,6 +99,13 @@ pub struct BootstrapConfig {
     pub identity: String,
     pub prompt_root: ConfigValue<PathBuf>,
     pub objective: ConfigValue<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalSessionExecution {
+    pub outcome: SessionOutcome,
+    pub snapshot: ReflectionSnapshot,
+    pub stopped_snapshot: ReflectionSnapshot,
 }
 
 impl BootstrapConfig {
@@ -182,12 +190,12 @@ pub fn assemble_local_runtime(config: &BootstrapConfig) -> SimardResult<LocalRun
     base_types.register(LocalProcessHarnessAdapter::single_process(LOCAL_BASE_TYPE)?);
 
     let contract = ManifestContract::new(
-        BOOTSTRAP_ENTRYPOINT,
+        bootstrap_entrypoint(),
         "bootstrap-config -> identity-loader -> runtime-ports -> local-runtime",
         config.manifest_precedence(),
         Provenance::new(
             "bootstrap",
-            format!("{BOOTSTRAP_ENTRYPOINT}:{}", config.identity),
+            format!("{}:{}", bootstrap_entrypoint(), config.identity),
         ),
         Freshness::now()?,
     )?;
@@ -205,13 +213,35 @@ pub fn assemble_local_runtime(config: &BootstrapConfig) -> SimardResult<LocalRun
     );
 
     LocalRuntime::compose(
-        RuntimePorts::new(prompt_store, memory_store, evidence_store, base_types),
+        RuntimePorts::new(
+            prompt_store,
+            memory_store,
+            evidence_store,
+            base_types,
+            Arc::new(UuidSessionIdGenerator),
+        ),
         request,
     )
 }
 
+pub fn run_local_session(config: &BootstrapConfig) -> SimardResult<LocalSessionExecution> {
+    let mut runtime = assemble_local_runtime(config)?;
+    runtime.start()?;
+
+    let outcome = runtime.run(config.objective.value.clone())?;
+    let snapshot = runtime.snapshot()?;
+    runtime.stop()?;
+    let stopped_snapshot = runtime.snapshot()?;
+
+    Ok(LocalSessionExecution {
+        outcome,
+        snapshot,
+        stopped_snapshot,
+    })
+}
+
 pub fn bootstrap_entrypoint() -> &'static str {
-    BOOTSTRAP_ENTRYPOINT
+    concat!(module_path!(), "::assemble_local_runtime")
 }
 
 fn read_optional_utf8_env(key: &'static str) -> SimardResult<Option<String>> {

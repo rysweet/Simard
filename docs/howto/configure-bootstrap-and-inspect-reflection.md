@@ -79,7 +79,7 @@ let snapshot = runtime.snapshot()?;
 
 assert_eq!(
     snapshot.manifest_contract.entrypoint,
-    "bootstrap::assemble_local_runtime"
+    "simard::bootstrap::assemble_local_runtime"
 );
 assert_eq!(snapshot.manifest_contract.provenance.source, "bootstrap");
 assert_eq!(
@@ -101,6 +101,10 @@ use simard::{RuntimeState, SimardError};
 runtime.stop()?;
 
 assert_eq!(runtime.snapshot()?.runtime_state, RuntimeState::Stopped);
+assert_eq!(
+    runtime.snapshot()?.manifest_contract.freshness.state,
+    simard::FreshnessState::Stale
+);
 assert_eq!(
     runtime.start().unwrap_err(),
     SimardError::RuntimeStopped {
@@ -128,7 +132,7 @@ If the identity is unknown, Simard returns `SimardError::UnknownIdentity`. It do
 
 ### For injected session IDs
 
-A valid session ID is canonicalized to `session-<uuid>`.
+A valid session ID is canonicalized to `session-<uuid>`, and the local UUID strategy is injected explicitly through bootstrap/runtime composition instead of being created as a hidden runtime default.
 
 ```rust
 use simard::SessionId;

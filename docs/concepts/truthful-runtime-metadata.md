@@ -34,7 +34,7 @@ The current repo guarantees:
 - freshness acquisition fails explicitly instead of fabricating an epoch timestamp
 - reflection reports `adapter_backend`, `memory_backend`, and `evidence_backend` from live wiring
 - memory and evidence stores already report truthful backend descriptors
-- `bootstrap::assemble_local_runtime` is the assembly boundary reflected by the CLI path
+- `simard::bootstrap::assemble_local_runtime` is the assembly boundary reflected by the CLI path
 - `stop()` moves the runtime into `Stopped`
 - `snapshot()` still works after `stop()`
 - post-stop calls surface `RuntimeStopped`
@@ -68,6 +68,7 @@ The runtime addresses that boundary in two ways:
 
 - `UuidSessionIdGenerator` emits UUID v7 values
 - `SessionId::parse(...)` accepts only UUID-based values and canonicalizes them to `session-<uuid>`
+- the local UUID strategy is selected explicitly at bootstrap instead of being hidden inside runtime composition defaults
 
 ## Why stop remains a lifecycle contract
 
@@ -99,6 +100,7 @@ Keeping those answers together makes reflection harder to fake accidentally and 
 - keep composition behind the bootstrap assembly boundary
 - validate session IDs at parsing and injection boundaries
 - preserve truthful store descriptors and extend the same rule to adapters
+- keep session ID allocation explicit at composition boundaries
 - surface stopped runtimes with a dedicated lifecycle error
 
 ## See also
