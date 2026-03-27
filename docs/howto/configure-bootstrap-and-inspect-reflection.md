@@ -31,6 +31,7 @@ Provide both the prompt root and objective yourself.
 ```bash
 SIMARD_PROMPT_ROOT="$PWD/prompt_assets" \
 SIMARD_OBJECTIVE="verify current reflection metadata" \
+SIMARD_IDENTITY="simard-engineer" \
 cargo run --quiet
 ```
 
@@ -154,6 +155,7 @@ Invalid values fail with `SimardError::InvalidSessionId`.
 ```bash
 export SIMARD_PROMPT_ROOT="$PWD/prompt_assets"
 export SIMARD_OBJECTIVE="verify current reflection metadata"
+export SIMARD_IDENTITY="simard-engineer"
 ```
 
 Or opt in explicitly:

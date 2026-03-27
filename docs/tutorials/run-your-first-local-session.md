@@ -34,6 +34,7 @@ From the repository root, start Simard with a real prompt asset directory and an
 ```bash
 SIMARD_PROMPT_ROOT="$PWD/prompt_assets" \
 SIMARD_OBJECTIVE="exercise the local runtime" \
+SIMARD_IDENTITY="simard-engineer" \
 cargo run --quiet
 ```
 
