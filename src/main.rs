@@ -1,35 +1,8 @@
-use std::sync::Arc;
-
-use simard::{
-    BaseTypeId, BaseTypeRegistry, BootstrapConfig, BuiltinIdentityLoader, FilePromptAssetStore,
-    IdentityLoadRequest, IdentityLoader, InMemoryEvidenceStore, InMemoryMemoryStore,
-    LocalProcessHarnessAdapter, LocalRuntime, ReflectiveRuntime, RuntimePorts, RuntimeRequest,
-    RuntimeTopology,
-};
+use simard::{BootstrapConfig, ReflectiveRuntime, assemble_local_runtime};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = BootstrapConfig::from_env()?;
-    let prompt_store = Arc::new(FilePromptAssetStore::new(config.prompt_root.value.clone()));
-    let memory_store = Arc::new(InMemoryMemoryStore::default());
-    let evidence_store = Arc::new(InMemoryEvidenceStore::default());
-
-    let mut base_types = BaseTypeRegistry::default();
-    base_types.register(LocalProcessHarnessAdapter::single_process("local-harness"));
-
-    let manifest = BuiltinIdentityLoader.load(&IdentityLoadRequest::new(
-        config.identity.clone(),
-        env!("CARGO_PKG_VERSION"),
-        config.manifest_precedence(),
-    ))?;
-
-    let request = RuntimeRequest::new(
-        manifest,
-        BaseTypeId::new("local-harness"),
-        RuntimeTopology::SingleProcess,
-    );
-
-    let ports = RuntimePorts::new(prompt_store, memory_store, evidence_store, base_types);
-    let mut runtime = LocalRuntime::compose(ports, request)?;
+    let mut runtime = assemble_local_runtime(&config)?;
     runtime.start()?;
 
     let outcome = runtime.run(config.objective.value.clone())?;

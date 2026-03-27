@@ -1,7 +1,7 @@
 use crate::base_types::BaseTypeId;
 use crate::error::SimardResult;
 use crate::identity::ManifestContract;
-use crate::metadata::{BackendDescriptor, Freshness, Provenance};
+use crate::metadata::BackendDescriptor;
 use crate::prompt_assets::PromptAssetId;
 use crate::runtime::{RuntimeState, RuntimeTopology};
 use crate::session::SessionPhase;
@@ -15,10 +15,9 @@ pub struct ReflectionSnapshot {
     pub session_phase: Option<SessionPhase>,
     pub prompt_assets: Vec<PromptAssetId>,
     pub manifest_contract: ManifestContract,
-    pub manifest_provenance: Provenance,
-    pub manifest_freshness: Freshness,
     pub evidence_records: usize,
     pub memory_records: usize,
+    pub adapter_backend: BackendDescriptor,
     pub memory_backend: BackendDescriptor,
     pub evidence_backend: BackendDescriptor,
 }

@@ -223,6 +223,7 @@ impl LocalRuntime {
     }
 
     pub fn start(&mut self) -> SimardResult<()> {
+        self.ensure_not_stopped("start")?;
         self.request
             .manifest
             .prompt_assets
@@ -234,11 +235,19 @@ impl LocalRuntime {
     }
 
     pub fn stop(&mut self) -> SimardResult<()> {
+        if matches!(self.state, RuntimeState::Stopped | RuntimeState::Stopping) {
+            return Err(SimardError::RuntimeStopped {
+                action: "stop".to_string(),
+            });
+        }
+
         self.transition(RuntimeState::Stopping)?;
         self.transition(RuntimeState::Stopped)
     }
 
     pub fn run(&mut self, objective: impl Into<String>) -> SimardResult<SessionOutcome> {
+        self.ensure_not_stopped("run")?;
+
         let result = (|| {
             self.transition(RuntimeState::Active)?;
 
@@ -316,11 +325,20 @@ impl LocalRuntime {
             })
         })();
 
-        if result.is_err() {
+        if result.is_err() && self.state != RuntimeState::Stopped {
             self.state = RuntimeState::Failed;
         }
 
         result
+    }
+
+    fn ensure_not_stopped(&self, action: &str) -> SimardResult<()> {
+        if matches!(self.state, RuntimeState::Stopped | RuntimeState::Stopping) {
+            return Err(SimardError::RuntimeStopped {
+                action: action.to_string(),
+            });
+        }
+        Ok(())
     }
 
     fn transition(&mut self, next: RuntimeState) -> SimardResult<()> {
@@ -340,16 +358,14 @@ impl LocalRuntime {
             Some(active_session) => self
                 .ports
                 .evidence_store
-                .list_for_session(&active_session.id)?
-                .len(),
+                .count_for_session(&active_session.id)?,
             None => 0,
         };
         let memory_records = match session {
             Some(active_session) => self
                 .ports
                 .memory_store
-                .list_for_session(&active_session.id)?
-                .len(),
+                .count_for_session(&active_session.id)?,
             None => 0,
         };
 
@@ -365,10 +381,9 @@ impl LocalRuntime {
                 .map(|asset| asset.id.clone())
                 .collect(),
             manifest_contract: self.request.manifest.contract.clone(),
-            manifest_provenance: self.request.manifest.provenance.clone(),
-            manifest_freshness: self.request.manifest.freshness,
             evidence_records,
             memory_records,
+            adapter_backend: self.adapter.descriptor().backend.clone(),
             memory_backend: self.ports.memory_store.descriptor(),
             evidence_backend: self.ports.evidence_store.descriptor(),
         })

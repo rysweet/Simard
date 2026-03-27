@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
 use std::fs;
+use std::path::Component;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -84,8 +85,17 @@ impl FilePromptAssetStore {
 
 impl PromptAssetStore for FilePromptAssetStore {
     fn load(&self, reference: &PromptAssetRef) -> SimardResult<PromptAsset> {
+        validate_prompt_asset_path(reference)?;
+
+        let root = self
+            .root
+            .canonicalize()
+            .map_err(|error| SimardError::PromptAssetRead {
+                path: self.root.clone(),
+                reason: error.to_string(),
+            })?;
         let path = self.root.join(&reference.relative_path);
-        let contents = fs::read_to_string(&path).map_err(|error| {
+        let canonical_path = path.canonicalize().map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 SimardError::PromptAssetMissing {
                     asset_id: reference.id.to_string(),
@@ -99,12 +109,50 @@ impl PromptAssetStore for FilePromptAssetStore {
             }
         })?;
 
+        if !canonical_path.starts_with(&root) {
+            return Err(SimardError::InvalidPromptAssetPath {
+                asset_id: reference.id.to_string(),
+                path: reference.relative_path.clone(),
+                reason: "path escapes configured prompt root".to_string(),
+            });
+        }
+
+        let contents =
+            fs::read_to_string(&canonical_path).map_err(|error| SimardError::PromptAssetRead {
+                path: canonical_path.clone(),
+                reason: error.to_string(),
+            })?;
+
         Ok(PromptAsset {
             id: reference.id.clone(),
             relative_path: reference.relative_path.clone(),
             contents,
         })
     }
+}
+
+fn validate_prompt_asset_path(reference: &PromptAssetRef) -> SimardResult<()> {
+    if reference.relative_path.is_absolute() {
+        return Err(SimardError::InvalidPromptAssetPath {
+            asset_id: reference.id.to_string(),
+            path: reference.relative_path.clone(),
+            reason: "expected a relative path inside the configured prompt root".to_string(),
+        });
+    }
+
+    if reference
+        .relative_path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    {
+        return Err(SimardError::InvalidPromptAssetPath {
+            asset_id: reference.id.to_string(),
+            path: reference.relative_path.clone(),
+            reason: "path traversal is not allowed".to_string(),
+        });
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Default)]

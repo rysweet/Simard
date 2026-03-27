@@ -12,6 +12,9 @@ pub enum SimardError {
         key: String,
         help: String,
     },
+    NonUnicodeConfigValue {
+        key: String,
+    },
     InvalidConfigValue {
         key: String,
         value: String,
@@ -20,11 +23,24 @@ pub enum SimardError {
     UnknownIdentity {
         requested: String,
     },
+    InvalidManifestContract {
+        field: String,
+        reason: String,
+    },
+    InvalidSessionId {
+        value: String,
+        reason: String,
+    },
     PromptAssetMissing {
         asset_id: String,
         path: PathBuf,
     },
     PromptAssetRead {
+        path: PathBuf,
+        reason: String,
+    },
+    InvalidPromptAssetPath {
+        asset_id: String,
         path: PathBuf,
         reason: String,
     },
@@ -47,12 +63,18 @@ pub enum SimardError {
         from: RuntimeState,
         to: RuntimeState,
     },
+    RuntimeStopped {
+        action: String,
+    },
     InvalidSessionTransition {
         from: SessionPhase,
         to: SessionPhase,
     },
     StoragePoisoned {
         store: String,
+    },
+    ClockBeforeUnixEpoch {
+        reason: String,
     },
 }
 
@@ -64,6 +86,9 @@ impl Display for SimardError {
             Self::MissingRequiredConfig { key, help } => {
                 write!(f, "missing required configuration '{key}': {help}")
             }
+            Self::NonUnicodeConfigValue { key } => {
+                write!(f, "configuration '{key}' must be valid UTF-8")
+            }
             Self::InvalidConfigValue { key, value, help } => {
                 write!(
                     f,
@@ -72,6 +97,12 @@ impl Display for SimardError {
             }
             Self::UnknownIdentity { requested } => {
                 write!(f, "identity '{requested}' is not registered")
+            }
+            Self::InvalidManifestContract { field, reason } => {
+                write!(f, "invalid manifest contract field '{field}': {reason}")
+            }
+            Self::InvalidSessionId { value, reason } => {
+                write!(f, "invalid session id '{value}': {reason}")
             }
             Self::PromptAssetMissing { asset_id, path } => {
                 write!(
@@ -87,6 +118,15 @@ impl Display for SimardError {
                     path.display()
                 )
             }
+            Self::InvalidPromptAssetPath {
+                asset_id,
+                path,
+                reason,
+            } => write!(
+                f,
+                "invalid prompt asset path for '{asset_id}' at {}: {reason}",
+                path.display()
+            ),
             Self::UnsupportedBaseType {
                 identity,
                 base_type,
@@ -114,11 +154,17 @@ impl Display for SimardError {
             Self::InvalidRuntimeTransition { from, to } => {
                 write!(f, "invalid runtime transition from '{from}' to '{to}'")
             }
+            Self::RuntimeStopped { action } => {
+                write!(f, "runtime is stopped and cannot '{action}'")
+            }
             Self::InvalidSessionTransition { from, to } => {
                 write!(f, "invalid session transition from '{from}' to '{to}'")
             }
             Self::StoragePoisoned { store } => {
                 write!(f, "storage lock for '{store}' is poisoned")
+            }
+            Self::ClockBeforeUnixEpoch { reason } => {
+                write!(f, "system clock is before UNIX epoch: {reason}")
             }
         }
     }

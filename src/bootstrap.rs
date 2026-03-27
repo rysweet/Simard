@@ -1,10 +1,25 @@
+use std::ffi::OsString;
 use std::fmt::{self, Display, Formatter};
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use crate::base_types::{BaseTypeId, LocalProcessHarnessAdapter};
 use crate::error::{SimardError, SimardResult};
+use crate::evidence::InMemoryEvidenceStore;
+use crate::identity::{
+    BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader, ManifestContract,
+};
+use crate::memory::InMemoryMemoryStore;
+use crate::metadata::{Freshness, Provenance};
+use crate::prompt_assets::FilePromptAssetStore;
+use crate::runtime::{
+    BaseTypeRegistry, LocalRuntime, RuntimePorts, RuntimeRequest, RuntimeTopology,
+};
 
 const DEFAULT_IDENTITY: &str = "simard-engineer";
 const DEFAULT_OBJECTIVE: &str = "bootstrap the Simard engineer loop";
+const LOCAL_BASE_TYPE: &str = "local-harness";
+const BOOTSTRAP_ENTRYPOINT: &str = "bootstrap::assemble_local_runtime";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BootstrapMode {
@@ -67,13 +82,13 @@ pub struct BootstrapInputs {
 }
 
 impl BootstrapInputs {
-    pub fn from_env() -> Self {
-        Self {
+    pub fn from_env() -> SimardResult<Self> {
+        Ok(Self {
             prompt_root: std::env::var_os("SIMARD_PROMPT_ROOT").map(PathBuf::from),
-            objective: std::env::var("SIMARD_OBJECTIVE").ok(),
-            mode: std::env::var("SIMARD_BOOTSTRAP_MODE").ok(),
-            identity: std::env::var("SIMARD_IDENTITY").ok(),
-        }
+            objective: read_optional_utf8_env("SIMARD_OBJECTIVE")?,
+            mode: read_optional_utf8_env("SIMARD_BOOTSTRAP_MODE")?,
+            identity: read_optional_utf8_env("SIMARD_IDENTITY")?,
+        })
     }
 }
 
@@ -87,7 +102,7 @@ pub struct BootstrapConfig {
 
 impl BootstrapConfig {
     pub fn from_env() -> SimardResult<Self> {
-        Self::resolve(BootstrapInputs::from_env())
+        Self::resolve(BootstrapInputs::from_env()?)
     }
 
     pub fn resolve(inputs: BootstrapInputs) -> SimardResult<Self> {
@@ -131,9 +146,18 @@ impl BootstrapConfig {
 
         Ok(Self {
             mode,
-            identity: inputs
-                .identity
-                .unwrap_or_else(|| DEFAULT_IDENTITY.to_string()),
+            identity: match inputs.identity {
+                Some(value) => value,
+                None if mode == BootstrapMode::BuiltinDefaults => DEFAULT_IDENTITY.to_string(),
+                None => {
+                    return Err(SimardError::MissingRequiredConfig {
+                        key: "SIMARD_IDENTITY".to_string(),
+                        help:
+                            "set SIMARD_IDENTITY or opt in with SIMARD_BOOTSTRAP_MODE=builtin-defaults"
+                                .to_string(),
+                    });
+                }
+            },
             prompt_root,
             objective,
         })
@@ -146,5 +170,87 @@ impl BootstrapConfig {
             format!("prompt-root:{}", self.prompt_root.source),
             format!("objective:{}", self.objective.source),
         ]
+    }
+}
+
+pub fn assemble_local_runtime(config: &BootstrapConfig) -> SimardResult<LocalRuntime> {
+    let prompt_store = Arc::new(FilePromptAssetStore::new(config.prompt_root.value.clone()));
+    let memory_store = Arc::new(InMemoryMemoryStore::try_default()?);
+    let evidence_store = Arc::new(InMemoryEvidenceStore::try_default()?);
+
+    let mut base_types = BaseTypeRegistry::default();
+    base_types.register(LocalProcessHarnessAdapter::single_process(LOCAL_BASE_TYPE)?);
+
+    let contract = ManifestContract::new(
+        BOOTSTRAP_ENTRYPOINT,
+        "bootstrap-config -> identity-loader -> runtime-ports -> local-runtime",
+        config.manifest_precedence(),
+        Provenance::new(
+            "bootstrap",
+            format!("{BOOTSTRAP_ENTRYPOINT}:{}", config.identity),
+        ),
+        Freshness::now()?,
+    )?;
+
+    let manifest = BuiltinIdentityLoader.load(&IdentityLoadRequest::new(
+        config.identity.clone(),
+        env!("CARGO_PKG_VERSION"),
+        contract,
+    ))?;
+
+    let request = RuntimeRequest::new(
+        manifest,
+        BaseTypeId::new(LOCAL_BASE_TYPE),
+        RuntimeTopology::SingleProcess,
+    );
+
+    LocalRuntime::compose(
+        RuntimePorts::new(prompt_store, memory_store, evidence_store, base_types),
+        request,
+    )
+}
+
+pub fn bootstrap_entrypoint() -> &'static str {
+    BOOTSTRAP_ENTRYPOINT
+}
+
+fn read_optional_utf8_env(key: &'static str) -> SimardResult<Option<String>> {
+    match std::env::var_os(key) {
+        None => Ok(None),
+        Some(value) => decode_utf8_env_value(key, value),
+    }
+}
+
+fn decode_utf8_env_value(key: &'static str, value: OsString) -> SimardResult<Option<String>> {
+    value
+        .into_string()
+        .map(Some)
+        .map_err(|_| SimardError::NonUnicodeConfigValue {
+            key: key.to_string(),
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    use std::ffi::OsString;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt;
+
+    use super::decode_utf8_env_value;
+    use crate::error::SimardError;
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_unicode_env_value_is_reported_explicitly() {
+        let error = decode_utf8_env_value("SIMARD_IDENTITY", OsString::from_vec(vec![0x66, 0x80]))
+            .expect_err("invalid unicode config should fail");
+
+        assert_eq!(
+            error,
+            SimardError::NonUnicodeConfigValue {
+                key: "SIMARD_IDENTITY".to_string(),
+            }
+        );
     }
 }

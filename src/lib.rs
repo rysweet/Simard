@@ -16,6 +16,7 @@ pub use base_types::{
 };
 pub use bootstrap::{
     BootstrapConfig, BootstrapInputs, BootstrapMode, ConfigValue, ConfigValueSource,
+    assemble_local_runtime, bootstrap_entrypoint,
 };
 pub use error::{SimardError, SimardResult};
 pub use evidence::{EvidenceRecord, EvidenceSource, EvidenceStore, InMemoryEvidenceStore};
@@ -24,7 +25,7 @@ pub use identity::{
     MemoryPolicy, OperatingMode,
 };
 pub use memory::{InMemoryMemoryStore, MemoryRecord, MemoryScope, MemoryStore};
-pub use metadata::{BackendDescriptor, Freshness, Provenance};
+pub use metadata::{BackendDescriptor, Freshness, FreshnessState, Provenance};
 pub use prompt_assets::{
     FilePromptAssetStore, InMemoryPromptAssetStore, PromptAsset, PromptAssetId, PromptAssetRef,
     PromptAssetStore,

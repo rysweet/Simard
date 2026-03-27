@@ -29,6 +29,59 @@ impl Default for MemoryPolicy {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManifestContract {
+    pub entrypoint: String,
+    pub composition: String,
+    pub precedence: Vec<String>,
+    pub provenance: Provenance,
+    pub freshness: Freshness,
+}
+
+impl ManifestContract {
+    pub fn new(
+        entrypoint: impl Into<String>,
+        composition: impl Into<String>,
+        precedence: Vec<String>,
+        provenance: Provenance,
+        freshness: Freshness,
+    ) -> SimardResult<Self> {
+        let entrypoint = required_contract_field("entrypoint", entrypoint.into())?;
+        let composition = required_contract_field("composition", composition.into())?;
+        if precedence.is_empty() {
+            return Err(SimardError::InvalidManifestContract {
+                field: "precedence".to_string(),
+                reason: "at least one precedence value is required".to_string(),
+            });
+        }
+        let precedence = precedence
+            .into_iter()
+            .map(|value| required_contract_field("precedence", value))
+            .collect::<SimardResult<Vec<_>>>()?;
+        let provenance_source = required_contract_field("provenance.source", provenance.source)?;
+        let provenance_locator = required_contract_field("provenance.locator", provenance.locator)?;
+
+        Ok(Self {
+            entrypoint,
+            composition,
+            precedence,
+            provenance: Provenance::new(provenance_source, provenance_locator),
+            freshness,
+        })
+    }
+}
+
+fn required_contract_field(field: &str, value: String) -> SimardResult<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(SimardError::InvalidManifestContract {
+            field: field.to_string(),
+            reason: "value cannot be empty".to_string(),
+        });
+    }
+    Ok(trimmed.to_string())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IdentityManifest {
     pub name: String,
     pub version: String,
@@ -38,15 +91,6 @@ pub struct IdentityManifest {
     pub default_mode: OperatingMode,
     pub memory_policy: MemoryPolicy,
     pub contract: ManifestContract,
-    pub provenance: Provenance,
-    pub freshness: Freshness,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ManifestContract {
-    pub entrypoint: String,
-    pub composition: String,
-    pub precedence: Vec<String>,
 }
 
 impl IdentityManifest {
@@ -58,25 +102,18 @@ impl IdentityManifest {
         required_capabilities: BTreeSet<BaseTypeCapability>,
         default_mode: OperatingMode,
         memory_policy: MemoryPolicy,
-    ) -> Self {
-        let name = name.into();
-        let version = version.into();
-        Self {
-            provenance: Provenance::new("inline", format!("identity:{name}")),
-            freshness: Freshness::now(),
-            contract: ManifestContract {
-                entrypoint: "inline-manifest".to_string(),
-                composition: "inline-manifest".to_string(),
-                precedence: vec!["inline-manifest".to_string()],
-            },
-            name,
-            version,
+        contract: ManifestContract,
+    ) -> SimardResult<Self> {
+        Ok(Self {
+            name: name.into(),
+            version: version.into(),
             prompt_assets,
             supported_base_types,
             required_capabilities,
             default_mode,
             memory_policy,
-        }
+            contract,
+        })
     }
 
     pub fn supports_base_type(&self, base_type: &BaseTypeId) -> bool {
@@ -84,40 +121,25 @@ impl IdentityManifest {
             .iter()
             .any(|candidate| candidate == base_type)
     }
-
-    pub fn with_contract(mut self, contract: ManifestContract) -> Self {
-        self.contract = contract;
-        self
-    }
-
-    pub fn with_provenance(mut self, provenance: Provenance) -> Self {
-        self.provenance = provenance;
-        self
-    }
-
-    pub fn with_freshness(mut self, freshness: Freshness) -> Self {
-        self.freshness = freshness;
-        self
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IdentityLoadRequest {
     pub identity: String,
     pub package_version: String,
-    pub precedence: Vec<String>,
+    pub contract: ManifestContract,
 }
 
 impl IdentityLoadRequest {
     pub fn new(
         identity: impl Into<String>,
         package_version: impl Into<String>,
-        precedence: Vec<String>,
+        contract: ManifestContract,
     ) -> Self {
         Self {
             identity: identity.into(),
             package_version: package_version.into(),
-            precedence,
+            contract,
         }
     }
 }
@@ -132,7 +154,7 @@ pub struct BuiltinIdentityLoader;
 impl IdentityLoader for BuiltinIdentityLoader {
     fn load(&self, request: &IdentityLoadRequest) -> SimardResult<IdentityManifest> {
         match request.identity.as_str() {
-            "simard-engineer" => Ok(IdentityManifest::new(
+            "simard-engineer" => IdentityManifest::new(
                 "simard-engineer",
                 request.package_version.clone(),
                 vec![PromptAssetRef::new(
@@ -153,19 +175,8 @@ impl IdentityLoader for BuiltinIdentityLoader {
                 ]),
                 OperatingMode::Engineer,
                 MemoryPolicy::default(),
-            )
-            .with_contract(ManifestContract {
-                entrypoint: "src/main.rs".to_string(),
-                composition:
-                    "bootstrap-config -> manifest-loader -> runtime-ports -> local-runtime"
-                        .to_string(),
-                precedence: request.precedence.clone(),
-            })
-            .with_provenance(Provenance::builtin(format!(
-                "identity:{}",
-                request.identity
-            )))
-            .with_freshness(Freshness::now())),
+                request.contract.clone(),
+            ),
             other => Err(SimardError::UnknownIdentity {
                 requested: other.to_string(),
             }),

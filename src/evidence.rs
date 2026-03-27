@@ -26,6 +26,8 @@ pub trait EvidenceStore: Send + Sync {
     fn record(&self, record: EvidenceRecord) -> SimardResult<()>;
 
     fn list_for_session(&self, session_id: &SessionId) -> SimardResult<Vec<EvidenceRecord>>;
+
+    fn count_for_session(&self, session_id: &SessionId) -> SimardResult<usize>;
 }
 
 #[derive(Debug)]
@@ -41,15 +43,13 @@ impl InMemoryEvidenceStore {
             descriptor,
         }
     }
-}
 
-impl Default for InMemoryEvidenceStore {
-    fn default() -> Self {
-        Self::new(BackendDescriptor::new(
+    pub fn try_default() -> SimardResult<Self> {
+        Ok(Self::new(BackendDescriptor::new(
             "evidence::in-memory",
             Provenance::injected("runtime-port:evidence-store"),
-            Freshness::now(),
-        ))
+            Freshness::now()?,
+        )))
     }
 }
 
@@ -79,5 +79,17 @@ impl EvidenceStore for InMemoryEvidenceStore {
             .filter(|record| &record.session_id == session_id)
             .cloned()
             .collect())
+    }
+
+    fn count_for_session(&self, session_id: &SessionId) -> SimardResult<usize> {
+        Ok(self
+            .records
+            .lock()
+            .map_err(|_| SimardError::StoragePoisoned {
+                store: "evidence".to_string(),
+            })?
+            .iter()
+            .filter(|record| &record.session_id == session_id)
+            .count())
     }
 }

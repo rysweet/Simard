@@ -3,6 +3,7 @@ use std::fmt::{self, Display, Formatter};
 
 use crate::error::{SimardError, SimardResult};
 use crate::identity::OperatingMode;
+use crate::metadata::{BackendDescriptor, Freshness, Provenance};
 use crate::prompt_assets::PromptAssetRef;
 use crate::runtime::RuntimeTopology;
 use crate::session::SessionId;
@@ -63,6 +64,7 @@ pub fn capability_set(
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BaseTypeDescriptor {
     pub id: BaseTypeId,
+    pub backend: BackendDescriptor,
     pub capabilities: BTreeSet<BaseTypeCapability>,
     pub supported_topologies: BTreeSet<RuntimeTopology>,
 }
@@ -105,17 +107,24 @@ impl LocalProcessHarnessAdapter {
         id: impl Into<String>,
         capabilities: impl IntoIterator<Item = BaseTypeCapability>,
         supported_topologies: impl IntoIterator<Item = RuntimeTopology>,
-    ) -> Self {
-        Self {
+    ) -> SimardResult<Self> {
+        let id = BaseTypeId::new(id);
+        let backend = BackendDescriptor::new(
+            id.to_string(),
+            Provenance::injected(format!("base-type-registry:{}", id)),
+            Freshness::now()?,
+        );
+        Ok(Self {
             descriptor: BaseTypeDescriptor {
-                id: BaseTypeId::new(id),
+                id,
+                backend,
                 capabilities: capability_set(capabilities),
                 supported_topologies: supported_topologies.into_iter().collect(),
             },
-        }
+        })
     }
 
-    pub fn single_process(id: impl Into<String>) -> Self {
+    pub fn single_process(id: impl Into<String>) -> SimardResult<Self> {
         Self::new(
             id,
             [

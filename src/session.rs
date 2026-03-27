@@ -10,14 +10,42 @@ use crate::identity::OperatingMode;
 pub struct SessionId(String);
 
 impl SessionId {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(format!("session-{uuid}"))
+    }
+
+    pub fn parse(value: impl AsRef<str>) -> SimardResult<Self> {
+        let value = value.as_ref().trim();
+        let uuid_value = value.strip_prefix("session-").unwrap_or(value);
+        let uuid = Uuid::parse_str(uuid_value).map_err(|error| SimardError::InvalidSessionId {
+            value: value.to_string(),
+            reason: format!("expected a UUID or 'session-<uuid>' value: {error}"),
+        })?;
+        Ok(Self::from_uuid(uuid))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
 impl Display for SessionId {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+impl From<Uuid> for SessionId {
+    fn from(value: Uuid) -> Self {
+        Self::from_uuid(value)
+    }
+}
+
+impl TryFrom<&str> for SessionId {
+    type Error = SimardError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::parse(value)
     }
 }
 
@@ -30,7 +58,7 @@ pub struct UuidSessionIdGenerator;
 
 impl SessionIdGenerator for UuidSessionIdGenerator {
     fn next_id(&self) -> SessionId {
-        SessionId::new(format!("session-{}", Uuid::now_v7()))
+        SessionId::from_uuid(Uuid::now_v7())
     }
 }
 

@@ -2,10 +2,11 @@ use std::sync::Arc;
 
 use simard::{
     BackendDescriptor, BaseTypeCapability, BaseTypeId, BaseTypeRegistry, EvidenceStore, Freshness,
-    IdentityManifest, InMemoryEvidenceStore, InMemoryMemoryStore, InMemoryPromptAssetStore,
-    LocalProcessHarnessAdapter, LocalRuntime, MemoryPolicy, MemoryScope, MemoryStore,
-    OperatingMode, PromptAsset, PromptAssetRef, Provenance, ReflectiveRuntime, RuntimePorts,
-    RuntimeRequest, RuntimeState, RuntimeTopology, SessionPhase, SimardError, capability_set,
+    FreshnessState, IdentityManifest, InMemoryEvidenceStore, InMemoryMemoryStore,
+    InMemoryPromptAssetStore, LocalProcessHarnessAdapter, LocalRuntime, ManifestContract,
+    MemoryPolicy, MemoryScope, MemoryStore, OperatingMode, PromptAsset, PromptAssetRef, Provenance,
+    ReflectiveRuntime, RuntimePorts, RuntimeRequest, RuntimeState, RuntimeTopology, SessionPhase,
+    SimardError, capability_set,
 };
 
 fn manifest() -> IdentityManifest {
@@ -29,7 +30,16 @@ fn manifest() -> IdentityManifest {
         ]),
         OperatingMode::Engineer,
         MemoryPolicy::default(),
+        ManifestContract::new(
+            simard::bootstrap_entrypoint(),
+            "bootstrap-config -> identity-loader -> runtime-ports -> local-runtime",
+            vec!["tests:lifecycle".to_string()],
+            Provenance::new("test", "lifecycle::manifest"),
+            Freshness::now().expect("freshness should be observable"),
+        )
+        .expect("contract should be valid"),
     )
+    .expect("manifest should be valid")
 }
 
 #[test]
@@ -42,15 +52,18 @@ fn local_runtime_runs_session_and_persists_boundaries() {
     let memory = Arc::new(InMemoryMemoryStore::new(BackendDescriptor::new(
         "memory::session-cache",
         Provenance::injected("test:memory-store"),
-        Freshness::now(),
+        Freshness::now().expect("freshness should be observable"),
     )));
     let evidence = Arc::new(InMemoryEvidenceStore::new(BackendDescriptor::new(
         "evidence::append-only-log",
         Provenance::injected("test:evidence-store"),
-        Freshness::now(),
+        Freshness::now().expect("freshness should be observable"),
     )));
     let mut base_types = BaseTypeRegistry::default();
-    base_types.register(LocalProcessHarnessAdapter::single_process("local-harness"));
+    base_types.register(
+        LocalProcessHarnessAdapter::single_process("local-harness")
+            .expect("adapter should initialize"),
+    );
 
     let request = RuntimeRequest::new(
         manifest(),
@@ -88,6 +101,12 @@ fn local_runtime_runs_session_and_persists_boundaries() {
         .list_for_session(&outcome.session.id)
         .expect("evidence should be queryable");
     assert_eq!(evidence_records.len(), 2);
+    assert_eq!(
+        evidence
+            .count_for_session(&outcome.session.id)
+            .expect("evidence counts should be queryable"),
+        2
+    );
     assert!(
         evidence_records
             .iter()
@@ -105,12 +124,27 @@ fn local_runtime_runs_session_and_persists_boundaries() {
         .expect("summary memory should be queryable");
     assert_eq!(summary_records.len(), 1);
     assert_eq!(summary_records[0].recorded_in, SessionPhase::Persistence);
+    assert_eq!(
+        memory
+            .count_for_session(&outcome.session.id)
+            .expect("memory counts should be queryable"),
+        2
+    );
 
     let snapshot = runtime.snapshot().expect("snapshot should succeed");
     assert_eq!(snapshot.runtime_state, RuntimeState::Ready);
     assert_eq!(snapshot.session_phase, Some(SessionPhase::Complete));
     assert_eq!(snapshot.evidence_records, 2);
     assert_eq!(snapshot.memory_records, 2);
+    assert_eq!(snapshot.adapter_backend.identity, "local-harness");
+    assert!(
+        snapshot
+            .adapter_backend
+            .provenance
+            .locator
+            .contains("local-harness"),
+        "adapter backend should come from the runtime-selected adapter descriptor"
+    );
     assert_eq!(snapshot.memory_backend.identity, "memory::session-cache");
     assert_eq!(
         snapshot.memory_backend.provenance,
@@ -124,10 +158,21 @@ fn local_runtime_runs_session_and_persists_boundaries() {
         snapshot.evidence_backend.provenance,
         Provenance::injected("test:evidence-store")
     );
-    assert_eq!(snapshot.manifest_contract.entrypoint, "inline-manifest");
+    assert!(
+        snapshot.manifest_contract.entrypoint.contains("bootstrap"),
+        "reflection should report the real bootstrap entrypoint instead of placeholder metadata"
+    );
+    assert_ne!(
+        snapshot.manifest_contract.entrypoint, "inline-manifest",
+        "inline placeholder entrypoints hide the real runtime assembly boundary"
+    );
+    assert_ne!(
+        snapshot.manifest_contract.provenance.source, "inline",
+        "reflection provenance should describe the true manifest source"
+    );
     assert_eq!(
-        snapshot.manifest_provenance,
-        Provenance::new("inline", "identity:simard-engineer")
+        snapshot.manifest_contract.freshness.state,
+        FreshnessState::Current
     );
 
     runtime
@@ -139,9 +184,66 @@ fn local_runtime_runs_session_and_persists_boundaries() {
     let error = runtime.run("should fail after stop").unwrap_err();
     assert_eq!(
         error,
-        SimardError::InvalidRuntimeTransition {
-            from: RuntimeState::Stopped,
-            to: RuntimeState::Active,
+        SimardError::RuntimeStopped {
+            action: "run".to_string(),
+        }
+    );
+}
+
+#[test]
+fn stopped_runtime_surfaces_dedicated_lifecycle_errors() {
+    let prompts = Arc::new(InMemoryPromptAssetStore::new([PromptAsset::new(
+        "engineer-system",
+        "simard/engineer_system.md",
+        "You are Simard.",
+    )]));
+    let memory = Arc::new(InMemoryMemoryStore::try_default().expect("store should initialize"));
+    let evidence = Arc::new(InMemoryEvidenceStore::try_default().expect("store should initialize"));
+    let mut base_types = BaseTypeRegistry::default();
+    base_types.register(
+        LocalProcessHarnessAdapter::single_process("local-harness")
+            .expect("adapter should initialize"),
+    );
+
+    let request = RuntimeRequest::new(
+        manifest(),
+        BaseTypeId::new("local-harness"),
+        RuntimeTopology::SingleProcess,
+    );
+
+    let mut runtime = LocalRuntime::compose(
+        RuntimePorts::new(prompts, memory, evidence, base_types),
+        request,
+    )
+    .expect("composition should succeed");
+
+    runtime.start().expect("startup should succeed");
+    runtime
+        .run("exercise stop semantics")
+        .expect("run should succeed before shutdown");
+    runtime.stop().expect("first stop should succeed");
+
+    let start_error = runtime.start().unwrap_err();
+    assert_eq!(
+        start_error,
+        SimardError::RuntimeStopped {
+            action: "start".to_string(),
+        }
+    );
+
+    let run_error = runtime.run("after stop").unwrap_err();
+    assert_eq!(
+        run_error,
+        SimardError::RuntimeStopped {
+            action: "run".to_string(),
+        }
+    );
+
+    let stop_error = runtime.stop().unwrap_err();
+    assert_eq!(
+        stop_error,
+        SimardError::RuntimeStopped {
+            action: "stop".to_string(),
         }
     );
 }
