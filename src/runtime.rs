@@ -233,7 +233,7 @@ impl LocalRuntime {
     }
 
     pub fn start(&mut self) -> SimardResult<()> {
-        self.ensure_not_stopped("start")?;
+        self.ensure_available("start")?;
         self.request
             .manifest
             .prompt_assets
@@ -256,7 +256,7 @@ impl LocalRuntime {
     }
 
     pub fn run(&mut self, objective: impl Into<String>) -> SimardResult<SessionOutcome> {
-        self.ensure_not_stopped("run")?;
+        self.ensure_available("run")?;
 
         let result = (|| {
             self.transition(RuntimeState::Active)?;
@@ -267,8 +267,10 @@ impl LocalRuntime {
                 self.request.selected_base_type.clone(),
                 self.ports.session_ids.as_ref(),
             );
+            self.remember_session(&session);
 
             session.advance(SessionPhase::Preparation)?;
+            self.remember_session(&session);
             let scratch_key = format!("{}-scratch", session.id);
             self.ports.memory_store.put(MemoryRecord {
                 key: scratch_key.clone(),
@@ -278,8 +280,10 @@ impl LocalRuntime {
                 recorded_in: SessionPhase::Preparation,
             })?;
             session.attach_memory(scratch_key);
+            self.remember_session(&session);
 
             session.advance(SessionPhase::Planning)?;
+            self.remember_session(&session);
             let outcome = self.adapter.invoke(BaseTypeRequest {
                 session_id: session.id.clone(),
                 objective: session.objective.clone(),
@@ -289,6 +293,7 @@ impl LocalRuntime {
             })?;
 
             session.advance(SessionPhase::Execution)?;
+            self.remember_session(&session);
             for (index, detail) in outcome.evidence.iter().enumerate() {
                 let evidence_id = format!("{}-evidence-{}", session.id, index + 1);
                 self.ports.evidence_store.record(EvidenceRecord {
@@ -300,9 +305,11 @@ impl LocalRuntime {
                 })?;
                 session.attach_evidence(evidence_id);
             }
+            self.remember_session(&session);
 
             self.transition(RuntimeState::Reflecting)?;
             session.advance(SessionPhase::Reflection)?;
+            self.remember_session(&session);
             let reflection = ReflectionReport {
                 summary: format!(
                     "Session '{}' completed through '{}' on '{}'.",
@@ -313,6 +320,7 @@ impl LocalRuntime {
 
             self.transition(RuntimeState::Persisting)?;
             session.advance(SessionPhase::Persistence)?;
+            self.remember_session(&session);
             let summary_key = format!("{}-summary", session.id);
             self.ports.memory_store.put(MemoryRecord {
                 key: summary_key.clone(),
@@ -322,10 +330,11 @@ impl LocalRuntime {
                 recorded_in: SessionPhase::Persistence,
             })?;
             session.attach_memory(summary_key);
+            self.remember_session(&session);
 
             session.advance(SessionPhase::Complete)?;
+            self.remember_session(&session);
             self.transition(RuntimeState::Ready)?;
-            self.last_session = Some(session.clone());
 
             Ok(SessionOutcome {
                 session,
@@ -337,19 +346,23 @@ impl LocalRuntime {
 
         if result.is_err() && !matches!(self.state, RuntimeState::Stopped | RuntimeState::Stopping)
         {
+            self.mark_last_session_failed();
             let _ = self.transition(RuntimeState::Failed);
         }
 
         result
     }
 
-    fn ensure_not_stopped(&self, action: &str) -> SimardResult<()> {
-        if matches!(self.state, RuntimeState::Stopped | RuntimeState::Stopping) {
-            return Err(SimardError::RuntimeStopped {
+    fn ensure_available(&self, action: &str) -> SimardResult<()> {
+        match self.state {
+            RuntimeState::Stopped | RuntimeState::Stopping => Err(SimardError::RuntimeStopped {
                 action: action.to_string(),
-            });
+            }),
+            RuntimeState::Failed => Err(SimardError::RuntimeFailed {
+                action: action.to_string(),
+            }),
+            _ => Ok(()),
         }
-        Ok(())
     }
 
     fn transition(&mut self, next: RuntimeState) -> SimardResult<()> {
@@ -362,6 +375,18 @@ impl LocalRuntime {
 
         self.state = next;
         Ok(())
+    }
+
+    fn remember_session(&mut self, session: &SessionRecord) {
+        self.last_session = Some(session.clone());
+    }
+
+    fn mark_last_session_failed(&mut self) {
+        if let Some(session) = self.last_session.as_mut() {
+            if session.phase != SessionPhase::Failed {
+                session.phase = SessionPhase::Failed;
+            }
+        }
     }
 
     fn snapshot_for(&self, session: Option<&SessionRecord>) -> SimardResult<ReflectionSnapshot> {

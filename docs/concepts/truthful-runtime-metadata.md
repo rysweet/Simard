@@ -84,6 +84,15 @@ After shutdown:
 
 That makes shutdown observable without forcing callers to interpret generic transition pairs.
 
+The same rule applies to failed runs:
+
+- the runtime state becomes `Failed`
+- the last session remains inspectable with `SessionPhase::Failed`
+- `start()` and `run()` fail with `RuntimeFailed`
+- `stop()` remains the explicit boundary that closes the failed runtime
+
+That keeps failure visible instead of silently resetting the runtime or collapsing back to a generic transition error.
+
 ## Why metadata truth should live in one place
 
 `ManifestContract` answers three separate questions in one object:

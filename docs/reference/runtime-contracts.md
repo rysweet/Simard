@@ -161,6 +161,17 @@ After `stop()` succeeds:
 - a repeated `stop()` fails with `RuntimeStopped { action: "stop" }`
 - callers must compose a new runtime instead of reusing the stopped one
 
+### Failed-state behavior
+
+After `run()` fails:
+
+- `snapshot()` remains valid
+- the last session remains visible with `session_phase == Some(Failed)`
+- manifest freshness is reported as `Stale`
+- `start()` fails with `RuntimeFailed`
+- `run()` fails with `RuntimeFailed`
+- `stop()` is still the explicit way to close the lifecycle boundary
+
 ## Reflection snapshot
 
 ### `ReflectionSnapshot`
@@ -221,6 +232,7 @@ Reflection rules:
 | --- | --- |
 | `InvalidRuntimeTransition` | A runtime lifecycle transition is invalid. |
 | `RuntimeStopped` | Caller attempted `start`, `run`, or `stop` after shutdown was already in effect. |
+| `RuntimeFailed` | Caller attempted `start` or `run` after a failed execution but before shutdown. |
 | `InvalidSessionTransition` | A session phase transition is invalid. |
 
 ### Prompt and storage errors

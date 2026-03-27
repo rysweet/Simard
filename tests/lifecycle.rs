@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
 use simard::{
-    BackendDescriptor, BaseTypeCapability, BaseTypeId, BaseTypeRegistry, EvidenceStore, Freshness,
-    FreshnessState, IdentityManifest, InMemoryEvidenceStore, InMemoryMemoryStore,
-    InMemoryPromptAssetStore, LocalProcessHarnessAdapter, LocalRuntime, ManifestContract,
-    MemoryPolicy, MemoryScope, MemoryStore, OperatingMode, PromptAsset, PromptAssetRef, Provenance,
-    ReflectiveRuntime, RuntimePorts, RuntimeRequest, RuntimeState, RuntimeTopology, SessionPhase,
-    SimardError, UuidSessionIdGenerator, capability_set,
+    BackendDescriptor, BaseTypeAdapter, BaseTypeCapability, BaseTypeDescriptor, BaseTypeId,
+    BaseTypeOutcome, BaseTypeRegistry, BaseTypeRequest, EvidenceStore, Freshness, FreshnessState,
+    IdentityManifest, InMemoryEvidenceStore, InMemoryMemoryStore, InMemoryPromptAssetStore,
+    LocalProcessHarnessAdapter, LocalRuntime, ManifestContract, MemoryPolicy, MemoryScope,
+    MemoryStore, OperatingMode, PromptAsset, PromptAssetRef, Provenance, ReflectiveRuntime,
+    RuntimePorts, RuntimeRequest, RuntimeState, RuntimeTopology, SessionPhase, SimardError,
+    SimardResult, UuidSessionIdGenerator, capability_set,
 };
 
 fn manifest() -> IdentityManifest {
@@ -40,6 +41,47 @@ fn manifest() -> IdentityManifest {
         .expect("contract should be valid"),
     )
     .expect("manifest should be valid")
+}
+
+#[derive(Debug)]
+struct FailingHarnessAdapter {
+    descriptor: BaseTypeDescriptor,
+}
+
+impl FailingHarnessAdapter {
+    fn new(id: &str) -> Self {
+        Self {
+            descriptor: BaseTypeDescriptor {
+                id: BaseTypeId::new(id),
+                backend: BackendDescriptor::new(
+                    id,
+                    Provenance::injected("test:failing-adapter"),
+                    Freshness::now().expect("freshness should be observable"),
+                ),
+                capabilities: capability_set([
+                    BaseTypeCapability::PromptAssets,
+                    BaseTypeCapability::SessionLifecycle,
+                    BaseTypeCapability::Memory,
+                    BaseTypeCapability::Evidence,
+                    BaseTypeCapability::Reflection,
+                ]),
+                supported_topologies: [RuntimeTopology::SingleProcess].into_iter().collect(),
+            },
+        }
+    }
+}
+
+impl BaseTypeAdapter for FailingHarnessAdapter {
+    fn descriptor(&self) -> &BaseTypeDescriptor {
+        &self.descriptor
+    }
+
+    fn invoke(&self, _request: BaseTypeRequest) -> SimardResult<BaseTypeOutcome> {
+        Err(SimardError::AdapterInvocationFailed {
+            base_type: self.descriptor.id.to_string(),
+            reason: "simulated adapter failure".to_string(),
+        })
+    }
 }
 
 #[test]
@@ -307,6 +349,90 @@ fn runtime_can_stop_before_start_and_preserve_a_stale_snapshot() {
     assert_eq!(snapshot.runtime_state, RuntimeState::Stopped);
     assert_eq!(
         snapshot.manifest_contract.freshness.state,
+        FreshnessState::Stale
+    );
+}
+
+#[test]
+fn failed_runs_preserve_failed_session_metadata_until_shutdown() {
+    let prompts = Arc::new(InMemoryPromptAssetStore::new([PromptAsset::new(
+        "engineer-system",
+        "simard/engineer_system.md",
+        "You are Simard.",
+    )]));
+    let memory = Arc::new(InMemoryMemoryStore::try_default().expect("store should initialize"));
+    let evidence = Arc::new(InMemoryEvidenceStore::try_default().expect("store should initialize"));
+    let mut base_types = BaseTypeRegistry::default();
+    base_types.register(FailingHarnessAdapter::new("local-harness"));
+
+    let request = RuntimeRequest::new(
+        manifest(),
+        BaseTypeId::new("local-harness"),
+        RuntimeTopology::SingleProcess,
+    );
+
+    let mut runtime = LocalRuntime::compose(
+        RuntimePorts::new(
+            prompts,
+            memory,
+            evidence,
+            base_types,
+            Arc::new(UuidSessionIdGenerator),
+        ),
+        request,
+    )
+    .expect("composition should succeed");
+
+    runtime.start().expect("startup should succeed");
+    let error = runtime.run("exercise failure handling").unwrap_err();
+    assert_eq!(
+        error,
+        SimardError::AdapterInvocationFailed {
+            base_type: "local-harness".to_string(),
+            reason: "simulated adapter failure".to_string(),
+        }
+    );
+
+    assert_eq!(runtime.state(), RuntimeState::Failed);
+
+    let failed_snapshot = runtime.snapshot().expect("snapshot should still work");
+    assert_eq!(failed_snapshot.runtime_state, RuntimeState::Failed);
+    assert_eq!(failed_snapshot.session_phase, Some(SessionPhase::Failed));
+    assert_eq!(failed_snapshot.memory_records, 1);
+    assert_eq!(failed_snapshot.evidence_records, 0);
+    assert_eq!(
+        failed_snapshot.adapter_backend.provenance,
+        Provenance::injected("test:failing-adapter")
+    );
+    assert_eq!(
+        failed_snapshot.manifest_contract.freshness.state,
+        FreshnessState::Stale
+    );
+
+    let start_error = runtime.start().unwrap_err();
+    assert_eq!(
+        start_error,
+        SimardError::RuntimeFailed {
+            action: "start".to_string(),
+        }
+    );
+
+    let run_error = runtime.run("retry after failure").unwrap_err();
+    assert_eq!(
+        run_error,
+        SimardError::RuntimeFailed {
+            action: "run".to_string(),
+        }
+    );
+
+    runtime
+        .stop()
+        .expect("failed runtimes should still allow an explicit stop boundary");
+    let stopped_snapshot = runtime.snapshot().expect("stopped snapshot should remain visible");
+    assert_eq!(stopped_snapshot.runtime_state, RuntimeState::Stopped);
+    assert_eq!(stopped_snapshot.session_phase, Some(SessionPhase::Failed));
+    assert_eq!(
+        stopped_snapshot.manifest_contract.freshness.state,
         FreshnessState::Stale
     );
 }

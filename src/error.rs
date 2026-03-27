@@ -51,6 +51,10 @@ pub enum SimardError {
     AdapterNotRegistered {
         base_type: String,
     },
+    AdapterInvocationFailed {
+        base_type: String,
+        reason: String,
+    },
     MissingCapability {
         base_type: String,
         capability: BaseTypeCapability,
@@ -64,6 +68,9 @@ pub enum SimardError {
         to: RuntimeState,
     },
     RuntimeStopped {
+        action: String,
+    },
+    RuntimeFailed {
         action: String,
     },
     InvalidSessionTransition {
@@ -137,6 +144,9 @@ impl Display for SimardError {
             Self::AdapterNotRegistered { base_type } => {
                 write!(f, "no adapter is registered for base type '{base_type}'")
             }
+            Self::AdapterInvocationFailed { base_type, reason } => {
+                write!(f, "base type '{base_type}' failed during invocation: {reason}")
+            }
             Self::MissingCapability {
                 base_type,
                 capability,
@@ -156,6 +166,9 @@ impl Display for SimardError {
             }
             Self::RuntimeStopped { action } => {
                 write!(f, "runtime is stopped and cannot '{action}'")
+            }
+            Self::RuntimeFailed { action } => {
+                write!(f, "runtime is failed and cannot '{action}' until it is stopped")
             }
             Self::InvalidSessionTransition { from, to } => {
                 write!(f, "invalid session transition from '{from}' to '{to}'")
