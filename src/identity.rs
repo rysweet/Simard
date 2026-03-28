@@ -161,6 +161,10 @@ pub struct IdentityManifest {
 }
 
 impl IdentityManifest {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "identity manifests are explicit contract values with distinct fields"
+    )]
     pub fn new(
         name: impl Into<String>,
         version: impl Into<String>,

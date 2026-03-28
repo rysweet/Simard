@@ -1,7 +1,7 @@
 ---
 title: "How to configure bootstrap and inspect reflection"
 description: Verify the Simard bootstrap path and inspect the truthful reflection snapshot exposed by the runtime.
-last_updated: 2026-03-27
+last_updated: 2026-03-28
 review_schedule: as-needed
 owner: simard
 doc_type: howto
@@ -28,10 +28,14 @@ Use this guide when you need to answer two questions:
 
 Provide both the prompt root and objective yourself.
 
+For the builtin `simard-engineer` identity, the current local scaffold accepts `local-harness`, `rusty-clawd`, or `copilot-sdk` as explicit base-type choices. All three currently run through the same single-process adapter shape, so `SIMARD_RUNTIME_TOPOLOGY` must still be `single-process`.
+
 ```bash
 SIMARD_PROMPT_ROOT="$PWD/prompt_assets" \
 SIMARD_OBJECTIVE="verify current reflection metadata" \
 SIMARD_IDENTITY="simard-engineer" \
+SIMARD_BASE_TYPE="local-harness" \
+SIMARD_RUNTIME_TOPOLOGY="single-process" \
 cargo run --quiet
 ```
 
@@ -40,9 +44,37 @@ In the current repo:
 - missing `SIMARD_PROMPT_ROOT` fails bootstrap
 - missing `SIMARD_OBJECTIVE` fails bootstrap
 - missing `SIMARD_IDENTITY` fails bootstrap
+- missing `SIMARD_BASE_TYPE` fails bootstrap
+- missing `SIMARD_RUNTIME_TOPOLOGY` fails bootstrap
 - unknown `SIMARD_IDENTITY` fails identity loading
+- invalid `SIMARD_RUNTIME_TOPOLOGY` values fail bootstrap config resolution
+- identity/base-type mismatches fail runtime composition with `UnsupportedBaseType`
+- manifest-supported but unregistered `SIMARD_BASE_TYPE` values fail runtime composition with `AdapterNotRegistered`
+- valid but unsupported `SIMARD_RUNTIME_TOPOLOGY` values fail runtime composition with `UnsupportedTopology`
 
 No missing value is replaced after startup.
+
+### Variation: exercise a non-default builtin base type
+
+Use this when you want to prove that bootstrap is not silently snapping back to `local-harness`.
+
+```bash
+SIMARD_PROMPT_ROOT="$PWD/prompt_assets" \
+SIMARD_OBJECTIVE="verify copilot-sdk bootstrap selection" \
+SIMARD_IDENTITY="simard-engineer" \
+SIMARD_BASE_TYPE="copilot-sdk" \
+SIMARD_RUNTIME_TOPOLOGY="single-process" \
+cargo run --quiet
+```
+
+In the current repo, you should see output shaped like:
+
+```text
+Bootstrap selection: identity=simard-engineer, base_type=copilot-sdk, topology=single-process
+Snapshot: state=ready, topology=single-process, base_type=copilot-sdk
+```
+
+That is the important contract boundary: the runtime records the explicit selection you asked for, and it does not reinterpret `copilot-sdk` as `local-harness`.
 
 ## 2. Opt in to builtin defaults only when you mean it
 
@@ -58,6 +90,8 @@ In the current repo:
 - `SIMARD_PROMPT_ROOT` resolves to the repository `prompt_assets/` directory
 - `SIMARD_OBJECTIVE` resolves to the builtin engineer-loop objective
 - `SIMARD_IDENTITY` resolves to `simard-engineer`
+- `SIMARD_BASE_TYPE` resolves to `local-harness`
+- `SIMARD_RUNTIME_TOPOLOGY` resolves to `single-process`
 - the configuration source is recorded as `opt-in:SIMARD_BOOTSTRAP_MODE`
 
 Builtin defaults are startup choices. They are not recovery behavior.
@@ -91,6 +125,8 @@ assert_eq!(snapshot.adapter_backend.identity, "local-harness");
 assert_eq!(snapshot.memory_backend.identity, "memory::session-cache");
 assert_eq!(snapshot.evidence_backend.identity, "evidence::append-only-log");
 ```
+
+If you launched with `SIMARD_BASE_TYPE="copilot-sdk"` or `SIMARD_BASE_TYPE="rusty-clawd"`, the same rule applies: `snapshot.adapter_backend.identity` must match the chosen base type exactly.
 
 ## 4. Validate stopped-state behavior
 
@@ -126,6 +162,8 @@ Set `SIMARD_IDENTITY` before startup:
 SIMARD_PROMPT_ROOT="$PWD/prompt_assets" \
 SIMARD_OBJECTIVE="run custom identity" \
 SIMARD_IDENTITY="simard-engineer" \
+SIMARD_BASE_TYPE="local-harness" \
+SIMARD_RUNTIME_TOPOLOGY="single-process" \
 cargo run --quiet
 ```
 
@@ -156,6 +194,8 @@ Invalid values fail with `SimardError::InvalidSessionId`.
 export SIMARD_PROMPT_ROOT="$PWD/prompt_assets"
 export SIMARD_OBJECTIVE="verify current reflection metadata"
 export SIMARD_IDENTITY="simard-engineer"
+export SIMARD_BASE_TYPE="local-harness"
+export SIMARD_RUNTIME_TOPOLOGY="single-process"
 ```
 
 Or opt in explicitly:
@@ -169,6 +209,14 @@ export SIMARD_BOOTSTRAP_MODE=builtin-defaults
 **Symptom**: `PromptAssetMissing` or `PromptAssetRead`.
 
 **Solution**: fix the asset path or contents. Simard does not continue with a different prompt asset.
+
+### Base type or topology selection fails
+
+**Symptom**: bootstrap resolves, but runtime composition returns `UnsupportedBaseType`, `AdapterNotRegistered`, or `UnsupportedTopology`.
+
+**Solution**: pick a base type the identity allows, make sure the adapter is registered for that identity, and choose a topology the selected adapter supports. Simard does not substitute a different base type or downgrade the topology silently.
+
+Today, the builtin base types `local-harness`, `rusty-clawd`, and `copilot-sdk` all require `SIMARD_RUNTIME_TOPOLOGY=single-process`.
 
 ### Reflection metadata is truthful but incomplete
 

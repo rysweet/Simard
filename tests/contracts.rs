@@ -138,6 +138,45 @@ fn start_rejects_missing_prompt_asset() {
 }
 
 #[test]
+fn compose_rejects_manifest_supported_base_types_without_registered_adapters() {
+    let prompts = prompt_store();
+    let memory = Arc::new(InMemoryMemoryStore::try_default().expect("store should initialize"));
+    let evidence = Arc::new(InMemoryEvidenceStore::try_default().expect("store should initialize"));
+    let mut base_types = BaseTypeRegistry::default();
+    base_types.register(
+        LocalProcessHarnessAdapter::single_process("local-harness")
+            .expect("adapter should initialize"),
+    );
+
+    let request = RuntimeRequest::new(
+        manifest("future-distributed-adapter"),
+        BaseTypeId::new("future-distributed-adapter"),
+        RuntimeTopology::SingleProcess,
+    );
+
+    let error = match LocalRuntime::compose(
+        RuntimePorts::new(
+            prompts,
+            memory,
+            evidence,
+            base_types,
+            Arc::new(UuidSessionIdGenerator),
+        ),
+        request,
+    ) {
+        Ok(_) => panic!("composition should have failed"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        error,
+        SimardError::AdapterNotRegistered {
+            base_type: "future-distributed-adapter".to_string(),
+        }
+    );
+}
+
+#[test]
 fn session_phase_rejects_skipped_transition() {
     let mut session = SessionRecord::new(
         OperatingMode::Engineer,

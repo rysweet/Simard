@@ -53,14 +53,14 @@ For delivery purposes, v1 should be interpreted narrowly:
 
 - one primary engineer loop
 - one default local single-process deployment path
-- one initially shipped adapter implementation
+- three builtin manifest-advertised base-type selections in the local scaffold: `local-harness`, `rusty-clawd`, and `copilot-sdk`
 - one durable memory path
 - one small benchmark set
 
 Meeting mode, sibling identities, broader distributed execution, and self-improvement remain part of the architecture direction, but they are not v1 ship blockers.
 
 Phased delivery does **not** permit a local-only or single-base-type architecture.
-From day one, the runtime must be written for dependency injection, topology-aware composition, and multiple base types even if the first runnable path is local and only one adapter ships initially.
+From day one, the runtime must be written for dependency injection, topology-aware composition, and multiple base types even if the first runnable path is local and only a single-process harness implementation ships underneath the initial builtin selections.
 
 ## Day-One Architectural Constraints
 
@@ -68,7 +68,7 @@ The following are hard constraints for the first implementation, not deferred as
 
 - **Dependency injection from the outset**: runtime composition must happen through explicit ports, traits, and typed configuration rather than hidden globals or direct construction buried inside the core loop.
 - **Distributed-readiness from the outset**: runtime, session, memory, and reflection contracts must not assume in-process execution even when the first deployment path is single-process.
-- **Multiple base types from the outset**: identity manifests and runtime selection logic must support multiple base types immediately, even if only one concrete adapter is shipped and used in v1.
+- **Multiple base types from the outset**: identity manifests and runtime selection logic must support multiple base types immediately. In the current v1 scaffold, `local-harness`, `rusty-clawd`, and `copilot-sdk` are all selectable builtin base types, even though they currently share a single-process harness implementation shape.
 - **Visible failures from the outset**: unsupported capabilities, missing prompt assets, invalid lifecycle transitions, and unsupported topologies must fail explicitly through typed errors instead of silent fallbacks.
 
 ## Non-Goals
@@ -299,6 +299,14 @@ Candidate base types include:
 - Claude Code SDK
 - the amplihack / amplihack-rs goal-seeking agent and its OODA loop
 
+The current Simard scaffold already publishes builtin manifest-facing base-type identifiers for:
+
+- `local-harness`
+- `rusty-clawd`
+- `copilot-sdk`
+
+Those identifiers are intentionally explicit at bootstrap time. Unsupported or unregistered base-type/topology pairs must fail visibly rather than collapsing into a hidden local default.
+
 Each base type should ideally have a Rust wrapper or adapter so the rest of the platform can interact with them through a more uniform model.
 
 The wrapper boundary should normalize:
@@ -414,6 +422,8 @@ The runtime is responsible for:
 - transferring or attaching durable memory when work moves between machines
 - exposing reflection interfaces so the active agent can inspect its own runtime state
 
+For the current Simard repo, that runtime contract is exposed as a local CLI/bootstrap surface and in-process Rust APIs. It is not an HTTP API and it does not currently publish a database schema contract.
+
 #### Runtime Lifecycle and Control Plane
 
 The runtime needs a concrete control model, not just a responsibility list.
@@ -451,6 +461,9 @@ The identity should not need different business logic just because its internals
 
 That does not mean every topology has identical semantics.
 Ordering, latency, freshness, and partial-failure behavior may differ across deployment shapes, and the runtime must expose those guarantees honestly.
+
+In the current v1 scaffold, topology is already explicit at bootstrap time, but the only supported runnable builtin topology is `single-process`.
+`multi-process` and `distributed` are still accepted as configuration values so unsupported requests can fail explicitly, but that explicit `UnsupportedTopology` failure is a hard v1 boundary rather than partial support.
 
 This is close to the hive-mind idea in amplihack:
 agent communication and memory semantics should be fundamentally the same whether the system is local or distributed.
@@ -742,7 +755,7 @@ These are deliberate next-iteration questions, not omissions in this document.
 
 ## Decision Summary
 
-Simard v1 should be built as a narrow, local, terminal-native engineering identity with one primary loop, one initial base type, explicit evidence, and disciplined session orchestration.
+Simard v1 should be built as a narrow, local, terminal-native engineering identity with one primary loop, explicit evidence, disciplined session orchestration, and multiple manifest-advertised builtin base types selectable from day one.
 It should preserve clean seams between prompt assets, agent base types, agent identities, and agent runtime so that a broader platform can emerge without corrupting the first implementation.
 The first implementation should stay small, Rust-native, and highly inspectable.
 The product wins if it can repeatedly behave like a trustworthy engineer on bounded tasks, not if it accumulates flashy but ungrounded features.

@@ -1,7 +1,7 @@
 ---
 title: Runtime contracts reference
 description: Reference for the current Simard runtime surface, reflection contracts, and lifecycle errors.
-last_updated: 2026-03-27
+last_updated: 2026-03-28
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -17,6 +17,21 @@ related:
 
 This file describes the API shape that exists in the repository today.
 
+## Public surfaces
+
+Simard v1 currently exposes two surfaces:
+
+- the local CLI bootstrap path through `cargo run --quiet`
+- the in-process Rust runtime/bootstrap types in `src/bootstrap.rs`, `src/runtime.rs`, and related modules
+
+Simard v1 does **not** currently expose:
+
+- an HTTP API
+- a network service contract
+- a database schema contract
+
+The stable contract in this repository is the bootstrap/runtime behavior described below.
+
 ## Configuration
 
 ### Environment variables
@@ -27,13 +42,32 @@ This file describes the API shape that exists in the repository today.
 | `SIMARD_OBJECTIVE` | Yes in `explicit-config` | none | Objective passed to `run()`. |
 | `SIMARD_BOOTSTRAP_MODE` | No | `explicit-config` | Startup mode. Accepted values: `explicit-config`, `builtin-defaults`. |
 | `SIMARD_IDENTITY` | Yes in `explicit-config` | none in `explicit-config`; `simard-engineer` in `builtin-defaults` | Identity to load before runtime composition. Non-UTF-8 values fail bootstrap instead of being treated as missing. |
+| `SIMARD_BASE_TYPE` | Yes in `explicit-config` | none in `explicit-config`; `local-harness` in `builtin-defaults` | Base type selected for the runtime request. Unsupported or unregistered choices fail explicitly. |
+| `SIMARD_RUNTIME_TOPOLOGY` | Yes in `explicit-config` | none in `explicit-config`; `single-process` in `builtin-defaults` | Runtime topology selected for the runtime request. Accepted values: `single-process`, `multi-process`, `distributed`. |
+
+### Current builtin base-type registrations
+
+The builtin `simard-engineer` identity currently advertises and local bootstrap registers these base types:
+
+| Base type | Current adapter shape | Supported topologies in this scaffold |
+| --- | --- | --- |
+| `local-harness` | single-process local process harness adapter | `single-process` |
+| `rusty-clawd` | single-process local process harness adapter | `single-process` |
+| `copilot-sdk` | single-process local process harness adapter | `single-process` |
+
+Notes:
+
+- bootstrap registers adapters from the manifest-advertised base-type list instead of assuming a single hardcoded local adapter
+- for v1, `multi-process` and `distributed` are explicit configuration values but not supported builtin deployment modes; selecting either with the builtin adapters fails explicitly with `UnsupportedTopology`
+- if a future identity advertises a base type without a registered adapter, runtime composition still fails explicitly with `AdapterNotRegistered`
+- the descriptors remain truthful: `adapter_backend` is copied from the selected adapter instance's descriptor, so `adapter_backend.identity` reflects the chosen base type (`local-harness`, `rusty-clawd`, or `copilot-sdk`) even though the current v1 builtin adapters are all instantiated from the same local harness implementation shape
 
 ### Bootstrap modes
 
 | Mode | Behavior |
 | --- | --- |
-| `explicit-config` | Requires prompt root, objective, and identity from configuration. |
-| `builtin-defaults` | Allows builtin prompt root, builtin objective, and builtin identity, but only because startup opted in explicitly. |
+| `explicit-config` | Requires prompt root, objective, identity, base type, and topology from configuration. |
+| `builtin-defaults` | Allows builtin prompt root, builtin objective, builtin identity, builtin base type (`local-harness`), and builtin topology (`single-process`), but only because startup opted in explicitly. |
 
 ### Config value sources
 
@@ -43,6 +77,36 @@ This file describes the API shape that exists in the repository today.
 | --- | --- |
 | `Environment(&'static str)` | The value came directly from an environment variable. |
 | `ExplicitOptIn(&'static str)` | The value came from an explicit startup mode that permits builtin defaults. |
+
+### Example: explicit bootstrap with `copilot-sdk`
+
+This is the canonical non-default base-type example for the current scaffold:
+
+```bash
+SIMARD_PROMPT_ROOT="$PWD/prompt_assets" \
+SIMARD_OBJECTIVE="inspect copilot-sdk bootstrap wiring" \
+SIMARD_IDENTITY="simard-engineer" \
+SIMARD_BASE_TYPE="copilot-sdk" \
+SIMARD_RUNTIME_TOPOLOGY="single-process" \
+cargo run --quiet
+```
+
+Expected output shape:
+
+```text
+Simard local runtime executed successfully.
+Bootstrap mode: explicit-config
+Config sources: prompt_root=env:SIMARD_PROMPT_ROOT, objective=env:SIMARD_OBJECTIVE, base_type=env:SIMARD_BASE_TYPE, topology=env:SIMARD_RUNTIME_TOPOLOGY
+Bootstrap selection: identity=simard-engineer, base_type=copilot-sdk, topology=single-process
+...
+Snapshot: state=ready, topology=single-process, base_type=copilot-sdk
+Shutdown: stopped
+```
+
+This confirms two important contract points:
+
+- bootstrap only uses the selected base type because you passed it explicitly
+- the current v1 runtime accepts `copilot-sdk` immediately, but only with `single-process`
 
 ## Identity metadata
 
@@ -75,6 +139,8 @@ Notes:
 ```text
 mode:explicit-config
 identity:simard-engineer
+base-type:local-harness
+topology:single-process
 prompt-root:env:SIMARD_PROMPT_ROOT
 objective:env:SIMARD_OBJECTIVE
 ```
@@ -206,7 +272,7 @@ pub struct BackendDescriptor {
 Reflection rules:
 
 - `manifest_contract` carries entrypoint, provenance, and freshness together
-- `adapter_backend` comes from the runtime-selected adapter descriptor
+- `adapter_backend` comes from `descriptor()` on the selected adapter instance, not from a shared implementation label or bootstrap shortcut
 - `memory_backend` comes from the live memory store descriptor
 - `evidence_backend` comes from the live evidence store descriptor
 - reflection reports live wiring, not placeholder labels
@@ -225,6 +291,10 @@ Reflection rules:
 | `InvalidManifestContract` | Manifest contract metadata is incomplete or untruthful. |
 | `ClockBeforeUnixEpoch` | Runtime metadata could not record a truthful observation time. |
 | `InvalidSessionId` | A supplied session ID is not a valid distributed-safe identifier. |
+| `UnsupportedBaseType` | The chosen identity does not allow the requested base type. |
+| `AdapterNotRegistered` | No adapter has been registered for the requested base type. |
+| `MissingCapability` | The selected adapter exists but does not satisfy the manifest's required capabilities. |
+| `UnsupportedTopology` | The selected adapter does not support the requested topology. |
 
 ### Lifecycle and session errors
 

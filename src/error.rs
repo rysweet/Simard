@@ -145,7 +145,10 @@ impl Display for SimardError {
                 write!(f, "no adapter is registered for base type '{base_type}'")
             }
             Self::AdapterInvocationFailed { base_type, reason } => {
-                write!(f, "base type '{base_type}' failed during invocation: {reason}")
+                write!(
+                    f,
+                    "base type '{base_type}' failed during invocation: {reason}"
+                )
             }
             Self::MissingCapability {
                 base_type,
@@ -168,7 +171,10 @@ impl Display for SimardError {
                 write!(f, "runtime is stopped and cannot '{action}'")
             }
             Self::RuntimeFailed { action } => {
-                write!(f, "runtime is failed and cannot '{action}' until it is stopped")
+                write!(
+                    f,
+                    "runtime is failed and cannot '{action}' until it is stopped"
+                )
             }
             Self::InvalidSessionTransition { from, to } => {
                 write!(f, "invalid session transition from '{from}' to '{to}'")

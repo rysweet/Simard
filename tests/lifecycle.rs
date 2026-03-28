@@ -428,7 +428,9 @@ fn failed_runs_preserve_failed_session_metadata_until_shutdown() {
     runtime
         .stop()
         .expect("failed runtimes should still allow an explicit stop boundary");
-    let stopped_snapshot = runtime.snapshot().expect("stopped snapshot should remain visible");
+    let stopped_snapshot = runtime
+        .snapshot()
+        .expect("stopped snapshot should remain visible");
     assert_eq!(stopped_snapshot.runtime_state, RuntimeState::Stopped);
     assert_eq!(stopped_snapshot.session_phase, Some(SessionPhase::Failed));
     assert_eq!(

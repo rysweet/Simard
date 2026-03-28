@@ -382,10 +382,10 @@ impl LocalRuntime {
     }
 
     fn mark_last_session_failed(&mut self) {
-        if let Some(session) = self.last_session.as_mut() {
-            if session.phase != SessionPhase::Failed {
-                session.phase = SessionPhase::Failed;
-            }
+        if let Some(session) = self.last_session.as_mut()
+            && session.phase != SessionPhase::Failed
+        {
+            session.phase = SessionPhase::Failed;
         }
     }
 

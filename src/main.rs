@@ -7,12 +7,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Simard local runtime executed successfully.");
     println!("Bootstrap mode: {}", config.mode);
     println!(
-        "Config sources: prompt_root={}, objective={}",
-        config.prompt_root.source, config.objective.source
+        "Config sources: prompt_root={}, objective={}, base_type={}, topology={}",
+        config.prompt_root.source,
+        config.objective.source,
+        config.selected_base_type.source,
+        config.topology.source
     );
-    println!("Plan: {}", execution.outcome.plan);
-    println!("Execution: {}", execution.outcome.execution_summary);
-    println!("Reflection: {}", execution.outcome.reflection.summary);
+    println!(
+        "Bootstrap selection: identity={}, base_type={}, topology={}",
+        config.identity, config.selected_base_type.value, config.topology.value
+    );
     println!(
         "Snapshot: state={}, topology={}, base_type={}",
         execution.snapshot.runtime_state,

@@ -7,7 +7,7 @@ use crate::base_types::{BaseTypeId, LocalProcessHarnessAdapter};
 use crate::error::{SimardError, SimardResult};
 use crate::evidence::InMemoryEvidenceStore;
 use crate::identity::{
-    BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader, ManifestContract,
+    BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader, IdentityManifest, ManifestContract,
 };
 use crate::memory::InMemoryMemoryStore;
 use crate::metadata::{Freshness, Provenance};
@@ -21,6 +21,8 @@ use crate::session::UuidSessionIdGenerator;
 const DEFAULT_IDENTITY: &str = "simard-engineer";
 const DEFAULT_OBJECTIVE: &str = "bootstrap the Simard engineer loop";
 const LOCAL_BASE_TYPE: &str = "local-harness";
+const RUSTY_CLAWD_BASE_TYPE: &str = "rusty-clawd";
+const COPILOT_SDK_BASE_TYPE: &str = "copilot-sdk";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BootstrapMode {
@@ -80,6 +82,8 @@ pub struct BootstrapInputs {
     pub objective: Option<String>,
     pub mode: Option<String>,
     pub identity: Option<String>,
+    pub base_type: Option<String>,
+    pub topology: Option<String>,
 }
 
 impl BootstrapInputs {
@@ -89,6 +93,8 @@ impl BootstrapInputs {
             objective: read_optional_utf8_env("SIMARD_OBJECTIVE")?,
             mode: read_optional_utf8_env("SIMARD_BOOTSTRAP_MODE")?,
             identity: read_optional_utf8_env("SIMARD_IDENTITY")?,
+            base_type: read_optional_utf8_env("SIMARD_BASE_TYPE")?,
+            topology: read_optional_utf8_env("SIMARD_RUNTIME_TOPOLOGY")?,
         })
     }
 }
@@ -99,6 +105,8 @@ pub struct BootstrapConfig {
     pub identity: String,
     pub prompt_root: ConfigValue<PathBuf>,
     pub objective: ConfigValue<String>,
+    pub selected_base_type: ConfigValue<BaseTypeId>,
+    pub topology: ConfigValue<RuntimeTopology>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -152,6 +160,43 @@ impl BootstrapConfig {
             }
         };
 
+        let selected_base_type = match inputs.base_type {
+            Some(value) => ConfigValue {
+                value: BaseTypeId::new(value),
+                source: ConfigValueSource::Environment("SIMARD_BASE_TYPE"),
+            },
+            None if mode == BootstrapMode::BuiltinDefaults => ConfigValue {
+                value: BaseTypeId::new(LOCAL_BASE_TYPE),
+                source: ConfigValueSource::ExplicitOptIn("SIMARD_BOOTSTRAP_MODE"),
+            },
+            None => {
+                return Err(SimardError::MissingRequiredConfig {
+                    key: "SIMARD_BASE_TYPE".to_string(),
+                    help:
+                        "set SIMARD_BASE_TYPE or opt in with SIMARD_BOOTSTRAP_MODE=builtin-defaults"
+                            .to_string(),
+                });
+            }
+        };
+
+        let topology = match inputs.topology {
+            Some(value) => ConfigValue {
+                value: parse_runtime_topology(value)?,
+                source: ConfigValueSource::Environment("SIMARD_RUNTIME_TOPOLOGY"),
+            },
+            None if mode == BootstrapMode::BuiltinDefaults => ConfigValue {
+                value: RuntimeTopology::SingleProcess,
+                source: ConfigValueSource::ExplicitOptIn("SIMARD_BOOTSTRAP_MODE"),
+            },
+            None => {
+                return Err(SimardError::MissingRequiredConfig {
+                    key: "SIMARD_RUNTIME_TOPOLOGY".to_string(),
+                    help: "set SIMARD_RUNTIME_TOPOLOGY or opt in with SIMARD_BOOTSTRAP_MODE=builtin-defaults"
+                        .to_string(),
+                });
+            }
+        };
+
         Ok(Self {
             mode,
             identity: match inputs.identity {
@@ -168,6 +213,8 @@ impl BootstrapConfig {
             },
             prompt_root,
             objective,
+            selected_base_type,
+            topology,
         })
     }
 
@@ -175,6 +222,8 @@ impl BootstrapConfig {
         vec![
             format!("mode:{}", self.mode),
             format!("identity:{}", self.identity),
+            format!("base-type:{}", self.selected_base_type.value),
+            format!("topology:{}", self.topology.value),
             format!("prompt-root:{}", self.prompt_root.source),
             format!("objective:{}", self.objective.source),
         ]
@@ -185,9 +234,6 @@ pub fn assemble_local_runtime(config: &BootstrapConfig) -> SimardResult<LocalRun
     let prompt_store = Arc::new(FilePromptAssetStore::new(config.prompt_root.value.clone()));
     let memory_store = Arc::new(InMemoryMemoryStore::try_default()?);
     let evidence_store = Arc::new(InMemoryEvidenceStore::try_default()?);
-
-    let mut base_types = BaseTypeRegistry::default();
-    base_types.register(LocalProcessHarnessAdapter::single_process(LOCAL_BASE_TYPE)?);
 
     let contract = ManifestContract::new(
         bootstrap_entrypoint(),
@@ -205,11 +251,12 @@ pub fn assemble_local_runtime(config: &BootstrapConfig) -> SimardResult<LocalRun
         env!("CARGO_PKG_VERSION"),
         contract,
     ))?;
+    let base_types = base_type_registry_for_manifest(&manifest)?;
 
     let request = RuntimeRequest::new(
         manifest,
-        BaseTypeId::new(LOCAL_BASE_TYPE),
-        RuntimeTopology::SingleProcess,
+        config.selected_base_type.value.clone(),
+        config.topology.value,
     );
 
     LocalRuntime::compose(
@@ -260,6 +307,38 @@ fn decode_utf8_env_value(key: &'static str, value: OsString) -> SimardResult<Opt
         })
 }
 
+fn parse_runtime_topology(value: String) -> SimardResult<RuntimeTopology> {
+    match value.as_str() {
+        "single-process" => Ok(RuntimeTopology::SingleProcess),
+        "multi-process" => Ok(RuntimeTopology::MultiProcess),
+        "distributed" => Ok(RuntimeTopology::Distributed),
+        _ => Err(SimardError::InvalidConfigValue {
+            key: "SIMARD_RUNTIME_TOPOLOGY".to_string(),
+            value,
+            help: "expected 'single-process', 'multi-process', or 'distributed'".to_string(),
+        }),
+    }
+}
+
+fn base_type_registry_for_manifest(manifest: &IdentityManifest) -> SimardResult<BaseTypeRegistry> {
+    let mut base_types = BaseTypeRegistry::default();
+    for base_type in &manifest.supported_base_types {
+        if let Some(adapter) = builtin_adapter_for(base_type)? {
+            base_types.register(adapter);
+        }
+    }
+    Ok(base_types)
+}
+
+fn builtin_adapter_for(base_type: &BaseTypeId) -> SimardResult<Option<LocalProcessHarnessAdapter>> {
+    match base_type.as_str() {
+        LOCAL_BASE_TYPE | RUSTY_CLAWD_BASE_TYPE | COPILOT_SDK_BASE_TYPE => Ok(Some(
+            LocalProcessHarnessAdapter::single_process(base_type.as_str())?,
+        )),
+        _ => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
@@ -267,7 +346,8 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
 
-    use super::decode_utf8_env_value;
+    use super::{builtin_adapter_for, decode_utf8_env_value};
+    use crate::base_types::{BaseTypeAdapter, BaseTypeId};
     use crate::error::SimardError;
 
     #[cfg(unix)]
@@ -282,5 +362,16 @@ mod tests {
                 key: "SIMARD_IDENTITY".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn builtin_adapter_catalog_covers_manifest_advertised_base_types() {
+        for base_type in ["local-harness", "rusty-clawd", "copilot-sdk"] {
+            let adapter = builtin_adapter_for(&BaseTypeId::new(base_type))
+                .expect("catalog lookup should succeed")
+                .expect("builtin manifest base type should be registered");
+
+            assert_eq!(adapter.descriptor().id, BaseTypeId::new(base_type));
+        }
     }
 }
