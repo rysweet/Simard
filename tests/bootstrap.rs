@@ -146,6 +146,20 @@ fn bootstrap_rejects_invalid_topology_values() {
 }
 
 #[test]
+fn invalid_config_display_redacts_raw_values() {
+    let error = SimardError::InvalidConfigValue {
+        key: "SIMARD_RUNTIME_TOPOLOGY".to_string(),
+        value: "mystery-mesh".to_string(),
+        help: "expected 'single-process', 'multi-process', or 'distributed'".to_string(),
+    };
+
+    let rendered = error.to_string();
+    assert!(rendered.contains("SIMARD_RUNTIME_TOPOLOGY"));
+    assert!(rendered.contains("expected 'single-process'"));
+    assert!(!rendered.contains("mystery-mesh"));
+}
+
+#[test]
 fn builtin_identity_loader_preserves_manifest_contract_metadata() {
     let contract = ManifestContract::new(
         bootstrap_entrypoint(),
@@ -265,6 +279,14 @@ fn main_does_not_print_objective_derived_runtime_details() {
 }
 
 #[test]
+fn main_reports_selected_base_type_and_runtime_implementation_separately() {
+    let main_rs = include_str!("../src/main.rs");
+
+    assert!(main_rs.contains("Bootstrap selection:"));
+    assert!(main_rs.contains("Adapter implementation:"));
+}
+
+#[test]
 fn bootstrap_run_local_session_executes_the_cli_lifecycle() {
     let config = BootstrapConfig::resolve(BootstrapInputs {
         prompt_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")),
@@ -309,8 +331,31 @@ fn bootstrap_assembly_supports_multiple_builtin_manifest_base_types() {
             execution.snapshot.selected_base_type,
             BaseTypeId::new(base_type)
         );
-        assert_eq!(execution.snapshot.adapter_backend.identity, base_type);
+        assert_eq!(execution.snapshot.adapter_backend.identity, "local-harness");
         assert_eq!(execution.snapshot.topology, RuntimeTopology::SingleProcess);
+        assert!(
+            execution
+                .snapshot
+                .adapter_backend
+                .provenance
+                .locator
+                .contains(base_type),
+            "adapter provenance should keep the selected alias visible"
+        );
+        assert!(
+            execution
+                .outcome
+                .execution_summary
+                .contains("implementation 'local-harness'"),
+            "execution summary should describe the canonical v1 implementation"
+        );
+        assert!(
+            !execution
+                .outcome
+                .execution_summary
+                .contains(config.objective.value.as_str()),
+            "execution summaries should not persist the raw objective"
+        );
     }
 }
 

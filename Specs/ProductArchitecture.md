@@ -53,7 +53,7 @@ For delivery purposes, v1 should be interpreted narrowly:
 
 - one primary engineer loop
 - one default local single-process deployment path
-- three builtin manifest-advertised base-type selections in the local scaffold: `local-harness`, `rusty-clawd`, and `copilot-sdk`
+- three builtin manifest-advertised base-type selections in the local scaffold: `local-harness`, `rusty-clawd`, and `copilot-sdk`, with the latter two behaving as explicit v1 aliases of the local harness implementation
 - one durable memory path
 - one small benchmark set
 
@@ -68,7 +68,7 @@ The following are hard constraints for the first implementation, not deferred as
 
 - **Dependency injection from the outset**: runtime composition must happen through explicit ports, traits, and typed configuration rather than hidden globals or direct construction buried inside the core loop.
 - **Distributed-readiness from the outset**: runtime, session, memory, and reflection contracts must not assume in-process execution even when the first deployment path is single-process.
-- **Multiple base types from the outset**: identity manifests and runtime selection logic must support multiple base types immediately. In the current v1 scaffold, `local-harness`, `rusty-clawd`, and `copilot-sdk` are all selectable builtin base types, even though they currently share a single-process harness implementation shape.
+- **Multiple base types from the outset**: identity manifests and runtime selection logic must support multiple base types immediately. In the current v1 scaffold, `local-harness`, `rusty-clawd`, and `copilot-sdk` are all selectable builtin base types, but `rusty-clawd` and `copilot-sdk` are still explicit aliases of the same local single-process harness implementation.
 - **Visible failures from the outset**: unsupported capabilities, missing prompt assets, invalid lifecycle transitions, and unsupported topologies must fail explicitly through typed errors instead of silent fallbacks.
 
 ## Non-Goals
@@ -113,7 +113,7 @@ The terminal is the primary execution surface, and conversational text exists to
 
 ### 2. Explicit State Over Hidden Magic
 
-Every meaningful run should have explicit session metadata, a task objective, a working memory area, and a durable output trail.
+Every meaningful run should have explicit session metadata, a live task objective, a working memory area, and a durable output trail that stores sanitized objective metadata rather than raw task text.
 If a future developer cannot explain why Simard took an action by inspecting session records, the architecture is too opaque.
 
 ### 3. Roles Must Be Separated
@@ -246,7 +246,7 @@ This is disposable and should be cheap to reset.
 
 #### 2. Session Summary
 
-A compact record written at the end of the session: objective, key actions, outcomes, changed artifacts, and follow-up items.
+A compact record written at the end of the session: sanitized objective metadata, key actions, outcomes, changed artifacts, and follow-up items.
 This is the primary bridge between one session and the next.
 
 #### 3. Project Memory
@@ -265,6 +265,7 @@ This memory is for evaluation and tuning, not for contaminating normal project c
 - Session scratch should not automatically become long-term memory.
 - Benchmark outcomes should be queryable separately from project execution history.
 - Meeting outputs should write decisions, not entire raw conversations, into durable memory.
+- V1 manifests must keep `MemoryPolicy.allow_project_writes=false` until there is an explicit project-write contract.
 
 ## Platform Architecture Layers
 
@@ -305,7 +306,7 @@ The current Simard scaffold already publishes builtin manifest-facing base-type 
 - `rusty-clawd`
 - `copilot-sdk`
 
-Those identifiers are intentionally explicit at bootstrap time. Unsupported or unregistered base-type/topology pairs must fail visibly rather than collapsing into a hidden local default.
+Those identifiers are intentionally explicit at bootstrap time. Unsupported or unregistered base-type/topology pairs must fail visibly rather than collapsing into a hidden local default, and the v1 aliases must still report the honest `local-harness` implementation identity behind them.
 
 Each base type should ideally have a Rust wrapper or adapter so the rest of the platform can interact with them through a more uniform model.
 

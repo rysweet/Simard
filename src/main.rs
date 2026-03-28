@@ -23,6 +23,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         execution.snapshot.topology,
         execution.snapshot.selected_base_type
     );
+    println!(
+        "Adapter implementation: {}",
+        execution.snapshot.adapter_backend.identity
+    );
     println!("Shutdown: {}", execution.stopped_snapshot.runtime_state);
 
     Ok(())

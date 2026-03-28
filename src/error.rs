@@ -44,6 +44,10 @@ pub enum SimardError {
         path: PathBuf,
         reason: String,
     },
+    UnsupportedMemoryPolicy {
+        field: String,
+        reason: String,
+    },
     UnsupportedBaseType {
         identity: String,
         base_type: String,
@@ -96,11 +100,12 @@ impl Display for SimardError {
             Self::NonUnicodeConfigValue { key } => {
                 write!(f, "configuration '{key}' must be valid UTF-8")
             }
-            Self::InvalidConfigValue { key, value, help } => {
-                write!(
-                    f,
-                    "invalid value '{value}' for configuration '{key}': {help}"
-                )
+            Self::InvalidConfigValue {
+                key,
+                value: _,
+                help,
+            } => {
+                write!(f, "invalid value for configuration '{key}': {help}")
             }
             Self::UnknownIdentity { requested } => {
                 write!(f, "identity '{requested}' is not registered")
@@ -111,29 +116,23 @@ impl Display for SimardError {
             Self::InvalidSessionId { value, reason } => {
                 write!(f, "invalid session id '{value}': {reason}")
             }
-            Self::PromptAssetMissing { asset_id, path } => {
+            Self::PromptAssetMissing { asset_id, path: _ } => {
                 write!(
                     f,
-                    "prompt asset '{asset_id}' was not found at {}",
-                    path.display()
+                    "prompt asset '{asset_id}' was not found under the configured prompt root"
                 )
             }
-            Self::PromptAssetRead { path, reason } => {
-                write!(
-                    f,
-                    "failed to read prompt asset {}: {reason}",
-                    path.display()
-                )
+            Self::PromptAssetRead { path: _, reason } => {
+                write!(f, "failed to read configured prompt asset: {reason}")
             }
             Self::InvalidPromptAssetPath {
                 asset_id,
-                path,
+                path: _,
                 reason,
-            } => write!(
-                f,
-                "invalid prompt asset path for '{asset_id}' at {}: {reason}",
-                path.display()
-            ),
+            } => write!(f, "invalid prompt asset path for '{asset_id}': {reason}"),
+            Self::UnsupportedMemoryPolicy { field, reason } => {
+                write!(f, "unsupported memory policy '{field}': {reason}")
+            }
             Self::UnsupportedBaseType {
                 identity,
                 base_type,

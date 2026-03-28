@@ -28,7 +28,7 @@ Use this guide when you need to answer two questions:
 
 Provide both the prompt root and objective yourself.
 
-For the builtin `simard-engineer` identity, the current local scaffold accepts `local-harness`, `rusty-clawd`, or `copilot-sdk` as explicit base-type choices. All three currently run through the same single-process adapter shape, so `SIMARD_RUNTIME_TOPOLOGY` must still be `single-process`.
+For the builtin `simard-engineer` identity, the current local scaffold accepts `local-harness`, `rusty-clawd`, or `copilot-sdk` as explicit base-type choices. In v1, `rusty-clawd` and `copilot-sdk` are explicit aliases of the same `local-harness` single-process implementation, so `SIMARD_RUNTIME_TOPOLOGY` must still be `single-process`.
 
 ```bash
 SIMARD_PROMPT_ROOT="$PWD/prompt_assets" \
@@ -72,9 +72,10 @@ In the current repo, you should see output shaped like:
 ```text
 Bootstrap selection: identity=simard-engineer, base_type=copilot-sdk, topology=single-process
 Snapshot: state=ready, topology=single-process, base_type=copilot-sdk
+Adapter implementation: local-harness
 ```
 
-That is the important contract boundary: the runtime records the explicit selection you asked for, and it does not reinterpret `copilot-sdk` as `local-harness`.
+That is the important contract boundary: the runtime records the explicit selection you asked for, and it also reports the honest v1 implementation identity. Simard does not silently rewrite your selection, but it also does not pretend the alias is already a distinct backend.
 
 ## 2. Opt in to builtin defaults only when you mean it
 
@@ -126,7 +127,9 @@ assert_eq!(snapshot.memory_backend.identity, "memory::session-cache");
 assert_eq!(snapshot.evidence_backend.identity, "evidence::append-only-log");
 ```
 
-If you launched with `SIMARD_BASE_TYPE="copilot-sdk"` or `SIMARD_BASE_TYPE="rusty-clawd"`, the same rule applies: `snapshot.adapter_backend.identity` must match the chosen base type exactly.
+If you launched with `SIMARD_BASE_TYPE="copilot-sdk"` or `SIMARD_BASE_TYPE="rusty-clawd"`, `snapshot.selected_base_type` still shows the alias you chose, while `snapshot.adapter_backend.identity` remains `local-harness`.
+
+The same redaction rule applies to persisted session text: scratch memory, session summaries, and reflection summaries record `objective-metadata(...)` instead of the raw `SIMARD_OBJECTIVE` string.
 
 ## 4. Validate stopped-state behavior
 
@@ -216,7 +219,13 @@ export SIMARD_BOOTSTRAP_MODE=builtin-defaults
 
 **Solution**: pick a base type the identity allows, make sure the adapter is registered for that identity, and choose a topology the selected adapter supports. Simard does not substitute a different base type or downgrade the topology silently.
 
-Today, the builtin base types `local-harness`, `rusty-clawd`, and `copilot-sdk` all require `SIMARD_RUNTIME_TOPOLOGY=single-process`.
+Today, the builtin base types `local-harness`, `rusty-clawd`, and `copilot-sdk` all require `SIMARD_RUNTIME_TOPOLOGY=single-process`, and the latter two still report `Adapter implementation: local-harness`.
+
+### Project writes are rejected in v1
+
+**Symptom**: manifest construction or runtime composition returns `UnsupportedMemoryPolicy`.
+
+**Solution**: keep `MemoryPolicy.allow_project_writes=false` until Simard ships an explicit project-write contract. The current runtime accepts summary scope selection, but not repository mutation through memory policy.
 
 ### Reflection metadata is truthful but incomplete
 

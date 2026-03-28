@@ -25,15 +25,17 @@ Today Simard provides:
 
 - explicit bootstrap configuration, with `builtin-defaults` available only through opt-in startup mode
 - explicit base-type and topology selection at bootstrap, with opt-in defaults only in `builtin-defaults`
-- builtin manifest-advertised base types selectable at startup today: `local-harness`, `rusty-clawd`, and `copilot-sdk`
+- builtin manifest-advertised base types selectable at startup today: `local-harness`, `rusty-clawd`, and `copilot-sdk`, with the latter two wired as explicit v1 aliases of the local harness implementation
 - `single-process` as the only supported v1 topology for the builtin base types, with unsupported pairs failing explicitly
 - `ManifestContract { entrypoint, composition, precedence, provenance, freshness }`
 - `ReflectionSnapshot { manifest_contract, adapter_backend, memory_backend, evidence_backend }`
 - truthful memory and evidence backend descriptors
-- truthful adapter backend metadata from the runtime-selected base type
+- truthful adapter backend metadata from the runtime-selected wiring, including the canonical `local-harness` implementation identity behind the current aliases
+- persisted scratch, summary, and reflection text that records objective metadata instead of raw objective text
 - canonical session IDs shaped as `session-<uuid-v7>`, with validation at parsing boundaries
 - a real stopped runtime state whose snapshot remains inspectable after shutdown
 - explicit `RuntimeStopped`, `InvalidSessionId`, and `InvalidManifestContract` errors
+- explicit rejection of `MemoryPolicy.allow_project_writes=true` in v1
 - a local CLI/runtime contract, not an HTTP API or database-backed service
 
 ## Contributor verification

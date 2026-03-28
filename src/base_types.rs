@@ -6,6 +6,7 @@ use crate::identity::OperatingMode;
 use crate::metadata::{BackendDescriptor, Freshness};
 use crate::prompt_assets::PromptAssetRef;
 use crate::runtime::RuntimeTopology;
+use crate::sanitization::objective_metadata;
 use crate::session::SessionId;
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -105,13 +106,15 @@ pub struct LocalProcessHarnessAdapter {
 impl LocalProcessHarnessAdapter {
     pub fn new(
         id: impl Into<String>,
+        implementation_identity: impl Into<String>,
         capabilities: impl IntoIterator<Item = BaseTypeCapability>,
         supported_topologies: impl IntoIterator<Item = RuntimeTopology>,
     ) -> SimardResult<Self> {
         let id = BaseTypeId::new(id);
+        let implementation_identity = implementation_identity.into();
         let backend = BackendDescriptor::for_runtime_type::<Self>(
-            id.to_string(),
-            format!("registered-base-type:{id}"),
+            implementation_identity.clone(),
+            format!("registered-base-type:{id}::implementation:{implementation_identity}"),
             Freshness::now()?,
         );
         Ok(Self {
@@ -125,8 +128,17 @@ impl LocalProcessHarnessAdapter {
     }
 
     pub fn single_process(id: impl Into<String>) -> SimardResult<Self> {
+        let id = id.into();
+        Self::single_process_alias(id.clone(), id)
+    }
+
+    pub fn single_process_alias(
+        id: impl Into<String>,
+        implementation_identity: impl Into<String>,
+    ) -> SimardResult<Self> {
         Self::new(
             id,
+            implementation_identity,
             [
                 BaseTypeCapability::PromptAssets,
                 BaseTypeCapability::SessionLifecycle,
@@ -158,15 +170,17 @@ impl BaseTypeAdapter for LocalProcessHarnessAdapter {
             .map(|asset| asset.id.to_string())
             .collect::<Vec<_>>()
             .join(", ");
+        let objective_summary = objective_metadata(&request.objective);
+        let implementation_identity = &self.descriptor.backend.identity;
 
         Ok(BaseTypeOutcome {
             plan: format!(
-                "Run {:?} session '{}' with prompt assets [{}].",
-                request.mode, request.objective, prompt_ids
+                "Run {:?} session with {} and prompt assets [{}].",
+                request.mode, objective_summary, prompt_ids
             ),
             execution_summary: format!(
-                "Local single-process harness executed '{}' via '{}'.",
-                request.objective, self.descriptor.id
+                "Local single-process harness executed {} via selected base type '{}' on implementation '{}'.",
+                objective_summary, self.descriptor.id, implementation_identity
             ),
             evidence: vec![
                 format!("selected-base-type={}", self.descriptor.id),

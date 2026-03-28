@@ -31,7 +31,7 @@ This tutorial follows the runtime path that exists in the repository today.
 
 From the repository root, start Simard with a real prompt asset directory and an explicit objective.
 
-For the builtin `simard-engineer` identity, you can currently choose `local-harness`, `rusty-clawd`, or `copilot-sdk` here. The local scaffold still runs them through a single-process adapter path, so this example keeps `SIMARD_RUNTIME_TOPOLOGY="single-process"`.
+For the builtin `simard-engineer` identity, you can currently choose `local-harness`, `rusty-clawd`, or `copilot-sdk` here. In v1, `rusty-clawd` and `copilot-sdk` are explicit aliases of the same local single-process harness implementation, so this example keeps `SIMARD_RUNTIME_TOPOLOGY="single-process"`.
 
 ```bash
 SIMARD_PROMPT_ROOT="$PWD/prompt_assets" \
@@ -49,10 +49,8 @@ Simard local runtime executed successfully.
 Bootstrap mode: explicit-config
 Config sources: prompt_root=env:SIMARD_PROMPT_ROOT, objective=env:SIMARD_OBJECTIVE, base_type=env:SIMARD_BASE_TYPE, topology=env:SIMARD_RUNTIME_TOPOLOGY
 Bootstrap selection: identity=simard-engineer, base_type=local-harness, topology=single-process
-Plan: ...
-Execution: ...
-Reflection: ...
 Snapshot: state=ready, topology=single-process, base_type=local-harness
+Adapter implementation: local-harness
 Shutdown: stopped
 ```
 
@@ -76,9 +74,10 @@ Look for these lines:
 ```text
 Bootstrap selection: identity=simard-engineer, base_type=copilot-sdk, topology=single-process
 Snapshot: state=ready, topology=single-process, base_type=copilot-sdk
+Adapter implementation: local-harness
 ```
 
-**Checkpoint**: the runtime contract is explicit. `copilot-sdk` is selectable now, but the v1 scaffold still only supports `single-process`. The runtime records the base type you chose instead of silently drifting back to `local-harness`.
+**Checkpoint**: the runtime contract is explicit. `copilot-sdk` is selectable now, but the v1 scaffold still only supports `single-process`, and the underlying implementation stays `local-harness`. Simard preserves the selected base type without pretending it is already a distinct backend integration.
 
 ## Step 3: Opt in to builtin defaults
 
@@ -143,12 +142,15 @@ assert_eq!(snapshot.manifest_contract.freshness.state, FreshnessState::Current);
 assert_eq!(snapshot.adapter_backend.identity, "local-harness");
 ```
 
+If you launched with `SIMARD_BASE_TYPE="copilot-sdk"` or `SIMARD_BASE_TYPE="rusty-clawd"`, `snapshot.selected_base_type` still shows the explicit selection while `snapshot.adapter_backend.identity` remains `local-harness`.
+
 ## Summary
 
 You now know:
 
 - how to run the local runtime with explicit config
 - how to switch between built-in base types without hidden inference
+- how the current v1 aliases still expose the real `local-harness` implementation honestly
 - how opt-in defaults are recorded
 - how reflection reports truthful runtime metadata
 - how stop semantics behave after shutdown

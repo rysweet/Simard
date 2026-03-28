@@ -333,7 +333,7 @@ fn base_type_registry_for_manifest(manifest: &IdentityManifest) -> SimardResult<
 fn builtin_adapter_for(base_type: &BaseTypeId) -> SimardResult<Option<LocalProcessHarnessAdapter>> {
     match base_type.as_str() {
         LOCAL_BASE_TYPE | RUSTY_CLAWD_BASE_TYPE | COPILOT_SDK_BASE_TYPE => Ok(Some(
-            LocalProcessHarnessAdapter::single_process(base_type.as_str())?,
+            LocalProcessHarnessAdapter::single_process_alias(base_type.as_str(), LOCAL_BASE_TYPE)?,
         )),
         _ => Ok(None),
     }
@@ -346,7 +346,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
 
-    use super::{builtin_adapter_for, decode_utf8_env_value};
+    use super::{LOCAL_BASE_TYPE, builtin_adapter_for, decode_utf8_env_value};
     use crate::base_types::{BaseTypeAdapter, BaseTypeId};
     use crate::error::SimardError;
 
@@ -372,6 +372,7 @@ mod tests {
                 .expect("builtin manifest base type should be registered");
 
             assert_eq!(adapter.descriptor().id, BaseTypeId::new(base_type));
+            assert_eq!(adapter.descriptor().backend.identity, LOCAL_BASE_TYPE);
         }
     }
 }

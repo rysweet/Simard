@@ -39,7 +39,7 @@ The stable contract in this repository is the bootstrap/runtime behavior describ
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
 | `SIMARD_PROMPT_ROOT` | Yes in `explicit-config` | none | Root directory for prompt assets. |
-| `SIMARD_OBJECTIVE` | Yes in `explicit-config` | none | Objective passed to `run()`. |
+| `SIMARD_OBJECTIVE` | Yes in `explicit-config` | none | Objective passed to `run()`. Persisted scratch, summary, and reflection text store metadata derived from it instead of the raw objective text. |
 | `SIMARD_BOOTSTRAP_MODE` | No | `explicit-config` | Startup mode. Accepted values: `explicit-config`, `builtin-defaults`. |
 | `SIMARD_IDENTITY` | Yes in `explicit-config` | none in `explicit-config`; `simard-engineer` in `builtin-defaults` | Identity to load before runtime composition. Non-UTF-8 values fail bootstrap instead of being treated as missing. |
 | `SIMARD_BASE_TYPE` | Yes in `explicit-config` | none in `explicit-config`; `local-harness` in `builtin-defaults` | Base type selected for the runtime request. Unsupported or unregistered choices fail explicitly. |
@@ -49,18 +49,19 @@ The stable contract in this repository is the bootstrap/runtime behavior describ
 
 The builtin `simard-engineer` identity currently advertises and local bootstrap registers these base types:
 
-| Base type | Current adapter shape | Supported topologies in this scaffold |
+| Base type selection | Current adapter implementation | Supported topologies in this scaffold |
 | --- | --- | --- |
-| `local-harness` | single-process local process harness adapter | `single-process` |
-| `rusty-clawd` | single-process local process harness adapter | `single-process` |
-| `copilot-sdk` | single-process local process harness adapter | `single-process` |
+| `local-harness` | `local-harness` single-process local process harness adapter | `single-process` |
+| `rusty-clawd` | `local-harness` single-process local process harness adapter (alias) | `single-process` |
+| `copilot-sdk` | `local-harness` single-process local process harness adapter (alias) | `single-process` |
 
 Notes:
 
 - bootstrap registers adapters from the manifest-advertised base-type list instead of assuming a single hardcoded local adapter
 - for v1, `multi-process` and `distributed` are explicit configuration values but not supported builtin deployment modes; selecting either with the builtin adapters fails explicitly with `UnsupportedTopology`
 - if a future identity advertises a base type without a registered adapter, runtime composition still fails explicitly with `AdapterNotRegistered`
-- the descriptors remain truthful: `adapter_backend` is copied from the selected adapter instance's descriptor, so `adapter_backend.identity` reflects the chosen base type (`local-harness`, `rusty-clawd`, or `copilot-sdk`) even though the current v1 builtin adapters are all instantiated from the same local harness implementation shape
+- the descriptors remain truthful: `selected_base_type` preserves the explicit bootstrap choice, while `adapter_backend.identity` exposes the actual v1 implementation identity (`local-harness`) behind the current aliases
+- `MemoryPolicy.allow_project_writes=true` is rejected explicitly in v1 rather than being ignored
 
 ### Bootstrap modes
 
@@ -98,15 +99,25 @@ Simard local runtime executed successfully.
 Bootstrap mode: explicit-config
 Config sources: prompt_root=env:SIMARD_PROMPT_ROOT, objective=env:SIMARD_OBJECTIVE, base_type=env:SIMARD_BASE_TYPE, topology=env:SIMARD_RUNTIME_TOPOLOGY
 Bootstrap selection: identity=simard-engineer, base_type=copilot-sdk, topology=single-process
+Adapter implementation: local-harness
 ...
 Snapshot: state=ready, topology=single-process, base_type=copilot-sdk
 Shutdown: stopped
 ```
 
-This confirms two important contract points:
+This confirms three important contract points:
 
 - bootstrap only uses the selected base type because you passed it explicitly
 - the current v1 runtime accepts `copilot-sdk` immediately, but only with `single-process`
+- the current v1 implementation behind that alias is still `local-harness`
+
+### Persisted session text
+
+Simard keeps the live objective available while the run is executing, but persisted session text is redacted down to objective metadata.
+
+- session scratch records store `objective-metadata(chars=..., words=..., lines=...)`
+- reflection summaries describe completion with objective metadata instead of raw objective text
+- persisted session summaries reuse sanitized plan and execution strings rather than copying the raw objective back out
 
 ## Identity metadata
 

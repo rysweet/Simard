@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
 
-use crate::base_types::{BaseTypeAdapter, BaseTypeId, BaseTypeRequest};
+use crate::base_types::{BaseTypeAdapter, BaseTypeId, BaseTypeOutcome, BaseTypeRequest};
 use crate::error::{SimardError, SimardResult};
 use crate::evidence::{EvidenceRecord, EvidenceSource, EvidenceStore};
 use crate::identity::IdentityManifest;
@@ -10,6 +10,7 @@ use crate::memory::{MemoryRecord, MemoryScope, MemoryStore};
 use crate::metadata::{Freshness, FreshnessState};
 use crate::prompt_assets::{PromptAssetRef, PromptAssetStore};
 use crate::reflection::{ReflectionReport, ReflectionSnapshot, ReflectiveRuntime};
+use crate::sanitization::objective_metadata;
 use crate::session::{SessionIdGenerator, SessionPhase, SessionRecord};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -184,6 +185,8 @@ pub struct LocalRuntime {
 
 impl LocalRuntime {
     pub fn compose(ports: RuntimePorts, request: RuntimeRequest) -> SimardResult<Self> {
+        request.manifest.memory_policy.validate()?;
+
         if !request
             .manifest
             .supports_base_type(&request.selected_base_type)
@@ -257,92 +260,9 @@ impl LocalRuntime {
 
     pub fn run(&mut self, objective: impl Into<String>) -> SimardResult<SessionOutcome> {
         self.ensure_available("run")?;
+        let objective = objective.into();
 
-        let result = (|| {
-            self.transition(RuntimeState::Active)?;
-
-            let mut session = SessionRecord::new(
-                self.request.manifest.default_mode,
-                objective.into(),
-                self.request.selected_base_type.clone(),
-                self.ports.session_ids.as_ref(),
-            );
-            self.remember_session(&session);
-
-            session.advance(SessionPhase::Preparation)?;
-            self.remember_session(&session);
-            let scratch_key = format!("{}-scratch", session.id);
-            self.ports.memory_store.put(MemoryRecord {
-                key: scratch_key.clone(),
-                scope: MemoryScope::SessionScratch,
-                value: format!("objective={}", session.objective),
-                session_id: session.id.clone(),
-                recorded_in: SessionPhase::Preparation,
-            })?;
-            session.attach_memory(scratch_key);
-            self.remember_session(&session);
-
-            session.advance(SessionPhase::Planning)?;
-            self.remember_session(&session);
-            let outcome = self.adapter.invoke(BaseTypeRequest {
-                session_id: session.id.clone(),
-                objective: session.objective.clone(),
-                mode: session.mode,
-                topology: self.request.topology,
-                prompt_assets: self.prompt_assets.clone(),
-            })?;
-
-            session.advance(SessionPhase::Execution)?;
-            self.remember_session(&session);
-            for (index, detail) in outcome.evidence.iter().enumerate() {
-                let evidence_id = format!("{}-evidence-{}", session.id, index + 1);
-                self.ports.evidence_store.record(EvidenceRecord {
-                    id: evidence_id.clone(),
-                    session_id: session.id.clone(),
-                    phase: SessionPhase::Execution,
-                    detail: detail.clone(),
-                    source: EvidenceSource::BaseType(self.request.selected_base_type.clone()),
-                })?;
-                session.attach_evidence(evidence_id);
-            }
-            self.remember_session(&session);
-
-            self.transition(RuntimeState::Reflecting)?;
-            session.advance(SessionPhase::Reflection)?;
-            self.remember_session(&session);
-            let reflection = ReflectionReport {
-                summary: format!(
-                    "Session '{}' completed through '{}' on '{}'.",
-                    session.objective, self.request.selected_base_type, self.request.topology
-                ),
-                snapshot: self.snapshot_for(Some(&session))?,
-            };
-
-            self.transition(RuntimeState::Persisting)?;
-            session.advance(SessionPhase::Persistence)?;
-            self.remember_session(&session);
-            let summary_key = format!("{}-summary", session.id);
-            self.ports.memory_store.put(MemoryRecord {
-                key: summary_key.clone(),
-                scope: self.request.manifest.memory_policy.summary_scope,
-                value: format!("{} | {}", outcome.plan, outcome.execution_summary),
-                session_id: session.id.clone(),
-                recorded_in: SessionPhase::Persistence,
-            })?;
-            session.attach_memory(summary_key);
-            self.remember_session(&session);
-
-            session.advance(SessionPhase::Complete)?;
-            self.remember_session(&session);
-            self.transition(RuntimeState::Ready)?;
-
-            Ok(SessionOutcome {
-                session,
-                plan: outcome.plan,
-                execution_summary: outcome.execution_summary,
-                reflection,
-            })
-        })();
+        let result = self.execute_session(objective);
 
         if result.is_err() && !matches!(self.state, RuntimeState::Stopped | RuntimeState::Stopping)
         {
@@ -351,6 +271,18 @@ impl LocalRuntime {
         }
 
         result
+    }
+
+    fn execute_session(&mut self, objective: String) -> SimardResult<SessionOutcome> {
+        self.transition(RuntimeState::Active)?;
+
+        let mut session = self.new_session(objective);
+        self.persist_session_scratch(&mut session)?;
+        let outcome = self.invoke_selected_adapter(&mut session)?;
+        self.record_execution_evidence(&mut session, &outcome)?;
+        let reflection = self.build_reflection(&mut session)?;
+        self.persist_session_summary(&mut session, &outcome)?;
+        self.complete_session(session, outcome, reflection)
     }
 
     fn ensure_available(&self, action: &str) -> SimardResult<()> {
@@ -379,6 +311,132 @@ impl LocalRuntime {
 
     fn remember_session(&mut self, session: &SessionRecord) {
         self.last_session = Some(session.clone());
+    }
+
+    fn new_session(&mut self, objective: String) -> SessionRecord {
+        let session = SessionRecord::new(
+            self.request.manifest.default_mode,
+            objective,
+            self.request.selected_base_type.clone(),
+            self.ports.session_ids.as_ref(),
+        );
+        self.remember_session(&session);
+        session
+    }
+
+    fn persist_session_scratch(&mut self, session: &mut SessionRecord) -> SimardResult<()> {
+        session.advance(SessionPhase::Preparation)?;
+        self.remember_session(session);
+
+        let scratch_key = format!("{}-scratch", session.id);
+        self.ports.memory_store.put(MemoryRecord {
+            key: scratch_key.clone(),
+            scope: MemoryScope::SessionScratch,
+            value: objective_metadata(&session.objective),
+            session_id: session.id.clone(),
+            recorded_in: SessionPhase::Preparation,
+        })?;
+        session.attach_memory(scratch_key);
+        self.remember_session(session);
+
+        Ok(())
+    }
+
+    fn invoke_selected_adapter(
+        &mut self,
+        session: &mut SessionRecord,
+    ) -> SimardResult<BaseTypeOutcome> {
+        session.advance(SessionPhase::Planning)?;
+        self.remember_session(session);
+
+        self.adapter.invoke(BaseTypeRequest {
+            session_id: session.id.clone(),
+            objective: session.objective.clone(),
+            mode: session.mode,
+            topology: self.request.topology,
+            prompt_assets: self.prompt_assets.clone(),
+        })
+    }
+
+    fn record_execution_evidence(
+        &mut self,
+        session: &mut SessionRecord,
+        outcome: &BaseTypeOutcome,
+    ) -> SimardResult<()> {
+        session.advance(SessionPhase::Execution)?;
+        self.remember_session(session);
+
+        for (index, detail) in outcome.evidence.iter().enumerate() {
+            let evidence_id = format!("{}-evidence-{}", session.id, index + 1);
+            self.ports.evidence_store.record(EvidenceRecord {
+                id: evidence_id.clone(),
+                session_id: session.id.clone(),
+                phase: SessionPhase::Execution,
+                detail: detail.clone(),
+                source: EvidenceSource::BaseType(self.request.selected_base_type.clone()),
+            })?;
+            session.attach_evidence(evidence_id);
+        }
+        self.remember_session(session);
+
+        Ok(())
+    }
+
+    fn build_reflection(&mut self, session: &mut SessionRecord) -> SimardResult<ReflectionReport> {
+        self.transition(RuntimeState::Reflecting)?;
+        session.advance(SessionPhase::Reflection)?;
+        self.remember_session(session);
+
+        Ok(ReflectionReport {
+            summary: format!(
+                "Session completed through '{}' on '{}' with {}.",
+                self.request.selected_base_type,
+                self.request.topology,
+                objective_metadata(&session.objective)
+            ),
+            snapshot: self.snapshot_for(Some(session))?,
+        })
+    }
+
+    fn persist_session_summary(
+        &mut self,
+        session: &mut SessionRecord,
+        outcome: &BaseTypeOutcome,
+    ) -> SimardResult<()> {
+        self.transition(RuntimeState::Persisting)?;
+        session.advance(SessionPhase::Persistence)?;
+        self.remember_session(session);
+
+        let summary_key = format!("{}-summary", session.id);
+        self.ports.memory_store.put(MemoryRecord {
+            key: summary_key.clone(),
+            scope: self.request.manifest.memory_policy.summary_scope,
+            value: format!("{} | {}", outcome.plan, outcome.execution_summary),
+            session_id: session.id.clone(),
+            recorded_in: SessionPhase::Persistence,
+        })?;
+        session.attach_memory(summary_key);
+        self.remember_session(session);
+
+        Ok(())
+    }
+
+    fn complete_session(
+        &mut self,
+        mut session: SessionRecord,
+        outcome: BaseTypeOutcome,
+        reflection: ReflectionReport,
+    ) -> SimardResult<SessionOutcome> {
+        session.advance(SessionPhase::Complete)?;
+        self.remember_session(&session);
+        self.transition(RuntimeState::Ready)?;
+
+        Ok(SessionOutcome {
+            session,
+            plan: outcome.plan,
+            execution_summary: outcome.execution_summary,
+            reflection,
+        })
     }
 
     fn mark_last_session_failed(&mut self) {

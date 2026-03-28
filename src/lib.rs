@@ -8,6 +8,7 @@ pub mod metadata;
 pub mod prompt_assets;
 pub mod reflection;
 pub mod runtime;
+mod sanitization;
 pub mod session;
 
 pub use base_types::{

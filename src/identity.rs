@@ -28,6 +28,19 @@ impl Default for MemoryPolicy {
     }
 }
 
+impl MemoryPolicy {
+    pub fn validate(&self) -> SimardResult<()> {
+        if self.allow_project_writes {
+            return Err(SimardError::UnsupportedMemoryPolicy {
+                field: "memory_policy.allow_project_writes".to_string(),
+                reason: "v1 only supports read-only project boundaries".to_string(),
+            });
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManifestContract {
     pub entrypoint: String,
@@ -175,6 +188,8 @@ impl IdentityManifest {
         memory_policy: MemoryPolicy,
         contract: ManifestContract,
     ) -> SimardResult<Self> {
+        memory_policy.validate()?;
+
         Ok(Self {
             name: name.into(),
             version: version.into(),

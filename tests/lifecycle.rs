@@ -172,6 +172,24 @@ fn local_runtime_runs_session_and_persists_boundaries() {
         .expect("summary memory should be queryable");
     assert_eq!(summary_records.len(), 1);
     assert_eq!(summary_records[0].recorded_in, SessionPhase::Persistence);
+    assert!(scratch_records[0].value.contains("objective-metadata("));
+    assert!(
+        !scratch_records[0]
+            .value
+            .contains("exercise the local runtime")
+    );
+    assert!(
+        !summary_records[0]
+            .value
+            .contains("exercise the local runtime")
+    );
+    assert!(
+        !outcome
+            .reflection
+            .summary
+            .contains("exercise the local runtime")
+    );
+    assert!(outcome.reflection.summary.contains("objective-metadata("));
     assert_eq!(
         memory
             .count_for_session(&outcome.session.id)
