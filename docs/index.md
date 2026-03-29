@@ -32,12 +32,13 @@ Today Simard provides:
 - a facilitator-backed `simard-meeting` identity that captures structured decisions, risks, next steps, and open questions without mutating code
 - `single-process` for all builtin base types plus loopback `multi-process` execution for `rusty-clawd`, with unsupported pairs failing explicitly
 - a starter benchmark gym suite that exercises all current builtin base-type selections plus a composite identity session through `cargo run --quiet --bin simard-gym -- run-suite starter`
-- benchmark artifacts written under `target/simard-gym/`, including per-scenario JSON and text summaries plus a suite summary
+- benchmark artifacts written under `target/simard-gym/`, including per-scenario JSON and text summaries, a dedicated review artifact, and a suite summary
 - `ManifestContract { entrypoint, composition, precedence, provenance, freshness }`
 - `ReflectionSnapshot { manifest_contract, runtime_node, mailbox_address, agent_program_backend, adapter_backend, topology_backend, transport_backend, supervisor_backend, memory_backend, evidence_backend }`
 - truthful memory and evidence backend descriptors
 - file-backed memory, evidence, and handoff stores on the bootstrap path, with persisted local state under the configured state root
 - durable meeting decision records persisted under the configured state root so later sessions can inspect concise planning outcomes
+- offline review artifacts and concise decision records persisted under the configured state root when the operator runs the review probe
 - truthful runtime service metadata from the runtime-selected wiring, including the injected agent program, handoff store, and the canonical backend identities behind each selected base type
 - persisted scratch, summary, and reflection text that records objective metadata instead of raw objective text
 - handoff snapshots that preserve runtime/session continuity while redacting the persisted session objective down to objective metadata
@@ -61,6 +62,7 @@ Those hooks enforce `cargo fmt --all -- --check`, `cargo clippy --all-targets --
 
 - `src/main.rs` is the thin CLI wrapper; `bootstrap::run_local_session` owns the run loop and `simard::bootstrap::assemble_local_runtime` remains the reflected assembly boundary
 - `src/bin/simard_gym.rs` is the operator-facing benchmark CLI for the starter gym suite
+- `src/bin/simard_operator_probe.rs` now exposes `review-run` so operators can run a bounded session, inspect the exported handoff, and persist evidence-linked review proposals
 - `bootstrap::run_local_session` now persists durable memory/evidence records and the latest handoff snapshot under the configured state root
 - defaults are startup choices, never silent runtime recovery
 - reflection metadata is derived from the active runtime wiring, not placeholder labels

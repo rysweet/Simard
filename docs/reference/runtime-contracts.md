@@ -39,6 +39,8 @@ The stable contract in this repository is the bootstrap/runtime and benchmark-gy
 The shipped operator probe also supports a meeting-specific path:
 
 - `cargo run --quiet --bin simard_operator_probe -- meeting-run <base-type> <topology> <structured-objective>`
+- `cargo run --quiet --bin simard_operator_probe -- review-run <base-type> <topology> <objective>`
+- `cargo run --quiet --bin simard_operator_probe -- review-read <base-type> <topology>`
 
 Use a structured objective with lines such as:
 
@@ -54,6 +56,24 @@ The v1 meeting contract is intentionally narrow:
 - meeting mode uses the facilitator agent program backend `agent-program::meeting-facilitator`
 - it persists concise decision memory under the durable state root
 - it does not mutate code paths or pretend implementation work happened
+
+The review path is also intentionally narrow:
+
+- it runs an ordinary bounded session first, then inspects the exported handoff offline
+- it persists a concise JSON review artifact under `SIMARD_STATE_ROOT/review-artifacts/`
+- it persists a concise decision-scoped review record so later sessions can reuse approved findings
+- it emits concrete proposals tied to persisted evidence instead of silently changing prompts or policies
+- it can read the latest persisted review artifact back in a later operator process through `review-read`
+
+### Self-improvement review foundation mapping
+
+The current review foundation is the explicit v1 reconciliation between `Specs/ProductArchitecture.md` and the original issue prompt for this feature.
+
+- `src/review.rs` owns the offline review contract: it consumes exported handoff state plus normalized benchmark/session signals, then emits concrete improvement proposals instead of generic summaries.
+- `src/gym.rs` converts benchmark checks and measurement notes into the same `ReviewRequest` shape, so benchmark evidence and session evidence flow through one review surface.
+- `src/bin/simard_operator_probe.rs` exercises the operator path end-to-end: `review-run` persists the durable artifact and concise decision record, while `review-read` proves that a later process can retrieve them again from `SIMARD_STATE_ROOT`.
+- `src/runtime.rs`, `src/memory.rs`, `src/evidence.rs`, and the exported handoff snapshot remain the architecture seams from the product spec; the review layer reads those seams rather than inventing a parallel persistence stack.
+- The implementation stays inside the product constraints: the loop is offline, evidence-linked, operator-reviewable, and limited to concise durable artifacts instead of raw transcript dumps or silent self-modification.
 
 ## Benchmark gym CLI
 
@@ -71,7 +91,7 @@ The starter suite is intentionally small and exercises:
 - the dedicated `simard-gym` identity
 - the composite `simard-composite-engineer` identity
 
-Artifacts are written under `target/simard-gym/` as JSON and text reports.
+Artifacts are written under `target/simard-gym/` as JSON and text reports plus a `review.json` artifact for each scenario run.
 
 ## Configuration
 

@@ -11,6 +11,7 @@ pub mod metadata;
 mod persistence;
 pub mod prompt_assets;
 pub mod reflection;
+pub mod review;
 pub mod runtime;
 mod sanitization;
 pub mod session;
@@ -55,6 +56,11 @@ pub use prompt_assets::{
     PromptAssetStore,
 };
 pub use reflection::{ReflectionReport, ReflectionSnapshot, ReflectiveRuntime};
+pub use review::{
+    ImprovementProposal, ReviewArtifact, ReviewRequest, ReviewSignal, ReviewTargetKind,
+    build_review_artifact, latest_review_artifact, load_review_artifact, persist_review_artifact,
+    render_review_text, review_artifacts_dir,
+};
 pub use runtime::{
     BaseTypeRegistry, CoordinatedSupervisor, InMemoryMailboxTransport, InProcessSupervisor,
     InProcessTopologyDriver, LocalRuntime, LoopbackMailboxTransport, LoopbackMeshTopologyDriver,

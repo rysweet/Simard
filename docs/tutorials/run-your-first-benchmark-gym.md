@@ -79,6 +79,7 @@ Per scenario, Simard currently emits:
 
 - `report.json`
 - `report.txt`
+- `review.json`
 
 The suite run also writes:
 
@@ -89,6 +90,7 @@ Those artifacts record:
 - scenario metadata
 - the selected identity, base type, and topology
 - runtime and handoff summaries
+- review proposals linked to persisted evidence
 - correctness checks and whether they passed
 - measurement notes that explain what the current v1 gym does not yet infer automatically
 
@@ -108,6 +110,8 @@ Open the JSON artifact and look for:
 - `checks`
 - `runtime`
 - `handoff`
+- `artifacts.review_json`
+- `scorecard.human_review_notes`
 - `scorecard.measurement_notes`
 
 ## Step 5: Understand the current measurement boundary

@@ -35,6 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             println!("Artifact report: {}", report.artifacts.report_json);
             println!("Artifact summary: {}", report.artifacts.report_txt);
+            println!("Review artifact: {}", report.artifacts.review_json);
         }
         "run-suite" => {
             let suite_id = args.next().ok_or("expected suite id")?;

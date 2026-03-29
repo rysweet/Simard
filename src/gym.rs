@@ -17,6 +17,7 @@ use crate::memory::{InMemoryMemoryStore, MemoryRecord, MemoryScope, MemoryStore}
 use crate::metadata::{Freshness, Provenance};
 use crate::prompt_assets::FilePromptAssetStore;
 use crate::reflection::ReflectiveRuntime;
+use crate::review::{ReviewRequest, ReviewSignal, ReviewTargetKind, build_review_artifact};
 use crate::runtime::{
     BaseTypeRegistry, CoordinatedSupervisor, LocalRuntime, LoopbackMailboxTransport,
     LoopbackMeshTopologyDriver, RuntimePorts, RuntimeRequest, RuntimeState, RuntimeTopology,
@@ -73,6 +74,7 @@ pub struct BenchmarkArtifactPaths {
     pub run_dir: String,
     pub report_json: String,
     pub report_txt: String,
+    pub review_json: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -414,6 +416,30 @@ fn execute_scenario(
     create_dir_all(&run_dir)?;
     let report_json = run_dir.join("report.json");
     let report_txt = run_dir.join("report.txt");
+    let review_json = run_dir.join("review.json");
+    let measurement_notes = vec![
+        "v1 benchmark foundation derives evidence from runtime, memory, and handoff artifacts rather than a task-specific code-change judge".to_string(),
+        "unnecessary_action_count remains unmeasured until the benchmark runner can classify shell/tool actions directly".to_string(),
+        "retry_count is currently zero because the benchmark runner does not yet re-plan or retry failed scenarios automatically".to_string(),
+    ];
+    let review = build_review_artifact(
+        ReviewRequest {
+            target_kind: ReviewTargetKind::Benchmark,
+            target_label: format!("{suite_id}:{}", scenario.id),
+            execution_summary: outcome.execution_summary.clone(),
+            reflection_summary: outcome.reflection.summary.clone(),
+            measurement_notes: measurement_notes.clone(),
+            signals: checks
+                .iter()
+                .map(|check| ReviewSignal {
+                    id: check.id.clone(),
+                    passed: check.passed,
+                    detail: check.detail.clone(),
+                })
+                .collect(),
+        },
+        &exported,
+    )?;
     let report = BenchmarkRunReport {
         suite_id: suite_id.to_string(),
         scenario,
@@ -431,12 +457,12 @@ fn execute_scenario(
             correctness_checks_total: checks.len(),
             unnecessary_action_count: None,
             retry_count: 0,
-            human_review_notes: Vec::new(),
-            measurement_notes: vec![
-                "v1 benchmark foundation derives evidence from runtime, memory, and handoff artifacts rather than a task-specific code-change judge".to_string(),
-                "unnecessary_action_count remains unmeasured until the benchmark runner can classify shell/tool actions directly".to_string(),
-                "retry_count is currently zero because the benchmark runner does not yet re-plan or retry failed scenarios automatically".to_string(),
-            ],
+            human_review_notes: review
+                .proposals
+                .iter()
+                .map(|proposal| format!("{}: {}", proposal.title, proposal.suggested_change))
+                .collect(),
+            measurement_notes,
         },
         checks,
         plan: outcome.plan,
@@ -462,17 +488,24 @@ fn execute_scenario(
             exported_memory_records: exported.memory_records.len(),
             exported_evidence_records: exported.evidence_records.len(),
             restored_runtime_state: restored_snapshot.runtime_state.to_string(),
-            restored_session_phase: restored_snapshot.session_phase.map(|phase| phase.to_string()),
-            restored_session_objective: exported.session.as_ref().map(|session| session.objective.clone()),
+            restored_session_phase: restored_snapshot
+                .session_phase
+                .map(|phase| phase.to_string()),
+            restored_session_objective: exported
+                .session
+                .as_ref()
+                .map(|session| session.objective.clone()),
         },
         artifacts: BenchmarkArtifactPaths {
             run_dir: display_path(&run_dir),
             report_json: display_path(&report_json),
             report_txt: display_path(&report_txt),
+            review_json: display_path(&review_json),
         },
     };
     write_json(&report_json, &report)?;
     write_text(&report_txt, render_text_report(&report))?;
+    write_json(&review_json, &review)?;
     Ok(report)
 }
 
@@ -546,6 +579,7 @@ fn render_text_report(report: &BenchmarkRunReport) -> String {
         format!("Plan: {}", report.plan),
         format!("Execution summary: {}", report.execution_summary),
         format!("Reflection summary: {}", report.reflection_summary),
+        format!("Review artifact: {}", report.artifacts.review_json),
         "Checks:".to_string(),
     ];
     for check in &report.checks {
@@ -555,6 +589,12 @@ fn render_text_report(report: &BenchmarkRunReport) -> String {
             if check.passed { "passed" } else { "failed" },
             check.detail
         ));
+    }
+    if !report.scorecard.human_review_notes.is_empty() {
+        lines.push("Human review notes:".to_string());
+        for note in &report.scorecard.human_review_notes {
+            lines.push(format!("- {note}"));
+        }
     }
     lines.join("\n")
 }
