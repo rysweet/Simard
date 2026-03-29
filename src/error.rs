@@ -104,6 +104,12 @@ pub enum SimardError {
         field: String,
         reason: String,
     },
+    PersistentStoreIo {
+        store: String,
+        action: String,
+        path: PathBuf,
+        reason: String,
+    },
     BenchmarkScenarioNotFound {
         scenario_id: String,
     },
@@ -238,6 +244,15 @@ impl Display for SimardError {
             Self::InvalidHandoffSnapshot { field, reason } => {
                 write!(f, "invalid handoff snapshot field '{field}': {reason}")
             }
+            Self::PersistentStoreIo {
+                store,
+                action,
+                path: _,
+                reason,
+            } => write!(
+                f,
+                "persistent store '{store}' failed during '{action}': {reason}"
+            ),
             Self::BenchmarkScenarioNotFound { scenario_id } => {
                 write!(f, "benchmark scenario '{scenario_id}' is not registered")
             }

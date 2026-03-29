@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter};
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::{SimardError, SimardResult};
 use crate::identity::OperatingMode;
 use crate::metadata::{BackendDescriptor, Freshness};
@@ -9,7 +11,7 @@ use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeTopology};
 use crate::sanitization::objective_metadata;
 use crate::session::SessionId;
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub struct BaseTypeId(String);
 
 impl BaseTypeId {

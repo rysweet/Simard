@@ -30,13 +30,14 @@ This tutorial follows the runtime path that exists in the repository today.
 
 ## Step 1: Run the current local runtime with explicit configuration
 
-From the repository root, start Simard with a real prompt asset directory and an explicit objective.
+From the repository root, start Simard with a real prompt asset directory, an explicit objective, and an explicit durable state root.
 
 For the builtin identities in this repo, you can currently choose `local-harness`, `rusty-clawd`, or `copilot-sdk` here. `rusty-clawd` is a distinct backend, while `copilot-sdk` remains an explicit alias of the local harness implementation. The default bootstrap path still opts into `single-process`, but the runtime can now inject a loopback `multi-process` topology when you request a supported pairing such as `rusty-clawd + multi-process`.
 
 ```bash
 SIMARD_PROMPT_ROOT="$PWD/prompt_assets" \
 SIMARD_OBJECTIVE="exercise the local runtime" \
+SIMARD_STATE_ROOT="$PWD/target/simard-state" \
 SIMARD_IDENTITY="simard-engineer" \
 SIMARD_BASE_TYPE="local-harness" \
 SIMARD_RUNTIME_TOPOLOGY="single-process" \
@@ -48,8 +49,9 @@ You should see output shaped like this:
 ```text
 Simard local runtime executed successfully.
 Bootstrap mode: explicit-config
-Config sources: prompt_root=env:SIMARD_PROMPT_ROOT, objective=env:SIMARD_OBJECTIVE, base_type=env:SIMARD_BASE_TYPE, topology=env:SIMARD_RUNTIME_TOPOLOGY
+Config sources: prompt_root=env:SIMARD_PROMPT_ROOT, objective=env:SIMARD_OBJECTIVE, state_root=env:SIMARD_STATE_ROOT, base_type=env:SIMARD_BASE_TYPE, topology=env:SIMARD_RUNTIME_TOPOLOGY
 Bootstrap selection: identity=simard-engineer, base_type=local-harness, topology=single-process
+State root: /.../target/simard-state
 Snapshot: state=ready, topology=single-process, base_type=local-harness
 Adapter implementation: local-harness
 Shutdown: stopped
@@ -64,6 +66,7 @@ Run the same bootstrap path again, but select `copilot-sdk` explicitly.
 ```bash
 SIMARD_PROMPT_ROOT="$PWD/prompt_assets" \
 SIMARD_OBJECTIVE="exercise the copilot-sdk runtime path" \
+SIMARD_STATE_ROOT="$PWD/target/simard-state" \
 SIMARD_IDENTITY="simard-engineer" \
 SIMARD_BASE_TYPE="copilot-sdk" \
 SIMARD_RUNTIME_TOPOLOGY="single-process" \
@@ -122,6 +125,7 @@ You should see:
 - `Bootstrap mode: builtin-defaults`
 - `prompt_root=opt-in:SIMARD_BOOTSTRAP_MODE`
 - `objective=opt-in:SIMARD_BOOTSTRAP_MODE`
+- `state_root=opt-in:SIMARD_BOOTSTRAP_MODE`
 - `base_type=opt-in:SIMARD_BOOTSTRAP_MODE`
 - `topology=opt-in:SIMARD_BOOTSTRAP_MODE`
 - the builtin identity `simard-engineer`
@@ -171,9 +175,11 @@ assert_eq!(snapshot.manifest_contract.freshness.state, FreshnessState::Current);
 assert_eq!(snapshot.runtime_node.to_string(), "node-local");
 assert_eq!(snapshot.mailbox_address.to_string(), "inmemory://node-local");
 assert_eq!(snapshot.agent_program_backend.identity, "agent-program::objective-relay");
-assert_eq!(snapshot.handoff_backend.identity, "handoff::in-memory");
+assert_eq!(snapshot.handoff_backend.identity, "handoff::json-file-store");
 assert_eq!(snapshot.adapter_backend.identity, "local-harness");
 assert_eq!(snapshot.transport_backend.identity, "transport::in-memory-mailbox");
+assert_eq!(snapshot.memory_backend.identity, "memory::json-file-store");
+assert_eq!(snapshot.evidence_backend.identity, "evidence::json-file-store");
 ```
 
 If you launched with `SIMARD_BASE_TYPE="copilot-sdk"`, `snapshot.selected_base_type` still shows the explicit selection while `snapshot.adapter_backend.identity` remains `local-harness`. If you launched with `SIMARD_BASE_TYPE="rusty-clawd"`, reflection now reports `rusty-clawd::session-backend`. The runtime-side wiring is explicit too: single-process runs report `node-local` / `inmemory://node-local`, while loopback multi-process runs report `node-loopback-mesh` / `loopback://node-loopback-mesh`. Composite identities also expose `snapshot.identity_components`.
@@ -188,6 +194,7 @@ You now know:
 - how composite identities surface their assembled components explicitly
 - how loopback multi-process execution reuses the same runtime contracts
 - how opt-in defaults are recorded
+- how the bootstrap path persists durable local state under the configured state root
 - how reflection reports truthful runtime metadata
 - how stop semantics behave after shutdown
 

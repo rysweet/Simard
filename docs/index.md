@@ -25,6 +25,7 @@ This docs set describes the runtime behavior that exists in this repository toda
 Today Simard provides:
 
 - explicit bootstrap configuration, with `builtin-defaults` available only through opt-in startup mode
+- a durable local state root selected through `SIMARD_STATE_ROOT` in `explicit-config` or defaulted through `builtin-defaults`
 - explicit base-type and topology selection at bootstrap, with opt-in defaults only in `builtin-defaults`
 - builtin manifest-advertised base types selectable at startup today: `local-harness`, `rusty-clawd`, and `copilot-sdk`, with `rusty-clawd` wired as a distinct session backend and `copilot-sdk` still aliased to the local harness implementation
 - builtin identities selectable at startup today: `simard-engineer`, `simard-meeting`, `simard-gym`, and the composite `simard-composite-engineer`
@@ -34,6 +35,7 @@ Today Simard provides:
 - `ManifestContract { entrypoint, composition, precedence, provenance, freshness }`
 - `ReflectionSnapshot { manifest_contract, runtime_node, mailbox_address, agent_program_backend, adapter_backend, topology_backend, transport_backend, supervisor_backend, memory_backend, evidence_backend }`
 - truthful memory and evidence backend descriptors
+- file-backed memory, evidence, and handoff stores on the bootstrap path, with persisted local state under the configured state root
 - truthful runtime service metadata from the runtime-selected wiring, including the injected agent program, handoff store, and the canonical backend identities behind each selected base type
 - persisted scratch, summary, and reflection text that records objective metadata instead of raw objective text
 - handoff snapshots that preserve runtime/session continuity while redacting the persisted session objective down to objective metadata
@@ -57,6 +59,7 @@ Those hooks enforce `cargo fmt --all -- --check`, `cargo clippy --all-targets --
 
 - `src/main.rs` is the thin CLI wrapper; `bootstrap::run_local_session` owns the run loop and `simard::bootstrap::assemble_local_runtime` remains the reflected assembly boundary
 - `src/bin/simard_gym.rs` is the operator-facing benchmark CLI for the starter gym suite
+- `bootstrap::run_local_session` now persists durable memory/evidence records and the latest handoff snapshot under the configured state root
 - defaults are startup choices, never silent runtime recovery
 - reflection metadata is derived from the active runtime wiring, not placeholder labels
 - post-stop `start()`, `run()`, and repeated `stop()` surface `SimardError::RuntimeStopped`

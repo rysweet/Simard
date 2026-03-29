@@ -1,17 +1,20 @@
 use std::ffi::OsString;
 use std::fmt::{self, Display, Formatter};
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::agent_program::ObjectiveRelayProgram;
 use crate::base_types::{BaseTypeId, LocalProcessHarnessAdapter, RustyClawdAdapter};
 use crate::error::{SimardError, SimardResult};
-use crate::evidence::InMemoryEvidenceStore;
+use crate::evidence::{EvidenceStore, FileBackedEvidenceStore};
+use crate::handoff::{FileBackedHandoffStore, RuntimeHandoffSnapshot, RuntimeHandoffStore};
 use crate::identity::{
     BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader, IdentityManifest, ManifestContract,
 };
-use crate::memory::InMemoryMemoryStore;
+use crate::memory::{FileBackedMemoryStore, MemoryStore};
 use crate::metadata::{Freshness, Provenance};
-use crate::prompt_assets::FilePromptAssetStore;
+use crate::prompt_assets::{FilePromptAssetStore, PromptAssetStore};
 use crate::reflection::{ReflectionSnapshot, ReflectiveRuntime};
 use crate::runtime::{
     BaseTypeRegistry, CoordinatedSupervisor, LocalRuntime, LoopbackMailboxTransport,
@@ -21,6 +24,7 @@ use crate::session::UuidSessionIdGenerator;
 
 const DEFAULT_IDENTITY: &str = "simard-engineer";
 const DEFAULT_OBJECTIVE: &str = "bootstrap the Simard engineer loop";
+const DEFAULT_STATE_ROOT: &str = "target/simard-state";
 const LOCAL_BASE_TYPE: &str = "local-harness";
 const RUSTY_CLAWD_BASE_TYPE: &str = "rusty-clawd";
 const COPILOT_SDK_BASE_TYPE: &str = "copilot-sdk";
@@ -81,6 +85,7 @@ pub struct ConfigValue<T> {
 pub struct BootstrapInputs {
     pub prompt_root: Option<PathBuf>,
     pub objective: Option<String>,
+    pub state_root: Option<PathBuf>,
     pub mode: Option<String>,
     pub identity: Option<String>,
     pub base_type: Option<String>,
@@ -92,6 +97,7 @@ impl BootstrapInputs {
         Ok(Self {
             prompt_root: std::env::var_os("SIMARD_PROMPT_ROOT").map(PathBuf::from),
             objective: read_optional_utf8_env("SIMARD_OBJECTIVE")?,
+            state_root: std::env::var_os("SIMARD_STATE_ROOT").map(PathBuf::from),
             mode: read_optional_utf8_env("SIMARD_BOOTSTRAP_MODE")?,
             identity: read_optional_utf8_env("SIMARD_IDENTITY")?,
             base_type: read_optional_utf8_env("SIMARD_BASE_TYPE")?,
@@ -106,6 +112,7 @@ pub struct BootstrapConfig {
     pub identity: String,
     pub prompt_root: ConfigValue<PathBuf>,
     pub objective: ConfigValue<String>,
+    pub state_root: ConfigValue<PathBuf>,
     pub selected_base_type: ConfigValue<BaseTypeId>,
     pub topology: ConfigValue<RuntimeTopology>,
 }
@@ -160,7 +167,6 @@ impl BootstrapConfig {
                 });
             }
         };
-
         let selected_base_type = match inputs.base_type {
             Some(value) => ConfigValue {
                 value: BaseTypeId::new(value),
@@ -197,6 +203,23 @@ impl BootstrapConfig {
                 });
             }
         };
+        let state_root = match inputs.state_root {
+            Some(path) => ConfigValue {
+                value: path,
+                source: ConfigValueSource::Environment("SIMARD_STATE_ROOT"),
+            },
+            None if mode == BootstrapMode::BuiltinDefaults => ConfigValue {
+                value: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(DEFAULT_STATE_ROOT),
+                source: ConfigValueSource::ExplicitOptIn("SIMARD_BOOTSTRAP_MODE"),
+            },
+            None => {
+                return Err(SimardError::MissingRequiredConfig {
+                    key: "SIMARD_STATE_ROOT".to_string(),
+                    help: "set SIMARD_STATE_ROOT or opt in with SIMARD_BOOTSTRAP_MODE=builtin-defaults"
+                        .to_string(),
+                });
+            }
+        };
 
         Ok(Self {
             mode,
@@ -214,6 +237,7 @@ impl BootstrapConfig {
             },
             prompt_root,
             objective,
+            state_root,
             selected_base_type,
             topology,
         })
@@ -226,6 +250,7 @@ impl BootstrapConfig {
             format!("base-type:{}", self.selected_base_type.value),
             format!("topology:{}", self.topology.value),
             format!("prompt-root:{}", self.prompt_root.source),
+            format!("state-root:{}", self.state_root.source),
             format!("objective:{}", self.objective.source),
         ]
     }
@@ -233,8 +258,13 @@ impl BootstrapConfig {
 
 pub fn assemble_local_runtime(config: &BootstrapConfig) -> SimardResult<LocalRuntime> {
     let prompt_store = Arc::new(FilePromptAssetStore::new(config.prompt_root.value.clone()));
-    let memory_store = Arc::new(InMemoryMemoryStore::try_default()?);
-    let evidence_store = Arc::new(InMemoryEvidenceStore::try_default()?);
+    let memory_store = Arc::new(FileBackedMemoryStore::try_new(config.memory_store_path())?);
+    let evidence_store = Arc::new(FileBackedEvidenceStore::try_new(
+        config.evidence_store_path(),
+    )?);
+    let handoff_store = Arc::new(FileBackedHandoffStore::try_new(
+        config.handoff_store_path(),
+    )?);
 
     let contract = ManifestContract::new(
         bootstrap_entrypoint(),
@@ -265,10 +295,61 @@ pub fn assemble_local_runtime(config: &BootstrapConfig) -> SimardResult<LocalRun
             prompt_store,
             memory_store,
             evidence_store,
+            handoff_store,
             base_types,
             config.topology.value,
         )?,
         request,
+    )
+}
+
+pub fn assemble_local_runtime_from_handoff(
+    config: &BootstrapConfig,
+    snapshot: RuntimeHandoffSnapshot,
+) -> SimardResult<LocalRuntime> {
+    let prompt_store = Arc::new(FilePromptAssetStore::new(config.prompt_root.value.clone()));
+    let memory_store = Arc::new(FileBackedMemoryStore::try_new(config.memory_store_path())?);
+    let evidence_store = Arc::new(FileBackedEvidenceStore::try_new(
+        config.evidence_store_path(),
+    )?);
+    let handoff_store = Arc::new(FileBackedHandoffStore::try_new(
+        config.handoff_store_path(),
+    )?);
+
+    let contract = ManifestContract::new(
+        bootstrap_entrypoint(),
+        "bootstrap-config -> identity-loader -> runtime-ports -> local-runtime",
+        config.manifest_precedence(),
+        Provenance::new(
+            "bootstrap",
+            format!("{}:{}", bootstrap_entrypoint(), config.identity),
+        ),
+        Freshness::now()?,
+    )?;
+
+    let manifest = BuiltinIdentityLoader.load(&IdentityLoadRequest::new(
+        config.identity.clone(),
+        env!("CARGO_PKG_VERSION"),
+        contract,
+    ))?;
+    let base_types = builtin_base_type_registry_for_manifest(&manifest)?;
+    let request = RuntimeRequest::new(
+        manifest,
+        config.selected_base_type.value.clone(),
+        config.topology.value,
+    );
+
+    LocalRuntime::compose_from_handoff(
+        runtime_ports_for_topology(
+            prompt_store,
+            memory_store,
+            evidence_store,
+            handoff_store,
+            base_types,
+            config.topology.value,
+        )?,
+        request,
+        snapshot,
     )
 }
 
@@ -277,6 +358,7 @@ pub fn run_local_session(config: &BootstrapConfig) -> SimardResult<LocalSessionE
     runtime.start()?;
 
     let outcome = runtime.run(config.objective.value.clone())?;
+    let _ = runtime.export_handoff()?;
     let snapshot = runtime.snapshot()?;
     runtime.stop()?;
     let stopped_snapshot = runtime.snapshot()?;
@@ -286,6 +368,12 @@ pub fn run_local_session(config: &BootstrapConfig) -> SimardResult<LocalSessionE
         snapshot,
         stopped_snapshot,
     })
+}
+
+pub fn latest_local_handoff(
+    config: &BootstrapConfig,
+) -> SimardResult<Option<RuntimeHandoffSnapshot>> {
+    FileBackedHandoffStore::try_new(config.handoff_store_path())?.latest()
 }
 
 pub fn bootstrap_entrypoint() -> &'static str {
@@ -332,22 +420,28 @@ pub fn builtin_base_type_registry_for_manifest(
 }
 
 fn runtime_ports_for_topology(
-    prompt_store: Arc<FilePromptAssetStore>,
-    memory_store: Arc<InMemoryMemoryStore>,
-    evidence_store: Arc<InMemoryEvidenceStore>,
+    prompt_store: Arc<dyn PromptAssetStore>,
+    memory_store: Arc<dyn MemoryStore>,
+    evidence_store: Arc<dyn EvidenceStore>,
+    handoff_store: Arc<dyn RuntimeHandoffStore>,
     base_types: BaseTypeRegistry,
     topology: RuntimeTopology,
 ) -> SimardResult<RuntimePorts> {
     match topology {
-        RuntimeTopology::SingleProcess => Ok(RuntimePorts::new(
+        RuntimeTopology::SingleProcess => Ok(RuntimePorts::with_runtime_services_and_program(
             prompt_store,
             memory_store,
             evidence_store,
             base_types,
+            Arc::new(crate::runtime::InProcessTopologyDriver::try_default()?),
+            Arc::new(crate::runtime::InMemoryMailboxTransport::try_default()?),
+            Arc::new(crate::runtime::InProcessSupervisor::try_default()?),
+            Arc::new(ObjectiveRelayProgram::try_default()?),
+            handoff_store,
             Arc::new(UuidSessionIdGenerator),
         )),
         RuntimeTopology::MultiProcess | RuntimeTopology::Distributed => {
-            Ok(RuntimePorts::with_runtime_services(
+            Ok(RuntimePorts::with_runtime_services_and_program(
                 prompt_store,
                 memory_store,
                 evidence_store,
@@ -355,9 +449,29 @@ fn runtime_ports_for_topology(
                 Arc::new(LoopbackMeshTopologyDriver::try_default()?),
                 Arc::new(LoopbackMailboxTransport::try_default()?),
                 Arc::new(CoordinatedSupervisor::try_default()?),
+                Arc::new(ObjectiveRelayProgram::try_default()?),
+                handoff_store,
                 Arc::new(UuidSessionIdGenerator),
             ))
         }
+    }
+}
+
+impl BootstrapConfig {
+    pub fn memory_store_path(&self) -> PathBuf {
+        self.state_root.value.join("memory_records.json")
+    }
+
+    pub fn evidence_store_path(&self) -> PathBuf {
+        self.state_root.value.join("evidence_records.json")
+    }
+
+    pub fn handoff_store_path(&self) -> PathBuf {
+        self.state_root.value.join("latest_handoff.json")
+    }
+
+    pub fn state_root_path(&self) -> &Path {
+        &self.state_root.value
     }
 }
 

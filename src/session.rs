@@ -1,5 +1,6 @@
 use std::fmt::{self, Display, Formatter};
 
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::base_types::BaseTypeId;
@@ -7,7 +8,7 @@ use crate::error::{SimardError, SimardResult};
 use crate::identity::OperatingMode;
 use crate::sanitization::objective_metadata;
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub struct SessionId(String);
 
 impl SessionId {
@@ -63,7 +64,8 @@ impl SessionIdGenerator for UuidSessionIdGenerator {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum SessionPhase {
     Intake,
     Preparation,
@@ -106,7 +108,7 @@ impl SessionPhase {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SessionRecord {
     pub id: SessionId,
     pub mode: OperatingMode,

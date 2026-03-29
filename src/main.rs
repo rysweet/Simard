@@ -7,9 +7,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Simard local runtime executed successfully.");
     println!("Bootstrap mode: {}", config.mode);
     println!(
-        "Config sources: prompt_root={}, objective={}, base_type={}, topology={}",
+        "Config sources: prompt_root={}, objective={}, state_root={}, base_type={}, topology={}",
         config.prompt_root.source,
         config.objective.source,
+        config.state_root.source,
         config.selected_base_type.source,
         config.topology.source
     );
@@ -17,6 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Bootstrap selection: identity={}, base_type={}, topology={}",
         config.identity, config.selected_base_type.value, config.topology.value
     );
+    println!("State root: {}", config.state_root.value.display());
     if !execution.snapshot.identity_components.is_empty() {
         println!(
             "Identity components: {}",

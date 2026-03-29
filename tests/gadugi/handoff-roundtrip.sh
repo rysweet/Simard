@@ -12,6 +12,13 @@ OUTPUT="$(
 
 printf '%s\n' "$OUTPUT"
 
+STATE_ROOT="$(printf '%s\n' "$OUTPUT" | sed -n 's/^State root: //p')"
+[ -n "$STATE_ROOT" ]
+[ -d "$STATE_ROOT" ]
+[ -f "$STATE_ROOT/memory_records.json" ]
+[ -f "$STATE_ROOT/evidence_records.json" ]
+[ -f "$STATE_ROOT/latest_handoff.json" ]
+
 printf '%s\n' "$OUTPUT" | grep -F "Probe mode: handoff-roundtrip" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Identity: simard-composite-engineer" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Identity components: simard-engineer, simard-meeting, simard-gym" >/dev/null

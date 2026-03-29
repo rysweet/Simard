@@ -1,13 +1,16 @@
 use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter};
 
+use serde::{Deserialize, Serialize};
+
 use crate::base_types::{BaseTypeCapability, BaseTypeId, capability_set};
 use crate::error::{SimardError, SimardResult};
 use crate::memory::MemoryScope;
 use crate::metadata::{Freshness, Provenance};
 use crate::prompt_assets::PromptAssetRef;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum OperatingMode {
     Engineer,
     Meeting,

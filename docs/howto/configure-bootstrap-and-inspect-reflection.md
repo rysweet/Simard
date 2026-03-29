@@ -26,13 +26,14 @@ Use this guide when you need to answer two questions:
 
 ## 1. Use explicit configuration by default
 
-Provide both the prompt root and objective yourself.
+Provide the prompt root, objective, and state root yourself.
 
 For the builtin identities in this repo, the current scaffold accepts `local-harness`, `rusty-clawd`, or `copilot-sdk` as explicit base-type choices. `rusty-clawd` is a distinct session backend, while `copilot-sdk` remains an explicit alias of `local-harness`. The bootstrap path now injects either the in-process runtime services for `single-process` or the loopback mesh services for `multi-process`, so unsupported topology/base-type pairs fail explicitly instead of being rewritten.
 
 ```bash
 SIMARD_PROMPT_ROOT="$PWD/prompt_assets" \
 SIMARD_OBJECTIVE="verify current reflection metadata" \
+SIMARD_STATE_ROOT="$PWD/target/simard-state" \
 SIMARD_IDENTITY="simard-engineer" \
 SIMARD_BASE_TYPE="local-harness" \
 SIMARD_RUNTIME_TOPOLOGY="single-process" \
@@ -43,6 +44,7 @@ In the current repo:
 
 - missing `SIMARD_PROMPT_ROOT` fails bootstrap
 - missing `SIMARD_OBJECTIVE` fails bootstrap
+- missing `SIMARD_STATE_ROOT` fails bootstrap
 - missing `SIMARD_IDENTITY` fails bootstrap
 - missing `SIMARD_BASE_TYPE` fails bootstrap
 - missing `SIMARD_RUNTIME_TOPOLOGY` fails bootstrap
@@ -61,6 +63,7 @@ Use this when you want to prove that bootstrap is not silently snapping back to 
 ```bash
 SIMARD_PROMPT_ROOT="$PWD/prompt_assets" \
 SIMARD_OBJECTIVE="verify copilot-sdk bootstrap selection" \
+SIMARD_STATE_ROOT="$PWD/target/simard-state" \
 SIMARD_IDENTITY="simard-engineer" \
 SIMARD_BASE_TYPE="copilot-sdk" \
 SIMARD_RUNTIME_TOPOLOGY="single-process" \
@@ -90,6 +93,7 @@ In the current repo:
 
 - `SIMARD_PROMPT_ROOT` resolves to the repository `prompt_assets/` directory
 - `SIMARD_OBJECTIVE` resolves to the builtin engineer-loop objective
+- `SIMARD_STATE_ROOT` resolves to the repository `target/simard-state` directory
 - `SIMARD_IDENTITY` resolves to `simard-engineer`
 - `SIMARD_BASE_TYPE` resolves to `local-harness`
 - `SIMARD_RUNTIME_TOPOLOGY` resolves to the topology you selected, with builtin defaults still opting into `single-process`
@@ -132,13 +136,13 @@ assert_eq!(
 assert_eq!(snapshot.runtime_node.to_string(), "node-local");
 assert_eq!(snapshot.mailbox_address.to_string(), "inmemory://node-local");
 assert_eq!(snapshot.agent_program_backend.identity, "agent-program::objective-relay");
-assert_eq!(snapshot.handoff_backend.identity, "handoff::in-memory");
+assert_eq!(snapshot.handoff_backend.identity, "handoff::json-file-store");
 assert_eq!(snapshot.adapter_backend.identity, "local-harness");
 assert_eq!(snapshot.topology_backend.identity, "topology::in-process");
 assert_eq!(snapshot.transport_backend.identity, "transport::in-memory-mailbox");
 assert_eq!(snapshot.supervisor_backend.identity, "supervisor::in-process");
-assert_eq!(snapshot.memory_backend.identity, "memory::session-cache");
-assert_eq!(snapshot.evidence_backend.identity, "evidence::append-only-log");
+assert_eq!(snapshot.memory_backend.identity, "memory::json-file-store");
+assert_eq!(snapshot.evidence_backend.identity, "evidence::json-file-store");
 ```
 
 If you launched with `SIMARD_BASE_TYPE="copilot-sdk"`, `snapshot.selected_base_type` still shows the alias you chose while `snapshot.adapter_backend.identity` remains `local-harness`. If you launched with `SIMARD_BASE_TYPE="rusty-clawd"`, reflection truthfully reports `snapshot.adapter_backend.identity == "rusty-clawd::session-backend"`. Composite identities also surface `snapshot.identity_components` so operator tooling can see which roles were assembled.
@@ -178,6 +182,7 @@ Set `SIMARD_IDENTITY` before startup:
 ```bash
 SIMARD_PROMPT_ROOT="$PWD/prompt_assets" \
 SIMARD_OBJECTIVE="run custom identity" \
+SIMARD_STATE_ROOT="$PWD/target/simard-state" \
 SIMARD_IDENTITY="simard-engineer" \
 SIMARD_BASE_TYPE="local-harness" \
 SIMARD_RUNTIME_TOPOLOGY="single-process" \
@@ -210,6 +215,7 @@ Invalid values fail with `SimardError::InvalidSessionId`.
 ```bash
 export SIMARD_PROMPT_ROOT="$PWD/prompt_assets"
 export SIMARD_OBJECTIVE="verify current reflection metadata"
+export SIMARD_STATE_ROOT="$PWD/target/simard-state"
 export SIMARD_IDENTITY="simard-engineer"
 export SIMARD_BASE_TYPE="local-harness"
 export SIMARD_RUNTIME_TOPOLOGY="single-process"
