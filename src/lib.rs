@@ -3,6 +3,7 @@ pub mod base_types;
 pub mod bootstrap;
 pub mod error;
 pub mod evidence;
+pub mod gym;
 pub mod handoff;
 pub mod identity;
 pub mod memory;
@@ -26,6 +27,11 @@ pub use bootstrap::{
 };
 pub use error::{SimardError, SimardResult};
 pub use evidence::{EvidenceRecord, EvidenceSource, EvidenceStore, InMemoryEvidenceStore};
+pub use gym::{
+    BenchmarkArtifactPaths, BenchmarkCheckResult, BenchmarkRunReport, BenchmarkScenario,
+    BenchmarkSuiteReport, BenchmarkSuiteScenarioSummary, benchmark_scenarios, default_output_root,
+    run_benchmark_scenario, run_benchmark_suite,
+};
 pub use handoff::{InMemoryHandoffStore, RuntimeHandoffSnapshot, RuntimeHandoffStore};
 pub use identity::{
     BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader, IdentityManifest, ManifestContract,

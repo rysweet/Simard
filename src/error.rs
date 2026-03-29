@@ -104,6 +104,16 @@ pub enum SimardError {
         field: String,
         reason: String,
     },
+    BenchmarkScenarioNotFound {
+        scenario_id: String,
+    },
+    BenchmarkSuiteNotFound {
+        suite_id: String,
+    },
+    ArtifactIo {
+        path: PathBuf,
+        reason: String,
+    },
     StoragePoisoned {
         store: String,
     },
@@ -227,6 +237,15 @@ impl Display for SimardError {
             }
             Self::InvalidHandoffSnapshot { field, reason } => {
                 write!(f, "invalid handoff snapshot field '{field}': {reason}")
+            }
+            Self::BenchmarkScenarioNotFound { scenario_id } => {
+                write!(f, "benchmark scenario '{scenario_id}' is not registered")
+            }
+            Self::BenchmarkSuiteNotFound { suite_id } => {
+                write!(f, "benchmark suite '{suite_id}' is not registered")
+            }
+            Self::ArtifactIo { path: _, reason } => {
+                write!(f, "failed to read or write benchmark artifact: {reason}")
             }
             Self::StoragePoisoned { store } => {
                 write!(f, "storage lock for '{store}' is poisoned")
