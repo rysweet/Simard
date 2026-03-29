@@ -15,6 +15,7 @@ const MEMORY_STORE_NAME: &str = "memory";
 pub enum MemoryScope {
     SessionScratch,
     SessionSummary,
+    Decision,
     Project,
     Benchmark,
 }

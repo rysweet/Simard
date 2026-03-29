@@ -1,5 +1,5 @@
 name: "Simard Operator Runtime Behavior"
-description: "Outside-in operator coverage for base-type selection, composite identity execution, loopback multi-process runtime wiring, handoff restore behavior, and the shipped benchmark gym starter suite."
+description: "Outside-in operator coverage for base-type selection, composite identity execution, meeting-mode decision capture, loopback multi-process runtime wiring, handoff restore behavior, and the shipped benchmark gym starter suite."
 version: "1.0.0"
 
 config:
@@ -55,6 +55,13 @@ steps:
       command: "tests/gadugi/composite-identity.sh"
     timeout: 300000
 
+  - name: "Meeting mode decision capture"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/meeting-mode.sh"
+    timeout: 300000
+
   - name: "Composite handoff roundtrip"
     agent: "cli-agent"
     action: "execute_command"
@@ -82,6 +89,7 @@ metadata:
     - "behavior"
     - "simard"
     - "bootstrap"
+    - "meeting"
     - "handoff"
     - "composite"
     - "benchmark-gym"
