@@ -8,6 +8,7 @@ pub mod handoff;
 pub mod identity;
 pub mod memory;
 pub mod metadata;
+mod persistence;
 pub mod prompt_assets;
 pub mod reflection;
 pub mod runtime;
@@ -22,22 +23,29 @@ pub use base_types::{
 };
 pub use bootstrap::{
     BootstrapConfig, BootstrapInputs, BootstrapMode, ConfigValue, ConfigValueSource,
-    LocalSessionExecution, assemble_local_runtime, bootstrap_entrypoint,
-    builtin_base_type_registry_for_manifest, run_local_session,
+    LocalSessionExecution, assemble_local_runtime, assemble_local_runtime_from_handoff,
+    bootstrap_entrypoint, builtin_base_type_registry_for_manifest, latest_local_handoff,
+    run_local_session,
 };
 pub use error::{SimardError, SimardResult};
-pub use evidence::{EvidenceRecord, EvidenceSource, EvidenceStore, InMemoryEvidenceStore};
+pub use evidence::{
+    EvidenceRecord, EvidenceSource, EvidenceStore, FileBackedEvidenceStore, InMemoryEvidenceStore,
+};
 pub use gym::{
     BenchmarkArtifactPaths, BenchmarkCheckResult, BenchmarkRunReport, BenchmarkScenario,
     BenchmarkSuiteReport, BenchmarkSuiteScenarioSummary, benchmark_scenarios, default_output_root,
     run_benchmark_scenario, run_benchmark_suite,
 };
-pub use handoff::{InMemoryHandoffStore, RuntimeHandoffSnapshot, RuntimeHandoffStore};
+pub use handoff::{
+    FileBackedHandoffStore, InMemoryHandoffStore, RuntimeHandoffSnapshot, RuntimeHandoffStore,
+};
 pub use identity::{
     BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader, IdentityManifest, ManifestContract,
     MemoryPolicy, OperatingMode,
 };
-pub use memory::{InMemoryMemoryStore, MemoryRecord, MemoryScope, MemoryStore};
+pub use memory::{
+    FileBackedMemoryStore, InMemoryMemoryStore, MemoryRecord, MemoryScope, MemoryStore,
+};
 pub use metadata::{BackendDescriptor, Freshness, FreshnessState, Provenance};
 pub use prompt_assets::{
     FilePromptAssetStore, InMemoryPromptAssetStore, PromptAsset, PromptAssetId, PromptAssetRef,

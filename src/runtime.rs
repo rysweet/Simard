@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::agent_program::{AgentProgram, AgentProgramContext, ObjectiveRelayProgram};
 use crate::base_types::{BaseTypeFactory, BaseTypeId, BaseTypeOutcome, BaseTypeSessionRequest};
@@ -17,7 +17,7 @@ use crate::reflection::{ReflectionReport, ReflectionSnapshot, ReflectiveRuntime}
 use crate::sanitization::objective_metadata;
 use crate::session::{SessionIdGenerator, SessionPhase, SessionRecord};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RuntimeTopology {
     SingleProcess,
@@ -36,7 +36,8 @@ impl Display for RuntimeTopology {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum RuntimeState {
     Initializing,
     Ready,
@@ -89,7 +90,7 @@ impl RuntimeState {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub struct RuntimeNodeId(String);
 
 impl RuntimeNodeId {
@@ -108,7 +109,7 @@ impl Display for RuntimeNodeId {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub struct RuntimeAddress(String);
 
 impl RuntimeAddress {

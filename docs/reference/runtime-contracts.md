@@ -60,6 +60,7 @@ Artifacts are written under `target/simard-gym/` as JSON and text reports.
 | --- | --- | --- | --- |
 | `SIMARD_PROMPT_ROOT` | Yes in `explicit-config` | none | Root directory for prompt assets. |
 | `SIMARD_OBJECTIVE` | Yes in `explicit-config` | none | Objective passed to `run()`. Live execution keeps the real objective in memory while persisted scratch, summary, reflection, and exported handoff session text store objective metadata instead of the raw objective text. |
+| `SIMARD_STATE_ROOT` | Yes in `explicit-config` | none in `explicit-config`; `target/simard-state` in `builtin-defaults` | Root directory for the durable local memory, evidence, and latest handoff snapshot files written by the bootstrap path. |
 | `SIMARD_BOOTSTRAP_MODE` | No | `explicit-config` | Startup mode. Accepted values: `explicit-config`, `builtin-defaults`. |
 | `SIMARD_IDENTITY` | Yes in `explicit-config` | none in `explicit-config`; `simard-engineer` in `builtin-defaults` | Identity to load before runtime composition. Non-UTF-8 values fail bootstrap instead of being treated as missing. |
 | `SIMARD_BASE_TYPE` | Yes in `explicit-config` | none in `explicit-config`; `local-harness` in `builtin-defaults` | Base type selected for the runtime request. Unsupported or unregistered choices fail explicitly. |
@@ -90,8 +91,8 @@ Notes:
 
 | Mode | Behavior |
 | --- | --- |
-| `explicit-config` | Requires prompt root, objective, identity, base type, and topology from configuration. |
-| `builtin-defaults` | Allows builtin prompt root, builtin objective, builtin identity, builtin base type (`local-harness`), and builtin topology (`single-process`), but only because startup opted in explicitly. |
+| `explicit-config` | Requires prompt root, objective, state root, identity, base type, and topology from configuration. |
+| `builtin-defaults` | Allows builtin prompt root, builtin objective, builtin state root (`target/simard-state`), builtin identity, builtin base type (`local-harness`), and builtin topology (`single-process`), but only because startup opted in explicitly. |
 
 ### Config value sources
 
@@ -109,6 +110,7 @@ This is the canonical non-default base-type example for the current scaffold:
 ```bash
 SIMARD_PROMPT_ROOT="$PWD/prompt_assets" \
 SIMARD_OBJECTIVE="inspect copilot-sdk bootstrap wiring" \
+SIMARD_STATE_ROOT="$PWD/target/simard-state" \
 SIMARD_IDENTITY="simard-engineer" \
 SIMARD_BASE_TYPE="copilot-sdk" \
 SIMARD_RUNTIME_TOPOLOGY="single-process" \
@@ -120,7 +122,7 @@ Expected output shape:
 ```text
 Simard local runtime executed successfully.
 Bootstrap mode: explicit-config
-Config sources: prompt_root=env:SIMARD_PROMPT_ROOT, objective=env:SIMARD_OBJECTIVE, base_type=env:SIMARD_BASE_TYPE, topology=env:SIMARD_RUNTIME_TOPOLOGY
+Config sources: prompt_root=env:SIMARD_PROMPT_ROOT, objective=env:SIMARD_OBJECTIVE, state_root=env:SIMARD_STATE_ROOT, base_type=env:SIMARD_BASE_TYPE, topology=env:SIMARD_RUNTIME_TOPOLOGY
 Bootstrap selection: identity=simard-engineer, base_type=copilot-sdk, topology=single-process
 Adapter implementation: local-harness
 ...
@@ -142,6 +144,7 @@ Simard keeps the live objective available while the run is executing, but persis
 - reflection summaries describe completion with objective metadata instead of raw objective text
 - persisted session summaries reuse sanitized plan and execution strings rather than copying the raw objective back out
 - exported handoff snapshots preserve the session boundary while replacing `RuntimeHandoffSnapshot.session.objective` with the same objective metadata string
+- bootstrap persists the latest exported handoff snapshot under `SIMARD_STATE_ROOT/latest_handoff.json`
 
 ## Identity metadata
 
@@ -177,10 +180,11 @@ identity:simard-engineer
 base-type:local-harness
 topology:single-process
 prompt-root:env:SIMARD_PROMPT_ROOT
+state-root:env:SIMARD_STATE_ROOT
 objective:env:SIMARD_OBJECTIVE
 ```
 
-If builtin defaults are used intentionally, the prompt-root and objective entries record `opt-in:SIMARD_BOOTSTRAP_MODE`.
+If builtin defaults are used intentionally, the prompt-root, state-root, and objective entries record `opt-in:SIMARD_BOOTSTRAP_MODE`.
 
 ## Provenance and freshness
 
@@ -364,7 +368,7 @@ Reflection rules:
 | --- | --- |
 | `PromptAssetMissing` | A referenced prompt asset was not found. |
 | `PromptAssetRead` | A prompt asset could not be read. |
-| `StoragePoisoned` | An in-memory store lock was poisoned. |
+| `StoragePoisoned` | A durable store lock was poisoned before Simard could read or persist state. |
 ## Example: truthful fields
 
 ```rust
@@ -382,12 +386,13 @@ assert_eq!(snapshot.manifest_contract.freshness.state, FreshnessState::Current);
 assert_eq!(snapshot.runtime_node.to_string(), "node-local");
 assert_eq!(snapshot.mailbox_address.to_string(), "inmemory://node-local");
 assert_eq!(snapshot.agent_program_backend.identity, "agent-program::objective-relay");
-assert_eq!(snapshot.handoff_backend.identity, "handoff::in-memory");
+assert_eq!(snapshot.handoff_backend.identity, "handoff::json-file-store");
 assert_eq!(snapshot.adapter_backend.identity, "local-harness");
 assert_eq!(snapshot.topology_backend.identity, "topology::in-process");
 assert_eq!(snapshot.transport_backend.identity, "transport::in-memory-mailbox");
 assert_eq!(snapshot.supervisor_backend.identity, "supervisor::in-process");
-assert_eq!(snapshot.memory_backend.identity, "memory::session-cache");
+assert_eq!(snapshot.memory_backend.identity, "memory::json-file-store");
+assert_eq!(snapshot.evidence_backend.identity, "evidence::json-file-store");
 ```
 
 ## See also

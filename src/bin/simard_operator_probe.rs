@@ -1,12 +1,8 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use simard::{
-    BootstrapConfig, BootstrapInputs, BuiltinIdentityLoader, CoordinatedSupervisor,
-    FilePromptAssetStore, IdentityLoadRequest, IdentityLoader, InMemoryEvidenceStore,
-    InMemoryMemoryStore, LoopbackMailboxTransport, LoopbackMeshTopologyDriver, ManifestContract,
-    Provenance, ReflectiveRuntime, RuntimePorts, RuntimeRequest, RuntimeTopology,
-    UuidSessionIdGenerator, bootstrap_entrypoint, builtin_base_type_registry_for_manifest,
+    BootstrapConfig, BootstrapInputs, ReflectiveRuntime, assemble_local_runtime_from_handoff,
+    latest_local_handoff,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -38,6 +34,15 @@ fn prompt_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")
 }
 
+fn state_root(identity: &str, base_type: &str, topology: &str, probe: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target/operator-probe-state")
+        .join(probe)
+        .join(identity)
+        .join(base_type)
+        .join(topology)
+}
+
 fn run_bootstrap_probe(
     identity: &str,
     base_type: &str,
@@ -47,6 +52,7 @@ fn run_bootstrap_probe(
     let config = BootstrapConfig::resolve(BootstrapInputs {
         prompt_root: Some(prompt_root()),
         objective: Some(objective.to_string()),
+        state_root: Some(state_root(identity, base_type, topology, "bootstrap-run")),
         identity: Some(identity.to_string()),
         base_type: Some(base_type.to_string()),
         topology: Some(topology.to_string()),
@@ -81,6 +87,7 @@ fn run_bootstrap_probe(
         "Transport backend: {}",
         execution.snapshot.transport_backend.identity
     );
+    println!("State root: {}", config.state_root_path().display());
     println!("Session phase: {}", execution.outcome.session.phase);
     println!("Shutdown: {}", execution.stopped_snapshot.runtime_state);
     println!("Execution summary: {}", execution.outcome.execution_summary);
@@ -97,52 +104,28 @@ fn run_handoff_probe(
     topology: &str,
     objective: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let topology = parse_topology(topology)?;
-    let contract = ManifestContract::new(
-        bootstrap_entrypoint(),
-        "bootstrap-config -> identity-loader -> runtime-ports -> local-runtime",
-        vec![
-            "probe:handoff-roundtrip".to_string(),
-            format!("identity:{identity}"),
-            format!("base-type:{base_type}"),
-            format!("topology:{topology}"),
-        ],
-        Provenance::new("probe", "simard_operator_probe"),
-        simard::Freshness::now()?,
-    )?;
-    let manifest = BuiltinIdentityLoader.load(&IdentityLoadRequest::new(
-        identity.to_string(),
-        env!("CARGO_PKG_VERSION"),
-        contract,
-    ))?;
-    let request = RuntimeRequest::new(
-        manifest.clone(),
-        simard::BaseTypeId::new(base_type),
-        topology,
-    );
+    let config = BootstrapConfig::resolve(BootstrapInputs {
+        prompt_root: Some(prompt_root()),
+        objective: Some(objective.to_string()),
+        state_root: Some(state_root(
+            identity,
+            base_type,
+            topology,
+            "handoff-roundtrip",
+        )),
+        identity: Some(identity.to_string()),
+        base_type: Some(base_type.to_string()),
+        topology: Some(topology.to_string()),
+        ..BootstrapInputs::default()
+    })?;
 
-    let mut runtime = simard::LocalRuntime::compose(
-        assemble_loopback_ports(
-            Arc::new(FilePromptAssetStore::new(prompt_root())),
-            builtin_base_type_registry_for_manifest(&manifest)?,
-        )?,
-        request.clone(),
-    )?;
-    runtime.start()?;
-    let outcome = runtime.run(objective.to_string())?;
-    let exported = runtime.export_handoff()?;
-
-    let restored = simard::LocalRuntime::compose_from_handoff(
-        assemble_loopback_ports(
-            Arc::new(FilePromptAssetStore::new(prompt_root())),
-            builtin_base_type_registry_for_manifest(&manifest)?,
-        )?,
-        request,
-        exported.clone(),
-    )?;
+    let execution = simard::run_local_session(&config)?;
+    let exported = latest_local_handoff(&config)?.ok_or("expected durable handoff snapshot")?;
+    let restored = assemble_local_runtime_from_handoff(&config, exported.clone())?;
     let restored_snapshot = restored.snapshot()?;
 
     println!("Probe mode: handoff-roundtrip");
+    println!("State root: {}", config.state_root_path().display());
     println!("Identity: {}", restored_snapshot.identity_name);
     println!(
         "Identity components: {}",
@@ -184,31 +167,6 @@ fn run_handoff_probe(
         "Restored transport backend: {}",
         restored_snapshot.transport_backend.identity
     );
-    println!("Execution summary: {}", outcome.execution_summary);
+    println!("Execution summary: {}", execution.outcome.execution_summary);
     Ok(())
-}
-
-fn assemble_loopback_ports(
-    prompt_store: Arc<FilePromptAssetStore>,
-    base_types: simard::BaseTypeRegistry,
-) -> Result<RuntimePorts, Box<dyn std::error::Error>> {
-    Ok(RuntimePorts::with_runtime_services(
-        prompt_store,
-        Arc::new(InMemoryMemoryStore::try_default()?),
-        Arc::new(InMemoryEvidenceStore::try_default()?),
-        base_types,
-        Arc::new(LoopbackMeshTopologyDriver::try_default()?),
-        Arc::new(LoopbackMailboxTransport::try_default()?),
-        Arc::new(CoordinatedSupervisor::try_default()?),
-        Arc::new(UuidSessionIdGenerator),
-    ))
-}
-
-fn parse_topology(value: &str) -> Result<RuntimeTopology, Box<dyn std::error::Error>> {
-    match value {
-        "single-process" => Ok(RuntimeTopology::SingleProcess),
-        "multi-process" => Ok(RuntimeTopology::MultiProcess),
-        "distributed" => Ok(RuntimeTopology::Distributed),
-        other => Err(format!("unsupported topology '{other}'").into()),
-    }
 }

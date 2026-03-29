@@ -1,11 +1,19 @@
+use std::fs;
 use std::path::PathBuf;
 
 use simard::{
     BaseTypeId, BootstrapConfig, BootstrapInputs, BootstrapMode, BuiltinIdentityLoader,
     ConfigValueSource, IdentityLoadRequest, IdentityLoader, ManifestContract, Provenance,
     ReflectiveRuntime, RuntimeState, RuntimeTopology, SimardError, assemble_local_runtime,
-    bootstrap_entrypoint, run_local_session,
+    assemble_local_runtime_from_handoff, bootstrap_entrypoint, latest_local_handoff,
+    run_local_session,
 };
+
+fn state_root(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target/test-state")
+        .join(name)
+}
 
 #[test]
 fn bootstrap_requires_explicit_prompt_root_and_objective_by_default() {
@@ -40,6 +48,10 @@ fn bootstrap_builtin_defaults_are_only_used_with_explicit_opt_in() {
         ConfigValueSource::ExplicitOptIn("SIMARD_BOOTSTRAP_MODE")
     );
     assert_eq!(
+        config.state_root.source,
+        ConfigValueSource::ExplicitOptIn("SIMARD_BOOTSTRAP_MODE")
+    );
+    assert_eq!(
         config.selected_base_type.source,
         ConfigValueSource::ExplicitOptIn("SIMARD_BOOTSTRAP_MODE")
     );
@@ -50,6 +62,10 @@ fn bootstrap_builtin_defaults_are_only_used_with_explicit_opt_in() {
     assert_eq!(
         config.prompt_root.value,
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")
+    );
+    assert_eq!(
+        config.state_root.value,
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/simard-state")
     );
     assert_eq!(config.objective.value, "bootstrap the Simard engineer loop");
     assert_eq!(
@@ -66,6 +82,7 @@ fn bootstrap_requires_explicit_identity_without_builtin_defaults() {
         objective: Some("exercise bootstrap identity handling".to_string()),
         base_type: Some("local-harness".to_string()),
         topology: Some("single-process".to_string()),
+        state_root: Some(state_root("missing-identity")),
         ..BootstrapInputs::default()
     })
     .unwrap_err();
@@ -87,6 +104,7 @@ fn bootstrap_requires_explicit_base_type_without_builtin_defaults() {
         objective: Some("exercise bootstrap base type handling".to_string()),
         identity: Some("simard-engineer".to_string()),
         topology: Some("single-process".to_string()),
+        state_root: Some(state_root("missing-base-type")),
         ..BootstrapInputs::default()
     })
     .unwrap_err();
@@ -108,6 +126,7 @@ fn bootstrap_requires_explicit_topology_without_builtin_defaults() {
         objective: Some("exercise bootstrap topology handling".to_string()),
         identity: Some("simard-engineer".to_string()),
         base_type: Some("local-harness".to_string()),
+        state_root: Some(state_root("missing-topology")),
         ..BootstrapInputs::default()
     })
     .unwrap_err();
@@ -131,6 +150,7 @@ fn bootstrap_rejects_invalid_topology_values() {
         identity: Some("simard-engineer".to_string()),
         base_type: Some("local-harness".to_string()),
         topology: Some("mystery-mesh".to_string()),
+        state_root: Some(state_root("invalid-topology")),
         ..BootstrapInputs::default()
     })
     .unwrap_err();
@@ -193,6 +213,7 @@ fn bootstrap_assembly_produces_truthful_manifest_metadata() {
         identity: Some("simard-engineer".to_string()),
         base_type: Some("local-harness".to_string()),
         topology: Some("single-process".to_string()),
+        state_root: Some(state_root("assembly")),
         ..BootstrapInputs::default()
     })
     .expect("explicit bootstrap config should resolve");
@@ -296,6 +317,7 @@ fn bootstrap_run_local_session_executes_the_cli_lifecycle() {
         identity: Some("simard-engineer".to_string()),
         base_type: Some("local-harness".to_string()),
         topology: Some("single-process".to_string()),
+        state_root: Some(state_root("run-loop")),
         ..BootstrapInputs::default()
     })
     .expect("explicit bootstrap config should resolve");
@@ -314,6 +336,69 @@ fn bootstrap_run_local_session_executes_the_cli_lifecycle() {
 }
 
 #[test]
+fn bootstrap_persists_durable_state_and_restores_latest_handoff() {
+    let state_root = state_root("durable-restore");
+    if state_root.exists() {
+        fs::remove_dir_all(&state_root).expect("old test state should be removable");
+    }
+
+    let config = BootstrapConfig::resolve(BootstrapInputs {
+        prompt_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")),
+        objective: Some("exercise durable bootstrap persistence".to_string()),
+        state_root: Some(state_root.clone()),
+        identity: Some("simard-engineer".to_string()),
+        base_type: Some("local-harness".to_string()),
+        topology: Some("single-process".to_string()),
+        ..BootstrapInputs::default()
+    })
+    .expect("explicit bootstrap config should resolve");
+
+    let execution = run_local_session(&config).expect("bootstrap run loop should succeed");
+    assert!(config.memory_store_path().is_file());
+    assert!(config.evidence_store_path().is_file());
+    assert!(config.handoff_store_path().is_file());
+
+    let snapshot = latest_local_handoff(&config)
+        .expect("durable handoff lookup should succeed")
+        .expect("a durable handoff snapshot should exist after the run");
+    assert_eq!(
+        snapshot.session.as_ref().map(|session| session.phase),
+        Some(simard::SessionPhase::Complete)
+    );
+    assert_eq!(snapshot.memory_records.len(), 2);
+    assert_eq!(snapshot.evidence_records.len(), 4);
+
+    let restored = assemble_local_runtime_from_handoff(&config, snapshot)
+        .expect("restored runtime should compose");
+    let restored_snapshot = restored
+        .snapshot()
+        .expect("restored snapshot should succeed");
+    assert_eq!(restored_snapshot.runtime_state, RuntimeState::Initializing);
+    assert_eq!(
+        restored_snapshot.session_phase,
+        Some(simard::SessionPhase::Complete)
+    );
+    assert_eq!(restored_snapshot.memory_records, 2);
+    assert_eq!(restored_snapshot.evidence_records, 4);
+    assert_eq!(
+        restored_snapshot.memory_backend.identity,
+        "memory::json-file-store"
+    );
+    assert_eq!(
+        restored_snapshot.evidence_backend.identity,
+        "evidence::json-file-store"
+    );
+    assert_eq!(
+        restored_snapshot.handoff_backend.identity,
+        "handoff::json-file-store"
+    );
+    assert_eq!(
+        execution.stopped_snapshot.runtime_state,
+        RuntimeState::Stopped
+    );
+}
+
+#[test]
 fn bootstrap_supports_composite_identity_execution() {
     let config = BootstrapConfig::resolve(BootstrapInputs {
         prompt_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")),
@@ -321,6 +406,7 @@ fn bootstrap_supports_composite_identity_execution() {
         identity: Some("simard-composite-engineer".to_string()),
         base_type: Some("local-harness".to_string()),
         topology: Some("single-process".to_string()),
+        state_root: Some(state_root("composite")),
         ..BootstrapInputs::default()
     })
     .expect("explicit composite bootstrap config should resolve");
@@ -356,6 +442,7 @@ fn bootstrap_assembly_supports_multiple_builtin_manifest_base_types() {
             identity: Some("simard-engineer".to_string()),
             base_type: Some(base_type.to_string()),
             topology: Some("single-process".to_string()),
+            state_root: Some(state_root(base_type)),
             ..BootstrapInputs::default()
         })
         .expect("explicit bootstrap config should resolve");
@@ -410,6 +497,7 @@ fn bootstrap_supports_rusty_clawd_multi_process_execution() {
         identity: Some("simard-engineer".to_string()),
         base_type: Some("rusty-clawd".to_string()),
         topology: Some("multi-process".to_string()),
+        state_root: Some(state_root("rusty-clawd-multi-process")),
         ..BootstrapInputs::default()
     })
     .expect("multi-process bootstrap config should resolve");
@@ -452,6 +540,7 @@ fn bootstrap_assembly_surfaces_identity_base_type_mismatches_explicitly() {
         identity: Some("simard-engineer".to_string()),
         base_type: Some("meeting-bot".to_string()),
         topology: Some("single-process".to_string()),
+        state_root: Some(state_root("identity-base-mismatch")),
         ..BootstrapInputs::default()
     })
     .expect("explicit bootstrap config should resolve");
@@ -478,6 +567,7 @@ fn bootstrap_assembly_surfaces_unsupported_topologies_explicitly() {
         identity: Some("simard-engineer".to_string()),
         base_type: Some("local-harness".to_string()),
         topology: Some("distributed".to_string()),
+        state_root: Some(state_root("unsupported-topology")),
         ..BootstrapInputs::default()
     })
     .expect("explicit bootstrap config should resolve");
