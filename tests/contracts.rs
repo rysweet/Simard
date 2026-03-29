@@ -3,9 +3,9 @@ use std::sync::Arc;
 use simard::{
     BaseTypeCapability, BaseTypeId, BaseTypeRegistry, IdentityManifest, InMemoryEvidenceStore,
     InMemoryMemoryStore, InMemoryPromptAssetStore, LocalProcessHarnessAdapter, LocalRuntime,
-    ManifestContract, MemoryPolicy, OperatingMode, PromptAsset, PromptAssetRef, Provenance,
-    RuntimePorts, RuntimeRequest, RuntimeTopology, SessionId, SessionIdGenerator, SessionPhase,
-    SessionRecord, SimardError, UuidSessionIdGenerator, capability_set,
+    ManifestContract, MemoryPolicy, MemoryScope, OperatingMode, PromptAsset, PromptAssetRef,
+    Provenance, RuntimePorts, RuntimeRequest, RuntimeTopology, SessionId, SessionIdGenerator,
+    SessionPhase, SessionRecord, SimardError, UuidSessionIdGenerator, capability_set,
 };
 use uuid::Uuid;
 
@@ -18,6 +18,10 @@ fn prompt_store() -> Arc<InMemoryPromptAssetStore> {
 }
 
 fn manifest(base_type: &str) -> IdentityManifest {
+    manifest_with_policy(base_type, MemoryPolicy::default())
+}
+
+fn manifest_with_policy(base_type: &str, memory_policy: MemoryPolicy) -> IdentityManifest {
     IdentityManifest::new(
         "simard-engineer",
         "0.1.0",
@@ -37,7 +41,7 @@ fn manifest(base_type: &str) -> IdentityManifest {
             BaseTypeCapability::Reflection,
         ]),
         OperatingMode::Engineer,
-        MemoryPolicy::default(),
+        memory_policy,
         ManifestContract::new(
             simard::bootstrap_entrypoint(),
             "bootstrap-config -> identity-loader -> runtime-ports -> local-runtime",
@@ -58,6 +62,7 @@ fn compose_rejects_missing_capability() {
     let mut base_types = BaseTypeRegistry::default();
     base_types.register(
         LocalProcessHarnessAdapter::new(
+            "limited-harness",
             "limited-harness",
             [
                 BaseTypeCapability::PromptAssets,
@@ -133,6 +138,149 @@ fn start_rejects_missing_prompt_asset() {
         SimardError::PromptAssetMissing {
             asset_id: "engineer-system".to_string(),
             path: "simard/engineer_system.md".into(),
+        }
+    );
+}
+
+#[test]
+fn prompt_asset_error_display_redacts_absolute_paths() {
+    let missing = SimardError::PromptAssetMissing {
+        asset_id: "engineer-system".to_string(),
+        path: "/tmp/private/prompt.md".into(),
+    };
+    assert!(!missing.to_string().contains("/tmp/private/prompt.md"));
+
+    let invalid = SimardError::InvalidPromptAssetPath {
+        asset_id: "engineer-system".to_string(),
+        path: "/tmp/private/prompt.md".into(),
+        reason: "expected a relative path inside the configured prompt root".to_string(),
+    };
+    assert!(!invalid.to_string().contains("/tmp/private/prompt.md"));
+}
+
+#[test]
+fn compose_rejects_manifest_supported_base_types_without_registered_adapters() {
+    let prompts = prompt_store();
+    let memory = Arc::new(InMemoryMemoryStore::try_default().expect("store should initialize"));
+    let evidence = Arc::new(InMemoryEvidenceStore::try_default().expect("store should initialize"));
+    let mut base_types = BaseTypeRegistry::default();
+    base_types.register(
+        LocalProcessHarnessAdapter::single_process("local-harness")
+            .expect("adapter should initialize"),
+    );
+
+    let request = RuntimeRequest::new(
+        manifest("future-distributed-adapter"),
+        BaseTypeId::new("future-distributed-adapter"),
+        RuntimeTopology::SingleProcess,
+    );
+
+    let error = match LocalRuntime::compose(
+        RuntimePorts::new(
+            prompts,
+            memory,
+            evidence,
+            base_types,
+            Arc::new(UuidSessionIdGenerator),
+        ),
+        request,
+    ) {
+        Ok(_) => panic!("composition should have failed"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        error,
+        SimardError::AdapterNotRegistered {
+            base_type: "future-distributed-adapter".to_string(),
+        }
+    );
+}
+
+#[test]
+fn manifest_rejects_project_write_policy_in_v1() {
+    let error = IdentityManifest::new(
+        "simard-engineer",
+        "0.1.0",
+        vec![PromptAssetRef::new(
+            "engineer-system",
+            "simard/engineer_system.md",
+        )],
+        vec![BaseTypeId::new("local-harness")],
+        capability_set([
+            BaseTypeCapability::PromptAssets,
+            BaseTypeCapability::SessionLifecycle,
+            BaseTypeCapability::Memory,
+            BaseTypeCapability::Evidence,
+            BaseTypeCapability::Reflection,
+        ]),
+        OperatingMode::Engineer,
+        MemoryPolicy {
+            allow_project_writes: true,
+            summary_scope: MemoryScope::SessionSummary,
+        },
+        ManifestContract::new(
+            simard::bootstrap_entrypoint(),
+            "bootstrap-config -> identity-loader -> runtime-ports -> local-runtime",
+            vec!["tests:contracts".to_string()],
+            Provenance::new("test", "contracts::project-writes"),
+            simard::Freshness::now().expect("freshness should be observable"),
+        )
+        .expect("contract should be valid"),
+    )
+    .expect_err("v1 should reject project-write policies");
+
+    assert_eq!(
+        error,
+        SimardError::UnsupportedMemoryPolicy {
+            field: "memory_policy.allow_project_writes".to_string(),
+            reason: "v1 only supports read-only project boundaries".to_string(),
+        }
+    );
+}
+
+#[test]
+fn runtime_compose_rejects_project_write_policy_even_if_manifest_is_mutated() {
+    let prompts = prompt_store();
+    let memory = Arc::new(InMemoryMemoryStore::try_default().expect("store should initialize"));
+    let evidence = Arc::new(InMemoryEvidenceStore::try_default().expect("store should initialize"));
+    let mut base_types = BaseTypeRegistry::default();
+    base_types.register(
+        LocalProcessHarnessAdapter::single_process("local-harness")
+            .expect("adapter should initialize"),
+    );
+
+    let mut mutated_manifest = manifest("local-harness");
+    mutated_manifest.memory_policy = MemoryPolicy {
+        allow_project_writes: true,
+        summary_scope: MemoryScope::SessionSummary,
+    };
+
+    let request = RuntimeRequest::new(
+        mutated_manifest,
+        BaseTypeId::new("local-harness"),
+        RuntimeTopology::SingleProcess,
+    );
+
+    let error = match LocalRuntime::compose(
+        RuntimePorts::new(
+            prompts,
+            memory,
+            evidence,
+            base_types,
+            Arc::new(UuidSessionIdGenerator),
+        ),
+        request,
+    ) {
+        Ok(_) => panic!("runtime composition should reject unsupported memory policies"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        error,
+        SimardError::UnsupportedMemoryPolicy {
+            field: "memory_policy.allow_project_writes".to_string(),
+            reason: "v1 only supports read-only project boundaries".to_string(),
         }
     );
 }
@@ -229,6 +377,26 @@ fn reflection_snapshot_exposes_resolved_adapter_backend_descriptor() {
     assert!(
         reflection_rs.contains("pub adapter_backend: BackendDescriptor"),
         "reflection snapshots need an adapter_backend descriptor so backend identity comes from the runtime-selected adapter"
+    );
+}
+
+#[test]
+fn reflection_snapshot_exposes_agent_program_backend_descriptor() {
+    let reflection_rs = include_str!("../src/reflection.rs");
+
+    assert!(
+        reflection_rs.contains("pub agent_program_backend: BackendDescriptor"),
+        "reflection snapshots need an agent_program_backend descriptor so agent logic wiring stays inspectable"
+    );
+}
+
+#[test]
+fn reflection_snapshot_exposes_handoff_backend_descriptor() {
+    let reflection_rs = include_str!("../src/reflection.rs");
+
+    assert!(
+        reflection_rs.contains("pub handoff_backend: BackendDescriptor"),
+        "reflection snapshots need a handoff_backend descriptor so export/import wiring stays inspectable"
     );
 }
 

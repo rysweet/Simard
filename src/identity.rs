@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::fmt::{self, Display, Formatter};
 
 use crate::base_types::{BaseTypeCapability, BaseTypeId, capability_set};
 use crate::error::{SimardError, SimardResult};
@@ -13,6 +14,17 @@ pub enum OperatingMode {
     Gym,
 }
 
+impl Display for OperatingMode {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Self::Engineer => "engineer",
+            Self::Meeting => "meeting",
+            Self::Gym => "gym",
+        };
+        f.write_str(label)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MemoryPolicy {
     pub allow_project_writes: bool,
@@ -25,6 +37,19 @@ impl Default for MemoryPolicy {
             allow_project_writes: false,
             summary_scope: MemoryScope::SessionSummary,
         }
+    }
+}
+
+impl MemoryPolicy {
+    pub fn validate(&self) -> SimardResult<()> {
+        if self.allow_project_writes {
+            return Err(SimardError::UnsupportedMemoryPolicy {
+                field: "memory_policy.allow_project_writes".to_string(),
+                reason: "v1 only supports read-only project boundaries".to_string(),
+            });
+        }
+
+        Ok(())
     }
 }
 
@@ -161,6 +186,10 @@ pub struct IdentityManifest {
 }
 
 impl IdentityManifest {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "identity manifests are explicit contract values with distinct fields"
+    )]
     pub fn new(
         name: impl Into<String>,
         version: impl Into<String>,
@@ -171,6 +200,8 @@ impl IdentityManifest {
         memory_policy: MemoryPolicy,
         contract: ManifestContract,
     ) -> SimardResult<Self> {
+        memory_policy.validate()?;
+
         Ok(Self {
             name: name.into(),
             version: version.into(),

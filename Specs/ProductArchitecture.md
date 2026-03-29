@@ -7,7 +7,7 @@ It is intentionally opinionated, directional, and lightweight enough to guide ea
 
 ## Current Codebase Context
 
-Simard now contains an initial Rust architecture scaffold organized around explicit contracts for prompt assets, base-type adapters, identity manifests, runtime control, sessions, memory, evidence, and reflection.
+Simard now contains an initial Rust architecture scaffold organized around explicit contracts for prompt assets, base-type factories and sessions, identity manifests, runtime control, topology services, memory, evidence, and reflection.
 The codebase is still early, but it is no longer a blank crate.
 This specification therefore serves two jobs at once: it defines the intended operating model and it sets the architectural constraints that the scaffold must keep preserving as implementation breadth expands.
 
@@ -16,7 +16,7 @@ This specification therefore serves two jobs at once: it defines the intended op
 The document uses the following terms with strict meanings:
 
 - **Prompt Asset**: a file-based prompt or prompt fragment that is versioned separately from runtime code.
-- **Agent Base Type**: the backend execution substrate an identity builds on, such as RustyClawd or a Copilot/Claude SDK adapter.
+- **Agent Base Type**: the backend execution substrate an identity builds on, such as RustyClawd or a Copilot/Claude SDK integration, normalized through a Simard base-type factory/session contract.
 - **Agent Identity**: the durable definition of an agent's purpose, prompts, policies, composition, and allowed behaviors.
 - **Agent Runtime**: the control plane that instantiates identities, runs sessions, manages lifecycle, and wires components together.
 - **Role**: a sub-function inside an identity, such as engineer, reviewer, or facilitator.
@@ -53,14 +53,14 @@ For delivery purposes, v1 should be interpreted narrowly:
 
 - one primary engineer loop
 - one default local single-process deployment path
-- one initially shipped adapter implementation
+- three builtin manifest-advertised base-type selections in the local scaffold: `local-harness`, `rusty-clawd`, and `copilot-sdk`, with the latter two behaving as explicit v1 aliases of the local harness implementation
 - one durable memory path
 - one small benchmark set
 
 Meeting mode, sibling identities, broader distributed execution, and self-improvement remain part of the architecture direction, but they are not v1 ship blockers.
 
 Phased delivery does **not** permit a local-only or single-base-type architecture.
-From day one, the runtime must be written for dependency injection, topology-aware composition, and multiple base types even if the first runnable path is local and only one adapter ships initially.
+From day one, the runtime must be written for dependency injection, topology-aware composition, and multiple base types even if the first runnable path is local and only a single-process harness implementation ships underneath the initial builtin selections.
 
 ## Day-One Architectural Constraints
 
@@ -68,7 +68,7 @@ The following are hard constraints for the first implementation, not deferred as
 
 - **Dependency injection from the outset**: runtime composition must happen through explicit ports, traits, and typed configuration rather than hidden globals or direct construction buried inside the core loop.
 - **Distributed-readiness from the outset**: runtime, session, memory, and reflection contracts must not assume in-process execution even when the first deployment path is single-process.
-- **Multiple base types from the outset**: identity manifests and runtime selection logic must support multiple base types immediately, even if only one concrete adapter is shipped and used in v1.
+- **Multiple base types from the outset**: identity manifests and runtime selection logic must support multiple base types immediately. In the current v1 scaffold, `local-harness`, `rusty-clawd`, and `copilot-sdk` are all selectable builtin base types, but `rusty-clawd` and `copilot-sdk` are still explicit aliases of the same local single-process harness implementation.
 - **Visible failures from the outset**: unsupported capabilities, missing prompt assets, invalid lifecycle transitions, and unsupported topologies must fail explicitly through typed errors instead of silent fallbacks.
 
 ## Non-Goals
@@ -83,7 +83,7 @@ The following are explicitly out of scope for v1.
 - Multi-user enterprise collaboration features such as permissions, shared inboxes, or hosted tenancy.
 - Detailed low-level plugin APIs before the core session, memory, and evaluation loops have proven value.
 - Shipping full distributed infrastructure, remote transport, clustering, or cross-host scheduling in v1.
-- Shipping every planned base-type adapter in v1.
+- Shipping every planned base-type backend integration in v1.
 - Shipping sibling identities such as `Cumulona` or `Victoria` in v1.
 - Automatic self-modification or autonomous promotion of changes in production paths.
 - A marketplace or plugin ecosystem for third-party identities before the core loop is proven.
@@ -113,7 +113,7 @@ The terminal is the primary execution surface, and conversational text exists to
 
 ### 2. Explicit State Over Hidden Magic
 
-Every meaningful run should have explicit session metadata, a task objective, a working memory area, and a durable output trail.
+Every meaningful run should have explicit session metadata, a live task objective, a working memory area, and a durable output trail that stores sanitized objective metadata rather than raw task text.
 If a future developer cannot explain why Simard took an action by inspecting session records, the architecture is too opaque.
 
 ### 3. Roles Must Be Separated
@@ -246,7 +246,7 @@ This is disposable and should be cheap to reset.
 
 #### 2. Session Summary
 
-A compact record written at the end of the session: objective, key actions, outcomes, changed artifacts, and follow-up items.
+A compact record written at the end of the session: sanitized objective metadata, key actions, outcomes, changed artifacts, and follow-up items.
 This is the primary bridge between one session and the next.
 
 #### 3. Project Memory
@@ -265,6 +265,7 @@ This memory is for evaluation and tuning, not for contaminating normal project c
 - Session scratch should not automatically become long-term memory.
 - Benchmark outcomes should be queryable separately from project execution history.
 - Meeting outputs should write decisions, not entire raw conversations, into durable memory.
+- V1 manifests must keep `MemoryPolicy.allow_project_writes=false` until there is an explicit project-write contract.
 
 ## Platform Architecture Layers
 
@@ -298,6 +299,14 @@ Candidate base types include:
 - GitHub Copilot SDK
 - Claude Code SDK
 - the amplihack / amplihack-rs goal-seeking agent and its OODA loop
+
+The current Simard scaffold already publishes builtin manifest-facing base-type identifiers for:
+
+- `local-harness`
+- `rusty-clawd`
+- `copilot-sdk`
+
+Those identifiers are intentionally explicit at bootstrap time. Unsupported or unregistered base-type/topology pairs must fail visibly rather than collapsing into a hidden local default, and the v1 aliases must still report the honest `local-harness` implementation identity behind them.
 
 Each base type should ideally have a Rust wrapper or adapter so the rest of the platform can interact with them through a more uniform model.
 
@@ -370,7 +379,7 @@ Without an explicit manifest and precedence model, composition will drift into h
 
 There should be a reusable starter shape for new identities.
 At the simplest end, an identity could be created from a prompt file plus a small amount of metadata.
-At the richer end, an identity could compose multiple prompts, skills, recipes, tools, subordinate identities, and multiple base-type adapters.
+At the richer end, an identity could compose multiple prompts, skills, recipes, tools, subordinate identities, and multiple base-type backend integrations.
 
 This suggests Simard should not be a one-off snowflake.
 It should help define a general identity template or starter repository that can also support sibling identities.
@@ -414,6 +423,8 @@ The runtime is responsible for:
 - transferring or attaching durable memory when work moves between machines
 - exposing reflection interfaces so the active agent can inspect its own runtime state
 
+For the current Simard repo, that runtime contract is exposed as a local CLI/bootstrap surface and in-process Rust APIs. It is not an HTTP API and it does not currently publish a database schema contract.
+
 #### Runtime Lifecycle and Control Plane
 
 The runtime needs a concrete control model, not just a responsibility list.
@@ -451,6 +462,9 @@ The identity should not need different business logic just because its internals
 
 That does not mean every topology has identical semantics.
 Ordering, latency, freshness, and partial-failure behavior may differ across deployment shapes, and the runtime must expose those guarantees honestly.
+
+In the current v1 scaffold, the default CLI bootstrap path still injects `single-process`, so builtin terminal runs fail early on `UnsupportedRuntimeTopology` if you request `multi-process` or `distributed`.
+The runtime core now also ships a second injected topology path for mesh-style runs, proving that agent logic can stay unchanged while topology services vary. That is still an internal/runtime seam, not a full distributed product feature.
 
 This is close to the hive-mind idea in amplihack:
 agent communication and memory semantics should be fundamentally the same whether the system is local or distributed.
@@ -602,8 +616,8 @@ This repository is Rust-based, so the architecture should lean into Rust where i
 - prompt assets stored as files, not embedded strings
 - typed adapters around supported base types
 - a typed identity model distinct from runtime configuration
-- a small core runtime for session state and orchestration
-- typed domain models for session records, memory entries, and benchmark results
+- a small core runtime for session state, orchestration, topology services, and handoff
+- typed domain models for session records, memory entries, evidence, and handoff snapshots
 - dependency injection through explicit runtime ports rather than hidden globals
 - clear module boundaries between control plane, execution plane, and persistence
 - minimal external dependencies until product shape stabilizes
@@ -619,9 +633,9 @@ These are directional module seams, not a frozen package layout.
 The first scaffold should keep them concrete enough to code against immediately:
 
 - `prompt_assets`: prompt asset identifiers, file-backed loading, and store contracts
-- `base_types`: adapter identifiers, capability contracts, topology support, and concrete adapter implementations
+- `base_types`: backend identifiers, capability contracts, topology support, and concrete factory/session implementations
 - `identity`: identity manifests, memory policy, mode definitions, and base-type eligibility
-- `runtime`: control-plane composition, lifecycle state, startup validation, topology, and local single-process runtime
+- `runtime`: control-plane composition, lifecycle state, startup validation, topology, handoff, and local runtime kernels
 - `session`: typed session identity, ordered lifecycle phases, and transition validation
 - `memory`: layered memory scopes, write/read contracts, and storage implementations
 - `evidence`: evidence records, provenance, and evidence sinks
@@ -637,7 +651,7 @@ The long-term architecture likely spans multiple repos, but the dependency direc
 ### Target Split
 
 - **Simard repo**: Simard identity definition, prompt assets, Simard-specific recipes, policies, and tests
-- **Shared runtime repo**: base-type adapters, lifecycle control plane, reflection, topology management, and orchestration substrate
+- **Shared runtime repo**: base-type factories/session backends, lifecycle control plane, reflection, topology management, and orchestration substrate
 - **Shared benchmark repo**: benchmark task schema, scoring, replay, and shared harness logic used by Simard and related projects such as Skwaq
 - **Shared memory repo**: durable memory primitives and storage libraries, likely continuing to live in `amplihack-memory-lib`
 
@@ -671,7 +685,7 @@ Before implementation expands past scaffolding, the project should explicitly ch
 
 - establish this specification as the product baseline
 - replace placeholder project context with Simard-specific context
-- create the minimal Rust module skeleton for prompt assets, base-type adapters, identity, runtime, session, memory, and modes
+- create the minimal Rust module skeleton for prompt assets, base-type factories/sessions, identity, runtime, session, memory, and modes
 - define benchmark task record formats and session summary formats
 - define the first identity template shape, even if initially backed by simple files
 - decide the first external prompt-file layout and loading model
@@ -684,7 +698,7 @@ Before implementation expands past scaffolding, the project should explicitly ch
 - support local repository inspection and bounded file edits
 - add durable session summaries and project memory writes
 - prove the loop on documentation and simple code-change tasks
-- implement the first base-type adapter, most likely around RustyClawd
+- implement the first real base-type factory/session backend around RustyClawd
 - keep runtime local and single-process
 - **Exit criteria:** one bounded repository task can be completed end to end with evidence and repeatable verification
 
@@ -742,7 +756,7 @@ These are deliberate next-iteration questions, not omissions in this document.
 
 ## Decision Summary
 
-Simard v1 should be built as a narrow, local, terminal-native engineering identity with one primary loop, one initial base type, explicit evidence, and disciplined session orchestration.
+Simard v1 should be built as a narrow, local, terminal-native engineering identity with one primary loop, explicit evidence, disciplined session orchestration, and multiple manifest-advertised builtin base types selectable from day one.
 It should preserve clean seams between prompt assets, agent base types, agent identities, and agent runtime so that a broader platform can emerge without corrupting the first implementation.
 The first implementation should stay small, Rust-native, and highly inspectable.
 The product wins if it can repeatedly behave like a trustworthy engineer on bounded tasks, not if it accumulates flashy but ungrounded features.

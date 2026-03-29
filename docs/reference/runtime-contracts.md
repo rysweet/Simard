@@ -1,142 +1,244 @@
 ---
 title: Runtime contracts reference
-description: Reference for the current Simard runtime surface, reflection contracts, and lifecycle errors.
-last_updated: 2026-03-27
+description: Reference for Simard bootstrap configuration, runtime/base-type APIs, topology support, handoff restore, and reflection/error contracts.
+last_updated: 2026-03-29
 review_schedule: as-needed
 owner: simard
 doc_type: reference
 related:
   - ../index.md
   - ../howto/configure-bootstrap-and-inspect-reflection.md
+  - ../howto/export-and-restore-runtime-handoff.md
+  - ../tutorials/run-rusty-clawd-on-loopback-mesh.md
+  - ../concepts/topology-neutral-runtime-kernel.md
   - ../concepts/truthful-runtime-metadata.md
 ---
 
 # Runtime contracts reference
 
-## Status
+## Overview
 
-This file describes the API shape that exists in the repository today.
+Simard v1 exposes two supported surfaces in this repository:
 
-## Configuration
+- the local CLI bootstrap path through `cargo run --quiet`
+- the in-process Rust runtime/bootstrap types re-exported from `src/lib.rs`
+
+Simard v1 does **not** currently expose:
+
+- an HTTP API
+- a remote service contract
+- a database schema contract
+
+The stable contract in this repository is the local CLI/bootstrap behavior and the in-process Rust runtime/kernel API described below.
+
+## Contents
+
+- [CLI configuration](#cli-configuration)
+- [Supported base types and topology combinations](#supported-base-types-and-topology-combinations)
+- [Bootstrap and runtime APIs](#bootstrap-and-runtime-apis)
+- [Lifecycle and state](#lifecycle-and-state)
+- [Base-type session contract](#base-type-session-contract)
+- [Handoff contract](#handoff-contract)
+- [Reflection contract](#reflection-contract)
+- [Errors](#errors)
+- [Security and non-goals](#security-and-non-goals)
+
+## CLI configuration
 
 ### Environment variables
 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
 | `SIMARD_PROMPT_ROOT` | Yes in `explicit-config` | none | Root directory for prompt assets. |
-| `SIMARD_OBJECTIVE` | Yes in `explicit-config` | none | Objective passed to `run()`. |
+| `SIMARD_OBJECTIVE` | Yes in `explicit-config` | none | Objective passed to `run()`. Live execution uses the real objective. Persisted scratch/summary memory and live reflection summaries use redacted `objective-metadata(...)`. Current handoff export still clones the latest `SessionRecord`, so `RuntimeHandoffSnapshot.session` may contain the raw objective until handoff redaction lands. |
 | `SIMARD_BOOTSTRAP_MODE` | No | `explicit-config` | Startup mode. Accepted values: `explicit-config`, `builtin-defaults`. |
 | `SIMARD_IDENTITY` | Yes in `explicit-config` | none in `explicit-config`; `simard-engineer` in `builtin-defaults` | Identity to load before runtime composition. Non-UTF-8 values fail bootstrap instead of being treated as missing. |
+| `SIMARD_BASE_TYPE` | Yes in `explicit-config` | none in `explicit-config`; `local-harness` in `builtin-defaults` | Base type selected for the runtime request. Unsupported or unregistered selections fail explicitly. |
+| `SIMARD_RUNTIME_TOPOLOGY` | Yes in `explicit-config` | none in `explicit-config`; `single-process` in `builtin-defaults` | Runtime topology selected for the runtime request. Accepted values: `single-process`, `multi-process`, `distributed`. Parsing a value does not guarantee the assembled runtime currently supports it end to end. |
 
 ### Bootstrap modes
 
 | Mode | Behavior |
 | --- | --- |
-| `explicit-config` | Requires prompt root, objective, and identity from configuration. |
-| `builtin-defaults` | Allows builtin prompt root, builtin objective, and builtin identity, but only because startup opted in explicitly. |
+| `explicit-config` | Requires prompt root, objective, identity, base type, and topology from configuration. |
+| `builtin-defaults` | Allows builtin prompt root, builtin objective, builtin identity, builtin base type (`local-harness`), and builtin topology (`single-process`), but only because startup opted in explicitly. |
 
-### Config value sources
+### Example: explicit CLI run with the real `rusty-clawd` backend
 
-`ConfigValueSource` records where a resolved value came from.
-
-| Variant | Meaning |
-| --- | --- |
-| `Environment(&'static str)` | The value came directly from an environment variable. |
-| `ExplicitOptIn(&'static str)` | The value came from an explicit startup mode that permits builtin defaults. |
-
-## Identity metadata
-
-### `IdentityManifest`
-
-`IdentityManifest` stores contract truth in `contract: ManifestContract`.
-
-### `ManifestContract`
-
-```rust
-pub struct ManifestContract {
-    pub entrypoint: String,
-    pub composition: String,
-    pub precedence: Vec<String>,
-    pub provenance: Provenance,
-    pub freshness: Freshness,
-}
+```bash
+SIMARD_PROMPT_ROOT="$PWD/prompt_assets" SIMARD_OBJECTIVE="exercise the rusty-clawd runtime path" SIMARD_IDENTITY="simard-engineer" SIMARD_BASE_TYPE="rusty-clawd" SIMARD_RUNTIME_TOPOLOGY="single-process" cargo run --quiet
 ```
 
-Notes:
-
-- the CLI bootstrap path uses `simard::bootstrap::assemble_local_runtime` as the entrypoint
-- provenance and freshness stay inside the contract so reflection carries a single source of truth
-- invalid empty fields fail with `SimardError::InvalidManifestContract`
-
-### Current precedence rules
-
-`precedence` is ordered from highest to lowest influence within the bootstrap path. A typical local sequence is:
+Expected output shape:
 
 ```text
-mode:explicit-config
-identity:simard-engineer
-prompt-root:env:SIMARD_PROMPT_ROOT
-objective:env:SIMARD_OBJECTIVE
+Simard local runtime executed successfully.
+Bootstrap mode: explicit-config
+Config sources: prompt_root=env:SIMARD_PROMPT_ROOT, objective=env:SIMARD_OBJECTIVE, base_type=env:SIMARD_BASE_TYPE, topology=env:SIMARD_RUNTIME_TOPOLOGY
+Bootstrap selection: identity=simard-engineer, base_type=rusty-clawd, topology=single-process
+Snapshot: state=ready, topology=single-process, base_type=rusty-clawd
+Adapter implementation: rusty-clawd::session-backend
+Shutdown: stopped
 ```
 
-If builtin defaults are used intentionally, the prompt-root and objective entries record `opt-in:SIMARD_BOOTSTRAP_MODE`.
+### Example: opt in to builtin defaults
 
-## Provenance and freshness
-
-### `Provenance`
-
-```rust
-pub struct Provenance {
-    pub source: String,
-    pub locator: String,
-}
+```bash
+SIMARD_BOOTSTRAP_MODE=builtin-defaults cargo run --quiet
 ```
 
-Helpers currently provided:
+Expected output shape:
 
-| Helper | Meaning |
+```text
+Bootstrap mode: builtin-defaults
+Bootstrap selection: identity=simard-engineer, base_type=local-harness, topology=single-process
+```
+
+Defaults are startup choices, not runtime recovery behavior.
+
+## Supported base types and topology combinations
+
+### Builtin base-type registrations
+
+| Base type selection | Reflected backend implementation | CLI topology support | In-process runtime support | Notes |
+| --- | --- | --- | --- | --- |
+| `local-harness` | `local-harness` | `single-process` | `single-process` | Default local scaffold. |
+| `rusty-clawd` | `rusty-clawd::session-backend` | `single-process` | `single-process`, `multi-process` | Real backend with a second topology path in the runtime API. |
+| `copilot-sdk` | `local-harness` | `single-process` | `single-process` | Explicit alias. Selection remains `copilot-sdk`; implementation remains `local-harness` until a distinct backend is registered. |
+
+### Runtime topology drivers
+
+| Runtime assembly path | Topology driver | Transport | Supervisor | Supported topologies |
+| --- | --- | --- | --- | --- |
+| `RuntimePorts::new(...)` | `topology::in-process` | `transport::in-memory-mailbox` | `supervisor::in-process` | `single-process` |
+| `RuntimePorts::with_runtime_services(...)` | caller-injected | caller-injected | caller-injected | whatever the injected services advertise |
+| `RuntimePorts::with_runtime_services_and_program(...)` | caller-injected | caller-injected | caller-injected | whatever the injected services advertise |
+
+Repository-provided runtime services currently include:
+
+- `InProcessTopologyDriver` for `single-process`
+- `LoopbackMeshTopologyDriver` for `multi-process`, and for `distributed` requests when callers inject the rest of a compatible runtime
+- `InMemoryMailboxTransport` for `inmemory://...` addresses
+- `LoopbackMailboxTransport` for `loopback://...` addresses
+- `InProcessSupervisor` and `CoordinatedSupervisor`
+
+Important boundaries:
+
+- the default CLI path always uses `RuntimePorts::new(...)`, so CLI runs remain `single-process` even though the in-process runtime API can inject alternate topology services
+- repository-provided registered base types cover `single-process` and `multi-process` end to end today; `distributed` remains a contract/configuration value until callers inject a compatible base type and runtime service set
+
+## Bootstrap and runtime APIs
+
+### Primary bootstrap types
+
+| Surface | Purpose |
 | --- | --- |
-| `Provenance::new(source, locator)` | Build an explicit provenance value. |
-| `Provenance::builtin(locator)` | Mark a builtin metadata source. |
-| `Provenance::injected(locator)` | Mark an injected metadata source. |
-| `Provenance::runtime(locator)` | Mark runtime-derived metadata. |
+| `BootstrapInputs::from_env()` | Reads the CLI bootstrap inputs from environment variables. |
+| `BootstrapConfig::from_env()` | Resolves validated bootstrap config for the CLI path. |
+| `assemble_local_runtime(&BootstrapConfig)` | Composes the local runtime for CLI execution. |
+| `run_local_session(&BootstrapConfig)` | Starts, runs, snapshots, stops, and returns the local session execution bundle. |
+| `bootstrap_entrypoint()` | Returns the reflected bootstrap assembly boundary: `simard::bootstrap::assemble_local_runtime`. |
 
-### `Freshness`
+### Runtime assembly types
+
+| Surface | Purpose |
+| --- | --- |
+| `BaseTypeRegistry` | Registers `BaseTypeFactory` implementations by `BaseTypeId`. |
+| `RuntimePorts` | Injects prompt assets, memory, evidence, base-type factories, topology driver, transport, supervisor, agent program, handoff store, and session ID strategy. |
+| `RuntimeRequest::new(manifest, selected_base_type, topology)` | Describes the identity/base-type/topology request to compose. |
+| `RuntimeKernel::compose(ports, request)` | Composes a fresh runtime from injected ports and a validated runtime request. |
+| `RuntimeKernel::compose_from_handoff(ports, request, snapshot)` | Rehydrates a fresh runtime from a previously exported `RuntimeHandoffSnapshot`. |
+| `LocalRuntime` | Type alias for `RuntimeKernel` used by the local runtime path. |
+
+### `RuntimePorts` constructors
+
+| Constructor | Behavior |
+| --- | --- |
+| `RuntimePorts::new(...)` | Injects `InProcessTopologyDriver`, `InMemoryMailboxTransport`, `InProcessSupervisor`, `ObjectiveRelayProgram`, and `InMemoryHandoffStore`. |
+| `RuntimePorts::with_session_ids(...)` | Same runtime-service defaults as `new(...)`, but makes session-ID injection explicit at the call site. |
+| `RuntimePorts::with_runtime_services(...)` | Lets callers inject topology, transport, and supervisor while keeping the default objective-relay agent program and in-memory handoff store. |
+| `RuntimePorts::with_runtime_services_and_program(...)` | Lets callers inject all runtime services, including the agent program and handoff store. Use this for alternate topologies, migration tests, and custom orchestration. |
+
+### Example: compose the alternate topology path in-process
 
 ```rust
-pub enum FreshnessState {
-    Current,
-    Stale,
-}
+use std::sync::Arc;
 
-pub struct Freshness {
-    pub state: FreshnessState,
-    pub observed_at_unix_ms: u64,
-}
+use simard::{
+    BaseTypeId, BaseTypeRegistry, IdentityManifest, InMemoryEvidenceStore, InMemoryHandoffStore,
+    InMemoryMemoryStore, InMemoryPromptAssetStore, InProcessSupervisor,
+    LoopbackMailboxTransport, LoopbackMeshTopologyDriver, LocalRuntime, ManifestContract,
+    MemoryPolicy, OperatingMode, PromptAsset, PromptAssetRef, Provenance, RuntimePorts,
+    RuntimeRequest, RuntimeTopology, RustyClawdAdapter, UuidSessionIdGenerator,
+    capability_set, BaseTypeCapability, Freshness,
+};
+
+let prompts = Arc::new(InMemoryPromptAssetStore::new([PromptAsset::new(
+    "engineer-system",
+    "simard/engineer_system.md",
+    "You are Simard.",
+)]));
+let memory = Arc::new(InMemoryMemoryStore::try_default()?);
+let evidence = Arc::new(InMemoryEvidenceStore::try_default()?);
+let handoff = Arc::new(InMemoryHandoffStore::try_default()?);
+let mut base_types = BaseTypeRegistry::default();
+base_types.register(RustyClawdAdapter::registered("rusty-clawd")?);
+
+let request = RuntimeRequest::new(
+    IdentityManifest::new(
+        "simard-engineer",
+        env!("CARGO_PKG_VERSION"),
+        vec![PromptAssetRef::new("engineer-system", "simard/engineer_system.md")],
+        vec![BaseTypeId::new("rusty-clawd")],
+        capability_set([
+            BaseTypeCapability::PromptAssets,
+            BaseTypeCapability::SessionLifecycle,
+            BaseTypeCapability::Memory,
+            BaseTypeCapability::Evidence,
+            BaseTypeCapability::Reflection,
+        ]),
+        OperatingMode::Engineer,
+        MemoryPolicy::default(),
+        ManifestContract::new(
+            simard::bootstrap_entrypoint(),
+            "bootstrap-config -> identity-loader -> runtime-ports -> local-runtime",
+            vec!["docs:runtime-contracts".to_string()],
+            Provenance::new("docs", "reference::runtime-contracts"),
+            Freshness::now()?,
+        )?,
+    )?,
+    BaseTypeId::new("rusty-clawd"),
+    RuntimeTopology::MultiProcess,
+);
+
+let runtime = LocalRuntime::compose(
+    RuntimePorts::with_runtime_services_and_program(
+        prompts,
+        memory,
+        evidence,
+        base_types,
+        Arc::new(LoopbackMeshTopologyDriver::try_default()?),
+        Arc::new(LoopbackMailboxTransport::try_default()?),
+        Arc::new(InProcessSupervisor::try_default()?),
+        Arc::new(simard::ObjectiveRelayProgram::try_default()?),
+        handoff,
+        Arc::new(UuidSessionIdGenerator),
+    ),
+    request,
+)?;
 ```
 
-Notes:
+## Lifecycle and state
 
-- `Freshness::now()` returns `SimardResult<Freshness>` and fails explicitly if the system clock is before the Unix epoch
-- freshness can explicitly represent stale metadata when a caller needs to surface it
+### `RuntimeKernel` lifecycle methods
 
-## Session identity
-
-### `SessionId`
-
-```rust
-pub struct SessionId(String);
-```
-
-Rules:
-
-- `UuidSessionIdGenerator` emits `session-<uuid-v7>`
-- `SessionId::parse(...)` accepts a bare UUID or a `session-<uuid>` value and canonicalizes to `session-<uuid>`
-- invalid values fail with `SimardError::InvalidSessionId`
-- custom `SessionIdGenerator` implementations must return valid `SessionId` values
-- the session ID strategy is injected through `RuntimePorts`; the local bootstrap path opts into `UuidSessionIdGenerator` explicitly
-
-## Runtime lifecycle
+| Method | Meaning |
+| --- | --- |
+| `start()` | Loads prompt assets and transitions the runtime into `Ready`. |
+| `run(objective)` | Executes a session for the selected base type. On success the runtime returns to `Ready`. On failure the runtime becomes `Failed`. |
+| `snapshot()` | Returns the current `ReflectionSnapshot`. Snapshot inspection remains valid after failure and after stop. |
+| `export_handoff()` | Exports the latest session boundary as currently stored, plus memory records and evidence records, into a `RuntimeHandoffSnapshot` and persists it through the injected handoff store. |
+| `stop()` | Transitions the runtime into `Stopped`. After stop, `start()`, `run()`, and repeated `stop()` calls fail explicitly. |
 
 ### `RuntimeState`
 
@@ -144,24 +246,21 @@ Rules:
 | --- | --- |
 | `Initializing` | Runtime has been composed but not started. |
 | `Ready` | Prompt assets are loaded and the runtime can execute. |
-| `Active` | Adapter invocation is in progress. |
+| `Active` | Base-type session work is in progress. |
 | `Reflecting` | Reflection metadata is being assembled. |
 | `Persisting` | Memory and evidence summaries are being persisted. |
 | `Failed` | Execution failed before completion. |
 | `Stopping` | Shutdown is in progress. |
 | `Stopped` | Runtime has been shut down and cannot accept more work. |
 
-### Stopped-state behavior
+### Stopped and failed behavior
 
 After `stop()` succeeds:
 
 - `snapshot()` remains valid
 - `run()` fails with `RuntimeStopped { action: "run" }`
 - `start()` fails with `RuntimeStopped { action: "start" }`
-- a repeated `stop()` fails with `RuntimeStopped { action: "stop" }`
-- callers must compose a new runtime instead of reusing the stopped one
-
-### Failed-state behavior
+- repeated `stop()` fails with `RuntimeStopped { action: "stop" }`
 
 After `run()` fails:
 
@@ -172,7 +271,66 @@ After `run()` fails:
 - `run()` fails with `RuntimeFailed`
 - `stop()` is still the explicit way to close the lifecycle boundary
 
-## Reflection snapshot
+## Base-type session contract
+
+### Core types
+
+| Type | Meaning |
+| --- | --- |
+| `BaseTypeDescriptor` | Describes the selected base type, the reflected backend descriptor, required capabilities, and supported topologies. |
+| `BaseTypeFactory` | Opens base-type sessions for a given runtime request. |
+| `BaseTypeSessionRequest` | Carries the session ID, operating mode, topology, prompt assets, runtime node, and mailbox address into the base-type session. |
+| `BaseTypeTurnInput` | Carries the objective for the next turn. |
+| `BaseTypeOutcome` | Returns `plan`, `execution_summary`, and execution-time evidence lines. |
+
+### Contract rules
+
+- identity selection and backend implementation are distinct facts
+- `selected_base_type` preserves what the caller asked for
+- `adapter_backend.identity` reports the implementation that actually ran
+- topology support is checked twice: once against the injected runtime topology driver, then against the selected base-type descriptor
+- unsupported combinations fail explicitly; Simard does not silently change the base type or topology for you
+
+## Handoff contract
+
+### `RuntimeHandoffSnapshot`
+
+| Field | Meaning |
+| --- | --- |
+| `exported_state` | Runtime state at export time. |
+| `identity_name` | Identity name that must match the restore request. |
+| `selected_base_type` | Base type that must match the restore request. |
+| `topology` | Topology of the source runtime. |
+| `source_runtime_node` | Runtime node reported by the source topology driver. |
+| `source_mailbox_address` | Mailbox address reported by the source transport. |
+| `session` | Latest session boundary. Current export clones the stored `SessionRecord`, so `session.objective` remains verbatim until handoff redaction is implemented. |
+| `memory_records` | Session-scoped memory records rehydrated into the destination runtime. |
+| `evidence_records` | Session-scoped evidence records rehydrated into the destination runtime. |
+
+### Restore behavior
+
+`RuntimeKernel::compose_from_handoff(...)` enforces these rules:
+
+- `snapshot.identity_name` must match `request.manifest.name`
+- `snapshot.selected_base_type` must match `request.selected_base_type`
+- `snapshot.topology` is preserved in the snapshot, but current restore does not reject a request solely because the topology differs
+- memory and evidence records are copied into the destination stores before the runtime starts
+- the last session boundary is restored so `snapshot()` can report the carried-over session phase immediately
+- the restored runtime remains in `Initializing` until `start()` is called
+
+### Example: export and restore
+
+```rust
+let snapshot = source_runtime.export_handoff()?;
+let restored = simard::LocalRuntime::compose_from_handoff(restored_ports, request, snapshot)?;
+
+assert_eq!(restored.snapshot()?.runtime_state, simard::RuntimeState::Initializing);
+assert_eq!(restored.snapshot()?.session_phase, Some(simard::SessionPhase::Complete));
+```
+
+Treat exported handoff payloads as sensitive. They contain session identifiers, memory summaries, evidence records, runtime-node data, mailbox addresses, and today the stored session objective as well.
+
+## Reflection contract
 
 ### `ReflectionSnapshot`
 
@@ -182,34 +340,33 @@ pub struct ReflectionSnapshot {
     pub selected_base_type: BaseTypeId,
     pub topology: RuntimeTopology,
     pub runtime_state: RuntimeState,
+    pub runtime_node: RuntimeNodeId,
+    pub mailbox_address: RuntimeAddress,
     pub session_phase: Option<SessionPhase>,
     pub prompt_assets: Vec<PromptAssetId>,
     pub manifest_contract: ManifestContract,
     pub evidence_records: usize,
     pub memory_records: usize,
+    pub agent_program_backend: BackendDescriptor,
+    pub handoff_backend: BackendDescriptor,
     pub adapter_backend: BackendDescriptor,
+    pub topology_backend: BackendDescriptor,
+    pub transport_backend: BackendDescriptor,
+    pub supervisor_backend: BackendDescriptor,
     pub memory_backend: BackendDescriptor,
     pub evidence_backend: BackendDescriptor,
 }
 ```
 
-### Backend descriptors
-
-```rust
-pub struct BackendDescriptor {
-    pub identity: String,
-    pub provenance: Provenance,
-    pub freshness: Freshness,
-}
-```
-
 Reflection rules:
 
-- `manifest_contract` carries entrypoint, provenance, and freshness together
-- `adapter_backend` comes from the runtime-selected adapter descriptor
-- `memory_backend` comes from the live memory store descriptor
-- `evidence_backend` comes from the live evidence store descriptor
-- reflection reports live wiring, not placeholder labels
+- `manifest_contract` carries entrypoint, provenance, precedence, composition, and freshness together
+- `runtime_node` and `mailbox_address` come from the injected topology and transport services
+- `agent_program_backend` comes from the injected agent-program contract, not from hardcoded runtime logic
+- `handoff_backend` comes from the injected handoff store used for export/import
+- `adapter_backend` comes from the selected base-type factory/session descriptor, not from a bootstrap shortcut
+- `topology_backend`, `transport_backend`, and `supervisor_backend` come from the live runtime services
+- `memory_backend` and `evidence_backend` come from the live stores
 - stopped or failed snapshots mark manifest freshness as `Stale`
 
 ## Errors
@@ -224,46 +381,47 @@ Reflection rules:
 | `UnknownIdentity` | Requested identity is not registered. |
 | `InvalidManifestContract` | Manifest contract metadata is incomplete or untruthful. |
 | `ClockBeforeUnixEpoch` | Runtime metadata could not record a truthful observation time. |
-| `InvalidSessionId` | A supplied session ID is not a valid distributed-safe identifier. |
+| `InvalidSessionId` | A supplied session ID is not a valid UUID-based Simard session ID. |
+| `UnsupportedBaseType` | The chosen identity does not allow the requested base type. |
+| `AdapterNotRegistered` | No base-type factory has been registered for the requested base type. |
+| `MissingCapability` | The selected base-type backend exists but does not satisfy the manifest's required capabilities. |
+| `UnsupportedRuntimeTopology` | The injected topology driver does not support the requested topology. |
+| `UnsupportedTopology` | The selected base-type backend does not support the requested topology. |
+| `UnsupportedMemoryPolicy` | The manifest asked for a memory policy Simard v1 does not allow, including `allow_project_writes=true`. |
 
-### Lifecycle and session errors
+### Lifecycle, handoff, and session errors
 
 | Error | Meaning |
 | --- | --- |
 | `InvalidRuntimeTransition` | A runtime lifecycle transition is invalid. |
+| `InvalidBaseTypeSessionState` | A base-type session was opened, used, or closed out of order. |
+| `AdapterInvocationFailed` | The selected base-type backend failed while executing a turn. |
+| `InvalidHandoffSnapshot` | A handoff snapshot could not be restored into the requested runtime. |
 | `RuntimeStopped` | Caller attempted `start`, `run`, or `stop` after shutdown was already in effect. |
 | `RuntimeFailed` | Caller attempted `start` or `run` after a failed execution but before shutdown. |
 | `InvalidSessionTransition` | A session phase transition is invalid. |
+| `StoragePoisoned` | An in-memory store lock was poisoned. |
 
-### Prompt and storage errors
+### Prompt and asset errors
 
 | Error | Meaning |
 | --- | --- |
 | `PromptAssetMissing` | A referenced prompt asset was not found. |
 | `PromptAssetRead` | A prompt asset could not be read. |
-| `StoragePoisoned` | An in-memory store lock was poisoned. |
-## Example: truthful fields
+| `InvalidPromptAssetPath` | A prompt asset path was rejected because it escaped the allowed prompt root contract. |
 
-```rust
-use simard::{FreshnessState, ReflectiveRuntime};
+## Security and non-goals
 
-let snapshot = runtime.snapshot()?;
-
-assert_eq!(snapshot.runtime_state.to_string(), "ready");
-assert_eq!(
-    snapshot.manifest_contract.entrypoint,
-    "simard::bootstrap::assemble_local_runtime"
-);
-assert_eq!(snapshot.manifest_contract.provenance.source, "bootstrap");
-assert_eq!(snapshot.manifest_contract.freshness.state, FreshnessState::Current);
-assert_eq!(snapshot.adapter_backend.identity, "local-harness");
-assert_eq!(snapshot.memory_backend.identity, "memory::session-cache");
-```
+- Simard documents a local CLI and in-process Rust contract only. There is no HTTP, auth-token, TLS, or database contract in this feature.
+- Exported handoff payloads are sensitive. [PLANNED] objective redaction for exported session text has not landed yet, so store and transfer them as full runtime artifacts.
+- `MemoryPolicy.allow_project_writes=true` is rejected explicitly in v1.
+- Unsupported identities, base types, and topologies fail explicitly. Simard does not downgrade or substitute behind the caller's back.
 
 ## See also
 
 - [How to configure bootstrap and inspect reflection](../howto/configure-bootstrap-and-inspect-reflection.md)
+- [How to export and restore runtime handoff](../howto/export-and-restore-runtime-handoff.md)
+- [Tutorial: Run RustyClawd on the loopback mesh](../tutorials/run-rusty-clawd-on-loopback-mesh.md)
+- [Concept: topology-neutral runtime kernel](../concepts/topology-neutral-runtime-kernel.md)
 - [Concept: truthful runtime metadata](../concepts/truthful-runtime-metadata.md)
-- [Tutorial: Run your first local session](../tutorials/run-your-first-local-session.md)
-
-See the [documentation index](../index.md) for the full set of Simard docs.
+- [Documentation index](../index.md)

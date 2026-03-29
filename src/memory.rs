@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::error::{SimardError, SimardResult};
@@ -35,14 +36,20 @@ pub trait MemoryStore: Send + Sync {
 
 #[derive(Debug)]
 pub struct InMemoryMemoryStore {
-    records: Mutex<Vec<MemoryRecord>>,
+    state: Mutex<MemoryStoreState>,
     descriptor: BackendDescriptor,
+}
+
+#[derive(Debug, Default)]
+struct MemoryStoreState {
+    records: Vec<MemoryRecord>,
+    session_counts: HashMap<SessionId, usize>,
 }
 
 impl InMemoryMemoryStore {
     pub fn new(descriptor: BackendDescriptor) -> Self {
         Self {
-            records: Mutex::new(Vec::new()),
+            state: Mutex::new(MemoryStoreState::default()),
             descriptor,
         }
     }
@@ -62,22 +69,28 @@ impl MemoryStore for InMemoryMemoryStore {
     }
 
     fn put(&self, record: MemoryRecord) -> SimardResult<()> {
-        self.records
+        let mut state = self
+            .state
             .lock()
             .map_err(|_| SimardError::StoragePoisoned {
                 store: "memory".to_string(),
-            })?
-            .push(record);
+            })?;
+        *state
+            .session_counts
+            .entry(record.session_id.clone())
+            .or_insert(0) += 1;
+        state.records.push(record);
         Ok(())
     }
 
     fn list(&self, scope: MemoryScope) -> SimardResult<Vec<MemoryRecord>> {
-        Ok(self
-            .records
+        let state = self
+            .state
             .lock()
             .map_err(|_| SimardError::StoragePoisoned {
                 store: "memory".to_string(),
-            })?
+            })?;
+        Ok(state
             .iter()
             .filter(|record| record.scope == scope)
             .cloned()
@@ -85,12 +98,13 @@ impl MemoryStore for InMemoryMemoryStore {
     }
 
     fn list_for_session(&self, session_id: &SessionId) -> SimardResult<Vec<MemoryRecord>> {
-        Ok(self
-            .records
+        let state = self
+            .state
             .lock()
             .map_err(|_| SimardError::StoragePoisoned {
                 store: "memory".to_string(),
-            })?
+            })?;
+        Ok(state
             .iter()
             .filter(|record| &record.session_id == session_id)
             .cloned()
@@ -98,14 +112,92 @@ impl MemoryStore for InMemoryMemoryStore {
     }
 
     fn count_for_session(&self, session_id: &SessionId) -> SimardResult<usize> {
-        Ok(self
-            .records
+        let state = self
+            .state
             .lock()
             .map_err(|_| SimardError::StoragePoisoned {
                 store: "memory".to_string(),
-            })?
-            .iter()
-            .filter(|record| &record.session_id == session_id)
-            .count())
+            })?;
+        Ok(state
+            .session_counts
+            .get(session_id)
+            .copied()
+            .unwrap_or_default())
+    }
+}
+
+impl MemoryStoreState {
+    fn iter(&self) -> impl Iterator<Item = &MemoryRecord> {
+        self.records.iter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{InMemoryMemoryStore, MemoryRecord, MemoryScope, MemoryStore};
+    use crate::session::{SessionId, SessionPhase};
+
+    #[test]
+    fn cached_session_counts_stay_in_sync_with_records() {
+        let store = InMemoryMemoryStore::try_default().expect("store should initialize");
+        let hot = SessionId::parse("session-00000000-0000-0000-0000-000000000001")
+            .expect("session id should parse");
+        let cold = SessionId::parse("session-00000000-0000-0000-0000-000000000002")
+            .expect("session id should parse");
+
+        store
+            .put(MemoryRecord {
+                key: "hot-scratch".to_string(),
+                scope: MemoryScope::SessionScratch,
+                value: "x".to_string(),
+                session_id: hot.clone(),
+                recorded_in: SessionPhase::Preparation,
+            })
+            .expect("first record should persist");
+        store
+            .put(MemoryRecord {
+                key: "cold-summary".to_string(),
+                scope: MemoryScope::SessionSummary,
+                value: "y".to_string(),
+                session_id: cold.clone(),
+                recorded_in: SessionPhase::Persistence,
+            })
+            .expect("second record should persist");
+        store
+            .put(MemoryRecord {
+                key: "hot-summary".to_string(),
+                scope: MemoryScope::SessionSummary,
+                value: "z".to_string(),
+                session_id: hot.clone(),
+                recorded_in: SessionPhase::Persistence,
+            })
+            .expect("third record should persist");
+
+        assert_eq!(
+            store
+                .count_for_session(&hot)
+                .expect("hot session count should be indexed"),
+            2
+        );
+        assert_eq!(
+            store
+                .count_for_session(&cold)
+                .expect("cold session count should be indexed"),
+            1
+        );
+        assert_eq!(
+            store
+                .list(MemoryScope::SessionSummary)
+                .expect("scope listing should still work")
+                .len(),
+            2
+        );
+        assert_eq!(
+            store
+                .list_for_session(&hot)
+                .expect("session listing should still scan full records")
+                .len(),
+            2
+        );
     }
 }
