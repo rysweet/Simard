@@ -1,8 +1,10 @@
 use std::path::PathBuf;
 
 use simard::{
-    BootstrapConfig, BootstrapInputs, MemoryScope, ReflectiveRuntime,
-    assemble_local_runtime_from_handoff, latest_local_handoff,
+    BootstrapConfig, BootstrapInputs, FileBackedMemoryStore, MemoryRecord, MemoryScope,
+    MemoryStore, ReflectiveRuntime, ReviewRequest, ReviewTargetKind,
+    assemble_local_runtime_from_handoff, build_review_artifact, latest_local_handoff,
+    persist_review_artifact,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -29,6 +31,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let topology = args.next().ok_or("expected topology")?;
             let objective = args.next().ok_or("expected objective")?;
             run_meeting_probe(&base_type, &topology, &objective)?;
+        }
+        "review-run" => {
+            let base_type = args.next().ok_or("expected base type")?;
+            let topology = args.next().ok_or("expected topology")?;
+            let objective = args.next().ok_or("expected objective")?;
+            run_review_probe(&base_type, &topology, &objective)?;
         }
         other => return Err(format!("unsupported probe command '{other}'").into()),
     }
@@ -215,6 +223,83 @@ fn run_meeting_probe(
     for (index, value) in decision_records.iter().enumerate() {
         println!("Decision record {}: {}", index + 1, value);
     }
+    println!("Execution summary: {}", execution.outcome.execution_summary);
+    println!(
+        "Reflection summary: {}",
+        execution.outcome.reflection.summary
+    );
+    Ok(())
+}
+
+fn run_review_probe(
+    base_type: &str,
+    topology: &str,
+    objective: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let identity = "simard-engineer";
+    let config = BootstrapConfig::resolve(BootstrapInputs {
+        prompt_root: Some(prompt_root()),
+        objective: Some(objective.to_string()),
+        state_root: Some(state_root(identity, base_type, topology, "review-run")),
+        identity: Some(identity.to_string()),
+        base_type: Some(base_type.to_string()),
+        topology: Some(topology.to_string()),
+        ..BootstrapInputs::default()
+    })?;
+
+    let execution = simard::run_local_session(&config)?;
+    let exported = latest_local_handoff(&config)?.ok_or("expected durable review handoff")?;
+    let review = build_review_artifact(
+        ReviewRequest {
+            target_kind: ReviewTargetKind::Session,
+            target_label: "operator-review".to_string(),
+            execution_summary: execution.outcome.execution_summary.clone(),
+            reflection_summary: execution.outcome.reflection.summary.clone(),
+            measurement_notes: Vec::new(),
+            signals: Vec::new(),
+        },
+        &exported,
+    )?;
+    let review_artifact_path = persist_review_artifact(config.state_root_path(), &review)?;
+    let session_id = exported
+        .session
+        .as_ref()
+        .ok_or("expected session boundary in review handoff")?
+        .id
+        .clone();
+    let memory_store = FileBackedMemoryStore::try_new(config.memory_store_path())?;
+    let review_key = format!("{}-review-record", session_id);
+    memory_store.put(MemoryRecord {
+        key: review_key.clone(),
+        scope: MemoryScope::Decision,
+        value: review.concise_record(),
+        session_id,
+        recorded_in: simard::SessionPhase::Complete,
+    })?;
+    let decision_records = memory_store.list(MemoryScope::Decision)?;
+
+    println!("Probe mode: review-run");
+    println!("Identity: {}", execution.snapshot.identity_name);
+    println!(
+        "Selected base type: {}",
+        execution.snapshot.selected_base_type
+    );
+    println!("Topology: {}", execution.snapshot.topology);
+    println!("State root: {}", config.state_root_path().display());
+    println!("Session phase: {}", execution.outcome.session.phase);
+    println!("Review artifact: {}", review_artifact_path.display());
+    println!("Review proposals: {}", review.proposals.len());
+    for (index, proposal) in review.proposals.iter().enumerate() {
+        println!(
+            "Proposal {}: [{}] {} => {}",
+            index + 1,
+            proposal.category,
+            proposal.title,
+            proposal.suggested_change
+        );
+    }
+    println!("Decision records: {}", decision_records.len());
+    println!("Review record key: {}", review_key);
     println!("Execution summary: {}", execution.outcome.execution_summary);
     println!(
         "Reflection summary: {}",

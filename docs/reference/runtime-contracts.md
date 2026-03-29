@@ -39,6 +39,7 @@ The stable contract in this repository is the bootstrap/runtime and benchmark-gy
 The shipped operator probe also supports a meeting-specific path:
 
 - `cargo run --quiet --bin simard_operator_probe -- meeting-run <base-type> <topology> <structured-objective>`
+- `cargo run --quiet --bin simard_operator_probe -- review-run <base-type> <topology> <objective>`
 
 Use a structured objective with lines such as:
 
@@ -54,6 +55,13 @@ The v1 meeting contract is intentionally narrow:
 - meeting mode uses the facilitator agent program backend `agent-program::meeting-facilitator`
 - it persists concise decision memory under the durable state root
 - it does not mutate code paths or pretend implementation work happened
+
+The review path is also intentionally narrow:
+
+- it runs an ordinary bounded session first, then inspects the exported handoff offline
+- it persists a concise JSON review artifact under `SIMARD_STATE_ROOT/review-artifacts/`
+- it persists a concise decision-scoped review record so later sessions can reuse approved findings
+- it emits concrete proposals tied to persisted evidence instead of silently changing prompts or policies
 
 ## Benchmark gym CLI
 
@@ -71,7 +79,7 @@ The starter suite is intentionally small and exercises:
 - the dedicated `simard-gym` identity
 - the composite `simard-composite-engineer` identity
 
-Artifacts are written under `target/simard-gym/` as JSON and text reports.
+Artifacts are written under `target/simard-gym/` as JSON and text reports plus a `review.json` artifact for each scenario run.
 
 ## Configuration
 
