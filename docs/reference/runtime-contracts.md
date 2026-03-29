@@ -19,9 +19,10 @@ This file describes the API shape that exists in the repository today.
 
 ## Public surfaces
 
-Simard v1 currently exposes three surfaces:
+Simard v1 currently exposes four surfaces:
 
 - the local CLI bootstrap path through `cargo run --quiet`
+- the benchmark gym CLI through `cargo run --quiet --bin simard-gym -- ...`
 - the operator/runtime probe through `cargo run --quiet --bin simard_operator_probe -- ...`
 - the in-process Rust runtime/bootstrap types in `src/bootstrap.rs`, `src/runtime.rs`, and related modules
 
@@ -31,7 +32,25 @@ Simard v1 does **not** currently expose:
 - a network service contract
 - a database schema contract
 
-The stable contract in this repository is the bootstrap/runtime behavior described below.
+The stable contract in this repository is the bootstrap/runtime and benchmark-gym behavior described below.
+
+## Benchmark gym CLI
+
+The shipped benchmark CLI currently supports:
+
+- `cargo run --quiet --bin simard-gym -- list`
+- `cargo run --quiet --bin simard-gym -- run <scenario-id>`
+- `cargo run --quiet --bin simard-gym -- run-suite starter`
+
+The starter suite is intentionally small and exercises:
+
+- `local-harness`
+- `copilot-sdk`
+- `rusty-clawd`
+- the dedicated `simard-gym` identity
+- the composite `simard-composite-engineer` identity
+
+Artifacts are written under `target/simard-gym/` as JSON and text reports.
 
 ## Configuration
 

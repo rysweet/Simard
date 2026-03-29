@@ -1,6 +1,6 @@
 ---
 title: Simard documentation
-description: Start here for the current Simard runtime contracts, bootstrap flow, and reflection metadata.
+description: Start here for the current Simard runtime contracts, benchmark gym flow, bootstrap behavior, and reflection metadata.
 last_updated: 2026-03-28
 review_schedule: as-needed
 owner: simard
@@ -8,13 +8,14 @@ owner: simard
 
 # Simard documentation
 
-Simard is a DI-first runtime shell for agent execution, reflection, memory, and evidence capture.
+Simard is a DI-first runtime shell for agent execution, reflection, memory, evidence capture, and benchmark-gym validation.
 
 This docs set describes the runtime behavior that exists in this repository today.
 
 ## Start here
 
 - [Tutorial: Run your first local session](./tutorials/run-your-first-local-session.md) - Walk the local runtime flow end to end.
+- [Tutorial: Run your first benchmark gym suite](./tutorials/run-your-first-benchmark-gym.md) - Run the shipped starter benchmark suite and inspect the emitted artifacts.
 - [How to configure bootstrap and inspect reflection](./howto/configure-bootstrap-and-inspect-reflection.md) - Verify bootstrap inputs and inspect the truthful reflection surface.
 - [Runtime contracts reference](./reference/runtime-contracts.md) - Look up the current public API and error contracts.
 - [Concept: truthful runtime metadata](./concepts/truthful-runtime-metadata.md) - Read the design rationale behind the stricter contract.
@@ -28,6 +29,8 @@ Today Simard provides:
 - builtin manifest-advertised base types selectable at startup today: `local-harness`, `rusty-clawd`, and `copilot-sdk`, with `rusty-clawd` wired as a distinct session backend and `copilot-sdk` still aliased to the local harness implementation
 - builtin identities selectable at startup today: `simard-engineer`, `simard-meeting`, `simard-gym`, and the composite `simard-composite-engineer`
 - `single-process` for all builtin base types plus loopback `multi-process` execution for `rusty-clawd`, with unsupported pairs failing explicitly
+- a starter benchmark gym suite that exercises all current builtin base-type selections plus a composite identity session through `cargo run --quiet --bin simard-gym -- run-suite starter`
+- benchmark artifacts written under `target/simard-gym/`, including per-scenario JSON and text summaries plus a suite summary
 - `ManifestContract { entrypoint, composition, precedence, provenance, freshness }`
 - `ReflectionSnapshot { manifest_contract, runtime_node, mailbox_address, agent_program_backend, adapter_backend, topology_backend, transport_backend, supervisor_backend, memory_backend, evidence_backend }`
 - truthful memory and evidence backend descriptors
@@ -53,6 +56,7 @@ Those hooks enforce `cargo fmt --all -- --check`, `cargo clippy --all-targets --
 ## Key runtime facts
 
 - `src/main.rs` is the thin CLI wrapper; `bootstrap::run_local_session` owns the run loop and `simard::bootstrap::assemble_local_runtime` remains the reflected assembly boundary
+- `src/bin/simard_gym.rs` is the operator-facing benchmark CLI for the starter gym suite
 - defaults are startup choices, never silent runtime recovery
 - reflection metadata is derived from the active runtime wiring, not placeholder labels
 - post-stop `start()`, `run()`, and repeated `stop()` surface `SimardError::RuntimeStopped`

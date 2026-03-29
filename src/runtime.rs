@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
 
+use serde::Serialize;
+
 use crate::agent_program::{AgentProgram, AgentProgramContext, ObjectiveRelayProgram};
 use crate::base_types::{BaseTypeFactory, BaseTypeId, BaseTypeOutcome, BaseTypeSessionRequest};
 use crate::error::{SimardError, SimardResult};
@@ -15,7 +17,8 @@ use crate::reflection::{ReflectionReport, ReflectionSnapshot, ReflectiveRuntime}
 use crate::sanitization::objective_metadata;
 use crate::session::{SessionIdGenerator, SessionPhase, SessionRecord};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum RuntimeTopology {
     SingleProcess,
     MultiProcess,

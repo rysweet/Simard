@@ -1,5 +1,5 @@
 name: "Simard Operator Runtime Behavior"
-description: "Outside-in operator coverage for base-type selection, composite identity execution, loopback multi-process runtime wiring, and handoff restore behavior."
+description: "Outside-in operator coverage for base-type selection, composite identity execution, loopback multi-process runtime wiring, handoff restore behavior, and the shipped benchmark gym starter suite."
 version: "1.0.0"
 
 config:
@@ -62,6 +62,13 @@ steps:
       command: "tests/gadugi/handoff-roundtrip.sh"
     timeout: 300000
 
+  - name: "Benchmark gym starter suite"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/gym-suite.sh"
+    timeout: 300000
+
 assertions: []
 
 cleanup:
@@ -77,6 +84,7 @@ metadata:
     - "bootstrap"
     - "handoff"
     - "composite"
+    - "benchmark-gym"
   priority: "high"
   author: "copilot"
   test_type: "outside-in"
