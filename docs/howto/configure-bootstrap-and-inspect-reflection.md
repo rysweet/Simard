@@ -149,6 +149,33 @@ If you launched with `SIMARD_BASE_TYPE="copilot-sdk"`, `snapshot.selected_base_t
 
 The same redaction rule applies to persisted session text: scratch memory, session summaries, and reflection summaries record `objective-metadata(...)` instead of the raw `SIMARD_OBJECTIVE` string.
 
+## 5. Exercise meeting mode without switching into engineer mode
+
+Use the operator probe when you want to validate facilitator behavior directly:
+
+```bash
+cargo run --quiet --bin simard_operator_probe -- \
+  meeting-run local-harness single-process \
+  "$(cat <<'EOF'
+agenda: align the next Simard block
+update: durable memory is now merged
+decision: prioritize meeting-mode validation before remote orchestration
+risk: workflow automation is still unreliable in clean worktrees
+next-step: ship operator-visible meeting coverage
+open-question: when should meeting decisions influence engineer planning?
+EOF
+)"
+```
+
+Look for:
+
+- `Probe mode: meeting-run`
+- `Identity: simard-meeting`
+- `Decision records: 1`
+- a durable decision record containing the decision, risk, next step, and open question
+
+This is the current honest v1 behavior: meeting mode captures structured planning output and writes concise decision memory, but it does not mutate code.
+
 ## 4. Validate stopped-state behavior
 
 Stopping the runtime is already observable.

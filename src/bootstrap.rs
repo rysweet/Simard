@@ -4,13 +4,14 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::agent_program::ObjectiveRelayProgram;
+use crate::agent_program::{AgentProgram, MeetingFacilitatorProgram, ObjectiveRelayProgram};
 use crate::base_types::{BaseTypeId, LocalProcessHarnessAdapter, RustyClawdAdapter};
 use crate::error::{SimardError, SimardResult};
 use crate::evidence::{EvidenceStore, FileBackedEvidenceStore};
 use crate::handoff::{FileBackedHandoffStore, RuntimeHandoffSnapshot, RuntimeHandoffStore};
 use crate::identity::{
     BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader, IdentityManifest, ManifestContract,
+    OperatingMode,
 };
 use crate::memory::{FileBackedMemoryStore, MemoryStore};
 use crate::metadata::{Freshness, Provenance};
@@ -289,6 +290,7 @@ pub fn assemble_local_runtime(config: &BootstrapConfig) -> SimardResult<LocalRun
         config.selected_base_type.value.clone(),
         config.topology.value,
     );
+    let agent_program = agent_program_for_manifest(&request.manifest)?;
 
     LocalRuntime::compose(
         runtime_ports_for_topology(
@@ -298,6 +300,7 @@ pub fn assemble_local_runtime(config: &BootstrapConfig) -> SimardResult<LocalRun
             handoff_store,
             base_types,
             config.topology.value,
+            agent_program,
         )?,
         request,
     )
@@ -338,6 +341,7 @@ pub fn assemble_local_runtime_from_handoff(
         config.selected_base_type.value.clone(),
         config.topology.value,
     );
+    let agent_program = agent_program_for_manifest(&request.manifest)?;
 
     LocalRuntime::compose_from_handoff(
         runtime_ports_for_topology(
@@ -347,6 +351,7 @@ pub fn assemble_local_runtime_from_handoff(
             handoff_store,
             base_types,
             config.topology.value,
+            agent_program,
         )?,
         request,
         snapshot,
@@ -426,6 +431,7 @@ fn runtime_ports_for_topology(
     handoff_store: Arc<dyn RuntimeHandoffStore>,
     base_types: BaseTypeRegistry,
     topology: RuntimeTopology,
+    agent_program: Arc<dyn AgentProgram>,
 ) -> SimardResult<RuntimePorts> {
     match topology {
         RuntimeTopology::SingleProcess => Ok(RuntimePorts::with_runtime_services_and_program(
@@ -436,7 +442,7 @@ fn runtime_ports_for_topology(
             Arc::new(crate::runtime::InProcessTopologyDriver::try_default()?),
             Arc::new(crate::runtime::InMemoryMailboxTransport::try_default()?),
             Arc::new(crate::runtime::InProcessSupervisor::try_default()?),
-            Arc::new(ObjectiveRelayProgram::try_default()?),
+            Arc::clone(&agent_program),
             handoff_store,
             Arc::new(UuidSessionIdGenerator),
         )),
@@ -449,10 +455,19 @@ fn runtime_ports_for_topology(
                 Arc::new(LoopbackMeshTopologyDriver::try_default()?),
                 Arc::new(LoopbackMailboxTransport::try_default()?),
                 Arc::new(CoordinatedSupervisor::try_default()?),
-                Arc::new(ObjectiveRelayProgram::try_default()?),
+                agent_program,
                 handoff_store,
                 Arc::new(UuidSessionIdGenerator),
             ))
+        }
+    }
+}
+
+fn agent_program_for_manifest(manifest: &IdentityManifest) -> SimardResult<Arc<dyn AgentProgram>> {
+    match manifest.default_mode {
+        OperatingMode::Meeting => Ok(Arc::new(MeetingFacilitatorProgram::try_default()?)),
+        OperatingMode::Engineer | OperatingMode::Gym => {
+            Ok(Arc::new(ObjectiveRelayProgram::try_default()?))
         }
     }
 }

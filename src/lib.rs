@@ -15,7 +15,10 @@ pub mod runtime;
 mod sanitization;
 pub mod session;
 
-pub use agent_program::{AgentProgram, AgentProgramContext, ObjectiveRelayProgram};
+pub use agent_program::{
+    AgentProgram, AgentProgramContext, AgentProgramMemoryRecord, MeetingFacilitatorProgram,
+    ObjectiveRelayProgram,
+};
 pub use base_types::{
     BaseTypeCapability, BaseTypeDescriptor, BaseTypeFactory, BaseTypeId, BaseTypeOutcome,
     BaseTypeSession, BaseTypeSessionRequest, BaseTypeTurnInput, LocalProcessHarnessAdapter,

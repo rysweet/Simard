@@ -3,10 +3,10 @@ use std::path::PathBuf;
 
 use simard::{
     BaseTypeId, BootstrapConfig, BootstrapInputs, BootstrapMode, BuiltinIdentityLoader,
-    ConfigValueSource, IdentityLoadRequest, IdentityLoader, ManifestContract, Provenance,
-    ReflectiveRuntime, RuntimeState, RuntimeTopology, SimardError, assemble_local_runtime,
-    assemble_local_runtime_from_handoff, bootstrap_entrypoint, latest_local_handoff,
-    run_local_session,
+    ConfigValueSource, IdentityLoadRequest, IdentityLoader, ManifestContract, MemoryScope,
+    Provenance, ReflectiveRuntime, RuntimeState, RuntimeTopology, SimardError,
+    assemble_local_runtime, assemble_local_runtime_from_handoff, bootstrap_entrypoint,
+    latest_local_handoff, run_local_session,
 };
 
 fn state_root(name: &str) -> PathBuf {
@@ -430,6 +430,66 @@ fn bootstrap_supports_composite_identity_execution() {
     assert_eq!(
         execution.outcome.session.phase,
         simard::SessionPhase::Complete
+    );
+}
+
+#[test]
+fn bootstrap_meeting_mode_persists_structured_decision_memory() {
+    let config = BootstrapConfig::resolve(BootstrapInputs {
+        prompt_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")),
+        objective: Some(
+            "agenda: review next Simard milestone\nupdate: durable memory shipped in PR 29\ndecision: prioritize meeting mode before remote orchestration\nrisk: workflow runner keeps drifting worktrees\nnext-step: add outside-in meeting probe\nopen-question: when should meeting decisions auto-influence engineer planning?"
+                .to_string(),
+        ),
+        identity: Some("simard-meeting".to_string()),
+        base_type: Some("local-harness".to_string()),
+        topology: Some("single-process".to_string()),
+        state_root: Some(state_root("meeting-mode")),
+        ..BootstrapInputs::default()
+    })
+    .expect("meeting bootstrap config should resolve");
+
+    let execution = run_local_session(&config).expect("meeting mode should execute");
+    let exported = latest_local_handoff(&config)
+        .expect("meeting handoff lookup should succeed")
+        .expect("meeting handoff should exist");
+    let decision_records = exported
+        .memory_records
+        .iter()
+        .filter(|record| record.scope == MemoryScope::Decision)
+        .collect::<Vec<_>>();
+
+    assert_eq!(execution.snapshot.identity_name, "simard-meeting");
+    assert_eq!(
+        execution.snapshot.agent_program_backend.identity,
+        "agent-program::meeting-facilitator"
+    );
+    assert_eq!(decision_records.len(), 1);
+    assert!(
+        decision_records[0]
+            .value
+            .contains("prioritize meeting mode before remote orchestration"),
+        "decision memory should keep the explicit decision"
+    );
+    assert!(
+        decision_records[0]
+            .value
+            .contains("workflow runner keeps drifting worktrees"),
+        "decision memory should keep the explicit risk"
+    );
+    assert!(
+        decision_records[0]
+            .value
+            .contains("add outside-in meeting probe"),
+        "decision memory should keep the next step"
+    );
+    assert!(
+        execution
+            .outcome
+            .reflection
+            .summary
+            .contains("captured 1 decisions, 1 risks, 1 next steps, and 1 open questions"),
+        "meeting reflection should expose the structured capture counts"
     );
 }
 

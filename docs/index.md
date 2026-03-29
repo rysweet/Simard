@@ -29,6 +29,7 @@ Today Simard provides:
 - explicit base-type and topology selection at bootstrap, with opt-in defaults only in `builtin-defaults`
 - builtin manifest-advertised base types selectable at startup today: `local-harness`, `rusty-clawd`, and `copilot-sdk`, with `rusty-clawd` wired as a distinct session backend and `copilot-sdk` still aliased to the local harness implementation
 - builtin identities selectable at startup today: `simard-engineer`, `simard-meeting`, `simard-gym`, and the composite `simard-composite-engineer`
+- a facilitator-backed `simard-meeting` identity that captures structured decisions, risks, next steps, and open questions without mutating code
 - `single-process` for all builtin base types plus loopback `multi-process` execution for `rusty-clawd`, with unsupported pairs failing explicitly
 - a starter benchmark gym suite that exercises all current builtin base-type selections plus a composite identity session through `cargo run --quiet --bin simard-gym -- run-suite starter`
 - benchmark artifacts written under `target/simard-gym/`, including per-scenario JSON and text summaries plus a suite summary
@@ -36,6 +37,7 @@ Today Simard provides:
 - `ReflectionSnapshot { manifest_contract, runtime_node, mailbox_address, agent_program_backend, adapter_backend, topology_backend, transport_backend, supervisor_backend, memory_backend, evidence_backend }`
 - truthful memory and evidence backend descriptors
 - file-backed memory, evidence, and handoff stores on the bootstrap path, with persisted local state under the configured state root
+- durable meeting decision records persisted under the configured state root so later sessions can inspect concise planning outcomes
 - truthful runtime service metadata from the runtime-selected wiring, including the injected agent program, handoff store, and the canonical backend identities behind each selected base type
 - persisted scratch, summary, and reflection text that records objective metadata instead of raw objective text
 - handoff snapshots that preserve runtime/session continuity while redacting the persisted session objective down to objective metadata

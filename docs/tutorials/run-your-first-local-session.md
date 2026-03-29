@@ -191,6 +191,7 @@ You now know:
 - how to run the local runtime with explicit config
 - how to switch between built-in base types without hidden inference
 - how `copilot-sdk` still aliases `local-harness` while `rusty-clawd` now reports a distinct backend honestly
+- how `simard-meeting` uses a facilitator program to persist concise decision records instead of acting like an engineer session
 - how composite identities surface their assembled components explicitly
 - how loopback multi-process execution reuses the same runtime contracts
 - how opt-in defaults are recorded

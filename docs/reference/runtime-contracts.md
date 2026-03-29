@@ -34,6 +34,27 @@ Simard v1 does **not** currently expose:
 
 The stable contract in this repository is the bootstrap/runtime and benchmark-gym behavior described below.
 
+## Meeting-mode operator flow
+
+The shipped operator probe also supports a meeting-specific path:
+
+- `cargo run --quiet --bin simard_operator_probe -- meeting-run <base-type> <topology> <structured-objective>`
+
+Use a structured objective with lines such as:
+
+- `agenda: ...`
+- `update: ...`
+- `decision: ...`
+- `risk: ...`
+- `next-step: ...`
+- `open-question: ...`
+
+The v1 meeting contract is intentionally narrow:
+
+- meeting mode uses the facilitator agent program backend `agent-program::meeting-facilitator`
+- it persists concise decision memory under the durable state root
+- it does not mutate code paths or pretend implementation work happened
+
 ## Benchmark gym CLI
 
 The shipped benchmark CLI currently supports:
@@ -305,6 +326,8 @@ pub struct ReflectionSnapshot {
     pub evidence_backend: BackendDescriptor,
 }
 ```
+
+For `simard-meeting`, reflection also reports `agent_program_backend.identity == "agent-program::meeting-facilitator"`.
 
 ### Backend descriptors
 

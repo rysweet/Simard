@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use simard::{
-    BootstrapConfig, BootstrapInputs, ReflectiveRuntime, assemble_local_runtime_from_handoff,
-    latest_local_handoff,
+    BootstrapConfig, BootstrapInputs, MemoryScope, ReflectiveRuntime,
+    assemble_local_runtime_from_handoff, latest_local_handoff,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -23,6 +23,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let topology = args.next().ok_or("expected topology")?;
             let objective = args.next().ok_or("expected objective")?;
             run_handoff_probe(&identity, &base_type, &topology, &objective)?;
+        }
+        "meeting-run" => {
+            let base_type = args.next().ok_or("expected base type")?;
+            let topology = args.next().ok_or("expected topology")?;
+            let objective = args.next().ok_or("expected objective")?;
+            run_meeting_probe(&base_type, &topology, &objective)?;
         }
         other => return Err(format!("unsupported probe command '{other}'").into()),
     }
@@ -168,5 +174,51 @@ fn run_handoff_probe(
         restored_snapshot.transport_backend.identity
     );
     println!("Execution summary: {}", execution.outcome.execution_summary);
+    Ok(())
+}
+
+fn run_meeting_probe(
+    base_type: &str,
+    topology: &str,
+    objective: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let identity = "simard-meeting";
+    let config = BootstrapConfig::resolve(BootstrapInputs {
+        prompt_root: Some(prompt_root()),
+        objective: Some(objective.to_string()),
+        state_root: Some(state_root(identity, base_type, topology, "meeting-run")),
+        identity: Some(identity.to_string()),
+        base_type: Some(base_type.to_string()),
+        topology: Some(topology.to_string()),
+        ..BootstrapInputs::default()
+    })?;
+
+    let execution = simard::run_local_session(&config)?;
+    let exported = latest_local_handoff(&config)?.ok_or("expected durable meeting handoff")?;
+    let decision_records = exported
+        .memory_records
+        .iter()
+        .filter(|record| record.scope == MemoryScope::Decision)
+        .map(|record| record.value.clone())
+        .collect::<Vec<_>>();
+
+    println!("Probe mode: meeting-run");
+    println!("Identity: {}", execution.snapshot.identity_name);
+    println!(
+        "Selected base type: {}",
+        execution.snapshot.selected_base_type
+    );
+    println!("Topology: {}", execution.snapshot.topology);
+    println!("State root: {}", config.state_root_path().display());
+    println!("Session phase: {}", execution.outcome.session.phase);
+    println!("Decision records: {}", decision_records.len());
+    for (index, value) in decision_records.iter().enumerate() {
+        println!("Decision record {}: {}", index + 1, value);
+    }
+    println!("Execution summary: {}", execution.outcome.execution_summary);
+    println!(
+        "Reflection summary: {}",
+        execution.outcome.reflection.summary
+    );
     Ok(())
 }

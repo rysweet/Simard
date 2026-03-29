@@ -834,6 +834,22 @@ impl RuntimeKernel {
             recorded_in: SessionPhase::Persistence,
         })?;
         session.attach_memory(summary_key);
+
+        for record in self
+            .ports
+            .agent_program
+            .additional_memory_records(&self.agent_program_context(session), outcome)?
+        {
+            let key = format!("{}-{}", session.id, record.key_suffix);
+            self.ports.memory_store.put(MemoryRecord {
+                key: key.clone(),
+                scope: record.scope,
+                value: record.value,
+                session_id: session.id.clone(),
+                recorded_in: SessionPhase::Persistence,
+            })?;
+            session.attach_memory(key);
+        }
         self.remember_session(session);
 
         Ok(())
