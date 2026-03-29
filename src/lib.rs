@@ -58,7 +58,8 @@ pub use prompt_assets::{
 pub use reflection::{ReflectionReport, ReflectionSnapshot, ReflectiveRuntime};
 pub use review::{
     ImprovementProposal, ReviewArtifact, ReviewRequest, ReviewSignal, ReviewTargetKind,
-    build_review_artifact, persist_review_artifact, render_review_text,
+    build_review_artifact, latest_review_artifact, load_review_artifact, persist_review_artifact,
+    render_review_text, review_artifacts_dir,
 };
 pub use runtime::{
     BaseTypeRegistry, CoordinatedSupervisor, InMemoryMailboxTransport, InProcessSupervisor,

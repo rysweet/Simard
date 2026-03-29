@@ -5,7 +5,7 @@ use simard::{
     BaseTypeId, EvidenceRecord, EvidenceSource, ImprovementProposal, MemoryRecord, MemoryScope,
     ReviewRequest, ReviewTargetKind, RuntimeAddress, RuntimeHandoffSnapshot, RuntimeNodeId,
     RuntimeState, RuntimeTopology, SessionId, SessionPhase, SessionRecord, build_review_artifact,
-    persist_review_artifact,
+    latest_review_artifact, persist_review_artifact,
 };
 use uuid::Uuid;
 
@@ -143,6 +143,62 @@ fn persisted_review_artifact_lands_under_review_artifacts_directory() {
     assert!(artifact_path.ends_with(format!("review-artifacts/{}.json", review.review_id)));
     let payload = fs::read_to_string(&artifact_path).expect("artifact should be readable");
     assert!(payload.contains(&review.review_id));
+
+    if temp_root.exists() {
+        fs::remove_dir_all(PathBuf::from(&temp_root)).expect("temp root should be removable");
+    }
+}
+
+#[test]
+fn latest_review_artifact_returns_newest_persisted_review_across_runs() {
+    let handoff = fixture_handoff();
+    let temp_root = std::env::temp_dir().join(format!("simard-review-test-{}", Uuid::now_v7()));
+    let mut older_review = build_review_artifact(
+        ReviewRequest {
+            target_kind: ReviewTargetKind::Session,
+            target_label: "operator-review".to_string(),
+            execution_summary: "completed a bounded engineering session".to_string(),
+            reflection_summary: "reflection covers the first pass clearly enough for testing"
+                .to_string(),
+            measurement_notes: Vec::new(),
+            signals: Vec::new(),
+        },
+        &handoff,
+    )
+    .expect("older review should build");
+    older_review.review_id = "older-review".to_string();
+    older_review.reviewed_at_unix_ms = 10;
+    persist_review_artifact(&temp_root, &older_review).expect("older review should persist");
+
+    let mut newer_review = build_review_artifact(
+        ReviewRequest {
+            target_kind: ReviewTargetKind::Benchmark,
+            target_label: "starter:composite-session-review".to_string(),
+            execution_summary: "completed benchmark scenario".to_string(),
+            reflection_summary: "reflection covers the benchmark replay with explicit evidence and operator follow-up"
+                .to_string(),
+            measurement_notes: vec![
+                "retry_count is currently zero because the benchmark runner does not yet re-plan or retry failed scenarios automatically".to_string(),
+            ],
+            signals: Vec::new(),
+        },
+        &handoff,
+    )
+    .expect("newer review should build");
+    newer_review.review_id = "newer-review".to_string();
+    newer_review.reviewed_at_unix_ms = 20;
+    persist_review_artifact(&temp_root, &newer_review).expect("newer review should persist");
+
+    let (artifact_path, loaded_review) = latest_review_artifact(&temp_root)
+        .expect("latest review lookup should succeed")
+        .expect("latest review should exist");
+    assert!(artifact_path.ends_with("review-artifacts/newer-review.json"));
+    assert_eq!(loaded_review.review_id, "newer-review");
+    assert_eq!(loaded_review.target_kind, ReviewTargetKind::Benchmark);
+    assert!(
+        proposal_titles(&loaded_review.proposals)
+            .contains(&"Track bounded retries in benchmark runs")
+    );
 
     if temp_root.exists() {
         fs::remove_dir_all(PathBuf::from(&temp_root)).expect("temp root should be removable");

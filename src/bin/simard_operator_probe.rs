@@ -4,7 +4,7 @@ use simard::{
     BootstrapConfig, BootstrapInputs, FileBackedMemoryStore, MemoryRecord, MemoryScope,
     MemoryStore, ReflectiveRuntime, ReviewRequest, ReviewTargetKind,
     assemble_local_runtime_from_handoff, build_review_artifact, latest_local_handoff,
-    persist_review_artifact,
+    latest_review_artifact, persist_review_artifact,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -37,6 +37,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let topology = args.next().ok_or("expected topology")?;
             let objective = args.next().ok_or("expected objective")?;
             run_review_probe(&base_type, &topology, &objective)?;
+        }
+        "review-read" => {
+            let base_type = args.next().ok_or("expected base type")?;
+            let topology = args.next().ok_or("expected topology")?;
+            run_review_read_probe(&base_type, &topology)?;
         }
         other => return Err(format!("unsupported probe command '{other}'").into()),
     }
@@ -305,5 +310,45 @@ fn run_review_probe(
         "Reflection summary: {}",
         execution.outcome.reflection.summary
     );
+    Ok(())
+}
+
+fn run_review_read_probe(
+    base_type: &str,
+    topology: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let identity = "simard-engineer";
+    let state_root = state_root(identity, base_type, topology, "review-run");
+    let (review_artifact_path, review) =
+        latest_review_artifact(&state_root)?.ok_or("expected persisted review artifact")?;
+    let memory_store = FileBackedMemoryStore::try_new(state_root.join("memory_records.json"))?;
+    let decision_records = memory_store
+        .list(MemoryScope::Decision)?
+        .into_iter()
+        .filter(|record| record.value.starts_with("review-summary |"))
+        .collect::<Vec<_>>();
+
+    println!("Probe mode: review-read");
+    println!("Identity: {}", review.identity_name);
+    println!("Selected base type: {}", review.selected_base_type);
+    println!("Topology: {}", review.topology);
+    println!("State root: {}", state_root.display());
+    println!("Latest review artifact: {}", review_artifact_path.display());
+    println!("Latest review target: {}", review.target_label);
+    println!("Latest review summary: {}", review.summary);
+    println!("Review proposals: {}", review.proposals.len());
+    for (index, proposal) in review.proposals.iter().enumerate() {
+        println!(
+            "Proposal {}: [{}] {} => {}",
+            index + 1,
+            proposal.category,
+            proposal.title,
+            proposal.suggested_change
+        );
+    }
+    println!("Decision review records: {}", decision_records.len());
+    if let Some(record) = decision_records.last() {
+        println!("Latest decision review record: {}", record.value);
+    }
     Ok(())
 }
