@@ -2,6 +2,7 @@
 name = "simard"
 version = "0.1.1"
 edition = "2024"
+default-run = "simard"
 
 [dependencies]
 uuid = { version = "1.18.1", features = ["v7"] }

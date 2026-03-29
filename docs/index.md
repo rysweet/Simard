@@ -33,6 +33,7 @@ Today Simard provides:
 - truthful memory and evidence backend descriptors
 - truthful runtime service metadata from the runtime-selected wiring, including the injected agent program, handoff store, and the canonical backend identities behind each selected base type
 - persisted scratch, summary, and reflection text that records objective metadata instead of raw objective text
+- handoff snapshots that preserve runtime/session continuity while redacting the persisted session objective down to objective metadata
 - canonical session IDs shaped as `session-<uuid-v7>`, with validation at parsing boundaries
 - a real stopped runtime state whose snapshot remains inspectable after shutdown
 - explicit `RuntimeStopped`, `InvalidSessionId`, and `InvalidManifestContract` errors
@@ -66,5 +67,5 @@ If you need exact field names or error contracts, use the [runtime contracts ref
 
 If you are changing architecture, read the [truthful runtime metadata concept guide](./concepts/truthful-runtime-metadata.md) first.
 
-- runtime handoff export/import through `RuntimeHandoffSnapshot` and `RuntimeKernel::compose_from_handoff(...)`
+- runtime handoff export/import through `RuntimeHandoffSnapshot` and `RuntimeKernel::compose_from_handoff(...)`, with restore currently validating identity and selected base type before rehydrating memory/evidence and preserving the redacted session boundary
 - operator-level runtime validation through `cargo run --quiet --bin simard_operator_probe -- ...`

@@ -579,15 +579,21 @@ impl RuntimeKernel {
             });
         }
 
+        let mut sanitized_snapshot = snapshot;
+        sanitized_snapshot.session = sanitized_snapshot
+            .session
+            .as_ref()
+            .map(SessionRecord::redacted_for_handoff);
+
         let mut runtime = Self::compose(ports, request)?;
-        for record in &snapshot.memory_records {
+        for record in &sanitized_snapshot.memory_records {
             runtime.ports.memory_store.put(record.clone())?;
         }
-        for record in &snapshot.evidence_records {
+        for record in &sanitized_snapshot.evidence_records {
             runtime.ports.evidence_store.record(record.clone())?;
         }
-        runtime.last_session = snapshot.session.clone();
-        runtime.ports.handoff_store.save(snapshot)?;
+        runtime.last_session = sanitized_snapshot.session.clone();
+        runtime.ports.handoff_store.save(sanitized_snapshot)?;
         Ok(runtime)
     }
 
@@ -646,7 +652,10 @@ impl RuntimeKernel {
             topology: self.request.topology,
             source_runtime_node: self.runtime_node.clone(),
             source_mailbox_address: self.mailbox_address.clone(),
-            session: self.last_session.clone(),
+            session: self
+                .last_session
+                .as_ref()
+                .map(SessionRecord::redacted_for_handoff),
             memory_records,
             evidence_records,
         };

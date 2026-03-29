@@ -40,7 +40,7 @@ The stable contract in this repository is the bootstrap/runtime behavior describ
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
 | `SIMARD_PROMPT_ROOT` | Yes in `explicit-config` | none | Root directory for prompt assets. |
-| `SIMARD_OBJECTIVE` | Yes in `explicit-config` | none | Objective passed to `run()`. Persisted scratch, summary, and reflection text store metadata derived from it instead of the raw objective text. |
+| `SIMARD_OBJECTIVE` | Yes in `explicit-config` | none | Objective passed to `run()`. Live execution keeps the real objective in memory while persisted scratch, summary, reflection, and exported handoff session text store objective metadata instead of the raw objective text. |
 | `SIMARD_BOOTSTRAP_MODE` | No | `explicit-config` | Startup mode. Accepted values: `explicit-config`, `builtin-defaults`. |
 | `SIMARD_IDENTITY` | Yes in `explicit-config` | none in `explicit-config`; `simard-engineer` in `builtin-defaults` | Identity to load before runtime composition. Non-UTF-8 values fail bootstrap instead of being treated as missing. |
 | `SIMARD_BASE_TYPE` | Yes in `explicit-config` | none in `explicit-config`; `local-harness` in `builtin-defaults` | Base type selected for the runtime request. Unsupported or unregistered choices fail explicitly. |
@@ -122,6 +122,7 @@ Simard keeps the live objective available while the run is executing, but persis
 - session scratch records store `objective-metadata(chars=..., words=..., lines=...)`
 - reflection summaries describe completion with objective metadata instead of raw objective text
 - persisted session summaries reuse sanitized plan and execution strings rather than copying the raw objective back out
+- exported handoff snapshots preserve the session boundary while replacing `RuntimeHandoffSnapshot.session.objective` with the same objective metadata string
 
 ## Identity metadata
 
@@ -383,4 +384,9 @@ See the [documentation index](../index.md) for the full set of Simard docs.
 
 `RuntimeKernel::export_handoff()` exports the latest session metadata, memory records, and evidence records into a `RuntimeHandoffSnapshot` and persists it through the injected `RuntimeHandoffStore`.
 
-`RuntimeKernel::compose_from_handoff(...)` restores that snapshot into fresh runtime ports, rehydrates memory/evidence stores, and preserves the last session boundary for a new process or node.
+Handoff notes for the current repository surface:
+
+- the repository contract here is still the local CLI/operator path plus the in-process Rust runtime types; there is no HTTP, network-service, or database schema handoff contract in this branch
+- `RuntimeHandoffSnapshot` should be treated as sensitive runtime state even after objective redaction because it still contains memory/evidence records and session linkage
+- `RuntimeKernel::export_handoff()` preserves the latest session boundary but redacts `session.objective` down to `objective-metadata(...)` before persistence/export
+- `RuntimeKernel::compose_from_handoff(...)` currently validates `identity_name` and `selected_base_type`, then rehydrates memory/evidence stores and preserves the redacted last-session boundary for a new process or node
