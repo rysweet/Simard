@@ -1,0 +1,32 @@
+name: verify
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install pre-commit
+        run: python -m pip install --upgrade pip pre-commit
+
+      - name: Run pre-commit stage
+        run: python -m pre_commit run --all-files --show-diff-on-failure --hook-stage pre-commit
+
+      - name: Run pre-push stage
+        run: python -m pre_commit run --all-files --show-diff-on-failure --hook-stage pre-push

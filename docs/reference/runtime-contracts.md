@@ -1,7 +1,7 @@
 ---
 title: Runtime contracts reference
 description: Reference for the current Simard runtime surface, reflection contracts, and lifecycle errors.
-last_updated: 2026-03-27
+last_updated: 2026-03-28
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -17,6 +17,21 @@ related:
 
 This file describes the API shape that exists in the repository today.
 
+## Public surfaces
+
+Simard v1 currently exposes two surfaces:
+
+- the local CLI bootstrap path through `cargo run --quiet`
+- the in-process Rust runtime/bootstrap types in `src/bootstrap.rs`, `src/runtime.rs`, and related modules
+
+Simard v1 does **not** currently expose:
+
+- an HTTP API
+- a network service contract
+- a database schema contract
+
+The stable contract in this repository is the bootstrap/runtime behavior described below.
+
 ## Configuration
 
 ### Environment variables
@@ -24,16 +39,38 @@ This file describes the API shape that exists in the repository today.
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
 | `SIMARD_PROMPT_ROOT` | Yes in `explicit-config` | none | Root directory for prompt assets. |
-| `SIMARD_OBJECTIVE` | Yes in `explicit-config` | none | Objective passed to `run()`. |
+| `SIMARD_OBJECTIVE` | Yes in `explicit-config` | none | Objective passed to `run()`. Persisted scratch, summary, and reflection text store metadata derived from it instead of the raw objective text. |
 | `SIMARD_BOOTSTRAP_MODE` | No | `explicit-config` | Startup mode. Accepted values: `explicit-config`, `builtin-defaults`. |
 | `SIMARD_IDENTITY` | Yes in `explicit-config` | none in `explicit-config`; `simard-engineer` in `builtin-defaults` | Identity to load before runtime composition. Non-UTF-8 values fail bootstrap instead of being treated as missing. |
+| `SIMARD_BASE_TYPE` | Yes in `explicit-config` | none in `explicit-config`; `local-harness` in `builtin-defaults` | Base type selected for the runtime request. Unsupported or unregistered choices fail explicitly. |
+| `SIMARD_RUNTIME_TOPOLOGY` | Yes in `explicit-config` | none in `explicit-config`; `single-process` in `builtin-defaults` | Runtime topology selected for the runtime request. Accepted values: `single-process`, `multi-process`, `distributed`. |
+
+### Current builtin base-type registrations
+
+The builtin `simard-engineer` identity currently advertises and local bootstrap registers these base types:
+
+| Base type selection | Current session backend implementation | Supported topologies in this scaffold |
+| --- | --- | --- |
+| `local-harness` | `local-harness` single-process local process harness session backend | `single-process` |
+| `rusty-clawd` | `rusty-clawd::session-backend` real session backend | `single-process`, `multi-process` |
+| `copilot-sdk` | `local-harness` single-process local process harness session backend (alias) | `single-process` |
+
+Notes:
+
+- bootstrap registers base-type factories from the manifest-advertised base-type list instead of assuming a single hardcoded local backend
+- for the local CLI bootstrap path, `multi-process` and `distributed` still fail first with `UnsupportedRuntimeTopology` because the injected topology driver is `topology::in-process`
+- outside bootstrap, the runtime also ships a second injected topology path through `topology::loopback-mesh` and `transport::loopback-mailbox` for multi-process style execution and migration tests
+- if a future identity advertises a base type without a registered factory, runtime composition still fails explicitly with `AdapterNotRegistered`
+- the descriptors remain truthful: `selected_base_type` preserves the explicit choice, while `adapter_backend.identity` exposes the actual backend (`rusty-clawd::session-backend` for `rusty-clawd`, `local-harness` for the current `copilot-sdk` alias)
+- `runtime_node`, `mailbox_address`, `topology_backend`, `transport_backend`, `supervisor_backend`, and `handoff_backend` expose the actual runtime assembly rather than inferred labels
+- `MemoryPolicy.allow_project_writes=true` is rejected explicitly in v1 rather than being ignored
 
 ### Bootstrap modes
 
 | Mode | Behavior |
 | --- | --- |
-| `explicit-config` | Requires prompt root, objective, and identity from configuration. |
-| `builtin-defaults` | Allows builtin prompt root, builtin objective, and builtin identity, but only because startup opted in explicitly. |
+| `explicit-config` | Requires prompt root, objective, identity, base type, and topology from configuration. |
+| `builtin-defaults` | Allows builtin prompt root, builtin objective, builtin identity, builtin base type (`local-harness`), and builtin topology (`single-process`), but only because startup opted in explicitly. |
 
 ### Config value sources
 
@@ -43,6 +80,46 @@ This file describes the API shape that exists in the repository today.
 | --- | --- |
 | `Environment(&'static str)` | The value came directly from an environment variable. |
 | `ExplicitOptIn(&'static str)` | The value came from an explicit startup mode that permits builtin defaults. |
+
+### Example: explicit bootstrap with `copilot-sdk`
+
+This is the canonical non-default base-type example for the current scaffold:
+
+```bash
+SIMARD_PROMPT_ROOT="$PWD/prompt_assets" \
+SIMARD_OBJECTIVE="inspect copilot-sdk bootstrap wiring" \
+SIMARD_IDENTITY="simard-engineer" \
+SIMARD_BASE_TYPE="copilot-sdk" \
+SIMARD_RUNTIME_TOPOLOGY="single-process" \
+cargo run --quiet
+```
+
+Expected output shape:
+
+```text
+Simard local runtime executed successfully.
+Bootstrap mode: explicit-config
+Config sources: prompt_root=env:SIMARD_PROMPT_ROOT, objective=env:SIMARD_OBJECTIVE, base_type=env:SIMARD_BASE_TYPE, topology=env:SIMARD_RUNTIME_TOPOLOGY
+Bootstrap selection: identity=simard-engineer, base_type=copilot-sdk, topology=single-process
+Adapter implementation: local-harness
+...
+Snapshot: state=ready, topology=single-process, base_type=copilot-sdk
+Shutdown: stopped
+```
+
+This confirms three important contract points:
+
+- bootstrap only uses the selected base type because you passed it explicitly
+- the current v1 runtime accepts `copilot-sdk` immediately, but only with `single-process`
+- the current v1 implementation behind that alias is still `local-harness`
+
+### Persisted session text
+
+Simard keeps the live objective available while the run is executing, but persisted session text is redacted down to objective metadata.
+
+- session scratch records store `objective-metadata(chars=..., words=..., lines=...)`
+- reflection summaries describe completion with objective metadata instead of raw objective text
+- persisted session summaries reuse sanitized plan and execution strings rather than copying the raw objective back out
 
 ## Identity metadata
 
@@ -75,6 +152,8 @@ Notes:
 ```text
 mode:explicit-config
 identity:simard-engineer
+base-type:local-harness
+topology:single-process
 prompt-root:env:SIMARD_PROMPT_ROOT
 objective:env:SIMARD_OBJECTIVE
 ```
@@ -144,7 +223,7 @@ Rules:
 | --- | --- |
 | `Initializing` | Runtime has been composed but not started. |
 | `Ready` | Prompt assets are loaded and the runtime can execute. |
-| `Active` | Adapter invocation is in progress. |
+| `Active` | Base-type session work is in progress. |
 | `Reflecting` | Reflection metadata is being assembled. |
 | `Persisting` | Memory and evidence summaries are being persisted. |
 | `Failed` | Execution failed before completion. |
@@ -182,12 +261,19 @@ pub struct ReflectionSnapshot {
     pub selected_base_type: BaseTypeId,
     pub topology: RuntimeTopology,
     pub runtime_state: RuntimeState,
+    pub runtime_node: RuntimeNodeId,
+    pub mailbox_address: RuntimeAddress,
     pub session_phase: Option<SessionPhase>,
     pub prompt_assets: Vec<PromptAssetId>,
     pub manifest_contract: ManifestContract,
     pub evidence_records: usize,
     pub memory_records: usize,
+    pub agent_program_backend: BackendDescriptor,
+    pub handoff_backend: BackendDescriptor,
     pub adapter_backend: BackendDescriptor,
+    pub topology_backend: BackendDescriptor,
+    pub transport_backend: BackendDescriptor,
+    pub supervisor_backend: BackendDescriptor,
     pub memory_backend: BackendDescriptor,
     pub evidence_backend: BackendDescriptor,
 }
@@ -206,7 +292,11 @@ pub struct BackendDescriptor {
 Reflection rules:
 
 - `manifest_contract` carries entrypoint, provenance, and freshness together
-- `adapter_backend` comes from the runtime-selected adapter descriptor
+- `agent_program_backend` comes from the injected agent-program contract, not from hardcoded runtime logic
+- `handoff_backend` comes from the injected handoff store used for export/import
+- `adapter_backend` comes from the selected base-type factory/session descriptor, not from a bootstrap shortcut
+- `runtime_node` and `mailbox_address` come from the injected topology and transport services
+- `topology_backend`, `transport_backend`, and `supervisor_backend` come from the live runtime services
 - `memory_backend` comes from the live memory store descriptor
 - `evidence_backend` comes from the live evidence store descriptor
 - reflection reports live wiring, not placeholder labels
@@ -225,12 +315,20 @@ Reflection rules:
 | `InvalidManifestContract` | Manifest contract metadata is incomplete or untruthful. |
 | `ClockBeforeUnixEpoch` | Runtime metadata could not record a truthful observation time. |
 | `InvalidSessionId` | A supplied session ID is not a valid distributed-safe identifier. |
+| `UnsupportedBaseType` | The chosen identity does not allow the requested base type. |
+| `AdapterNotRegistered` | No base-type factory has been registered for the requested base type. |
+| `MissingCapability` | The selected base-type backend exists but does not satisfy the manifest's required capabilities. |
+| `UnsupportedRuntimeTopology` | The injected topology driver does not support the requested topology. |
+| `UnsupportedTopology` | The selected base-type backend does not support the requested topology. |
 
 ### Lifecycle and session errors
 
 | Error | Meaning |
 | --- | --- |
 | `InvalidRuntimeTransition` | A runtime lifecycle transition is invalid. |
+| `InvalidBaseTypeSessionState` | A base-type session was opened, used, or closed out of order. |
+| `AdapterInvocationFailed` | The selected base-type backend failed while executing a turn. |
+| `InvalidHandoffSnapshot` | A handoff snapshot could not be restored into the requested runtime. |
 | `RuntimeStopped` | Caller attempted `start`, `run`, or `stop` after shutdown was already in effect. |
 | `RuntimeFailed` | Caller attempted `start` or `run` after a failed execution but before shutdown. |
 | `InvalidSessionTransition` | A session phase transition is invalid. |
@@ -256,7 +354,14 @@ assert_eq!(
 );
 assert_eq!(snapshot.manifest_contract.provenance.source, "bootstrap");
 assert_eq!(snapshot.manifest_contract.freshness.state, FreshnessState::Current);
+assert_eq!(snapshot.runtime_node.to_string(), "node-local");
+assert_eq!(snapshot.mailbox_address.to_string(), "inmemory://node-local");
+assert_eq!(snapshot.agent_program_backend.identity, "agent-program::objective-relay");
+assert_eq!(snapshot.handoff_backend.identity, "handoff::in-memory");
 assert_eq!(snapshot.adapter_backend.identity, "local-harness");
+assert_eq!(snapshot.topology_backend.identity, "topology::in-process");
+assert_eq!(snapshot.transport_backend.identity, "transport::in-memory-mailbox");
+assert_eq!(snapshot.supervisor_backend.identity, "supervisor::in-process");
 assert_eq!(snapshot.memory_backend.identity, "memory::session-cache");
 ```
 
@@ -267,3 +372,10 @@ assert_eq!(snapshot.memory_backend.identity, "memory::session-cache");
 - [Tutorial: Run your first local session](../tutorials/run-your-first-local-session.md)
 
 See the [documentation index](../index.md) for the full set of Simard docs.
+
+
+## Handoff and migration
+
+`RuntimeKernel::export_handoff()` exports the latest session metadata, memory records, and evidence records into a `RuntimeHandoffSnapshot` and persists it through the injected `RuntimeHandoffStore`.
+
+`RuntimeKernel::compose_from_handoff(...)` restores that snapshot into fresh runtime ports, rehydrates memory/evidence stores, and preserves the last session boundary for a new process or node.

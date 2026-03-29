@@ -32,7 +32,8 @@ The current repo guarantees:
 - prompt loading failures stay failures
 - `ManifestContract` carries `entrypoint`, `provenance`, and `freshness`
 - freshness acquisition fails explicitly instead of fabricating an epoch timestamp
-- reflection reports `adapter_backend`, `memory_backend`, and `evidence_backend` from live wiring
+- reflection reports `agent_program_backend`, `handoff_backend`, `adapter_backend`, `topology_backend`, `transport_backend`, `supervisor_backend`, `memory_backend`, and `evidence_backend` from live wiring
+- reflection reports `runtime_node` and `mailbox_address` from the injected topology and transport services
 - memory and evidence stores already report truthful backend descriptors
 - `simard::bootstrap::assemble_local_runtime` is the assembly boundary reflected by the CLI path
 - `stop()` moves the runtime into `Stopped`
@@ -61,7 +62,7 @@ Session IDs appear in:
 
 - memory records
 - evidence records
-- adapter requests
+- base-type session requests
 - reflection output
 
 The runtime addresses that boundary in two ways:
@@ -108,7 +109,7 @@ Keeping those answers together makes reflection harder to fake accidentally and 
 - keep the current explicit-default bootstrap behavior
 - keep composition behind the bootstrap assembly boundary
 - validate session IDs at parsing and injection boundaries
-- preserve truthful store descriptors and extend the same rule to adapters
+- preserve truthful store descriptors and extend the same rule to handoff stores, base-type backends, topology drivers, transports, and supervisors
 - keep session ID allocation explicit at composition boundaries
 - surface stopped runtimes with a dedicated lifecycle error
 

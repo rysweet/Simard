@@ -1,7 +1,7 @@
 ---
 title: Simard documentation
 description: Start here for the current Simard runtime contracts, bootstrap flow, and reflection metadata.
-last_updated: 2026-03-27
+last_updated: 2026-03-28
 review_schedule: as-needed
 owner: simard
 ---
@@ -24,13 +24,29 @@ This docs set describes the runtime behavior that exists in this repository toda
 Today Simard provides:
 
 - explicit bootstrap configuration, with `builtin-defaults` available only through opt-in startup mode
+- explicit base-type and topology selection at bootstrap, with opt-in defaults only in `builtin-defaults`
+- builtin manifest-advertised base types selectable at startup today: `local-harness`, `rusty-clawd`, and `copilot-sdk`, with `rusty-clawd` wired as a distinct session backend and `copilot-sdk` still aliased to the local harness implementation
+- `single-process` as the only supported v1 topology for the builtin base types, with unsupported pairs failing explicitly
 - `ManifestContract { entrypoint, composition, precedence, provenance, freshness }`
-- `ReflectionSnapshot { manifest_contract, adapter_backend, memory_backend, evidence_backend }`
+- `ReflectionSnapshot { manifest_contract, runtime_node, mailbox_address, agent_program_backend, adapter_backend, topology_backend, transport_backend, supervisor_backend, memory_backend, evidence_backend }`
 - truthful memory and evidence backend descriptors
-- truthful adapter backend metadata from the runtime-selected base type
+- truthful runtime service metadata from the runtime-selected wiring, including the injected agent program, handoff store, and the canonical backend identities behind each selected base type
+- persisted scratch, summary, and reflection text that records objective metadata instead of raw objective text
 - canonical session IDs shaped as `session-<uuid-v7>`, with validation at parsing boundaries
 - a real stopped runtime state whose snapshot remains inspectable after shutdown
 - explicit `RuntimeStopped`, `InvalidSessionId`, and `InvalidManifestContract` errors
+- explicit rejection of `MemoryPolicy.allow_project_writes=true` in v1
+- a local CLI/runtime contract, not an HTTP API or database-backed service
+
+## Contributor verification
+
+Repository changes are expected to pass the same checks locally and in CI:
+
+- `python3 -m pre_commit install --hook-type pre-commit --hook-type pre-push`
+- `python3 -m pre_commit run --all-files --hook-stage pre-commit`
+- `python3 -m pre_commit run --all-files --hook-stage pre-push`
+
+Those hooks enforce `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, and `cargo test --all-features --locked`.
 
 ## Key runtime facts
 
@@ -48,3 +64,5 @@ If you need to wire configuration or debug reflection output, jump to the [boots
 If you need exact field names or error contracts, use the [runtime contracts reference](./reference/runtime-contracts.md).
 
 If you are changing architecture, read the [truthful runtime metadata concept guide](./concepts/truthful-runtime-metadata.md) first.
+
+- runtime handoff export/import through `RuntimeHandoffSnapshot` and `RuntimeKernel::compose_from_handoff(...)`
