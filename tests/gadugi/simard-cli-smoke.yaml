@@ -1,0 +1,82 @@
+name: "Simard Operator Runtime Behavior"
+description: "Outside-in operator coverage for base-type selection, composite identity execution, loopback multi-process runtime wiring, and handoff restore behavior."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Explicit local-harness bootstrap"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/smoke-explicit-local.sh"
+    timeout: 300000
+
+  - name: "Explicit rusty-clawd bootstrap"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/smoke-explicit-rusty-clawd.sh"
+    timeout: 300000
+
+  - name: "Builtin-default bootstrap"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/smoke-builtin-defaults.sh"
+    timeout: 300000
+
+  - name: "Composite identity bootstrap"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/composite-identity.sh"
+    timeout: 300000
+
+  - name: "Composite handoff roundtrip"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/handoff-roundtrip.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "behavior"
+    - "simard"
+    - "bootstrap"
+    - "handoff"
+    - "composite"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

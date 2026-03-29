@@ -1,7 +1,7 @@
 ---
 title: "Tutorial: Run your first local session"
 description: Learn the Simard local runtime flow, from bootstrap through reflection and shutdown.
-last_updated: 2026-03-27
+last_updated: 2026-03-28
 review_schedule: as-needed
 owner: simard
 doc_type: tutorial
@@ -20,6 +20,7 @@ This tutorial follows the runtime path that exists in the repository today.
 - How the local runtime starts with explicit configuration
 - How explicit opt-in defaults behave
 - What reflection reports after a run
+- How runtime node, mailbox, and backend wiring appear in reflection
 - What stop semantics look like in practice
 
 ## Prerequisites
@@ -31,10 +32,14 @@ This tutorial follows the runtime path that exists in the repository today.
 
 From the repository root, start Simard with a real prompt asset directory and an explicit objective.
 
+For the builtin identities in this repo, you can currently choose `local-harness`, `rusty-clawd`, or `copilot-sdk` here. `rusty-clawd` is a distinct backend, while `copilot-sdk` remains an explicit alias of the local harness implementation. The default bootstrap path still opts into `single-process`, but the runtime can now inject a loopback `multi-process` topology when you request a supported pairing such as `rusty-clawd + multi-process`.
+
 ```bash
 SIMARD_PROMPT_ROOT="$PWD/prompt_assets" \
 SIMARD_OBJECTIVE="exercise the local runtime" \
 SIMARD_IDENTITY="simard-engineer" \
+SIMARD_BASE_TYPE="local-harness" \
+SIMARD_RUNTIME_TOPOLOGY="single-process" \
 cargo run --quiet
 ```
 
@@ -43,17 +48,67 @@ You should see output shaped like this:
 ```text
 Simard local runtime executed successfully.
 Bootstrap mode: explicit-config
-Config sources: prompt_root=env:SIMARD_PROMPT_ROOT, objective=env:SIMARD_OBJECTIVE
-Plan: ...
-Execution: ...
-Reflection: ...
+Config sources: prompt_root=env:SIMARD_PROMPT_ROOT, objective=env:SIMARD_OBJECTIVE, base_type=env:SIMARD_BASE_TYPE, topology=env:SIMARD_RUNTIME_TOPOLOGY
+Bootstrap selection: identity=simard-engineer, base_type=local-harness, topology=single-process
 Snapshot: state=ready, topology=single-process, base_type=local-harness
+Adapter implementation: local-harness
 Shutdown: stopped
 ```
 
 **Checkpoint**: this is the real CLI path. `src/main.rs` is the thin wrapper; `bootstrap::run_local_session` owns the run loop, and `simard::bootstrap::assemble_local_runtime` remains the reflected assembly boundary.
 
-## Step 2: Opt in to builtin defaults
+## Step 2: Switch to another built-in base type
+
+Run the same bootstrap path again, but select `copilot-sdk` explicitly.
+
+```bash
+SIMARD_PROMPT_ROOT="$PWD/prompt_assets" \
+SIMARD_OBJECTIVE="exercise the copilot-sdk runtime path" \
+SIMARD_IDENTITY="simard-engineer" \
+SIMARD_BASE_TYPE="copilot-sdk" \
+SIMARD_RUNTIME_TOPOLOGY="single-process" \
+cargo run --quiet
+```
+
+Look for these lines:
+
+```text
+Bootstrap selection: identity=simard-engineer, base_type=copilot-sdk, topology=single-process
+Snapshot: state=ready, topology=single-process, base_type=copilot-sdk
+Adapter implementation: local-harness
+```
+
+**Checkpoint**: the runtime contract is explicit. `copilot-sdk` is selectable now, but its underlying implementation still stays `local-harness`. Simard preserves the selected base type without pretending the alias is already a distinct backend integration.
+
+## Step 3: Exercise a composite identity and loopback multi-process runtime
+
+Use the shipped operator probe to validate the broader runtime seams like an operator would.
+
+```bash
+cargo run --quiet --bin simard_operator_probe -- \
+  bootstrap-run simard-composite-engineer local-harness single-process \
+  "exercise the composite engineer loop"
+```
+
+Then run the multi-process path:
+
+```bash
+cargo run --quiet --bin simard_operator_probe -- \
+  bootstrap-run simard-engineer rusty-clawd multi-process \
+  "exercise loopback multi-process runtime"
+```
+
+Look for:
+
+- `Identity components: simard-engineer, simard-meeting, simard-gym`
+- `Topology: multi-process`
+- `Topology backend: topology::loopback-mesh`
+- `Transport backend: transport::loopback-mailbox`
+- `Adapter implementation: rusty-clawd::session-backend`
+
+**Checkpoint**: composition and topology are now visible runtime facts, not just architecture aspirations.
+
+## Step 4: Opt in to builtin defaults
 
 Builtin defaults exist for local bootstrap convenience, but they are only used when startup opts in.
 
@@ -67,11 +122,13 @@ You should see:
 - `Bootstrap mode: builtin-defaults`
 - `prompt_root=opt-in:SIMARD_BOOTSTRAP_MODE`
 - `objective=opt-in:SIMARD_BOOTSTRAP_MODE`
+- `base_type=opt-in:SIMARD_BOOTSTRAP_MODE`
+- `topology=opt-in:SIMARD_BOOTSTRAP_MODE`
 - the builtin identity `simard-engineer`
 
 **Checkpoint**: defaults are a startup choice, not a recovery path. This part of the audited contract already exists.
 
-## Step 3: Observe stopped-state behavior
+## Step 5: Observe stopped-state behavior
 
 The runtime preserves its snapshot after shutdown and surfaces a dedicated stopped-state error:
 
@@ -96,7 +153,7 @@ assert_eq!(
 
 After shutdown, the reflected manifest freshness becomes `Stale` so callers can tell they are looking at post-stop metadata instead of a live runtime.
 
-## Step 4: Inspect truthful reflection metadata
+## Step 6: Inspect truthful reflection metadata
 
 After a successful run, reflection reports the assembled contract and backend descriptors:
 
@@ -111,14 +168,25 @@ assert_eq!(
 );
 assert_eq!(snapshot.manifest_contract.provenance.source, "bootstrap");
 assert_eq!(snapshot.manifest_contract.freshness.state, FreshnessState::Current);
+assert_eq!(snapshot.runtime_node.to_string(), "node-local");
+assert_eq!(snapshot.mailbox_address.to_string(), "inmemory://node-local");
+assert_eq!(snapshot.agent_program_backend.identity, "agent-program::objective-relay");
+assert_eq!(snapshot.handoff_backend.identity, "handoff::in-memory");
 assert_eq!(snapshot.adapter_backend.identity, "local-harness");
+assert_eq!(snapshot.transport_backend.identity, "transport::in-memory-mailbox");
 ```
+
+If you launched with `SIMARD_BASE_TYPE="copilot-sdk"`, `snapshot.selected_base_type` still shows the explicit selection while `snapshot.adapter_backend.identity` remains `local-harness`. If you launched with `SIMARD_BASE_TYPE="rusty-clawd"`, reflection now reports `rusty-clawd::session-backend`. The runtime-side wiring is explicit too: single-process runs report `node-local` / `inmemory://node-local`, while loopback multi-process runs report `node-loopback-mesh` / `loopback://node-loopback-mesh`. Composite identities also expose `snapshot.identity_components`.
 
 ## Summary
 
 You now know:
 
 - how to run the local runtime with explicit config
+- how to switch between built-in base types without hidden inference
+- how `copilot-sdk` still aliases `local-harness` while `rusty-clawd` now reports a distinct backend honestly
+- how composite identities surface their assembled components explicitly
+- how loopback multi-process execution reuses the same runtime contracts
 - how opt-in defaults are recorded
 - how reflection reports truthful runtime metadata
 - how stop semantics behave after shutdown

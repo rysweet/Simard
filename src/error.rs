@@ -23,6 +23,10 @@ pub enum SimardError {
     UnknownIdentity {
         requested: String,
     },
+    InvalidIdentityComposition {
+        identity: String,
+        reason: String,
+    },
     InvalidManifestContract {
         field: String,
         reason: String,
@@ -44,6 +48,10 @@ pub enum SimardError {
         path: PathBuf,
         reason: String,
     },
+    UnsupportedMemoryPolicy {
+        field: String,
+        reason: String,
+    },
     UnsupportedBaseType {
         identity: String,
         base_type: String,
@@ -55,6 +63,17 @@ pub enum SimardError {
         base_type: String,
         reason: String,
     },
+    BaseTypeSessionCleanupFailed {
+        base_type: String,
+        action: String,
+        reason: String,
+        cleanup_reason: String,
+    },
+    InvalidBaseTypeSessionState {
+        base_type: String,
+        action: String,
+        reason: String,
+    },
     MissingCapability {
         base_type: String,
         capability: BaseTypeCapability,
@@ -62,6 +81,10 @@ pub enum SimardError {
     UnsupportedTopology {
         base_type: String,
         topology: RuntimeTopology,
+    },
+    UnsupportedRuntimeTopology {
+        topology: RuntimeTopology,
+        driver: String,
     },
     InvalidRuntimeTransition {
         from: RuntimeState,
@@ -76,6 +99,10 @@ pub enum SimardError {
     InvalidSessionTransition {
         from: SessionPhase,
         to: SessionPhase,
+    },
+    InvalidHandoffSnapshot {
+        field: String,
+        reason: String,
     },
     StoragePoisoned {
         store: String,
@@ -96,14 +123,18 @@ impl Display for SimardError {
             Self::NonUnicodeConfigValue { key } => {
                 write!(f, "configuration '{key}' must be valid UTF-8")
             }
-            Self::InvalidConfigValue { key, value, help } => {
-                write!(
-                    f,
-                    "invalid value '{value}' for configuration '{key}': {help}"
-                )
+            Self::InvalidConfigValue {
+                key,
+                value: _,
+                help,
+            } => {
+                write!(f, "invalid value for configuration '{key}': {help}")
             }
             Self::UnknownIdentity { requested } => {
                 write!(f, "identity '{requested}' is not registered")
+            }
+            Self::InvalidIdentityComposition { identity, reason } => {
+                write!(f, "identity '{identity}' has invalid composition: {reason}")
             }
             Self::InvalidManifestContract { field, reason } => {
                 write!(f, "invalid manifest contract field '{field}': {reason}")
@@ -111,29 +142,23 @@ impl Display for SimardError {
             Self::InvalidSessionId { value, reason } => {
                 write!(f, "invalid session id '{value}': {reason}")
             }
-            Self::PromptAssetMissing { asset_id, path } => {
+            Self::PromptAssetMissing { asset_id, path: _ } => {
                 write!(
                     f,
-                    "prompt asset '{asset_id}' was not found at {}",
-                    path.display()
+                    "prompt asset '{asset_id}' was not found under the configured prompt root"
                 )
             }
-            Self::PromptAssetRead { path, reason } => {
-                write!(
-                    f,
-                    "failed to read prompt asset {}: {reason}",
-                    path.display()
-                )
+            Self::PromptAssetRead { path: _, reason } => {
+                write!(f, "failed to read configured prompt asset: {reason}")
             }
             Self::InvalidPromptAssetPath {
                 asset_id,
-                path,
+                path: _,
                 reason,
-            } => write!(
-                f,
-                "invalid prompt asset path for '{asset_id}' at {}: {reason}",
-                path.display()
-            ),
+            } => write!(f, "invalid prompt asset path for '{asset_id}': {reason}"),
+            Self::UnsupportedMemoryPolicy { field, reason } => {
+                write!(f, "unsupported memory policy '{field}': {reason}")
+            }
             Self::UnsupportedBaseType {
                 identity,
                 base_type,
@@ -145,8 +170,28 @@ impl Display for SimardError {
                 write!(f, "no adapter is registered for base type '{base_type}'")
             }
             Self::AdapterInvocationFailed { base_type, reason } => {
-                write!(f, "base type '{base_type}' failed during invocation: {reason}")
+                write!(
+                    f,
+                    "base type '{base_type}' failed during invocation: {reason}"
+                )
             }
+            Self::BaseTypeSessionCleanupFailed {
+                base_type,
+                action,
+                reason,
+                cleanup_reason,
+            } => write!(
+                f,
+                "base type session '{base_type}' failed during '{action}': {reason}; cleanup failed: {cleanup_reason}"
+            ),
+            Self::InvalidBaseTypeSessionState {
+                base_type,
+                action,
+                reason,
+            } => write!(
+                f,
+                "base type session '{base_type}' cannot '{action}': {reason}"
+            ),
             Self::MissingCapability {
                 base_type,
                 capability,
@@ -161,6 +206,10 @@ impl Display for SimardError {
                 f,
                 "base type '{base_type}' does not support topology '{topology}'"
             ),
+            Self::UnsupportedRuntimeTopology { topology, driver } => write!(
+                f,
+                "runtime topology driver '{driver}' does not support topology '{topology}'"
+            ),
             Self::InvalidRuntimeTransition { from, to } => {
                 write!(f, "invalid runtime transition from '{from}' to '{to}'")
             }
@@ -168,10 +217,16 @@ impl Display for SimardError {
                 write!(f, "runtime is stopped and cannot '{action}'")
             }
             Self::RuntimeFailed { action } => {
-                write!(f, "runtime is failed and cannot '{action}' until it is stopped")
+                write!(
+                    f,
+                    "runtime is failed and cannot '{action}' until it is stopped"
+                )
             }
             Self::InvalidSessionTransition { from, to } => {
                 write!(f, "invalid session transition from '{from}' to '{to}'")
+            }
+            Self::InvalidHandoffSnapshot { field, reason } => {
+                write!(f, "invalid handoff snapshot field '{field}': {reason}")
             }
             Self::StoragePoisoned { store } => {
                 write!(f, "storage lock for '{store}' is poisoned")

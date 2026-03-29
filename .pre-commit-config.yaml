@@ -1,0 +1,37 @@
+fail_fast: false
+default_install_hook_types:
+  - pre-commit
+  - pre-push
+
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt --all -- --check
+        entry: cargo fmt --all -- --check
+        language: system
+        pass_filenames: false
+        files: ^(src/|tests/|Cargo\.toml|Cargo\.lock|prompt_assets/)
+        stages:
+          - pre-commit
+          - manual
+
+      - id: cargo-clippy
+        name: cargo clippy --all-targets --all-features --locked -- -D warnings
+        entry: cargo clippy --all-targets --all-features --locked -- -D warnings
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages:
+          - pre-push
+          - manual
+
+      - id: cargo-test
+        name: cargo test --all-features --locked
+        entry: cargo test --all-features --locked
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages:
+          - pre-push
+          - manual
