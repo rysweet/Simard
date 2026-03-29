@@ -23,6 +23,10 @@ pub enum SimardError {
     UnknownIdentity {
         requested: String,
     },
+    InvalidIdentityComposition {
+        identity: String,
+        reason: String,
+    },
     InvalidManifestContract {
         field: String,
         reason: String,
@@ -128,6 +132,9 @@ impl Display for SimardError {
             }
             Self::UnknownIdentity { requested } => {
                 write!(f, "identity '{requested}' is not registered")
+            }
+            Self::InvalidIdentityComposition { identity, reason } => {
+                write!(f, "identity '{identity}' has invalid composition: {reason}")
             }
             Self::InvalidManifestContract { field, reason } => {
                 write!(f, "invalid manifest contract field '{field}': {reason}")

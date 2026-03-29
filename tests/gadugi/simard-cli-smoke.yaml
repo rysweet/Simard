@@ -1,5 +1,5 @@
-name: "Simard CLI Runtime Smoke"
-description: "Outside-in smoke coverage for explicit local-harness, explicit rusty-clawd, and builtin-default bootstrap flows."
+name: "Simard Operator Runtime Behavior"
+description: "Outside-in operator coverage for base-type selection, composite identity execution, loopback multi-process runtime wiring, and handoff restore behavior."
 version: "1.0.0"
 
 config:
@@ -48,6 +48,20 @@ steps:
       command: "tests/gadugi/smoke-builtin-defaults.sh"
     timeout: 300000
 
+  - name: "Composite identity bootstrap"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/composite-identity.sh"
+    timeout: 300000
+
+  - name: "Composite handoff roundtrip"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/handoff-roundtrip.sh"
+    timeout: 300000
+
 assertions: []
 
 cleanup:
@@ -58,9 +72,11 @@ cleanup:
 metadata:
   tags:
     - "cli"
-    - "smoke"
+    - "behavior"
     - "simard"
     - "bootstrap"
+    - "handoff"
+    - "composite"
   priority: "high"
   author: "copilot"
   test_type: "outside-in"

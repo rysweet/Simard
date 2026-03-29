@@ -28,7 +28,7 @@ Use this guide when you need to answer two questions:
 
 Provide both the prompt root and objective yourself.
 
-For the builtin `simard-engineer` identity, the current local scaffold accepts `local-harness`, `rusty-clawd`, or `copilot-sdk` as explicit base-type choices. `rusty-clawd` is now a distinct session backend, while `copilot-sdk` remains an explicit alias of `local-harness`. The default local bootstrap path still injects `single-process`, so CLI runs must keep `SIMARD_RUNTIME_TOPOLOGY=single-process`.
+For the builtin identities in this repo, the current scaffold accepts `local-harness`, `rusty-clawd`, or `copilot-sdk` as explicit base-type choices. `rusty-clawd` is a distinct session backend, while `copilot-sdk` remains an explicit alias of `local-harness`. The bootstrap path now injects either the in-process runtime services for `single-process` or the loopback mesh services for `multi-process`, so unsupported topology/base-type pairs fail explicitly instead of being rewritten.
 
 ```bash
 SIMARD_PROMPT_ROOT="$PWD/prompt_assets" \
@@ -92,7 +92,7 @@ In the current repo:
 - `SIMARD_OBJECTIVE` resolves to the builtin engineer-loop objective
 - `SIMARD_IDENTITY` resolves to `simard-engineer`
 - `SIMARD_BASE_TYPE` resolves to `local-harness`
-- `SIMARD_RUNTIME_TOPOLOGY` resolves to `single-process`
+- `SIMARD_RUNTIME_TOPOLOGY` resolves to the topology you selected, with builtin defaults still opting into `single-process`
 - the configuration source is recorded as `opt-in:SIMARD_BOOTSTRAP_MODE`
 
 Builtin defaults are startup choices. They are not recovery behavior.
@@ -141,7 +141,7 @@ assert_eq!(snapshot.memory_backend.identity, "memory::session-cache");
 assert_eq!(snapshot.evidence_backend.identity, "evidence::append-only-log");
 ```
 
-If you launched with `SIMARD_BASE_TYPE="copilot-sdk"`, `snapshot.selected_base_type` still shows the alias you chose while `snapshot.adapter_backend.identity` remains `local-harness`. If you launched with `SIMARD_BASE_TYPE="rusty-clawd"`, reflection now truthfully reports `snapshot.adapter_backend.identity == "rusty-clawd::session-backend"`.
+If you launched with `SIMARD_BASE_TYPE="copilot-sdk"`, `snapshot.selected_base_type` still shows the alias you chose while `snapshot.adapter_backend.identity` remains `local-harness`. If you launched with `SIMARD_BASE_TYPE="rusty-clawd"`, reflection truthfully reports `snapshot.adapter_backend.identity == "rusty-clawd::session-backend"`. Composite identities also surface `snapshot.identity_components` so operator tooling can see which roles were assembled.
 
 The same redaction rule applies to persisted session text: scratch memory, session summaries, and reflection summaries record `objective-metadata(...)` instead of the raw `SIMARD_OBJECTIVE` string.
 
@@ -233,7 +233,7 @@ export SIMARD_BOOTSTRAP_MODE=builtin-defaults
 
 **Solution**: pick a base type the identity allows, make sure the base-type factory is registered for that identity, and choose a topology supported by both the injected runtime services and the selected base-type backend. Simard does not substitute a different base type or downgrade the topology silently.
 
-Today, the local CLI bootstrap path still requires `SIMARD_RUNTIME_TOPOLOGY=single-process` for all builtin base types because it injects the in-process topology driver. `copilot-sdk` still reports `Adapter implementation: local-harness`, while `rusty-clawd` now reports `Adapter implementation: rusty-clawd::session-backend`.
+Today, builtin defaults still choose `single-process`, `copilot-sdk` still reports `Adapter implementation: local-harness`, and `rusty-clawd` reports `Adapter implementation: rusty-clawd::session-backend`. If you request `multi-process`, bootstrap now injects the loopback mesh topology/transport/supervisor path, and composition still fails explicitly if the selected base type does not support that topology.
 
 ### Project writes are rejected in v1
 

@@ -5,17 +5,20 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
 OUTPUT="$(
-  SIMARD_PROMPT_ROOT="$ROOT/prompt_assets" \
-  SIMARD_OBJECTIVE='verify rusty-clawd bootstrap' \
-  SIMARD_IDENTITY='simard-engineer' \
-  SIMARD_BASE_TYPE='rusty-clawd' \
-  SIMARD_RUNTIME_TOPOLOGY='single-process' \
-  cargo run --quiet
+  cargo run --quiet --bin simard_operator_probe -- \
+    bootstrap-run simard-engineer rusty-clawd multi-process \
+    "verify rusty clawd operator bootstrap"
 )"
 
 printf '%s\n' "$OUTPUT"
 
-printf '%s\n' "$OUTPUT" | grep -F "Bootstrap mode: explicit-config" >/dev/null
-printf '%s\n' "$OUTPUT" | grep -F "Bootstrap selection: identity=simard-engineer, base_type=rusty-clawd, topology=single-process" >/dev/null
+printf '%s\n' "$OUTPUT" | grep -F "Probe mode: bootstrap-run" >/dev/null
+printf '%s\n' "$OUTPUT" | grep -F "Identity: simard-engineer" >/dev/null
+printf '%s\n' "$OUTPUT" | grep -F "Selected base type: rusty-clawd" >/dev/null
+printf '%s\n' "$OUTPUT" | grep -F "Topology: multi-process" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Adapter implementation: rusty-clawd::session-backend" >/dev/null
+printf '%s\n' "$OUTPUT" | grep -F "Topology backend: topology::loopback-mesh" >/dev/null
+printf '%s\n' "$OUTPUT" | grep -F "Transport backend: transport::loopback-mailbox" >/dev/null
+printf '%s\n' "$OUTPUT" | grep -F "Session phase: complete" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Shutdown: stopped" >/dev/null
+printf '%s\n' "$OUTPUT" | grep -F "Execution summary: RustyClawd session backend executed objective-metadata(" >/dev/null

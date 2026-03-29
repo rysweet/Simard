@@ -17,6 +17,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Bootstrap selection: identity={}, base_type={}, topology={}",
         config.identity, config.selected_base_type.value, config.topology.value
     );
+    if !execution.snapshot.identity_components.is_empty() {
+        println!(
+            "Identity components: {}",
+            execution.snapshot.identity_components.join(", ")
+        );
+    }
     println!(
         "Snapshot: state={}, topology={}, base_type={}",
         execution.snapshot.runtime_state,

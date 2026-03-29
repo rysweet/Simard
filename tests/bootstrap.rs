@@ -182,6 +182,7 @@ fn builtin_identity_loader_preserves_manifest_contract_metadata() {
         .expect("builtin identity should load");
 
     assert_eq!(manifest.contract, contract);
+    assert!(manifest.components.is_empty());
 }
 
 #[test]
@@ -213,6 +214,7 @@ fn bootstrap_assembly_produces_truthful_manifest_metadata() {
         snapshot.selected_base_type,
         BaseTypeId::new("local-harness")
     );
+    assert!(snapshot.identity_components.is_empty());
     assert_eq!(snapshot.topology, RuntimeTopology::SingleProcess);
     assert!(
         snapshot
@@ -312,6 +314,40 @@ fn bootstrap_run_local_session_executes_the_cli_lifecycle() {
 }
 
 #[test]
+fn bootstrap_supports_composite_identity_execution() {
+    let config = BootstrapConfig::resolve(BootstrapInputs {
+        prompt_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")),
+        objective: Some("exercise the composite engineer loop".to_string()),
+        identity: Some("simard-composite-engineer".to_string()),
+        base_type: Some("local-harness".to_string()),
+        topology: Some("single-process".to_string()),
+        ..BootstrapInputs::default()
+    })
+    .expect("explicit composite bootstrap config should resolve");
+
+    let execution = run_local_session(&config).expect("composite identity should execute");
+
+    assert_eq!(
+        execution.snapshot.identity_name,
+        "simard-composite-engineer"
+    );
+    assert_eq!(
+        execution.snapshot.identity_components,
+        vec![
+            "simard-engineer".to_string(),
+            "simard-meeting".to_string(),
+            "simard-gym".to_string()
+        ]
+    );
+    assert_eq!(execution.snapshot.topology, RuntimeTopology::SingleProcess);
+    assert_eq!(execution.snapshot.adapter_backend.identity, "local-harness");
+    assert_eq!(
+        execution.outcome.session.phase,
+        simard::SessionPhase::Complete
+    );
+}
+
+#[test]
 fn bootstrap_assembly_supports_multiple_builtin_manifest_base_types() {
     for base_type in ["local-harness", "rusty-clawd", "copilot-sdk"] {
         let config = BootstrapConfig::resolve(BootstrapInputs {
@@ -367,6 +403,48 @@ fn bootstrap_assembly_supports_multiple_builtin_manifest_base_types() {
 }
 
 #[test]
+fn bootstrap_supports_rusty_clawd_multi_process_execution() {
+    let config = BootstrapConfig::resolve(BootstrapInputs {
+        prompt_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")),
+        objective: Some("exercise multi-process rusty-clawd bootstrap".to_string()),
+        identity: Some("simard-engineer".to_string()),
+        base_type: Some("rusty-clawd".to_string()),
+        topology: Some("multi-process".to_string()),
+        ..BootstrapInputs::default()
+    })
+    .expect("multi-process bootstrap config should resolve");
+
+    let execution =
+        run_local_session(&config).expect("loopback multi-process bootstrap should execute");
+
+    assert_eq!(execution.snapshot.topology, RuntimeTopology::MultiProcess);
+    assert_eq!(
+        execution.snapshot.runtime_node.to_string(),
+        "node-loopback-mesh"
+    );
+    assert_eq!(
+        execution.snapshot.mailbox_address.to_string(),
+        "loopback://node-loopback-mesh"
+    );
+    assert_eq!(
+        execution.snapshot.adapter_backend.identity,
+        "rusty-clawd::session-backend"
+    );
+    assert_eq!(
+        execution.snapshot.topology_backend.identity,
+        "topology::loopback-mesh"
+    );
+    assert_eq!(
+        execution.snapshot.transport_backend.identity,
+        "transport::loopback-mailbox"
+    );
+    assert_eq!(
+        execution.snapshot.supervisor_backend.identity,
+        "supervisor::coordinated"
+    );
+}
+
+#[test]
 fn bootstrap_assembly_surfaces_identity_base_type_mismatches_explicitly() {
     let config = BootstrapConfig::resolve(BootstrapInputs {
         prompt_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")),
@@ -411,9 +489,9 @@ fn bootstrap_assembly_surfaces_unsupported_topologies_explicitly() {
 
     assert_eq!(
         error,
-        SimardError::UnsupportedRuntimeTopology {
+        SimardError::UnsupportedTopology {
+            base_type: "local-harness".to_string(),
             topology: RuntimeTopology::Distributed,
-            driver: "topology::in-process".to_string(),
         }
     );
 }

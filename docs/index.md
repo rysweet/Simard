@@ -26,7 +26,8 @@ Today Simard provides:
 - explicit bootstrap configuration, with `builtin-defaults` available only through opt-in startup mode
 - explicit base-type and topology selection at bootstrap, with opt-in defaults only in `builtin-defaults`
 - builtin manifest-advertised base types selectable at startup today: `local-harness`, `rusty-clawd`, and `copilot-sdk`, with `rusty-clawd` wired as a distinct session backend and `copilot-sdk` still aliased to the local harness implementation
-- `single-process` as the only supported v1 topology for the builtin base types, with unsupported pairs failing explicitly
+- builtin identities selectable at startup today: `simard-engineer`, `simard-meeting`, `simard-gym`, and the composite `simard-composite-engineer`
+- `single-process` for all builtin base types plus loopback `multi-process` execution for `rusty-clawd`, with unsupported pairs failing explicitly
 - `ManifestContract { entrypoint, composition, precedence, provenance, freshness }`
 - `ReflectionSnapshot { manifest_contract, runtime_node, mailbox_address, agent_program_backend, adapter_backend, topology_backend, transport_backend, supervisor_backend, memory_backend, evidence_backend }`
 - truthful memory and evidence backend descriptors
@@ -66,3 +67,4 @@ If you need exact field names or error contracts, use the [runtime contracts ref
 If you are changing architecture, read the [truthful runtime metadata concept guide](./concepts/truthful-runtime-metadata.md) first.
 
 - runtime handoff export/import through `RuntimeHandoffSnapshot` and `RuntimeKernel::compose_from_handoff(...)`
+- operator-level runtime validation through `cargo run --quiet --bin simard_operator_probe -- ...`

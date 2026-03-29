@@ -9,6 +9,7 @@ use crate::session::SessionPhase;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReflectionSnapshot {
     pub identity_name: String,
+    pub identity_components: Vec<String>,
     pub selected_base_type: BaseTypeId,
     pub topology: RuntimeTopology,
     pub runtime_state: RuntimeState,

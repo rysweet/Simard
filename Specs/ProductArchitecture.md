@@ -52,8 +52,8 @@ The long-term vision is broader than the first shippable version.
 For delivery purposes, v1 should be interpreted narrowly:
 
 - one primary engineer loop
-- one default local single-process deployment path
-- three builtin manifest-advertised base-type selections in the local scaffold: `local-harness`, `rusty-clawd`, and `copilot-sdk`, with the latter two behaving as explicit v1 aliases of the local harness implementation
+- one default local single-process deployment path, plus an explicit loopback multi-process operator path for supported base types
+- three builtin manifest-advertised base-type selections in the local scaffold: `local-harness`, `rusty-clawd`, and `copilot-sdk`, with `rusty-clawd` now behaving as a distinct session backend and `copilot-sdk` remaining an explicit alias of the local harness implementation
 - one durable memory path
 - one small benchmark set
 
@@ -68,7 +68,7 @@ The following are hard constraints for the first implementation, not deferred as
 
 - **Dependency injection from the outset**: runtime composition must happen through explicit ports, traits, and typed configuration rather than hidden globals or direct construction buried inside the core loop.
 - **Distributed-readiness from the outset**: runtime, session, memory, and reflection contracts must not assume in-process execution even when the first deployment path is single-process.
-- **Multiple base types from the outset**: identity manifests and runtime selection logic must support multiple base types immediately. In the current v1 scaffold, `local-harness`, `rusty-clawd`, and `copilot-sdk` are all selectable builtin base types, but `rusty-clawd` and `copilot-sdk` are still explicit aliases of the same local single-process harness implementation.
+- **Multiple base types from the outset**: identity manifests and runtime selection logic must support multiple base types immediately. In the current v1 scaffold, `local-harness`, `rusty-clawd`, and `copilot-sdk` are all selectable builtin base types. `rusty-clawd` is now a distinct session backend, while `copilot-sdk` remains an explicit alias of the local single-process harness implementation.
 - **Visible failures from the outset**: unsupported capabilities, missing prompt assets, invalid lifecycle transitions, and unsupported topologies must fail explicitly through typed errors instead of silent fallbacks.
 
 ## Non-Goals
@@ -463,8 +463,8 @@ The identity should not need different business logic just because its internals
 That does not mean every topology has identical semantics.
 Ordering, latency, freshness, and partial-failure behavior may differ across deployment shapes, and the runtime must expose those guarantees honestly.
 
-In the current v1 scaffold, the default CLI bootstrap path still injects `single-process`, so builtin terminal runs fail early on `UnsupportedRuntimeTopology` if you request `multi-process` or `distributed`.
-The runtime core now also ships a second injected topology path for mesh-style runs, proving that agent logic can stay unchanged while topology services vary. That is still an internal/runtime seam, not a full distributed product feature.
+In the current v1 scaffold, builtin defaults still inject `single-process`, but explicit bootstrap now also supports a loopback `multi-process` path for compatible base types such as `rusty-clawd`.
+The runtime core also ships handoff export/restore and a composite builtin identity surface, proving that agent logic and identity composition can stay stable while topology services and runtime ownership vary. This is still not a full distributed product feature.
 
 This is close to the hive-mind idea in amplihack:
 agent communication and memory semantics should be fundamentally the same whether the system is local or distributed.

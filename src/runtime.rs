@@ -889,6 +889,7 @@ impl RuntimeKernel {
 
         Ok(ReflectionSnapshot {
             identity_name: self.request.manifest.name.clone(),
+            identity_components: self.request.manifest.components.clone(),
             selected_base_type: self.request.selected_base_type.clone(),
             topology: self.request.topology,
             runtime_state: self.state,

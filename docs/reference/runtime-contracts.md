@@ -19,9 +19,10 @@ This file describes the API shape that exists in the repository today.
 
 ## Public surfaces
 
-Simard v1 currently exposes two surfaces:
+Simard v1 currently exposes three surfaces:
 
 - the local CLI bootstrap path through `cargo run --quiet`
+- the operator/runtime probe through `cargo run --quiet --bin simard_operator_probe -- ...`
 - the in-process Rust runtime/bootstrap types in `src/bootstrap.rs`, `src/runtime.rs`, and related modules
 
 Simard v1 does **not** currently expose:
@@ -47,7 +48,7 @@ The stable contract in this repository is the bootstrap/runtime behavior describ
 
 ### Current builtin base-type registrations
 
-The builtin `simard-engineer` identity currently advertises and local bootstrap registers these base types:
+The builtin identities currently advertised by the loader are `simard-engineer`, `simard-meeting`, `simard-gym`, and the composite `simard-composite-engineer`. Their common builtin base-type registrations are:
 
 | Base type selection | Current session backend implementation | Supported topologies in this scaffold |
 | --- | --- | --- |
@@ -58,8 +59,9 @@ The builtin `simard-engineer` identity currently advertises and local bootstrap 
 Notes:
 
 - bootstrap registers base-type factories from the manifest-advertised base-type list instead of assuming a single hardcoded local backend
-- for the local CLI bootstrap path, `multi-process` and `distributed` still fail first with `UnsupportedRuntimeTopology` because the injected topology driver is `topology::in-process`
-- outside bootstrap, the runtime also ships a second injected topology path through `topology::loopback-mesh` and `transport::loopback-mailbox` for multi-process style execution and migration tests
+- for `single-process`, bootstrap injects `topology::in-process`, `transport::in-memory-mailbox`, and `supervisor::in-process`
+- for `multi-process` and `distributed`, bootstrap injects `topology::loopback-mesh`, `transport::loopback-mailbox`, and `supervisor::coordinated`
+- unsupported topology/base-type pairs still fail explicitly; for example, `local-harness + multi-process` returns `UnsupportedTopology`
 - if a future identity advertises a base type without a registered factory, runtime composition still fails explicitly with `AdapterNotRegistered`
 - the descriptors remain truthful: `selected_base_type` preserves the explicit choice, while `adapter_backend.identity` exposes the actual backend (`rusty-clawd::session-backend` for `rusty-clawd`, `local-harness` for the current `copilot-sdk` alias)
 - `runtime_node`, `mailbox_address`, `topology_backend`, `transport_backend`, `supervisor_backend`, and `handoff_backend` expose the actual runtime assembly rather than inferred labels
@@ -258,6 +260,7 @@ After `run()` fails:
 ```rust
 pub struct ReflectionSnapshot {
     pub identity_name: String,
+    pub identity_components: Vec<String>,
     pub selected_base_type: BaseTypeId,
     pub topology: RuntimeTopology,
     pub runtime_state: RuntimeState,
@@ -312,6 +315,7 @@ Reflection rules:
 | `NonUnicodeConfigValue` | A configuration value exists but cannot be decoded as UTF-8. |
 | `InvalidConfigValue` | A configuration value is present but invalid. |
 | `UnknownIdentity` | Requested identity is not registered. |
+| `InvalidIdentityComposition` | A composite identity definition is internally inconsistent. |
 | `InvalidManifestContract` | Manifest contract metadata is incomplete or untruthful. |
 | `ClockBeforeUnixEpoch` | Runtime metadata could not record a truthful observation time. |
 | `InvalidSessionId` | A supplied session ID is not a valid distributed-safe identifier. |
@@ -328,6 +332,7 @@ Reflection rules:
 | `InvalidRuntimeTransition` | A runtime lifecycle transition is invalid. |
 | `InvalidBaseTypeSessionState` | A base-type session was opened, used, or closed out of order. |
 | `AdapterInvocationFailed` | The selected base-type backend failed while executing a turn. |
+| `BaseTypeSessionCleanupFailed` | A base-type session failed during execution and then also failed to close cleanly. |
 | `InvalidHandoffSnapshot` | A handoff snapshot could not be restored into the requested runtime. |
 | `RuntimeStopped` | Caller attempted `start`, `run`, or `stop` after shutdown was already in effect. |
 | `RuntimeFailed` | Caller attempted `start` or `run` after a failed execution but before shutdown. |

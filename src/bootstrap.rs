@@ -14,7 +14,8 @@ use crate::metadata::{Freshness, Provenance};
 use crate::prompt_assets::FilePromptAssetStore;
 use crate::reflection::{ReflectionSnapshot, ReflectiveRuntime};
 use crate::runtime::{
-    BaseTypeRegistry, LocalRuntime, RuntimePorts, RuntimeRequest, RuntimeTopology, SessionOutcome,
+    BaseTypeRegistry, CoordinatedSupervisor, LocalRuntime, LoopbackMailboxTransport,
+    LoopbackMeshTopologyDriver, RuntimePorts, RuntimeRequest, RuntimeTopology, SessionOutcome,
 };
 use crate::session::UuidSessionIdGenerator;
 
@@ -251,7 +252,7 @@ pub fn assemble_local_runtime(config: &BootstrapConfig) -> SimardResult<LocalRun
         env!("CARGO_PKG_VERSION"),
         contract,
     ))?;
-    let base_types = base_type_registry_for_manifest(&manifest)?;
+    let base_types = builtin_base_type_registry_for_manifest(&manifest)?;
 
     let request = RuntimeRequest::new(
         manifest,
@@ -260,13 +261,13 @@ pub fn assemble_local_runtime(config: &BootstrapConfig) -> SimardResult<LocalRun
     );
 
     LocalRuntime::compose(
-        RuntimePorts::new(
+        runtime_ports_for_topology(
             prompt_store,
             memory_store,
             evidence_store,
             base_types,
-            Arc::new(UuidSessionIdGenerator),
-        ),
+            config.topology.value,
+        )?,
         request,
     )
 }
@@ -320,12 +321,44 @@ fn parse_runtime_topology(value: String) -> SimardResult<RuntimeTopology> {
     }
 }
 
-fn base_type_registry_for_manifest(manifest: &IdentityManifest) -> SimardResult<BaseTypeRegistry> {
+pub fn builtin_base_type_registry_for_manifest(
+    manifest: &IdentityManifest,
+) -> SimardResult<BaseTypeRegistry> {
     let mut base_types = BaseTypeRegistry::default();
     for base_type in &manifest.supported_base_types {
         register_builtin_base_type(&mut base_types, base_type)?;
     }
     Ok(base_types)
+}
+
+fn runtime_ports_for_topology(
+    prompt_store: Arc<FilePromptAssetStore>,
+    memory_store: Arc<InMemoryMemoryStore>,
+    evidence_store: Arc<InMemoryEvidenceStore>,
+    base_types: BaseTypeRegistry,
+    topology: RuntimeTopology,
+) -> SimardResult<RuntimePorts> {
+    match topology {
+        RuntimeTopology::SingleProcess => Ok(RuntimePorts::new(
+            prompt_store,
+            memory_store,
+            evidence_store,
+            base_types,
+            Arc::new(UuidSessionIdGenerator),
+        )),
+        RuntimeTopology::MultiProcess | RuntimeTopology::Distributed => {
+            Ok(RuntimePorts::with_runtime_services(
+                prompt_store,
+                memory_store,
+                evidence_store,
+                base_types,
+                Arc::new(LoopbackMeshTopologyDriver::try_default()?),
+                Arc::new(LoopbackMailboxTransport::try_default()?),
+                Arc::new(CoordinatedSupervisor::try_default()?),
+                Arc::new(UuidSessionIdGenerator),
+            ))
+        }
+    }
 }
 
 fn register_builtin_base_type(
@@ -362,7 +395,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
 
-    use super::{LOCAL_BASE_TYPE, base_type_registry_for_manifest, decode_utf8_env_value};
+    use super::{LOCAL_BASE_TYPE, builtin_base_type_registry_for_manifest, decode_utf8_env_value};
     use crate::base_types::{BaseTypeFactory, BaseTypeId, RustyClawdAdapter};
     use crate::error::SimardError;
     use crate::identity::{
@@ -401,7 +434,8 @@ mod tests {
             ))
             .expect("builtin identity should load");
 
-        let registry = base_type_registry_for_manifest(&manifest).expect("registry should build");
+        let registry =
+            builtin_base_type_registry_for_manifest(&manifest).expect("registry should build");
         let local = registry
             .get(&BaseTypeId::new("local-harness"))
             .expect("local harness should be registered");

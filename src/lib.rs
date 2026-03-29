@@ -21,7 +21,8 @@ pub use base_types::{
 };
 pub use bootstrap::{
     BootstrapConfig, BootstrapInputs, BootstrapMode, ConfigValue, ConfigValueSource,
-    LocalSessionExecution, assemble_local_runtime, bootstrap_entrypoint, run_local_session,
+    LocalSessionExecution, assemble_local_runtime, bootstrap_entrypoint,
+    builtin_base_type_registry_for_manifest, run_local_session,
 };
 pub use error::{SimardError, SimardResult};
 pub use evidence::{EvidenceRecord, EvidenceSource, EvidenceStore, InMemoryEvidenceStore};

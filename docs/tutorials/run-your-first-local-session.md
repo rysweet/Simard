@@ -32,7 +32,7 @@ This tutorial follows the runtime path that exists in the repository today.
 
 From the repository root, start Simard with a real prompt asset directory and an explicit objective.
 
-For the builtin `simard-engineer` identity, you can currently choose `local-harness`, `rusty-clawd`, or `copilot-sdk` here. `rusty-clawd` is now a distinct backend, while `copilot-sdk` remains an explicit alias of the local harness implementation. The CLI bootstrap path still keeps `SIMARD_RUNTIME_TOPOLOGY="single-process"` because it injects the in-process topology driver.
+For the builtin identities in this repo, you can currently choose `local-harness`, `rusty-clawd`, or `copilot-sdk` here. `rusty-clawd` is a distinct backend, while `copilot-sdk` remains an explicit alias of the local harness implementation. The default bootstrap path still opts into `single-process`, but the runtime can now inject a loopback `multi-process` topology when you request a supported pairing such as `rusty-clawd + multi-process`.
 
 ```bash
 SIMARD_PROMPT_ROOT="$PWD/prompt_assets" \
@@ -78,9 +78,37 @@ Snapshot: state=ready, topology=single-process, base_type=copilot-sdk
 Adapter implementation: local-harness
 ```
 
-**Checkpoint**: the runtime contract is explicit. `copilot-sdk` is selectable now, but the v1 scaffold still only supports `single-process`, and the underlying implementation stays `local-harness`. Simard preserves the selected base type without pretending it is already a distinct backend integration.
+**Checkpoint**: the runtime contract is explicit. `copilot-sdk` is selectable now, but its underlying implementation still stays `local-harness`. Simard preserves the selected base type without pretending the alias is already a distinct backend integration.
 
-## Step 3: Opt in to builtin defaults
+## Step 3: Exercise a composite identity and loopback multi-process runtime
+
+Use the shipped operator probe to validate the broader runtime seams like an operator would.
+
+```bash
+cargo run --quiet --bin simard_operator_probe -- \
+  bootstrap-run simard-composite-engineer local-harness single-process \
+  "exercise the composite engineer loop"
+```
+
+Then run the multi-process path:
+
+```bash
+cargo run --quiet --bin simard_operator_probe -- \
+  bootstrap-run simard-engineer rusty-clawd multi-process \
+  "exercise loopback multi-process runtime"
+```
+
+Look for:
+
+- `Identity components: simard-engineer, simard-meeting, simard-gym`
+- `Topology: multi-process`
+- `Topology backend: topology::loopback-mesh`
+- `Transport backend: transport::loopback-mailbox`
+- `Adapter implementation: rusty-clawd::session-backend`
+
+**Checkpoint**: composition and topology are now visible runtime facts, not just architecture aspirations.
+
+## Step 4: Opt in to builtin defaults
 
 Builtin defaults exist for local bootstrap convenience, but they are only used when startup opts in.
 
@@ -100,7 +128,7 @@ You should see:
 
 **Checkpoint**: defaults are a startup choice, not a recovery path. This part of the audited contract already exists.
 
-## Step 4: Observe stopped-state behavior
+## Step 5: Observe stopped-state behavior
 
 The runtime preserves its snapshot after shutdown and surfaces a dedicated stopped-state error:
 
@@ -125,7 +153,7 @@ assert_eq!(
 
 After shutdown, the reflected manifest freshness becomes `Stale` so callers can tell they are looking at post-stop metadata instead of a live runtime.
 
-## Step 5: Inspect truthful reflection metadata
+## Step 6: Inspect truthful reflection metadata
 
 After a successful run, reflection reports the assembled contract and backend descriptors:
 
@@ -148,7 +176,7 @@ assert_eq!(snapshot.adapter_backend.identity, "local-harness");
 assert_eq!(snapshot.transport_backend.identity, "transport::in-memory-mailbox");
 ```
 
-If you launched with `SIMARD_BASE_TYPE="copilot-sdk"`, `snapshot.selected_base_type` still shows the explicit selection while `snapshot.adapter_backend.identity` remains `local-harness`. If you launched with `SIMARD_BASE_TYPE="rusty-clawd"`, reflection now reports `rusty-clawd::session-backend`. The runtime-side wiring is also explicit: the current scaffold reports `node-local`, `inmemory://node-local`, `handoff::in-memory`, and the injected in-process topology, transport, and supervisor backends instead of implying future distributed support.
+If you launched with `SIMARD_BASE_TYPE="copilot-sdk"`, `snapshot.selected_base_type` still shows the explicit selection while `snapshot.adapter_backend.identity` remains `local-harness`. If you launched with `SIMARD_BASE_TYPE="rusty-clawd"`, reflection now reports `rusty-clawd::session-backend`. The runtime-side wiring is explicit too: single-process runs report `node-local` / `inmemory://node-local`, while loopback multi-process runs report `node-loopback-mesh` / `loopback://node-loopback-mesh`. Composite identities also expose `snapshot.identity_components`.
 
 ## Summary
 
@@ -157,6 +185,8 @@ You now know:
 - how to run the local runtime with explicit config
 - how to switch between built-in base types without hidden inference
 - how `copilot-sdk` still aliases `local-harness` while `rusty-clawd` now reports a distinct backend honestly
+- how composite identities surface their assembled components explicitly
+- how loopback multi-process execution reuses the same runtime contracts
 - how opt-in defaults are recorded
 - how reflection reports truthful runtime metadata
 - how stop semantics behave after shutdown
