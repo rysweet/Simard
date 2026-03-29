@@ -1,3 +1,4 @@
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -108,17 +109,53 @@ pub fn execute_terminal_turn(
 
 fn normalize_shell(value: &str, base_type: &str) -> SimardResult<String> {
     let shell = value.trim();
+    let shell_path = Path::new(shell);
     if shell.is_empty()
         || shell.contains('\n')
         || shell.contains('\r')
-        || shell.contains('\'')
         || shell.chars().any(char::is_whitespace)
+        || !shell_path.is_absolute()
+        || !shell
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-'))
     {
         return Err(SimardError::AdapterInvocationFailed {
             base_type: base_type.to_string(),
-            reason:
-                "terminal-shell only accepts a single shell path token without quotes or whitespace"
-                    .to_string(),
+            reason: "terminal-shell only accepts an absolute shell executable path using safe path characters"
+                .to_string(),
+        });
+    }
+
+    let metadata =
+        fs::metadata(shell_path).map_err(|error| SimardError::AdapterInvocationFailed {
+            base_type: base_type.to_string(),
+            reason: format!(
+                "terminal-shell shell path '{}' could not be inspected: {error}",
+                shell_path.display()
+            ),
+        })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+            return Err(SimardError::AdapterInvocationFailed {
+                base_type: base_type.to_string(),
+                reason: format!(
+                    "terminal-shell shell path '{}' must be an executable file",
+                    shell_path.display()
+                ),
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    if !metadata.is_file() {
+        return Err(SimardError::AdapterInvocationFailed {
+            base_type: base_type.to_string(),
+            reason: format!(
+                "terminal-shell shell path '{}' must be a file",
+                shell_path.display()
+            ),
         });
     }
 
@@ -238,4 +275,39 @@ fn transcript_preview(transcript: &str) -> String {
     }
 
     normalized
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_shell;
+
+    #[test]
+    fn normalize_shell_accepts_known_safe_absolute_shell() {
+        assert_eq!(
+            normalize_shell("/usr/bin/bash", "terminal-shell").unwrap(),
+            "/usr/bin/bash"
+        );
+    }
+
+    #[test]
+    fn normalize_shell_rejects_metacharacters() {
+        let error = normalize_shell("/usr/bin/bash$(printf-pwned)", "terminal-shell").unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "only accepts an absolute shell executable path using safe path characters"
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn normalize_shell_rejects_relative_paths() {
+        let error = normalize_shell("bash", "terminal-shell").unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "only accepts an absolute shell executable path using safe path characters"
+            ),
+            "unexpected error: {error}"
+        );
+    }
 }

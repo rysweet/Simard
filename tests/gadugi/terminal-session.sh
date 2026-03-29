@@ -22,3 +22,19 @@ printf '%s\n' "$OUTPUT" | grep -F "Adapter capabilities: prompt-assets, session-
 printf '%s\n' "$OUTPUT" | grep -F "Session phase: complete" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Terminal evidence: terminal-command-count=2" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "terminal-foundation-ok" >/dev/null
+
+MARKER="$(mktemp /tmp/simard-terminal-injection.XXXXXX)"
+rm -f "$MARKER"
+BAD_OBJECTIVE="$(printf 'shell: /usr/bin/bash$(printf pwned>%s)\ncommand: pwd\n' "$MARKER")"
+
+set +e
+BAD_OUTPUT="$(
+  cargo run --quiet --bin simard_operator_probe -- \
+    terminal-run single-process "$BAD_OBJECTIVE" 2>&1
+)"
+BAD_STATUS=$?
+set -e
+
+[ "$BAD_STATUS" -ne 0 ]
+[ ! -e "$MARKER" ]
+printf '%s\n' "$BAD_OUTPUT" | grep -F "terminal-shell only accepts an absolute shell executable path using safe path characters" >/dev/null
