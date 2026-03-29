@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::agent_program::{AgentProgram, MeetingFacilitatorProgram, ObjectiveRelayProgram};
-use crate::base_types::{BaseTypeId, LocalProcessHarnessAdapter, RustyClawdAdapter};
+use crate::base_types::{
+    BaseTypeId, LocalProcessHarnessAdapter, RustyClawdAdapter, TerminalShellAdapter,
+};
 use crate::error::{SimardError, SimardResult};
 use crate::evidence::{EvidenceStore, FileBackedEvidenceStore};
 use crate::handoff::{FileBackedHandoffStore, RuntimeHandoffSnapshot, RuntimeHandoffStore};
@@ -27,6 +29,7 @@ const DEFAULT_IDENTITY: &str = "simard-engineer";
 const DEFAULT_OBJECTIVE: &str = "bootstrap the Simard engineer loop";
 const DEFAULT_STATE_ROOT: &str = "target/simard-state";
 const LOCAL_BASE_TYPE: &str = "local-harness";
+const TERMINAL_SHELL_BASE_TYPE: &str = "terminal-shell";
 const RUSTY_CLAWD_BASE_TYPE: &str = "rusty-clawd";
 const COPILOT_SDK_BASE_TYPE: &str = "copilot-sdk";
 
@@ -500,6 +503,10 @@ fn register_builtin_base_type(
                 base_type.as_str(),
                 LOCAL_BASE_TYPE,
             )?);
+            Ok(())
+        }
+        TERMINAL_SHELL_BASE_TYPE => {
+            base_types.register(TerminalShellAdapter::registered(base_type.as_str())?);
             Ok(())
         }
         RUSTY_CLAWD_BASE_TYPE => {

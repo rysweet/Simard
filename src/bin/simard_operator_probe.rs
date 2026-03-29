@@ -32,6 +32,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let objective = args.next().ok_or("expected objective")?;
             run_meeting_probe(&base_type, &topology, &objective)?;
         }
+        "terminal-run" => {
+            let topology = args.next().ok_or("expected topology")?;
+            let objective = args.next().ok_or("expected objective")?;
+            run_terminal_probe(&topology, &objective)?;
+        }
         "review-run" => {
             let base_type = args.next().ok_or("expected base type")?;
             let topology = args.next().ok_or("expected topology")?;
@@ -227,6 +232,61 @@ fn run_meeting_probe(
     println!("Decision records: {}", decision_records.len());
     for (index, value) in decision_records.iter().enumerate() {
         println!("Decision record {}: {}", index + 1, value);
+    }
+    println!("Execution summary: {}", execution.outcome.execution_summary);
+    println!(
+        "Reflection summary: {}",
+        execution.outcome.reflection.summary
+    );
+    Ok(())
+}
+
+fn run_terminal_probe(topology: &str, objective: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let identity = "simard-engineer";
+    let base_type = "terminal-shell";
+    let config = BootstrapConfig::resolve(BootstrapInputs {
+        prompt_root: Some(prompt_root()),
+        objective: Some(objective.to_string()),
+        state_root: Some(state_root(identity, base_type, topology, "terminal-run")),
+        identity: Some(identity.to_string()),
+        base_type: Some(base_type.to_string()),
+        topology: Some(topology.to_string()),
+        ..BootstrapInputs::default()
+    })?;
+
+    let execution = simard::run_local_session(&config)?;
+    let exported = latest_local_handoff(&config)?.ok_or("expected durable terminal handoff")?;
+    let terminal_evidence = exported
+        .evidence_records
+        .iter()
+        .filter(|record| {
+            record.detail.starts_with("shell=")
+                || record.detail.starts_with("terminal-")
+                || record.detail.starts_with("backend-implementation=")
+        })
+        .map(|record| record.detail.clone())
+        .collect::<Vec<_>>();
+
+    println!("Probe mode: terminal-run");
+    println!("Identity: {}", execution.snapshot.identity_name);
+    println!(
+        "Selected base type: {}",
+        execution.snapshot.selected_base_type
+    );
+    println!("Topology: {}", execution.snapshot.topology);
+    println!(
+        "Adapter implementation: {}",
+        execution.snapshot.adapter_backend.identity
+    );
+    println!(
+        "Adapter capabilities: {}",
+        execution.snapshot.adapter_capabilities.join(", ")
+    );
+    println!("State root: {}", config.state_root_path().display());
+    println!("Session phase: {}", execution.outcome.session.phase);
+    println!("Terminal evidence lines: {}", terminal_evidence.len());
+    for detail in terminal_evidence {
+        println!("Terminal evidence: {detail}");
     }
     println!("Execution summary: {}", execution.outcome.execution_summary);
     println!(

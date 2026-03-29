@@ -10,6 +10,7 @@ use crate::prompt_assets::PromptAssetRef;
 use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeTopology};
 use crate::sanitization::objective_metadata;
 use crate::session::SessionId;
+use crate::terminal_session::execute_terminal_turn;
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub struct BaseTypeId(String);
@@ -43,6 +44,7 @@ pub enum BaseTypeCapability {
     Memory,
     Evidence,
     Reflection,
+    TerminalSession,
 }
 
 impl Display for BaseTypeCapability {
@@ -53,6 +55,7 @@ impl Display for BaseTypeCapability {
             Self::Memory => "memory",
             Self::Evidence => "evidence",
             Self::Reflection => "reflection",
+            Self::TerminalSession => "terminal-session",
         };
         f.write_str(label)
     }
@@ -341,6 +344,128 @@ impl BaseTypeSession for RustyClawdSession {
                 format!("mailbox-address={}", self.request.mailbox_address),
             ],
         })
+    }
+
+    fn close(&mut self) -> SimardResult<()> {
+        self.ensure_can("close")?;
+        if !self.is_open {
+            return Err(SimardError::InvalidBaseTypeSessionState {
+                base_type: self.descriptor.id.to_string(),
+                action: "close".to_string(),
+                reason: "session was never opened".to_string(),
+            });
+        }
+        self.is_closed = true;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct TerminalShellAdapter {
+    descriptor: BaseTypeDescriptor,
+}
+
+impl TerminalShellAdapter {
+    pub fn registered(id: impl Into<String>) -> SimardResult<Self> {
+        let id = BaseTypeId::new(id);
+        Ok(Self {
+            descriptor: BaseTypeDescriptor {
+                id,
+                backend: BackendDescriptor::for_runtime_type::<Self>(
+                    "terminal-shell::local-pty",
+                    "registered-base-type:terminal-shell",
+                    Freshness::now()?,
+                ),
+                capabilities: capability_set([
+                    BaseTypeCapability::PromptAssets,
+                    BaseTypeCapability::SessionLifecycle,
+                    BaseTypeCapability::Memory,
+                    BaseTypeCapability::Evidence,
+                    BaseTypeCapability::Reflection,
+                    BaseTypeCapability::TerminalSession,
+                ]),
+                supported_topologies: [RuntimeTopology::SingleProcess].into_iter().collect(),
+            },
+        })
+    }
+}
+
+impl BaseTypeFactory for TerminalShellAdapter {
+    fn descriptor(&self) -> &BaseTypeDescriptor {
+        &self.descriptor
+    }
+
+    fn open_session(
+        &self,
+        request: BaseTypeSessionRequest,
+    ) -> SimardResult<Box<dyn BaseTypeSession>> {
+        if !self.descriptor.supports_topology(request.topology) {
+            return Err(SimardError::UnsupportedTopology {
+                base_type: self.descriptor.id.to_string(),
+                topology: request.topology,
+            });
+        }
+
+        Ok(Box::new(TerminalShellSession {
+            descriptor: self.descriptor.clone(),
+            request,
+            is_open: false,
+            is_closed: false,
+        }))
+    }
+}
+
+#[derive(Debug)]
+struct TerminalShellSession {
+    descriptor: BaseTypeDescriptor,
+    request: BaseTypeSessionRequest,
+    is_open: bool,
+    is_closed: bool,
+}
+
+impl TerminalShellSession {
+    fn ensure_can(&self, action: &str) -> SimardResult<()> {
+        if self.is_closed {
+            return Err(SimardError::InvalidBaseTypeSessionState {
+                base_type: self.descriptor.id.to_string(),
+                action: action.to_string(),
+                reason: "session is already closed".to_string(),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+impl BaseTypeSession for TerminalShellSession {
+    fn descriptor(&self) -> &BaseTypeDescriptor {
+        &self.descriptor
+    }
+
+    fn open(&mut self) -> SimardResult<()> {
+        self.ensure_can("open")?;
+        if self.is_open {
+            return Err(SimardError::InvalidBaseTypeSessionState {
+                base_type: self.descriptor.id.to_string(),
+                action: "open".to_string(),
+                reason: "session is already open".to_string(),
+            });
+        }
+        self.is_open = true;
+        Ok(())
+    }
+
+    fn run_turn(&mut self, input: BaseTypeTurnInput) -> SimardResult<BaseTypeOutcome> {
+        self.ensure_can("run_turn")?;
+        if !self.is_open {
+            return Err(SimardError::InvalidBaseTypeSessionState {
+                base_type: self.descriptor.id.to_string(),
+                action: "run_turn".to_string(),
+                reason: "session must be opened before turns can run".to_string(),
+            });
+        }
+
+        execute_terminal_turn(&self.descriptor, &self.request, &input)
     }
 
     fn close(&mut self) -> SimardResult<()> {

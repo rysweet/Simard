@@ -62,6 +62,13 @@ steps:
       command: "tests/gadugi/meeting-mode.sh"
     timeout: 300000
 
+  - name: "Terminal session foundation"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/terminal-session.sh"
+    timeout: 300000
+
   - name: "Composite handoff roundtrip"
     agent: "cli-agent"
     action: "execute_command"
@@ -90,6 +97,7 @@ metadata:
     - "simard"
     - "bootstrap"
     - "meeting"
+    - "terminal"
     - "handoff"
     - "composite"
     - "benchmark-gym"

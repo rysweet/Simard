@@ -27,19 +27,19 @@ Today Simard provides:
 - explicit bootstrap configuration, with `builtin-defaults` available only through opt-in startup mode
 - a durable local state root selected through `SIMARD_STATE_ROOT` in `explicit-config` or defaulted through `builtin-defaults`
 - explicit base-type and topology selection at bootstrap, with opt-in defaults only in `builtin-defaults`
-- builtin manifest-advertised base types selectable at startup today: `local-harness`, `rusty-clawd`, and `copilot-sdk`, with `rusty-clawd` wired as a distinct session backend and `copilot-sdk` still aliased to the local harness implementation
+- builtin manifest-advertised base types selectable at startup today: `local-harness`, `terminal-shell`, `rusty-clawd`, and `copilot-sdk`, with `terminal-shell` wired as a real local PTY-backed shell session for `simard-engineer`, `rusty-clawd` wired as a distinct session backend, and `copilot-sdk` still aliased to the local harness implementation
 - builtin identities selectable at startup today: `simard-engineer`, `simard-meeting`, `simard-gym`, and the composite `simard-composite-engineer`
 - a facilitator-backed `simard-meeting` identity that captures structured decisions, risks, next steps, and open questions without mutating code
-- `single-process` for all builtin base types plus loopback `multi-process` execution for `rusty-clawd`, with unsupported pairs failing explicitly
+- `single-process` for all builtin base types plus loopback `multi-process` execution for `rusty-clawd`, with `terminal-shell` intentionally limited to local single-process runs and unsupported pairs failing explicitly
 - a starter benchmark gym suite that exercises all current builtin base-type selections plus a composite identity session through `cargo run --quiet --bin simard-gym -- run-suite starter`
 - benchmark artifacts written under `target/simard-gym/`, including per-scenario JSON and text summaries, a dedicated review artifact, and a suite summary
 - `ManifestContract { entrypoint, composition, precedence, provenance, freshness }`
-- `ReflectionSnapshot { manifest_contract, runtime_node, mailbox_address, agent_program_backend, adapter_backend, topology_backend, transport_backend, supervisor_backend, memory_backend, evidence_backend }`
+- `ReflectionSnapshot { manifest_contract, runtime_node, mailbox_address, agent_program_backend, adapter_backend, adapter_capabilities, adapter_supported_topologies, topology_backend, transport_backend, supervisor_backend, memory_backend, evidence_backend }`
 - truthful memory and evidence backend descriptors
 - file-backed memory, evidence, and handoff stores on the bootstrap path, with persisted local state under the configured state root
 - durable meeting decision records persisted under the configured state root so later sessions can inspect concise planning outcomes
 - offline review artifacts and concise decision records persisted under the configured state root when the operator runs the review probe
-- truthful runtime service metadata from the runtime-selected wiring, including the injected agent program, handoff store, and the canonical backend identities behind each selected base type
+- truthful runtime service metadata from the runtime-selected wiring, including the injected agent program, handoff store, the canonical backend identities behind each selected base type, and adapter capability/topology limits surfaced directly in reflection
 - persisted scratch, summary, and reflection text that records objective metadata instead of raw objective text
 - handoff snapshots that preserve runtime/session continuity while redacting the persisted session objective down to objective metadata
 - canonical session IDs shaped as `session-<uuid-v7>`, with validation at parsing boundaries

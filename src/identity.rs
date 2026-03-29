@@ -372,6 +372,7 @@ impl IdentityLoader for BuiltinIdentityLoader {
                 )],
                 vec![
                     BaseTypeId::new("local-harness"),
+                    BaseTypeId::new("terminal-shell"),
                     BaseTypeId::new("rusty-clawd"),
                     BaseTypeId::new("copilot-sdk"),
                 ],

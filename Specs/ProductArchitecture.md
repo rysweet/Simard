@@ -53,7 +53,7 @@ For delivery purposes, v1 should be interpreted narrowly:
 
 - one primary engineer loop
 - one default local single-process deployment path, plus an explicit loopback multi-process operator path for supported base types
-- three builtin manifest-advertised base-type selections in the local scaffold: `local-harness`, `rusty-clawd`, and `copilot-sdk`, with `rusty-clawd` now behaving as a distinct session backend and `copilot-sdk` remaining an explicit alias of the local harness implementation
+- four builtin manifest-advertised base-type selections in the local scaffold: `local-harness`, `terminal-shell`, `rusty-clawd`, and `copilot-sdk`, with `terminal-shell` now providing a local PTY-backed shell path for the engineer identity, `rusty-clawd` behaving as a distinct session backend, and `copilot-sdk` remaining an explicit alias of the local harness implementation
 - one durable memory path
 - one small benchmark set
 
@@ -68,7 +68,7 @@ The following are hard constraints for the first implementation, not deferred as
 
 - **Dependency injection from the outset**: runtime composition must happen through explicit ports, traits, and typed configuration rather than hidden globals or direct construction buried inside the core loop.
 - **Distributed-readiness from the outset**: runtime, session, memory, and reflection contracts must not assume in-process execution even when the first deployment path is single-process.
-- **Multiple base types from the outset**: identity manifests and runtime selection logic must support multiple base types immediately. In the current v1 scaffold, `local-harness`, `rusty-clawd`, and `copilot-sdk` are all selectable builtin base types. `rusty-clawd` is now a distinct session backend, while `copilot-sdk` remains an explicit alias of the local single-process harness implementation.
+- **Multiple base types from the outset**: identity manifests and runtime selection logic must support multiple base types immediately. In the current v1 scaffold, `local-harness`, `terminal-shell`, `rusty-clawd`, and `copilot-sdk` are all selectable builtin base types for the engineer identity. `terminal-shell` is a local PTY-backed shell path, `rusty-clawd` is a distinct session backend, and `copilot-sdk` remains an explicit alias of the local single-process harness implementation.
 - **Visible failures from the outset**: unsupported capabilities, missing prompt assets, invalid lifecycle transitions, and unsupported topologies must fail explicitly through typed errors instead of silent fallbacks.
 
 ## Non-Goals
@@ -303,6 +303,7 @@ Candidate base types include:
 The current Simard scaffold already publishes builtin manifest-facing base-type identifiers for:
 
 - `local-harness`
+- `terminal-shell`
 - `rusty-clawd`
 - `copilot-sdk`
 
