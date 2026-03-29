@@ -495,10 +495,18 @@ fn bootstrap_meeting_mode_persists_structured_decision_memory() {
 
 #[test]
 fn bootstrap_assembly_supports_multiple_builtin_manifest_base_types() {
-    for base_type in ["local-harness", "rusty-clawd", "copilot-sdk"] {
+    for base_type in [
+        "local-harness",
+        "terminal-shell",
+        "rusty-clawd",
+        "copilot-sdk",
+    ] {
         let config = BootstrapConfig::resolve(BootstrapInputs {
             prompt_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")),
-            objective: Some(format!("exercise base type handling for {base_type}")),
+            objective: Some(match base_type {
+                "terminal-shell" => "working-directory: .\ncommand: pwd\ncommand: printf \"terminal-bootstrap-ok\\n\"".to_string(),
+                _ => format!("exercise base type handling for {base_type}"),
+            }),
             identity: Some("simard-engineer".to_string()),
             base_type: Some(base_type.to_string()),
             topology: Some("single-process".to_string()),
@@ -515,6 +523,7 @@ fn bootstrap_assembly_supports_multiple_builtin_manifest_base_types() {
             BaseTypeId::new(base_type)
         );
         let expected_backend = match base_type {
+            "terminal-shell" => "terminal-shell::local-pty",
             "rusty-clawd" => "rusty-clawd::session-backend",
             _ => "local-harness",
         };
@@ -547,6 +556,69 @@ fn bootstrap_assembly_supports_multiple_builtin_manifest_base_types() {
             "execution summaries should not persist the raw objective"
         );
     }
+}
+
+#[test]
+fn bootstrap_supports_terminal_shell_execution() {
+    let config = BootstrapConfig::resolve(BootstrapInputs {
+        prompt_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")),
+        objective: Some(
+            "working-directory: .\ncommand: pwd\ncommand: printf \"terminal-foundation-ok\\n\""
+                .to_string(),
+        ),
+        identity: Some("simard-engineer".to_string()),
+        base_type: Some("terminal-shell".to_string()),
+        topology: Some("single-process".to_string()),
+        state_root: Some(state_root("terminal-shell-execution")),
+        ..BootstrapInputs::default()
+    })
+    .expect("terminal-shell config should resolve");
+
+    let execution =
+        run_local_session(&config).expect("terminal-shell bootstrap run loop should succeed");
+    let exported = latest_local_handoff(&config)
+        .expect("terminal handoff should load")
+        .expect("terminal handoff should exist");
+
+    assert_eq!(
+        execution.snapshot.adapter_backend.identity,
+        "terminal-shell::local-pty"
+    );
+    assert!(
+        execution
+            .snapshot
+            .adapter_capabilities
+            .contains(&"terminal-session".to_string()),
+        "reflection should expose the terminal-session capability"
+    );
+    assert_eq!(
+        execution.snapshot.adapter_supported_topologies,
+        vec!["single-process".to_string()]
+    );
+    assert!(
+        execution
+            .outcome
+            .execution_summary
+            .contains("terminal-shell::local-pty"),
+        "execution summary should report the terminal-shell backend"
+    );
+    let terminal_evidence = exported
+        .evidence_records
+        .iter()
+        .map(|record| record.detail.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        terminal_evidence
+            .iter()
+            .any(|detail| detail == &"terminal-command-count=2"),
+        "terminal evidence should report the interactive command count"
+    );
+    assert!(
+        terminal_evidence
+            .iter()
+            .any(|detail| detail.contains("terminal-foundation-ok")),
+        "terminal transcript evidence should keep a preview of real terminal output"
+    );
 }
 
 #[test]

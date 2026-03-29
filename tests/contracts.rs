@@ -401,6 +401,20 @@ fn reflection_snapshot_exposes_handoff_backend_descriptor() {
 }
 
 #[test]
+fn reflection_snapshot_exposes_adapter_capabilities_and_topologies() {
+    let reflection_rs = include_str!("../src/reflection.rs");
+
+    assert!(
+        reflection_rs.contains("pub adapter_capabilities: Vec<String>"),
+        "reflection snapshots should expose adapter capabilities for operator-facing introspection"
+    );
+    assert!(
+        reflection_rs.contains("pub adapter_supported_topologies: Vec<String>"),
+        "reflection snapshots should expose adapter topology limits for operator-facing introspection"
+    );
+}
+
+#[test]
 fn manifest_contract_carries_provenance_and_freshness_directly() {
     let identity_rs = include_str!("../src/identity.rs");
     let manifest_contract_section = identity_rs

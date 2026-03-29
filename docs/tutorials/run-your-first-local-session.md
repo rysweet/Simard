@@ -32,7 +32,7 @@ This tutorial follows the runtime path that exists in the repository today.
 
 From the repository root, start Simard with a real prompt asset directory, an explicit objective, and an explicit durable state root.
 
-For the builtin identities in this repo, you can currently choose `local-harness`, `rusty-clawd`, or `copilot-sdk` here. `rusty-clawd` is a distinct backend, while `copilot-sdk` remains an explicit alias of the local harness implementation. The default bootstrap path still opts into `single-process`, but the runtime can now inject a loopback `multi-process` topology when you request a supported pairing such as `rusty-clawd + multi-process`.
+For the builtin identities in this repo, you can currently choose `local-harness`, `rusty-clawd`, or `copilot-sdk` everywhere, and `simard-engineer` additionally accepts `terminal-shell` for a real local PTY-backed shell session. `rusty-clawd` is a distinct backend, `terminal-shell` is intentionally local-only, and `copilot-sdk` remains an explicit alias of the local harness implementation. The default bootstrap path still opts into `single-process`, but the runtime can now inject a loopback `multi-process` topology when you request a supported pairing such as `rusty-clawd + multi-process`.
 
 ```bash
 SIMARD_PROMPT_ROOT="$PWD/prompt_assets" \
@@ -82,6 +82,27 @@ Adapter implementation: local-harness
 ```
 
 **Checkpoint**: the runtime contract is explicit. `copilot-sdk` is selectable now, but its underlying implementation still stays `local-harness`. Simard preserves the selected base type without pretending the alias is already a distinct backend integration.
+
+### Variation: exercise the terminal-backed engineer path
+
+Use the shipped operator probe to drive a real local PTY-backed shell session through the runtime:
+
+```bash
+cargo run --quiet --bin simard_operator_probe -- \
+  terminal-run single-process \
+  $'working-directory: .\ncommand: pwd\ncommand: printf "terminal-foundation-ok\\n"'
+```
+
+Look for these lines:
+
+```text
+Probe mode: terminal-run
+Selected base type: terminal-shell
+Adapter implementation: terminal-shell::local-pty
+Terminal evidence: terminal-command-count=2
+```
+
+**Checkpoint**: this path is no longer synthetic. The runtime is actually allocating a local PTY-backed shell session and preserving a transcript preview in evidence, while still honestly limiting the feature to local single-process execution.
 
 ## Step 3: Exercise a composite identity and loopback multi-process runtime
 

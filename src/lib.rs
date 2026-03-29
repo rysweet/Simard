@@ -15,6 +15,7 @@ pub mod review;
 pub mod runtime;
 mod sanitization;
 pub mod session;
+mod terminal_session;
 
 pub use agent_program::{
     AgentProgram, AgentProgramContext, AgentProgramMemoryRecord, MeetingFacilitatorProgram,
@@ -23,7 +24,7 @@ pub use agent_program::{
 pub use base_types::{
     BaseTypeCapability, BaseTypeDescriptor, BaseTypeFactory, BaseTypeId, BaseTypeOutcome,
     BaseTypeSession, BaseTypeSessionRequest, BaseTypeTurnInput, LocalProcessHarnessAdapter,
-    RustyClawdAdapter, capability_set,
+    RustyClawdAdapter, TerminalShellAdapter, capability_set,
 };
 pub use bootstrap::{
     BootstrapConfig, BootstrapInputs, BootstrapMode, ConfigValue, ConfigValueSource,

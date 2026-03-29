@@ -23,6 +23,8 @@ pub struct ReflectionSnapshot {
     pub agent_program_backend: BackendDescriptor,
     pub handoff_backend: BackendDescriptor,
     pub adapter_backend: BackendDescriptor,
+    pub adapter_capabilities: Vec<String>,
+    pub adapter_supported_topologies: Vec<String>,
     pub topology_backend: BackendDescriptor,
     pub transport_backend: BackendDescriptor,
     pub supervisor_backend: BackendDescriptor,

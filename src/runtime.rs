@@ -940,6 +940,20 @@ impl RuntimeKernel {
             agent_program_backend: self.ports.agent_program.descriptor(),
             handoff_backend: self.ports.handoff_store.descriptor(),
             adapter_backend: self.factory.descriptor().backend.clone(),
+            adapter_capabilities: self
+                .factory
+                .descriptor()
+                .capabilities
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            adapter_supported_topologies: self
+                .factory
+                .descriptor()
+                .supported_topologies
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
             topology_backend: self.ports.topology_driver.descriptor(),
             transport_backend: self.ports.transport.descriptor(),
             supervisor_backend: self.ports.supervisor.descriptor(),

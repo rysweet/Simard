@@ -36,7 +36,7 @@ The stable contract in this repository is the bootstrap/runtime and benchmark-gy
 
 ## Meeting-mode operator flow
 
-The shipped operator probe also supports a meeting-specific path:
+The shipped operator probe also supports meeting-specific and terminal-session-specific paths:
 
 - `cargo run --quiet --bin simard_operator_probe -- meeting-run <base-type> <topology> <structured-objective>`
 - `cargo run --quiet --bin simard_operator_probe -- review-run <base-type> <topology> <objective>`
@@ -86,6 +86,7 @@ The shipped benchmark CLI currently supports:
 The starter suite is intentionally small and exercises:
 
 - `local-harness`
+- `terminal-shell`
 - `copilot-sdk`
 - `rusty-clawd`
 - the dedicated `simard-gym` identity
@@ -109,11 +110,12 @@ Artifacts are written under `target/simard-gym/` as JSON and text reports plus a
 
 ### Current builtin base-type registrations
 
-The builtin identities currently advertised by the loader are `simard-engineer`, `simard-meeting`, `simard-gym`, and the composite `simard-composite-engineer`. Their common builtin base-type registrations are:
+The builtin identities currently advertised by the loader are `simard-engineer`, `simard-meeting`, `simard-gym`, and the composite `simard-composite-engineer`. All of them accept `local-harness`, `rusty-clawd`, and `copilot-sdk`; `simard-engineer` additionally accepts `terminal-shell` for the local terminal-backed path:
 
 | Base type selection | Current session backend implementation | Supported topologies in this scaffold |
 | --- | --- | --- |
 | `local-harness` | `local-harness` single-process local process harness session backend | `single-process` |
+| `terminal-shell` | `terminal-shell::local-pty` real local PTY-backed shell session backend (`simard-engineer` only) | `single-process` |
 | `rusty-clawd` | `rusty-clawd::session-backend` real session backend | `single-process`, `multi-process` |
 | `copilot-sdk` | `local-harness` single-process local process harness session backend (alias) | `single-process` |
 
@@ -124,8 +126,8 @@ Notes:
 - for `multi-process` and `distributed`, bootstrap injects `topology::loopback-mesh`, `transport::loopback-mailbox`, and `supervisor::coordinated`
 - unsupported topology/base-type pairs still fail explicitly; for example, `local-harness + multi-process` returns `UnsupportedTopology`
 - if a future identity advertises a base type without a registered factory, runtime composition still fails explicitly with `AdapterNotRegistered`
-- the descriptors remain truthful: `selected_base_type` preserves the explicit choice, while `adapter_backend.identity` exposes the actual backend (`rusty-clawd::session-backend` for `rusty-clawd`, `local-harness` for the current `copilot-sdk` alias)
-- `runtime_node`, `mailbox_address`, `topology_backend`, `transport_backend`, `supervisor_backend`, and `handoff_backend` expose the actual runtime assembly rather than inferred labels
+- the descriptors remain truthful: `selected_base_type` preserves the explicit choice, while `adapter_backend.identity` exposes the actual backend (`terminal-shell::local-pty` for `terminal-shell`, `rusty-clawd::session-backend` for `rusty-clawd`, `local-harness` for the current `copilot-sdk` alias)
+- `runtime_node`, `mailbox_address`, `adapter_capabilities`, `adapter_supported_topologies`, `topology_backend`, `transport_backend`, `supervisor_backend`, and `handoff_backend` expose the actual runtime assembly rather than inferred labels
 - `MemoryPolicy.allow_project_writes=true` is rejected explicitly in v1 rather than being ignored
 
 ### Bootstrap modes
@@ -339,6 +341,8 @@ pub struct ReflectionSnapshot {
     pub agent_program_backend: BackendDescriptor,
     pub handoff_backend: BackendDescriptor,
     pub adapter_backend: BackendDescriptor,
+    pub adapter_capabilities: Vec<String>,
+    pub adapter_supported_topologies: Vec<String>,
     pub topology_backend: BackendDescriptor,
     pub transport_backend: BackendDescriptor,
     pub supervisor_backend: BackendDescriptor,

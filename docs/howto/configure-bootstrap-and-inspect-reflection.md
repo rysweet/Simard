@@ -28,7 +28,7 @@ Use this guide when you need to answer two questions:
 
 Provide the prompt root, objective, and state root yourself.
 
-For the builtin identities in this repo, the current scaffold accepts `local-harness`, `rusty-clawd`, or `copilot-sdk` as explicit base-type choices. `rusty-clawd` is a distinct session backend, while `copilot-sdk` remains an explicit alias of `local-harness`. The bootstrap path now injects either the in-process runtime services for `single-process` or the loopback mesh services for `multi-process`, so unsupported topology/base-type pairs fail explicitly instead of being rewritten.
+For the builtin identities in this repo, the current scaffold accepts `local-harness`, `rusty-clawd`, or `copilot-sdk` as explicit base-type choices everywhere, and `simard-engineer` additionally accepts `terminal-shell` for a real local PTY-backed shell session. `rusty-clawd` is a distinct session backend, `terminal-shell` is intentionally local-only, and `copilot-sdk` remains an explicit alias of `local-harness`. The bootstrap path now injects either the in-process runtime services for `single-process` or the loopback mesh services for `multi-process`, so unsupported topology/base-type pairs fail explicitly instead of being rewritten.
 
 ```bash
 SIMARD_PROMPT_ROOT="$PWD/prompt_assets" \
@@ -111,6 +111,8 @@ Builtin defaults are startup choices. They are not recovery behavior.
 - `agent_program_backend`
 - `handoff_backend`
 - `adapter_backend`
+- `adapter_capabilities`
+- `adapter_supported_topologies`
 - `topology_backend`
 - `transport_backend`
 - `supervisor_backend`
@@ -145,7 +147,7 @@ assert_eq!(snapshot.memory_backend.identity, "memory::json-file-store");
 assert_eq!(snapshot.evidence_backend.identity, "evidence::json-file-store");
 ```
 
-If you launched with `SIMARD_BASE_TYPE="copilot-sdk"`, `snapshot.selected_base_type` still shows the alias you chose while `snapshot.adapter_backend.identity` remains `local-harness`. If you launched with `SIMARD_BASE_TYPE="rusty-clawd"`, reflection truthfully reports `snapshot.adapter_backend.identity == "rusty-clawd::session-backend"`. Composite identities also surface `snapshot.identity_components` so operator tooling can see which roles were assembled.
+If you launched with `SIMARD_BASE_TYPE="copilot-sdk"`, `snapshot.selected_base_type` still shows the alias you chose while `snapshot.adapter_backend.identity` remains `local-harness`. If you launched with `SIMARD_BASE_TYPE="rusty-clawd"`, reflection truthfully reports `snapshot.adapter_backend.identity == "rusty-clawd::session-backend"`. If you launch the engineer identity with `SIMARD_BASE_TYPE="terminal-shell"`, reflection reports `snapshot.adapter_backend.identity == "terminal-shell::local-pty"`, `snapshot.adapter_capabilities` includes `terminal-session`, and `snapshot.adapter_supported_topologies == ["single-process"]`. Composite identities also surface `snapshot.identity_components` so operator tooling can see which roles were assembled.
 
 The same redaction rule applies to persisted session text: scratch memory, session summaries, and reflection summaries record `objective-metadata(...)` instead of the raw `SIMARD_OBJECTIVE` string.
 
@@ -175,6 +177,27 @@ Look for:
 - a durable decision record containing the decision, risk, next step, and open question
 
 This is the current honest v1 behavior: meeting mode captures structured planning output and writes concise decision memory, but it does not mutate code.
+
+## 6. Exercise the terminal-backed engineer path
+
+Use the operator probe when you want to validate the new terminal-backed engineer substrate directly:
+
+```bash
+cargo run --quiet --bin simard_operator_probe -- \
+  terminal-run single-process \
+  $'working-directory: .\ncommand: pwd\ncommand: printf "terminal-foundation-ok\\n"'
+```
+
+Look for:
+
+- `Probe mode: terminal-run`
+- `Selected base type: terminal-shell`
+- `Adapter implementation: terminal-shell::local-pty`
+- `Adapter capabilities: ... terminal-session`
+- `Terminal evidence: terminal-command-count=2`
+- a transcript preview containing `terminal-foundation-ok`
+
+This is the honest v1 terminal slice: Simard can drive a real local PTY-backed shell session through the runtime, but it does not claim remote hosts, Azlin orchestration, or distributed terminal control yet.
 
 ## 4. Validate stopped-state behavior
 
