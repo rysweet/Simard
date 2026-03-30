@@ -90,16 +90,16 @@ fn redact_secret_values(raw: &str) -> String {
 }
 
 fn redact_secret_line(line: &str) -> String {
-    if let Some((prefix, _)) = line.split_once('=') {
-        if is_sensitive_key(prefix) {
-            return format!("{prefix}=[REDACTED]");
-        }
+    if let Some((prefix, _)) = line.split_once('=')
+        && is_sensitive_key(prefix)
+    {
+        return format!("{prefix}=[REDACTED]");
     }
 
-    if let Some((prefix, _)) = line.split_once(':') {
-        if is_sensitive_key(prefix) {
-            return format!("{prefix}: [REDACTED]");
-        }
+    if let Some((prefix, _)) = line.split_once(':')
+        && is_sensitive_key(prefix)
+    {
+        return format!("{prefix}: [REDACTED]");
     }
 
     if line
