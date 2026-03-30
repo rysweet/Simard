@@ -3,6 +3,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const CLEARED_GIT_ENV_VARS: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_PREFIX",
+];
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -22,11 +32,7 @@ fn run_engineer_loop_probe(workspace_root: &Path, objective: &str) -> Output {
 }
 
 fn worktree_dirty(path: &Path) -> bool {
-    let output = Command::new("git")
-        .args(["status", "--short", "--untracked-files=all"])
-        .current_dir(path)
-        .output()
-        .expect("git status should launch");
+    let output = run_command(path, &["git", "status", "--short", "--untracked-files=all"]);
     assert!(
         output.status.success(),
         "git status should succeed in repo-rooted engineer-loop tests"
@@ -42,11 +48,12 @@ fn rendered_output(output: &Output) -> String {
 
 fn run_command(cwd: &Path, argv: &[&str]) -> Output {
     let (program, args) = argv.split_first().expect("argv should include a program");
-    Command::new(program)
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .expect("command should launch")
+    let mut command = Command::new(program);
+    command.args(args).current_dir(cwd);
+    for key in CLEARED_GIT_ENV_VARS {
+        command.env_remove(key);
+    }
+    command.output().expect("command should launch")
 }
 
 fn output_field<'a>(output: &'a str, label: &str) -> &'a str {
@@ -62,8 +69,13 @@ fn init_fixture_repo(label: &str) -> TempDirGuard {
     fs::write(&readme_path, "# Demo Repo\n\nCurrent status: TODO\n")
         .expect("fixture file should be written");
 
-    let init = run_command(repo.path(), &["git", "init", "-b", "main"]);
+    let init = run_command(repo.path(), &["git", "init"]);
     assert!(init.status.success(), "git init should succeed");
+    let checkout_main = run_command(repo.path(), &["git", "checkout", "-b", "main"]);
+    assert!(
+        checkout_main.status.success(),
+        "git checkout -b main should succeed"
+    );
     let config_name = run_command(repo.path(), &["git", "config", "user.name", "Simard Test"]);
     assert!(
         config_name.status.success(),
