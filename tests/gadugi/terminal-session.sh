@@ -20,11 +20,12 @@ printf '%s\n' "$OUTPUT" | grep -F "Topology: single-process" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Adapter implementation: terminal-shell::local-pty" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Adapter capabilities: prompt-assets, session-lifecycle, memory, evidence, reflection, terminal-session" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Session phase: complete" >/dev/null
-printf '%s\n' "$OUTPUT" | grep -F "Terminal evidence: terminal-step-count=3" >/dev/null
-printf '%s\n' "$OUTPUT" | grep -F "Terminal evidence: terminal-command-count=2" >/dev/null
-printf '%s\n' "$OUTPUT" | grep -F "Terminal evidence: terminal-wait-count=1" >/dev/null
-printf '%s\n' "$OUTPUT" | grep -F "Terminal evidence: terminal-checkpoint-1=terminal-foundation-ready" >/dev/null
-printf '%s\n' "$OUTPUT" | grep -F "Terminal evidence: terminal-last-output-line=terminal-foundation-ok" >/dev/null
+printf '%s\n' "$OUTPUT" | grep -F "Terminal command count: 2" >/dev/null
+printf '%s\n' "$OUTPUT" | grep -F "Terminal wait count: 1" >/dev/null
+printf '%s\n' "$OUTPUT" | grep -F "Terminal steps count: 3" >/dev/null
+printf '%s\n' "$OUTPUT" | grep -F "Terminal step 2: wait-for: terminal-foundation-ready" >/dev/null
+printf '%s\n' "$OUTPUT" | grep -F "Terminal checkpoint 1: terminal-foundation-ready" >/dev/null
+printf '%s\n' "$OUTPUT" | grep -F "Terminal last output line: terminal-foundation-ok" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "terminal-foundation-ok" >/dev/null
 
 READ_OUTPUT="$(

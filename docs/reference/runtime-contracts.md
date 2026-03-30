@@ -157,7 +157,7 @@ This substrate exposes the real `terminal-shell` base type on the primary CLI:
 - the selected base type remains `terminal-shell`
 - reflection still reports `terminal-shell::local-pty` as the adapter implementation
 - terminal objectives may include `command:` / `input:` lines and explicit `wait-for:` / `expect:` checkpoints so bounded interactive terminal turns can pause for expected output before sending the next line
-- terminal evidence lines remain operator-visible
+- the run surface now renders the same structured terminal audit shape as `terminal-read`: shell details, command/wait counts, ordered steps, satisfied checkpoints, last meaningful output line, and sanitized transcript preview
 - unsatisfied wait checkpoints fail explicitly instead of silently replaying the rest of the objective and claiming success
 - unsupported topology and invalid state-root choices still fail explicitly
 
