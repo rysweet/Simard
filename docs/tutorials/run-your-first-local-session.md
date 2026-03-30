@@ -1,7 +1,7 @@
 ---
 title: "Tutorial: Run your first local session"
-description: Learn the Simard local runtime flow, from bootstrap through reflection and shutdown.
-last_updated: 2026-03-28
+description: Learn the Simard local runtime flow, from bootstrap through reflection, goal stewardship, and shutdown.
+last_updated: 2026-03-30
 review_schedule: as-needed
 owner: simard
 doc_type: tutorial
@@ -20,6 +20,7 @@ This tutorial follows the runtime path that exists in the repository today.
 - How the local runtime starts with explicit configuration
 - How explicit opt-in defaults behave
 - What reflection reports after a run
+- How durable goal stewardship flows into later sessions
 - How runtime node, mailbox, and backend wiring appear in reflection
 - What stop semantics look like in practice
 
@@ -119,14 +120,50 @@ Look for these lines:
 ```text
 Probe mode: engineer-loop-run
 Repo root: /path/to/repo
+Active goals count: 0
 Execution scope: local-only
 Selected action: cargo-metadata-scan
 Verification status: verified
 ```
 
-**Checkpoint**: Simard is now doing more than opening a shell. It is inspecting repo state, choosing a bounded repo-native action, verifying that repo grounding stayed stable, and persisting truthful memory/evidence for the loop.
+**Checkpoint**: Simard is now doing more than opening a shell. It is inspecting repo state, choosing a bounded repo-native action, verifying that repo grounding stayed stable, and persisting truthful memory/evidence for the loop. When a shared state root already contains durable goals, the same probe also reports the active top-goal set.
 
-## Step 3: Exercise a composite identity and loopback multi-process runtime
+## Step 3: Curate durable top goals and reuse them in later sessions
+
+Use the goal-curation probe to persist a truthful top-5 goal set:
+
+```bash
+STATE_ROOT="$PWD/target/simard-goal-demo"
+
+cargo run --quiet --bin simard_operator_probe -- \
+  goal-curation-run local-harness single-process \
+  "$(cat <<'EOF'
+goal: Keep Simard's top 5 goals current | priority=1 | status=active | rationale=long-horizon stewardship is now a shipped product responsibility
+goal: Preserve meeting-to-engineer continuity | priority=2 | status=active | rationale=meeting outputs should shape later engineer sessions
+EOF
+)" \
+  "$STATE_ROOT"
+```
+
+Then point the engineer loop at the same state root:
+
+```bash
+cargo run --quiet --bin simard_operator_probe -- \
+  engineer-loop-run single-process . \
+  $'inspect the repository state\nrun one safe local engineering action\nverify the outcome explicitly\npersist truthful local evidence and memory' \
+  "$STATE_ROOT"
+```
+
+Look for:
+
+- `Probe mode: goal-curation-run`
+- `Identity: simard-goal-curator`
+- `Active goal 1: p1 [active] Keep Simard's top 5 goals current`
+- the later engineer-loop run reporting the same active goals
+
+**Checkpoint**: this is the current honest backlog-stewardship slice. Simard can now preserve durable top goals and feed them into later engineer sessions without pretending it already has a full remote PM agent.
+
+## Step 4: Exercise a composite identity and loopback multi-process runtime
 
 Use the shipped operator probe to validate the broader runtime seams like an operator would.
 
@@ -146,7 +183,7 @@ cargo run --quiet --bin simard_operator_probe -- \
 
 Look for:
 
-- `Identity components: simard-engineer, simard-meeting, simard-gym`
+- `Identity components: simard-engineer, simard-meeting, simard-gym, simard-goal-curator`
 - `Topology: multi-process`
 - `Topology backend: topology::loopback-mesh`
 - `Transport backend: transport::loopback-mailbox`
@@ -154,7 +191,7 @@ Look for:
 
 **Checkpoint**: composition and topology are now visible runtime facts, not just architecture aspirations.
 
-## Step 4: Opt in to builtin defaults
+## Step 5: Opt in to builtin defaults
 
 Builtin defaults exist for local bootstrap convenience, but they are only used when startup opts in.
 
@@ -175,7 +212,7 @@ You should see:
 
 **Checkpoint**: defaults are a startup choice, not a recovery path. This part of the audited contract already exists.
 
-## Step 5: Observe stopped-state behavior
+## Step 6: Observe stopped-state behavior
 
 The runtime preserves its snapshot after shutdown and surfaces a dedicated stopped-state error:
 
@@ -200,7 +237,7 @@ assert_eq!(
 
 After shutdown, the reflected manifest freshness becomes `Stale` so callers can tell they are looking at post-stop metadata instead of a live runtime.
 
-## Step 6: Inspect truthful reflection metadata
+## Step 7: Inspect truthful reflection metadata
 
 After a successful run, reflection reports the assembled contract and backend descriptors:
 
@@ -217,10 +254,12 @@ assert_eq!(snapshot.manifest_contract.provenance.source, "bootstrap");
 assert_eq!(snapshot.manifest_contract.freshness.state, FreshnessState::Current);
 assert_eq!(snapshot.runtime_node.to_string(), "node-local");
 assert_eq!(snapshot.mailbox_address.to_string(), "inmemory://node-local");
+assert_eq!(snapshot.active_goal_count, 0);
 assert_eq!(snapshot.agent_program_backend.identity, "agent-program::objective-relay");
 assert_eq!(snapshot.handoff_backend.identity, "handoff::json-file-store");
 assert_eq!(snapshot.adapter_backend.identity, "local-harness");
 assert_eq!(snapshot.transport_backend.identity, "transport::in-memory-mailbox");
+assert_eq!(snapshot.goal_backend.identity, "goals::json-file-store");
 assert_eq!(snapshot.memory_backend.identity, "memory::json-file-store");
 assert_eq!(snapshot.evidence_backend.identity, "evidence::json-file-store");
 ```
@@ -235,6 +274,7 @@ You now know:
 - how to switch between built-in base types without hidden inference
 - how `copilot-sdk` still aliases `local-harness` while `rusty-clawd` now reports a distinct backend honestly
 - how `simard-meeting` uses a facilitator program to persist concise decision records instead of acting like an engineer session
+- how `simard-goal-curator` persists durable top-goal state that later engineer runs can read back
 - how composite identities surface their assembled components explicitly
 - how loopback multi-process execution reuses the same runtime contracts
 - how opt-in defaults are recorded

@@ -422,7 +422,8 @@ fn bootstrap_supports_composite_identity_execution() {
         vec![
             "simard-engineer".to_string(),
             "simard-meeting".to_string(),
-            "simard-gym".to_string()
+            "simard-gym".to_string(),
+            "simard-goal-curator".to_string(),
         ]
     );
     assert_eq!(execution.snapshot.topology, RuntimeTopology::SingleProcess);
@@ -438,7 +439,7 @@ fn bootstrap_meeting_mode_persists_structured_decision_memory() {
     let config = BootstrapConfig::resolve(BootstrapInputs {
         prompt_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")),
         objective: Some(
-            "agenda: review next Simard milestone\nupdate: durable memory shipped in PR 29\ndecision: prioritize meeting mode before remote orchestration\nrisk: workflow runner keeps drifting worktrees\nnext-step: add outside-in meeting probe\nopen-question: when should meeting decisions auto-influence engineer planning?"
+            "agenda: review next Simard milestone\nupdate: durable memory shipped in PR 29\ndecision: prioritize meeting mode before remote orchestration\nrisk: workflow runner keeps drifting worktrees\nnext-step: add outside-in meeting probe\nopen-question: when should meeting decisions auto-influence engineer planning?\ngoal: Ship meeting-to-engineer handoff | priority=1 | status=active | rationale=meeting decisions should influence later engineer sessions"
                 .to_string(),
         ),
         identity: Some("simard-meeting".to_string()),
@@ -490,6 +491,45 @@ fn bootstrap_meeting_mode_persists_structured_decision_memory() {
             .summary
             .contains("captured 1 decisions, 1 risks, 1 next steps, and 1 open questions"),
         "meeting reflection should expose the structured capture counts"
+    );
+    assert_eq!(execution.snapshot.active_goal_count, 1);
+    assert_eq!(
+        execution.snapshot.active_goals,
+        vec!["p1 [active] Ship meeting-to-engineer handoff".to_string()]
+    );
+}
+
+#[test]
+fn bootstrap_goal_curator_mode_persists_top_five_goal_state() {
+    let config = BootstrapConfig::resolve(BootstrapInputs {
+        prompt_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")),
+        objective: Some(
+            "goal: Keep Simard's top 5 goals current | priority=1 | status=active | rationale=explicit long-horizon stewardship\ngoal: Preserve meeting-to-engineer continuity | priority=2 | status=active | rationale=meetings should shape later execution"
+                .to_string(),
+        ),
+        identity: Some("simard-goal-curator".to_string()),
+        base_type: Some("local-harness".to_string()),
+        topology: Some("single-process".to_string()),
+        state_root: Some(state_root("goal-curator")),
+        ..BootstrapInputs::default()
+    })
+    .expect("goal curator bootstrap config should resolve");
+
+    let execution = run_local_session(&config).expect("goal curator mode should execute");
+
+    assert_eq!(execution.snapshot.identity_name, "simard-goal-curator");
+    assert_eq!(
+        execution.snapshot.agent_program_backend.identity,
+        "agent-program::goal-curator"
+    );
+    assert_eq!(execution.snapshot.active_goal_count, 2);
+    assert!(
+        execution
+            .snapshot
+            .active_goals
+            .iter()
+            .any(|goal| goal.contains("Keep Simard's top 5 goals current")),
+        "goal curator reflection should surface active top-goal state"
     );
 }
 

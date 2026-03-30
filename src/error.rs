@@ -31,6 +31,10 @@ pub enum SimardError {
         field: String,
         reason: String,
     },
+    InvalidGoalRecord {
+        field: String,
+        reason: String,
+    },
     InvalidSessionId {
         value: String,
         reason: String,
@@ -168,6 +172,9 @@ impl Display for SimardError {
             }
             Self::InvalidManifestContract { field, reason } => {
                 write!(f, "invalid manifest contract field '{field}': {reason}")
+            }
+            Self::InvalidGoalRecord { field, reason } => {
+                write!(f, "invalid goal record field '{field}': {reason}")
             }
             Self::InvalidSessionId { value, reason } => {
                 write!(f, "invalid session id '{value}': {reason}")

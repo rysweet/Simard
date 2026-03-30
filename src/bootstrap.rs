@@ -4,12 +4,15 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::agent_program::{AgentProgram, MeetingFacilitatorProgram, ObjectiveRelayProgram};
+use crate::agent_program::{
+    AgentProgram, GoalCuratorProgram, MeetingFacilitatorProgram, ObjectiveRelayProgram,
+};
 use crate::base_types::{
     BaseTypeId, LocalProcessHarnessAdapter, RustyClawdAdapter, TerminalShellAdapter,
 };
 use crate::error::{SimardError, SimardResult};
 use crate::evidence::{EvidenceStore, FileBackedEvidenceStore};
+use crate::goals::{FileBackedGoalStore, GoalStore};
 use crate::handoff::{FileBackedHandoffStore, RuntimeHandoffSnapshot, RuntimeHandoffStore};
 use crate::identity::{
     BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader, IdentityManifest, ManifestContract,
@@ -266,6 +269,7 @@ pub fn assemble_local_runtime(config: &BootstrapConfig) -> SimardResult<LocalRun
     let evidence_store = Arc::new(FileBackedEvidenceStore::try_new(
         config.evidence_store_path(),
     )?);
+    let goal_store = Arc::new(FileBackedGoalStore::try_new(config.goal_store_path())?);
     let handoff_store = Arc::new(FileBackedHandoffStore::try_new(
         config.handoff_store_path(),
     )?);
@@ -300,6 +304,7 @@ pub fn assemble_local_runtime(config: &BootstrapConfig) -> SimardResult<LocalRun
             prompt_store,
             memory_store,
             evidence_store,
+            goal_store,
             handoff_store,
             base_types,
             config.topology.value,
@@ -318,6 +323,7 @@ pub fn assemble_local_runtime_from_handoff(
     let evidence_store = Arc::new(FileBackedEvidenceStore::try_new(
         config.evidence_store_path(),
     )?);
+    let goal_store = Arc::new(FileBackedGoalStore::try_new(config.goal_store_path())?);
     let handoff_store = Arc::new(FileBackedHandoffStore::try_new(
         config.handoff_store_path(),
     )?);
@@ -351,6 +357,7 @@ pub fn assemble_local_runtime_from_handoff(
             prompt_store,
             memory_store,
             evidence_store,
+            goal_store,
             handoff_store,
             base_types,
             config.topology.value,
@@ -427,10 +434,15 @@ pub fn builtin_base_type_registry_for_manifest(
     Ok(base_types)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "bootstrap wiring passes explicit stores and runtime services for topology-neutral assembly"
+)]
 fn runtime_ports_for_topology(
     prompt_store: Arc<dyn PromptAssetStore>,
     memory_store: Arc<dyn MemoryStore>,
     evidence_store: Arc<dyn EvidenceStore>,
+    goal_store: Arc<dyn GoalStore>,
     handoff_store: Arc<dyn RuntimeHandoffStore>,
     base_types: BaseTypeRegistry,
     topology: RuntimeTopology,
@@ -441,6 +453,7 @@ fn runtime_ports_for_topology(
             prompt_store,
             memory_store,
             evidence_store,
+            goal_store,
             base_types,
             Arc::new(crate::runtime::InProcessTopologyDriver::try_default()?),
             Arc::new(crate::runtime::InMemoryMailboxTransport::try_default()?),
@@ -454,6 +467,7 @@ fn runtime_ports_for_topology(
                 prompt_store,
                 memory_store,
                 evidence_store,
+                goal_store,
                 base_types,
                 Arc::new(LoopbackMeshTopologyDriver::try_default()?),
                 Arc::new(LoopbackMailboxTransport::try_default()?),
@@ -469,6 +483,7 @@ fn runtime_ports_for_topology(
 fn agent_program_for_manifest(manifest: &IdentityManifest) -> SimardResult<Arc<dyn AgentProgram>> {
     match manifest.default_mode {
         OperatingMode::Meeting => Ok(Arc::new(MeetingFacilitatorProgram::try_default()?)),
+        OperatingMode::Curator => Ok(Arc::new(GoalCuratorProgram::try_default()?)),
         OperatingMode::Engineer | OperatingMode::Gym => {
             Ok(Arc::new(ObjectiveRelayProgram::try_default()?))
         }
@@ -482,6 +497,10 @@ impl BootstrapConfig {
 
     pub fn evidence_store_path(&self) -> PathBuf {
         self.state_root.value.join("evidence_records.json")
+    }
+
+    pub fn goal_store_path(&self) -> PathBuf {
+        self.state_root.value.join("goal_records.json")
     }
 
     pub fn handoff_store_path(&self) -> PathBuf {

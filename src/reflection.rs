@@ -20,6 +20,8 @@ pub struct ReflectionSnapshot {
     pub manifest_contract: ManifestContract,
     pub evidence_records: usize,
     pub memory_records: usize,
+    pub active_goal_count: usize,
+    pub active_goals: Vec<String>,
     pub agent_program_backend: BackendDescriptor,
     pub handoff_backend: BackendDescriptor,
     pub adapter_backend: BackendDescriptor,
@@ -30,6 +32,7 @@ pub struct ReflectionSnapshot {
     pub supervisor_backend: BackendDescriptor,
     pub memory_backend: BackendDescriptor,
     pub evidence_backend: BackendDescriptor,
+    pub goal_backend: BackendDescriptor,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

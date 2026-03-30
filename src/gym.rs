@@ -9,6 +9,7 @@ use serde::Serialize;
 use crate::bootstrap::builtin_base_type_registry_for_manifest;
 use crate::error::{SimardError, SimardResult};
 use crate::evidence::{EvidenceRecord, EvidenceSource, EvidenceStore, InMemoryEvidenceStore};
+use crate::goals::InMemoryGoalStore;
 use crate::handoff::RuntimeHandoffSnapshot;
 use crate::identity::{
     BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader, ManifestContract,
@@ -551,6 +552,7 @@ fn runtime_ports_for_topology(
                 prompt_store,
                 memory_store,
                 evidence_store,
+                Arc::new(InMemoryGoalStore::try_default()?),
                 base_types,
                 Arc::new(LoopbackMeshTopologyDriver::try_default()?),
                 Arc::new(LoopbackMailboxTransport::try_default()?),

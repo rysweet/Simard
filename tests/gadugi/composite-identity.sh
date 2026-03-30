@@ -14,7 +14,7 @@ printf '%s\n' "$OUTPUT"
 
 printf '%s\n' "$OUTPUT" | grep -F "Probe mode: bootstrap-run" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Identity: simard-composite-engineer" >/dev/null
-printf '%s\n' "$OUTPUT" | grep -F "Identity components: simard-engineer, simard-meeting, simard-gym" >/dev/null
+printf '%s\n' "$OUTPUT" | grep -F "Identity components: simard-engineer, simard-meeting, simard-gym, simard-goal-curator" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Selected base type: local-harness" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Topology: single-process" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Adapter implementation: local-harness" >/dev/null
