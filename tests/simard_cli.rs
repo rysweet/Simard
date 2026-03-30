@@ -1,12 +1,10 @@
 //! Outside-in contract tests for the next product block after the bounded
 //! engineer loop landed in PR #55.
 //!
-//! `Specs/ProductArchitecture.md` defines five operator-visible modes
-//! (engineer, meeting, goal-curation, improvement-curation, gym). The current
-//! implementation still fragments those modes across `simard`,
-//! `simard_operator_probe`, and `simard-gym`. These tests lock the next block
-//! as one primary `simard` CLI while preserving the legacy specialist binaries
-//! as compatibility surfaces.
+//! `Specs/ProductArchitecture.md` defines five operator-visible modes plus a
+//! terminal-backed engineer substrate. The canonical `simard` CLI is now the
+//! primary surface for those shipped behaviors, while `simard_operator_probe`
+//! and `simard-gym` remain compatibility surfaces for older scripts.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -71,6 +69,7 @@ fn simard_help_surfaces_the_five_product_modes_and_operator_utilities() {
     );
     for expected in [
         "engineer",
+        "terminal",
         "meeting",
         "goal-curation",
         "improvement-curation",
@@ -153,6 +152,51 @@ fn simard_engineer_run_drives_the_bounded_engineer_loop_from_the_primary_cli() {
     assert!(
         state_root.path().join("latest_handoff.json").is_file(),
         "engineer mode should persist the latest handoff under the chosen state root"
+    );
+}
+
+#[test]
+fn simard_engineer_terminal_exposes_the_terminal_backed_engineer_surface() {
+    let objective = "working-directory: .\ncommand: pwd\ncommand: printf \"terminal-cli-ok\\n\"";
+    let simard_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("terminal")
+        .arg("single-process")
+        .arg(objective)
+        .output()
+        .expect("simard engineer terminal should launch");
+    let simard_rendered = rendered_output(&simard_output);
+
+    assert!(
+        simard_output.status.success(),
+        "simard engineer terminal should expose the terminal-backed engineer substrate through the canonical CLI:\n{simard_rendered}"
+    );
+    for expected in [
+        "Selected base type: terminal-shell",
+        "Adapter implementation: terminal-shell::local-pty",
+        "terminal-cli-ok",
+    ] {
+        assert!(
+            simard_rendered.contains(expected),
+            "terminal engineer mode should surface '{expected}' for operators:\n{simard_rendered}"
+        );
+    }
+
+    let legacy_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .arg("terminal-run")
+        .arg("single-process")
+        .arg(objective)
+        .output()
+        .expect("legacy terminal-run should launch");
+    let legacy_rendered = rendered_output(&legacy_output);
+
+    assert!(
+        legacy_output.status.success(),
+        "legacy terminal-run should remain functional while operators migrate:\n{legacy_rendered}"
+    );
+    assert_eq!(
+        simard_rendered, legacy_rendered,
+        "the canonical terminal engineer surface should preserve the legacy terminal-run output exactly until operators migrate"
     );
 }
 

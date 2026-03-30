@@ -55,8 +55,9 @@ where
         "terminal-run" => {
             let topology = next_required(&mut args, "topology")?;
             let objective = next_required(&mut args, "objective")?;
+            let state_root = next_optional_path(&mut args);
             reject_extra_args(args)?;
-            run_terminal_probe(&topology, &objective)?;
+            run_terminal_probe(&topology, &objective, state_root)?;
         }
         "engineer-loop-run" => {
             let topology = next_required(&mut args, "topology")?;
@@ -374,18 +375,20 @@ pub fn run_goal_curation_probe(
 pub fn run_terminal_probe(
     topology: &str,
     objective: &str,
+    state_root_override: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = "simard-engineer";
     let base_type = "terminal-shell";
     let config = BootstrapConfig::resolve(BootstrapInputs {
         prompt_root: Some(prompt_root()),
         objective: Some(objective.to_string()),
-        state_root: Some(validate_state_root(state_root(
+        state_root: Some(resolved_state_root(
+            state_root_override,
             identity,
             base_type,
             topology,
             "terminal-run",
-        ))?),
+        )?),
         identity: Some(identity.to_string()),
         base_type: Some(base_type.to_string()),
         topology: Some(topology.to_string()),

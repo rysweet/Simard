@@ -22,7 +22,7 @@ This tutorial exercises the shipped local-session flows through the canonical `s
 Today:
 
 - `simard` is the primary operator-facing CLI
-- `simard_operator_probe` remains available for compatibility-only flows such as `terminal-run`
+- `simard_operator_probe` remains available for older compatibility scripts
 - `simard-gym` remains available for compatibility with legacy benchmark scripts, although `simard gym ...` is the canonical benchmark surface
 
 ## What you'll learn
@@ -167,7 +167,7 @@ Look for:
 
 **Checkpoint**: reviewed evidence is now feeding durable priorities through the same runtime contract the CLI exposes elsewhere.
 
-## Step 7: Know where bootstrap and terminal compatibility fit
+## Step 7: Exercise bootstrap and the terminal-backed engineer substrate
 
 Bootstrap and benchmark execution both live on the canonical CLI:
 
@@ -177,12 +177,12 @@ cargo run --quiet --   bootstrap run simard-engineer local-harness single-proces
 cargo run --quiet -- gym list
 ```
 
-The terminal-backed engineer substrate is still compatibility-only:
+The terminal-backed engineer substrate now lives on the canonical CLI too:
 
 ```bash
-cargo run --quiet --bin simard_operator_probe --   terminal-run single-process   $'working-directory: .
+cargo run --quiet --   engineer terminal single-process   $'working-directory: .
 command: pwd
-command: printf "terminal-foundation-ok\n"'
+command: printf "terminal-foundation-ok\n"'   "$STATE_ROOT"
 ```
 
 ## Summary
@@ -193,7 +193,7 @@ You now know how to:
 - carry meeting decisions into later engineer runs
 - curate durable goals directly
 - turn review findings into durable improvement priorities
-- use compatibility binaries only where the canonical CLI has not absorbed a niche surface yet
+- keep compatibility binaries reserved for older scripts or exact legacy output
 
 ## Next steps
 

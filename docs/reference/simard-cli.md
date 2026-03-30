@@ -24,7 +24,8 @@ The legacy `simard_operator_probe` and `simard-gym` binaries still ship for comp
 ```text
 simard
 |- engineer
-|  `- run <topology> <workspace-root> <objective> [state-root]
+|  |- run <topology> <workspace-root> <objective> [state-root]
+|  `- terminal <topology> <objective> [state-root]
 |- meeting
 |  `- run <base-type> <topology> <structured-objective> [state-root]
 |- goal-curation
@@ -50,6 +51,7 @@ Bare `simard` prints this unified help surface.
 | Canonical command | Compatibility surface |
 | --- | --- |
 | `simard engineer run ...` | `simard_operator_probe engineer-loop-run ...` |
+| `simard engineer terminal ...` | `simard_operator_probe terminal-run ...` |
 | `simard meeting run ...` | `simard_operator_probe meeting-run ...` |
 | `simard goal-curation run ...` | `simard_operator_probe goal-curation-run ...` |
 | `simard improvement-curation run ...` | `simard_operator_probe improvement-curation-run ...` |
@@ -93,6 +95,28 @@ verify the outcome explicitly
 persist truthful local evidence and memory'
 
 simard engineer run single-process "$PWD" "$ENGINEER_OBJECTIVE" "$STATE_ROOT"
+```
+
+### `simard engineer terminal <topology> <objective> [state-root]`
+
+Runs the terminal-backed engineer substrate on the canonical CLI instead of
+requiring the legacy probe binary.
+
+Key behavior:
+
+- selects the `terminal-shell` base type explicitly
+- preserves truthful adapter reflection and terminal evidence output
+- fails visibly for unsupported topology and invalid state-root inputs
+- keeps `simard_operator_probe terminal-run ...` available for compatibility
+
+Example:
+
+```bash
+STATE_ROOT="$(mktemp -d /tmp/simard-terminal.XXXXXX)"
+
+simard engineer terminal single-process $'working-directory: .
+command: pwd
+command: printf "terminal-foundation-ok\n"' "$STATE_ROOT"
 ```
 
 ### `simard meeting run <base-type> <topology> <structured-objective> [state-root]`

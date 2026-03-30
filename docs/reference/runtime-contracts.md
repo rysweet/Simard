@@ -32,7 +32,7 @@ Simard does **not** expose:
 | --- | --- | --- |
 | explicit bootstrap | `simard bootstrap run ...` | `simard_operator_probe bootstrap-run ...` |
 | bounded engineer loop | `simard engineer run ...` | `simard_operator_probe engineer-loop-run ...` |
-| terminal-backed engineer substrate | compatibility only | `simard_operator_probe terminal-run ...` |
+| terminal-backed engineer substrate | `simard engineer terminal ...` | `simard_operator_probe terminal-run ...` |
 | meeting mode | `simard meeting run ...` | `simard_operator_probe meeting-run ...` |
 | goal-curation mode | `simard goal-curation run ...` | `simard_operator_probe goal-curation-run ...` |
 | improvement-curation mode | `simard improvement-curation run ...` | `simard_operator_probe improvement-curation-run ...` |
@@ -44,6 +44,7 @@ Simard does **not** expose:
 The shipped operator-facing command tree is:
 
 - `simard engineer run <topology> <workspace-root> <objective> [state-root]`
+- `simard engineer terminal <topology> <objective> [state-root]`
 - `simard meeting run <base-type> <topology> <structured-objective> [state-root]`
 - `simard goal-curation run <base-type> <topology> <structured-objective> [state-root]`
 - `simard improvement-curation run <base-type> <topology> <structured-objective> [state-root]`
@@ -101,6 +102,19 @@ That structured edit path is intentionally narrow:
 - the repo must start clean so Simard does not overwrite unrelated user changes
 - only one expected changed file is allowed
 - verification must confirm both file content and git-visible change state
+
+### Terminal-backed engineer substrate
+
+Canonical entrypoint: `simard engineer terminal <topology> <objective> [state-root]`
+
+Compatibility surface: `simard_operator_probe terminal-run <topology> <objective> [state-root]`
+
+This substrate exposes the real `terminal-shell` base type on the primary CLI:
+
+- the selected base type remains `terminal-shell`
+- reflection still reports `terminal-shell::local-pty` as the adapter implementation
+- terminal evidence lines remain operator-visible
+- unsupported topology and invalid state-root choices still fail explicitly
 
 ### Meeting mode
 
