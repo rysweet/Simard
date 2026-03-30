@@ -1,12 +1,13 @@
 ---
 title: Runtime contracts reference
-description: Reference for the current Simard runtime surface, reflection contracts, lifecycle errors, and durable goal stewardship.
+description: Reference for the current Simard executable surfaces, the in-process runtime contract, and the planned unified CLI shape.
 last_updated: 2026-03-30
 review_schedule: as-needed
 owner: simard
 doc_type: reference
 related:
   - ../index.md
+  - ./simard-cli.md
   - ../howto/carry-meeting-decisions-into-engineer-sessions.md
   - ../howto/configure-bootstrap-and-inspect-reflection.md
   - ../concepts/truthful-runtime-metadata.md
@@ -16,83 +17,83 @@ related:
 
 ## Status
 
-This file describes the API shape that exists in the repository today.
+The in-process Rust runtime described here exists today.
+
+The fully unified `simard` CLI described in the product architecture does **not** exist as a complete executable surface yet.
+
+Today:
+
+- `simard` is a bootstrap-from-environment entrypoint
+- `simard_operator_probe` exposes the current operator-mode compatibility commands
+- `simard-gym` exposes the current benchmark CLI
+
+The mode contracts below are still real today because the probe and gym binaries exercise the same runtime code paths that the unified CLI will eventually dispatch.
 
 ## Public surfaces
 
-Simard v1 currently exposes five surfaces:
+Simard exposes three public surface classes:
 
-- the local CLI bootstrap path through `cargo run --quiet`
-- the benchmark gym CLI through `cargo run --quiet --bin simard-gym -- ...`
-- the operator/runtime probe through `cargo run --quiet --bin simard_operator_probe -- ...`
-- the local-first engineer loop probe through `cargo run --quiet --bin simard_operator_probe -- engineer-loop-run <topology> <workspace-root> <objective> [state-root]`
-- the in-process Rust runtime/bootstrap types in `src/bootstrap.rs`, `src/runtime.rs`, and related modules
+- current executables:
+  - `simard`
+  - `simard_operator_probe`
+  - `simard-gym`
+- the planned unified operator CLI rooted at `simard`
+- the in-process Rust runtime and bootstrap types in `src/bootstrap.rs`, `src/runtime.rs`, and related modules
 
-Simard v1 does **not** currently expose:
+Simard does **not** expose:
 
 - an HTTP API
 - a network service contract
 - a database schema contract
 
-The stable contract in this repository is the bootstrap/runtime and benchmark-gym behavior described below.
+## Current executable mappings
 
-## Meeting-mode operator flow
+| Runtime behavior | Current executable surface | Planned unified surface |
+| --- | --- | --- |
+| bootstrap-configured local session | `simard` with `SIMARD_*` environment variables | `simard bootstrap run ...` |
+| bounded engineer loop | `simard_operator_probe engineer-loop-run ...` | `simard engineer run ...` |
+| terminal-backed engineer substrate | `simard_operator_probe terminal-run ...` | `simard engineer terminal ...` |
+| meeting mode | `simard_operator_probe meeting-run ...` | `simard meeting run ...` |
+| goal-curation mode | `simard_operator_probe goal-curation-run ...` | `simard goal-curation run ...` |
+| improvement-curation mode | `simard_operator_probe improvement-curation-run ...` | `simard improvement-curation run ...` |
+| review artifact persistence and readback | `simard_operator_probe review-run ...` and `review-read ...` | `simard review ...` |
+| benchmark scenarios and suites | `simard-gym ...` | `simard gym ...` |
 
-The shipped operator probe also supports meeting-specific, goal-curation-specific, improvement-curation-specific, terminal-session-specific, and engineer-loop-specific paths:
+## [PLANNED] Canonical CLI surface
 
-- `cargo run --quiet --bin simard_operator_probe -- meeting-run <base-type> <topology> <structured-objective>`
-- `cargo run --quiet --bin simard_operator_probe -- goal-curation-run <base-type> <topology> <structured-objective>`
-- `cargo run --quiet --bin simard_operator_probe -- improvement-curation-run <base-type> <topology> <structured-objective> [state-root]`
-- `cargo run --quiet --bin simard_operator_probe -- engineer-loop-run <topology> <workspace-root> <objective> [state-root]`
-- `cargo run --quiet --bin simard_operator_probe -- review-run <base-type> <topology> <objective> [state-root]`
-- `cargo run --quiet --bin simard_operator_probe -- review-read <base-type> <topology> [state-root]`
+The canonical operator-facing command tree Simard is being built toward is:
 
-Use a structured objective with lines such as:
+- `simard engineer run <topology> <workspace-root> <objective> [state-root]`
+- `simard engineer terminal <topology> <structured-objective>`
+- `simard meeting run <base-type> <topology> <structured-objective> [state-root]`
+- `simard goal-curation run <base-type> <topology> <structured-objective> [state-root]`
+- `simard improvement-curation run <base-type> <topology> <structured-objective> [state-root]`
+- `simard gym list`
+- `simard gym run <scenario-id>`
+- `simard gym run-suite <suite-id>`
+- `simard review run <base-type> <topology> <objective> [state-root]`
+- `simard review read <base-type> <topology> [state-root]`
+- `simard bootstrap run <identity> <base-type> <topology> <objective> [state-root]`
 
-- `agenda: ...`
-- `update: ...`
-- `decision: ...`
-- `risk: ...`
-- `next-step: ...`
-- `open-question: ...`
-- `goal: title | priority=1 | status=active | rationale=why this belongs in Simard's top 5`
-- `approve: proposal title | priority=1 | status=proposed|active | rationale=why this should be tracked now`
-- `defer: proposal title | rationale=why this should wait`
+Use the [Simard CLI reference](./simard-cli.md) for the exact command tree, examples, and current runnable mappings.
 
-The v1 meeting contract is intentionally narrow:
+## Mode contracts
 
-- meeting mode uses the facilitator agent program backend `agent-program::meeting-facilitator`
-- it persists a concise meeting record under the durable state root when the structured objective contains persistable outputs such as `update:`, `decision:`, `risk:`, `next-step:`, `open-question:`, or structured `goal:` lines
-- later `engineer-loop-run` probes against the same state root surface those carried meeting decisions explicitly, separate from the active top-goal list
-- it can also persist structured goal updates into the durable goal register
-- it does not mutate code paths or pretend implementation work happened
+### Engineer mode
 
-### Meeting-to-engineer handoff contract
+The bounded engineer contract already exists in the runtime today.
 
-The public CLI contract for this feature lives on the operator probe:
+- current operator entrypoint: `simard_operator_probe engineer-loop-run <topology> <workspace-root> <objective> [state-root]`
+- planned unified entrypoint: `simard engineer run <topology> <workspace-root> <objective> [state-root]`
 
-- `cargo run --quiet --bin simard_operator_probe -- meeting-run <base-type> <topology> <structured-objective> [state-root]`
-- `cargo run --quiet --bin simard_operator_probe -- engineer-loop-run <topology> <workspace-root> <objective> [state-root]`
+The bounded engineer loop is intentionally narrow:
 
-For predictable handoff behavior, both commands should use the same explicit `state-root`.
-
-When that shared state root contains prior meeting decisions, `engineer-loop-run` adds these operator-visible lines:
-
-- `Carried meeting decisions: <count>`
-- `Carried meeting decision <index>: <concise record>`
-
-`engineer-loop-run` currently surfaces at most the three most recent persisted meeting records from that state root.
-
-That concise record currently carries the facilitator summary fields `agenda`, `updates`, `decisions`, `risks`, `next_steps`, `open_questions`, and `goals`.
-
-A bare `agenda:` or `topic:` line without any persistable structured outputs does not create a carried meeting record.
-
-That output is additive. It does not replace the existing engineer-loop fields:
-
-- `Active goals count` and `Active goal <index>:` still reflect durable goal stewardship
-- `Action plan` and `Verification steps` expose the bounded execution plan Simard formed before acting
-- `Selected action`, `Action status`, `Changed files after action`, and `Verification status` still describe the bounded engineer-loop execution
-- carried meeting decisions remain advisory planning context, not implicit code execution
+- it inspects the selected repo before acting
+- it prints a short action plan and explicit verification steps
+- it chooses one bounded local action
+- it verifies the result explicitly
+- it persists concise evidence and memory under the selected state root
+- it surfaces active goals and up to the three most recent carried meeting records from the same state root
 
 The current bounded engineer loop supports two honest action shapes:
 
@@ -110,46 +111,78 @@ That structured edit path is intentionally narrow:
 - only one expected changed file is allowed
 - verification must confirm both file content and git-visible change state
 
-The goal-curation path is intentionally narrow too:
+### Meeting mode
+
+The meeting-mode contract already exists in the runtime today.
+
+- current operator entrypoint: `simard_operator_probe meeting-run <base-type> <topology> <structured-objective> [state-root]`
+- planned unified entrypoint: `simard meeting run <base-type> <topology> <structured-objective> [state-root]`
+
+Meeting mode uses the facilitator agent program backend `agent-program::meeting-facilitator`.
+
+Its contract is intentionally narrow:
+
+- it persists a concise meeting record under the durable state root when the structured objective contains persistable outputs such as `update:`, `decision:`, `risk:`, `next-step:`, `open-question:`, or structured `goal:` lines
+- later engineer runs against the same state root surface those carried meeting decisions explicitly, separate from the active top-goal list
+- it can also persist structured goal updates into the durable goal register
+- it does not mutate code paths or pretend implementation work happened
+
+### Goal-curation mode
+
+The goal-curation contract already exists in the runtime today.
+
+- current operator entrypoint: `simard_operator_probe goal-curation-run <base-type> <topology> <structured-objective> [state-root]`
+- planned unified entrypoint: `simard goal-curation run <base-type> <topology> <structured-objective> [state-root]`
+
+The goal-curation path is intentionally narrow:
 
 - it uses the dedicated `simard-goal-curator` identity and the `agent-program::goal-curator` backend
 - it persists durable goal records under the selected state root
-- reflection and later operator probes expose the active top 5 goals directly
+- reflection and later operator runs expose the active top 5 goals directly
 - it does not claim implementation work or remote orchestration
 
-The improvement-curation path is intentionally narrow as well:
+### Improvement-curation mode
+
+The improvement-curation contract already exists in the runtime today.
+
+- current operator entrypoint: `simard_operator_probe improvement-curation-run <base-type> <topology> <structured-objective> [state-root]`
+- planned unified entrypoint: `simard improvement-curation run <base-type> <topology> <structured-objective> [state-root]`
+
+The improvement-curation path is intentionally narrow:
 
 - it uses the dedicated `simard-improvement-curator` identity and the `agent-program::improvement-curator` backend
 - it reads the latest persisted review artifact from the selected durable state root and turns explicit operator approvals into durable active or proposed priorities
 - it preserves deferred proposals as durable decision memory rather than silently discarding them
-- reflection and later operator probes expose both active and proposed improvement priorities directly
+- reflection and later operator runs expose both active and proposed improvement priorities directly
 - it does not mutate code or silently promote unreviewed changes
 
-The review path is also intentionally narrow:
+### Review mode
+
+The review contract already exists in the runtime today.
+
+- current operator entrypoint: `simard_operator_probe review-run <base-type> <topology> <objective> [state-root]` and `simard_operator_probe review-read <base-type> <topology> [state-root]`
+- planned unified entrypoint: `simard review run ...` and `simard review read ...`
+
+The review path is intentionally narrow:
 
 - it runs an ordinary bounded session first, then inspects the exported handoff offline
 - it persists a concise JSON review artifact under `SIMARD_STATE_ROOT/review-artifacts/`
 - it persists a concise decision-scoped review record so later sessions can reuse approved findings
 - it emits concrete proposals tied to persisted evidence instead of silently changing prompts or policies
-- it can read the latest persisted review artifact back in a later operator process through `review-read`
+- it can read the latest persisted review artifact back in a later operator process through the current `review-read` entrypoint and the planned `simard review read` entrypoint
 
-### Self-improvement review foundation mapping
+### Gym mode
 
-The current review foundation is the explicit v1 reconciliation between `Specs/ProductArchitecture.md` and the original issue prompt for this feature.
+The gym contract already exists in the runtime today.
 
-- `src/review.rs` owns the offline review contract: it consumes exported handoff state plus normalized benchmark/session signals, then emits concrete improvement proposals instead of generic summaries.
-- `src/gym.rs` converts benchmark checks and measurement notes into the same `ReviewRequest` shape, so benchmark evidence and session evidence flow through one review surface.
-- `src/bin/simard_operator_probe.rs` exercises the operator path end-to-end: `review-run` persists the durable artifact and concise decision record, `review-read` proves that a later process can retrieve them again from `SIMARD_STATE_ROOT`, and `improvement-curation-run` turns approved proposals into durable priorities in that same state root.
-- `src/runtime.rs`, `src/memory.rs`, `src/evidence.rs`, and the exported handoff snapshot remain the architecture seams from the product spec; the review layer reads those seams rather than inventing a parallel persistence stack.
-- The implementation stays inside the product constraints: the loop is offline, evidence-linked, operator-reviewable, and limited to concise durable artifacts instead of raw transcript dumps or silent self-modification.
+- current operator entrypoint: `simard-gym list`, `simard-gym run <scenario-id>`, and `simard-gym run-suite <suite-id>`
+- planned unified entrypoint: `simard gym list`, `simard gym run <scenario-id>`, and `simard gym run-suite <suite-id>`
 
-## Benchmark gym CLI
+The shipped benchmark surface supports:
 
-The shipped benchmark CLI currently supports:
-
-- `cargo run --quiet --bin simard-gym -- list`
-- `cargo run --quiet --bin simard-gym -- run <scenario-id>`
-- `cargo run --quiet --bin simard-gym -- run-suite starter`
+- listing the shipped scenarios
+- running one benchmark scenario
+- running the `starter` suite
 
 The starter suite is intentionally small and exercises:
 
@@ -162,30 +195,52 @@ The starter suite is intentionally small and exercises:
 
 Artifacts are written under `target/simard-gym/` as JSON and text reports plus a `review.json` artifact for each scenario run.
 
+### Bootstrap mode
+
+The bootstrap contract already exists in the runtime today, but its current entrypoint differs from the planned CLI shape.
+
+- current operator entrypoint: `simard` with `SIMARD_*` environment variables
+- current compatibility helper: `simard_operator_probe bootstrap-run <identity> <base-type> <topology> <objective> [state-root]`
+- planned unified entrypoint: `simard bootstrap run <identity> <base-type> <topology> <objective> [state-root]`
+
+The bootstrap utility exposes explicit runtime assembly rather than hidden defaults:
+
+- unsupported or unregistered base types fail explicitly
+- unsupported topology and base-type pairs fail explicitly
+- builtin defaults are only used through explicit opt-in startup mode
+
 ## Configuration
 
 ### Environment variables
 
-| Variable | Required | Default | Description |
+| Variable | Required for current `simard` entrypoint | Default | Description |
 | --- | --- | --- | --- |
-| `SIMARD_PROMPT_ROOT` | Yes in `explicit-config` | none | Root directory for prompt assets. |
-| `SIMARD_OBJECTIVE` | Yes in `explicit-config` | none | Objective passed to `run()`. Live execution keeps the real objective in memory while persisted scratch, summary, reflection, and exported handoff session text store objective metadata instead of the raw objective text. |
-| `SIMARD_STATE_ROOT` | Yes in `explicit-config` | none in `explicit-config`; `target/simard-state` in `builtin-defaults` | Root directory for the durable local memory, goals, evidence, and latest handoff snapshot files written by the bootstrap path. |
+| `SIMARD_PROMPT_ROOT` | Yes in `explicit-config` bootstrap flows | none | Root directory for prompt assets. |
+| `SIMARD_OBJECTIVE` | No when `SIMARD_BOOTSTRAP_MODE=builtin-defaults`; otherwise yes | none in `explicit-config`; `bootstrap the Simard engineer loop` in `builtin-defaults` | Objective passed to bootstrapped runs. Live execution keeps the real objective in memory while persisted scratch, summary, reflection, and exported handoff session text store objective metadata instead of the raw objective text. |
+| `SIMARD_STATE_ROOT` | No when `SIMARD_BOOTSTRAP_MODE=builtin-defaults` | none in `explicit-config`; `target/simard-state` in `builtin-defaults` | Root directory for the durable local memory, goals, evidence, and latest handoff snapshot files written by the bootstrap path. |
 | `SIMARD_BOOTSTRAP_MODE` | No | `explicit-config` | Startup mode. Accepted values: `explicit-config`, `builtin-defaults`. |
-| `SIMARD_IDENTITY` | Yes in `explicit-config` | none in `explicit-config`; `simard-engineer` in `builtin-defaults` | Identity to load before runtime composition. Non-UTF-8 values fail bootstrap instead of being treated as missing. |
-| `SIMARD_BASE_TYPE` | Yes in `explicit-config` | none in `explicit-config`; `local-harness` in `builtin-defaults` | Base type selected for the runtime request. Unsupported or unregistered choices fail explicitly. |
-| `SIMARD_RUNTIME_TOPOLOGY` | Yes in `explicit-config` | none in `explicit-config`; `single-process` in `builtin-defaults` | Runtime topology selected for the runtime request. Accepted values: `single-process`, `multi-process`, `distributed`. |
+| `SIMARD_IDENTITY` | No when `SIMARD_BOOTSTRAP_MODE=builtin-defaults`; otherwise yes | none in `explicit-config`; `simard-engineer` in `builtin-defaults` | Identity to load before runtime composition. |
+| `SIMARD_BASE_TYPE` | No when `SIMARD_BOOTSTRAP_MODE=builtin-defaults`; otherwise yes | none in `explicit-config`; `local-harness` in `builtin-defaults` | Base type selected for the runtime request. Unsupported or unregistered choices fail explicitly. |
+| `SIMARD_RUNTIME_TOPOLOGY` | No when `SIMARD_BOOTSTRAP_MODE=builtin-defaults`; otherwise yes | none in `explicit-config`; `single-process` in `builtin-defaults` | Runtime topology selected for the runtime request. Accepted values: `single-process`, `multi-process`, `distributed`. |
 
-### Operator probe carryover configuration
+### Operator carryover configuration
 
-The meeting-to-engineer handoff uses CLI arguments rather than environment variables:
+Meeting-to-engineer handoff currently uses the explicit trailing `state-root` argument on the probe commands:
 
-- `meeting-run` accepts an optional trailing `state-root`
-- `engineer-loop-run` accepts an optional trailing `state-root`
-- passing the same explicit directory to both commands is the supported way to make meeting decisions visible in later engineer-loop runs
-- the carryover surface is intentionally bounded: `engineer-loop-run` reports at most the three most recent persisted meeting records from that shared state root
-- if you omit the shared state root, the probes still run, but there is no guaranteed cross-session carryover contract
-- if you want the bounded edit path instead of the default read-only scan, pass a structured objective containing `edit-file:`, `replace:`, `with:`, and `verify-contains:` lines
+- `simard_operator_probe meeting-run ... [state-root]`
+- `simard_operator_probe engineer-loop-run ... [state-root]`
+
+The planned unified CLI preserves the same carryover contract:
+
+- `simard meeting run ... [state-root]`
+- `simard engineer run ... [state-root]`
+
+Passing the same explicit directory to both commands is the supported way to make meeting decisions visible in later engineer runs.
+
+The carryover surface is intentionally bounded:
+
+- engineer mode reports at most the three most recent persisted meeting records from that shared state root
+- if you omit the shared state root, the commands still run, but there is no guaranteed cross-session carryover contract
 
 ### Current builtin base-type registrations
 
@@ -201,64 +256,11 @@ The builtin identities currently advertised by the loader are `simard-engineer`,
 Notes:
 
 - bootstrap registers base-type factories from the manifest-advertised base-type list instead of assuming a single hardcoded local backend
-- for `single-process`, bootstrap injects `topology::in-process`, `transport::in-memory-mailbox`, and `supervisor::in-process`
-- for `multi-process` and `distributed`, bootstrap injects `topology::loopback-mesh`, `transport::loopback-mailbox`, and `supervisor::coordinated`
-- unsupported topology/base-type pairs still fail explicitly; for example, `local-harness + multi-process` returns `UnsupportedTopology`
-- if a future identity advertises a base type without a registered factory, runtime composition still fails explicitly with `AdapterNotRegistered`
-- the descriptors remain truthful: `selected_base_type` preserves the explicit choice, while `adapter_backend.identity` exposes the actual backend (`terminal-shell::local-pty` for `terminal-shell`, `rusty-clawd::session-backend` for `rusty-clawd`, `local-harness` for the current `copilot-sdk` alias)
-- `runtime_node`, `mailbox_address`, `adapter_capabilities`, `adapter_supported_topologies`, `topology_backend`, `transport_backend`, `supervisor_backend`, and `handoff_backend` expose the actual runtime assembly rather than inferred labels
+- unsupported topology and base-type pairs still fail explicitly; for example, `local-harness + multi-process` returns `UnsupportedTopology`
+- descriptors remain truthful: `selected_base_type` preserves the explicit choice, while `adapter_backend.identity` exposes the actual backend
 - `MemoryPolicy.allow_project_writes=true` is rejected explicitly in v1 rather than being ignored
 
-### Bootstrap modes
-
-| Mode | Behavior |
-| --- | --- |
-| `explicit-config` | Requires prompt root, objective, state root, identity, base type, and topology from configuration. |
-| `builtin-defaults` | Allows builtin prompt root, builtin objective, builtin state root (`target/simard-state`), builtin identity, builtin base type (`local-harness`), and builtin topology (`single-process`), but only because startup opted in explicitly. |
-
-### Config value sources
-
-`ConfigValueSource` records where a resolved value came from.
-
-| Variant | Meaning |
-| --- | --- |
-| `Environment(&'static str)` | The value came directly from an environment variable. |
-| `ExplicitOptIn(&'static str)` | The value came from an explicit startup mode that permits builtin defaults. |
-
-### Example: explicit bootstrap with `copilot-sdk`
-
-This is the canonical non-default base-type example for the current scaffold:
-
-```bash
-SIMARD_PROMPT_ROOT="$PWD/prompt_assets" \
-SIMARD_OBJECTIVE="inspect copilot-sdk bootstrap wiring" \
-SIMARD_STATE_ROOT="$PWD/target/simard-state" \
-SIMARD_IDENTITY="simard-engineer" \
-SIMARD_BASE_TYPE="copilot-sdk" \
-SIMARD_RUNTIME_TOPOLOGY="single-process" \
-cargo run --quiet
-```
-
-Expected output shape:
-
-```text
-Simard local runtime executed successfully.
-Bootstrap mode: explicit-config
-Config sources: prompt_root=env:SIMARD_PROMPT_ROOT, objective=env:SIMARD_OBJECTIVE, state_root=env:SIMARD_STATE_ROOT, base_type=env:SIMARD_BASE_TYPE, topology=env:SIMARD_RUNTIME_TOPOLOGY
-Bootstrap selection: identity=simard-engineer, base_type=copilot-sdk, topology=single-process
-Adapter implementation: local-harness
-...
-Snapshot: state=ready, topology=single-process, base_type=copilot-sdk
-Shutdown: stopped
-```
-
-This confirms three important contract points:
-
-- bootstrap only uses the selected base type because you passed it explicitly
-- the current v1 runtime accepts `copilot-sdk` immediately, but only with `single-process`
-- the current v1 implementation behind that alias is still `local-harness`
-
-### Persisted session text
+## Persisted session text
 
 Simard keeps the live objective available while the run is executing, but persisted session text is redacted down to objective metadata.
 
@@ -268,13 +270,9 @@ Simard keeps the live objective available while the run is executing, but persis
 - exported handoff snapshots preserve the session boundary while replacing `RuntimeHandoffSnapshot.session.objective` with the same objective metadata string
 - bootstrap persists the latest exported handoff snapshot under `SIMARD_STATE_ROOT/latest_handoff.json`
 - bootstrap persists durable goal state under `SIMARD_STATE_ROOT/goal_records.json`
-- runtime reflection now reports both `active_goal_count` / `active_goals` and `proposed_goal_count` / `proposed_goals`
+- runtime reflection reports both `active_goal_count` / `active_goals` and `proposed_goal_count` / `proposed_goals`
 
 ## Identity metadata
-
-### `IdentityManifest`
-
-`IdentityManifest` stores contract truth in `contract: ManifestContract`.
 
 ### `ManifestContract`
 
@@ -290,27 +288,9 @@ pub struct ManifestContract {
 
 Notes:
 
-- the CLI bootstrap path uses `simard::bootstrap::assemble_local_runtime` as the entrypoint
+- the current CLI bootstrap path uses `simard::bootstrap::assemble_local_runtime` as the entrypoint
 - provenance and freshness stay inside the contract so reflection carries a single source of truth
 - invalid empty fields fail with `SimardError::InvalidManifestContract`
-
-### Current precedence rules
-
-`precedence` is ordered from highest to lowest influence within the bootstrap path. A typical local sequence is:
-
-```text
-mode:explicit-config
-identity:simard-engineer
-base-type:local-harness
-topology:single-process
-prompt-root:env:SIMARD_PROMPT_ROOT
-state-root:env:SIMARD_STATE_ROOT
-objective:env:SIMARD_OBJECTIVE
-```
-
-If builtin defaults are used intentionally, the prompt-root, state-root, and objective entries record `opt-in:SIMARD_BOOTSTRAP_MODE`.
-
-## Provenance and freshness
 
 ### `Provenance`
 
@@ -437,9 +417,9 @@ pub struct ReflectionSnapshot {
 }
 ```
 
-For `simard-meeting`, reflection also reports `agent_program_backend.identity == "agent-program::meeting-facilitator"`. For `simard-goal-curator`, it reports `agent_program_backend.identity == "agent-program::goal-curator"`. For `simard-improvement-curator`, it reports `agent_program_backend.identity == "agent-program::improvement-curator"`.
+For `simard-meeting`, reflection reports `agent_program_backend.identity == "agent-program::meeting-facilitator"`. For `simard-goal-curator`, it reports `agent_program_backend.identity == "agent-program::goal-curator"`. For `simard-improvement-curator`, it reports `agent_program_backend.identity == "agent-program::improvement-curator"`.
 
-### Backend descriptors
+### `BackendDescriptor`
 
 ```rust
 pub struct BackendDescriptor {
@@ -454,7 +434,7 @@ Reflection rules:
 - `manifest_contract` carries entrypoint, provenance, and freshness together
 - `agent_program_backend` comes from the injected agent-program contract, not from hardcoded runtime logic
 - `handoff_backend` comes from the injected handoff store used for export/import
-- `adapter_backend` comes from the selected base-type factory/session descriptor, not from a bootstrap shortcut
+- `adapter_backend` comes from the selected base-type factory or session descriptor, not from a bootstrap shortcut
 - `runtime_node` and `mailbox_address` come from the injected topology and transport services
 - `topology_backend`, `transport_backend`, and `supervisor_backend` come from the live runtime services
 - `memory_backend` comes from the live memory store descriptor
@@ -506,6 +486,7 @@ Reflection rules:
 | `PromptAssetMissing` | A referenced prompt asset was not found. |
 | `PromptAssetRead` | A prompt asset could not be read. |
 | `StoragePoisoned` | A durable store lock was poisoned before Simard could read or persist state. |
+
 ## Example: truthful fields
 
 ```rust
@@ -522,32 +503,12 @@ assert_eq!(snapshot.manifest_contract.provenance.source, "bootstrap");
 assert_eq!(snapshot.manifest_contract.freshness.state, FreshnessState::Current);
 assert_eq!(snapshot.runtime_node.to_string(), "node-local");
 assert_eq!(snapshot.mailbox_address.to_string(), "inmemory://node-local");
-assert_eq!(snapshot.agent_program_backend.identity, "agent-program::objective-relay");
-assert_eq!(snapshot.handoff_backend.identity, "handoff::json-file-store");
 assert_eq!(snapshot.adapter_backend.identity, "local-harness");
-assert_eq!(snapshot.topology_backend.identity, "topology::in-process");
-assert_eq!(snapshot.transport_backend.identity, "transport::in-memory-mailbox");
-assert_eq!(snapshot.supervisor_backend.identity, "supervisor::in-process");
-assert_eq!(snapshot.memory_backend.identity, "memory::json-file-store");
-assert_eq!(snapshot.evidence_backend.identity, "evidence::json-file-store");
 ```
 
 ## See also
 
+- [Simard CLI reference](./simard-cli.md)
 - [How to configure bootstrap and inspect reflection](../howto/configure-bootstrap-and-inspect-reflection.md)
+- [How to carry meeting decisions into engineer sessions](../howto/carry-meeting-decisions-into-engineer-sessions.md)
 - [Concept: truthful runtime metadata](../concepts/truthful-runtime-metadata.md)
-- [Tutorial: Run your first local session](../tutorials/run-your-first-local-session.md)
-
-See the [documentation index](../index.md) for the full set of Simard docs.
-
-
-## Handoff and migration
-
-`RuntimeKernel::export_handoff()` exports the latest session metadata, memory records, and evidence records into a `RuntimeHandoffSnapshot` and persists it through the injected `RuntimeHandoffStore`.
-
-Handoff notes for the current repository surface:
-
-- the repository contract here is still the local CLI/operator path plus the in-process Rust runtime types; there is no HTTP, network-service, or database schema handoff contract in this branch
-- `RuntimeHandoffSnapshot` should be treated as sensitive runtime state even after objective redaction because it still contains memory/evidence records and session linkage
-- `RuntimeKernel::export_handoff()` preserves the latest session boundary but redacts `session.objective` down to `objective-metadata(...)` before persistence/export
-- `RuntimeKernel::compose_from_handoff(...)` currently validates `identity_name` and `selected_base_type`, then rehydrates memory/evidence stores and preserves the redacted last-session boundary for a new process or node

@@ -11,6 +11,8 @@ pub mod identity;
 pub mod improvements;
 pub mod memory;
 pub mod metadata;
+pub mod operator_cli;
+pub mod operator_commands;
 mod persistence;
 pub mod prompt_assets;
 pub mod reflection;
@@ -63,6 +65,13 @@ pub use memory::{
     FileBackedMemoryStore, InMemoryMemoryStore, MemoryRecord, MemoryScope, MemoryStore,
 };
 pub use metadata::{BackendDescriptor, Freshness, FreshnessState, Provenance};
+pub use operator_cli::{dispatch_operator_cli, operator_cli_help, operator_cli_usage};
+pub use operator_commands::{
+    dispatch_legacy_gym_cli, dispatch_operator_probe, gym_usage, run_bootstrap_probe,
+    run_engineer_loop_probe, run_goal_curation_probe, run_gym_list, run_gym_scenario,
+    run_gym_suite, run_handoff_probe, run_improvement_curation_probe, run_meeting_probe,
+    run_review_probe, run_review_read_probe, run_terminal_probe,
+};
 pub use prompt_assets::{
     FilePromptAssetStore, InMemoryPromptAssetStore, PromptAsset, PromptAssetId, PromptAssetRef,
     PromptAssetStore,
