@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::operator_commands::{
     run_bootstrap_probe, run_engineer_loop_probe, run_goal_curation_probe, run_gym_compare,
     run_gym_list, run_gym_scenario, run_gym_suite, run_improvement_curation_probe,
-    run_meeting_probe, run_review_probe, run_review_read_probe,
+    run_meeting_probe, run_review_probe, run_review_read_probe, run_terminal_probe,
 };
 
 const OPERATOR_CLI_HELP: &str = "\
@@ -11,6 +11,7 @@ Simard unified operator CLI
 
 Product modes:
   engineer run <topology> <workspace-root> <objective> [state-root]
+  engineer terminal <topology> <objective> [state-root]
   meeting run <base-type> <topology> <objective> [state-root]
   goal-curation run <base-type> <topology> <objective> [state-root]
   improvement-curation run <base-type> <topology> <objective> [state-root]
@@ -79,6 +80,13 @@ fn dispatch_engineer_command(
                 &objective,
                 state_root,
             )
+        }
+        "terminal" => {
+            let topology = next_required(&mut args, "topology")?;
+            let objective = next_required(&mut args, "objective")?;
+            let state_root = next_optional_path(&mut args);
+            reject_extra_args(args)?;
+            run_terminal_probe(&topology, &objective, state_root)
         }
         other => Err(format!("unsupported command 'engineer {other}'").into()),
     }

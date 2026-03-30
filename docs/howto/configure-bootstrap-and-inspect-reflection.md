@@ -24,7 +24,7 @@ Use this guide when you need to answer two questions:
 
 The canonical bootstrap surface is now `simard bootstrap run ...`.
 
-The old zero-argument `simard` bootstrap fallback is gone. Operators must pass the runtime selection explicitly. The terminal-backed engineer substrate still lives on the compatibility binary because that subcommand has not moved onto the canonical CLI yet.
+The old zero-argument `simard` bootstrap fallback is gone. Operators must pass the runtime selection explicitly. The terminal-backed engineer substrate now also lives on the canonical CLI through `simard engineer terminal ...`, while `simard_operator_probe terminal-run ...` remains as a compatibility alias.
 
 ## Prerequisites
 
@@ -135,12 +135,12 @@ If you launched with `copilot-sdk`, `snapshot.selected_base_type` still shows th
 
 ## 3. Exercise the terminal-backed engineer substrate
 
-The terminal-backed engineer substrate is still compatibility-only:
+Use the canonical CLI when you want the real local PTY-backed engineer substrate:
 
 ```bash
-cargo run --quiet --bin simard_operator_probe --   terminal-run single-process   $'working-directory: .
+cargo run --quiet --   engineer terminal single-process   $'working-directory: .
 command: pwd
-command: printf "terminal-foundation-ok\n"'
+command: printf "terminal-foundation-ok\n"'   "$PWD/target/simard-state"
 ```
 
 Look for:
