@@ -7,6 +7,7 @@ owner: simard
 doc_type: reference
 related:
   - ../index.md
+  - ../howto/carry-meeting-decisions-into-engineer-sessions.md
   - ../howto/configure-bootstrap-and-inspect-reflection.md
   - ../concepts/truthful-runtime-metadata.md
 ---
@@ -24,7 +25,7 @@ Simard v1 currently exposes five surfaces:
 - the local CLI bootstrap path through `cargo run --quiet`
 - the benchmark gym CLI through `cargo run --quiet --bin simard-gym -- ...`
 - the operator/runtime probe through `cargo run --quiet --bin simard_operator_probe -- ...`
-- the local-first engineer loop probe through `cargo run --quiet --bin simard_operator_probe -- engineer-loop-run <topology> <workspace-root> <objective>`
+- the local-first engineer loop probe through `cargo run --quiet --bin simard_operator_probe -- engineer-loop-run <topology> <workspace-root> <objective> [state-root]`
 - the in-process Rust runtime/bootstrap types in `src/bootstrap.rs`, `src/runtime.rs`, and related modules
 
 Simard v1 does **not** currently expose:
@@ -61,9 +62,36 @@ Use a structured objective with lines such as:
 The v1 meeting contract is intentionally narrow:
 
 - meeting mode uses the facilitator agent program backend `agent-program::meeting-facilitator`
-- it persists concise decision memory under the durable state root
+- it persists a concise meeting record under the durable state root when the structured objective contains persistable outputs such as `update:`, `decision:`, `risk:`, `next-step:`, `open-question:`, or structured `goal:` lines
+- later `engineer-loop-run` probes against the same state root surface those carried meeting decisions explicitly, separate from the active top-goal list
 - it can also persist structured goal updates into the durable goal register
 - it does not mutate code paths or pretend implementation work happened
+
+### Meeting-to-engineer handoff contract
+
+The public CLI contract for this feature lives on the operator probe:
+
+- `cargo run --quiet --bin simard_operator_probe -- meeting-run <base-type> <topology> <structured-objective> [state-root]`
+- `cargo run --quiet --bin simard_operator_probe -- engineer-loop-run <topology> <workspace-root> <objective> [state-root]`
+
+For predictable handoff behavior, both commands should use the same explicit `state-root`.
+
+When that shared state root contains prior meeting decisions, `engineer-loop-run` adds these operator-visible lines:
+
+- `Carried meeting decisions: <count>`
+- `Carried meeting decision <index>: <concise record>`
+
+`engineer-loop-run` currently surfaces at most the three most recent persisted meeting records from that state root.
+
+That concise record currently carries the facilitator summary fields `agenda`, `updates`, `decisions`, `risks`, `next_steps`, `open_questions`, and `goals`.
+
+A bare `agenda:` or `topic:` line without any persistable structured outputs does not create a carried meeting record.
+
+That output is additive. It does not replace the existing engineer-loop fields:
+
+- `Active goals count` and `Active goal <index>:` still reflect durable goal stewardship
+- `Selected action`, `Action status`, and `Verification status` still describe the bounded engineer-loop execution
+- carried meeting decisions remain advisory planning context, not implicit code execution
 
 The goal-curation path is intentionally narrow too:
 
@@ -130,6 +158,16 @@ Artifacts are written under `target/simard-gym/` as JSON and text reports plus a
 | `SIMARD_IDENTITY` | Yes in `explicit-config` | none in `explicit-config`; `simard-engineer` in `builtin-defaults` | Identity to load before runtime composition. Non-UTF-8 values fail bootstrap instead of being treated as missing. |
 | `SIMARD_BASE_TYPE` | Yes in `explicit-config` | none in `explicit-config`; `local-harness` in `builtin-defaults` | Base type selected for the runtime request. Unsupported or unregistered choices fail explicitly. |
 | `SIMARD_RUNTIME_TOPOLOGY` | Yes in `explicit-config` | none in `explicit-config`; `single-process` in `builtin-defaults` | Runtime topology selected for the runtime request. Accepted values: `single-process`, `multi-process`, `distributed`. |
+
+### Operator probe carryover configuration
+
+The meeting-to-engineer handoff uses CLI arguments rather than environment variables:
+
+- `meeting-run` accepts an optional trailing `state-root`
+- `engineer-loop-run` accepts an optional trailing `state-root`
+- passing the same explicit directory to both commands is the supported way to make meeting decisions visible in later engineer-loop runs
+- the carryover surface is intentionally bounded: `engineer-loop-run` reports at most the three most recent persisted meeting records from that shared state root
+- if you omit the shared state root, the probes still run, but there is no guaranteed cross-session carryover contract
 
 ### Current builtin base-type registrations
 

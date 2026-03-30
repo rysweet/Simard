@@ -7,6 +7,7 @@ owner: simard
 doc_type: howto
 related:
   - ../index.md
+  - ./carry-meeting-decisions-into-engineer-sessions.md
   - ../reference/runtime-contracts.md
   - ../concepts/truthful-runtime-metadata.md
 ---
@@ -183,9 +184,11 @@ Look for:
 - `Identity: simard-meeting`
 - `Decision records: 1`
 - `Active goals count: 1`
-- a durable decision record containing the decision, risk, next step, and open question
+- a durable meeting record containing the structured updates, decisions, risks, next steps, open questions, and goal updates from the objective
 
-This is the current honest v1 behavior: meeting mode captures structured planning output, can optionally persist structured goal updates, and writes concise decision memory, but it does not mutate code.
+This is the current honest v1 behavior: meeting mode captures structured planning output, can optionally persist structured goal updates, and writes a concise meeting record whenever the objective includes persistable structured fields, but it does not mutate code.
+
+If you need to prove the later engineer-session handoff rather than meeting capture in isolation, follow [How to carry meeting decisions into engineer sessions](./carry-meeting-decisions-into-engineer-sessions.md).
 
 ## 5. Exercise goal stewardship directly
 
@@ -252,6 +255,8 @@ Look for:
 - `Verification status: verified`
 
 This is the current honest v1 engineer-loop slice: Simard inspects the local repo, reads the active durable goals for context, performs one bounded repo-native action, verifies that the repo grounding stayed stable, and persists durable memory/evidence, but it does not claim remote execution or autonomous multi-step coding yet.
+
+When you pass the same explicit state root that an earlier `meeting-run` used, this same probe also prints `Carried meeting decisions: N` and up to the three most recent `Carried meeting decision <index>:` lines.
 
 ## 8. Validate stopped-state behavior
 

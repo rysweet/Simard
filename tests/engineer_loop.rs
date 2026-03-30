@@ -126,6 +126,10 @@ fn engineer_loop_probe_reports_repo_state_runs_verified_action_and_persists_trut
         "v1 engineer loop must stay honest about local-only execution:\n{rendered}"
     );
     assert!(
+        rendered.contains("Carried meeting decisions: 0"),
+        "isolated engineer-loop runs should say when no prior meeting decisions were carried forward:\n{rendered}"
+    );
+    assert!(
         rendered.contains("Selected action: "),
         "engineer-loop probe should report the grounded engineering action it chose:\n{rendered}"
     );
@@ -186,5 +190,9 @@ fn engineer_loop_probe_reports_repo_state_runs_verified_action_and_persists_trut
     assert!(
         handoff_payload.contains("verification-status=verified"),
         "handoff payload should preserve verified outcome status for truthful resume behavior:\n{handoff_payload}"
+    );
+    assert!(
+        evidence_payload.contains("carried-meeting-decisions=<none>"),
+        "evidence payload should preserve whether prior meeting decisions were available:\n{evidence_payload}"
     );
 }
