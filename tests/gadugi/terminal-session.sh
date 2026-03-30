@@ -28,6 +28,25 @@ printf '%s\n' "$OUTPUT" | grep -F "Terminal checkpoint 1: terminal-foundation-re
 printf '%s\n' "$OUTPUT" | grep -F "Terminal last output line: terminal-foundation-ok" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "terminal-foundation-ok" >/dev/null
 
+OBJECTIVE_FILE="$(mktemp /tmp/simard-terminal-objective.XXXXXX)"
+cat > "$OBJECTIVE_FILE" <<'EOF'
+working-directory: .
+command: printf "terminal-file-ready\n"
+wait-for: terminal-file-ready
+input: printf "terminal-file-ok\n"
+EOF
+
+FILE_OUTPUT="$(
+  cargo run --quiet --bin simard -- \
+    engineer terminal-file single-process "$OBJECTIVE_FILE"
+)"
+
+printf '%s\n' "$FILE_OUTPUT"
+
+printf '%s\n' "$FILE_OUTPUT" | grep -F "Terminal steps count: 3" >/dev/null
+printf '%s\n' "$FILE_OUTPUT" | grep -F "Terminal checkpoint 1: terminal-file-ready" >/dev/null
+printf '%s\n' "$FILE_OUTPUT" | grep -F "Terminal last output line: terminal-file-ok" >/dev/null
+
 READ_OUTPUT="$(
   cargo run --quiet --bin simard -- \
     engineer terminal-read single-process
@@ -59,3 +78,4 @@ set -e
 [ "$BAD_STATUS" -ne 0 ]
 [ ! -e "$MARKER" ]
 printf '%s\n' "$BAD_OUTPUT" | grep -F "terminal-shell only accepts an absolute shell executable path using safe path characters" >/dev/null
+rm -f "$OBJECTIVE_FILE"

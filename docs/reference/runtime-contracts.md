@@ -37,6 +37,7 @@ Simard does **not** expose:
 | bounded engineer loop | `simard engineer run ...` | `simard_operator_probe engineer-loop-run ...` |
 | engineer state readback | `simard engineer read ...` | `simard_operator_probe engineer-read ...` |
 | terminal-backed engineer substrate | `simard engineer terminal ...` | `simard_operator_probe terminal-run ...` |
+| file-backed terminal engineer substrate | `simard engineer terminal-file ...` | `simard_operator_probe terminal-run-file ...` |
 | terminal session readback | `simard engineer terminal-read ...` | `simard_operator_probe terminal-read ...` |
 | meeting mode | `simard meeting run ...` | `simard_operator_probe meeting-run ...` |
 | meeting state readback | `simard meeting read ...` | `simard_operator_probe meeting-read ...` |
@@ -54,6 +55,7 @@ The shipped operator-facing command tree is:
 - `simard engineer run <topology> <workspace-root> <objective> [state-root]`
 - `simard engineer read <topology> [state-root]`
 - `simard engineer terminal <topology> <objective> [state-root]`
+- `simard engineer terminal-file <topology> <objective-file> [state-root]`
 - `simard engineer terminal-read <topology> [state-root]`
 - `simard meeting run <base-type> <topology> <structured-objective> [state-root]`
 - `simard meeting read <base-type> <topology> [state-root]`
@@ -181,6 +183,19 @@ The contract is intentionally explicit:
 - output order stays deterministic: runtime header, handoff session summary, adapter details, shell details, step/checkpoint audit trail, transcript summary, durable record counts
 - the command performs no mutation, replay, resume, or execution
 - invalid state roots, missing files, unreadable storage, and malformed persisted terminal data fail explicitly
+
+#### File-backed terminal session execution
+
+Canonical entrypoint: `simard engineer terminal-file <topology> <objective-file> [state-root]`
+
+Compatibility surface: `simard_operator_probe terminal-run-file <topology> <objective-file> [state-root]`
+
+This is the reusable authoring companion to `simard engineer terminal`.
+
+- it executes the same bounded `terminal-shell` substrate as `engineer terminal`
+- `<objective-file>` must exist as a readable UTF-8 regular file; symlinks and other file kinds are rejected explicitly
+- the loaded file contents remain subject to the same shell validation, wait-checkpoint behavior, sanitization, and durable state contracts as inline terminal objectives
+- the run surface and `terminal-read` continue to present the same structured terminal audit trail
 
 ### Meeting mode
 

@@ -61,6 +61,7 @@ Bare `simard` prints this operator surface directly.
 | --- | --- |
 | `simard engineer run ...` | `simard_operator_probe engineer-loop-run ...` |
 | `simard engineer terminal ...` | `simard_operator_probe terminal-run ...` |
+| `simard engineer terminal-file ...` | `simard_operator_probe terminal-run-file ...` |
 | `simard engineer terminal-read ...` | `simard_operator_probe terminal-read ...` |
 | `simard engineer read ...` | `simard_operator_probe engineer-read ...` |
 | `simard meeting run ...` | `simard_operator_probe meeting-run ...` |
@@ -195,6 +196,30 @@ simard engineer terminal single-process $'working-directory: .
 command: printf "terminal-foundation-ready\n"
 wait-for: terminal-foundation-ready
 command: printf "terminal-foundation-ok\n"' "$STATE_ROOT"
+```
+
+### `simard engineer terminal-file <topology> <objective-file> [state-root]`
+
+Runs the same bounded terminal-backed engineer substrate, but loads the session recipe from a reusable UTF-8 text file instead of requiring the whole objective inline on the command line.
+
+Behavior:
+
+- reuses the same `terminal-shell` base type and bounded wait/send terminal semantics as `engineer terminal`
+- requires `<objective-file>` to exist as a readable regular file; symlinks and non-files fail explicitly
+- preserves the same structured terminal audit trail on the run surface and through `terminal-read`
+- keeps `simard_operator_probe terminal-run-file ...` available for compatibility
+
+Example:
+
+```bash
+cat > /tmp/simard-terminal.recipe <<'EOF'
+working-directory: .
+command: printf "terminal-file-ready\n"
+wait-for: terminal-file-ready
+input: printf "terminal-file-ok\n"
+EOF
+
+simard engineer terminal-file single-process /tmp/simard-terminal.recipe "$STATE_ROOT"
 ```
 
 ### `simard engineer terminal-read <topology> [state-root]`
