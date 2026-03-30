@@ -1,6 +1,15 @@
-use simard::{BootstrapConfig, run_local_session};
+use simard::{BootstrapConfig, dispatch_operator_cli, run_local_session};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if !args.is_empty() {
+        return dispatch_operator_cli(args);
+    }
+
+    run_legacy_bootstrap_entrypoint()
+}
+
+fn run_legacy_bootstrap_entrypoint() -> Result<(), Box<dyn std::error::Error>> {
     let config = BootstrapConfig::from_env()?;
     let execution = run_local_session(&config)?;
 
