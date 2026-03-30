@@ -181,7 +181,7 @@ Key behavior:
 
 - selects the `terminal-shell` base type explicitly
 - accepts bounded terminal objectives with `command:`/`input:` lines plus `wait-for:` or `expect:` checkpoints so a run can pause for expected output before sending the next line
-- preserves truthful adapter reflection and terminal evidence output
+- preserves truthful adapter reflection and terminal evidence output, including ordered terminal steps, satisfied checkpoints, and the last visible output line
 - fails visibly for unsupported topology and invalid state-root inputs
 - fails explicitly if a requested wait checkpoint never appears instead of pretending the terminal interaction succeeded
 - keeps `simard_operator_probe terminal-run ...` available for compatibility
@@ -207,7 +207,7 @@ Behavior:
 - requires any explicit `state-root` to already exist as a directory
 - requires `latest_handoff.json`, `memory_records.json`, and `evidence_records.json` to already exist as readable regular files; symlinked artifacts are rejected
 - treats `latest_handoff.json` as authoritative for session identity, selected base type, topology, session phase, redacted objective metadata, and the persisted terminal evidence summary
-- renders terminal shell, working directory, command count, wait count, and transcript preview in stable operator-visible order
+- renders terminal shell, working directory, command count, wait count, ordered terminal steps, satisfied wait checkpoints, last output line, and transcript preview in stable operator-visible order
 - strips terminal control sequences and secret-shaped values from displayed output before printing it
 - fails explicitly for invalid `state-root` values and for missing, unreadable, or malformed persisted terminal state
 

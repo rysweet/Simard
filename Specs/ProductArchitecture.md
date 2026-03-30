@@ -245,7 +245,7 @@ The current shipped v1 engineer-loop slice stays intentionally narrow:
 - a bounded mutating path exists only for explicit structured objectives with `edit-file:`, `replace:`, `with:`, and `verify-contains:` directives
 - the mutating path requires a clean repo, exactly one expected changed file, and explicit content verification before success is reported
 - the terminal-backed engineer substrate now supports bounded interactive checkpoints with `wait-for:` / `expect:` directives so a local PTY session can pause for expected output before sending the next terminal line
-- the terminal-backed engineer substrate now also has a read-only audit companion so operators can inspect persisted shell details and transcript summaries after a terminal-backed session completes
+- the terminal-backed engineer substrate now also has a read-only audit companion so operators can inspect persisted shell details, ordered terminal steps, satisfied wait checkpoints, last output lines, and transcript summaries after a terminal-backed session completes
 
 ## Memory Architecture
 
