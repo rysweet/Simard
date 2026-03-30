@@ -1,8 +1,11 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::base_types::BaseTypeId;
 use crate::bootstrap::validate_state_root;
 use crate::goals::{FileBackedGoalStore, GoalRecord, GoalStatus, GoalStore};
+use crate::improvements::PersistedImprovementRecord;
+use crate::meetings::PersistedMeetingRecord;
 use crate::sanitization::sanitize_terminal_text;
 use crate::{
     BootstrapConfig, BootstrapInputs, BuiltinIdentityLoader, FileBackedMemoryStore, Freshness,
@@ -11,8 +14,8 @@ use crate::{
     assemble_local_runtime_from_handoff, benchmark_scenarios, build_review_artifact,
     builtin_base_type_registry_for_manifest, compare_latest_benchmark_runs, default_output_root,
     latest_local_handoff, latest_review_artifact, persist_review_artifact,
-    render_review_context_directives, run_benchmark_scenario, run_benchmark_suite,
-    run_local_engineer_loop, run_local_session,
+    render_review_context_directives, review_artifacts_dir, run_benchmark_scenario,
+    run_benchmark_suite, run_local_engineer_loop, run_local_session,
 };
 
 pub fn dispatch_operator_probe<I>(args: I) -> Result<(), Box<dyn std::error::Error>>
@@ -47,6 +50,13 @@ where
             let state_root = next_optional_path(&mut args);
             reject_extra_args(args)?;
             run_meeting_probe(&base_type, &topology, &objective, state_root)?;
+        }
+        "meeting-read" => {
+            let base_type = next_required(&mut args, "base type")?;
+            let topology = next_required(&mut args, "topology")?;
+            let state_root = next_optional_path(&mut args);
+            reject_extra_args(args)?;
+            run_meeting_read_probe(&base_type, &topology, state_root)?;
         }
         "goal-curation-run" => {
             let base_type = next_required(&mut args, "base type")?;
@@ -98,6 +108,13 @@ where
             let state_root = next_optional_path(&mut args);
             reject_extra_args(args)?;
             run_improvement_curation_probe(&base_type, &topology, &objective, state_root)?;
+        }
+        "improvement-curation-read" => {
+            let base_type = next_required(&mut args, "base type")?;
+            let topology = next_required(&mut args, "topology")?;
+            let state_root = next_optional_path(&mut args);
+            reject_extra_args(args)?;
+            run_improvement_curation_read_probe(&base_type, &topology, state_root)?;
         }
         other => return Err(format!("unsupported probe command '{other}'").into()),
     }
@@ -329,6 +346,41 @@ pub fn run_meeting_probe(
     }
     print_text("Execution summary", &execution.outcome.execution_summary);
     print_text("Reflection summary", &execution.outcome.reflection.summary);
+    Ok(())
+}
+
+pub fn run_meeting_read_probe(
+    base_type: &str,
+    topology: &str,
+    state_root_override: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let state_root = resolved_meeting_read_state_root(state_root_override, base_type, topology)?;
+    let memory_store = FileBackedMemoryStore::try_new(state_root.join("memory_records.json"))?;
+    let meeting_records = memory_store
+        .list(MemoryScope::Decision)?
+        .into_iter()
+        .filter(|record| crate::looks_like_persisted_meeting_record(&record.value))
+        .collect::<Vec<_>>();
+    let latest_record = meeting_records
+        .last()
+        .ok_or("expected persisted meeting decision record")?;
+    let parsed_record =
+        PersistedMeetingRecord::parse(&latest_record.value).map_err(|error| format!("{error}"))?;
+
+    println!("Probe mode: meeting-read");
+    println!("Identity: simard-meeting");
+    print_text("Selected base type", base_type);
+    print_text("Topology", topology);
+    print_display("State root", state_root.display());
+    println!("Meeting records: {}", meeting_records.len());
+    print_text("Latest agenda", &parsed_record.agenda);
+    print_string_section("Updates", &parsed_record.updates);
+    print_string_section("Decisions", &parsed_record.decisions);
+    print_string_section("Risks", &parsed_record.risks);
+    print_string_section("Next steps", &parsed_record.next_steps);
+    print_string_section("Open questions", &parsed_record.open_questions);
+    print_meeting_goal_section(&parsed_record.goals);
+    print_text("Latest meeting record", &latest_record.value);
     Ok(())
 }
 
@@ -727,6 +779,81 @@ pub fn run_improvement_curation_probe(
     Ok(())
 }
 
+pub fn run_improvement_curation_read_probe(
+    base_type: &str,
+    topology: &str,
+    state_root_override: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let state_root =
+        resolved_improvement_curation_read_state_root(state_root_override, base_type, topology)?;
+    let (review_artifact_path, review) =
+        latest_review_artifact(&state_root)?.ok_or("expected persisted review artifact")?;
+    let memory_store = FileBackedMemoryStore::try_new(state_root.join("memory_records.json"))?;
+    let latest_record = memory_store
+        .list(MemoryScope::Decision)?
+        .into_iter()
+        .rfind(|record| record.key.ends_with("improvement-curation-record"))
+        .ok_or("expected persisted improvement decision record")?;
+    let parsed_record = PersistedImprovementRecord::parse(&latest_record.value)
+        .map_err(|error| format!("{error}"))?;
+    let goal_store = FileBackedGoalStore::try_new(state_root.join("goal_records.json"))?;
+    let goal_records = goal_store.list()?;
+
+    println!("Probe mode: improvement-curation-read");
+    println!("Identity: simard-improvement-curator");
+    print_text(
+        "Selected base type",
+        parsed_record
+            .selected_base_type
+            .as_deref()
+            .unwrap_or(&review.selected_base_type),
+    );
+    print_text(
+        "Topology",
+        parsed_record
+            .topology
+            .as_deref()
+            .unwrap_or(&review.topology),
+    );
+    print_display("State root", state_root.display());
+    print_display("Latest review artifact", review_artifact_path.display());
+    print_text("Review id", &review.review_id);
+    print_text("Review target", &review.target_label);
+    println!("Review proposals: {}", review.proposals.len());
+    println!(
+        "Approved proposals: {}",
+        parsed_record.approved_proposals.len()
+    );
+    if parsed_record.approved_proposals.is_empty() {
+        println!("Approved proposals: <none>");
+    } else {
+        for (index, approval) in parsed_record.approved_proposals.iter().enumerate() {
+            print_text(
+                &format!("Approved proposal {}", index + 1),
+                approval.concise_label(),
+            );
+        }
+    }
+    println!(
+        "Deferred proposals: {}",
+        parsed_record.deferred_proposals.len()
+    );
+    if parsed_record.deferred_proposals.is_empty() {
+        println!("Deferred proposals: <none>");
+    } else {
+        for (index, deferral) in parsed_record.deferred_proposals.iter().enumerate() {
+            print_text(
+                &format!("Deferred proposal {}", index + 1),
+                format!("{} ({})", deferral.title, deferral.rationale),
+            );
+        }
+    }
+    print_goal_section(&goal_records, GoalStatus::Active, "Active");
+    print_goal_section(&goal_records, GoalStatus::Proposed, "Proposed");
+    print_text("Latest improvement record", parsed_record.concise_record());
+    Ok(())
+}
+
 pub fn run_gym_list() -> Result<(), Box<dyn std::error::Error>> {
     println!("Simard benchmark scenarios:");
     for scenario in benchmark_scenarios() {
@@ -968,6 +1095,132 @@ fn resolved_review_state_root(
     )
 }
 
+fn resolved_improvement_curation_read_state_root(
+    explicit: Option<PathBuf>,
+    base_type: &str,
+    topology: &str,
+) -> crate::SimardResult<PathBuf> {
+    let state_root = resolved_review_state_root(explicit, base_type, topology)?;
+    validate_improvement_curation_read_state_root(&state_root)?;
+    Ok(state_root)
+}
+
+fn resolved_meeting_read_state_root(
+    explicit: Option<PathBuf>,
+    base_type: &str,
+    topology: &str,
+) -> crate::SimardResult<PathBuf> {
+    let state_root = resolved_state_root(
+        explicit,
+        "simard-meeting",
+        base_type,
+        topology,
+        "meeting-run",
+    )?;
+    validate_meeting_read_state_root(&state_root)?;
+    Ok(state_root)
+}
+
+fn validate_meeting_read_state_root(state_root: &Path) -> crate::SimardResult<()> {
+    validate_existing_read_state_root_root("meeting read", state_root)?;
+    require_existing_read_file_for_mode(
+        "meeting read",
+        state_root,
+        &state_root.join("memory_records.json"),
+    )?;
+    Ok(())
+}
+
+fn validate_improvement_curation_read_state_root(state_root: &Path) -> crate::SimardResult<()> {
+    validate_existing_read_state_root_root("improvement-curation read", state_root)?;
+
+    require_existing_read_directory_for_mode(
+        "improvement-curation read",
+        state_root,
+        &review_artifacts_dir(state_root),
+        "review-artifacts/",
+    )?;
+    require_existing_read_file_for_mode(
+        "improvement-curation read",
+        state_root,
+        &state_root.join("memory_records.json"),
+    )?;
+    require_existing_read_file_for_mode(
+        "improvement-curation read",
+        state_root,
+        &state_root.join("goal_records.json"),
+    )?;
+    Ok(())
+}
+
+fn validate_existing_read_state_root_root(
+    mode_label: &str,
+    state_root: &Path,
+) -> crate::SimardResult<()> {
+    let root_metadata =
+        fs::metadata(state_root).map_err(|error| crate::SimardError::InvalidStateRoot {
+            path: state_root.to_path_buf(),
+            reason: format!("{mode_label} requires an existing state root directory: {error}"),
+        })?;
+    if root_metadata.is_dir() {
+        return Ok(());
+    }
+
+    Err(crate::SimardError::InvalidStateRoot {
+        path: state_root.to_path_buf(),
+        reason: format!("{mode_label} requires state-root to resolve to a directory"),
+    })
+}
+
+fn require_existing_read_directory_for_mode(
+    mode_label: &str,
+    state_root: &Path,
+    path: &Path,
+    label: &str,
+) -> crate::SimardResult<()> {
+    let metadata = fs::metadata(path).map_err(|error| crate::SimardError::InvalidStateRoot {
+        path: state_root.to_path_buf(),
+        reason: format!(
+            "{mode_label} requires '{}' to exist as a directory: {error}",
+            path.display()
+        ),
+    })?;
+    if metadata.is_dir() {
+        return Ok(());
+    }
+
+    Err(crate::SimardError::InvalidStateRoot {
+        path: state_root.to_path_buf(),
+        reason: format!("{mode_label} requires {label} to exist as a directory"),
+    })
+}
+
+fn require_existing_read_file_for_mode(
+    mode_label: &str,
+    state_root: &Path,
+    path: &Path,
+) -> crate::SimardResult<()> {
+    let metadata = fs::metadata(path).map_err(|error| crate::SimardError::InvalidStateRoot {
+        path: state_root.to_path_buf(),
+        reason: format!(
+            "{mode_label} requires '{}' to exist as a file: {error}",
+            path.display()
+        ),
+    })?;
+    if metadata.is_file() {
+        return Ok(());
+    }
+
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file");
+    Err(crate::SimardError::InvalidStateRoot {
+        path: state_root.to_path_buf(),
+        reason: format!("{mode_label} requires {file_name} to exist as a file"),
+    })
+}
+
 fn parse_runtime_topology(value: &str) -> crate::SimardResult<RuntimeTopology> {
     match value {
         "single-process" => Ok(RuntimeTopology::SingleProcess),
@@ -1010,6 +1263,56 @@ fn print_text(label: &str, value: impl AsRef<str>) {
 
 fn print_display(label: &str, value: impl std::fmt::Display) {
     println!("{label}: {}", sanitize_terminal_text(&value.to_string()));
+}
+
+fn print_string_section(label: &str, values: &[String]) {
+    println!("{label} count: {}", values.len());
+    if values.is_empty() {
+        println!("{label}: <none>");
+        return;
+    }
+
+    let singular = label.strip_suffix('s').unwrap_or(label);
+    for (index, value) in values.iter().enumerate() {
+        print_text(&format!("{singular} {}", index + 1), value);
+    }
+}
+
+fn print_meeting_goal_section(goals: &[crate::PersistedMeetingGoalUpdate]) {
+    println!("Goal updates count: {}", goals.len());
+    if goals.is_empty() {
+        println!("Goal updates: <none>");
+        return;
+    }
+
+    for (index, goal) in goals.iter().enumerate() {
+        print_text(&format!("Goal update {}", index + 1), goal.concise_label());
+    }
+}
+
+fn print_goal_section(records: &[GoalRecord], status: GoalStatus, heading: &'static str) {
+    let mut matching = records
+        .iter()
+        .filter(|record| record.status == status)
+        .collect::<Vec<_>>();
+    matching.sort_by(|left, right| {
+        left.priority
+            .cmp(&right.priority)
+            .then(left.title.cmp(&right.title))
+            .then(left.slug.cmp(&right.slug))
+    });
+    println!("{} goals count: {}", heading, matching.len());
+    if matching.is_empty() {
+        println!("{} goals: <none>", heading);
+        return;
+    }
+
+    for (index, goal) in matching.iter().enumerate() {
+        print_text(
+            &format!("{heading} goal {}", index + 1),
+            goal.concise_label(),
+        );
+    }
 }
 
 struct GoalRegisterView {

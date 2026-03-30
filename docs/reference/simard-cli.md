@@ -8,7 +8,9 @@ doc_type: reference
 related:
   - ../index.md
   - ./runtime-contracts.md
+  - ../howto/inspect-meeting-records.md
   - ../howto/inspect-durable-goal-register.md
+  - ../howto/inspect-improvement-curation-state.md
   - ../howto/configure-bootstrap-and-inspect-reflection.md
   - ../howto/carry-meeting-decisions-into-engineer-sessions.md
   - ../tutorials/run-your-first-local-session.md
@@ -30,12 +32,14 @@ simard
 |  |- run <topology> <workspace-root> <objective> [state-root]
 |  `- terminal <topology> <objective> [state-root]
 |- meeting
-|  `- run <base-type> <topology> <structured-objective> [state-root]
+|  |- run <base-type> <topology> <structured-objective> [state-root]
+|  `- read <base-type> <topology> [state-root]
 |- goal-curation
 |  |- run <base-type> <topology> <structured-objective> [state-root]
 |  `- read <base-type> <topology> [state-root]
 |- improvement-curation
-|  `- run <base-type> <topology> <structured-objective> [state-root]
+|  |- run <base-type> <topology> <structured-objective> [state-root]
+|  `- read <base-type> <topology> [state-root]
 |- gym
 |  |- list
 |  |- run <scenario-id>
@@ -57,9 +61,11 @@ Bare `simard` prints this unified help surface.
 | `simard engineer run ...` | `simard_operator_probe engineer-loop-run ...` |
 | `simard engineer terminal ...` | `simard_operator_probe terminal-run ...` |
 | `simard meeting run ...` | `simard_operator_probe meeting-run ...` |
+| `simard meeting read ...` | `simard_operator_probe meeting-read ...` |
 | `simard goal-curation run ...` | `simard_operator_probe goal-curation-run ...` |
 | `simard goal-curation read ...` | none |
 | `simard improvement-curation run ...` | `simard_operator_probe improvement-curation-run ...` |
+| `simard improvement-curation read ...` | `simard_operator_probe improvement-curation-read ...` |
 | `simard review run ...` | `simard_operator_probe review-run ...` |
 | `simard review read ...` | `simard_operator_probe review-read ...` |
 | `simard bootstrap run ...` | `simard_operator_probe bootstrap-run ...` |
@@ -155,6 +161,53 @@ EOF2
 simard meeting run local-harness single-process "$MEETING_OBJECTIVE" "$STATE_ROOT"
 ```
 
+### `simard meeting read <base-type> <topology> [state-root]`
+
+Reads the latest durable meeting record without mutating it.
+
+Key behavior:
+
+- loads the latest persisted meeting decision record from the validated `state-root`
+- reuses the same canonical default durable root as `meeting run` when `[state-root]` is omitted
+- validates `base-type` and `topology` before deriving that default root
+- requires explicit read-layout inputs before probing: the state root itself must already exist as a directory and `memory_records.json` must already be present
+- prints sections in this fixed order: latest agenda, updates, decisions, risks, next steps, open questions, goal updates, latest meeting record
+- includes explicit zero-state lines for empty update, decision, risk, next-step, open-question, and goal-update sections
+- strips terminal control sequences from persisted meeting text before printing it
+- preserves `meeting run` as the only meeting-state mutation workflow
+- fails explicitly for invalid `state-root` values and for missing, unreadable, or malformed persisted meeting state
+
+Example:
+
+```bash
+simard meeting read local-harness single-process "$STATE_ROOT"
+```
+
+Output shape:
+
+```text
+Probe mode: meeting-read
+Identity: simard-meeting
+Selected base type: local-harness
+Topology: single-process
+State root: /tmp/simard-meeting.XXXXXX
+Meeting records: 1
+Latest agenda: align the next Simard workstream
+Updates count: 1
+Update 1: durable memory foundation merged in PR 29
+Decisions count: 1
+Decision 1: preserve meeting-to-engineer continuity
+Risks count: 1
+Risk 1: workflow routing is still unreliable
+Next steps count: 1
+Next step 1: keep durable priorities visible
+Open questions count: 1
+Open question 1: how aggressively should Simard reprioritize?
+Goal updates count: 1
+Goal update 1: p1 [active] Preserve meeting handoff
+Latest meeting record: agenda=align the next Simard workstream; ...
+```
+
 ### `simard goal-curation run <base-type> <topology> <structured-objective> [state-root]`
 
 Maintains durable backlog records and the active top five goals.
@@ -227,6 +280,70 @@ Example:
 
 ```bash
 simard improvement-curation run local-harness single-process   "approve: Capture denser execution evidence | priority=1 | status=active | rationale=operators need denser execution evidence now"   "$STATE_ROOT"
+```
+
+When `[state-root]` is omitted, `improvement-curation run` reuses the same canonical durable root that `review run` uses for the validated runtime pairing:
+
+```text
+target/operator-probe-state/review-run/simard-engineer/<base-type>/<topology>
+```
+
+### `simard improvement-curation read <base-type> <topology> [state-root]`
+
+Reads the latest durable improvement-curation state without mutating it.
+
+Key behavior:
+
+- loads the latest persisted review artifact from the validated `state-root`, where "latest" means the review artifact with the highest `reviewed_at_unix_ms`
+- loads the latest persisted improvement-curation decision record from the same root, where "latest" means the last decision memory record whose key ends with `improvement-curation-record`
+- reuses the same canonical default durable root as `review run` and `improvement-curation run` when `[state-root]` is omitted
+- validates `base-type` and `topology` before deriving that default root
+- requires explicit read-layout inputs before probing: the state root itself must already exist as a directory, `review-artifacts/` must exist, and both `memory_records.json` and `goal_records.json` must already be present
+- prints sections in this fixed order: latest review metadata, approved proposals, deferred proposals, active goals, proposed goals, latest improvement record
+- includes explicit zero-state lines for empty approved, deferred, active-goal, and proposed-goal sections
+- strips terminal control sequences from persisted proposal titles, rationales, goal text, review metadata, and decision records before printing them
+- preserves `improvement-curation run` as the only curation workflow
+- fails explicitly for invalid `state-root` values and for missing, unreadable, or malformed persisted review or improvement state
+
+Example:
+
+```bash
+simard review run local-harness single-process \
+  "inspect the current Simard review surface and preserve concrete proposals" \
+  "$STATE_ROOT"
+
+simard improvement-curation run local-harness single-process \
+  "$(cat <<'EOF'
+approve: Capture denser execution evidence | priority=1 | status=active | rationale=operators need denser execution evidence now
+defer: Promote this pattern into a repeatable benchmark | rationale=hold this until the next benchmark planning pass
+EOF
+)" \
+  "$STATE_ROOT"
+
+simard improvement-curation read local-harness single-process "$STATE_ROOT"
+```
+
+Output shape:
+
+```text
+Probe mode: improvement-curation-read
+Identity: simard-improvement-curator
+Selected base type: local-harness
+Topology: single-process
+State root: /tmp/simard-improvement-curation.XXXXXX
+Latest review artifact: /tmp/simard-improvement-curation.XXXXXX/review_artifacts/review-....json
+Review id: review-...
+Review target: operator-review
+Review proposals: 2
+Approved proposals: 1
+Approved proposal 1: p1 [active] Capture denser execution evidence
+Deferred proposals: 1
+Deferred proposal 1: Promote this pattern into a repeatable benchmark (hold this until the next benchmark planning pass)
+Active goals count: 1
+Active goal 1: p1 [active] Capture denser execution evidence
+Proposed goals count: 0
+Proposed goals: <none>
+Latest improvement record: review=review-... target=operator-review approvals=[p1 [active] Capture denser execution evidence] deferred=[Promote this pattern into a repeatable benchmark (hold this until the next benchmark planning pass)]
 ```
 
 ### `simard gym list`
@@ -402,5 +519,6 @@ Simard fails explicitly for these common operator-facing cases:
 - unsupported base type for the selected identity
 - unsupported topology for the selected base type
 - missing or invalid workspace root
+- missing persisted review state for `review read`
 - nested-worktree or repo-root drift detected during engineer-mode execution
 - structured edit requested on a dirty repo

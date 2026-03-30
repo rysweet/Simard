@@ -10,6 +10,7 @@ related:
   - ../reference/simard-cli.md
   - ../reference/runtime-contracts.md
   - ../howto/carry-meeting-decisions-into-engineer-sessions.md
+  - ../howto/inspect-meeting-records.md
   - ../howto/configure-bootstrap-and-inspect-reflection.md
 ---
 
@@ -29,7 +30,7 @@ Today:
 
 - how to run the bounded engineer loop against a local repo
 - how meeting mode carries durable decision context into later engineer runs
-- how goal curation and improvement curation reuse the same durable state root
+- how goal curation, review, and improvement curation reuse explicit durable state roots
 - how bootstrap and benchmark flows fit into the same operator-facing CLI story
 
 ## Prerequisites
@@ -100,6 +101,20 @@ Active goal 1: p1 [active] Preserve meeting handoff
 
 **Checkpoint**: the meeting run persisted one concise decision record and durable goal updates, but it did not mutate the repository.
 
+If you want to inspect the stored meeting state directly before moving on, run:
+
+```bash
+cargo run --quiet -- \
+  meeting read local-harness single-process "$STATE_ROOT"
+```
+
+Look for:
+
+- `Probe mode: meeting-read`
+- `Latest agenda: align the next Simard workstream`
+- `Decision 1: preserve meeting-to-engineer continuity`
+- `Goal update 1: p1 [active] Preserve meeting handoff`
+
 ## Step 4: Re-run engineer mode and confirm carryover
 
 Use the same repo and the same state root again.
@@ -140,7 +155,7 @@ Look for:
 
 **Checkpoint**: durable backlog stewardship is its own operator-visible mode, not an engineer-loop side effect.
 
-## Step 6: Generate a review artifact and promote one approved improvement
+## Step 6: Generate a review artifact, curate one approval and one deferral, then read the stored improvement state
 
 First persist the latest review artifact:
 
@@ -153,7 +168,7 @@ Then curate explicit approvals into durable priorities:
 ```bash
 cargo run --quiet --   improvement-curation run local-harness single-process   "$(cat <<'EOF'
 approve: Capture denser execution evidence | priority=1 | status=active | rationale=operators need denser execution evidence now
-approve: Promote this pattern into a repeatable benchmark | priority=2 | status=proposed | rationale=carry this into the next benchmark planning pass
+defer: Promote this pattern into a repeatable benchmark | rationale=hold this until the next benchmark planning pass
 EOF
 )"   "$STATE_ROOT"
 ```
@@ -161,11 +176,25 @@ EOF
 Look for:
 
 - `Identity: simard-improvement-curator`
-- `Approved proposals: 2`
+- `Approved proposals: 1`
+- `Deferred proposals: 1`
 - `Active goal 1: p1 [active] Capture denser execution evidence`
-- `Proposed goal 1: p2 [proposed] Promote this pattern into a repeatable benchmark`
 
-**Checkpoint**: reviewed evidence is now feeding durable priorities through the same runtime contract the CLI exposes elsewhere.
+**Checkpoint**: reviewed evidence is now feeding durable priorities, and deferred proposals stay in durable state instead of vanishing into session output.
+
+Now read the durable audit state through the same public CLI:
+
+```bash
+cargo run --quiet -- \
+  improvement-curation read local-harness single-process "$STATE_ROOT"
+```
+
+Look for:
+
+- `Probe mode: improvement-curation-read`
+- `Latest review artifact:`
+- `Deferred proposal 1: Promote this pattern into a repeatable benchmark (hold this until the next benchmark planning pass)`
+- `Latest improvement record: review=`
 
 ## Step 7: Exercise bootstrap and the terminal-backed engineer substrate
 
@@ -199,4 +228,6 @@ You now know how to:
 
 - Use [How to configure bootstrap and inspect reflection](../howto/configure-bootstrap-and-inspect-reflection.md) when you need the bootstrap contract in more detail.
 - Use [How to carry meeting decisions into engineer sessions](../howto/carry-meeting-decisions-into-engineer-sessions.md) when you need a narrower handoff-focused workflow.
+- Use [How to inspect meeting records](../howto/inspect-meeting-records.md) when you need the read-only meeting audit flow.
+- Use [How to inspect improvement-curation state](../howto/inspect-improvement-curation-state.md) when you need the read-only review-to-priority audit flow.
 - Use [Simard CLI reference](../reference/simard-cli.md) when you need the exact command tree and compatibility mapping.

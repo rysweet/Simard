@@ -8,6 +8,8 @@ doc_type: reference
 related:
   - ../index.md
   - ./simard-cli.md
+  - ../howto/inspect-meeting-records.md
+  - ../howto/inspect-improvement-curation-state.md
   - ../howto/configure-bootstrap-and-inspect-reflection.md
   - ../tutorials/run-your-first-local-session.md
 ---
@@ -34,8 +36,11 @@ Simard does **not** expose:
 | bounded engineer loop | `simard engineer run ...` | `simard_operator_probe engineer-loop-run ...` |
 | terminal-backed engineer substrate | `simard engineer terminal ...` | `simard_operator_probe terminal-run ...` |
 | meeting mode | `simard meeting run ...` | `simard_operator_probe meeting-run ...` |
+| meeting state readback | `simard meeting read ...` | `simard_operator_probe meeting-read ...` |
 | goal-curation mode | `simard goal-curation run ...` | `simard_operator_probe goal-curation-run ...` |
+| goal-curation state readback | `simard goal-curation read ...` | none |
 | improvement-curation mode | `simard improvement-curation run ...` | `simard_operator_probe improvement-curation-run ...` |
+| improvement-curation state readback | `simard improvement-curation read ...` | `simard_operator_probe improvement-curation-read ...` |
 | review artifact persistence and readback | `simard review ...` | `simard_operator_probe review-run ...` and `review-read ...` |
 | benchmark scenarios and suites | `simard gym ...` | `simard-gym ...` |
 
@@ -46,8 +51,11 @@ The shipped operator-facing command tree is:
 - `simard engineer run <topology> <workspace-root> <objective> [state-root]`
 - `simard engineer terminal <topology> <objective> [state-root]`
 - `simard meeting run <base-type> <topology> <structured-objective> [state-root]`
+- `simard meeting read <base-type> <topology> [state-root]`
 - `simard goal-curation run <base-type> <topology> <structured-objective> [state-root]`
+- `simard goal-curation read <base-type> <topology> [state-root]`
 - `simard improvement-curation run <base-type> <topology> <structured-objective> [state-root]`
+- `simard improvement-curation read <base-type> <topology> [state-root]`
 - `simard gym list`
 - `simard gym run <scenario-id>`
 - `simard gym compare <scenario-id>`
@@ -118,9 +126,12 @@ This substrate exposes the real `terminal-shell` base type on the primary CLI:
 
 ### Meeting mode
 
-Canonical entrypoint: `simard meeting run <base-type> <topology> <structured-objective> [state-root]`
+Canonical entrypoints:
 
-Compatibility surface: `simard_operator_probe meeting-run <base-type> <topology> <structured-objective> [state-root]`
+- `simard meeting run <base-type> <topology> <structured-objective> [state-root]`
+- `simard meeting read <base-type> <topology> [state-root]`
+
+Compatibility surface: `simard_operator_probe meeting-run ...` and `simard_operator_probe meeting-read ...`
 
 Meeting mode persists concise durable planning data without touching repository contents. Structured lines may include:
 
@@ -132,21 +143,52 @@ Meeting mode persists concise durable planning data without touching repository 
 - `open-question: ...`
 - `goal: title | priority=1 | status=active | rationale=...`
 
+The shipped contract is intentionally explicit:
+
+- `meeting run` remains the only mutation path for agenda, update, decision, risk, next-step, open-question, and goal-update capture
+- `meeting read` is the read-only audit surface for the latest persisted meeting decision state
+- both commands reuse the same validated state root, and both default to the same canonical durable root for `simard-meeting`
+- `meeting read` loads the latest persisted meeting decision record, where "latest" means the last decision memory record whose value matches the shipped meeting record shape
+- `meeting read` renders agenda, updates, decisions, risks, next steps, open questions, goal updates, and the latest raw meeting record in a stable operator-visible order
+- operator-visible strings are sanitized before printing so persisted terminal control sequences are not replayed
+- invalid state roots, missing memory state, unreadable storage, and malformed persisted meeting data fail explicitly
+
 ### Goal-curation mode
 
-Canonical entrypoint: `simard goal-curation run <base-type> <topology> <structured-objective> [state-root]`
+Canonical entrypoints:
+
+- `simard goal-curation run <base-type> <topology> <structured-objective> [state-root]`
+- `simard goal-curation read <base-type> <topology> [state-root]`
 
 Compatibility surface: `simard_operator_probe goal-curation-run <base-type> <topology> <structured-objective> [state-root]`
 
-Goal-curation mode maintains durable backlog records and the active top five goals.
+Goal-curation mode maintains durable backlog records and the active top five goals. The readback command exposes the stored goal register from the same validated state root without mutating it.
 
 ### Improvement-curation mode
 
-Canonical entrypoint: `simard improvement-curation run <base-type> <topology> <structured-objective> [state-root]`
+Canonical entrypoints:
 
-Compatibility surface: `simard_operator_probe improvement-curation-run <base-type> <topology> <structured-objective> [state-root]`
+- `simard improvement-curation run <base-type> <topology> <structured-objective> [state-root]`
+- `simard improvement-curation read <base-type> <topology> [state-root]`
 
-Improvement-curation mode promotes approved review proposals into durable priorities.
+Compatibility surface: `simard_operator_probe improvement-curation-run ...` and `simard_operator_probe improvement-curation-read ...`
+
+Improvement-curation mode promotes approved review proposals into durable priorities and keeps deferred proposals inspectable instead of silently self-modifying.
+
+The shipped contract is intentionally explicit:
+
+- `improvement-curation run` remains the only mutation path for approving or deferring proposals
+- `improvement-curation read` is the read-only audit surface for the latest review-to-priority promotion state
+- both commands reuse the same validated state root, and both default to the same canonical durable root as `review run`
+- `improvement-curation read` loads the latest persisted review artifact, where "latest" means the artifact with the highest `reviewed_at_unix_ms`
+- `improvement-curation read` loads the latest persisted improvement decision record, where "latest" means the last decision memory record whose key ends with `improvement-curation-record`
+- `improvement-curation read` renders approved proposals, deferred proposals, active goals, proposed goals, and the latest improvement decision record in a stable operator-visible order
+- operator-visible strings are sanitized before printing so persisted terminal control sequences are not replayed
+- invalid state roots, missing review artifacts, missing improvement records, unreadable storage, and malformed persisted decision data fail explicitly
+
+```text
+target/operator-probe-state/review-run/simard-engineer/<base-type>/<topology>
+```
 
 ### Review mode
 
@@ -229,6 +271,7 @@ That shared state root is what allows:
 - carried meeting decisions to appear in later engineer runs
 - durable goals to stay visible across operator modes
 - review artifacts to feed improvement-curation
+- improvement-curation decisions to stay durable and remain auditable through the shipped `improvement-curation read` surface
 
 The contract depends on passing the same validated state root across commands, not on hidden global state.
 
