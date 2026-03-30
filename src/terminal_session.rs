@@ -1,7 +1,9 @@
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::base_types::{
     BaseTypeDescriptor, BaseTypeOutcome, BaseTypeSessionRequest, BaseTypeTurnInput,
@@ -11,23 +13,46 @@ use crate::sanitization::objective_metadata;
 
 const DEFAULT_SHELL: &str = "/usr/bin/bash";
 const PTY_LAUNCHER: &str = "script";
+const WAIT_STEP_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TerminalStep {
+    Input(String),
+    WaitFor(String),
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TerminalTurnSpec {
     shell: String,
     working_directory: Option<PathBuf>,
-    commands: Vec<String>,
+    steps: Vec<TerminalStep>,
+}
+
+struct TranscriptGuard {
+    path: PathBuf,
+}
+
+impl TranscriptGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl Drop for TranscriptGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 impl TerminalTurnSpec {
     fn parse(raw: &str, base_type: &str) -> SimardResult<Self> {
         let mut shell = None;
         let mut working_directory = None;
-        let mut commands = Vec::new();
+        let mut steps = Vec::new();
 
         for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
             let Some((label, value)) = line.split_once(':') else {
-                commands.push(line.to_string());
+                steps.push(TerminalStep::Input(line.to_string()));
                 continue;
             };
 
@@ -42,23 +67,43 @@ impl TerminalTurnSpec {
                 "working-directory" | "working_directory" | "cwd" => {
                     working_directory = Some(PathBuf::from(value))
                 }
-                "command" => commands.push(value.to_string()),
-                _ => commands.push(line.to_string()),
+                "command" | "input" => steps.push(TerminalStep::Input(value.to_string())),
+                "wait-for" | "wait_for" | "expect" => {
+                    steps.push(TerminalStep::WaitFor(value.to_string()))
+                }
+                _ => steps.push(TerminalStep::Input(line.to_string())),
             }
         }
 
-        if commands.is_empty() {
+        if !steps
+            .iter()
+            .any(|step| matches!(step, TerminalStep::Input(_)))
+        {
             return Err(SimardError::AdapterInvocationFailed {
                 base_type: base_type.to_string(),
-                reason: "terminal-shell requires at least one command line".to_string(),
+                reason: "terminal-shell requires at least one input line".to_string(),
             });
         }
 
         Ok(Self {
             shell: shell.unwrap_or_else(|| DEFAULT_SHELL.to_string()),
             working_directory,
-            commands,
+            steps,
         })
+    }
+
+    fn input_count(&self) -> usize {
+        self.steps
+            .iter()
+            .filter(|step| matches!(step, TerminalStep::Input(_)))
+            .count()
+    }
+
+    fn wait_count(&self) -> usize {
+        self.steps
+            .iter()
+            .filter(|step| matches!(step, TerminalStep::WaitFor(_)))
+            .count()
     }
 }
 
@@ -73,18 +118,21 @@ pub fn execute_terminal_turn(
     let transcript = run_terminal_script(descriptor.id.as_str(), &spec, &working_directory)?;
     let transcript_preview = transcript_preview(&transcript);
     let objective_summary = objective_metadata(&input.objective);
+    let input_count = spec.input_count();
+    let wait_count = spec.wait_count();
 
     Ok(BaseTypeOutcome {
         plan: format!(
-            "Open local PTY shell '{}' in '{}' and run {} terminal command(s) for '{}' on '{}'.",
+            "Open local PTY shell '{}' in '{}' and run {} terminal input line(s) with {} wait checkpoint(s) for '{}' on '{}'.",
             spec.shell,
             working_directory.display(),
-            spec.commands.len(),
+            input_count,
+            wait_count,
             request.mode,
             request.topology,
         ),
         execution_summary: format!(
-            "Terminal shell session executed {} via selected base type '{}' on implementation '{}' from node '{}' at '{}' with shell '{}' in '{}' across {} terminal command(s).",
+            "Terminal shell session executed {} via selected base type '{}' on implementation '{}' from node '{}' at '{}' with shell '{}' in '{}' across {} terminal input line(s) and {} wait checkpoint(s).",
             objective_summary,
             descriptor.id,
             descriptor.backend.identity,
@@ -92,14 +140,16 @@ pub fn execute_terminal_turn(
             request.mailbox_address,
             spec.shell,
             working_directory.display(),
-            spec.commands.len(),
+            input_count,
+            wait_count,
         ),
         evidence: vec![
             format!("selected-base-type={}", descriptor.id),
             format!("backend-implementation={}", descriptor.backend.identity),
             format!("shell={}", spec.shell),
             format!("terminal-working-directory={}", working_directory.display()),
-            format!("terminal-command-count={}", spec.commands.len()),
+            format!("terminal-command-count={input_count}"),
+            format!("terminal-wait-count={wait_count}"),
             format!("terminal-transcript-preview={transcript_preview}"),
             format!("runtime-node={}", request.runtime_node),
             format!("mailbox-address={}", request.mailbox_address),
@@ -196,15 +246,18 @@ fn run_terminal_script(
     working_directory: &Path,
 ) -> SimardResult<String> {
     let launch_command = format!("{} --noprofile --norc -i", spec.shell);
+    let transcript_path = unique_transcript_path("transcript");
+    let _transcript_guard = TranscriptGuard::new(transcript_path.clone());
+    let _transcript_file = open_exclusive_temp_file(&transcript_path, base_type)?;
     let mut child = Command::new(PTY_LAUNCHER)
         .arg("-qefc")
         .arg(&launch_command)
-        .arg("/dev/null")
+        .arg(&transcript_path)
         .current_dir(working_directory)
         .env("TERM", "dumb")
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .map_err(|error| SimardError::AdapterInvocationFailed {
             base_type: base_type.to_string(),
@@ -219,16 +272,31 @@ fn run_terminal_script(
                 base_type: base_type.to_string(),
                 reason: "terminal-shell session did not expose stdin".to_string(),
             })?;
-        for command in &spec.commands {
-            writeln!(stdin, "{command}").map_err(|error| SimardError::AdapterInvocationFailed {
-                base_type: base_type.to_string(),
-                reason: format!("failed to write terminal command input: {error}"),
-            })?;
+        for step in &spec.steps {
+            match step {
+                TerminalStep::Input(command) => {
+                    writeln!(stdin, "{command}").map_err(|error| {
+                        SimardError::AdapterInvocationFailed {
+                            base_type: base_type.to_string(),
+                            reason: format!("failed to write terminal command input: {error}"),
+                        }
+                    })?;
+                    stdin
+                        .flush()
+                        .map_err(|error| SimardError::AdapterInvocationFailed {
+                            base_type: base_type.to_string(),
+                            reason: format!("failed to flush terminal command input: {error}"),
+                        })?;
+                }
+                TerminalStep::WaitFor(expected) => wait_for_transcript(
+                    base_type,
+                    &mut child,
+                    &transcript_path,
+                    expected,
+                    WAIT_STEP_TIMEOUT,
+                )?,
+            }
         }
-        writeln!(stdin, "exit").map_err(|error| SimardError::AdapterInvocationFailed {
-            base_type: base_type.to_string(),
-            reason: format!("failed to finalize terminal session input: {error}"),
-        })?;
     }
 
     let output =
@@ -249,28 +317,105 @@ fn run_terminal_script(
         });
     }
 
-    let mut transcript = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !stderr.trim().is_empty() {
-        if !transcript.ends_with('\n') {
-            transcript.push('\n');
-        }
-        transcript.push_str(&stderr);
-    }
+    fs::read_to_string(&transcript_path).map_err(|error| SimardError::AdapterInvocationFailed {
+        base_type: base_type.to_string(),
+        reason: format!(
+            "failed to read terminal transcript '{}': {error}",
+            transcript_path.display()
+        ),
+    })
+}
 
-    Ok(transcript)
+fn wait_for_transcript(
+    base_type: &str,
+    child: &mut std::process::Child,
+    transcript_path: &Path,
+    expected: &str,
+    timeout: Duration,
+) -> SimardResult<()> {
+    let start = Instant::now();
+    loop {
+        if fs::read_to_string(transcript_path)
+            .map(|transcript| transcript.contains(expected))
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+
+        if let Some(status) =
+            child
+                .try_wait()
+                .map_err(|error| SimardError::AdapterInvocationFailed {
+                    base_type: base_type.to_string(),
+                    reason: format!("failed to poll terminal-shell session state: {error}"),
+                })?
+        {
+            return Err(SimardError::AdapterInvocationFailed {
+                base_type: base_type.to_string(),
+                reason: format!(
+                    "terminal-shell session exited with status {status} before expected output '{expected}' appeared"
+                ),
+            });
+        }
+
+        if start.elapsed() >= timeout {
+            return Err(SimardError::AdapterInvocationFailed {
+                base_type: base_type.to_string(),
+                reason: format!(
+                    "terminal-shell did not emit expected output '{expected}' within {}s",
+                    timeout.as_secs()
+                ),
+            });
+        }
+
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn unique_transcript_path(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "simard-terminal-shell-{label}-{}-{nanos}.log",
+        std::process::id()
+    ))
+}
+
+fn open_exclusive_temp_file(path: &Path, base_type: &str) -> SimardResult<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(path)
+        .map_err(|error| SimardError::AdapterInvocationFailed {
+            base_type: base_type.to_string(),
+            reason: format!(
+                "failed to create terminal transcript '{}': {error}",
+                path.display()
+            ),
+        })
 }
 
 fn transcript_preview(transcript: &str) -> String {
     let mut normalized = transcript
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty())
+        .filter(|line| {
+            !line.is_empty()
+                && !line.starts_with("Script started on ")
+                && !line.starts_with("Script done on ")
+        })
         .collect::<Vec<_>>()
         .join(" | ");
 
-    if normalized.len() > 240 {
-        normalized.truncate(240);
+    if normalized.len() > 512 {
+        normalized.truncate(512);
         normalized.push_str("...");
     }
 
@@ -279,7 +424,7 @@ fn transcript_preview(transcript: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_shell;
+    use super::{TerminalStep, TerminalTurnSpec, normalize_shell};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -426,5 +571,25 @@ mod tests {
             error.to_string().contains("must be an executable file"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn parse_terminal_turn_supports_wait_for_steps() {
+        let spec = TerminalTurnSpec::parse(
+            "working-directory: .\ncommand: printf \"ready\\n\"\nwait-for: ready\ninput: exit",
+            "terminal-shell",
+        )
+        .expect("terminal turn should parse");
+
+        assert_eq!(
+            spec.steps,
+            vec![
+                TerminalStep::Input("printf \"ready\\n\"".to_string()),
+                TerminalStep::WaitFor("ready".to_string()),
+                TerminalStep::Input("exit".to_string()),
+            ]
+        );
+        assert_eq!(spec.input_count(), 2);
+        assert_eq!(spec.wait_count(), 1);
     }
 }

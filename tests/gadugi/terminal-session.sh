@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
-OBJECTIVE=$'working-directory: .\ncommand: pwd\ncommand: printf "terminal-foundation-ok\\n"'
+OBJECTIVE=$'working-directory: .\ncommand: printf "terminal-foundation-ready\\n"\nwait-for: terminal-foundation-ready\ncommand: printf "terminal-foundation-ok\\n"'
 
 OUTPUT="$(
   cargo run --quiet --bin simard_operator_probe -- \
@@ -21,6 +21,7 @@ printf '%s\n' "$OUTPUT" | grep -F "Adapter implementation: terminal-shell::local
 printf '%s\n' "$OUTPUT" | grep -F "Adapter capabilities: prompt-assets, session-lifecycle, memory, evidence, reflection, terminal-session" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Session phase: complete" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Terminal evidence: terminal-command-count=2" >/dev/null
+printf '%s\n' "$OUTPUT" | grep -F "Terminal evidence: terminal-wait-count=1" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "terminal-foundation-ok" >/dev/null
 
 MARKER="$(mktemp /tmp/simard-terminal-injection.XXXXXX)"
