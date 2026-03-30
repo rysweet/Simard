@@ -39,7 +39,7 @@ Version 1 includes the smallest coherent product that proves Simard's operating 
 - A terminal-first interaction model where the primary execution surface is a shell-driven engineering session.
 - Explicit session orchestration with a clear lifecycle: intake, planning, execution, reflection, and persistence.
 - A memory system that separates durable project knowledge from short-lived session state.
-- Identity separation between system control roles so planning, execution, review, and meeting facilitation do not collapse into a single undifferentiated voice.
+- Identity separation between system control roles so planning, execution, review, meeting facilitation, and goal stewardship do not collapse into a single undifferentiated voice.
 - A benchmark gym that exercises Simard against repeatable engineering tasks and records outcomes.
 - A meeting mode for alignment, architecture discussion, and decision capture without conflating that mode with implementation mode.
 - A self-improvement loop that uses benchmark results and session reviews to propose targeted changes to prompts, policies, or runtime behavior.
@@ -57,7 +57,7 @@ For delivery purposes, v1 should be interpreted narrowly:
 - one durable memory path
 - one small benchmark set
 
-Meeting mode, sibling identities, broader distributed execution, and self-improvement remain part of the architecture direction, but they are not v1 ship blockers.
+Broader distributed execution, richer sibling identities, and the full self-improvement loop remain part of the architecture direction, but they are not v1 ship blockers. The current scaffold now includes honest meeting-mode and goal-stewardship slices because they proved necessary to support the core engineer loop.
 
 Phased delivery does **not** permit a local-only or single-base-type architecture.
 From day one, the runtime must be written for dependency injection, topology-aware composition, and multiple base types even if the first runnable path is local and only a single-process harness implementation ships underneath the initial builtin selections.
@@ -90,7 +90,7 @@ The following are explicitly out of scope for v1.
 
 ## Product Shape
 
-Simard should be treated as a focused engineering runtime with three user-visible modes:
+Simard should be treated as a focused engineering runtime with four user-visible modes:
 
 1. Engineer mode
    Simard accepts a concrete task, inspects the local repo, plans the work, executes through terminal actions, and reports outcomes with evidence.
@@ -98,7 +98,10 @@ Simard should be treated as a focused engineering runtime with three user-visibl
 2. Meeting mode
    Simard helps humans think, decide, and record architecture or planning outcomes, but does not silently drift into implementation without an explicit handoff.
 
-3. Gym mode
+3. Goal-curation mode
+   Simard curates durable backlog state and an explicit active top 5 goals list without pretending implementation work happened.
+
+4. Gym mode
    Simard runs controlled benchmark tasks to measure capability, regressions, and improvement over time.
 
 These are not cosmetic personas.
@@ -118,7 +121,7 @@ If a future developer cannot explain why Simard took an action by inspecting ses
 
 ### 3. Roles Must Be Separated
 
-Planner, engineer, reviewer, and facilitator responsibilities should remain distinct even if they are implemented in one binary at first.
+Planner, engineer, reviewer, facilitator, and goal-curation responsibilities should remain distinct even if they are implemented in one binary at first.
 This avoids prompt collapse, makes failures diagnosable, and creates clear seams for future multi-agent execution.
 
 ### 4. Benchmarks Drive Product Truth
@@ -265,6 +268,7 @@ This memory is for evaluation and tuning, not for contaminating normal project c
 - Session scratch should not automatically become long-term memory.
 - Benchmark outcomes should be queryable separately from project execution history.
 - Meeting outputs should write decisions, not entire raw conversations, into durable memory.
+- Goal stewardship should preserve a durable active top 5 that later engineer sessions can inspect directly.
 - V1 manifests must keep `MemoryPolicy.allow_project_writes=false` until there is an explicit project-write contract.
 
 ## Platform Architecture Layers
@@ -549,10 +553,15 @@ The reviewer must be able to disagree with the engineer.
 Used in meeting mode to keep discussion structured, clarify trade-offs, and capture decisions.
 The facilitator is optimized for alignment and synthesis, not code mutation.
 
+#### Goal Curator
+
+Used in goal-curation mode to maintain durable backlog priorities and the active top 5 goals.
+The curator is optimized for truthful stewardship and prioritization, not code mutation.
+
 This separation matters because it prevents a single identity from planning, executing, grading, and excusing itself in the same breath.
 
 This role separation sits inside a larger distinction:
-the Simard identity is the overall agent identity, while engineer, reviewer, and facilitator are operating roles or sub-identities that may be implemented through composition.
+the Simard identity is the overall agent identity, while engineer, reviewer, facilitator, and goal curator are operating roles or sub-identities that may be implemented through composition.
 
 ## Meeting Mode
 
@@ -570,6 +579,7 @@ Meeting mode exists so Simard can participate in product and architecture work w
 - scoped action items
 - identified risks
 - explicit open questions
+- optional structured goal updates that later engineer sessions can read back through durable state
 
 ### Constraints
 
@@ -579,7 +589,29 @@ Meeting mode exists so Simard can participate in product and architecture work w
 
 Meeting mode is a planning and alignment surface, not a disguised autonomous executor.
 
-Meeting mode should be treated as post-v1 unless it proves necessary to support the core engineer loop.
+The current v1 scaffold now includes an honest meeting-mode delivery slice because it proved necessary to support the core engineer loop and durable backlog stewardship.
+
+## Goal Stewardship Mode
+
+Goal stewardship exists so Simard can maintain a durable backlog and explicit top 5 goals instead of relying on transient session summaries.
+
+### Purpose
+
+- preserve a truthful active top 5
+- distinguish active, proposed, paused, and completed priorities
+- give later engineer sessions explicit durable goal context
+
+### Expected Outputs
+
+- durable goal records
+- an active top-goal list surfaced through reflection
+- meeting-to-engineer carryover through shared state roots
+
+### Constraints
+
+- Goal stewardship should not claim code execution or verification work.
+- It should preserve concise priorities and rationales, not transcript dumps.
+- It should expose the active top-goal set honestly, even when fewer than five active goals exist.
 
 ## Self-Improvement Loop
 

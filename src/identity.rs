@@ -14,6 +14,7 @@ use crate::prompt_assets::PromptAssetRef;
 pub enum OperatingMode {
     Engineer,
     Meeting,
+    Curator,
     Gym,
 }
 
@@ -22,6 +23,7 @@ impl Display for OperatingMode {
         let label = match self {
             Self::Engineer => "engineer",
             Self::Meeting => "meeting",
+            Self::Curator => "curator",
             Self::Gym => "gym",
         };
         f.write_str(label)
@@ -430,6 +432,29 @@ impl IdentityLoader for BuiltinIdentityLoader {
                 MemoryPolicy::default(),
                 request.contract.clone(),
             ),
+            "simard-goal-curator" => IdentityManifest::new(
+                "simard-goal-curator",
+                request.package_version.clone(),
+                vec![PromptAssetRef::new(
+                    "goal-curator-system",
+                    "simard/goal_curator_system.md",
+                )],
+                vec![
+                    BaseTypeId::new("local-harness"),
+                    BaseTypeId::new("rusty-clawd"),
+                    BaseTypeId::new("copilot-sdk"),
+                ],
+                capability_set([
+                    BaseTypeCapability::PromptAssets,
+                    BaseTypeCapability::SessionLifecycle,
+                    BaseTypeCapability::Memory,
+                    BaseTypeCapability::Evidence,
+                    BaseTypeCapability::Reflection,
+                ]),
+                OperatingMode::Curator,
+                MemoryPolicy::default(),
+                request.contract.clone(),
+            ),
             "simard-composite-engineer" => IdentityManifest::compose(
                 "simard-composite-engineer",
                 request.package_version.clone(),
@@ -446,6 +471,11 @@ impl IdentityLoader for BuiltinIdentityLoader {
                     ))?,
                     self.load(&IdentityLoadRequest::new(
                         "simard-gym",
+                        request.package_version.clone(),
+                        request.contract.clone(),
+                    ))?,
+                    self.load(&IdentityLoadRequest::new(
+                        "simard-goal-curator",
                         request.package_version.clone(),
                         request.contract.clone(),
                     ))?,

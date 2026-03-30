@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use simard::{
     BaseTypeCapability, BaseTypeId, BaseTypeRegistry, Freshness, IdentityManifest,
-    InMemoryEvidenceStore, InMemoryHandoffStore, InMemoryMailboxTransport, InMemoryMemoryStore,
-    InMemoryPromptAssetStore, InProcessSupervisor, InProcessTopologyDriver,
+    InMemoryEvidenceStore, InMemoryGoalStore, InMemoryHandoffStore, InMemoryMailboxTransport,
+    InMemoryMemoryStore, InMemoryPromptAssetStore, InProcessSupervisor, InProcessTopologyDriver,
     LocalProcessHarnessAdapter, LocalRuntime, ManifestContract, MemoryPolicy,
     ObjectiveRelayProgram, OperatingMode, PromptAsset, PromptAssetRef, Provenance,
     RuntimeHandoffStore, RuntimePorts, RuntimeRequest, RuntimeTopology, SessionPhase,
@@ -73,6 +73,7 @@ fn compose_runtime(handoff: Arc<InMemoryHandoffStore>) -> LocalRuntime {
             prompts,
             memory,
             evidence,
+            Arc::new(InMemoryGoalStore::try_default().expect("goal store should initialize")),
             base_types,
             Arc::new(InProcessTopologyDriver::try_default().expect("driver should initialize")),
             Arc::new(InMemoryMailboxTransport::try_default().expect("transport should initialize")),
@@ -143,6 +144,7 @@ fn restored_handoff_keeps_only_redacted_session_objective() {
             Arc::new(
                 InMemoryEvidenceStore::try_default().expect("evidence store should initialize"),
             ),
+            Arc::new(InMemoryGoalStore::try_default().expect("goal store should initialize")),
             {
                 let mut base_types = BaseTypeRegistry::default();
                 base_types.register(

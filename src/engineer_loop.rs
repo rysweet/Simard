@@ -7,6 +7,7 @@ use serde_json::Value;
 use crate::base_types::BaseTypeId;
 use crate::error::{SimardError, SimardResult};
 use crate::evidence::{EvidenceRecord, EvidenceSource, EvidenceStore, FileBackedEvidenceStore};
+use crate::goals::{FileBackedGoalStore, GoalRecord, GoalStore};
 use crate::handoff::{FileBackedHandoffStore, RuntimeHandoffSnapshot, RuntimeHandoffStore};
 use crate::memory::{FileBackedMemoryStore, MemoryRecord, MemoryScope, MemoryStore};
 use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeState, RuntimeTopology};
@@ -34,6 +35,7 @@ pub struct RepoInspection {
     pub head: String,
     pub worktree_dirty: bool,
     pub changed_files: Vec<String>,
+    pub active_goals: Vec<GoalRecord>,
     pub architecture_gap_summary: String,
 }
 
@@ -75,10 +77,10 @@ pub fn run_local_engineer_loop(
     state_root: impl Into<PathBuf>,
 ) -> SimardResult<EngineerLoopRun> {
     let state_root = state_root.into();
-    let inspection = inspect_workspace(workspace_root.as_ref())?;
+    let inspection = inspect_workspace(workspace_root.as_ref(), &state_root)?;
     let selected_action = select_engineer_action(&inspection)?;
     let action = execute_engineer_action(&inspection.repo_root, selected_action)?;
-    let verification = verify_engineer_action(&inspection, &action)?;
+    let verification = verify_engineer_action(&inspection, &action, &state_root)?;
     persist_engineer_loop_artifacts(
         &state_root,
         topology,
@@ -97,7 +99,7 @@ pub fn run_local_engineer_loop(
     })
 }
 
-fn inspect_workspace(workspace_root: &Path) -> SimardResult<RepoInspection> {
+fn inspect_workspace(workspace_root: &Path, state_root: &Path) -> SimardResult<RepoInspection> {
     let workspace_root =
         fs::canonicalize(workspace_root).map_err(|error| SimardError::NotARepo {
             path: workspace_root.to_path_buf(),
@@ -119,6 +121,8 @@ fn inspect_workspace(workspace_root: &Path) -> SimardResult<RepoInspection> {
     )?;
     let changed_files = parse_status_paths(&status_output.stdout);
     let worktree_dirty = !changed_files.is_empty();
+    let active_goals =
+        FileBackedGoalStore::try_new(state_root.join("goal_records.json"))?.active_top_goals(5)?;
 
     Ok(RepoInspection {
         workspace_root,
@@ -131,6 +135,7 @@ fn inspect_workspace(workspace_root: &Path) -> SimardResult<RepoInspection> {
         head,
         worktree_dirty,
         changed_files,
+        active_goals,
         architecture_gap_summary: architecture_gap_summary(&repo_root)?,
     })
 }
@@ -223,6 +228,7 @@ fn execute_engineer_action(
 fn verify_engineer_action(
     inspection: &RepoInspection,
     action: &ExecutedEngineerAction,
+    state_root: &Path,
 ) -> SimardResult<VerificationReport> {
     if action.exit_code != 0 {
         return Err(SimardError::VerificationFailed {
@@ -233,7 +239,7 @@ fn verify_engineer_action(
         });
     }
 
-    let post = inspect_workspace(&inspection.repo_root)?;
+    let post = inspect_workspace(&inspection.repo_root, state_root)?;
     let mut checks = Vec::new();
 
     if post.repo_root != inspection.repo_root {
@@ -273,6 +279,13 @@ fn verify_engineer_action(
         });
     }
     checks.push(format!("worktree-dirty={}", post.worktree_dirty));
+    if post.active_goals != inspection.active_goals {
+        return Err(SimardError::VerificationFailed {
+            reason: "active goal set changed during a non-mutating local engineer action"
+                .to_string(),
+        });
+    }
+    checks.push(format!("active-goals={}", post.active_goals.len()));
 
     match action.selected.label.as_str() {
         "cargo-metadata-scan" => {
@@ -398,6 +411,19 @@ fn persist_engineer_loop_artifacts(
                 inspection.changed_files.join(", ")
             }
         ),
+        format!(
+            "active-goals={}",
+            if inspection.active_goals.is_empty() {
+                "<none>".to_string()
+            } else {
+                inspection
+                    .active_goals
+                    .iter()
+                    .map(GoalRecord::concise_label)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        ),
         format!("architecture-gap={}", inspection.architecture_gap_summary),
         format!("execution-scope={EXECUTION_SCOPE}"),
         format!("selected-action={}", action.selected.label),
@@ -429,10 +455,20 @@ fn persist_engineer_loop_artifacts(
         key: summary_key.clone(),
         scope: MemoryScope::SessionSummary,
         value: format!(
-            "engineer-loop-summary | repo-root={} | repo-branch={} | worktree-dirty={} | selected-action={} | verification-status={} | execution-scope={EXECUTION_SCOPE}",
+            "engineer-loop-summary | repo-root={} | repo-branch={} | worktree-dirty={} | active-goals={} | selected-action={} | verification-status={} | execution-scope={EXECUTION_SCOPE}",
             inspection.repo_root.display(),
             inspection.branch,
             inspection.worktree_dirty,
+            if inspection.active_goals.is_empty() {
+                "<none>".to_string()
+            } else {
+                inspection
+                    .active_goals
+                    .iter()
+                    .map(GoalRecord::concise_label)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            },
             action.selected.label,
             verification.status
         ),

@@ -1,7 +1,7 @@
 ---
 title: "How to configure bootstrap and inspect reflection"
-description: Verify the Simard bootstrap path and inspect the truthful reflection snapshot exposed by the runtime.
-last_updated: 2026-03-28
+description: Verify the Simard bootstrap path and inspect the truthful reflection snapshot exposed by the runtime, including durable goal state.
+last_updated: 2026-03-30
 review_schedule: as-needed
 owner: simard
 doc_type: howto
@@ -113,11 +113,14 @@ Builtin defaults are startup choices. They are not recovery behavior.
 - `adapter_backend`
 - `adapter_capabilities`
 - `adapter_supported_topologies`
+- `active_goal_count`
+- `active_goals`
 - `topology_backend`
 - `transport_backend`
 - `supervisor_backend`
 - `memory_backend`
 - `evidence_backend`
+- `goal_backend`
 
 For the CLI bootstrap path, the manifest entrypoint is the bootstrap assembly boundary, not the thin binary wrapper.
 
@@ -149,9 +152,11 @@ assert_eq!(snapshot.evidence_backend.identity, "evidence::json-file-store");
 
 If you launched with `SIMARD_BASE_TYPE="copilot-sdk"`, `snapshot.selected_base_type` still shows the alias you chose while `snapshot.adapter_backend.identity` remains `local-harness`. If you launched with `SIMARD_BASE_TYPE="rusty-clawd"`, reflection truthfully reports `snapshot.adapter_backend.identity == "rusty-clawd::session-backend"`. If you launch the engineer identity with `SIMARD_BASE_TYPE="terminal-shell"`, reflection reports `snapshot.adapter_backend.identity == "terminal-shell::local-pty"`, `snapshot.adapter_capabilities` includes `terminal-session`, and `snapshot.adapter_supported_topologies == ["single-process"]`. Composite identities also surface `snapshot.identity_components` so operator tooling can see which roles were assembled.
 
+If you have persisted goal state in the selected `SIMARD_STATE_ROOT`, reflection also reports the active top 5 goals directly through `snapshot.active_goal_count` and `snapshot.active_goals`, and `snapshot.goal_backend.identity` shows the live goal-store backend.
+
 The same redaction rule applies to persisted session text: scratch memory, session summaries, and reflection summaries record `objective-metadata(...)` instead of the raw `SIMARD_OBJECTIVE` string.
 
-## 5. Exercise meeting mode without switching into engineer mode
+## 4. Exercise meeting mode without switching into engineer mode
 
 Use the operator probe when you want to validate facilitator behavior directly:
 
@@ -165,6 +170,7 @@ decision: prioritize meeting-mode validation before remote orchestration
 risk: workflow automation is still unreliable in clean worktrees
 next-step: ship operator-visible meeting coverage
 open-question: when should meeting decisions influence engineer planning?
+goal: Preserve meeting-to-engineer handoff | priority=1 | status=active | rationale=meeting outcomes should shape later execution
 EOF
 )"
 ```
@@ -174,9 +180,33 @@ Look for:
 - `Probe mode: meeting-run`
 - `Identity: simard-meeting`
 - `Decision records: 1`
+- `Active goals count: 1`
 - a durable decision record containing the decision, risk, next step, and open question
 
-This is the current honest v1 behavior: meeting mode captures structured planning output and writes concise decision memory, but it does not mutate code.
+This is the current honest v1 behavior: meeting mode captures structured planning output, can optionally persist structured goal updates, and writes concise decision memory, but it does not mutate code.
+
+## 5. Exercise goal stewardship directly
+
+Use the goal-curation identity when you want to update Simard's durable top-goal set without pretending code execution happened:
+
+```bash
+cargo run --quiet --bin simard_operator_probe -- \
+  goal-curation-run local-harness single-process \
+  "$(cat <<'EOF'
+goal: Keep Simard's top 5 goals current | priority=1 | status=active | rationale=long-horizon stewardship is now a shipped product responsibility
+goal: Preserve meeting-to-engineer continuity | priority=2 | status=active | rationale=meeting outputs should shape later engineer sessions
+EOF
+)"
+```
+
+Look for:
+
+- `Probe mode: goal-curation-run`
+- `Identity: simard-goal-curator`
+- `Active goals count: 2`
+- `Active goal 1: p1 [active] Keep Simard's top 5 goals current`
+
+This is the current honest v1 stewardship slice: Simard can persist durable backlog priorities and expose them through reflection and later operator probes, but it is still not claiming remote orchestration or autonomous cross-repo execution.
 
 ## 6. Exercise the terminal-backed engineer path
 
@@ -213,14 +243,15 @@ Look for:
 
 - `Probe mode: engineer-loop-run`
 - `Repo root: ...`
+- `Active goals count: ...`
 - `Execution scope: local-only`
 - `Selected action: cargo-metadata-scan` (or another explicit local-first action)
 - `Action status: success`
 - `Verification status: verified`
 
-This is the current honest v1 engineer-loop slice: Simard inspects the local repo, performs one bounded repo-native action, verifies that the repo grounding stayed stable, and persists durable memory/evidence, but it does not claim remote execution or autonomous multi-step coding yet.
+This is the current honest v1 engineer-loop slice: Simard inspects the local repo, reads the active durable goals for context, performs one bounded repo-native action, verifies that the repo grounding stayed stable, and persists durable memory/evidence, but it does not claim remote execution or autonomous multi-step coding yet.
 
-## 4. Validate stopped-state behavior
+## 8. Validate stopped-state behavior
 
 Stopping the runtime is already observable.
 

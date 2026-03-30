@@ -8,6 +8,7 @@ use crate::agent_program::{AgentProgram, AgentProgramContext, ObjectiveRelayProg
 use crate::base_types::{BaseTypeFactory, BaseTypeId, BaseTypeOutcome, BaseTypeSessionRequest};
 use crate::error::{SimardError, SimardResult};
 use crate::evidence::{EvidenceRecord, EvidenceSource, EvidenceStore};
+use crate::goals::{GoalRecord, GoalStore, InMemoryGoalStore};
 use crate::handoff::{InMemoryHandoffStore, RuntimeHandoffSnapshot, RuntimeHandoffStore};
 use crate::identity::IdentityManifest;
 use crate::memory::{MemoryRecord, MemoryScope, MemoryStore};
@@ -334,6 +335,7 @@ pub struct RuntimePorts {
     prompt_store: Arc<dyn PromptAssetStore>,
     memory_store: Arc<dyn MemoryStore>,
     evidence_store: Arc<dyn EvidenceStore>,
+    goal_store: Arc<dyn GoalStore>,
     base_types: BaseTypeRegistry,
     topology_driver: Arc<dyn RuntimeTopologyDriver>,
     transport: Arc<dyn RuntimeMailboxTransport>,
@@ -355,6 +357,9 @@ impl RuntimePorts {
             prompt_store,
             memory_store,
             evidence_store,
+            Arc::new(
+                InMemoryGoalStore::try_default().expect("default goal store should initialize"),
+            ),
             base_types,
             Arc::new(
                 InProcessTopologyDriver::try_default()
@@ -396,6 +401,7 @@ impl RuntimePorts {
         prompt_store: Arc<dyn PromptAssetStore>,
         memory_store: Arc<dyn MemoryStore>,
         evidence_store: Arc<dyn EvidenceStore>,
+        goal_store: Arc<dyn GoalStore>,
         base_types: BaseTypeRegistry,
         topology_driver: Arc<dyn RuntimeTopologyDriver>,
         transport: Arc<dyn RuntimeMailboxTransport>,
@@ -406,6 +412,7 @@ impl RuntimePorts {
             prompt_store,
             memory_store,
             evidence_store,
+            goal_store,
             base_types,
             topology_driver,
             transport,
@@ -430,6 +437,7 @@ impl RuntimePorts {
         prompt_store: Arc<dyn PromptAssetStore>,
         memory_store: Arc<dyn MemoryStore>,
         evidence_store: Arc<dyn EvidenceStore>,
+        goal_store: Arc<dyn GoalStore>,
         base_types: BaseTypeRegistry,
         topology_driver: Arc<dyn RuntimeTopologyDriver>,
         transport: Arc<dyn RuntimeMailboxTransport>,
@@ -442,6 +450,7 @@ impl RuntimePorts {
             prompt_store,
             memory_store,
             evidence_store,
+            goal_store,
             base_types,
             topology_driver,
             transport,
@@ -850,6 +859,18 @@ impl RuntimeKernel {
             })?;
             session.attach_memory(key);
         }
+        for update in self
+            .ports
+            .agent_program
+            .goal_updates(&self.agent_program_context(session), outcome)?
+        {
+            self.ports.goal_store.put(GoalRecord::from_update(
+                update,
+                self.request.manifest.name.clone(),
+                session.id.clone(),
+                SessionPhase::Persistence,
+            )?)?;
+        }
         self.remember_session(session);
 
         Ok(())
@@ -891,6 +912,11 @@ impl RuntimeKernel {
             runtime_node: self.runtime_node.clone(),
             mailbox_address: self.mailbox_address.clone(),
             objective: session.objective.clone(),
+            active_goals: self
+                .ports
+                .goal_store
+                .active_top_goals(5)
+                .unwrap_or_default(),
         }
     }
 
@@ -909,6 +935,7 @@ impl RuntimeKernel {
                 .count_for_session(&active_session.id)?,
             None => 0,
         };
+        let active_goals = self.ports.goal_store.active_top_goals(5)?;
         let manifest_freshness = match self.state {
             RuntimeState::Stopped | RuntimeState::Failed => {
                 Freshness::observed(FreshnessState::Stale)?
@@ -937,6 +964,8 @@ impl RuntimeKernel {
                 .with_freshness(manifest_freshness),
             evidence_records,
             memory_records,
+            active_goal_count: active_goals.len(),
+            active_goals: active_goals.iter().map(GoalRecord::concise_label).collect(),
             agent_program_backend: self.ports.agent_program.descriptor(),
             handoff_backend: self.ports.handoff_store.descriptor(),
             adapter_backend: self.factory.descriptor().backend.clone(),
@@ -959,6 +988,7 @@ impl RuntimeKernel {
             supervisor_backend: self.ports.supervisor.descriptor(),
             memory_backend: self.ports.memory_store.descriptor(),
             evidence_backend: self.ports.evidence_store.descriptor(),
+            goal_backend: self.ports.goal_store.descriptor(),
         })
     }
 }

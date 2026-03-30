@@ -4,6 +4,7 @@ pub mod bootstrap;
 pub mod engineer_loop;
 pub mod error;
 pub mod evidence;
+pub mod goals;
 pub mod gym;
 pub mod handoff;
 pub mod identity;
@@ -40,6 +41,9 @@ pub use engineer_loop::{
 pub use error::{SimardError, SimardResult};
 pub use evidence::{
     EvidenceRecord, EvidenceSource, EvidenceStore, FileBackedEvidenceStore, InMemoryEvidenceStore,
+};
+pub use goals::{
+    FileBackedGoalStore, GoalRecord, GoalStatus, GoalStore, GoalUpdate, InMemoryGoalStore,
 };
 pub use gym::{
     BenchmarkArtifactPaths, BenchmarkCheckResult, BenchmarkRunReport, BenchmarkScenario,

@@ -11,6 +11,7 @@ decision: prioritize facilitator behavior before remote orchestration
 risk: workflow automation is still unreliable in clean worktrees
 next-step: ship operator-visible meeting validation
 open-question: how should meeting decisions influence engineer planning?
+goal: Preserve meeting-to-engineer handoff | priority=1 | status=active | rationale=meeting decisions should shape later engineer work
 EOF
 )"
 
@@ -27,6 +28,7 @@ printf '%s\n' "$OUTPUT" | grep -F "Identity: simard-meeting" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Selected base type: local-harness" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Topology: single-process" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Decision records: 1" >/dev/null
+printf '%s\n' "$OUTPUT" | grep -F "Active goals count: 1" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "prioritize facilitator behavior before remote orchestration" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "workflow automation is still unreliable in clean worktrees" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "ship operator-visible meeting validation" >/dev/null

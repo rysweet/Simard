@@ -1,7 +1,7 @@
 ---
 title: Runtime contracts reference
-description: Reference for the current Simard runtime surface, reflection contracts, and lifecycle errors.
-last_updated: 2026-03-28
+description: Reference for the current Simard runtime surface, reflection contracts, lifecycle errors, and durable goal stewardship.
+last_updated: 2026-03-30
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -37,10 +37,11 @@ The stable contract in this repository is the bootstrap/runtime and benchmark-gy
 
 ## Meeting-mode operator flow
 
-The shipped operator probe also supports meeting-specific, terminal-session-specific, and engineer-loop-specific paths:
+The shipped operator probe also supports meeting-specific, goal-curation-specific, terminal-session-specific, and engineer-loop-specific paths:
 
 - `cargo run --quiet --bin simard_operator_probe -- meeting-run <base-type> <topology> <structured-objective>`
-- `cargo run --quiet --bin simard_operator_probe -- engineer-loop-run <topology> <workspace-root> <objective>`
+- `cargo run --quiet --bin simard_operator_probe -- goal-curation-run <base-type> <topology> <structured-objective>`
+- `cargo run --quiet --bin simard_operator_probe -- engineer-loop-run <topology> <workspace-root> <objective> [state-root]`
 - `cargo run --quiet --bin simard_operator_probe -- review-run <base-type> <topology> <objective>`
 - `cargo run --quiet --bin simard_operator_probe -- review-read <base-type> <topology>`
 
@@ -52,12 +53,21 @@ Use a structured objective with lines such as:
 - `risk: ...`
 - `next-step: ...`
 - `open-question: ...`
+- `goal: title | priority=1 | status=active | rationale=why this belongs in Simard's top 5`
 
 The v1 meeting contract is intentionally narrow:
 
 - meeting mode uses the facilitator agent program backend `agent-program::meeting-facilitator`
 - it persists concise decision memory under the durable state root
+- it can also persist structured goal updates into the durable goal register
 - it does not mutate code paths or pretend implementation work happened
+
+The goal-curation path is intentionally narrow too:
+
+- it uses the dedicated `simard-goal-curator` identity and the `agent-program::goal-curator` backend
+- it persists durable goal records under the selected state root
+- reflection and later operator probes expose the active top 5 goals directly
+- it does not claim implementation work or remote orchestration
 
 The review path is also intentionally narrow:
 
@@ -104,7 +114,7 @@ Artifacts are written under `target/simard-gym/` as JSON and text reports plus a
 | --- | --- | --- | --- |
 | `SIMARD_PROMPT_ROOT` | Yes in `explicit-config` | none | Root directory for prompt assets. |
 | `SIMARD_OBJECTIVE` | Yes in `explicit-config` | none | Objective passed to `run()`. Live execution keeps the real objective in memory while persisted scratch, summary, reflection, and exported handoff session text store objective metadata instead of the raw objective text. |
-| `SIMARD_STATE_ROOT` | Yes in `explicit-config` | none in `explicit-config`; `target/simard-state` in `builtin-defaults` | Root directory for the durable local memory, evidence, and latest handoff snapshot files written by the bootstrap path. |
+| `SIMARD_STATE_ROOT` | Yes in `explicit-config` | none in `explicit-config`; `target/simard-state` in `builtin-defaults` | Root directory for the durable local memory, goals, evidence, and latest handoff snapshot files written by the bootstrap path. |
 | `SIMARD_BOOTSTRAP_MODE` | No | `explicit-config` | Startup mode. Accepted values: `explicit-config`, `builtin-defaults`. |
 | `SIMARD_IDENTITY` | Yes in `explicit-config` | none in `explicit-config`; `simard-engineer` in `builtin-defaults` | Identity to load before runtime composition. Non-UTF-8 values fail bootstrap instead of being treated as missing. |
 | `SIMARD_BASE_TYPE` | Yes in `explicit-config` | none in `explicit-config`; `local-harness` in `builtin-defaults` | Base type selected for the runtime request. Unsupported or unregistered choices fail explicitly. |
@@ -112,7 +122,7 @@ Artifacts are written under `target/simard-gym/` as JSON and text reports plus a
 
 ### Current builtin base-type registrations
 
-The builtin identities currently advertised by the loader are `simard-engineer`, `simard-meeting`, `simard-gym`, and the composite `simard-composite-engineer`. All of them accept `local-harness`, `rusty-clawd`, and `copilot-sdk`; `simard-engineer` additionally accepts `terminal-shell` for the local terminal-backed path:
+The builtin identities currently advertised by the loader are `simard-engineer`, `simard-meeting`, `simard-goal-curator`, `simard-gym`, and the composite `simard-composite-engineer`. All of them accept `local-harness`, `rusty-clawd`, and `copilot-sdk`; `simard-engineer` additionally accepts `terminal-shell` for the local terminal-backed path:
 
 | Base type selection | Current session backend implementation | Supported topologies in this scaffold |
 | --- | --- | --- |
@@ -190,6 +200,7 @@ Simard keeps the live objective available while the run is executing, but persis
 - persisted session summaries reuse sanitized plan and execution strings rather than copying the raw objective back out
 - exported handoff snapshots preserve the session boundary while replacing `RuntimeHandoffSnapshot.session.objective` with the same objective metadata string
 - bootstrap persists the latest exported handoff snapshot under `SIMARD_STATE_ROOT/latest_handoff.json`
+- bootstrap persists durable goal state under `SIMARD_STATE_ROOT/goal_records.json`
 
 ## Identity metadata
 
@@ -340,6 +351,8 @@ pub struct ReflectionSnapshot {
     pub manifest_contract: ManifestContract,
     pub evidence_records: usize,
     pub memory_records: usize,
+    pub active_goal_count: usize,
+    pub active_goals: Vec<String>,
     pub agent_program_backend: BackendDescriptor,
     pub handoff_backend: BackendDescriptor,
     pub adapter_backend: BackendDescriptor,
@@ -350,10 +363,11 @@ pub struct ReflectionSnapshot {
     pub supervisor_backend: BackendDescriptor,
     pub memory_backend: BackendDescriptor,
     pub evidence_backend: BackendDescriptor,
+    pub goal_backend: BackendDescriptor,
 }
 ```
 
-For `simard-meeting`, reflection also reports `agent_program_backend.identity == "agent-program::meeting-facilitator"`.
+For `simard-meeting`, reflection also reports `agent_program_backend.identity == "agent-program::meeting-facilitator"`. For `simard-goal-curator`, it reports `agent_program_backend.identity == "agent-program::goal-curator"`.
 
 ### Backend descriptors
 
@@ -375,6 +389,8 @@ Reflection rules:
 - `topology_backend`, `transport_backend`, and `supervisor_backend` come from the live runtime services
 - `memory_backend` comes from the live memory store descriptor
 - `evidence_backend` comes from the live evidence store descriptor
+- `goal_backend` comes from the live goal store descriptor
+- `active_goal_count` and `active_goals` expose the active top-goal state derived from the durable goal store
 - reflection reports live wiring, not placeholder labels
 - stopped or failed snapshots mark manifest freshness as `Stale`
 
@@ -390,6 +406,7 @@ Reflection rules:
 | `UnknownIdentity` | Requested identity is not registered. |
 | `InvalidIdentityComposition` | A composite identity definition is internally inconsistent. |
 | `InvalidManifestContract` | Manifest contract metadata is incomplete or untruthful. |
+| `InvalidGoalRecord` | A structured goal update is malformed or incomplete. |
 | `ClockBeforeUnixEpoch` | Runtime metadata could not record a truthful observation time. |
 | `InvalidSessionId` | A supplied session ID is not a valid distributed-safe identifier. |
 | `UnsupportedBaseType` | The chosen identity does not allow the requested base type. |

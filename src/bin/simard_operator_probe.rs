@@ -30,7 +30,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let base_type = args.next().ok_or("expected base type")?;
             let topology = args.next().ok_or("expected topology")?;
             let objective = args.next().ok_or("expected objective")?;
-            run_meeting_probe(&base_type, &topology, &objective)?;
+            let state_root = args.next().map(PathBuf::from);
+            run_meeting_probe(&base_type, &topology, &objective, state_root)?;
+        }
+        "goal-curation-run" => {
+            let base_type = args.next().ok_or("expected base type")?;
+            let topology = args.next().ok_or("expected topology")?;
+            let objective = args.next().ok_or("expected objective")?;
+            let state_root = args.next().map(PathBuf::from);
+            run_goal_curation_probe(&base_type, &topology, &objective, state_root)?;
         }
         "terminal-run" => {
             let topology = args.next().ok_or("expected topology")?;
@@ -41,7 +49,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let topology = args.next().ok_or("expected topology")?;
             let workspace_root = args.next().ok_or("expected workspace root")?;
             let objective = args.next().ok_or("expected objective")?;
-            run_engineer_loop_probe(&topology, Path::new(&workspace_root), &objective)?;
+            let state_root = args.next().map(PathBuf::from);
+            run_engineer_loop_probe(
+                &topology,
+                Path::new(&workspace_root),
+                &objective,
+                state_root,
+            )?;
         }
         "review-run" => {
             let base_type = args.next().ok_or("expected base type")?;
@@ -71,6 +85,16 @@ fn state_root(identity: &str, base_type: &str, topology: &str, probe: &str) -> P
         .join(identity)
         .join(base_type)
         .join(topology)
+}
+
+fn resolved_state_root(
+    explicit: Option<PathBuf>,
+    identity: &str,
+    base_type: &str,
+    topology: &str,
+    probe: &str,
+) -> PathBuf {
+    explicit.unwrap_or_else(|| state_root(identity, base_type, topology, probe))
 }
 
 fn run_bootstrap_probe(
@@ -205,12 +229,19 @@ fn run_meeting_probe(
     base_type: &str,
     topology: &str,
     objective: &str,
+    state_root_override: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = "simard-meeting";
     let config = BootstrapConfig::resolve(BootstrapInputs {
         prompt_root: Some(prompt_root()),
         objective: Some(objective.to_string()),
-        state_root: Some(state_root(identity, base_type, topology, "meeting-run")),
+        state_root: Some(resolved_state_root(
+            state_root_override,
+            identity,
+            base_type,
+            topology,
+            "meeting-run",
+        )),
         identity: Some(identity.to_string()),
         base_type: Some(base_type.to_string()),
         topology: Some(topology.to_string()),
@@ -236,8 +267,63 @@ fn run_meeting_probe(
     println!("State root: {}", config.state_root_path().display());
     println!("Session phase: {}", execution.outcome.session.phase);
     println!("Decision records: {}", decision_records.len());
+    println!(
+        "Active goals count: {}",
+        execution.snapshot.active_goal_count
+    );
+    for (index, goal) in execution.snapshot.active_goals.iter().enumerate() {
+        println!("Active goal {}: {}", index + 1, goal);
+    }
     for (index, value) in decision_records.iter().enumerate() {
         println!("Decision record {}: {}", index + 1, value);
+    }
+    println!("Execution summary: {}", execution.outcome.execution_summary);
+    println!(
+        "Reflection summary: {}",
+        execution.outcome.reflection.summary
+    );
+    Ok(())
+}
+
+fn run_goal_curation_probe(
+    base_type: &str,
+    topology: &str,
+    objective: &str,
+    state_root_override: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let identity = "simard-goal-curator";
+    let config = BootstrapConfig::resolve(BootstrapInputs {
+        prompt_root: Some(prompt_root()),
+        objective: Some(objective.to_string()),
+        state_root: Some(resolved_state_root(
+            state_root_override,
+            identity,
+            base_type,
+            topology,
+            "goal-curation-run",
+        )),
+        identity: Some(identity.to_string()),
+        base_type: Some(base_type.to_string()),
+        topology: Some(topology.to_string()),
+        ..BootstrapInputs::default()
+    })?;
+
+    let execution = simard::run_local_session(&config)?;
+    println!("Probe mode: goal-curation-run");
+    println!("Identity: {}", execution.snapshot.identity_name);
+    println!(
+        "Selected base type: {}",
+        execution.snapshot.selected_base_type
+    );
+    println!("Topology: {}", execution.snapshot.topology);
+    println!("State root: {}", config.state_root_path().display());
+    println!("Session phase: {}", execution.outcome.session.phase);
+    println!(
+        "Active goals count: {}",
+        execution.snapshot.active_goal_count
+    );
+    for (index, goal) in execution.snapshot.active_goals.iter().enumerate() {
+        println!("Active goal {}: {}", index + 1, goal);
     }
     println!("Execution summary: {}", execution.outcome.execution_summary);
     println!(
@@ -306,9 +392,11 @@ fn run_engineer_loop_probe(
     topology: &str,
     workspace_root: &Path,
     objective: &str,
+    state_root_override: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let runtime_topology = parse_runtime_topology(topology)?;
-    let state_root = state_root(
+    let state_root = resolved_state_root(
+        state_root_override,
         "simard-engineer",
         "terminal-shell",
         topology,
@@ -330,6 +418,10 @@ fn run_engineer_loop_probe(
             run.inspection.changed_files.join(", ")
         }
     );
+    println!("Active goals count: {}", run.inspection.active_goals.len());
+    for (index, goal) in run.inspection.active_goals.iter().enumerate() {
+        println!("Active goal {}: {}", index + 1, goal.concise_label());
+    }
     println!("Gap summary: {}", run.inspection.architecture_gap_summary);
     println!("Execution scope: {}", run.execution_scope);
     println!("Selected action: {}", run.action.selected.label);

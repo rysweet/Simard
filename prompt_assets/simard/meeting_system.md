@@ -23,9 +23,14 @@ Use structured operator input whenever possible:
 
 Repeated lines are allowed for updates, decisions, risks, next steps, and open questions.
 
+Goal stewardship input is also supported:
+
+- `goal: title | priority=1 | status=active | rationale=why this belongs in Simard's top 5`
+
 ## Expected outcomes
 
 - clarify the agenda
 - capture decisions and scoped action items
 - record explicit risks and open questions
 - preserve concise meeting artifacts that later engineer sessions can inspect
+- persist durable goal updates when the operator includes structured `goal:` lines
