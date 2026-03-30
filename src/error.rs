@@ -104,6 +104,20 @@ pub enum SimardError {
         field: String,
         reason: String,
     },
+    NotARepo {
+        path: PathBuf,
+        reason: String,
+    },
+    UnsupportedEngineerAction {
+        reason: String,
+    },
+    ActionExecutionFailed {
+        action: String,
+        reason: String,
+    },
+    VerificationFailed {
+        reason: String,
+    },
     PersistentStoreIo {
         store: String,
         action: String,
@@ -243,6 +257,25 @@ impl Display for SimardError {
             }
             Self::InvalidHandoffSnapshot { field, reason } => {
                 write!(f, "invalid handoff snapshot field '{field}': {reason}")
+            }
+            Self::NotARepo { path, reason } => {
+                write!(
+                    f,
+                    "NOT_A_REPO: '{}' is not inside a valid git worktree: {reason}",
+                    path.display()
+                )
+            }
+            Self::UnsupportedEngineerAction { reason } => {
+                write!(
+                    f,
+                    "no supported local engineer action is available: {reason}"
+                )
+            }
+            Self::ActionExecutionFailed { action, reason } => {
+                write!(f, "engineer action '{action}' failed: {reason}")
+            }
+            Self::VerificationFailed { reason } => {
+                write!(f, "engineer loop verification failed: {reason}")
             }
             Self::PersistentStoreIo {
                 store,

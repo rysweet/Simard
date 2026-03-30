@@ -1,6 +1,7 @@
 pub mod agent_program;
 pub mod base_types;
 pub mod bootstrap;
+pub mod engineer_loop;
 pub mod error;
 pub mod evidence;
 pub mod gym;
@@ -31,6 +32,10 @@ pub use bootstrap::{
     LocalSessionExecution, assemble_local_runtime, assemble_local_runtime_from_handoff,
     bootstrap_entrypoint, builtin_base_type_registry_for_manifest, latest_local_handoff,
     run_local_session,
+};
+pub use engineer_loop::{
+    EngineerLoopRun, ExecutedEngineerAction, RepoInspection, SelectedEngineerAction,
+    VerificationReport, run_local_engineer_loop,
 };
 pub use error::{SimardError, SimardResult};
 pub use evidence::{

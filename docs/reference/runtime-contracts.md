@@ -19,11 +19,12 @@ This file describes the API shape that exists in the repository today.
 
 ## Public surfaces
 
-Simard v1 currently exposes four surfaces:
+Simard v1 currently exposes five surfaces:
 
 - the local CLI bootstrap path through `cargo run --quiet`
 - the benchmark gym CLI through `cargo run --quiet --bin simard-gym -- ...`
 - the operator/runtime probe through `cargo run --quiet --bin simard_operator_probe -- ...`
+- the local-first engineer loop probe through `cargo run --quiet --bin simard_operator_probe -- engineer-loop-run <topology> <workspace-root> <objective>`
 - the in-process Rust runtime/bootstrap types in `src/bootstrap.rs`, `src/runtime.rs`, and related modules
 
 Simard v1 does **not** currently expose:
@@ -36,9 +37,10 @@ The stable contract in this repository is the bootstrap/runtime and benchmark-gy
 
 ## Meeting-mode operator flow
 
-The shipped operator probe also supports meeting-specific and terminal-session-specific paths:
+The shipped operator probe also supports meeting-specific, terminal-session-specific, and engineer-loop-specific paths:
 
 - `cargo run --quiet --bin simard_operator_probe -- meeting-run <base-type> <topology> <structured-objective>`
+- `cargo run --quiet --bin simard_operator_probe -- engineer-loop-run <topology> <workspace-root> <objective>`
 - `cargo run --quiet --bin simard_operator_probe -- review-run <base-type> <topology> <objective>`
 - `cargo run --quiet --bin simard_operator_probe -- review-read <base-type> <topology>`
 

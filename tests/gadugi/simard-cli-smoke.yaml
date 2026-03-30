@@ -69,6 +69,13 @@ steps:
       command: "tests/gadugi/terminal-session.sh"
     timeout: 300000
 
+  - name: "Terminal-native engineer loop"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/engineer-loop.sh"
+    timeout: 300000
+
   - name: "Composite handoff roundtrip"
     agent: "cli-agent"
     action: "execute_command"
@@ -98,6 +105,7 @@ metadata:
     - "bootstrap"
     - "meeting"
     - "terminal"
+    - "engineer-loop"
     - "handoff"
     - "composite"
     - "benchmark-gym"

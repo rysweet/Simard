@@ -55,12 +55,14 @@ where
         path: temp_path.clone(),
         reason: error.to_string(),
     })?;
+    set_owner_only_permissions(store, &temp_path)?;
     fs::rename(&temp_path, path).map_err(|error| SimardError::PersistentStoreIo {
         store: store.to_string(),
         action: "rename".to_string(),
         path: path.to_path_buf(),
         reason: error.to_string(),
-    })
+    })?;
+    set_owner_only_permissions(store, path)
 }
 
 fn temp_path(path: &Path) -> PathBuf {
@@ -70,4 +72,22 @@ fn temp_path(path: &Path) -> PathBuf {
         }
         _ => PathBuf::from(format!("{}.tmp", path.to_string_lossy())),
     }
+}
+
+#[cfg(unix)]
+fn set_owner_only_permissions(store: &str, path: &Path) -> SimardResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let permissions = fs::Permissions::from_mode(0o600);
+    fs::set_permissions(path, permissions).map_err(|error| SimardError::PersistentStoreIo {
+        store: store.to_string(),
+        action: "chmod".to_string(),
+        path: path.to_path_buf(),
+        reason: error.to_string(),
+    })
+}
+
+#[cfg(not(unix))]
+fn set_owner_only_permissions(_store: &str, _path: &Path) -> SimardResult<()> {
+    Ok(())
 }

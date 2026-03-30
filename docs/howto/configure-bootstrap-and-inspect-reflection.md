@@ -199,6 +199,27 @@ Look for:
 
 This is the honest v1 terminal slice: Simard can drive a real local PTY-backed shell session through the runtime, but it does not claim remote hosts, Azlin orchestration, or distributed terminal control yet.
 
+## 7. Exercise the local-first engineer loop
+
+Use the operator probe when you want Simard to inspect a repo, choose one safe local engineering action, verify the outcome, and persist truthful local artifacts:
+
+```bash
+cargo run --quiet --bin simard_operator_probe -- \
+  engineer-loop-run single-process . \
+  $'inspect the repository state\nrun one safe local engineering action\nverify the outcome explicitly\npersist truthful local evidence and memory'
+```
+
+Look for:
+
+- `Probe mode: engineer-loop-run`
+- `Repo root: ...`
+- `Execution scope: local-only`
+- `Selected action: cargo-metadata-scan` (or another explicit local-first action)
+- `Action status: success`
+- `Verification status: verified`
+
+This is the current honest v1 engineer-loop slice: Simard inspects the local repo, performs one bounded repo-native action, verifies that the repo grounding stayed stable, and persists durable memory/evidence, but it does not claim remote execution or autonomous multi-step coding yet.
+
 ## 4. Validate stopped-state behavior
 
 Stopping the runtime is already observable.
