@@ -2115,7 +2115,8 @@ fn simard_gym_list_matches_the_legacy_benchmark_binary_for_compatibility() {
         simard_rendered.contains("repo-exploration-local")
             && simard_rendered.contains("docs-refresh-copilot")
             && simard_rendered.contains("safe-code-change-rusty-clawd")
-            && simard_rendered.contains("composite-session-review"),
+            && simard_rendered.contains("composite-session-review")
+            && simard_rendered.contains("interactive-terminal-driving"),
         "gym list should surface the shipped benchmark scenarios:\n{simard_rendered}"
     );
 
@@ -2132,6 +2133,51 @@ fn simard_gym_list_matches_the_legacy_benchmark_binary_for_compatibility() {
     assert_eq!(
         simard_rendered, legacy_rendered,
         "the unified gym surface should preserve the legacy list output exactly until operators migrate"
+    );
+}
+
+#[test]
+fn simard_gym_run_exercises_the_interactive_terminal_driving_scenario() {
+    let artifact_root = TempDirGuard::new("simard-cli-gym-interactive-terminal");
+    let output = command_in_dir(env!("CARGO_BIN_EXE_simard"), artifact_root.path())
+        .arg("gym")
+        .arg("run")
+        .arg("interactive-terminal-driving")
+        .output()
+        .expect("simard interactive terminal benchmark should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        output.status.success(),
+        "interactive terminal benchmark should succeed on the canonical CLI:\n{rendered}"
+    );
+    for expected in [
+        "Scenario: interactive-terminal-driving",
+        "Passed: true",
+        "Checks passed:",
+        "Artifact report:",
+        "Review artifact:",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "interactive terminal benchmark should surface '{expected}' for operators:\n{rendered}"
+        );
+    }
+
+    let report_path = output_line_value(&rendered, "Artifact report: ")
+        .expect("interactive terminal benchmark should surface the report.json artifact path");
+    let report = load_json(resolve_cli_artifact_path(artifact_root.path(), report_path));
+    assert_eq!(
+        report["runtime"]["selected_base_type"].as_str(),
+        Some("terminal-shell"),
+        "interactive terminal benchmark should report terminal-shell as the selected base type:\n{}",
+        serde_json::to_string_pretty(&report).expect("report should render")
+    );
+    assert_eq!(
+        report["scenario"]["identity"].as_str(),
+        Some("simard-engineer"),
+        "interactive terminal benchmark should exercise the engineer identity rather than the gym harness identity:\n{}",
+        serde_json::to_string_pretty(&report).expect("report should render")
     );
 }
 

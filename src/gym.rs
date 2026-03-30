@@ -328,7 +328,7 @@ impl BenchmarkMetricFacts {
     }
 }
 
-const BENCHMARK_SCENARIOS: [BenchmarkScenario; 4] = [
+const BENCHMARK_SCENARIOS: [BenchmarkScenario; 5] = [
     BenchmarkScenario {
         id: "repo-exploration-local",
         title: "Repo exploration on local harness",
@@ -372,6 +372,17 @@ const BENCHMARK_SCENARIOS: [BenchmarkScenario; 4] = [
         topology: RuntimeTopology::SingleProcess,
         objective: "Run a disciplined bounded engineering session, preserve evidence, and produce a concise operator-facing summary of what happened.",
         expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "interactive-terminal-driving",
+        title: "Interactive terminal driving on terminal-shell",
+        description: "Exercise the engineer identity through the terminal-shell base type by launching a nested interactive child process, waiting for prompts, and sending bounded follow-up inputs like an operator driving a copilot-style terminal tool.",
+        class: BenchmarkClass::SessionQuality,
+        identity: "simard-engineer",
+        base_type: "terminal-shell",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "working-directory: .\ncommand: sh -c 'printf \"copilot-ready\\n\"; while IFS= read -r line; do if [ \"$line\" = \"/status\" ]; then printf \"mode: ready\\n\"; elif [ \"$line\" = \"/exit\" ]; then printf \"bye\\n\"; break; else printf \"echo:%s\\n\" \"$line\"; fi; done'\nwait-for: copilot-ready\ninput: /status\nwait-for: mode: ready\ninput: /exit\nwait-for: bye",
+        expected_min_runtime_evidence: 6,
     },
 ];
 
