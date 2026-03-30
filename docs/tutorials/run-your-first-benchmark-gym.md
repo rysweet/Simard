@@ -38,20 +38,23 @@ The starter suite is intentionally small and curated.
 cargo run --quiet -- gym list
 ```
 
-You should see four scenarios:
+You should see five scenarios:
 
 - `repo-exploration-local`
 - `docs-refresh-copilot`
 - `safe-code-change-rusty-clawd`
 - `composite-session-review`
+- `interactive-terminal-driving`
 
 Together they cover:
 
 - the dedicated `simard-gym` identity
 - the composite `simard-composite-engineer` identity
+- the primary `simard-engineer` identity on the terminal-backed substrate
 - `local-harness`
 - `copilot-sdk`
 - `rusty-clawd`
+- `terminal-shell`
 - both `single-process` and loopback `multi-process`
 
 If you need exact legacy output for an older script, `cargo run --quiet --bin simard-gym -- list` still works as a compatibility surface.
@@ -73,6 +76,7 @@ Suite passed: true
 - docs-refresh-copilot: passed (target/simard-gym/...)
 - safe-code-change-rusty-clawd: passed (target/simard-gym/...)
 - composite-session-review: passed (target/simard-gym/...)
+- interactive-terminal-driving: passed (target/simard-gym/...)
 Suite artifact report: target/simard-gym/suites/starter.json
 ```
 
@@ -107,7 +111,7 @@ Fresh runs now populate `scorecard.unnecessary_action_count` and `scorecard.retr
 You can also run a single scenario:
 
 ```bash
-cargo run --quiet -- gym run safe-code-change-rusty-clawd
+cargo run --quiet -- gym run interactive-terminal-driving
 ```
 
 That command prints the scenario result and the persisted artifact paths directly on the operator-facing CLI.
@@ -115,16 +119,16 @@ That command prints the scenario result and the persisted artifact paths directl
 You should see output shaped like:
 
 ```text
-Scenario: safe-code-change-rusty-clawd
+Scenario: interactive-terminal-driving
 Suite: starter
 Session: session-...
 Passed: true
 Checks passed: 8/8
 Unnecessary actions: 0
 Retry count: 0
-Artifact report: target/simard-gym/safe-code-change-rusty-clawd/.../report.json
-Artifact summary: target/simard-gym/safe-code-change-rusty-clawd/.../report.txt
-Review artifact: target/simard-gym/safe-code-change-rusty-clawd/.../review.json
+Artifact report: target/simard-gym/interactive-terminal-driving/.../report.json
+Artifact summary: target/simard-gym/interactive-terminal-driving/.../report.txt
+Review artifact: target/simard-gym/interactive-terminal-driving/.../review.json
 ```
 
 The detailed text artifact at `Artifact summary:` contains the full benchmark report, including identity, base type, topology, plan, execution summary, reflection summary, and the same metric values.
