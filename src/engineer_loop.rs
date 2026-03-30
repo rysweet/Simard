@@ -16,6 +16,15 @@ use crate::session::{SessionPhase, SessionRecord, UuidSessionIdGenerator};
 const ENGINEER_IDENTITY: &str = "simard-engineer";
 const ENGINEER_BASE_TYPE: &str = "terminal-shell";
 const EXECUTION_SCOPE: &str = "local-only";
+const CLEARED_GIT_ENV_VARS: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_PREFIX",
+];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoInspection {
@@ -485,9 +494,12 @@ fn run_command(cwd: &Path, argv: &[&str]) -> SimardResult<CommandOutput> {
         });
     }
 
-    let output = Command::new(program)
-        .args(args)
-        .current_dir(cwd)
+    let mut command = Command::new(program);
+    command.args(args).current_dir(cwd);
+    for key in CLEARED_GIT_ENV_VARS {
+        command.env_remove(key);
+    }
+    let output = command
         .output()
         .map_err(|error| SimardError::ActionExecutionFailed {
             action: argv.join(" "),
@@ -525,8 +537,8 @@ fn run_command(cwd: &Path, argv: &[&str]) -> SimardResult<CommandOutput> {
 
     Ok(CommandOutput {
         status: output.status,
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        stdout: sanitize_terminal_text(&String::from_utf8_lossy(&output.stdout)),
+        stderr: sanitize_terminal_text(&String::from_utf8_lossy(&output.stderr)),
     })
 }
 
