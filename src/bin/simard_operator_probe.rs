@@ -1,10 +1,10 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use simard::{
     BootstrapConfig, BootstrapInputs, FileBackedMemoryStore, MemoryRecord, MemoryScope,
-    MemoryStore, ReflectiveRuntime, ReviewRequest, ReviewTargetKind,
+    MemoryStore, ReflectiveRuntime, ReviewRequest, ReviewTargetKind, RuntimeTopology,
     assemble_local_runtime_from_handoff, build_review_artifact, latest_local_handoff,
-    latest_review_artifact, persist_review_artifact,
+    latest_review_artifact, persist_review_artifact, run_local_engineer_loop,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -36,6 +36,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let topology = args.next().ok_or("expected topology")?;
             let objective = args.next().ok_or("expected objective")?;
             run_terminal_probe(&topology, &objective)?;
+        }
+        "engineer-loop-run" => {
+            let topology = args.next().ok_or("expected topology")?;
+            let workspace_root = args.next().ok_or("expected workspace root")?;
+            let objective = args.next().ok_or("expected objective")?;
+            run_engineer_loop_probe(&topology, Path::new(&workspace_root), &objective)?;
         }
         "review-run" => {
             let base_type = args.next().ok_or("expected base type")?;
@@ -296,6 +302,46 @@ fn run_terminal_probe(topology: &str, objective: &str) -> Result<(), Box<dyn std
     Ok(())
 }
 
+fn run_engineer_loop_probe(
+    topology: &str,
+    workspace_root: &Path,
+    objective: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let runtime_topology = parse_runtime_topology(topology)?;
+    let state_root = state_root(
+        "simard-engineer",
+        "terminal-shell",
+        topology,
+        "engineer-loop-run",
+    );
+    let run = run_local_engineer_loop(workspace_root, objective, runtime_topology, &state_root)
+        .map_err(|error| format!("{error}"))?;
+
+    println!("Probe mode: engineer-loop-run");
+    println!("Repo root: {}", run.inspection.repo_root.display());
+    println!("Repo branch: {}", run.inspection.branch);
+    println!("Repo head: {}", run.inspection.head);
+    println!("Worktree dirty: {}", run.inspection.worktree_dirty);
+    println!(
+        "Changed files: {}",
+        if run.inspection.changed_files.is_empty() {
+            "<none>".to_string()
+        } else {
+            run.inspection.changed_files.join(", ")
+        }
+    );
+    println!("Gap summary: {}", run.inspection.architecture_gap_summary);
+    println!("Execution scope: {}", run.execution_scope);
+    println!("Selected action: {}", run.action.selected.label);
+    println!("Action rationale: {}", run.action.selected.rationale);
+    println!("Action command: {}", run.action.selected.argv.join(" "));
+    println!("Action status: success");
+    println!("Verification status: {}", run.verification.status);
+    println!("Verification summary: {}", run.verification.summary);
+    println!("State root: {}", run.state_root.display());
+    Ok(())
+}
+
 fn run_review_probe(
     base_type: &str,
     topology: &str,
@@ -411,4 +457,16 @@ fn run_review_read_probe(
         println!("Latest decision review record: {}", record.value);
     }
     Ok(())
+}
+
+fn parse_runtime_topology(value: &str) -> Result<RuntimeTopology, Box<dyn std::error::Error>> {
+    match value {
+        "single-process" => Ok(RuntimeTopology::SingleProcess),
+        "multi-process" => Ok(RuntimeTopology::MultiProcess),
+        "distributed" => Ok(RuntimeTopology::Distributed),
+        other => Err(format!(
+            "unsupported runtime topology '{other}'; expected single-process, multi-process, or distributed"
+        )
+        .into()),
+    }
 }

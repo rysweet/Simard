@@ -104,6 +104,28 @@ Terminal evidence: terminal-command-count=2
 
 **Checkpoint**: this path is no longer synthetic. The runtime is actually allocating a local PTY-backed shell session and preserving a transcript preview in evidence, while still honestly limiting the feature to local single-process execution.
 
+### Variation: exercise the local-first engineer loop
+
+Use the shipped operator probe to inspect the repo, run one explicit safe engineering action, and verify the result:
+
+```bash
+cargo run --quiet --bin simard_operator_probe -- \
+  engineer-loop-run single-process . \
+  $'inspect the repository state\nrun one safe local engineering action\nverify the outcome explicitly\npersist truthful local evidence and memory'
+```
+
+Look for these lines:
+
+```text
+Probe mode: engineer-loop-run
+Repo root: /path/to/repo
+Execution scope: local-only
+Selected action: cargo-metadata-scan
+Verification status: verified
+```
+
+**Checkpoint**: Simard is now doing more than opening a shell. It is inspecting repo state, choosing a bounded repo-native action, verifying that repo grounding stayed stable, and persisting truthful memory/evidence for the loop.
+
 ## Step 3: Exercise a composite identity and loopback multi-process runtime
 
 Use the shipped operator probe to validate the broader runtime seams like an operator would.

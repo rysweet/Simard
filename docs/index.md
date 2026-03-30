@@ -31,6 +31,7 @@ Today Simard provides:
 - builtin identities selectable at startup today: `simard-engineer`, `simard-meeting`, `simard-gym`, and the composite `simard-composite-engineer`
 - a facilitator-backed `simard-meeting` identity that captures structured decisions, risks, next steps, and open questions without mutating code
 - `single-process` for all builtin base types plus loopback `multi-process` execution for `rusty-clawd`, with `terminal-shell` intentionally limited to local single-process runs and unsupported pairs failing explicitly
+- a local-first engineer loop probe that inspects repo state, runs one explicit safe engineering action, verifies the outcome, and persists truthful local evidence/memory without pretending remote orchestration already exists
 - a starter benchmark gym suite that exercises all current builtin base-type selections plus a composite identity session through `cargo run --quiet --bin simard-gym -- run-suite starter`
 - benchmark artifacts written under `target/simard-gym/`, including per-scenario JSON and text summaries, a dedicated review artifact, and a suite summary
 - `ManifestContract { entrypoint, composition, precedence, provenance, freshness }`
@@ -62,7 +63,7 @@ Those hooks enforce `cargo fmt --all -- --check`, `cargo clippy --all-targets --
 
 - `src/main.rs` is the thin CLI wrapper; `bootstrap::run_local_session` owns the run loop and `simard::bootstrap::assemble_local_runtime` remains the reflected assembly boundary
 - `src/bin/simard_gym.rs` is the operator-facing benchmark CLI for the starter gym suite
-- `src/bin/simard_operator_probe.rs` now exposes `review-run` so operators can run a bounded session, inspect the exported handoff, and persist evidence-linked review proposals
+- `src/bin/simard_operator_probe.rs` now exposes `terminal-run`, `engineer-loop-run`, and `review-run` so operators can inspect bounded shell execution, the local-first engineer loop, and evidence-linked review proposals through public surfaces
 - `bootstrap::run_local_session` now persists durable memory/evidence records and the latest handoff snapshot under the configured state root
 - defaults are startup choices, never silent runtime recovery
 - reflection metadata is derived from the active runtime wiring, not placeholder labels
