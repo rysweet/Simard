@@ -25,6 +25,7 @@ enum TerminalStep {
 struct TerminalTurnSpec {
     shell: String,
     working_directory: Option<PathBuf>,
+    wait_timeout: Duration,
     steps: Vec<TerminalStep>,
 }
 
@@ -48,6 +49,7 @@ impl TerminalTurnSpec {
     fn parse(raw: &str, base_type: &str) -> SimardResult<Self> {
         let mut shell = None;
         let mut working_directory = None;
+        let mut wait_timeout = WAIT_STEP_TIMEOUT;
         let mut steps = Vec::new();
 
         for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
@@ -66,6 +68,9 @@ impl TerminalTurnSpec {
                 "shell" => shell = Some(normalize_shell(value, base_type)?),
                 "working-directory" | "working_directory" | "cwd" => {
                     working_directory = Some(PathBuf::from(value))
+                }
+                "wait-timeout-seconds" | "wait_timeout_seconds" | "wait-timeout" => {
+                    wait_timeout = parse_wait_timeout(value, base_type)?
                 }
                 "command" | "input" => steps.push(TerminalStep::Input(value.to_string())),
                 "wait-for" | "wait_for" | "expect" => {
@@ -88,6 +93,7 @@ impl TerminalTurnSpec {
         Ok(Self {
             shell: shell.unwrap_or_else(|| DEFAULT_SHELL.to_string()),
             working_directory,
+            wait_timeout,
             steps,
         })
     }
@@ -130,6 +136,10 @@ pub fn execute_terminal_turn(
         format!("terminal-working-directory={}", working_directory.display()),
         format!("terminal-command-count={input_count}"),
         format!("terminal-wait-count={wait_count}"),
+        format!(
+            "terminal-wait-timeout-seconds={}",
+            spec.wait_timeout.as_secs()
+        ),
         format!("terminal-step-count={}", spec.steps.len()),
         format!("terminal-transcript-preview={transcript_preview}"),
         format!("runtime-node={}", request.runtime_node),
@@ -143,16 +153,17 @@ pub fn execute_terminal_turn(
 
     Ok(BaseTypeOutcome {
         plan: format!(
-            "Open local PTY shell '{}' in '{}' and run {} terminal input line(s) with {} wait checkpoint(s) for '{}' on '{}'.",
+            "Open local PTY shell '{}' in '{}' and run {} terminal input line(s) with {} wait checkpoint(s) and a {}s wait timeout for '{}' on '{}'.",
             spec.shell,
             working_directory.display(),
             input_count,
             wait_count,
+            spec.wait_timeout.as_secs(),
             request.mode,
             request.topology,
         ),
         execution_summary: format!(
-            "Terminal shell session executed {} via selected base type '{}' on implementation '{}' from node '{}' at '{}' with shell '{}' in '{}' across {} terminal input line(s) and {} wait checkpoint(s).",
+            "Terminal shell session executed {} via selected base type '{}' on implementation '{}' from node '{}' at '{}' with shell '{}' in '{}' across {} terminal input line(s), {} wait checkpoint(s), and a {}s wait timeout.",
             objective_summary,
             descriptor.id,
             descriptor.backend.identity,
@@ -162,9 +173,28 @@ pub fn execute_terminal_turn(
             working_directory.display(),
             input_count,
             wait_count,
+            spec.wait_timeout.as_secs(),
         ),
         evidence,
     })
+}
+
+fn parse_wait_timeout(value: &str, base_type: &str) -> SimardResult<Duration> {
+    let seconds = value
+        .parse::<u64>()
+        .map_err(|error| SimardError::AdapterInvocationFailed {
+            base_type: base_type.to_string(),
+            reason: format!("terminal-shell wait timeout '{value}' is invalid: {error}"),
+        })?;
+    if !(1..=60).contains(&seconds) {
+        return Err(SimardError::AdapterInvocationFailed {
+            base_type: base_type.to_string(),
+            reason: format!(
+                "terminal-shell wait timeout '{value}' must be between 1 and 60 seconds"
+            ),
+        });
+    }
+    Ok(Duration::from_secs(seconds))
 }
 
 fn normalize_shell(value: &str, base_type: &str) -> SimardResult<String> {
@@ -303,7 +333,7 @@ fn run_terminal_script(
                     &mut child,
                     &transcript_path,
                     expected,
-                    WAIT_STEP_TIMEOUT,
+                    spec.wait_timeout,
                 )?,
             }
         }
@@ -690,6 +720,17 @@ mod tests {
         );
         assert_eq!(spec.input_count(), 2);
         assert_eq!(spec.wait_count(), 1);
+    }
+
+    #[test]
+    fn parse_terminal_turn_supports_wait_timeout_override() {
+        let spec = TerminalTurnSpec::parse(
+            "working-directory: .\nwait-timeout-seconds: 30\ncommand: printf \"ready\\n\"\nwait-for: ready",
+            "terminal-shell",
+        )
+        .expect("terminal turn should parse");
+
+        assert_eq!(spec.wait_timeout, std::time::Duration::from_secs(30));
     }
 
     #[test]

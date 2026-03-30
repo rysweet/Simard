@@ -1,7 +1,5 @@
 working-directory: .
-command: sh -c 'printf "copilot-ready\n"; while IFS= read -r line; do if [ "$line" = "/status" ]; then printf "mode: ready\n"; elif [ "$line" = "/exit" ]; then printf "bye\n"; break; else printf "echo:%s\n" "$line"; fi; done'
-wait-for: copilot-ready
-input: /status
-wait-for: mode: ready
-input: /exit
-wait-for: bye
+wait-timeout-seconds: 30
+command: amplihack copilot -- --version
+wait-for: GitHub Copilot CLI
+input: exit

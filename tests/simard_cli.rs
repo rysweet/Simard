@@ -7,6 +7,8 @@
 //! and `simard-gym` remain compatibility surfaces for older scripts.
 
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::{Mutex, OnceLock};
@@ -251,6 +253,31 @@ impl Drop for CleanupDirGuard {
             let _ = fs::remove_dir_all(&self.path);
         }
     }
+}
+
+fn path_with_prepend(prepend: &Path) -> String {
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let mut parts = vec![prepend.to_path_buf()];
+    parts.extend(std::env::split_paths(&existing));
+    std::env::join_paths(parts)
+        .expect("PATH entries should be joinable")
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn write_fake_amplihack(binary_dir: &Path, body: &str) -> PathBuf {
+    let binary_path = binary_dir.join("amplihack");
+    fs::write(&binary_path, body).expect("fake amplihack should be written");
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(&binary_path)
+            .expect("fake amplihack metadata should be readable")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&binary_path, permissions)
+            .expect("fake amplihack should be executable");
+    }
+    binary_path
 }
 
 #[test]
@@ -994,6 +1021,129 @@ fn simard_engineer_terminal_recipe_runs_builtin_named_recipe_with_probe_parity()
     assert_eq!(
         simard_normalized, legacy_normalized,
         "terminal-recipe should preserve compatibility parity with terminal-recipe-run"
+    );
+}
+
+#[test]
+fn simard_engineer_terminal_recipe_show_surfaces_truthful_copilot_probe_contents() {
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("terminal-recipe-show")
+        .arg("copilot-status-check")
+        .output()
+        .expect("simard engineer terminal-recipe-show copilot-status-check should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        output.status.success(),
+        "terminal-recipe-show should print the truthful Copilot status probe recipe:\n{rendered}"
+    );
+    for expected in [
+        "Terminal recipe: copilot-status-check",
+        "Recipe asset: simard/terminal_recipes/copilot-status-check.simard-terminal",
+        "wait-timeout-seconds: 30",
+        "command: amplihack copilot -- --version",
+        "wait-for: GitHub Copilot CLI",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "terminal-recipe-show should surface '{expected}':\n{rendered}"
+        );
+    }
+}
+
+#[test]
+fn simard_engineer_terminal_recipe_runs_truthful_copilot_status_probe_with_probe_parity() {
+    let fake_bin = TempDirGuard::new("simard-cli-fake-amplihack");
+    write_fake_amplihack(
+        fake_bin.path(),
+        "#!/usr/bin/env bash\nset -euo pipefail\nif [ \"$#\" -eq 3 ] && [ \"$1\" = \"copilot\" ] && [ \"$2\" = \"--\" ] && [ \"$3\" = \"--version\" ]; then\n  printf 'GitHub Copilot CLI 9.9.9-test.\\n'\n  exit 0\nfi\nprintf 'unexpected args:' >&2\nprintf ' %s' \"$@\" >&2\nprintf '\\n' >&2\nexit 64\n",
+    );
+    let path = path_with_prepend(fake_bin.path());
+    let state_root = TempDirGuard::new("simard-cli-copilot-recipe");
+    let simard_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("terminal-recipe")
+        .arg("single-process")
+        .arg("copilot-status-check")
+        .arg(state_root.path())
+        .env("PATH", &path)
+        .output()
+        .expect("simard engineer terminal-recipe copilot-status-check should launch");
+    let simard_rendered = rendered_output(&simard_output);
+
+    assert!(
+        simard_output.status.success(),
+        "copilot-status-check should execute a truthful bounded Copilot version probe:\n{simard_rendered}"
+    );
+    for expected in [
+        "Selected base type: terminal-shell",
+        "Terminal checkpoint 1: GitHub Copilot CLI",
+        "Terminal wait timeout seconds: 30",
+        "GitHub Copilot CLI 9.9.9-test.",
+    ] {
+        assert!(
+            simard_rendered.contains(expected),
+            "copilot-status-check should surface '{expected}':\n{simard_rendered}"
+        );
+    }
+
+    let legacy_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .arg("terminal-recipe-run")
+        .arg("single-process")
+        .arg("copilot-status-check")
+        .arg(state_root.path())
+        .env("PATH", &path)
+        .output()
+        .expect("legacy terminal-recipe-run copilot-status-check should launch");
+    let legacy_rendered = rendered_output(&legacy_output);
+
+    assert!(
+        legacy_output.status.success(),
+        "legacy copilot-status-check compatibility path should remain available:\n{legacy_rendered}"
+    );
+    let simard_normalized = replace_output_line_value(
+        &simard_rendered,
+        "Terminal transcript preview: ",
+        "<preview>",
+    );
+    let legacy_normalized = replace_output_line_value(
+        &legacy_rendered,
+        "Terminal transcript preview: ",
+        "<preview>",
+    );
+    assert_eq!(
+        simard_normalized, legacy_normalized,
+        "copilot-status-check should preserve compatibility parity with terminal-recipe-run"
+    );
+}
+
+#[test]
+fn simard_engineer_terminal_recipe_fails_closed_when_amplihack_is_missing() {
+    let empty_bin = TempDirGuard::new("simard-cli-empty-path");
+    let state_root = TempDirGuard::new("simard-cli-copilot-recipe-missing");
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("terminal-recipe")
+        .arg("single-process")
+        .arg("copilot-status-check")
+        .arg(state_root.path())
+        .env("PATH", empty_bin.path())
+        .output()
+        .expect("simard engineer terminal-recipe missing amplihack should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        !output.status.success(),
+        "copilot-status-check must fail closed when amplihack is unavailable:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("amplihack-binary-missing"),
+        "copilot-status-check should explain why the bounded status probe cannot run:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("required executable 'amplihack' is not available on PATH"),
+        "copilot-status-check should preserve the explicit absence detail:\n{rendered}"
     );
 }
 

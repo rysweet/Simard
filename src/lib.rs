@@ -1,6 +1,7 @@
 pub mod agent_program;
 pub mod base_types;
 pub mod bootstrap;
+mod copilot_status_probe;
 pub mod engineer_loop;
 pub mod error;
 pub mod evidence;
