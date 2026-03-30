@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::agent_program::{
-    AgentProgram, GoalCuratorProgram, MeetingFacilitatorProgram, ObjectiveRelayProgram,
+    AgentProgram, GoalCuratorProgram, ImprovementCuratorProgram, MeetingFacilitatorProgram,
+    ObjectiveRelayProgram,
 };
 use crate::base_types::{
     BaseTypeId, LocalProcessHarnessAdapter, RustyClawdAdapter, TerminalShellAdapter,
@@ -484,6 +485,7 @@ fn agent_program_for_manifest(manifest: &IdentityManifest) -> SimardResult<Arc<d
     match manifest.default_mode {
         OperatingMode::Meeting => Ok(Arc::new(MeetingFacilitatorProgram::try_default()?)),
         OperatingMode::Curator => Ok(Arc::new(GoalCuratorProgram::try_default()?)),
+        OperatingMode::Improvement => Ok(Arc::new(ImprovementCuratorProgram::try_default()?)),
         OperatingMode::Engineer | OperatingMode::Gym => {
             Ok(Arc::new(ObjectiveRelayProgram::try_default()?))
         }

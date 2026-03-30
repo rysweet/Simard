@@ -183,7 +183,7 @@ cargo run --quiet --bin simard_operator_probe -- \
 
 Look for:
 
-- `Identity components: simard-engineer, simard-meeting, simard-gym, simard-goal-curator`
+- `Identity components: simard-engineer, simard-meeting, simard-gym, simard-goal-curator, simard-improvement-curator`
 - `Topology: multi-process`
 - `Topology backend: topology::loopback-mesh`
 - `Transport backend: transport::loopback-mailbox`
@@ -191,7 +191,43 @@ Look for:
 
 **Checkpoint**: composition and topology are now visible runtime facts, not just architecture aspirations.
 
-## Step 5: Opt in to builtin defaults
+## Step 5: Promote a persisted review into durable improvement priorities
+
+First, generate a persisted review artifact:
+
+```bash
+STATE_ROOT="$PWD/target/simard-improvement-demo"
+
+cargo run --quiet --bin simard_operator_probe -- \
+  review-run local-harness single-process \
+  "inspect the current Simard review surface and preserve concrete proposals" \
+  "$STATE_ROOT"
+```
+
+Then promote explicit operator-approved proposals into durable priorities in the same state root:
+
+```bash
+cargo run --quiet --bin simard_operator_probe -- \
+  improvement-curation-run local-harness single-process \
+  "$(cat <<'EOF'
+approve: Capture denser execution evidence | priority=1 | status=active | rationale=operators need denser execution evidence now
+approve: Promote this pattern into a repeatable benchmark | priority=2 | status=proposed | rationale=carry this into the next benchmark planning pass
+EOF
+)" \
+  "$STATE_ROOT"
+```
+
+Look for:
+
+- `Probe mode: improvement-curation-run`
+- `Identity: simard-improvement-curator`
+- `Approved proposals: 2`
+- `Active goal 1: p1 [active] Capture denser execution evidence`
+- `Proposed goal 1: p2 [proposed] Promote this pattern into a repeatable benchmark`
+
+**Checkpoint**: Simard now has an honest evidence-to-priority loop. Review findings stay operator-reviewable, and approved improvements become durable backlog state instead of dead-end artifacts.
+
+## Step 6: Opt in to builtin defaults
 
 Builtin defaults exist for local bootstrap convenience, but they are only used when startup opts in.
 
@@ -212,7 +248,7 @@ You should see:
 
 **Checkpoint**: defaults are a startup choice, not a recovery path. This part of the audited contract already exists.
 
-## Step 6: Observe stopped-state behavior
+## Step 7: Observe stopped-state behavior
 
 The runtime preserves its snapshot after shutdown and surfaces a dedicated stopped-state error:
 

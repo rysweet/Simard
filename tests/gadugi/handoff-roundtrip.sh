@@ -21,7 +21,7 @@ STATE_ROOT="$(printf '%s\n' "$OUTPUT" | sed -n 's/^State root: //p')"
 
 printf '%s\n' "$OUTPUT" | grep -F "Probe mode: handoff-roundtrip" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Identity: simard-composite-engineer" >/dev/null
-printf '%s\n' "$OUTPUT" | grep -F "Identity components: simard-engineer, simard-meeting, simard-gym, simard-goal-curator" >/dev/null
+printf '%s\n' "$OUTPUT" | grep -F "Identity components: simard-engineer, simard-meeting, simard-gym, simard-goal-curator, simard-improvement-curator" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Selected base type: rusty-clawd" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Topology: multi-process" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Runtime node: node-loopback-mesh" >/dev/null

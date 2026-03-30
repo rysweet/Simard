@@ -2,6 +2,7 @@ use crate::base_types::{BaseTypeId, BaseTypeOutcome, BaseTypeTurnInput};
 use crate::error::{SimardError, SimardResult};
 use crate::goals::{GoalRecord, GoalStatus, GoalUpdate};
 use crate::identity::OperatingMode;
+use crate::improvements::ImprovementPromotionPlan;
 use crate::memory::MemoryScope;
 use crate::metadata::{BackendDescriptor, Freshness};
 use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeTopology};
@@ -314,6 +315,137 @@ impl AgentProgram for GoalCuratorProgram {
     }
 }
 
+#[derive(Debug)]
+pub struct ImprovementCuratorProgram {
+    descriptor: BackendDescriptor,
+}
+
+impl ImprovementCuratorProgram {
+    pub fn try_default() -> SimardResult<Self> {
+        Ok(Self {
+            descriptor: BackendDescriptor::for_runtime_type::<Self>(
+                "agent-program::improvement-curator",
+                "runtime-port:agent-program",
+                Freshness::now()?,
+            ),
+        })
+    }
+}
+
+impl AgentProgram for ImprovementCuratorProgram {
+    fn descriptor(&self) -> BackendDescriptor {
+        self.descriptor.clone()
+    }
+
+    fn plan_turn(&self, context: &AgentProgramContext) -> SimardResult<BaseTypeTurnInput> {
+        let plan = ImprovementPromotionPlan::parse(&context.objective)?;
+        Ok(BaseTypeTurnInput {
+            objective: format!(
+                "Review '{}' for '{}' contains {} proposal(s). Approve {} proposal(s), defer {} proposal(s), keep the promotion loop operator-reviewable, and preserve truthful durable priorities. Existing active goals in runtime state: {}.",
+                plan.review_id,
+                if plan.review_target.trim().is_empty() {
+                    "unknown-target".to_string()
+                } else {
+                    plan.review_target.clone()
+                },
+                plan.proposals.len(),
+                plan.approvals.len(),
+                plan.deferrals.len(),
+                if context.active_goals.is_empty() {
+                    "<none>".to_string()
+                } else {
+                    context
+                        .active_goals
+                        .iter()
+                        .map(GoalRecord::concise_label)
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                },
+            ),
+        })
+    }
+
+    fn reflection_summary(
+        &self,
+        context: &AgentProgramContext,
+        outcome: &BaseTypeOutcome,
+    ) -> SimardResult<String> {
+        let plan = ImprovementPromotionPlan::parse(&context.objective)?;
+        Ok(format!(
+            "Improvement curator '{}' reviewed '{}' for target '{}' through '{}' on '{}' from '{}'. Approved {} proposal(s), deferred {}, and preserved {} active runtime goals in scope. Outcome summary: {}.",
+            self.descriptor.identity,
+            plan.review_id,
+            if plan.review_target.trim().is_empty() {
+                "unknown-target".to_string()
+            } else {
+                plan.review_target.clone()
+            },
+            context.selected_base_type,
+            context.topology,
+            context.runtime_node,
+            plan.approvals.len(),
+            plan.deferrals.len(),
+            context.active_goals.len(),
+            outcome.execution_summary,
+        ))
+    }
+
+    fn persistence_summary(
+        &self,
+        context: &AgentProgramContext,
+        outcome: &BaseTypeOutcome,
+    ) -> SimardResult<String> {
+        let plan = ImprovementPromotionPlan::parse(&context.objective)?;
+        Ok(format!(
+            "improvement-curation-record | review={} | target={} | approvals={} | deferrals={} | approved_goals=[{}] | deferred=[{}] | selected-base-type={} | topology={} | outcome={}",
+            plan.review_id,
+            if plan.review_target.trim().is_empty() {
+                "unknown-target".to_string()
+            } else {
+                plan.review_target.clone()
+            },
+            plan.approvals.len(),
+            plan.deferrals.len(),
+            plan.approval_summaries().join(" | "),
+            plan.deferral_summaries().join(" | "),
+            context.selected_base_type,
+            context.topology,
+            outcome.execution_summary,
+        ))
+    }
+
+    fn additional_memory_records(
+        &self,
+        context: &AgentProgramContext,
+        _outcome: &BaseTypeOutcome,
+    ) -> SimardResult<Vec<AgentProgramMemoryRecord>> {
+        let plan = ImprovementPromotionPlan::parse(&context.objective)?;
+        Ok(vec![AgentProgramMemoryRecord {
+            key_suffix: "improvement-curation-record".to_string(),
+            scope: MemoryScope::Decision,
+            value: format!(
+                "review={} target={} approvals=[{}] deferred=[{}]",
+                plan.review_id,
+                if plan.review_target.trim().is_empty() {
+                    "unknown-target".to_string()
+                } else {
+                    plan.review_target.clone()
+                },
+                plan.approval_summaries().join(" | "),
+                plan.deferral_summaries().join(" | "),
+            ),
+        }])
+    }
+
+    fn goal_updates(
+        &self,
+        context: &AgentProgramContext,
+        _outcome: &BaseTypeOutcome,
+    ) -> SimardResult<Vec<GoalUpdate>> {
+        ImprovementPromotionPlan::parse(&context.objective)?.approved_goal_updates()
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct StructuredMeetingNotes {
     agenda: String,
@@ -545,11 +677,10 @@ fn parse_goal_directive(raw: &str, default_priority: u8) -> SimardResult<GoalUpd
 
 fn parse_goal_status(value: &str) -> SimardResult<GoalStatus> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "active" => Ok(GoalStatus::Active),
-        "proposed" | "candidate" => Ok(GoalStatus::Proposed),
-        "paused" | "hold" | "holding" => Ok(GoalStatus::Paused),
-        "completed" | "done" => Ok(GoalStatus::Completed),
-        other => Err(SimardError::InvalidGoalRecord {
+        "candidate" => Ok(GoalStatus::Proposed),
+        "hold" | "holding" => Ok(GoalStatus::Paused),
+        "done" => Ok(GoalStatus::Completed),
+        other => GoalStatus::parse(other).ok_or_else(|| SimardError::InvalidGoalRecord {
             field: "status".to_string(),
             reason: format!(
                 "unsupported goal status '{other}'; expected active, proposed, paused, or completed"

@@ -8,6 +8,7 @@ pub mod goals;
 pub mod gym;
 pub mod handoff;
 pub mod identity;
+pub mod improvements;
 pub mod memory;
 pub mod metadata;
 mod persistence;
@@ -20,8 +21,8 @@ pub mod session;
 mod terminal_session;
 
 pub use agent_program::{
-    AgentProgram, AgentProgramContext, AgentProgramMemoryRecord, MeetingFacilitatorProgram,
-    ObjectiveRelayProgram,
+    AgentProgram, AgentProgramContext, AgentProgramMemoryRecord, ImprovementCuratorProgram,
+    MeetingFacilitatorProgram, ObjectiveRelayProgram,
 };
 pub use base_types::{
     BaseTypeCapability, BaseTypeDescriptor, BaseTypeFactory, BaseTypeId, BaseTypeOutcome,
@@ -57,6 +58,7 @@ pub use identity::{
     BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader, IdentityManifest, ManifestContract,
     MemoryPolicy, OperatingMode,
 };
+pub use improvements::{ImprovementPromotionPlan, render_review_context_directives};
 pub use memory::{
     FileBackedMemoryStore, InMemoryMemoryStore, MemoryRecord, MemoryScope, MemoryStore,
 };

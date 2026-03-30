@@ -115,6 +115,8 @@ Builtin defaults are startup choices. They are not recovery behavior.
 - `adapter_supported_topologies`
 - `active_goal_count`
 - `active_goals`
+- `proposed_goal_count`
+- `proposed_goals`
 - `topology_backend`
 - `transport_backend`
 - `supervisor_backend`
@@ -152,7 +154,7 @@ assert_eq!(snapshot.evidence_backend.identity, "evidence::json-file-store");
 
 If you launched with `SIMARD_BASE_TYPE="copilot-sdk"`, `snapshot.selected_base_type` still shows the alias you chose while `snapshot.adapter_backend.identity` remains `local-harness`. If you launched with `SIMARD_BASE_TYPE="rusty-clawd"`, reflection truthfully reports `snapshot.adapter_backend.identity == "rusty-clawd::session-backend"`. If you launch the engineer identity with `SIMARD_BASE_TYPE="terminal-shell"`, reflection reports `snapshot.adapter_backend.identity == "terminal-shell::local-pty"`, `snapshot.adapter_capabilities` includes `terminal-session`, and `snapshot.adapter_supported_topologies == ["single-process"]`. Composite identities also surface `snapshot.identity_components` so operator tooling can see which roles were assembled.
 
-If you have persisted goal state in the selected `SIMARD_STATE_ROOT`, reflection also reports the active top 5 goals directly through `snapshot.active_goal_count` and `snapshot.active_goals`, and `snapshot.goal_backend.identity` shows the live goal-store backend.
+If you have persisted goal state in the selected `SIMARD_STATE_ROOT`, reflection also reports the active top 5 goals directly through `snapshot.active_goal_count` and `snapshot.active_goals`, reports durable proposed priorities through `snapshot.proposed_goal_count` and `snapshot.proposed_goals`, and `snapshot.goal_backend.identity` shows the live goal-store backend.
 
 The same redaction rule applies to persisted session text: scratch memory, session summaries, and reflection summaries record `objective-metadata(...)` instead of the raw `SIMARD_OBJECTIVE` string.
 

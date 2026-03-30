@@ -424,6 +424,7 @@ fn bootstrap_supports_composite_identity_execution() {
             "simard-meeting".to_string(),
             "simard-gym".to_string(),
             "simard-goal-curator".to_string(),
+            "simard-improvement-curator".to_string(),
         ]
     );
     assert_eq!(execution.snapshot.topology, RuntimeTopology::SingleProcess);
@@ -530,6 +531,63 @@ fn bootstrap_goal_curator_mode_persists_top_five_goal_state() {
             .iter()
             .any(|goal| goal.contains("Keep Simard's top 5 goals current")),
         "goal curator reflection should surface active top-goal state"
+    );
+}
+
+#[test]
+fn bootstrap_improvement_curator_mode_promotes_review_findings_into_durable_priorities() {
+    let config = BootstrapConfig::resolve(BootstrapInputs {
+        prompt_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")),
+        objective: Some(
+            "review-id: session-42-review\nreview-target: operator-review\nproposal: Capture denser execution evidence | category=evidence-capture | rationale=thin trail | suggested_change=record one evidence item per major phase | evidence=phase-a ;; phase-b\nproposal: Promote this pattern into a repeatable benchmark | category=benchmark-coverage | rationale=one-off flow | suggested_change=turn it into a named scenario | evidence=target=operator-review\napprove: Capture denser execution evidence | priority=1 | status=active | rationale=operators need denser evidence now\ndefer: Promote this pattern into a repeatable benchmark | rationale=wait until the next benchmark planning pass"
+                .to_string(),
+        ),
+        identity: Some("simard-improvement-curator".to_string()),
+        base_type: Some("local-harness".to_string()),
+        topology: Some("single-process".to_string()),
+        state_root: Some(state_root("improvement-curator")),
+        ..BootstrapInputs::default()
+    })
+    .expect("improvement curator bootstrap config should resolve");
+
+    let execution =
+        run_local_session(&config).expect("improvement curator mode should execute cleanly");
+    let exported = latest_local_handoff(&config)
+        .expect("improvement curator handoff lookup should succeed")
+        .expect("improvement curator handoff should exist");
+    let decision_records = exported
+        .memory_records
+        .iter()
+        .filter(|record| record.scope == MemoryScope::Decision)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        execution.snapshot.identity_name,
+        "simard-improvement-curator"
+    );
+    assert_eq!(
+        execution.snapshot.agent_program_backend.identity,
+        "agent-program::improvement-curator"
+    );
+    assert_eq!(execution.snapshot.active_goal_count, 1);
+    assert_eq!(
+        execution.snapshot.active_goals,
+        vec!["p1 [active] Capture denser execution evidence".to_string()]
+    );
+    assert_eq!(execution.snapshot.proposed_goal_count, 0);
+    assert!(
+        decision_records
+            .iter()
+            .any(|record| record.key.ends_with("improvement-curation-record")),
+        "improvement curation should persist a durable decision-scoped record"
+    );
+    assert!(
+        execution
+            .outcome
+            .reflection
+            .summary
+            .contains("Approved 1 proposal(s), deferred 1"),
+        "reflection should summarize the promotion decisions"
     );
 }
 

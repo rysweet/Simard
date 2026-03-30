@@ -22,6 +22,16 @@ pub enum GoalStatus {
 }
 
 impl GoalStatus {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "proposed" => Some(Self::Proposed),
+            "active" => Some(Self::Active),
+            "paused" => Some(Self::Paused),
+            "completed" => Some(Self::Completed),
+            _ => None,
+        }
+    }
+
     fn rank(self) -> u8 {
         match self {
             Self::Active => 0,
@@ -122,6 +132,12 @@ pub trait GoalStore: Send + Sync {
 
     fn list(&self) -> SimardResult<Vec<GoalRecord>>;
 
+    fn top_goals_by_status(
+        &self,
+        status: GoalStatus,
+        limit: usize,
+    ) -> SimardResult<Vec<GoalRecord>>;
+
     fn active_top_goals(&self, limit: usize) -> SimardResult<Vec<GoalRecord>>;
 }
 
@@ -212,13 +228,21 @@ impl GoalStore for InMemoryGoalStore {
             .clone())
     }
 
-    fn active_top_goals(&self, limit: usize) -> SimardResult<Vec<GoalRecord>> {
+    fn top_goals_by_status(
+        &self,
+        status: GoalStatus,
+        limit: usize,
+    ) -> SimardResult<Vec<GoalRecord>> {
         let records = self.list()?;
         Ok(sorted_goal_records(records)
             .into_iter()
-            .filter(|record| record.status.is_active())
+            .filter(|record| record.status == status)
             .take(limit)
             .collect())
+    }
+
+    fn active_top_goals(&self, limit: usize) -> SimardResult<Vec<GoalRecord>> {
+        self.top_goals_by_status(GoalStatus::Active, limit)
     }
 }
 
@@ -248,13 +272,21 @@ impl GoalStore for FileBackedGoalStore {
             .clone())
     }
 
-    fn active_top_goals(&self, limit: usize) -> SimardResult<Vec<GoalRecord>> {
+    fn top_goals_by_status(
+        &self,
+        status: GoalStatus,
+        limit: usize,
+    ) -> SimardResult<Vec<GoalRecord>> {
         let records = self.list()?;
         Ok(sorted_goal_records(records)
             .into_iter()
-            .filter(|record| record.status.is_active())
+            .filter(|record| record.status == status)
             .take(limit)
             .collect())
+    }
+
+    fn active_top_goals(&self, limit: usize) -> SimardResult<Vec<GoalRecord>> {
+        self.top_goals_by_status(GoalStatus::Active, limit)
     }
 }
 
