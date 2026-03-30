@@ -258,6 +258,7 @@ The current shipped v1 engineer-loop slice stays intentionally narrow:
 - the primary terminal-run surface now renders that same structured audit trail during execution so operators can follow bounded copilot-style terminal driving without dropping to raw evidence lines
 - operators can now author those bounded interactive terminal sessions either inline or from reusable file-backed recipes, while staying on the same truthful local PTY substrate
 - Simard now also ships named built-in terminal recipes so operators can discover, inspect, and rerun common interactive session flows without inventing ad hoc shell strings or temp files each time
+- the shipped `copilot-status-check` recipe is a truthful bounded local status probe: it only runs `amplihack copilot -- --version`, requires the `GitHub Copilot CLI` version signal, and fails closed instead of simulating an interactive Copilot session
 - those terminal surfaces are now an explicit on-ramp into the repo-grounded engineer loop when operators reuse the same `state-root`, but the later engineer run must still inspect the repository, form its own short plan, execute bounded local work, and verify explicitly
 - the bridge is descriptive continuity only: terminal-derived working directory, transcript snippets, or recipe metadata may inform operator readback, but they must not become authority for engineer action selection or workspace targeting
 

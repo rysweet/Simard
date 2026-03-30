@@ -59,6 +59,7 @@ cargo run --quiet -- engineer terminal-recipe-show foundation-check
 Look for:
 
 - `foundation-check`
+- `copilot-status-check`
 - a real bounded recipe asset with `working-directory:`, `command:`, and `wait-for:` lines
 
 **Checkpoint**: you can discover and inspect the shipped terminal recipes without claiming repo-grounded planning or verification happened yet.

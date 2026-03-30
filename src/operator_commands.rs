@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 
 use crate::base_types::BaseTypeId;
 use crate::bootstrap::validate_state_root;
+use crate::copilot_status_probe::{
+    CopilotStatusProbeResult, is_copilot_status_recipe, probe_local_copilot_status,
+};
 use crate::goals::{FileBackedGoalStore, GoalRecord, GoalStatus, GoalStore};
 use crate::improvements::PersistedImprovementRecord;
 use crate::meetings::PersistedMeetingRecord;
@@ -590,6 +593,7 @@ pub fn run_terminal_recipe_probe(
     recipe_name: &str,
     state_root_override: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    ensure_terminal_recipe_is_runnable(recipe_name)?;
     let recipe = load_terminal_recipe(recipe_name)?;
     run_terminal_probe(topology, &recipe.contents, state_root_override)
 }
@@ -1092,6 +1096,27 @@ fn prompt_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")
 }
 
+fn ensure_terminal_recipe_is_runnable(recipe_name: &str) -> crate::SimardResult<()> {
+    if !is_copilot_status_recipe(recipe_name) {
+        return Ok(());
+    }
+
+    match probe_local_copilot_status() {
+        CopilotStatusProbeResult::Available { .. } => Ok(()),
+        CopilotStatusProbeResult::Unavailable {
+            reason_code,
+            detail,
+        }
+        | CopilotStatusProbeResult::Unsupported {
+            reason_code,
+            detail,
+        } => Err(crate::SimardError::ActionExecutionFailed {
+            action: recipe_name.to_string(),
+            reason: format!("{reason_code}: {detail}"),
+        }),
+    }
+}
+
 const TERMINAL_RECIPE_DIRECTORY: &str = "simard/terminal_recipes";
 const TERMINAL_RECIPE_EXTENSION: &str = "simard-terminal";
 
@@ -1573,6 +1598,7 @@ struct TerminalReadView {
     working_directory: String,
     command_count: String,
     wait_count: String,
+    wait_timeout_seconds: String,
     step_count: usize,
     steps: Vec<String>,
     checkpoints: Vec<String>,
@@ -1838,6 +1864,12 @@ impl TerminalReadView {
             )
             .unwrap_or("0")
             .to_string(),
+            wait_timeout_seconds: optional_terminal_evidence_value(
+                &handoff.evidence_records,
+                "terminal-wait-timeout-seconds=",
+            )
+            .unwrap_or("5")
+            .to_string(),
             step_count: terminal_evidence_values(&handoff.evidence_records, "terminal-step-").len(),
             steps: terminal_evidence_values(&handoff.evidence_records, "terminal-step-"),
             checkpoints: terminal_evidence_values(
@@ -1898,6 +1930,7 @@ impl TerminalReadView {
         print_text("Working directory", &self.working_directory);
         print_text("Terminal command count", &self.command_count);
         print_text("Terminal wait count", &self.wait_count);
+        print_text("Terminal wait timeout seconds", &self.wait_timeout_seconds);
         println!("Terminal steps count: {}", self.step_count);
         if self.steps.is_empty() {
             println!("Terminal steps: <none>");
