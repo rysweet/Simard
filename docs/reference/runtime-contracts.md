@@ -1,6 +1,6 @@
 ---
 title: Runtime contracts reference
-description: Reference for the shipped Simard executable surfaces, the `engineer read` audit contract, compatibility binaries, and the in-process runtime contracts that back them.
+description: Reference for the shipped Simard executable surfaces, the shared-state-root bridge between bounded terminal sessions and the repo-grounded engineer loop, the `engineer read` audit contract, compatibility binaries, and the in-process runtime contracts that back them.
 last_updated: 2026-03-30
 review_schedule: as-needed
 owner: simard
@@ -11,6 +11,7 @@ related:
   - ../howto/inspect-meeting-records.md
   - ../howto/inspect-improvement-curation-state.md
   - ../howto/configure-bootstrap-and-inspect-reflection.md
+  - ../howto/move-from-terminal-recipes-into-engineer-runs.md
   - ../tutorials/run-your-first-local-session.md
 ---
 
@@ -89,6 +90,29 @@ Rejected inputs include:
 
 Safe roots are canonicalized once and then reused throughout the command.
 
+## Mode-scoped handoff artifacts
+
+When terminal session surfaces and the repo-grounded engineer loop reuse one explicit `state-root`, Simard keeps readback truthful by writing mode-scoped handoff artifacts:
+
+- `latest_terminal_handoff.json`
+- `latest_engineer_handoff.json`
+- `latest_handoff.json` as the compatibility fallback
+
+Those files have different jobs:
+
+- terminal session surfaces write the latest bounded terminal continuity summary
+- engineer runs write the latest repo-grounded engineer summary
+- compatibility readers can still inspect `latest_handoff.json` when a mode-scoped file has not been written yet
+
+Fail-closed rules:
+
+- `terminal-read` prefers `latest_terminal_handoff.json`
+- `engineer read` prefers `latest_engineer_handoff.json`
+- fallback to `latest_handoff.json` is allowed only when the mode-specific file is absent
+- if a mode-specific handoff exists but is malformed, the command fails explicitly instead of silently replaying stale compatibility data
+
+The bridge is descriptive continuity only. Terminal-derived data must never override `workspace-root`, the engineer objective, action selection, or verification.
+
 ## Mode contracts
 
 ### Engineer mode
@@ -105,6 +129,7 @@ The bounded engineer loop is intentionally narrow:
 - it verifies the result explicitly
 - it persists concise evidence and memory under the selected state root
 - it surfaces active goals and up to the three most recent carried meeting records from the same state root
+- it may surface a separate terminal continuity summary when the same state root already contains a valid terminal-scoped handoff
 
 The bounded engineer loop supports two honest action shapes:
 
@@ -135,14 +160,17 @@ The contract is intentionally explicit:
 - `engineer run` remains the only mutation and execution path for engineer work
 - `engineer read` reuses the same validated default state root as `engineer run` when `[state-root]` is omitted
 - any explicit `state-root` must already exist as a directory before readback begins
-- `engineer read` requires readable regular-file `latest_handoff.json`, `memory_records.json`, and `evidence_records.json`; symlinked artifacts are rejected
-- `latest_handoff.json` is authoritative for identity, selected base type, topology, session phase, redacted objective metadata, and the exported memory/evidence snapshot tied to the latest engineer run
+- `engineer read` requires readable regular-file `memory_records.json` and `evidence_records.json`; symlinked artifacts are rejected
+- `latest_engineer_handoff.json` is authoritative for identity, selected base type, topology, session phase, redacted objective metadata, and the exported memory/evidence snapshot tied to the latest engineer run
+- `latest_handoff.json` is used only as a compatibility fallback when the engineer-scoped handoff is absent
+- the rendered output includes which handoff file was used
 - persisted handoff objective metadata must already be trusted `objective-metadata(chars=<n>, words=<n>, lines=<n>)`; malformed or tampered metadata fails instead of being replayed
 - standalone `memory_records.json` and `evidence_records.json` files act as durability checks and supporting record-count sources; if they disagree with the handoff snapshot, handoff-derived values win
 - only redacted objective metadata is printable; raw engineer objective text must never be rendered back to the terminal
 - carried meeting state must remain valid persisted meeting records; malformed carried-meeting data fails explicitly instead of falling back to raw strings
+- when the same state root contains a valid terminal-scoped handoff, `engineer read` renders a distinct terminal continuity section with sanitized fields such as recipe source, working directory, last output line, and transcript preview
 - operator-visible strings are sanitized before printing so terminal control sequences and secret-shaped values are not replayed
-- output order stays deterministic: runtime header, handoff session summary, repo grounding, carried context, selected action summary, verification summary, durable record counts
+- output order stays deterministic: runtime header, handoff session summary, repo grounding, carried context, terminal continuity, selected action summary, verification summary, durable record counts
 - the command performs no mutation, repair, resume, or execution
 - invalid state roots, missing files, unreadable storage, and malformed persisted engineer data fail explicitly
 
@@ -164,6 +192,8 @@ This substrate exposes the real `terminal-shell` base type on the primary CLI:
 - reflection still reports `terminal-shell::local-pty` as the adapter implementation
 - terminal objectives may include `command:` / `input:` lines and explicit `wait-for:` / `expect:` checkpoints so bounded interactive terminal turns can pause for expected output before sending the next line
 - the run surface now renders the same structured terminal audit shape as `terminal-read`: shell details, command/wait counts, ordered steps, satisfied checkpoints, last meaningful output line, and sanitized transcript preview
+- the run surface prints explicit boundary guidance showing that terminal mode is a bounded local session surface and that continuing into engineer mode still requires an explicit later `engineer run`
+- the run persists `latest_terminal_handoff.json` plus compatibility `latest_handoff.json` under the shared root
 - unsatisfied wait checkpoints fail explicitly instead of silently replaying the rest of the objective and claiming success
 - unsupported topology and invalid state-root choices still fail explicitly
 
@@ -180,11 +210,14 @@ The contract is intentionally explicit:
 - `engineer terminal` remains the only execution path for terminal-backed engineer work
 - `terminal-read` reuses the same validated default state root as `engineer terminal` when `[state-root]` is omitted
 - any explicit `state-root` must already exist as a directory before readback begins
-- `terminal-read` requires readable regular-file `latest_handoff.json`, `memory_records.json`, and `evidence_records.json`; symlinked artifacts are rejected
-- `latest_handoff.json` is authoritative for identity, selected base type, topology, session phase, redacted objective metadata, and the persisted terminal evidence summary tied to the latest terminal session
+- `terminal-read` requires readable regular-file `memory_records.json` and `evidence_records.json`; symlinked artifacts are rejected
+- `latest_terminal_handoff.json` is authoritative for identity, selected base type, topology, session phase, redacted objective metadata, and the persisted terminal evidence summary tied to the latest terminal session
+- `latest_handoff.json` is used only as a compatibility fallback when the terminal-scoped handoff is absent
+- the rendered output includes which handoff file was used
 - persisted terminal evidence may include ordered terminal step lines, satisfied wait checkpoints, and the last observed output line so operators can inspect how a bounded interactive session was driven instead of relying only on aggregate counters
+- the rendered output also includes explicit engineer-next-step guidance so the bridge into repo-grounded engineer work stays operator-visible
 - operator-visible strings are sanitized before printing so persisted terminal control sequences and secret-shaped values are not replayed
-- output order stays deterministic: runtime header, handoff session summary, adapter details, shell details, step/checkpoint audit trail, transcript summary, durable record counts
+- output order stays deterministic: runtime header, handoff session summary, adapter details, shell details, step/checkpoint audit trail, transcript summary, continuation guidance, durable record counts
 - the command performs no mutation, replay, resume, or execution
 - invalid state roots, missing files, unreadable storage, and malformed persisted terminal data fail explicitly
 
@@ -222,6 +255,7 @@ This is the discoverable built-in recipe companion to inline and file-backed ter
 - unknown or invalid recipe names fail explicitly
 - `terminal-recipe-show` is read-only and prints the shipped recipe asset contents
 - `terminal-recipe` executes the same bounded `terminal-shell` substrate as `engineer terminal` and `engineer terminal-file`
+- the selected recipe name is preserved into the terminal continuity summary that later engineer surfaces may render from the same state root
 
 ### Meeting mode
 

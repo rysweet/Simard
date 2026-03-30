@@ -8,11 +8,15 @@ use crate::base_types::BaseTypeId;
 use crate::error::{SimardError, SimardResult};
 use crate::evidence::{EvidenceRecord, EvidenceSource, EvidenceStore, FileBackedEvidenceStore};
 use crate::goals::{FileBackedGoalStore, GoalRecord, GoalStore};
-use crate::handoff::{FileBackedHandoffStore, RuntimeHandoffSnapshot, RuntimeHandoffStore};
+use crate::handoff::RuntimeHandoffSnapshot;
 use crate::memory::{FileBackedMemoryStore, MemoryRecord, MemoryScope, MemoryStore};
 use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeState, RuntimeTopology};
 use crate::sanitization::{objective_metadata, sanitize_terminal_text};
 use crate::session::{SessionPhase, SessionRecord, UuidSessionIdGenerator};
+use crate::terminal_engineer_bridge::{
+    SHARED_EXPLICIT_STATE_ROOT_SOURCE, ScopedHandoffMode, TerminalBridgeContext,
+    persist_handoff_artifacts,
+};
 
 const ENGINEER_IDENTITY: &str = "simard-engineer";
 const ENGINEER_BASE_TYPE: &str = "terminal-shell";
@@ -89,6 +93,7 @@ pub struct EngineerLoopRun {
     pub inspection: RepoInspection,
     pub action: ExecutedEngineerAction,
     pub verification: VerificationReport,
+    pub terminal_bridge_context: Option<TerminalBridgeContext>,
 }
 
 pub fn run_local_engineer_loop(
@@ -99,6 +104,10 @@ pub fn run_local_engineer_loop(
 ) -> SimardResult<EngineerLoopRun> {
     let state_root = state_root.into();
     let inspection = inspect_workspace(workspace_root.as_ref(), &state_root)?;
+    let terminal_bridge_context = TerminalBridgeContext::load_from_state_root(
+        &state_root,
+        SHARED_EXPLICIT_STATE_ROOT_SOURCE,
+    )?;
     let selected_action = select_engineer_action(&inspection, objective)?;
     let action = execute_engineer_action(&inspection.repo_root, selected_action)?;
     let verification = verify_engineer_action(&inspection, &action, &state_root)?;
@@ -109,6 +118,7 @@ pub fn run_local_engineer_loop(
         &inspection,
         &action,
         &verification,
+        terminal_bridge_context.as_ref(),
     )?;
 
     Ok(EngineerLoopRun {
@@ -117,6 +127,7 @@ pub fn run_local_engineer_loop(
         inspection,
         action,
         verification,
+        terminal_bridge_context,
     })
 }
 
@@ -674,11 +685,11 @@ fn persist_engineer_loop_artifacts(
     inspection: &RepoInspection,
     action: &ExecutedEngineerAction,
     verification: &VerificationReport,
+    terminal_bridge_context: Option<&TerminalBridgeContext>,
 ) -> SimardResult<()> {
     let memory_store = FileBackedMemoryStore::try_new(state_root.join("memory_records.json"))?;
     let evidence_store =
         FileBackedEvidenceStore::try_new(state_root.join("evidence_records.json"))?;
-    let handoff_store = FileBackedHandoffStore::try_new(state_root.join("latest_handoff.json"))?;
 
     let session_ids = UuidSessionIdGenerator;
     let mut session = SessionRecord::new(
@@ -758,6 +769,10 @@ fn persist_engineer_loop_artifacts(
         format!("verification-status={}", verification.status),
         format!("verification-summary={}", verification.summary),
     ];
+    let mut evidence_details = evidence_details;
+    if let Some(terminal_bridge_context) = terminal_bridge_context {
+        evidence_details.extend(terminal_bridge_context.engineer_evidence_details());
+    }
 
     for (index, detail) in evidence_details.into_iter().enumerate() {
         let evidence_id = format!("{}-engineer-loop-evidence-{}", session.id, index + 1);
@@ -830,7 +845,7 @@ fn persist_engineer_loop_artifacts(
         memory_records: memory_store.list_for_session(&session.id)?,
         evidence_records: evidence_store.list_for_session(&session.id)?,
     };
-    handoff_store.save(handoff)?;
+    persist_handoff_artifacts(state_root, ScopedHandoffMode::Engineer, &handoff)?;
     Ok(())
 }
 

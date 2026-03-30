@@ -1,6 +1,6 @@
 ---
 title: Simard documentation
-description: Start here for the shipped `simard` operator CLI, the `engineer read` audit companion, compatibility binaries, runtime contracts, and benchmark flow.
+description: Start here for the shipped `simard` operator CLI, the shared-state-root bridge from bounded terminal sessions into the repo-grounded engineer loop, the `engineer read` audit companion, compatibility binaries, runtime contracts, and benchmark flow.
 last_updated: 2026-03-30
 review_schedule: as-needed
 owner: simard
@@ -10,11 +10,14 @@ owner: simard
 
 `simard` is the canonical operator-facing CLI.
 
-The shipped command tree covers `engineer`, `meeting`, `goal-curation`, `improvement-curation`, `gym`, `review`, and `bootstrap` from one binary, including the read-only `engineer read` audit companion. The legacy `simard_operator_probe` and `simard-gym` binaries remain available as compatibility surfaces while operators migrate, but the primary product surface is now `simard ...`.
+The shipped command tree covers `engineer`, `meeting`, `goal-curation`, `improvement-curation`, `gym`, `review`, and `bootstrap` from one binary, including the read-only `engineer read` audit companion and the bounded `engineer terminal*` session surfaces. The legacy `simard_operator_probe` and `simard-gym` binaries remain available as compatibility surfaces while operators migrate, but the primary product surface is now `simard ...`.
+
+Terminal sessions and repo-grounded engineer runs now bridge through one explicit local `state-root`. That bridge is file-backed and operator-visible. It does not imply hidden resume logic, external orchestration, or automatic continuation.
 
 ## Start here
 
 - [Tutorial: Run your first local session](./tutorials/run-your-first-local-session.md) - Exercise the local runtime through the primary CLI.
+- [How to move from terminal recipes into engineer runs](./howto/move-from-terminal-recipes-into-engineer-runs.md) - Start with a discoverable terminal recipe, then continue into the repo-grounded engineer loop through the same explicit state root.
 - [Tutorial: Run your first benchmark gym suite](./tutorials/run-your-first-benchmark-gym.md) - Run the shipped starter benchmark suite.
 - [How to configure bootstrap and inspect reflection](./howto/configure-bootstrap-and-inspect-reflection.md) - Bootstrap an explicit runtime selection and inspect the truthful runtime snapshot.
 - [How to carry meeting decisions into engineer sessions](./howto/carry-meeting-decisions-into-engineer-sessions.md) - Persist meeting records under a shared state root and confirm later engineer runs carry them forward.

@@ -9,14 +9,20 @@ use crate::improvements::PersistedImprovementRecord;
 use crate::meetings::PersistedMeetingRecord;
 use crate::prompt_assets::{FilePromptAssetStore, PromptAsset, PromptAssetRef, PromptAssetStore};
 use crate::sanitization::sanitize_terminal_text;
+use crate::terminal_engineer_bridge::{
+    ENGINEER_HANDOFF_FILE_NAME, ENGINEER_MODE_BOUNDARY, SHARED_DEFAULT_STATE_ROOT_SOURCE,
+    SHARED_EXPLICIT_STATE_ROOT_SOURCE, ScopedHandoffMode, TERMINAL_HANDOFF_FILE_NAME,
+    TERMINAL_MODE_BOUNDARY, TerminalBridgeContext, load_runtime_handoff_snapshot,
+    persist_handoff_artifacts, scoped_handoff_path, select_handoff_artifact_for_read,
+};
 use crate::{
     BootstrapConfig, BootstrapInputs, BuiltinIdentityLoader, EvidenceRecord,
-    FileBackedEvidenceStore, FileBackedHandoffStore, FileBackedMemoryStore, Freshness,
-    IdentityLoadRequest, IdentityLoader, ManifestContract, MemoryRecord, MemoryScope, MemoryStore,
-    Provenance, ReflectiveRuntime, ReviewRequest, ReviewTargetKind, RuntimeHandoffSnapshot,
-    RuntimeHandoffStore, RuntimeTopology, assemble_local_runtime_from_handoff, benchmark_scenarios,
-    build_review_artifact, builtin_base_type_registry_for_manifest, compare_latest_benchmark_runs,
-    default_output_root, latest_local_handoff, latest_review_artifact, persist_review_artifact,
+    FileBackedEvidenceStore, FileBackedMemoryStore, Freshness, IdentityLoadRequest, IdentityLoader,
+    ManifestContract, MemoryRecord, MemoryScope, MemoryStore, Provenance, ReflectiveRuntime,
+    ReviewRequest, ReviewTargetKind, RuntimeHandoffSnapshot, RuntimeTopology,
+    assemble_local_runtime_from_handoff, benchmark_scenarios, build_review_artifact,
+    builtin_base_type_registry_for_manifest, compare_latest_benchmark_runs, default_output_root,
+    latest_local_handoff, latest_review_artifact, persist_review_artifact,
     render_review_context_directives, review_artifacts_dir, run_benchmark_scenario,
     run_benchmark_suite, run_local_engineer_loop, run_local_session,
 };
@@ -490,6 +496,7 @@ pub fn run_terminal_probe(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = "simard-engineer";
     let base_type = "terminal-shell";
+    let state_root_was_explicit = state_root_override.is_some();
     let config = BootstrapConfig::resolve(BootstrapInputs {
         prompt_root: Some(prompt_root()),
         objective: Some(objective.to_string()),
@@ -508,7 +515,27 @@ pub fn run_terminal_probe(
 
     let execution = run_local_session(&config)?;
     let exported = latest_local_handoff(&config)?.ok_or("expected durable terminal handoff")?;
-    let view = TerminalReadView::from_handoff(config.state_root_path().to_path_buf(), exported)?;
+    persist_handoff_artifacts(
+        config.state_root_path(),
+        ScopedHandoffMode::Terminal,
+        &exported,
+    )?;
+    let handoff_source = scoped_handoff_path(config.state_root_path(), ScopedHandoffMode::Terminal)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("latest_terminal_handoff.json")
+        .to_string();
+    let continuity_source = if state_root_was_explicit {
+        SHARED_EXPLICIT_STATE_ROOT_SOURCE
+    } else {
+        SHARED_DEFAULT_STATE_ROOT_SOURCE
+    };
+    let view = TerminalReadView::from_handoff(
+        config.state_root_path().to_path_buf(),
+        exported,
+        handoff_source,
+        Some(continuity_source.to_string()),
+    )?;
     view.print_terminal_run(
         &execution.snapshot.adapter_capabilities,
         &execution.outcome.execution_summary,
@@ -574,6 +601,7 @@ pub fn run_engineer_loop_probe(
     state_root_override: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let runtime_topology = parse_runtime_topology(topology)?;
+    let state_root_was_explicit = state_root_override.is_some();
     let state_root = resolved_state_root(
         state_root_override,
         "simard-engineer",
@@ -585,6 +613,7 @@ pub fn run_engineer_loop_probe(
         .map_err(|error| format!("{error}"))?;
 
     println!("Probe mode: engineer-loop-run");
+    print_text("Mode boundary", ENGINEER_MODE_BOUNDARY);
     print_display("Repo root", run.inspection.repo_root.display());
     print_text("Repo branch", &run.inspection.branch);
     print_text("Repo head", &run.inspection.head);
@@ -608,6 +637,14 @@ pub fn run_engineer_loop_probe(
     for (index, decision) in run.inspection.carried_meeting_decisions.iter().enumerate() {
         print_text(&format!("Carried meeting decision {}", index + 1), decision);
     }
+    print_terminal_bridge_section(
+        run.terminal_bridge_context.as_ref(),
+        if state_root_was_explicit {
+            SHARED_EXPLICIT_STATE_ROOT_SOURCE
+        } else {
+            SHARED_DEFAULT_STATE_ROOT_SOURCE
+        },
+    );
     print_text("Gap summary", &run.inspection.architecture_gap_summary);
     print_text("Execution scope", &run.execution_scope);
     print_text("Selected action", &run.action.selected.label);
@@ -1434,6 +1471,7 @@ fn artifact_name(path: &Path) -> &str {
 
 struct EngineerReadArtifacts {
     handoff_path: PathBuf,
+    handoff_file_name: String,
     memory_path: PathBuf,
     evidence_path: PathBuf,
 }
@@ -1442,12 +1480,11 @@ fn validated_engineer_read_artifacts(
     state_root: &Path,
 ) -> crate::SimardResult<EngineerReadArtifacts> {
     validate_existing_read_state_root_root("engineer read", state_root)?;
+    let selected_handoff =
+        select_handoff_artifact_for_read(state_root, ScopedHandoffMode::Engineer, "engineer read")?;
     Ok(EngineerReadArtifacts {
-        handoff_path: require_existing_read_file_for_mode(
-            "engineer read",
-            state_root,
-            &state_root.join("latest_handoff.json"),
-        )?,
+        handoff_path: selected_handoff.path,
+        handoff_file_name: selected_handoff.file_name.to_string(),
         memory_path: require_existing_read_file_for_mode(
             "engineer read",
             state_root,
@@ -1465,12 +1502,11 @@ fn validated_terminal_read_artifacts(
     state_root: &Path,
 ) -> crate::SimardResult<EngineerReadArtifacts> {
     validate_existing_read_state_root_root("terminal read", state_root)?;
+    let selected_handoff =
+        select_handoff_artifact_for_read(state_root, ScopedHandoffMode::Terminal, "terminal read")?;
     Ok(EngineerReadArtifacts {
-        handoff_path: require_existing_read_file_for_mode(
-            "terminal read",
-            state_root,
-            &state_root.join("latest_handoff.json"),
-        )?,
+        handoff_path: selected_handoff.path,
+        handoff_file_name: selected_handoff.file_name.to_string(),
         memory_path: require_existing_read_file_for_mode(
             "terminal read",
             state_root,
@@ -1499,6 +1535,7 @@ fn parse_runtime_topology(value: &str) -> crate::SimardResult<RuntimeTopology> {
 
 struct EngineerReadView {
     state_root: PathBuf,
+    handoff_source: String,
     identity: String,
     selected_base_type: String,
     topology: String,
@@ -1518,12 +1555,14 @@ struct EngineerReadView {
     changed_files_after_action: String,
     verification_status: String,
     verification_summary: String,
+    terminal_bridge_context: Option<TerminalBridgeContext>,
     memory_record_count: usize,
     evidence_record_count: usize,
 }
 
 struct TerminalReadView {
     state_root: PathBuf,
+    handoff_source: String,
     identity: String,
     selected_base_type: String,
     topology: String,
@@ -1539,6 +1578,7 @@ struct TerminalReadView {
     checkpoints: Vec<String>,
     last_output_line: Option<String>,
     transcript_preview: String,
+    continuity_source: Option<String>,
     memory_record_count: usize,
     evidence_record_count: usize,
 }
@@ -1546,20 +1586,36 @@ struct TerminalReadView {
 impl EngineerReadView {
     fn load(state_root: PathBuf) -> crate::SimardResult<Self> {
         let artifacts = validated_engineer_read_artifacts(&state_root)?;
-        let handoff = latest_engineer_handoff(&artifacts.handoff_path)?;
-        let session = handoff.session.as_ref().ok_or_else(|| {
-            crate::SimardError::InvalidHandoffSnapshot {
-                field: "session".to_string(),
-                reason: "engineer read requires latest_handoff.json to contain a persisted session snapshot"
+        let handoff_source = artifacts.handoff_file_name.clone();
+        let handoff = load_runtime_handoff_snapshot(
+            &crate::terminal_engineer_bridge::SelectedHandoffArtifact {
+                path: artifacts.handoff_path.clone(),
+                file_name: match handoff_source.as_str() {
+                    ENGINEER_HANDOFF_FILE_NAME => ENGINEER_HANDOFF_FILE_NAME,
+                    _ => crate::terminal_engineer_bridge::COMPATIBILITY_HANDOFF_FILE_NAME,
+                },
+            },
+            "engineer read",
+        )?;
+        let session =
+            handoff
+                .session
+                .as_ref()
+                .ok_or_else(|| crate::SimardError::InvalidHandoffSnapshot {
+                    field: "session".to_string(),
+                    reason: format!(
+                        "engineer read requires {} to contain a persisted session snapshot",
+                        artifacts.handoff_file_name
+                    )
                     .to_string(),
-            }
-        })?;
+                })?;
 
         FileBackedMemoryStore::try_new(artifacts.memory_path)?;
         FileBackedEvidenceStore::try_new(artifacts.evidence_path)?;
 
         Ok(Self {
             state_root,
+            handoff_source: handoff_source.clone(),
             identity: handoff.identity_name,
             selected_base_type: handoff.selected_base_type.to_string(),
             topology: handoff.topology.to_string(),
@@ -1568,69 +1624,92 @@ impl EngineerReadView {
             repo_root: PathBuf::from(required_engineer_evidence_value(
                 &handoff.evidence_records,
                 "repo-root=",
+                &handoff_source,
             )?),
             repo_branch: required_engineer_evidence_value(
                 &handoff.evidence_records,
                 "repo-branch=",
+                &handoff_source,
             )?
             .to_string(),
-            repo_head: required_engineer_evidence_value(&handoff.evidence_records, "repo-head=")?
-                .to_string(),
+            repo_head: required_engineer_evidence_value(
+                &handoff.evidence_records,
+                "repo-head=",
+                &handoff_source,
+            )?
+            .to_string(),
             worktree_dirty: required_engineer_evidence_value(
                 &handoff.evidence_records,
                 "worktree-dirty=",
+                &handoff_source,
             )?
             .to_string(),
             changed_files: required_engineer_evidence_value(
                 &handoff.evidence_records,
                 "changed-files=",
+                &handoff_source,
             )?
             .to_string(),
             active_goals: parse_engineer_summary_list(
-                required_engineer_evidence_value(&handoff.evidence_records, "active-goals=")?,
+                required_engineer_evidence_value(
+                    &handoff.evidence_records,
+                    "active-goals=",
+                    &handoff_source,
+                )?,
                 ", ",
             ),
             carried_meeting_decisions: parse_carried_meeting_decisions(
                 required_engineer_evidence_value(
                     &handoff.evidence_records,
                     "carried-meeting-decisions=",
+                    &handoff_source,
                 )?,
             )?,
             selected_action: required_engineer_evidence_value(
                 &handoff.evidence_records,
                 "selected-action=",
+                &handoff_source,
             )?
             .to_string(),
             action_plan: required_engineer_evidence_value(
                 &handoff.evidence_records,
                 "action-plan=",
+                &handoff_source,
             )?
             .to_string(),
             verification_steps: required_engineer_evidence_value(
                 &handoff.evidence_records,
                 "action-verification-steps=",
+                &handoff_source,
             )?
             .to_string(),
             action_status: required_engineer_evidence_value(
                 &handoff.evidence_records,
                 "action-status=",
+                &handoff_source,
             )?
             .to_string(),
             changed_files_after_action: required_engineer_evidence_value(
                 &handoff.evidence_records,
                 "changed-files-after-action=",
+                &handoff_source,
             )?
             .to_string(),
             verification_status: required_engineer_evidence_value(
                 &handoff.evidence_records,
                 "verification-status=",
+                &handoff_source,
             )?
             .to_string(),
             verification_summary: required_engineer_evidence_value(
                 &handoff.evidence_records,
                 "verification-summary=",
+                &handoff_source,
             )?
             .to_string(),
+            terminal_bridge_context: TerminalBridgeContext::from_engineer_evidence(
+                &handoff.evidence_records,
+            )?,
             memory_record_count: handoff.memory_records.len(),
             evidence_record_count: handoff.evidence_records.len(),
         })
@@ -1638,6 +1717,8 @@ impl EngineerReadView {
 
     fn print(&self) {
         println!("Probe mode: engineer-read");
+        print_text("Engineer handoff source", &self.handoff_source);
+        print_text("Mode boundary", ENGINEER_MODE_BOUNDARY);
         print_text("Identity", &self.identity);
         print_text("Selected base type", &self.selected_base_type);
         print_text("Topology", &self.topology);
@@ -1660,6 +1741,13 @@ impl EngineerReadView {
         for (index, decision) in self.carried_meeting_decisions.iter().enumerate() {
             print_text(&format!("Carried meeting decision {}", index + 1), decision);
         }
+        print_terminal_bridge_section(
+            self.terminal_bridge_context.as_ref(),
+            self.terminal_bridge_context
+                .as_ref()
+                .map(|context| context.continuity_source.as_str())
+                .unwrap_or(SHARED_DEFAULT_STATE_ROOT_SOURCE),
+        );
         print_text("Selected action", &self.selected_action);
         print_text("Action plan", &self.action_plan);
         print_text("Verification steps", &self.verification_steps);
@@ -1678,28 +1766,43 @@ impl EngineerReadView {
 impl TerminalReadView {
     fn load(state_root: PathBuf) -> crate::SimardResult<Self> {
         let artifacts = validated_terminal_read_artifacts(&state_root)?;
-        let handoff = latest_engineer_handoff(&artifacts.handoff_path)?;
+        let handoff = load_runtime_handoff_snapshot(
+            &crate::terminal_engineer_bridge::SelectedHandoffArtifact {
+                path: artifacts.handoff_path.clone(),
+                file_name: match artifacts.handoff_file_name.as_str() {
+                    TERMINAL_HANDOFF_FILE_NAME => TERMINAL_HANDOFF_FILE_NAME,
+                    _ => crate::terminal_engineer_bridge::COMPATIBILITY_HANDOFF_FILE_NAME,
+                },
+            },
+            "terminal read",
+        )?;
 
         FileBackedMemoryStore::try_new(artifacts.memory_path)?;
         FileBackedEvidenceStore::try_new(artifacts.evidence_path)?;
 
-        Self::from_handoff(state_root, handoff)
+        Self::from_handoff(state_root, handoff, artifacts.handoff_file_name, None)
     }
 
     fn from_handoff(
         state_root: PathBuf,
         handoff: RuntimeHandoffSnapshot,
+        handoff_source: String,
+        continuity_source: Option<String>,
     ) -> crate::SimardResult<Self> {
+        let handoff_source_label = handoff_source.clone();
         let session = handoff.session.as_ref().ok_or_else(|| {
             crate::SimardError::InvalidHandoffSnapshot {
                 field: "session".to_string(),
-                reason: "terminal read requires latest_handoff.json to contain a persisted session snapshot"
+                reason: format!(
+                    "terminal read requires {handoff_source} to contain a persisted session snapshot"
+                )
                     .to_string(),
             }
         })?;
 
         Ok(Self {
             state_root,
+            handoff_source,
             identity: handoff.identity_name,
             selected_base_type: handoff.selected_base_type.to_string(),
             topology: handoff.topology.to_string(),
@@ -1708,18 +1811,25 @@ impl TerminalReadView {
             adapter_implementation: required_terminal_evidence_value(
                 &handoff.evidence_records,
                 "backend-implementation=",
+                &handoff_source_label,
             )?
             .to_string(),
-            shell: required_terminal_evidence_value(&handoff.evidence_records, "shell=")?
-                .to_string(),
+            shell: required_terminal_evidence_value(
+                &handoff.evidence_records,
+                "shell=",
+                &handoff_source_label,
+            )?
+            .to_string(),
             working_directory: required_terminal_evidence_value(
                 &handoff.evidence_records,
                 "terminal-working-directory=",
+                &handoff_source_label,
             )?
             .to_string(),
             command_count: required_terminal_evidence_value(
                 &handoff.evidence_records,
                 "terminal-command-count=",
+                &handoff_source_label,
             )?
             .to_string(),
             wait_count: optional_terminal_evidence_value(
@@ -1742,8 +1852,10 @@ impl TerminalReadView {
             transcript_preview: required_terminal_evidence_value(
                 &handoff.evidence_records,
                 "terminal-transcript-preview=",
+                &handoff_source_label,
             )?
             .to_string(),
+            continuity_source,
             memory_record_count: handoff.memory_records.len(),
             evidence_record_count: handoff.evidence_records.len(),
         })
@@ -1770,6 +1882,8 @@ impl TerminalReadView {
     }
 
     fn print_terminal_audit_header(&self) {
+        print_text("Terminal handoff source", &self.handoff_source);
+        print_text("Mode boundary", TERMINAL_MODE_BOUNDARY);
         print_text("Identity", &self.identity);
         print_text("Selected base type", &self.selected_base_type);
         print_text("Topology", &self.topology);
@@ -1804,25 +1918,23 @@ impl TerminalReadView {
             print_text("Terminal last output line", last_output_line);
         }
         print_text("Terminal transcript preview", &self.transcript_preview);
+        if let Some(continuity_source) = &self.continuity_source {
+            print_text("Next step source", continuity_source);
+        }
+        println!("Next steps count: 1");
+        println!(
+            "Next step 1: run 'simard engineer run <topology> <workspace-root> <objective> {}' to start the separate repo-grounded bounded loop",
+            self.state_root.display()
+        );
         println!("Memory records: {}", self.memory_record_count);
         println!("Evidence records: {}", self.evidence_record_count);
     }
 }
 
-fn latest_engineer_handoff(handoff_path: &Path) -> crate::SimardResult<RuntimeHandoffSnapshot> {
-    FileBackedHandoffStore::try_new(handoff_path)?
-        .latest()?
-        .ok_or_else(|| crate::SimardError::InvalidHandoffSnapshot {
-            field: "latest_handoff.json".to_string(),
-            reason:
-                "engineer read requires latest_handoff.json to contain a persisted handoff snapshot"
-                    .to_string(),
-        })
-}
-
 fn required_engineer_evidence_value<'a>(
     evidence_records: &'a [EvidenceRecord],
     prefix: &str,
+    handoff_source: &str,
 ) -> crate::SimardResult<&'a str> {
     evidence_records
         .iter()
@@ -1831,7 +1943,7 @@ fn required_engineer_evidence_value<'a>(
         .ok_or_else(|| crate::SimardError::InvalidHandoffSnapshot {
             field: prefix.trim_end_matches('=').to_string(),
             reason: format!(
-                "engineer read requires latest_handoff.json to carry persisted engineer evidence '{}' for operator output",
+                "engineer read requires {handoff_source} to carry persisted engineer evidence '{}' for operator output",
                 prefix.trim_end_matches('=')
             ),
         })
@@ -1840,6 +1952,7 @@ fn required_engineer_evidence_value<'a>(
 fn required_terminal_evidence_value<'a>(
     evidence_records: &'a [EvidenceRecord],
     prefix: &str,
+    handoff_source: &str,
 ) -> crate::SimardResult<&'a str> {
     evidence_records
         .iter()
@@ -1848,7 +1961,7 @@ fn required_terminal_evidence_value<'a>(
         .ok_or_else(|| crate::SimardError::InvalidHandoffSnapshot {
             field: prefix.trim_end_matches('=').to_string(),
             reason: format!(
-                "terminal read requires latest_handoff.json to carry persisted terminal evidence '{}' for operator output",
+                "terminal read requires {handoff_source} to carry persisted terminal evidence '{}' for operator output",
                 prefix.trim_end_matches('=')
             ),
         })
@@ -1904,7 +2017,10 @@ fn parse_carried_meeting_decisions(raw: &str) -> crate::SimardResult<Vec<String>
     if persisted_records.is_empty() {
         return Err(crate::SimardError::InvalidHandoffSnapshot {
             field: "carried-meeting-decisions".to_string(),
-            reason: "engineer read requires latest_handoff.json to carry at least one persisted meeting record or '<none>' for carried-meeting-decisions".to_string(),
+            reason: format!(
+                "engineer read requires {ENGINEER_HANDOFF_FILE_NAME} or {} to carry at least one persisted meeting record or '<none>' for carried-meeting-decisions",
+                crate::terminal_engineer_bridge::COMPATIBILITY_HANDOFF_FILE_NAME
+            ),
         });
     }
 
@@ -1914,7 +2030,7 @@ fn parse_carried_meeting_decisions(raw: &str) -> crate::SimardResult<Vec<String>
             crate::SimardError::InvalidHandoffSnapshot {
                 field: "carried-meeting-decisions".to_string(),
                 reason: format!(
-                    "engineer read requires latest_handoff.json to carry valid persisted meeting records for carried-meeting-decisions: {error}"
+                    "engineer read requires valid persisted meeting records for carried-meeting-decisions: {error}"
                 ),
             }
         })?;
@@ -1927,9 +2043,38 @@ fn render_redacted_objective_metadata(value: &str) -> crate::SimardResult<String
     crate::sanitization::normalize_objective_metadata(value).ok_or_else(|| {
         crate::SimardError::InvalidHandoffSnapshot {
             field: "session.objective".to_string(),
-            reason: "engineer read requires latest_handoff.json to persist trusted objective metadata as objective-metadata(chars=<n>, words=<n>, lines=<n>)".to_string(),
+            reason: "engineer read requires a trusted handoff artifact to persist objective metadata as objective-metadata(chars=<n>, words=<n>, lines=<n>)".to_string(),
         }
     })
+}
+
+fn print_terminal_bridge_section(
+    terminal_bridge_context: Option<&TerminalBridgeContext>,
+    default_source: &str,
+) {
+    match terminal_bridge_context {
+        Some(context) => {
+            print_text("Mode boundary", TERMINAL_MODE_BOUNDARY);
+            print_text("Terminal continuity available", "yes");
+            print_text("Terminal continuity source", &context.continuity_source);
+            print_text("Terminal continuity handoff", &context.handoff_file_name);
+            print_text(
+                "Terminal continuity working directory",
+                &context.working_directory,
+            );
+            print_text("Terminal continuity command count", &context.command_count);
+            print_text("Terminal continuity wait count", &context.wait_count);
+            if let Some(last_output_line) = &context.last_output_line {
+                print_text("Terminal continuity last output line", last_output_line);
+            } else {
+                print_text("Terminal continuity last output line", "<none>");
+            }
+        }
+        None => {
+            print_text("Terminal continuity available", "no");
+            print_text("Terminal continuity source", default_source);
+        }
+    }
 }
 
 fn next_required(

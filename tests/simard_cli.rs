@@ -41,6 +41,35 @@ fn load_json(path: impl AsRef<Path>) -> Value {
         .expect("artifact should deserialize as JSON")
 }
 
+fn write_json(path: impl AsRef<Path>, value: &Value) {
+    fs::write(
+        path.as_ref(),
+        serde_json::to_vec_pretty(value).expect("artifact should serialize"),
+    )
+    .expect("artifact should be written");
+}
+
+fn replace_handoff_evidence_detail(handoff: &mut Value, prefix: &str, replacement: &str) {
+    let evidence_records = handoff["evidence_records"]
+        .as_array_mut()
+        .expect("handoff should persist evidence records");
+    let mut replaced = false;
+    for record in evidence_records.iter_mut() {
+        let matches_prefix = record["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.starts_with(prefix));
+        if matches_prefix {
+            record["detail"] = json!(format!("{prefix}{replacement}"));
+            replaced = true;
+            break;
+        }
+    }
+    assert!(
+        replaced,
+        "handoff should persist an evidence detail starting with '{prefix}' before test tampering"
+    );
+}
+
 fn command_in_dir(binary_path: &str, dir: &Path) -> Command {
     let mut command = Command::new(binary_path);
     command.current_dir(dir);
@@ -1053,6 +1082,292 @@ input: printf \"terminal-read-ok\\n\"";
 }
 
 #[test]
+fn simard_engineer_run_persists_mode_scoped_engineer_handoff_alongside_compatibility_handoff() {
+    let state_root = TempDirGuard::new("simard-cli-engineer-mode-handoff");
+    let repo_root = repo_root();
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("run")
+        .arg("single-process")
+        .arg(&repo_root)
+        .arg(engineer_loop_objective())
+        .arg(state_root.path())
+        .output()
+        .expect("simard engineer run should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        output.status.success(),
+        "engineer run should succeed before mode-scoped handoff assertions:\n{rendered}"
+    );
+    assert!(
+        state_root.path().join("latest_handoff.json").is_file(),
+        "engineer run should keep writing the compatibility handoff snapshot"
+    );
+    assert!(
+        state_root
+            .path()
+            .join("latest_engineer_handoff.json")
+            .is_file(),
+        "engineer run should also persist a mode-scoped engineer handoff so engineer readback stays truthful when a shared state root also contains terminal artifacts"
+    );
+}
+
+#[test]
+fn simard_engineer_terminal_persists_mode_scoped_terminal_handoff_alongside_compatibility_handoff()
+{
+    let state_root = TempDirGuard::new("simard-cli-terminal-mode-handoff");
+    let objective = "\
+working-directory: .\n\
+command: printf \"terminal-mode-scope-ready\\n\"\n\
+wait-for: terminal-mode-scope-ready\n\
+input: printf \"terminal-mode-scope-ok\\n\"";
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("terminal")
+        .arg("single-process")
+        .arg(objective)
+        .arg(state_root.path())
+        .output()
+        .expect("simard engineer terminal should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        output.status.success(),
+        "terminal run should succeed before mode-scoped handoff assertions:\n{rendered}"
+    );
+    assert!(
+        state_root.path().join("latest_handoff.json").is_file(),
+        "terminal run should keep writing the compatibility handoff snapshot"
+    );
+    assert!(
+        state_root
+            .path()
+            .join("latest_terminal_handoff.json")
+            .is_file(),
+        "terminal run should also persist a mode-scoped terminal handoff so terminal readback stays truthful when the same state root later carries engineer artifacts"
+    );
+}
+
+#[test]
+fn simard_engineer_run_and_read_surface_honest_terminal_bridge_context_from_shared_state_root() {
+    let state_root = TempDirGuard::new("simard-cli-terminal-engineer-bridge");
+    let repo_root = repo_root();
+    let terminal_objective = "\
+working-directory: .\n\
+command: printf \"bridge-session-ready\\n\"\n\
+wait-for: bridge-session-ready\n\
+input: printf \"bridge-session-ok\\n\"";
+    let terminal_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("terminal")
+        .arg("single-process")
+        .arg(terminal_objective)
+        .arg(state_root.path())
+        .output()
+        .expect("simard engineer terminal should seed a shared state root");
+    let terminal_rendered = rendered_output(&terminal_output);
+
+    assert!(
+        terminal_output.status.success(),
+        "terminal run should succeed before the bridge flow is exercised:\n{terminal_rendered}"
+    );
+
+    let engineer_run_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("run")
+        .arg("single-process")
+        .arg(&repo_root)
+        .arg(engineer_loop_objective())
+        .arg(state_root.path())
+        .output()
+        .expect("simard engineer run should launch against the shared state root");
+    let engineer_run_rendered = rendered_output(&engineer_run_output);
+
+    assert!(
+        engineer_run_output.status.success(),
+        "engineer run should succeed before bridge assertions:\n{engineer_run_rendered}"
+    );
+
+    let engineer_read_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("read")
+        .arg("single-process")
+        .arg(state_root.path())
+        .output()
+        .expect("simard engineer read should launch against the shared state root");
+    let engineer_read_rendered = rendered_output(&engineer_read_output);
+
+    assert!(
+        engineer_read_output.status.success(),
+        "engineer read should succeed before bridge assertions:\n{engineer_read_rendered}"
+    );
+    for expected in [
+        "Mode boundary: terminal is a bounded local terminal session surface",
+        "Mode boundary: engineer is a separate repo-grounded bounded loop",
+        "Terminal continuity source: shared explicit state-root",
+        "Terminal continuity last output line: bridge-session-ok",
+    ] {
+        assert!(
+            engineer_run_rendered.contains(expected),
+            "engineer run should surface '{expected}' when it picks up terminal continuity from the same local state root:\n{engineer_run_rendered}"
+        );
+        assert!(
+            engineer_read_rendered.contains(expected),
+            "engineer read should keep '{expected}' visible in truthful persisted readback:\n{engineer_read_rendered}"
+        );
+    }
+}
+
+#[test]
+fn simard_engineer_read_prefers_latest_engineer_handoff_over_compatibility_handoff() {
+    let state_root = TempDirGuard::new("simard-cli-engineer-read-prefers-mode-handoff");
+    let repo_root = repo_root();
+    let run_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("run")
+        .arg("single-process")
+        .arg(&repo_root)
+        .arg(engineer_loop_objective())
+        .arg(state_root.path())
+        .output()
+        .expect("simard engineer run should seed durable state");
+    let run_rendered = rendered_output(&run_output);
+
+    assert!(
+        run_output.status.success(),
+        "engineer run should succeed before mode-specific readback preference is checked:\n{run_rendered}"
+    );
+
+    let generic_handoff_path = state_root.path().join("latest_handoff.json");
+    let mode_handoff_path = state_root.path().join("latest_engineer_handoff.json");
+    let mut mode_handoff = load_json(&generic_handoff_path);
+    replace_handoff_evidence_detail(
+        &mut mode_handoff,
+        "verification-summary=",
+        "mode-scoped engineer handoff wins",
+    );
+    write_json(&mode_handoff_path, &mode_handoff);
+
+    let read_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("read")
+        .arg("single-process")
+        .arg(state_root.path())
+        .output()
+        .expect("simard engineer read should launch against a mode-scoped handoff fixture");
+    let read_rendered = rendered_output(&read_output);
+
+    assert!(
+        read_output.status.success(),
+        "engineer read should succeed when a valid mode-scoped handoff is present:\n{read_rendered}"
+    );
+    assert!(
+        read_rendered.contains("Verification summary: mode-scoped engineer handoff wins"),
+        "engineer read should prefer latest_engineer_handoff.json over the compatibility handoff when both are present:\n{read_rendered}"
+    );
+}
+
+#[test]
+fn simard_engineer_read_fails_closed_on_malformed_mode_scoped_handoff_before_fallback() {
+    let state_root = TempDirGuard::new("simard-cli-engineer-read-malformed-mode-handoff");
+    let repo_root = repo_root();
+    let run_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("run")
+        .arg("single-process")
+        .arg(&repo_root)
+        .arg(engineer_loop_objective())
+        .arg(state_root.path())
+        .output()
+        .expect("simard engineer run should seed durable state");
+    let run_rendered = rendered_output(&run_output);
+
+    assert!(
+        run_output.status.success(),
+        "engineer run should succeed before malformed mode-scoped handoff assertions:\n{run_rendered}"
+    );
+
+    fs::write(
+        state_root.path().join("latest_engineer_handoff.json"),
+        "{ not-valid-json",
+    )
+    .expect("malformed mode-scoped handoff fixture should be written");
+
+    let read_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("read")
+        .arg("single-process")
+        .arg(state_root.path())
+        .output()
+        .expect("simard engineer read should launch against a malformed mode-scoped handoff");
+    let read_rendered = rendered_output(&read_output);
+
+    assert!(
+        !read_output.status.success(),
+        "engineer read must fail visibly when latest_engineer_handoff.json is malformed instead of silently falling back:\n{read_rendered}"
+    );
+    assert!(
+        read_rendered.contains("latest_engineer_handoff.json"),
+        "engineer read should identify the malformed mode-scoped handoff artifact explicitly:\n{read_rendered}"
+    );
+}
+
+#[test]
+fn simard_engineer_terminal_read_prefers_latest_terminal_handoff_over_compatibility_handoff() {
+    let state_root = TempDirGuard::new("simard-cli-terminal-read-prefers-mode-handoff");
+    let objective = "\
+working-directory: .\n\
+command: printf \"terminal-mode-read-ready\\n\"\n\
+wait-for: terminal-mode-read-ready\n\
+input: printf \"terminal-mode-read-generic\\n\"";
+    let run_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("terminal")
+        .arg("single-process")
+        .arg(objective)
+        .arg(state_root.path())
+        .output()
+        .expect("simard engineer terminal should seed durable state");
+    let run_rendered = rendered_output(&run_output);
+
+    assert!(
+        run_output.status.success(),
+        "terminal run should succeed before mode-specific readback preference is checked:\n{run_rendered}"
+    );
+
+    let generic_handoff_path = state_root.path().join("latest_handoff.json");
+    let mode_handoff_path = state_root.path().join("latest_terminal_handoff.json");
+    let mut mode_handoff = load_json(&generic_handoff_path);
+    replace_handoff_evidence_detail(
+        &mut mode_handoff,
+        "terminal-last-output-line=",
+        "terminal-mode-read-mode-scoped",
+    );
+    write_json(&mode_handoff_path, &mode_handoff);
+
+    let read_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("terminal-read")
+        .arg("single-process")
+        .arg(state_root.path())
+        .output()
+        .expect(
+            "simard engineer terminal-read should launch against a mode-scoped handoff fixture",
+        );
+    let read_rendered = rendered_output(&read_output);
+
+    assert!(
+        read_output.status.success(),
+        "terminal-read should succeed when a valid mode-scoped handoff is present:\n{read_rendered}"
+    );
+    assert!(
+        read_rendered.contains("Terminal last output line: terminal-mode-read-mode-scoped"),
+        "terminal-read should prefer latest_terminal_handoff.json over the compatibility handoff when both are present:\n{read_rendered}"
+    );
+}
+
+#[test]
 fn simard_engineer_terminal_fails_closed_when_wait_for_output_never_arrives() {
     let state_root = TempDirGuard::new("simard-cli-terminal-wait-timeout");
     let objective = "\
@@ -1297,7 +1612,7 @@ fn simard_engineer_read_rejects_tampered_persisted_objective_metadata() {
         "engineer run should succeed before objective-metadata tampering:\n{run_rendered}"
     );
 
-    let handoff_path = state_root.path().join("latest_handoff.json");
+    let handoff_path = state_root.path().join("latest_engineer_handoff.json");
     let mut handoff = load_json(&handoff_path);
     handoff["session"]["objective"] =
         json!("objective-metadata(chars=9, words=1, lines=1, token=LEAKME)");
@@ -1413,7 +1728,7 @@ goal: Preserve meeting handoff | priority=1 | status=active | rationale=carry de
         "engineer run should succeed before carried-meeting tampering:\n{engineer_rendered}"
     );
 
-    let handoff_path = state_root.path().join("latest_handoff.json");
+    let handoff_path = state_root.path().join("latest_engineer_handoff.json");
     let mut handoff = load_json(&handoff_path);
     let evidence_records = handoff["evidence_records"]
         .as_array_mut()

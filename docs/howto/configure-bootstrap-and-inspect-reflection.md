@@ -20,11 +20,7 @@ Use this guide when you need to answer two questions:
 - what bootstrap inputs did Simard actually use?
 - what does the live runtime report through reflection?
 
-## Status
-
-The canonical bootstrap surface is now `simard bootstrap run ...`.
-
-The old zero-argument `simard` bootstrap fallback is gone. Operators must pass the runtime selection explicitly. The terminal-backed engineer substrate now also lives on the canonical CLI through `simard engineer terminal ...`, while `simard_operator_probe terminal-run ...` remains as a compatibility alias.
+Use the canonical surfaces `simard bootstrap run ...` and `simard engineer terminal ...`. The old zero-argument `simard` bootstrap fallback is gone, and `simard_operator_probe terminal-run ...` remains only as a compatibility alias.
 
 ## Prerequisites
 

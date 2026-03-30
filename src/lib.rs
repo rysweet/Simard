@@ -21,6 +21,7 @@ pub mod review;
 pub mod runtime;
 mod sanitization;
 pub mod session;
+pub mod terminal_engineer_bridge;
 mod terminal_session;
 
 pub use agent_program::{
@@ -102,4 +103,9 @@ pub use runtime::{
 };
 pub use session::{
     SessionId, SessionIdGenerator, SessionPhase, SessionRecord, UuidSessionIdGenerator,
+};
+pub use terminal_engineer_bridge::{
+    ENGINEER_HANDOFF_FILE_NAME, ENGINEER_MODE_BOUNDARY, SHARED_DEFAULT_STATE_ROOT_SOURCE,
+    SHARED_EXPLICIT_STATE_ROOT_SOURCE, TERMINAL_HANDOFF_FILE_NAME, TERMINAL_MODE_BOUNDARY,
+    TerminalBridgeContext,
 };

@@ -1,6 +1,6 @@
 ---
 title: Simard CLI reference
-description: Reference for the shipped `simard` command tree, the `engineer read` audit companion, and the legacy compatibility binaries that still expose selected older runtime behaviors.
+description: Reference for the shipped `simard` command tree, the shared-state-root bridge between bounded terminal sessions and the repo-grounded engineer loop, the `engineer read` audit companion, and the legacy compatibility binaries that still expose selected older runtime behaviors.
 last_updated: 2026-03-30
 review_schedule: as-needed
 owner: simard
@@ -13,6 +13,7 @@ related:
   - ../howto/inspect-improvement-curation-state.md
   - ../howto/configure-bootstrap-and-inspect-reflection.md
   - ../howto/carry-meeting-decisions-into-engineer-sessions.md
+  - ../howto/move-from-terminal-recipes-into-engineer-runs.md
   - ../tutorials/run-your-first-local-session.md
 ---
 
@@ -30,8 +31,13 @@ This page documents the shipped operator-facing command tree. When a compatibili
 simard
 |- engineer
 |  |- run <topology> <workspace-root> <objective> [state-root]
+|  |- read <topology> [state-root]
 |  |- terminal <topology> <objective> [state-root]
-|  `- read <topology> [state-root]
+|  |- terminal-file <topology> <objective-file> [state-root]
+|  |- terminal-recipe-list
+|  |- terminal-recipe-show <recipe-name>
+|  |- terminal-recipe <topology> <recipe-name> [state-root]
+|  `- terminal-read <topology> [state-root]
 |- meeting
 |  |- run <base-type> <topology> <structured-objective> [state-root]
 |  `- read <base-type> <topology> [state-root]
@@ -88,18 +94,48 @@ Rejected inputs include:
 
 Safe state roots are canonicalized once and then reused for the rest of the command.
 
+## Terminal-to-engineer bridge
+
+The `simard engineer ...` namespace now exposes two distinct operator-visible surfaces:
+
+- `engineer terminal`, `engineer terminal-file`, `engineer terminal-recipe`, and `engineer terminal-read` are bounded local terminal session surfaces
+- `engineer run` and `engineer read` are the repo-grounded engineer loop and its read-only audit companion
+
+The bridge between them is explicit and local-only:
+
+- reuse the same explicit `state-root`
+- inspect the persisted terminal summary through `terminal-read`
+- invoke `engineer run` explicitly with a real `workspace-root` and engineer objective
+
+Simard writes mode-scoped handoffs under the shared root:
+
+- `latest_terminal_handoff.json`
+- `latest_engineer_handoff.json`
+- `latest_handoff.json` as the compatibility fallback
+
+Readback is fail-closed:
+
+- `terminal-read` prefers `latest_terminal_handoff.json`
+- `engineer read` prefers `latest_engineer_handoff.json`
+- fallback to `latest_handoff.json` happens only when the mode-scoped file is absent
+- if a mode-scoped handoff exists but is malformed, the command fails instead of silently replaying older data
+
+The bridge is descriptive continuity only. It does not auto-resume, auto-launch engineer mode, infer a repo path, or replace the engineer loop's inspect -> plan -> act -> verify contract.
+
 ## Mode reference
 
 ### `simard engineer run <topology> <workspace-root> <objective> [state-root]`
 
-Runs the bounded local engineer loop against the selected repository.
+Runs the repo-grounded bounded engineer loop against the selected repository.
 
 Key behavior:
 
 - inspects the selected repo before acting
 - prints the chosen bounded action and explicit verification steps
-- persists memory, evidence, and latest handoff under `state-root`
+- may render a separate terminal continuity section when the same `state-root` already contains a valid terminal-scoped handoff
+- persists memory, evidence, `latest_engineer_handoff.json`, and compatibility `latest_handoff.json` under `state-root`
 - surfaces active goals and carried meeting decisions from the same durable state
+- keeps terminal continuity descriptive only; it does not override `workspace-root`, the engineer objective, planning, or verification
 
 Example:
 
@@ -113,6 +149,8 @@ persist truthful local evidence and memory'
 simard engineer run single-process "$PWD" "$ENGINEER_OBJECTIVE" "$STATE_ROOT"
 ```
 
+To continue from a terminal recipe or terminal session, reuse the same `STATE_ROOT`. The terminal bridge stays local and explicit; Simard does not infer the engineer objective for you.
+
 ### `simard engineer read <topology> [state-root]`
 
 This is the read-only audit companion to `simard engineer run`. It inspects the latest persisted engineer state without resuming execution, repairing artifacts, or re-running the engineer loop.
@@ -122,14 +160,16 @@ Behavior:
 - reuses the same canonical default durable root as `engineer run` when `[state-root]` is omitted
 - validates `topology` before deriving that default root, so the default still follows the shipped engineer runtime pairing
 - requires any explicit `state-root` to already exist as a directory
-- requires `latest_handoff.json`, `memory_records.json`, and `evidence_records.json` to already exist as readable regular files; symlinked artifacts are rejected
-- treats `latest_handoff.json` as authoritative for session identity, selected base type, topology, session phase, redacted objective metadata, and the exported memory/evidence snapshot tied to the latest engineer run
+- requires `memory_records.json` and `evidence_records.json` to already exist as readable regular files; symlinked artifacts are rejected
+- prefers `latest_engineer_handoff.json` as the authoritative engineer readback artifact and falls back to `latest_handoff.json` only when the engineer-scoped handoff is absent
+- prints which handoff artifact was used so mode-scoped readback stays operator-visible
 - requires the persisted handoff session objective to already be trusted `objective-metadata(chars=<n>, words=<n>, lines=<n>)`; malformed or tampered metadata fails instead of being replayed
 - uses the standalone `memory_records.json` and `evidence_records.json` files as durability checks and supporting evidence counts; if they disagree with the handoff snapshot, the handoff-derived values win
 - renders only redacted objective metadata such as `objective-metadata(chars=150, words=21, lines=1)`, never the raw engineer objective text
 - requires carried meeting state to remain valid persisted meeting records; malformed carried-meeting data fails instead of being downgraded to raw strings
+- when the same state root contains a valid terminal-scoped handoff, renders a separate terminal continuity section with sanitized terminal summary fields
 - strips terminal control sequences and secret-shaped values from every displayed string before printing it
-- prints a stable operator-visible order: runtime header, handoff session summary, repo grounding, carried context, selected action summary, verification summary, durable record counts
+- prints a stable operator-visible order: runtime header, handoff session summary, repo grounding, carried context, terminal continuity, selected action summary, verification summary, durable record counts
 - fails explicitly for invalid `state-root` values and for missing, unreadable, or malformed persisted engineer state
 
 When `[state-root]` is omitted, the command reuses the same canonical durable root that `engineer run` already writes:
@@ -148,12 +188,14 @@ Output shape:
 
 ```text
 Probe mode: engineer-read
+Engineer handoff source: latest_engineer_handoff.json
 Identity: simard-engineer
 Selected base type: terminal-shell
 Topology: single-process
 State root: /tmp/simard-engineer.XXXXXX
 Session phase: complete
 Objective metadata: objective-metadata(chars=150, words=21, lines=1)
+Mode boundary: engineer
 Repo root: /path/to/repo
 Repo branch: main
 Repo head: 4b6cb7de0179e9adb480dfdea1cb2aee4a5d5e18
@@ -163,6 +205,11 @@ Active goals count: 1
 Active goal 1: p1 [active] Preserve meeting handoff
 Carried meeting decisions: 1
 Carried meeting decision 1: preserve meeting-to-engineer continuity
+Terminal continuity available: yes
+Terminal continuity source: latest_terminal_handoff.json
+Terminal recipe source: foundation-check
+Terminal working directory: .
+Terminal last output line: terminal-recipe-ok
 Selected action: cargo-metadata-scan
 Action plan: Inspect the repo, query Cargo metadata without mutating files, and verify repo grounding stayed stable.
 Verification steps: confirm cargo metadata returns valid workspace JSON || confirm repo root, branch, HEAD, and worktree state stayed stable || confirm carried meeting decisions and active goals stayed stable
@@ -176,14 +223,17 @@ Evidence records: 19
 
 ### `simard engineer terminal <topology> <objective> [state-root]`
 
-Runs the terminal-backed engineer substrate on the canonical CLI instead of
-requiring the legacy probe binary.
+Runs one bounded local terminal session on the canonical CLI instead of requiring the legacy probe binary.
+
+This is not the repo-grounded engineer loop. It is the honest terminal-session surface that operators can use before deciding to launch `engineer run`.
 
 Key behavior:
 
 - selects the `terminal-shell` base type explicitly
 - accepts bounded terminal objectives with `command:`/`input:` lines plus `wait-for:` or `expect:` checkpoints so a run can pause for expected output before sending the next line
 - preserves truthful adapter reflection and now renders the terminal audit trail directly on the run surface, including ordered terminal steps, satisfied checkpoints, the last visible output line, and a sanitized transcript preview
+- prints explicit next-step guidance for continuing into `engineer run` with the same `state-root`
+- persists `latest_terminal_handoff.json` and compatibility `latest_handoff.json` under the shared root
 - fails visibly for unsupported topology and invalid state-root inputs
 - fails explicitly if a requested wait checkpoint never appears instead of pretending the terminal interaction succeeded
 - keeps `simard_operator_probe terminal-run ...` available for compatibility
@@ -207,7 +257,7 @@ Behavior:
 
 - reuses the same `terminal-shell` base type and bounded wait/send terminal semantics as `engineer terminal`
 - requires `<objective-file>` to exist as a readable regular file; symlinks and non-files fail explicitly
-- preserves the same structured terminal audit trail on the run surface and through `terminal-read`
+- preserves the same structured terminal audit trail, mode-scoped terminal handoff, and engineer-next-step guidance as `engineer terminal`
 - keeps `simard_operator_probe terminal-run-file ...` available for compatibility
 
 Example:
@@ -238,7 +288,7 @@ Runs one of the built-in named terminal session recipes through the same bounded
 Behavior:
 
 - loads a named recipe from `prompt_assets/simard/terminal_recipes/*.simard-terminal`
-- preserves the same structured terminal audit trail on the run surface and through `terminal-read`
+- preserves the same structured terminal audit trail, mode-scoped terminal handoff, and engineer-next-step guidance as the other terminal session surfaces
 - fails explicitly when the requested recipe name is unknown or invalid
 - keeps `simard_operator_probe terminal-recipe-run ...` available for compatibility
 
@@ -258,9 +308,10 @@ Behavior:
 
 - reuses the same canonical default durable root as `engineer terminal` when `[state-root]` is omitted
 - requires any explicit `state-root` to already exist as a directory
-- requires `latest_handoff.json`, `memory_records.json`, and `evidence_records.json` to already exist as readable regular files; symlinked artifacts are rejected
-- treats `latest_handoff.json` as authoritative for session identity, selected base type, topology, session phase, redacted objective metadata, and the persisted terminal evidence summary
-- renders terminal shell, working directory, command count, wait count, ordered terminal steps, satisfied wait checkpoints, last output line, and transcript preview in stable operator-visible order
+- requires `memory_records.json` and `evidence_records.json` to already exist as readable regular files; symlinked artifacts are rejected
+- prefers `latest_terminal_handoff.json` as the authoritative terminal readback artifact and falls back to `latest_handoff.json` only when the terminal-scoped handoff is absent
+- prints which handoff artifact was used so terminal readback stays operator-visible
+- renders mode boundary, terminal shell, working directory, command count, wait count, ordered terminal steps, satisfied wait checkpoints, last output line, transcript preview, and engineer-next-step guidance in stable operator-visible order
 - strips terminal control sequences and secret-shaped values from displayed output before printing it
 - fails explicitly for invalid `state-root` values and for missing, unreadable, or malformed persisted terminal state
 
@@ -274,6 +325,22 @@ Example:
 
 ```bash
 simard engineer terminal-read single-process "$STATE_ROOT"
+```
+
+Output shape:
+
+```text
+Probe mode: terminal-read
+Terminal handoff source: latest_terminal_handoff.json
+Mode boundary: terminal
+Selected base type: terminal-shell
+Topology: single-process
+Terminal working directory: .
+Terminal recipe source: foundation-check
+Terminal steps count: 2
+Terminal last output line: terminal-recipe-ok
+Terminal transcript preview:
+Engineer next step: simard engineer run <topology> <workspace-root> <objective> <same-state-root>
 ```
 
 ### `simard meeting run <base-type> <topology> <structured-objective> [state-root]`
