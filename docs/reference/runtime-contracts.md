@@ -37,13 +37,14 @@ The stable contract in this repository is the bootstrap/runtime and benchmark-gy
 
 ## Meeting-mode operator flow
 
-The shipped operator probe also supports meeting-specific, goal-curation-specific, terminal-session-specific, and engineer-loop-specific paths:
+The shipped operator probe also supports meeting-specific, goal-curation-specific, improvement-curation-specific, terminal-session-specific, and engineer-loop-specific paths:
 
 - `cargo run --quiet --bin simard_operator_probe -- meeting-run <base-type> <topology> <structured-objective>`
 - `cargo run --quiet --bin simard_operator_probe -- goal-curation-run <base-type> <topology> <structured-objective>`
+- `cargo run --quiet --bin simard_operator_probe -- improvement-curation-run <base-type> <topology> <structured-objective> [state-root]`
 - `cargo run --quiet --bin simard_operator_probe -- engineer-loop-run <topology> <workspace-root> <objective> [state-root]`
-- `cargo run --quiet --bin simard_operator_probe -- review-run <base-type> <topology> <objective>`
-- `cargo run --quiet --bin simard_operator_probe -- review-read <base-type> <topology>`
+- `cargo run --quiet --bin simard_operator_probe -- review-run <base-type> <topology> <objective> [state-root]`
+- `cargo run --quiet --bin simard_operator_probe -- review-read <base-type> <topology> [state-root]`
 
 Use a structured objective with lines such as:
 
@@ -54,6 +55,8 @@ Use a structured objective with lines such as:
 - `next-step: ...`
 - `open-question: ...`
 - `goal: title | priority=1 | status=active | rationale=why this belongs in Simard's top 5`
+- `approve: proposal title | priority=1 | status=proposed|active | rationale=why this should be tracked now`
+- `defer: proposal title | rationale=why this should wait`
 
 The v1 meeting contract is intentionally narrow:
 
@@ -69,6 +72,14 @@ The goal-curation path is intentionally narrow too:
 - reflection and later operator probes expose the active top 5 goals directly
 - it does not claim implementation work or remote orchestration
 
+The improvement-curation path is intentionally narrow as well:
+
+- it uses the dedicated `simard-improvement-curator` identity and the `agent-program::improvement-curator` backend
+- it reads the latest persisted review artifact from the selected durable state root and turns explicit operator approvals into durable active or proposed priorities
+- it preserves deferred proposals as durable decision memory rather than silently discarding them
+- reflection and later operator probes expose both active and proposed improvement priorities directly
+- it does not mutate code or silently promote unreviewed changes
+
 The review path is also intentionally narrow:
 
 - it runs an ordinary bounded session first, then inspects the exported handoff offline
@@ -83,7 +94,7 @@ The current review foundation is the explicit v1 reconciliation between `Specs/P
 
 - `src/review.rs` owns the offline review contract: it consumes exported handoff state plus normalized benchmark/session signals, then emits concrete improvement proposals instead of generic summaries.
 - `src/gym.rs` converts benchmark checks and measurement notes into the same `ReviewRequest` shape, so benchmark evidence and session evidence flow through one review surface.
-- `src/bin/simard_operator_probe.rs` exercises the operator path end-to-end: `review-run` persists the durable artifact and concise decision record, while `review-read` proves that a later process can retrieve them again from `SIMARD_STATE_ROOT`.
+- `src/bin/simard_operator_probe.rs` exercises the operator path end-to-end: `review-run` persists the durable artifact and concise decision record, `review-read` proves that a later process can retrieve them again from `SIMARD_STATE_ROOT`, and `improvement-curation-run` turns approved proposals into durable priorities in that same state root.
 - `src/runtime.rs`, `src/memory.rs`, `src/evidence.rs`, and the exported handoff snapshot remain the architecture seams from the product spec; the review layer reads those seams rather than inventing a parallel persistence stack.
 - The implementation stays inside the product constraints: the loop is offline, evidence-linked, operator-reviewable, and limited to concise durable artifacts instead of raw transcript dumps or silent self-modification.
 
@@ -122,7 +133,7 @@ Artifacts are written under `target/simard-gym/` as JSON and text reports plus a
 
 ### Current builtin base-type registrations
 
-The builtin identities currently advertised by the loader are `simard-engineer`, `simard-meeting`, `simard-goal-curator`, `simard-gym`, and the composite `simard-composite-engineer`. All of them accept `local-harness`, `rusty-clawd`, and `copilot-sdk`; `simard-engineer` additionally accepts `terminal-shell` for the local terminal-backed path:
+The builtin identities currently advertised by the loader are `simard-engineer`, `simard-meeting`, `simard-goal-curator`, `simard-improvement-curator`, `simard-gym`, and the composite `simard-composite-engineer`. All of them accept `local-harness`, `rusty-clawd`, and `copilot-sdk`; `simard-engineer` additionally accepts `terminal-shell` for the local terminal-backed path:
 
 | Base type selection | Current session backend implementation | Supported topologies in this scaffold |
 | --- | --- | --- |
@@ -201,6 +212,7 @@ Simard keeps the live objective available while the run is executing, but persis
 - exported handoff snapshots preserve the session boundary while replacing `RuntimeHandoffSnapshot.session.objective` with the same objective metadata string
 - bootstrap persists the latest exported handoff snapshot under `SIMARD_STATE_ROOT/latest_handoff.json`
 - bootstrap persists durable goal state under `SIMARD_STATE_ROOT/goal_records.json`
+- runtime reflection now reports both `active_goal_count` / `active_goals` and `proposed_goal_count` / `proposed_goals`
 
 ## Identity metadata
 
@@ -353,6 +365,8 @@ pub struct ReflectionSnapshot {
     pub memory_records: usize,
     pub active_goal_count: usize,
     pub active_goals: Vec<String>,
+    pub proposed_goal_count: usize,
+    pub proposed_goals: Vec<String>,
     pub agent_program_backend: BackendDescriptor,
     pub handoff_backend: BackendDescriptor,
     pub adapter_backend: BackendDescriptor,
@@ -367,7 +381,7 @@ pub struct ReflectionSnapshot {
 }
 ```
 
-For `simard-meeting`, reflection also reports `agent_program_backend.identity == "agent-program::meeting-facilitator"`. For `simard-goal-curator`, it reports `agent_program_backend.identity == "agent-program::goal-curator"`.
+For `simard-meeting`, reflection also reports `agent_program_backend.identity == "agent-program::meeting-facilitator"`. For `simard-goal-curator`, it reports `agent_program_backend.identity == "agent-program::goal-curator"`. For `simard-improvement-curator`, it reports `agent_program_backend.identity == "agent-program::improvement-curator"`.
 
 ### Backend descriptors
 
@@ -391,6 +405,7 @@ Reflection rules:
 - `evidence_backend` comes from the live evidence store descriptor
 - `goal_backend` comes from the live goal store descriptor
 - `active_goal_count` and `active_goals` expose the active top-goal state derived from the durable goal store
+- `proposed_goal_count` and `proposed_goals` expose durable proposed priorities, including approved improvement proposals that have not been activated yet
 - reflection reports live wiring, not placeholder labels
 - stopped or failed snapshots mark manifest freshness as `Stale`
 

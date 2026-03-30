@@ -22,6 +22,8 @@ pub struct ReflectionSnapshot {
     pub memory_records: usize,
     pub active_goal_count: usize,
     pub active_goals: Vec<String>,
+    pub proposed_goal_count: usize,
+    pub proposed_goals: Vec<String>,
     pub agent_program_backend: BackendDescriptor,
     pub handoff_backend: BackendDescriptor,
     pub adapter_backend: BackendDescriptor,

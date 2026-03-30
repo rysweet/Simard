@@ -936,6 +936,10 @@ impl RuntimeKernel {
             None => 0,
         };
         let active_goals = self.ports.goal_store.active_top_goals(5)?;
+        let proposed_goals = self
+            .ports
+            .goal_store
+            .top_goals_by_status(crate::goals::GoalStatus::Proposed, 5)?;
         let manifest_freshness = match self.state {
             RuntimeState::Stopped | RuntimeState::Failed => {
                 Freshness::observed(FreshnessState::Stale)?
@@ -966,6 +970,11 @@ impl RuntimeKernel {
             memory_records,
             active_goal_count: active_goals.len(),
             active_goals: active_goals.iter().map(GoalRecord::concise_label).collect(),
+            proposed_goal_count: proposed_goals.len(),
+            proposed_goals: proposed_goals
+                .iter()
+                .map(GoalRecord::concise_label)
+                .collect(),
             agent_program_backend: self.ports.agent_program.descriptor(),
             handoff_backend: self.ports.handoff_store.descriptor(),
             adapter_backend: self.factory.descriptor().backend.clone(),

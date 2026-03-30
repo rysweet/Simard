@@ -90,7 +90,7 @@ The following are explicitly out of scope for v1.
 
 ## Product Shape
 
-Simard should be treated as a focused engineering runtime with four user-visible modes:
+Simard should be treated as a focused engineering runtime with five user-visible modes:
 
 1. Engineer mode
    Simard accepts a concrete task, inspects the local repo, plans the work, executes through terminal actions, and reports outcomes with evidence.
@@ -101,7 +101,10 @@ Simard should be treated as a focused engineering runtime with four user-visible
 3. Goal-curation mode
    Simard curates durable backlog state and an explicit active top 5 goals list without pretending implementation work happened.
 
-4. Gym mode
+4. Improvement-curation mode
+   Simard consumes persisted review findings, requires explicit operator approval or deferral, and promotes accepted improvements into durable active or proposed priorities without mutating code.
+
+5. Gym mode
    Simard runs controlled benchmark tasks to measure capability, regressions, and improvement over time.
 
 These are not cosmetic personas.
@@ -640,7 +643,7 @@ Simard should improve through controlled loops tied to evidence.
 - Improvements should be small and attributable.
 - If a change cannot be evaluated, it should not be promoted automatically.
 
-For v1, self-improvement should remain a reviewable offline loop, not an autonomous production feature.
+For v1, self-improvement should remain a reviewable offline loop, not an autonomous production feature. The shipped slice is explicit review artifact generation plus operator-driven improvement curation and promotion into durable priorities.
 
 ## Rust Implementation Direction
 
@@ -767,6 +770,13 @@ Before implementation expands past scaffolding, the project should explicitly ch
 - revisit UI surfaces only after terminal-native behavior is reliable
 - support sibling identities that reuse the same runtime substrate
 - **Exit criteria:** improvements can be proposed, evaluated, and accepted without destabilizing the core engineer loop
+
+Current shipped v1 slice:
+
+- review artifacts already emit concrete evidence-linked proposals
+- an explicit improvement-curation mode can now promote approved proposals into durable active or proposed priorities
+- deferred proposals remain visible in durable decision memory instead of triggering silent self-modification
+- broader automatic evaluation and promotion still remain post-v1 work
 
 ## Open Questions for Iteration
 

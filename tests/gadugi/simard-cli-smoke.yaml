@@ -69,6 +69,13 @@ steps:
       command: "tests/gadugi/goal-stewardship.sh"
     timeout: 300000
 
+  - name: "Improvement curation promotion loop"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/improvement-curation.sh"
+    timeout: 300000
+
   - name: "Terminal session foundation"
     agent: "cli-agent"
     action: "execute_command"
@@ -112,6 +119,7 @@ metadata:
     - "bootstrap"
     - "meeting"
     - "goal-stewardship"
+    - "improvement-curation"
     - "terminal"
     - "engineer-loop"
     - "handoff"

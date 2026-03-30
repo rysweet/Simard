@@ -4,7 +4,8 @@ use simard::{
     BootstrapConfig, BootstrapInputs, FileBackedMemoryStore, MemoryRecord, MemoryScope,
     MemoryStore, ReflectiveRuntime, ReviewRequest, ReviewTargetKind, RuntimeTopology,
     assemble_local_runtime_from_handoff, build_review_artifact, latest_local_handoff,
-    latest_review_artifact, persist_review_artifact, run_local_engineer_loop,
+    latest_review_artifact, persist_review_artifact, render_review_context_directives,
+    run_local_engineer_loop,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -61,12 +62,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let base_type = args.next().ok_or("expected base type")?;
             let topology = args.next().ok_or("expected topology")?;
             let objective = args.next().ok_or("expected objective")?;
-            run_review_probe(&base_type, &topology, &objective)?;
+            let state_root = args.next().map(PathBuf::from);
+            run_review_probe(&base_type, &topology, &objective, state_root)?;
         }
         "review-read" => {
             let base_type = args.next().ok_or("expected base type")?;
             let topology = args.next().ok_or("expected topology")?;
-            run_review_read_probe(&base_type, &topology)?;
+            let state_root = args.next().map(PathBuf::from);
+            run_review_read_probe(&base_type, &topology, state_root)?;
+        }
+        "improvement-curation-run" => {
+            let base_type = args.next().ok_or("expected base type")?;
+            let topology = args.next().ok_or("expected topology")?;
+            let objective = args.next().ok_or("expected objective")?;
+            let state_root = args.next().map(PathBuf::from);
+            run_improvement_curation_probe(&base_type, &topology, &objective, state_root)?;
         }
         other => return Err(format!("unsupported probe command '{other}'").into()),
     }
@@ -95,6 +105,20 @@ fn resolved_state_root(
     probe: &str,
 ) -> PathBuf {
     explicit.unwrap_or_else(|| state_root(identity, base_type, topology, probe))
+}
+
+fn resolved_review_state_root(
+    explicit: Option<PathBuf>,
+    base_type: &str,
+    topology: &str,
+) -> PathBuf {
+    resolved_state_root(
+        explicit,
+        "simard-engineer",
+        base_type,
+        topology,
+        "review-run",
+    )
 }
 
 fn run_bootstrap_probe(
@@ -438,12 +462,17 @@ fn run_review_probe(
     base_type: &str,
     topology: &str,
     objective: &str,
+    state_root_override: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = "simard-engineer";
     let config = BootstrapConfig::resolve(BootstrapInputs {
         prompt_root: Some(prompt_root()),
         objective: Some(objective.to_string()),
-        state_root: Some(state_root(identity, base_type, topology, "review-run")),
+        state_root: Some(resolved_review_state_root(
+            state_root_override,
+            base_type,
+            topology,
+        )),
         identity: Some(identity.to_string()),
         base_type: Some(base_type.to_string()),
         topology: Some(topology.to_string()),
@@ -514,9 +543,9 @@ fn run_review_probe(
 fn run_review_read_probe(
     base_type: &str,
     topology: &str,
+    state_root_override: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let identity = "simard-engineer";
-    let state_root = state_root(identity, base_type, topology, "review-run");
+    let state_root = resolved_review_state_root(state_root_override, base_type, topology);
     let (review_artifact_path, review) =
         latest_review_artifact(&state_root)?.ok_or("expected persisted review artifact")?;
     let memory_store = FileBackedMemoryStore::try_new(state_root.join("memory_records.json"))?;
@@ -548,6 +577,96 @@ fn run_review_read_probe(
     if let Some(record) = decision_records.last() {
         println!("Latest decision review record: {}", record.value);
     }
+    Ok(())
+}
+
+fn run_improvement_curation_probe(
+    base_type: &str,
+    topology: &str,
+    operator_objective: &str,
+    state_root_override: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let state_root = resolved_review_state_root(state_root_override, base_type, topology);
+    let (review_artifact_path, review) =
+        latest_review_artifact(&state_root)?.ok_or("expected persisted review artifact")?;
+    let objective = format!(
+        "{}\n{}",
+        render_review_context_directives(&review),
+        operator_objective
+    );
+    let config = BootstrapConfig::resolve(BootstrapInputs {
+        prompt_root: Some(prompt_root()),
+        objective: Some(objective.clone()),
+        state_root: Some(state_root.clone()),
+        identity: Some("simard-improvement-curator".to_string()),
+        base_type: Some(base_type.to_string()),
+        topology: Some(topology.to_string()),
+        ..BootstrapInputs::default()
+    })?;
+
+    let execution = simard::run_local_session(&config)?;
+    let plan = simard::ImprovementPromotionPlan::parse(&objective)?;
+    let memory_store = FileBackedMemoryStore::try_new(config.memory_store_path())?;
+    let improvement_records = memory_store
+        .list(MemoryScope::Decision)?
+        .into_iter()
+        .filter(|record| record.key.ends_with("improvement-curation-record"))
+        .collect::<Vec<_>>();
+
+    println!("Probe mode: improvement-curation-run");
+    println!("Identity: {}", execution.snapshot.identity_name);
+    println!(
+        "Selected base type: {}",
+        execution.snapshot.selected_base_type
+    );
+    println!("Topology: {}", execution.snapshot.topology);
+    println!("State root: {}", config.state_root_path().display());
+    println!("Review artifact: {}", review_artifact_path.display());
+    println!("Review id: {}", review.review_id);
+    println!("Review target: {}", review.target_label);
+    println!("Review proposals: {}", review.proposals.len());
+    println!("Approved proposals: {}", plan.approvals.len());
+    for (index, approval) in plan.approvals.iter().enumerate() {
+        println!(
+            "Approved proposal {}: p{} [{}] {}",
+            index + 1,
+            approval.priority,
+            approval.status,
+            approval.title
+        );
+    }
+    println!("Deferred proposals: {}", plan.deferrals.len());
+    for (index, deferral) in plan.deferrals.iter().enumerate() {
+        println!(
+            "Deferred proposal {}: {} ({})",
+            index + 1,
+            deferral.title,
+            deferral.rationale
+        );
+    }
+    println!(
+        "Active goals count: {}",
+        execution.snapshot.active_goal_count
+    );
+    for (index, goal) in execution.snapshot.active_goals.iter().enumerate() {
+        println!("Active goal {}: {}", index + 1, goal);
+    }
+    println!(
+        "Proposed goals count: {}",
+        execution.snapshot.proposed_goal_count
+    );
+    for (index, goal) in execution.snapshot.proposed_goals.iter().enumerate() {
+        println!("Proposed goal {}: {}", index + 1, goal);
+    }
+    println!("Decision records: {}", improvement_records.len());
+    if let Some(record) = improvement_records.last() {
+        println!("Latest improvement record: {}", record.value);
+    }
+    println!("Execution summary: {}", execution.outcome.execution_summary);
+    println!(
+        "Reflection summary: {}",
+        execution.outcome.reflection.summary
+    );
     Ok(())
 }
 
