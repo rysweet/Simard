@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -6,6 +7,7 @@ use crate::bootstrap::validate_state_root;
 use crate::goals::{FileBackedGoalStore, GoalRecord, GoalStatus, GoalStore};
 use crate::improvements::PersistedImprovementRecord;
 use crate::meetings::PersistedMeetingRecord;
+use crate::prompt_assets::{FilePromptAssetStore, PromptAsset, PromptAssetRef, PromptAssetStore};
 use crate::sanitization::sanitize_terminal_text;
 use crate::{
     BootstrapConfig, BootstrapInputs, BuiltinIdentityLoader, EvidenceRecord,
@@ -86,6 +88,22 @@ where
             let state_root = next_optional_path(&mut args);
             reject_extra_args(args)?;
             run_terminal_read_probe(&topology, state_root)?;
+        }
+        "terminal-recipe-list" => {
+            reject_extra_args(args)?;
+            run_terminal_recipe_list_probe()?;
+        }
+        "terminal-recipe-show" => {
+            let recipe_name = next_required(&mut args, "recipe name")?;
+            reject_extra_args(args)?;
+            run_terminal_recipe_show_probe(&recipe_name)?;
+        }
+        "terminal-recipe-run" => {
+            let topology = next_required(&mut args, "topology")?;
+            let recipe_name = next_required(&mut args, "recipe name")?;
+            let state_root = next_optional_path(&mut args);
+            reject_extra_args(args)?;
+            run_terminal_recipe_probe(&topology, &recipe_name, state_root)?;
         }
         "engineer-loop-run" => {
             let topology = next_required(&mut args, "topology")?;
@@ -516,6 +534,37 @@ pub fn run_terminal_read_probe(
     let view = TerminalReadView::load(state_root)?;
     view.print();
     Ok(())
+}
+
+pub fn run_terminal_recipe_list_probe() -> Result<(), Box<dyn std::error::Error>> {
+    let recipes = list_terminal_recipe_descriptors()?;
+    println!("Terminal recipes: {}", recipes.len());
+    for (index, recipe) in recipes.iter().enumerate() {
+        print_text(
+            &format!("Terminal recipe {}", index + 1),
+            format!(
+                "{} ({})",
+                recipe.name,
+                recipe.reference.relative_path.display()
+            ),
+        );
+    }
+    Ok(())
+}
+
+pub fn run_terminal_recipe_show_probe(recipe_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let recipe = load_terminal_recipe(recipe_name)?;
+    print_terminal_recipe(recipe_name, &recipe);
+    Ok(())
+}
+
+pub fn run_terminal_recipe_probe(
+    topology: &str,
+    recipe_name: &str,
+    state_root_override: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let recipe = load_terminal_recipe(recipe_name)?;
+    run_terminal_probe(topology, &recipe.contents, state_root_override)
 }
 
 pub fn run_engineer_loop_probe(
@@ -1004,6 +1053,86 @@ pub fn run_gym_suite(suite_id: &str) -> Result<(), Box<dyn std::error::Error>> {
 
 fn prompt_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")
+}
+
+const TERMINAL_RECIPE_DIRECTORY: &str = "simard/terminal_recipes";
+const TERMINAL_RECIPE_EXTENSION: &str = "simard-terminal";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TerminalRecipeDescriptor {
+    name: String,
+    reference: PromptAssetRef,
+}
+
+fn list_terminal_recipe_descriptors() -> crate::SimardResult<Vec<TerminalRecipeDescriptor>> {
+    let recipe_root = prompt_root().join(TERMINAL_RECIPE_DIRECTORY);
+    let entries =
+        fs::read_dir(&recipe_root).map_err(|error| crate::SimardError::PromptAssetRead {
+            path: recipe_root.clone(),
+            reason: error.to_string(),
+        })?;
+    let mut recipes = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| crate::SimardError::PromptAssetRead {
+            path: recipe_root.clone(),
+            reason: error.to_string(),
+        })?;
+        let entry_path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| crate::SimardError::PromptAssetRead {
+                path: entry_path.clone(),
+                reason: error.to_string(),
+            })?;
+        if !file_type.is_file()
+            || entry_path.extension() != Some(OsStr::new(TERMINAL_RECIPE_EXTENSION))
+        {
+            continue;
+        }
+        let Some(stem) = entry_path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        recipes.push(TerminalRecipeDescriptor {
+            name: stem.to_string(),
+            reference: terminal_recipe_reference(stem)?,
+        });
+    }
+    recipes.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(recipes)
+}
+
+fn load_terminal_recipe(recipe_name: &str) -> crate::SimardResult<PromptAsset> {
+    let reference = terminal_recipe_reference(recipe_name)?;
+    FilePromptAssetStore::new(prompt_root()).load(&reference)
+}
+
+fn terminal_recipe_reference(recipe_name: &str) -> crate::SimardResult<PromptAssetRef> {
+    if recipe_name.is_empty()
+        || !recipe_name
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+    {
+        return Err(crate::SimardError::InvalidPromptAssetPath {
+            asset_id: format!("terminal-recipe:{recipe_name}"),
+            path: PathBuf::from(recipe_name),
+            reason: "recipe names may only use lowercase ASCII letters, digits, and hyphens"
+                .to_string(),
+        });
+    }
+    Ok(PromptAssetRef::new(
+        format!("terminal-recipe:{recipe_name}"),
+        PathBuf::from(TERMINAL_RECIPE_DIRECTORY)
+            .join(format!("{recipe_name}.{TERMINAL_RECIPE_EXTENSION}")),
+    ))
+}
+
+fn print_terminal_recipe(recipe_name: &str, recipe: &PromptAsset) {
+    print_text("Terminal recipe", recipe_name);
+    print_display("Recipe asset", recipe.relative_path.display());
+    println!("Recipe contents:");
+    for line in sanitize_terminal_text(&recipe.contents).lines() {
+        println!("{line}");
+    }
 }
 
 fn state_root(

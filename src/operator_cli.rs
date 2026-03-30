@@ -5,7 +5,8 @@ use crate::operator_commands::{
     run_goal_curation_read_probe, run_gym_compare, run_gym_list, run_gym_scenario, run_gym_suite,
     run_improvement_curation_probe, run_improvement_curation_read_probe, run_meeting_probe,
     run_meeting_read_probe, run_review_probe, run_review_read_probe, run_terminal_probe,
-    run_terminal_probe_from_file, run_terminal_read_probe,
+    run_terminal_probe_from_file, run_terminal_read_probe, run_terminal_recipe_list_probe,
+    run_terminal_recipe_probe, run_terminal_recipe_show_probe,
 };
 
 const OPERATOR_CLI_HELP: &str = "\
@@ -15,6 +16,9 @@ Product modes:
   engineer run <topology> <workspace-root> <objective> [state-root]
   engineer terminal <topology> <objective> [state-root]
   engineer terminal-file <topology> <objective-file> [state-root]
+  engineer terminal-recipe-list
+  engineer terminal-recipe-show <recipe-name>
+  engineer terminal-recipe <topology> <recipe-name> [state-root]
   engineer terminal-read <topology> [state-root]
   engineer read <topology> [state-root]
   meeting run <base-type> <topology> <objective> [state-root]
@@ -108,6 +112,22 @@ fn dispatch_engineer_command(
             let state_root = next_optional_path(&mut args);
             reject_extra_args(args)?;
             run_terminal_read_probe(&topology, state_root)
+        }
+        "terminal-recipe-list" => {
+            reject_extra_args(args)?;
+            run_terminal_recipe_list_probe()
+        }
+        "terminal-recipe-show" => {
+            let recipe_name = next_required(&mut args, "recipe name")?;
+            reject_extra_args(args)?;
+            run_terminal_recipe_show_probe(&recipe_name)
+        }
+        "terminal-recipe" => {
+            let topology = next_required(&mut args, "topology")?;
+            let recipe_name = next_required(&mut args, "recipe name")?;
+            let state_root = next_optional_path(&mut args);
+            reject_extra_args(args)?;
+            run_terminal_recipe_probe(&topology, &recipe_name, state_root)
         }
         "read" => {
             let topology = next_required(&mut args, "topology")?;

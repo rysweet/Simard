@@ -62,6 +62,7 @@ Bare `simard` prints this operator surface directly.
 | `simard engineer run ...` | `simard_operator_probe engineer-loop-run ...` |
 | `simard engineer terminal ...` | `simard_operator_probe terminal-run ...` |
 | `simard engineer terminal-file ...` | `simard_operator_probe terminal-run-file ...` |
+| `simard engineer terminal-recipe ...` | `simard_operator_probe terminal-recipe-run ...` |
 | `simard engineer terminal-read ...` | `simard_operator_probe terminal-read ...` |
 | `simard engineer read ...` | `simard_operator_probe engineer-read ...` |
 | `simard meeting run ...` | `simard_operator_probe meeting-run ...` |
@@ -220,6 +221,33 @@ input: printf "terminal-file-ok\n"
 EOF
 
 simard engineer terminal-file single-process /tmp/simard-terminal.recipe "$STATE_ROOT"
+```
+
+### `simard engineer terminal-recipe-list`
+
+Lists the built-in named terminal session recipes shipped under `prompt_assets/simard/terminal_recipes/`.
+
+### `simard engineer terminal-recipe-show <recipe-name>`
+
+Prints the selected built-in terminal recipe asset and its bounded session contents before execution.
+
+### `simard engineer terminal-recipe <topology> <recipe-name> [state-root]`
+
+Runs one of the built-in named terminal session recipes through the same bounded PTY-backed substrate as `engineer terminal` and `engineer terminal-file`.
+
+Behavior:
+
+- loads a named recipe from `prompt_assets/simard/terminal_recipes/*.simard-terminal`
+- preserves the same structured terminal audit trail on the run surface and through `terminal-read`
+- fails explicitly when the requested recipe name is unknown or invalid
+- keeps `simard_operator_probe terminal-recipe-run ...` available for compatibility
+
+Example:
+
+```bash
+simard engineer terminal-recipe-list
+simard engineer terminal-recipe-show foundation-check
+simard engineer terminal-recipe single-process foundation-check "$STATE_ROOT"
 ```
 
 ### `simard engineer terminal-read <topology> [state-root]`

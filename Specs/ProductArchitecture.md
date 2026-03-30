@@ -248,6 +248,7 @@ The current shipped v1 engineer-loop slice stays intentionally narrow:
 - the terminal-backed engineer substrate now also has a read-only audit companion so operators can inspect persisted shell details, ordered terminal steps, satisfied wait checkpoints, last output lines, and transcript summaries after a terminal-backed session completes
 - the primary terminal-run surface now renders that same structured audit trail during execution so operators can follow bounded copilot-style terminal driving without dropping to raw evidence lines
 - operators can now author those bounded interactive terminal sessions either inline or from reusable file-backed recipes, while staying on the same truthful local PTY substrate
+- Simard now also ships named built-in terminal recipes so operators can discover, inspect, and rerun common interactive session flows without inventing ad hoc shell strings or temp files each time
 
 ## Memory Architecture
 
