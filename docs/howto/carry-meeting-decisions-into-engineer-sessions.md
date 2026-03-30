@@ -17,10 +17,6 @@ related:
 
 Use this guide when you want to prove one specific product seam: a meeting run captures durable meeting memory, and a later engineer run against the same state root carries that planning context forward without pretending code changed during the meeting.
 
-## Status
-
-The handoff behavior is shipped on the canonical `simard` CLI.
-
 ## Prerequisites
 
 - [ ] You are in the repository root

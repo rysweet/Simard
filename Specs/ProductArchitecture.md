@@ -95,6 +95,13 @@ Simard should be treated as a focused engineering runtime with five user-visible
 1. Engineer mode
    Simard accepts a concrete task, inspects the local repo, forms a bounded plan with explicit verification steps, executes through terminal actions, and reports outcomes with evidence. The shipped v1 slice now supports both read-only repo inspection actions and one narrow structured file edit on a clean repo.
 
+   Under the `simard engineer ...` namespace, v1 now exposes two distinct operator-visible surfaces that must stay honest about their boundary:
+
+   - `engineer terminal`, `engineer terminal-file`, `engineer terminal-recipe`, and `engineer terminal-read` are bounded local terminal session surfaces with checkpointed transcript audit
+   - `engineer run` and `engineer read` are the separate repo-grounded engineer loop and its read-only audit companion
+
+   Reusing the same explicit `state-root` bridges those surfaces through local persisted summaries only. That bridge must never imply hidden orchestration, automatic continuation, or unsupported external Copilot/amplihack execution.
+
 2. Meeting mode
    Simard helps humans think, decide, and record architecture or planning outcomes, but does not silently drift into implementation without an explicit handoff.
 
@@ -121,6 +128,8 @@ The terminal is the primary execution surface, and conversational text exists to
 
 Every meaningful run should have explicit session metadata, a live task objective, a working memory area, and a durable output trail that stores sanitized objective metadata rather than raw task text.
 If a future developer cannot explain why Simard took an action by inspecting session records, the architecture is too opaque.
+
+That rule now applies across the terminal-to-engineer bridge too. If a bounded terminal session is later reused as continuity for engineer mode, the continuity must come from explicit local persisted artifacts under the same operator-chosen `state-root`, with mode-scoped handoff records and readback that shows what was reused. Any bridged terminal fields that survive into persisted handoff state or operator-visible readback must be sanitized before persist and sanitized again before render so control sequences, secret-shaped values, and raw objective text are not replayed as product truth.
 
 ### 3. Roles Must Be Separated
 
@@ -249,6 +258,8 @@ The current shipped v1 engineer-loop slice stays intentionally narrow:
 - the primary terminal-run surface now renders that same structured audit trail during execution so operators can follow bounded copilot-style terminal driving without dropping to raw evidence lines
 - operators can now author those bounded interactive terminal sessions either inline or from reusable file-backed recipes, while staying on the same truthful local PTY substrate
 - Simard now also ships named built-in terminal recipes so operators can discover, inspect, and rerun common interactive session flows without inventing ad hoc shell strings or temp files each time
+- those terminal surfaces are now an explicit on-ramp into the repo-grounded engineer loop when operators reuse the same `state-root`, but the later engineer run must still inspect the repository, form its own short plan, execute bounded local work, and verify explicitly
+- the bridge is descriptive continuity only: terminal-derived working directory, transcript snippets, or recipe metadata may inform operator readback, but they must not become authority for engineer action selection or workspace targeting
 
 ## Memory Architecture
 
@@ -265,6 +276,16 @@ This is disposable and should be cheap to reset.
 
 A compact record written at the end of the session: sanitized objective metadata, key actions, outcomes, changed artifacts, and follow-up items.
 This is the primary bridge between one session and the next.
+
+When one explicit `state-root` is reused across the terminal session surfaces and the repo-grounded engineer loop, that bridge should be represented by mode-scoped handoff summaries rather than one ambiguous catch-all artifact.
+
+The concrete v1 handoff contract is:
+
+- `latest_terminal_handoff.json` is authoritative for `engineer terminal`, `engineer terminal-file`, `engineer terminal-recipe`, and `engineer terminal-read`
+- `latest_engineer_handoff.json` is authoritative for `engineer run` and `engineer read`
+- `latest_handoff.json` exists only as a compatibility fallback when the relevant mode-scoped handoff file is absent
+- mode-scoped readback must report which artifact it used and render in a deterministic operator-visible order: runtime header, handoff session summary, adapter details, shell or repo details, action/checkpoint audit, transcript or continuity summary, explicit next-step guidance, durable record counts
+- malformed mode-scoped state fails closed instead of silently falling back
 
 #### 3. Project Memory
 

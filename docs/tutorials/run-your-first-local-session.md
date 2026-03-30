@@ -1,6 +1,6 @@
 ---
 title: "Tutorial: Run your first local session"
-description: Exercise the shipped local-session flows through the canonical `simard` CLI and understand where the legacy compatibility binaries still fit.
+description: Exercise the shipped local-session flows through the canonical `simard` CLI, starting with discoverable terminal recipes and then continuing into the repo-grounded engineer loop through one explicit state root.
 last_updated: 2026-03-30
 review_schedule: as-needed
 owner: simard
@@ -9,6 +9,7 @@ related:
   - ../index.md
   - ../reference/simard-cli.md
   - ../reference/runtime-contracts.md
+  - ../howto/move-from-terminal-recipes-into-engineer-runs.md
   - ../howto/carry-meeting-decisions-into-engineer-sessions.md
   - ../howto/inspect-meeting-records.md
   - ../howto/configure-bootstrap-and-inspect-reflection.md
@@ -18,17 +19,14 @@ related:
 
 This tutorial exercises the shipped local-session flows through the canonical `simard` CLI.
 
-## Status
+The first half focuses on the honest bridge from bounded terminal recipes into the repo-grounded engineer loop. The later steps show how meeting, goal, review, improvement, bootstrap, and gym surfaces still fit into the same local operator story.
 
-Today:
-
-- `simard` is the primary operator-facing CLI
-- `simard_operator_probe` remains available for older compatibility scripts
-- `simard-gym` remains available for compatibility with legacy benchmark scripts, although `simard gym ...` is the canonical benchmark surface
+Use `simard` as the canonical operator-facing CLI. `simard_operator_probe` and `simard-gym` remain compatibility surfaces for older scripts, and `engineer terminal*` plus `engineer run/read` still share one honest local state model while remaining separate operator-visible modes.
 
 ## What you'll learn
 
 - how to run the bounded engineer loop against a local repo
+- how to start from a discoverable terminal recipe and continue into the engineer loop through the same explicit `state-root`
 - how meeting mode carries durable decision context into later engineer runs
 - how goal curation, review, and improvement curation reuse explicit durable state roots
 - how bootstrap and benchmark flows fit into the same operator-facing CLI story
@@ -49,7 +47,60 @@ Use one state root for the whole tutorial so later steps can read the same meeti
 STATE_ROOT="$(mktemp -d /tmp/simard-local-session.XXXXXX)"
 ```
 
-## Step 2: Run engineer mode through the canonical CLI
+## Step 2: Discover the shipped terminal recipe surface
+
+Start on the bounded local terminal surface, not the engineer loop.
+
+```bash
+cargo run --quiet -- engineer terminal-recipe-list
+cargo run --quiet -- engineer terminal-recipe-show foundation-check
+```
+
+Look for:
+
+- `foundation-check`
+- a real bounded recipe asset with `working-directory:`, `command:`, and `wait-for:` lines
+
+**Checkpoint**: you can discover and inspect the shipped terminal recipes without claiming repo-grounded planning or verification happened yet.
+
+## Step 3: Run the terminal recipe through the canonical CLI
+
+```bash
+cargo run --quiet -- \
+  engineer terminal-recipe single-process foundation-check "$STATE_ROOT"
+```
+
+Look for output shaped like this:
+
+```text
+Mode boundary: terminal
+Terminal recipe source: foundation-check
+Terminal steps count: 2
+Terminal last output line: terminal-recipe-ok
+Engineer next step: simard engineer run <topology> <workspace-root> <objective> <same-state-root>
+```
+
+**Checkpoint**: Simard ran one bounded local terminal session, persisted truthful terminal artifacts, and showed an explicit next-step path into the engineer loop without pretending that transition happened automatically.
+
+## Step 4: Read back the stored terminal session
+
+```bash
+cargo run --quiet -- \
+  engineer terminal-read single-process "$STATE_ROOT"
+```
+
+Look for:
+
+- `Probe mode: terminal-read`
+- `Terminal handoff source: latest_terminal_handoff.json`
+- `Mode boundary: terminal`
+- `Terminal recipe source: foundation-check`
+- `Terminal last output line: terminal-recipe-ok`
+- `Engineer next step: simard engineer run <topology> <workspace-root> <objective> <same-state-root>`
+
+**Checkpoint**: the terminal readback stays read-only, and the bridge guidance is coming from durable local state rather than from a hidden resume system.
+
+## Step 5: Continue into engineer mode through the same state root
 
 ```bash
 ENGINEER_OBJECTIVE=$'inspect the repository state
@@ -63,17 +114,37 @@ cargo run --quiet --   engineer run single-process "$PWD" "$ENGINEER_OBJECTIVE" 
 Look for output shaped like this:
 
 ```text
+Mode boundary: engineer
 Repo root: /path/to/repo
-Active goals count: 0
-Execution scope: local-only
+Terminal continuity available: yes
+Terminal continuity source: latest_terminal_handoff.json
+Terminal recipe source: foundation-check
 Action plan: Inspect the repo ...
 Selected action: cargo-metadata-scan
 Verification status: verified
 ```
 
-**Checkpoint**: Simard inspected the repo, chose one bounded action, and verified the result.
+**Checkpoint**: Simard inspected the repo, preserved the v1 engineer contract, and rendered terminal continuity as descriptive context only.
 
-## Step 3: Capture a meeting record in the same state root
+## Step 6: Read back the engineer audit trail
+
+```bash
+cargo run --quiet -- \
+  engineer read single-process "$STATE_ROOT"
+```
+
+Look for:
+
+- `Probe mode: engineer-read`
+- `Engineer handoff source: latest_engineer_handoff.json`
+- `Mode boundary: engineer`
+- `Terminal continuity available: yes`
+- `Terminal continuity source: latest_terminal_handoff.json`
+- `Verification status: verified`
+
+**Checkpoint**: `engineer read` prefers the engineer-scoped handoff, keeps the terminal continuity section separate, and never replays raw objective text.
+
+## Step 7: Capture a meeting record in the same state root
 
 ```bash
 MEETING_OBJECTIVE="$(cat <<'EOF'
@@ -115,7 +186,7 @@ Look for:
 - `Decision 1: preserve meeting-to-engineer continuity`
 - `Goal update 1: p1 [active] Preserve meeting handoff`
 
-## Step 4: Re-run engineer mode and confirm carryover
+## Step 8: Re-run engineer mode and confirm carryover
 
 Use the same repo and the same state root again.
 
@@ -135,7 +206,7 @@ Verification status: verified
 
 **Checkpoint**: meeting mode and engineer mode now share durable planning context through one explicit state root.
 
-## Step 5: Curate durable goals directly
+## Step 9: Curate durable goals directly
 
 You can also update the goal register without running a meeting first.
 
@@ -155,7 +226,7 @@ Look for:
 
 **Checkpoint**: durable backlog stewardship is its own operator-visible mode, not an engineer-loop side effect.
 
-## Step 6: Generate a review artifact, curate one approval and one deferral, then read the stored improvement state
+## Step 10: Generate a review artifact, curate one approval and one deferral, then read the stored improvement state
 
 First persist the latest review artifact:
 
@@ -196,7 +267,7 @@ Look for:
 - `Deferred proposal 1: Promote this pattern into a repeatable benchmark (hold this until the next benchmark planning pass)`
 - `Latest improvement record: review=`
 
-## Step 7: Exercise bootstrap and the terminal-backed engineer substrate
+## Step 11: Exercise bootstrap and benchmark discovery
 
 Bootstrap and benchmark execution both live on the canonical CLI:
 
@@ -206,48 +277,13 @@ cargo run --quiet --   bootstrap run simard-engineer local-harness single-proces
 cargo run --quiet -- gym list
 ```
 
-The terminal-backed engineer substrate now lives on the canonical CLI too:
-
-```bash
-cargo run --quiet --   engineer terminal single-process   $'working-directory: .
-command: pwd
-command: printf "terminal-foundation-ok\n"'   "$STATE_ROOT"
-```
-
-Look for:
-
-- `Adapter implementation: terminal-shell::local-pty`
-- `Terminal steps count: 2`
-- `Terminal step 1: input: pwd`
-- `Terminal last output line: terminal-foundation-ok`
-- `Terminal transcript preview:`
-
-If you want to keep a reusable interactive session recipe on disk instead of packing it into one CLI string, use the file-backed entrypoint:
-
-```bash
-cat > /tmp/simard-terminal.recipe <<'EOF'
-working-directory: .
-command: printf "terminal-file-ready\n"
-wait-for: terminal-file-ready
-input: printf "terminal-file-ok\n"
-EOF
-
-cargo run --quiet -- \
-  engineer terminal-file single-process /tmp/simard-terminal.recipe "$STATE_ROOT"
-```
-
-Simard also ships named built-in terminal recipes when you want reusable sessions without managing your own temp file:
-
-```bash
-cargo run --quiet -- engineer terminal-recipe-list
-cargo run --quiet -- engineer terminal-recipe-show foundation-check
-cargo run --quiet -- engineer terminal-recipe single-process foundation-check "$STATE_ROOT"
-```
-
 ## Summary
 
 You now know how to:
 
+- discover a shipped terminal recipe on the canonical CLI
+- run a bounded local terminal session and read back its truthful audit trail
+- continue from that terminal surface into the repo-grounded engineer loop through the same explicit `state-root`
 - run the shipped engineer flow through `simard`
 - carry meeting decisions into later engineer runs
 - curate durable goals directly
@@ -257,6 +293,7 @@ You now know how to:
 ## Next steps
 
 - Use [How to configure bootstrap and inspect reflection](../howto/configure-bootstrap-and-inspect-reflection.md) when you need the bootstrap contract in more detail.
+- Use [How to move from terminal recipes into engineer runs](../howto/move-from-terminal-recipes-into-engineer-runs.md) when you want the narrow terminal-to-engineer bridge workflow only.
 - Use [How to carry meeting decisions into engineer sessions](../howto/carry-meeting-decisions-into-engineer-sessions.md) when you need a narrower handoff-focused workflow.
 - Use [How to inspect meeting records](../howto/inspect-meeting-records.md) when you need the read-only meeting audit flow.
 - Use [How to inspect improvement-curation state](../howto/inspect-improvement-curation-state.md) when you need the read-only review-to-priority audit flow.
