@@ -1,6 +1,6 @@
 ---
 title: Simard CLI reference
-description: Reference for the shipped `simard` command tree and the legacy compatibility binaries that still expose selected older runtime behaviors.
+description: Reference for the shipped `simard` command tree, the `engineer read` audit companion, and the legacy compatibility binaries that still expose selected older runtime behaviors.
 last_updated: 2026-03-30
 review_schedule: as-needed
 owner: simard
@@ -22,15 +22,16 @@ related:
 
 The legacy `simard_operator_probe` and `simard-gym` binaries still ship for compatibility, but new operator workflows should use `simard ...`.
 
-This page distinguishes shipped commands from compatibility surfaces. When a compatibility surface is listed as `none`, the command is canonical-only.
+This page documents the shipped operator-facing command tree. When a compatibility surface is listed as `none`, the command is canonical-only.
 
-## Shipped command tree
+## Command tree
 
 ```text
 simard
 |- engineer
 |  |- run <topology> <workspace-root> <objective> [state-root]
-|  `- terminal <topology> <objective> [state-root]
+|  |- terminal <topology> <objective> [state-root]
+|  `- read <topology> [state-root]
 |- meeting
 |  |- run <base-type> <topology> <structured-objective> [state-root]
 |  `- read <base-type> <topology> [state-root]
@@ -52,7 +53,7 @@ simard
    `- run <identity> <base-type> <topology> <objective> [state-root]
 ```
 
-Bare `simard` prints this unified help surface.
+Bare `simard` prints this operator surface directly.
 
 ## Compatibility mapping
 
@@ -60,6 +61,7 @@ Bare `simard` prints this unified help surface.
 | --- | --- |
 | `simard engineer run ...` | `simard_operator_probe engineer-loop-run ...` |
 | `simard engineer terminal ...` | `simard_operator_probe terminal-run ...` |
+| `simard engineer read ...` | `simard_operator_probe engineer-read ...` |
 | `simard meeting run ...` | `simard_operator_probe meeting-run ...` |
 | `simard meeting read ...` | `simard_operator_probe meeting-read ...` |
 | `simard goal-curation run ...` | `simard_operator_probe goal-curation-run ...` |
@@ -106,6 +108,67 @@ verify the outcome explicitly
 persist truthful local evidence and memory'
 
 simard engineer run single-process "$PWD" "$ENGINEER_OBJECTIVE" "$STATE_ROOT"
+```
+
+### `simard engineer read <topology> [state-root]`
+
+This is the read-only audit companion to `simard engineer run`. It inspects the latest persisted engineer state without resuming execution, repairing artifacts, or re-running the engineer loop.
+
+Behavior:
+
+- reuses the same canonical default durable root as `engineer run` when `[state-root]` is omitted
+- validates `topology` before deriving that default root, so the default still follows the shipped engineer runtime pairing
+- requires any explicit `state-root` to already exist as a directory
+- requires `latest_handoff.json`, `memory_records.json`, and `evidence_records.json` to already exist as readable regular files; symlinked artifacts are rejected
+- treats `latest_handoff.json` as authoritative for session identity, selected base type, topology, session phase, redacted objective metadata, and the exported memory/evidence snapshot tied to the latest engineer run
+- requires the persisted handoff session objective to already be trusted `objective-metadata(chars=<n>, words=<n>, lines=<n>)`; malformed or tampered metadata fails instead of being replayed
+- uses the standalone `memory_records.json` and `evidence_records.json` files as durability checks and supporting evidence counts; if they disagree with the handoff snapshot, the handoff-derived values win
+- renders only redacted objective metadata such as `objective-metadata(chars=150, words=21, lines=1)`, never the raw engineer objective text
+- requires carried meeting state to remain valid persisted meeting records; malformed carried-meeting data fails instead of being downgraded to raw strings
+- strips terminal control sequences and secret-shaped values from every displayed string before printing it
+- prints a stable operator-visible order: runtime header, handoff session summary, repo grounding, carried context, selected action summary, verification summary, durable record counts
+- fails explicitly for invalid `state-root` values and for missing, unreadable, or malformed persisted engineer state
+
+When `[state-root]` is omitted, the command reuses the same canonical durable root that `engineer run` already writes:
+
+```text
+target/operator-probe-state/engineer-loop-run/simard-engineer/terminal-shell/<topology>
+```
+
+Example:
+
+```bash
+simard engineer read single-process "$STATE_ROOT"
+```
+
+Output shape:
+
+```text
+Probe mode: engineer-read
+Identity: simard-engineer
+Selected base type: terminal-shell
+Topology: single-process
+State root: /tmp/simard-engineer.XXXXXX
+Session phase: complete
+Objective metadata: objective-metadata(chars=150, words=21, lines=1)
+Repo root: /path/to/repo
+Repo branch: main
+Repo head: 4b6cb7de0179e9adb480dfdea1cb2aee4a5d5e18
+Worktree dirty: false
+Changed files: <none>
+Active goals count: 1
+Active goal 1: p1 [active] Preserve meeting handoff
+Carried meeting decisions: 1
+Carried meeting decision 1: preserve meeting-to-engineer continuity
+Selected action: cargo-metadata-scan
+Action plan: Inspect the repo, query Cargo metadata without mutating files, and verify repo grounding stayed stable.
+Verification steps: confirm cargo metadata returns valid workspace JSON || confirm repo root, branch, HEAD, and worktree state stayed stable || confirm carried meeting decisions and active goals stayed stable
+Action status: success
+Changed files after action: <none>
+Verification status: verified
+Verification summary: Verified local-only engineer action 'cargo-metadata-scan' against stable repo grounding, unchanged worktree state, and explicit repo-native action checks.
+Memory records: 3
+Evidence records: 19
 ```
 
 ### `simard engineer terminal <topology> <objective> [state-root]`

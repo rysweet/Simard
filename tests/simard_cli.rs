@@ -99,6 +99,20 @@ fn meeting_default_root_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+fn engineer_default_root_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn default_engineer_state_root(topology: &str) -> PathBuf {
+    repo_root()
+        .join("target/operator-probe-state")
+        .join("engineer-loop-run")
+        .join("simard-engineer")
+        .join("terminal-shell")
+        .join(topology)
+}
+
 fn default_meeting_state_root(base_type: &str, topology: &str) -> PathBuf {
     repo_root()
         .join("target/operator-probe-state")
@@ -320,6 +334,24 @@ fn simard_help_documents_improvement_curation_read_as_the_durable_review_decisio
 }
 
 #[test]
+fn simard_help_documents_engineer_read_as_the_durable_engineer_audit_surface() {
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("--help")
+        .output()
+        .expect("simard help should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        output.status.success(),
+        "simard help should stay readable while the engineer read audit command is added:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("engineer read <topology> [state-root]"),
+        "simard help should document the canonical read-only engineer audit workflow:\n{rendered}"
+    );
+}
+
+#[test]
 fn simard_engineer_run_drives_the_bounded_engineer_loop_from_the_primary_cli() {
     let state_root = TempDirGuard::new("simard-cli-engineer");
     let repo_root = repo_root();
@@ -362,6 +394,249 @@ fn simard_engineer_run_drives_the_bounded_engineer_loop_from_the_primary_cli() {
         state_root.path().join("latest_handoff.json").is_file(),
         "engineer mode should persist the latest handoff under the chosen state root"
     );
+}
+
+#[test]
+fn simard_engineer_read_reuses_the_run_default_state_root_and_stays_read_only() {
+    let _lock = engineer_default_root_lock()
+        .lock()
+        .expect("engineer default root test lock should not be poisoned");
+    let state_root = default_engineer_state_root("single-process");
+    let _cleanup = CleanupDirGuard::new(state_root.clone());
+    let repo_root = repo_root();
+    let objective = "\
+inspect the repository state, execute one safe local engineering action, verify the outcome explicitly, and persist truthful local evidence and memory
+raw-secret-token=shh \u{1b}[31mdo not replay this\u{1b}[0m";
+
+    let run_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("run")
+        .arg("single-process")
+        .arg(&repo_root)
+        .arg(objective)
+        .output()
+        .expect("simard engineer run should launch with its default state root");
+    let run_rendered = rendered_output(&run_output);
+
+    assert!(
+        run_output.status.success(),
+        "engineer run should succeed with its canonical default state root:\n{run_rendered}"
+    );
+    assert!(
+        run_rendered.contains(&format!("State root: {}", state_root.display())),
+        "engineer run should surface the canonical default durable root that engineer read later inspects:\n{run_rendered}"
+    );
+
+    let handoff = load_json(state_root.join("latest_handoff.json"));
+    let objective_metadata = handoff["session"]["objective"]
+        .as_str()
+        .expect("handoff should persist redacted objective metadata")
+        .to_string();
+    let memory_count = handoff["memory_records"]
+        .as_array()
+        .expect("handoff should persist exported memory records")
+        .len();
+    let evidence_count = handoff["evidence_records"]
+        .as_array()
+        .expect("handoff should persist exported evidence records")
+        .len();
+    let memory_before =
+        fs::read(state_root.join("memory_records.json")).expect("memory store should exist");
+    let evidence_before =
+        fs::read(state_root.join("evidence_records.json")).expect("evidence store should exist");
+    let handoff_before =
+        fs::read(state_root.join("latest_handoff.json")).expect("handoff store should exist");
+
+    let read_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("read")
+        .arg("single-process")
+        .output()
+        .expect("simard engineer read should launch with its default state root");
+    let read_rendered = rendered_output(&read_output);
+
+    assert!(
+        read_output.status.success(),
+        "engineer read should inspect the same canonical default durable root that engineer run populates:\n{read_rendered}"
+    );
+    for expected in [
+        "Probe mode: engineer-read",
+        "Identity: simard-engineer",
+        "Selected base type: terminal-shell",
+        "Topology: single-process",
+        &format!("State root: {}", state_root.display()),
+        "Session phase: complete",
+        &format!("Objective metadata: {objective_metadata}"),
+        &format!("Repo root: {}", repo_root.display()),
+        &format!("Memory records: {memory_count}"),
+        &format!("Evidence records: {evidence_count}"),
+    ] {
+        assert!(
+            read_rendered.contains(expected),
+            "engineer read should surface '{expected}' for operators:\n{read_rendered}"
+        );
+    }
+    for prefix in [
+        "Repo branch: ",
+        "Repo head: ",
+        "Worktree dirty: ",
+        "Changed files: ",
+        "Active goals count: ",
+        "Carried meeting decisions: ",
+        "Selected action: ",
+        "Action plan: ",
+        "Verification steps: ",
+        "Action status: ",
+        "Changed files after action: ",
+        "Verification status: ",
+        "Verification summary: ",
+    ] {
+        let value = output_line_value(&run_rendered, prefix)
+            .unwrap_or_else(|| panic!("engineer run should surface '{prefix}' before readback"));
+        assert!(
+            read_rendered.contains(&format!("{prefix}{value}")),
+            "engineer read should replay the persisted '{prefix}' summary from durable state:\n{read_rendered}"
+        );
+    }
+    for forbidden in ['\u{1b}', '\u{7}'] {
+        assert!(
+            !read_rendered.contains(forbidden),
+            "engineer read should sanitize persisted operator-visible text before printing it:\n{read_rendered}"
+        );
+    }
+    for raw in ["raw-secret-token=shh", "do not replay this"] {
+        assert!(
+            !read_rendered.contains(raw),
+            "engineer read must not reconstruct raw redacted objectives in operator output:\n{read_rendered}"
+        );
+    }
+
+    let memory_after =
+        fs::read(state_root.join("memory_records.json")).expect("memory store should exist");
+    let evidence_after =
+        fs::read(state_root.join("evidence_records.json")).expect("evidence store should exist");
+    let handoff_after =
+        fs::read(state_root.join("latest_handoff.json")).expect("handoff store should exist");
+    assert_eq!(
+        memory_before, memory_after,
+        "engineer read must not rewrite the durable memory store"
+    );
+    assert_eq!(
+        evidence_before, evidence_after,
+        "engineer read must not rewrite the durable evidence store"
+    );
+    assert_eq!(
+        handoff_before, handoff_after,
+        "engineer read must not rewrite the durable handoff snapshot"
+    );
+}
+
+#[test]
+fn simard_engineer_read_surfaces_carried_context_from_explicit_state_root_and_matches_probe_parity()
+{
+    let state_root = TempDirGuard::new("simard-cli-engineer-read-explicit");
+    let repo_root = repo_root();
+    let meeting_objective = "\
+agenda: align the next Simard engineer read workstream\n\
+decision: preserve meeting-to-engineer \u{1b}[31mcontinuity\u{1b}[0m\n\
+risk: readback might replay unsanitized durable state\n\
+next-step: add an operator-facing engineer audit surface\n\
+goal: Preserve \u{1b}]8;;https://example.invalid\u{7}meeting handoff\u{1b}]8;;\u{7} | priority=1 | status=active | rationale=meeting decisions must stay visible to later engineer reads";
+
+    let meeting_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("meeting")
+        .arg("run")
+        .arg("local-harness")
+        .arg("single-process")
+        .arg(meeting_objective)
+        .arg(state_root.path())
+        .output()
+        .expect("simard meeting run should launch against the shared engineer-read state root");
+    let meeting_rendered = rendered_output(&meeting_output);
+
+    assert!(
+        meeting_output.status.success(),
+        "meeting run should seed durable carried context for engineer read:\n{meeting_rendered}"
+    );
+
+    let engineer_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("run")
+        .arg("single-process")
+        .arg(&repo_root)
+        .arg(engineer_loop_objective())
+        .arg(state_root.path())
+        .output()
+        .expect("simard engineer run should launch against the shared engineer-read state root");
+    let engineer_rendered = rendered_output(&engineer_output);
+
+    assert!(
+        engineer_output.status.success(),
+        "engineer run should preserve carried meeting context in the shared durable root:\n{engineer_rendered}"
+    );
+
+    let simard_read_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("read")
+        .arg("single-process")
+        .arg(state_root.path())
+        .output()
+        .expect("simard engineer read should launch against an explicit state root");
+    let simard_read_rendered = rendered_output(&simard_read_output);
+
+    let probe_read_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .arg("engineer-read")
+        .arg("single-process")
+        .arg(state_root.path())
+        .output()
+        .expect("simard_operator_probe engineer-read should launch");
+    let probe_read_rendered = rendered_output(&probe_read_output);
+
+    assert!(
+        simard_read_output.status.success(),
+        "engineer read should expose carried meeting context through the canonical CLI:\n{simard_read_rendered}"
+    );
+    assert!(
+        probe_read_output.status.success(),
+        "the compatibility engineer-read probe should remain available while operators migrate:\n{probe_read_rendered}"
+    );
+    assert_eq!(
+        simard_read_rendered, probe_read_rendered,
+        "engineer read should preserve probe parity exactly so the canonical and compatibility surfaces do not drift"
+    );
+    for expected in [
+        &format!("State root: {}", state_root.path().display()),
+        "Active goals count: 1",
+        "Active goal 1: p1 [active] Preserve meeting handoff",
+        "Carried meeting decisions: 1",
+        "Carried meeting decision 1: preserve meeting-to-engineer continuity",
+    ] {
+        assert!(
+            simard_read_rendered.contains(expected),
+            "engineer read should surface '{expected}' from the shared durable state root:\n{simard_read_rendered}"
+        );
+    }
+    for prefix in [
+        "Selected action: ",
+        "Action plan: ",
+        "Verification steps: ",
+        "Action status: ",
+        "Verification status: ",
+        "Verification summary: ",
+    ] {
+        let value = output_line_value(&engineer_rendered, prefix)
+            .unwrap_or_else(|| panic!("engineer run should surface '{prefix}' before readback"));
+        assert!(
+            simard_read_rendered.contains(&format!("{prefix}{value}")),
+            "engineer read should keep the persisted '{prefix}' summary visible with explicit state roots:\n{simard_read_rendered}"
+        );
+    }
+    for forbidden in ['\u{1b}', '\u{7}'] {
+        assert!(
+            !simard_read_rendered.contains(forbidden),
+            "engineer read should sanitize carried context before printing it:\n{simard_read_rendered}"
+        );
+    }
 }
 
 #[test]
@@ -498,6 +773,308 @@ goal: Track future remote orchestration | priority=6 | status=active | rationale
     assert!(
         !goal_rendered.contains("Track future remote orchestration"),
         "goal-curation mode should omit lower-priority active goals from the top-five surface:\n{goal_rendered}"
+    );
+}
+
+#[test]
+fn simard_engineer_read_rejects_missing_and_incomplete_state_roots_before_snapshot_loading() {
+    let temp_dir = TempDirGuard::new("simard-cli-engineer-read-invalid-root");
+    let missing_root = temp_dir.path().join("missing-layout");
+    let empty_root = temp_dir.path().join("empty-layout");
+    let handoff_only_root = temp_dir.path().join("handoff-only-layout");
+    let handoff_and_memory_only_root = temp_dir.path().join("handoff-and-memory-only-layout");
+    fs::create_dir_all(&empty_root).expect("empty state root fixture should be created");
+    fs::create_dir_all(&handoff_only_root).expect("handoff-only fixture should be created");
+    fs::create_dir_all(&handoff_and_memory_only_root)
+        .expect("handoff-and-memory-only fixture should be created");
+    fs::write(handoff_only_root.join("latest_handoff.json"), "{}")
+        .expect("handoff-only fixture should include a placeholder handoff");
+    fs::write(
+        handoff_and_memory_only_root.join("latest_handoff.json"),
+        "{}",
+    )
+    .expect("handoff-and-memory-only fixture should include a placeholder handoff");
+    fs::write(
+        handoff_and_memory_only_root.join("memory_records.json"),
+        "[]",
+    )
+    .expect("handoff-and-memory-only fixture should include a placeholder memory store");
+
+    let missing_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("read")
+        .arg("single-process")
+        .arg(&missing_root)
+        .output()
+        .expect("simard engineer read missing-root check should launch");
+    let missing_rendered = rendered_output(&missing_output);
+
+    assert!(
+        !missing_output.status.success(),
+        "engineer read must fail visibly for a nonexistent explicit state root:\n{missing_rendered}"
+    );
+    assert!(
+        missing_rendered.contains("invalid state root")
+            || missing_rendered.contains("InvalidStateRoot"),
+        "engineer read should keep the failing state-root contract explicit:\n{missing_rendered}"
+    );
+    assert!(
+        missing_rendered.contains("requires an existing state root directory"),
+        "engineer read should explain why a nonexistent explicit root was rejected:\n{missing_rendered}"
+    );
+    assert!(
+        !missing_rendered.contains("unsupported command"),
+        "engineer read should fail through the read-state contract, not command dispatch:\n{missing_rendered}"
+    );
+
+    let empty_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("read")
+        .arg("single-process")
+        .arg(&empty_root)
+        .output()
+        .expect("simard engineer read empty-root check should launch");
+    let empty_rendered = rendered_output(&empty_output);
+
+    assert!(
+        !empty_output.status.success(),
+        "engineer read must fail visibly for an empty explicit state root:\n{empty_rendered}"
+    );
+    assert!(
+        empty_rendered.contains("latest_handoff.json"),
+        "engineer read should reject empty roots before parsing anything by requiring latest_handoff.json:\n{empty_rendered}"
+    );
+    assert!(
+        !empty_rendered.contains("missing field"),
+        "engineer read should validate read-layout files before attempting to deserialize them:\n{empty_rendered}"
+    );
+
+    let handoff_only_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("read")
+        .arg("single-process")
+        .arg(&handoff_only_root)
+        .output()
+        .expect("simard engineer read handoff-only check should launch");
+    let handoff_only_rendered = rendered_output(&handoff_only_output);
+
+    assert!(
+        !handoff_only_output.status.success(),
+        "engineer read must fail visibly for a state root that lacks the durable memory store:\n{handoff_only_rendered}"
+    );
+    assert!(
+        handoff_only_rendered.contains("memory_records.json"),
+        "engineer read should require memory_records.json before attempting snapshot parsing:\n{handoff_only_rendered}"
+    );
+    assert!(
+        !handoff_only_rendered.contains("missing field"),
+        "engineer read should not deserialize placeholder handoff JSON before validating required files:\n{handoff_only_rendered}"
+    );
+
+    let handoff_and_memory_only_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("read")
+        .arg("single-process")
+        .arg(&handoff_and_memory_only_root)
+        .output()
+        .expect("simard engineer read handoff-and-memory-only check should launch");
+    let handoff_and_memory_only_rendered = rendered_output(&handoff_and_memory_only_output);
+
+    assert!(
+        !handoff_and_memory_only_output.status.success(),
+        "engineer read must fail visibly for a state root that lacks the durable evidence store:\n{handoff_and_memory_only_rendered}"
+    );
+    assert!(
+        handoff_and_memory_only_rendered.contains("evidence_records.json"),
+        "engineer read should require evidence_records.json before attempting snapshot parsing:\n{handoff_and_memory_only_rendered}"
+    );
+    assert!(
+        !handoff_and_memory_only_rendered.contains("missing field"),
+        "engineer read should fail on incomplete layout before deserializing placeholder handoff JSON:\n{handoff_and_memory_only_rendered}"
+    );
+}
+
+#[test]
+fn simard_engineer_read_rejects_tampered_persisted_objective_metadata() {
+    let state_root = TempDirGuard::new("simard-cli-engineer-read-tampered-objective");
+    let repo_root = repo_root();
+    let run_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("run")
+        .arg("single-process")
+        .arg(&repo_root)
+        .arg(engineer_loop_objective())
+        .arg(state_root.path())
+        .output()
+        .expect("simard engineer run should seed durable state");
+    let run_rendered = rendered_output(&run_output);
+
+    assert!(
+        run_output.status.success(),
+        "engineer run should succeed before objective-metadata tampering:\n{run_rendered}"
+    );
+
+    let handoff_path = state_root.path().join("latest_handoff.json");
+    let mut handoff = load_json(&handoff_path);
+    handoff["session"]["objective"] =
+        json!("objective-metadata(chars=9, words=1, lines=1, token=LEAKME)");
+    fs::write(
+        &handoff_path,
+        serde_json::to_vec_pretty(&handoff).expect("tampered handoff should serialize"),
+    )
+    .expect("tampered handoff should be written");
+
+    let read_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("read")
+        .arg("single-process")
+        .arg(state_root.path())
+        .output()
+        .expect("simard engineer read should launch against the tampered handoff");
+    let read_rendered = rendered_output(&read_output);
+
+    assert!(
+        !read_output.status.success(),
+        "engineer read must fail visibly for untrusted persisted objective metadata:\n{read_rendered}"
+    );
+    assert!(
+        read_rendered.contains("session.objective") || read_rendered.contains("objective metadata"),
+        "engineer read should explain why the persisted objective metadata was rejected:\n{read_rendered}"
+    );
+    assert!(
+        !read_rendered.contains("LEAKME"),
+        "engineer read must not echo the tampered objective metadata payload:\n{read_rendered}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn simard_engineer_read_rejects_symlinked_required_artifacts_without_leaking_paths() {
+    use std::os::unix::fs::symlink;
+
+    let state_root = TempDirGuard::new("simard-cli-engineer-read-symlink-artifact");
+    let real_memory_path = state_root.path().join("real-memory-records.json");
+    let linked_memory_path = state_root.path().join("memory_records.json");
+
+    fs::write(state_root.path().join("latest_handoff.json"), "{}")
+        .expect("handoff placeholder should be created");
+    fs::write(state_root.path().join("evidence_records.json"), "[]")
+        .expect("evidence placeholder should be created");
+    fs::write(&real_memory_path, "[]").expect("real memory store should be created");
+    symlink(&real_memory_path, &linked_memory_path)
+        .expect("symlinked memory store should be created");
+
+    let read_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("read")
+        .arg("single-process")
+        .arg(state_root.path())
+        .output()
+        .expect("simard engineer read symlink rejection should launch");
+    let read_rendered = rendered_output(&read_output);
+
+    assert!(
+        !read_output.status.success(),
+        "engineer read must fail visibly when a required artifact is a symlink:\n{read_rendered}"
+    );
+    assert!(
+        read_rendered.contains("memory_records.json")
+            && read_rendered.contains("regular file")
+            && read_rendered.contains("symlink"),
+        "engineer read should reject symlinked required artifacts explicitly:\n{read_rendered}"
+    );
+    assert!(
+        !read_rendered.contains(&real_memory_path.display().to_string())
+            && !read_rendered.contains(&linked_memory_path.display().to_string()),
+        "engineer read should name the failing artifact without leaking absolute artifact paths:\n{read_rendered}"
+    );
+}
+
+#[test]
+fn simard_engineer_read_rejects_malformed_carried_meeting_records() {
+    let state_root = TempDirGuard::new("simard-cli-engineer-read-malformed-meeting");
+    let repo_root = repo_root();
+    let meeting_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("meeting")
+        .arg("run")
+        .arg("local-harness")
+        .arg("single-process")
+        .arg(
+            "agenda: align\n\
+decision: preserve continuity\n\
+goal: Preserve meeting handoff | priority=1 | status=active | rationale=carry decisions into engineer read",
+        )
+        .arg(state_root.path())
+        .output()
+        .expect("meeting run should seed carried context");
+    let meeting_rendered = rendered_output(&meeting_output);
+
+    assert!(
+        meeting_output.status.success(),
+        "meeting run should succeed before carried-meeting tampering:\n{meeting_rendered}"
+    );
+
+    let engineer_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("run")
+        .arg("single-process")
+        .arg(&repo_root)
+        .arg(engineer_loop_objective())
+        .arg(state_root.path())
+        .output()
+        .expect("engineer run should seed a readable engineer handoff");
+    let engineer_rendered = rendered_output(&engineer_output);
+
+    assert!(
+        engineer_output.status.success(),
+        "engineer run should succeed before carried-meeting tampering:\n{engineer_rendered}"
+    );
+
+    let handoff_path = state_root.path().join("latest_handoff.json");
+    let mut handoff = load_json(&handoff_path);
+    let evidence_records = handoff["evidence_records"]
+        .as_array_mut()
+        .expect("handoff should persist evidence records");
+    let mut replaced = false;
+    for record in evidence_records.iter_mut() {
+        let is_carried_detail = record["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.starts_with("carried-meeting-decisions="));
+        if is_carried_detail {
+            record["detail"] = json!(
+                "carried-meeting-decisions=agenda=align; updates=[]; decisions=not-a-list; risks=[]; next_steps=[]; open_questions=[]; goals=[]"
+            );
+            replaced = true;
+            break;
+        }
+    }
+    assert!(
+        replaced,
+        "handoff should persist carried meeting decisions before tampering"
+    );
+    fs::write(
+        &handoff_path,
+        serde_json::to_vec_pretty(&handoff).expect("tampered handoff should serialize"),
+    )
+    .expect("tampered handoff should be written");
+
+    let read_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("read")
+        .arg("single-process")
+        .arg(state_root.path())
+        .output()
+        .expect("simard engineer read should launch against the malformed carried meeting data");
+    let read_rendered = rendered_output(&read_output);
+
+    assert!(
+        !read_output.status.success(),
+        "engineer read must fail visibly for malformed carried meeting data:\n{read_rendered}"
+    );
+    assert!(
+        read_rendered.contains("carried-meeting-decisions")
+            && read_rendered.contains("invalid meeting record"),
+        "engineer read should keep malformed carried meeting state explicit:\n{read_rendered}"
     );
 }
 

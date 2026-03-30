@@ -1,6 +1,6 @@
 ---
 title: Runtime contracts reference
-description: Reference for the shipped Simard executable surfaces, compatibility binaries, and the in-process runtime contracts that back them.
+description: Reference for the shipped Simard executable surfaces, the `engineer read` audit contract, compatibility binaries, and the in-process runtime contracts that back them.
 last_updated: 2026-03-30
 review_schedule: as-needed
 owner: simard
@@ -19,6 +19,7 @@ related:
 This document covers:
 
 - the canonical `simard` CLI surface
+- the `engineer read` audit surface
 - the compatibility binaries that still expose a few legacy entrypoints
 - the in-process Rust runtime and bootstrap types in `src/bootstrap.rs`, `src/runtime.rs`, and related modules
 
@@ -34,6 +35,7 @@ Simard does **not** expose:
 | --- | --- | --- |
 | explicit bootstrap | `simard bootstrap run ...` | `simard_operator_probe bootstrap-run ...` |
 | bounded engineer loop | `simard engineer run ...` | `simard_operator_probe engineer-loop-run ...` |
+| engineer state readback | `simard engineer read ...` | `simard_operator_probe engineer-read ...` |
 | terminal-backed engineer substrate | `simard engineer terminal ...` | `simard_operator_probe terminal-run ...` |
 | meeting mode | `simard meeting run ...` | `simard_operator_probe meeting-run ...` |
 | meeting state readback | `simard meeting read ...` | `simard_operator_probe meeting-read ...` |
@@ -49,6 +51,7 @@ Simard does **not** expose:
 The shipped operator-facing command tree is:
 
 - `simard engineer run <topology> <workspace-root> <objective> [state-root]`
+- `simard engineer read <topology> [state-root]`
 - `simard engineer terminal <topology> <objective> [state-root]`
 - `simard meeting run <base-type> <topology> <structured-objective> [state-root]`
 - `simard meeting read <base-type> <topology> [state-root]`
@@ -110,6 +113,36 @@ That structured edit path is intentionally narrow:
 - the repo must start clean so Simard does not overwrite unrelated user changes
 - only one expected changed file is allowed
 - verification must confirm both file content and git-visible change state
+
+#### Engineer state readback
+
+Canonical entrypoint: `simard engineer read <topology> [state-root]`
+
+Compatibility surface: `simard_operator_probe engineer-read <topology> [state-root]`
+
+This is a read-only engineer audit surface, not a sixth operator mode. It exists to inspect the durable engineer artifacts that `engineer run` already writes.
+
+The contract is intentionally explicit:
+
+- `engineer run` remains the only mutation and execution path for engineer work
+- `engineer read` reuses the same validated default state root as `engineer run` when `[state-root]` is omitted
+- any explicit `state-root` must already exist as a directory before readback begins
+- `engineer read` requires readable regular-file `latest_handoff.json`, `memory_records.json`, and `evidence_records.json`; symlinked artifacts are rejected
+- `latest_handoff.json` is authoritative for identity, selected base type, topology, session phase, redacted objective metadata, and the exported memory/evidence snapshot tied to the latest engineer run
+- persisted handoff objective metadata must already be trusted `objective-metadata(chars=<n>, words=<n>, lines=<n>)`; malformed or tampered metadata fails instead of being replayed
+- standalone `memory_records.json` and `evidence_records.json` files act as durability checks and supporting record-count sources; if they disagree with the handoff snapshot, handoff-derived values win
+- only redacted objective metadata is printable; raw engineer objective text must never be rendered back to the terminal
+- carried meeting state must remain valid persisted meeting records; malformed carried-meeting data fails explicitly instead of falling back to raw strings
+- operator-visible strings are sanitized before printing so terminal control sequences and secret-shaped values are not replayed
+- output order stays deterministic: runtime header, handoff session summary, repo grounding, carried context, selected action summary, verification summary, durable record counts
+- the command performs no mutation, repair, resume, or execution
+- invalid state roots, missing files, unreadable storage, and malformed persisted engineer data fail explicitly
+
+The default root remains the same engineer durable path already used by `engineer run`:
+
+```text
+target/operator-probe-state/engineer-loop-run/simard-engineer/terminal-shell/<topology>
+```
 
 ### Terminal-backed engineer substrate
 
