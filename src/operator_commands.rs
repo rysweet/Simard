@@ -8,12 +8,13 @@ use crate::improvements::PersistedImprovementRecord;
 use crate::meetings::PersistedMeetingRecord;
 use crate::sanitization::sanitize_terminal_text;
 use crate::{
-    BootstrapConfig, BootstrapInputs, BuiltinIdentityLoader, FileBackedMemoryStore, Freshness,
+    BootstrapConfig, BootstrapInputs, BuiltinIdentityLoader, EvidenceRecord,
+    FileBackedEvidenceStore, FileBackedHandoffStore, FileBackedMemoryStore, Freshness,
     IdentityLoadRequest, IdentityLoader, ManifestContract, MemoryRecord, MemoryScope, MemoryStore,
-    Provenance, ReflectiveRuntime, ReviewRequest, ReviewTargetKind, RuntimeTopology,
-    assemble_local_runtime_from_handoff, benchmark_scenarios, build_review_artifact,
-    builtin_base_type_registry_for_manifest, compare_latest_benchmark_runs, default_output_root,
-    latest_local_handoff, latest_review_artifact, persist_review_artifact,
+    Provenance, ReflectiveRuntime, ReviewRequest, ReviewTargetKind, RuntimeHandoffSnapshot,
+    RuntimeHandoffStore, RuntimeTopology, assemble_local_runtime_from_handoff, benchmark_scenarios,
+    build_review_artifact, builtin_base_type_registry_for_manifest, compare_latest_benchmark_runs,
+    default_output_root, latest_local_handoff, latest_review_artifact, persist_review_artifact,
     render_review_context_directives, review_artifacts_dir, run_benchmark_scenario,
     run_benchmark_suite, run_local_engineer_loop, run_local_session,
 };
@@ -85,6 +86,12 @@ where
                 &objective,
                 state_root,
             )?;
+        }
+        "engineer-read" => {
+            let topology = next_required(&mut args, "topology")?;
+            let state_root = next_optional_path(&mut args);
+            reject_extra_args(args)?;
+            run_engineer_read_probe(&topology, state_root)?;
         }
         "review-run" => {
             let base_type = next_required(&mut args, "base type")?;
@@ -570,6 +577,16 @@ pub fn run_engineer_loop_probe(
     println!("Verification status: {}", run.verification.status);
     print_text("Verification summary", &run.verification.summary);
     print_display("State root", run.state_root.display());
+    Ok(())
+}
+
+pub fn run_engineer_read_probe(
+    topology: &str,
+    state_root_override: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let state_root = resolved_engineer_read_state_root(state_root_override, topology)?;
+    let view = EngineerReadView::load(state_root)?;
+    view.print();
     Ok(())
 }
 
@@ -1105,6 +1122,21 @@ fn resolved_improvement_curation_read_state_root(
     Ok(state_root)
 }
 
+fn resolved_engineer_read_state_root(
+    explicit: Option<PathBuf>,
+    topology: &str,
+) -> crate::SimardResult<PathBuf> {
+    let state_root = resolved_state_root(
+        explicit,
+        "simard-engineer",
+        "terminal-shell",
+        topology,
+        "engineer-loop-run",
+    )?;
+    validate_engineer_read_state_root(&state_root)?;
+    Ok(state_root)
+}
+
 fn resolved_meeting_read_state_root(
     explicit: Option<PathBuf>,
     base_type: &str,
@@ -1128,6 +1160,11 @@ fn validate_meeting_read_state_root(state_root: &Path) -> crate::SimardResult<()
         state_root,
         &state_root.join("memory_records.json"),
     )?;
+    Ok(())
+}
+
+fn validate_engineer_read_state_root(state_root: &Path) -> crate::SimardResult<()> {
+    validated_engineer_read_artifacts(state_root)?;
     Ok(())
 }
 
@@ -1158,10 +1195,16 @@ fn validate_existing_read_state_root_root(
     state_root: &Path,
 ) -> crate::SimardResult<()> {
     let root_metadata =
-        fs::metadata(state_root).map_err(|error| crate::SimardError::InvalidStateRoot {
+        fs::symlink_metadata(state_root).map_err(|error| crate::SimardError::InvalidStateRoot {
             path: state_root.to_path_buf(),
             reason: format!("{mode_label} requires an existing state root directory: {error}"),
         })?;
+    if root_metadata.file_type().is_symlink() {
+        return Err(crate::SimardError::InvalidStateRoot {
+            path: state_root.to_path_buf(),
+            reason: format!("{mode_label} requires state-root to be a directory, not a symlink"),
+        });
+    }
     if root_metadata.is_dir() {
         return Ok(());
     }
@@ -1178,13 +1221,17 @@ fn require_existing_read_directory_for_mode(
     path: &Path,
     label: &str,
 ) -> crate::SimardResult<()> {
-    let metadata = fs::metadata(path).map_err(|error| crate::SimardError::InvalidStateRoot {
-        path: state_root.to_path_buf(),
-        reason: format!(
-            "{mode_label} requires '{}' to exist as a directory: {error}",
-            path.display()
-        ),
-    })?;
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| crate::SimardError::InvalidStateRoot {
+            path: state_root.to_path_buf(),
+            reason: format!("{mode_label} requires {label} to exist as a directory: {error}"),
+        })?;
+    if metadata.file_type().is_symlink() {
+        return Err(crate::SimardError::InvalidStateRoot {
+            path: state_root.to_path_buf(),
+            reason: format!("{mode_label} requires {label} to exist as a directory, not a symlink"),
+        });
+    }
     if metadata.is_dir() {
         return Ok(());
     }
@@ -1199,25 +1246,65 @@ fn require_existing_read_file_for_mode(
     mode_label: &str,
     state_root: &Path,
     path: &Path,
-) -> crate::SimardResult<()> {
-    let metadata = fs::metadata(path).map_err(|error| crate::SimardError::InvalidStateRoot {
-        path: state_root.to_path_buf(),
-        reason: format!(
-            "{mode_label} requires '{}' to exist as a file: {error}",
-            path.display()
-        ),
-    })?;
+) -> crate::SimardResult<PathBuf> {
+    let file_name = artifact_name(path);
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| crate::SimardError::InvalidStateRoot {
+            path: state_root.to_path_buf(),
+            reason: format!(
+                "{mode_label} requires {file_name} to exist as a regular file: {error}"
+            ),
+        })?;
+    if metadata.file_type().is_symlink() {
+        return Err(crate::SimardError::InvalidStateRoot {
+            path: state_root.to_path_buf(),
+            reason: format!(
+                "{mode_label} requires {file_name} to exist as a regular file, not a symlink"
+            ),
+        });
+    }
     if metadata.is_file() {
-        return Ok(());
+        return Ok(path.to_path_buf());
     }
 
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("file");
     Err(crate::SimardError::InvalidStateRoot {
         path: state_root.to_path_buf(),
-        reason: format!("{mode_label} requires {file_name} to exist as a file"),
+        reason: format!("{mode_label} requires {file_name} to exist as a regular file"),
+    })
+}
+
+fn artifact_name(path: &Path) -> &str {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file")
+}
+
+struct EngineerReadArtifacts {
+    handoff_path: PathBuf,
+    memory_path: PathBuf,
+    evidence_path: PathBuf,
+}
+
+fn validated_engineer_read_artifacts(
+    state_root: &Path,
+) -> crate::SimardResult<EngineerReadArtifacts> {
+    validate_existing_read_state_root_root("engineer read", state_root)?;
+    Ok(EngineerReadArtifacts {
+        handoff_path: require_existing_read_file_for_mode(
+            "engineer read",
+            state_root,
+            &state_root.join("latest_handoff.json"),
+        )?,
+        memory_path: require_existing_read_file_for_mode(
+            "engineer read",
+            state_root,
+            &state_root.join("memory_records.json"),
+        )?,
+        evidence_path: require_existing_read_file_for_mode(
+            "engineer read",
+            state_root,
+            &state_root.join("evidence_records.json"),
+        )?,
     })
 }
 
@@ -1232,6 +1319,244 @@ fn parse_runtime_topology(value: &str) -> crate::SimardResult<RuntimeTopology> {
             help: "expected 'single-process', 'multi-process', or 'distributed'".to_string(),
         }),
     }
+}
+
+struct EngineerReadView {
+    state_root: PathBuf,
+    identity: String,
+    selected_base_type: String,
+    topology: String,
+    session_phase: String,
+    objective_metadata: String,
+    repo_root: PathBuf,
+    repo_branch: String,
+    repo_head: String,
+    worktree_dirty: String,
+    changed_files: String,
+    active_goals: Vec<String>,
+    carried_meeting_decisions: Vec<String>,
+    selected_action: String,
+    action_plan: String,
+    verification_steps: String,
+    action_status: String,
+    changed_files_after_action: String,
+    verification_status: String,
+    verification_summary: String,
+    memory_record_count: usize,
+    evidence_record_count: usize,
+}
+
+impl EngineerReadView {
+    fn load(state_root: PathBuf) -> crate::SimardResult<Self> {
+        let artifacts = validated_engineer_read_artifacts(&state_root)?;
+        let handoff = latest_engineer_handoff(&artifacts.handoff_path)?;
+        let session = handoff.session.as_ref().ok_or_else(|| {
+            crate::SimardError::InvalidHandoffSnapshot {
+                field: "session".to_string(),
+                reason: "engineer read requires latest_handoff.json to contain a persisted session snapshot"
+                    .to_string(),
+            }
+        })?;
+
+        FileBackedMemoryStore::try_new(artifacts.memory_path)?;
+        FileBackedEvidenceStore::try_new(artifacts.evidence_path)?;
+
+        Ok(Self {
+            state_root,
+            identity: handoff.identity_name,
+            selected_base_type: handoff.selected_base_type.to_string(),
+            topology: handoff.topology.to_string(),
+            session_phase: session.phase.to_string(),
+            objective_metadata: render_redacted_objective_metadata(&session.objective)?,
+            repo_root: PathBuf::from(required_engineer_evidence_value(
+                &handoff.evidence_records,
+                "repo-root=",
+            )?),
+            repo_branch: required_engineer_evidence_value(
+                &handoff.evidence_records,
+                "repo-branch=",
+            )?
+            .to_string(),
+            repo_head: required_engineer_evidence_value(&handoff.evidence_records, "repo-head=")?
+                .to_string(),
+            worktree_dirty: required_engineer_evidence_value(
+                &handoff.evidence_records,
+                "worktree-dirty=",
+            )?
+            .to_string(),
+            changed_files: required_engineer_evidence_value(
+                &handoff.evidence_records,
+                "changed-files=",
+            )?
+            .to_string(),
+            active_goals: parse_engineer_summary_list(
+                required_engineer_evidence_value(&handoff.evidence_records, "active-goals=")?,
+                ", ",
+            ),
+            carried_meeting_decisions: parse_carried_meeting_decisions(
+                required_engineer_evidence_value(
+                    &handoff.evidence_records,
+                    "carried-meeting-decisions=",
+                )?,
+            )?,
+            selected_action: required_engineer_evidence_value(
+                &handoff.evidence_records,
+                "selected-action=",
+            )?
+            .to_string(),
+            action_plan: required_engineer_evidence_value(
+                &handoff.evidence_records,
+                "action-plan=",
+            )?
+            .to_string(),
+            verification_steps: required_engineer_evidence_value(
+                &handoff.evidence_records,
+                "action-verification-steps=",
+            )?
+            .to_string(),
+            action_status: required_engineer_evidence_value(
+                &handoff.evidence_records,
+                "action-status=",
+            )?
+            .to_string(),
+            changed_files_after_action: required_engineer_evidence_value(
+                &handoff.evidence_records,
+                "changed-files-after-action=",
+            )?
+            .to_string(),
+            verification_status: required_engineer_evidence_value(
+                &handoff.evidence_records,
+                "verification-status=",
+            )?
+            .to_string(),
+            verification_summary: required_engineer_evidence_value(
+                &handoff.evidence_records,
+                "verification-summary=",
+            )?
+            .to_string(),
+            memory_record_count: handoff.memory_records.len(),
+            evidence_record_count: handoff.evidence_records.len(),
+        })
+    }
+
+    fn print(&self) {
+        println!("Probe mode: engineer-read");
+        print_text("Identity", &self.identity);
+        print_text("Selected base type", &self.selected_base_type);
+        print_text("Topology", &self.topology);
+        print_display("State root", self.state_root.display());
+        print_text("Session phase", &self.session_phase);
+        print_text("Objective metadata", &self.objective_metadata);
+        print_display("Repo root", self.repo_root.display());
+        print_text("Repo branch", &self.repo_branch);
+        print_text("Repo head", &self.repo_head);
+        print_text("Worktree dirty", &self.worktree_dirty);
+        print_text("Changed files", &self.changed_files);
+        println!("Active goals count: {}", self.active_goals.len());
+        for (index, goal) in self.active_goals.iter().enumerate() {
+            print_text(&format!("Active goal {}", index + 1), goal);
+        }
+        println!(
+            "Carried meeting decisions: {}",
+            self.carried_meeting_decisions.len()
+        );
+        for (index, decision) in self.carried_meeting_decisions.iter().enumerate() {
+            print_text(&format!("Carried meeting decision {}", index + 1), decision);
+        }
+        print_text("Selected action", &self.selected_action);
+        print_text("Action plan", &self.action_plan);
+        print_text("Verification steps", &self.verification_steps);
+        print_text("Action status", &self.action_status);
+        print_text(
+            "Changed files after action",
+            &self.changed_files_after_action,
+        );
+        print_text("Verification status", &self.verification_status);
+        print_text("Verification summary", &self.verification_summary);
+        println!("Memory records: {}", self.memory_record_count);
+        println!("Evidence records: {}", self.evidence_record_count);
+    }
+}
+
+fn latest_engineer_handoff(handoff_path: &Path) -> crate::SimardResult<RuntimeHandoffSnapshot> {
+    FileBackedHandoffStore::try_new(handoff_path)?
+        .latest()?
+        .ok_or_else(|| crate::SimardError::InvalidHandoffSnapshot {
+            field: "latest_handoff.json".to_string(),
+            reason:
+                "engineer read requires latest_handoff.json to contain a persisted handoff snapshot"
+                    .to_string(),
+        })
+}
+
+fn required_engineer_evidence_value<'a>(
+    evidence_records: &'a [EvidenceRecord],
+    prefix: &str,
+) -> crate::SimardResult<&'a str> {
+    evidence_records
+        .iter()
+        .rev()
+        .find_map(|record| record.detail.strip_prefix(prefix))
+        .ok_or_else(|| crate::SimardError::InvalidHandoffSnapshot {
+            field: prefix.trim_end_matches('=').to_string(),
+            reason: format!(
+                "engineer read requires latest_handoff.json to carry persisted engineer evidence '{}' for operator output",
+                prefix.trim_end_matches('=')
+            ),
+        })
+}
+
+fn parse_engineer_summary_list(raw: &str, separator: &str) -> Vec<String> {
+    if raw == "<none>" {
+        return Vec::new();
+    }
+
+    raw.split(separator)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn parse_carried_meeting_decisions(raw: &str) -> crate::SimardResult<Vec<String>> {
+    if raw == "<none>" {
+        return Ok(Vec::new());
+    }
+
+    let persisted_records = raw
+        .split(" || ")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    if persisted_records.is_empty() {
+        return Err(crate::SimardError::InvalidHandoffSnapshot {
+            field: "carried-meeting-decisions".to_string(),
+            reason: "engineer read requires latest_handoff.json to carry at least one persisted meeting record or '<none>' for carried-meeting-decisions".to_string(),
+        });
+    }
+
+    let mut decisions = Vec::new();
+    for persisted_record in persisted_records {
+        let record = PersistedMeetingRecord::parse(persisted_record).map_err(|error| {
+            crate::SimardError::InvalidHandoffSnapshot {
+                field: "carried-meeting-decisions".to_string(),
+                reason: format!(
+                    "engineer read requires latest_handoff.json to carry valid persisted meeting records for carried-meeting-decisions: {error}"
+                ),
+            }
+        })?;
+        decisions.extend(record.decisions);
+    }
+    Ok(decisions)
+}
+
+fn render_redacted_objective_metadata(value: &str) -> crate::SimardResult<String> {
+    crate::sanitization::normalize_objective_metadata(value).ok_or_else(|| {
+        crate::SimardError::InvalidHandoffSnapshot {
+            field: "session.objective".to_string(),
+            reason: "engineer read requires latest_handoff.json to persist trusted objective metadata as objective-metadata(chars=<n>, words=<n>, lines=<n>)".to_string(),
+        }
+    })
 }
 
 fn next_required(

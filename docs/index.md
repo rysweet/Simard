@@ -1,6 +1,6 @@
 ---
 title: Simard documentation
-description: Start here for the shipped `simard` operator CLI, compatibility binaries, runtime contracts, and benchmark flow.
+description: Start here for the shipped `simard` operator CLI, the `engineer read` audit companion, compatibility binaries, runtime contracts, and benchmark flow.
 last_updated: 2026-03-30
 review_schedule: as-needed
 owner: simard
@@ -10,7 +10,7 @@ owner: simard
 
 `simard` is the canonical operator-facing CLI.
 
-The shipped command tree covers `engineer`, `meeting`, `goal-curation`, `improvement-curation`, `gym`, `review`, and `bootstrap` from one binary. The legacy `simard_operator_probe` and `simard-gym` binaries remain available as compatibility surfaces while operators migrate, but the primary product surface is now `simard ...`.
+The shipped command tree covers `engineer`, `meeting`, `goal-curation`, `improvement-curation`, `gym`, `review`, and `bootstrap` from one binary, including the read-only `engineer read` audit companion. The legacy `simard_operator_probe` and `simard-gym` binaries remain available as compatibility surfaces while operators migrate, but the primary product surface is now `simard ...`.
 
 ## Start here
 
@@ -20,8 +20,8 @@ The shipped command tree covers `engineer`, `meeting`, `goal-curation`, `improve
 - [How to carry meeting decisions into engineer sessions](./howto/carry-meeting-decisions-into-engineer-sessions.md) - Persist meeting records under a shared state root and confirm later engineer runs carry them forward.
 - [How to inspect meeting records](./howto/inspect-meeting-records.md) - Read back the latest durable meeting record without mutating stored state.
 - [How to inspect improvement-curation state](./howto/inspect-improvement-curation-state.md) - Read back the latest approved, deferred, and promoted improvement state without mutation.
-- [Simard CLI reference](./reference/simard-cli.md) - Look up the shipped command tree and compatibility mappings.
-- [Runtime contracts reference](./reference/runtime-contracts.md) - Look up executable contracts and lifecycle guarantees.
+- [Simard CLI reference](./reference/simard-cli.md) - Look up the shipped command tree, `engineer read` audit surface, and compatibility mappings.
+- [Runtime contracts reference](./reference/runtime-contracts.md) - Look up executable contracts, state-root guarantees, and the shipped engineer audit readback semantics.
 - [Concept: truthful runtime metadata](./concepts/truthful-runtime-metadata.md) - Read the design rationale behind the stricter runtime contract.
 
 ## Canonical executable surface

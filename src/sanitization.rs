@@ -1,13 +1,60 @@
-pub fn objective_metadata(objective: &str) -> String {
-    let chars = objective.chars().count();
-    let words = objective.split_whitespace().count();
-    let lines = if objective.is_empty() {
-        0
-    } else {
-        objective.lines().count()
-    };
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ObjectiveMetadataSummary {
+    chars: usize,
+    words: usize,
+    lines: usize,
+}
 
-    format!("objective-metadata(chars={chars}, words={words}, lines={lines})")
+impl ObjectiveMetadataSummary {
+    fn from_objective(objective: &str) -> Self {
+        Self {
+            chars: objective.chars().count(),
+            words: objective.split_whitespace().count(),
+            lines: if objective.is_empty() {
+                0
+            } else {
+                objective.lines().count()
+            },
+        }
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        let inner = raw.strip_prefix("objective-metadata(")?.strip_suffix(')')?;
+        let mut chars = None;
+        let mut words = None;
+        let mut lines = None;
+        for segment in inner.split(", ") {
+            let (key, value) = segment.split_once('=')?;
+            let value = value.parse::<usize>().ok()?;
+            match key {
+                "chars" if chars.is_none() => chars = Some(value),
+                "words" if words.is_none() => words = Some(value),
+                "lines" if lines.is_none() => lines = Some(value),
+                _ => return None,
+            }
+        }
+
+        Some(Self {
+            chars: chars?,
+            words: words?,
+            lines: lines?,
+        })
+    }
+
+    fn render(self) -> String {
+        format!(
+            "objective-metadata(chars={}, words={}, lines={})",
+            self.chars, self.words, self.lines
+        )
+    }
+}
+
+pub fn objective_metadata(objective: &str) -> String {
+    ObjectiveMetadataSummary::from_objective(objective).render()
+}
+
+pub fn normalize_objective_metadata(value: &str) -> Option<String> {
+    ObjectiveMetadataSummary::parse(value).map(ObjectiveMetadataSummary::render)
 }
 
 pub fn sanitize_terminal_text(raw: &str) -> String {
@@ -143,6 +190,26 @@ fn is_sensitive_key(prefix: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::sanitize_terminal_text;
+    use super::{normalize_objective_metadata, objective_metadata};
+
+    #[test]
+    fn objective_metadata_round_trips_only_the_strict_shape() {
+        let summary = objective_metadata("hello world");
+        assert_eq!(
+            normalize_objective_metadata(&summary).as_deref(),
+            Some(summary.as_str())
+        );
+    }
+
+    #[test]
+    fn objective_metadata_rejects_untrusted_extra_fields() {
+        assert_eq!(
+            normalize_objective_metadata(
+                "objective-metadata(chars=11, words=2, lines=1, token=LEAKME)"
+            ),
+            None
+        );
+    }
 
     #[test]
     fn terminal_sanitization_strips_ansi_sequences() {

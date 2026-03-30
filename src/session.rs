@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::base_types::BaseTypeId;
 use crate::error::{SimardError, SimardResult};
 use crate::identity::OperatingMode;
-use crate::sanitization::objective_metadata;
+use crate::sanitization::{normalize_objective_metadata, objective_metadata};
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub struct SessionId(String);
@@ -151,16 +151,8 @@ impl SessionRecord {
 
     pub fn redacted_for_handoff(&self) -> Self {
         let mut redacted = self.clone();
-        redacted.objective = if self.objective.starts_with("objective-metadata(")
-            && self.objective.ends_with(')')
-            && self.objective.contains("chars=")
-            && self.objective.contains("words=")
-            && self.objective.contains("lines=")
-        {
-            self.objective.clone()
-        } else {
-            objective_metadata(&self.objective)
-        };
+        redacted.objective = normalize_objective_metadata(&self.objective)
+            .unwrap_or_else(|| objective_metadata(&self.objective));
         redacted
     }
 
