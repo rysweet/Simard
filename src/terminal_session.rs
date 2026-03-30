@@ -280,6 +280,31 @@ fn transcript_preview(transcript: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::normalize_shell;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    fn assert_invalid_shell(shell: &str, expected: &str) {
+        let error = normalize_shell(shell, "terminal-shell").unwrap_err();
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected error for {shell:?}: {error}"
+        );
+    }
+
+    fn unique_test_path(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "simard-terminal-shell-{label}-{}-{nanos}",
+            std::process::id()
+        ))
+    }
 
     #[test]
     fn normalize_shell_accepts_known_safe_absolute_shell() {
@@ -291,22 +316,75 @@ mod tests {
 
     #[test]
     fn normalize_shell_rejects_metacharacters() {
-        let error = normalize_shell("/usr/bin/bash$(printf-pwned)", "terminal-shell").unwrap_err();
-        assert!(
-            error.to_string().contains(
-                "only accepts an absolute shell executable path using safe path characters"
-            ),
-            "unexpected error: {error}"
-        );
+        for shell in [
+            "/usr/bin/bash$(printf-pwned)",
+            "/usr/bin/bash;whoami",
+            "/usr/bin/bash&",
+            "/usr/bin/bash|cat",
+            "/usr/bin/bash>file",
+            "/usr/bin/bash`whoami`",
+        ] {
+            assert_invalid_shell(
+                shell,
+                "only accepts an absolute shell executable path using safe path characters",
+            );
+        }
     }
 
     #[test]
     fn normalize_shell_rejects_relative_paths() {
-        let error = normalize_shell("bash", "terminal-shell").unwrap_err();
+        assert_invalid_shell(
+            "bash",
+            "only accepts an absolute shell executable path using safe path characters",
+        );
+    }
+
+    #[test]
+    fn normalize_shell_rejects_empty_or_whitespace_only_values() {
+        for shell in ["", "   ", "\t", "/usr/bin/bash whoami"] {
+            assert_invalid_shell(
+                shell,
+                "only accepts an absolute shell executable path using safe path characters",
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_shell_rejects_missing_files() {
+        let missing = unique_test_path("missing");
+        assert_invalid_shell(missing.to_string_lossy().as_ref(), "could not be inspected");
+    }
+
+    #[test]
+    fn normalize_shell_rejects_directories() {
+        let directory = unique_test_path("dir");
+        fs::create_dir(&directory).unwrap();
+        let result = normalize_shell(directory.to_string_lossy().as_ref(), "terminal-shell");
+        fs::remove_dir(&directory).unwrap();
+
+        let error = result.unwrap_err();
         assert!(
-            error.to_string().contains(
-                "only accepts an absolute shell executable path using safe path characters"
-            ),
+            error.to_string().contains("must be an executable file"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normalize_shell_rejects_non_executable_files() {
+        let file = unique_test_path("file");
+        fs::write(&file, "#!/bin/sh\nexit 0\n").unwrap();
+
+        let mut permissions = fs::metadata(&file).unwrap().permissions();
+        permissions.set_mode(0o644);
+        fs::set_permissions(&file, permissions).unwrap();
+
+        let result = normalize_shell(file.to_string_lossy().as_ref(), "terminal-shell");
+        fs::remove_file(&file).unwrap();
+
+        let error = result.unwrap_err();
+        assert!(
+            error.to_string().contains("must be an executable file"),
             "unexpected error: {error}"
         );
     }
