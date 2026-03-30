@@ -287,6 +287,45 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
+    enum TempPathKind {
+        File,
+        Directory,
+    }
+
+    struct TempPathGuard {
+        path: PathBuf,
+        kind: TempPathKind,
+    }
+
+    impl TempPathGuard {
+        fn directory(path: PathBuf) -> Self {
+            Self {
+                path,
+                kind: TempPathKind::Directory,
+            }
+        }
+
+        fn file(path: PathBuf) -> Self {
+            Self {
+                path,
+                kind: TempPathKind::File,
+            }
+        }
+    }
+
+    impl Drop for TempPathGuard {
+        fn drop(&mut self) {
+            match self.kind {
+                TempPathKind::File => {
+                    let _ = fs::remove_file(&self.path);
+                }
+                TempPathKind::Directory => {
+                    let _ = fs::remove_dir(&self.path);
+                }
+            }
+        }
+    }
+
     fn assert_invalid_shell(shell: &str, expected: &str) {
         let error = normalize_shell(shell, "terminal-shell").unwrap_err();
         assert!(
@@ -359,8 +398,8 @@ mod tests {
     fn normalize_shell_rejects_directories() {
         let directory = unique_test_path("dir");
         fs::create_dir(&directory).unwrap();
+        let _guard = TempPathGuard::directory(directory.clone());
         let result = normalize_shell(directory.to_string_lossy().as_ref(), "terminal-shell");
-        fs::remove_dir(&directory).unwrap();
 
         let error = result.unwrap_err();
         assert!(
@@ -374,13 +413,13 @@ mod tests {
     fn normalize_shell_rejects_non_executable_files() {
         let file = unique_test_path("file");
         fs::write(&file, "#!/bin/sh\nexit 0\n").unwrap();
+        let _guard = TempPathGuard::file(file.clone());
 
         let mut permissions = fs::metadata(&file).unwrap().permissions();
         permissions.set_mode(0o644);
         fs::set_permissions(&file, permissions).unwrap();
 
         let result = normalize_shell(file.to_string_lossy().as_ref(), "terminal-shell");
-        fs::remove_file(&file).unwrap();
 
         let error = result.unwrap_err();
         assert!(
