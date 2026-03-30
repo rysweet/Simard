@@ -188,7 +188,10 @@ fn split_existing_prefix(path: &Path) -> SimardResult<(PathBuf, Vec<OsString>)> 
 
     loop {
         match fs::symlink_metadata(&existing) {
-            Ok(_) => return Ok((existing, missing_segments)),
+            Ok(_) => {
+                missing_segments.reverse();
+                return Ok((existing, missing_segments));
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let segment =
                     existing
@@ -777,6 +780,22 @@ mod tests {
         let resolved =
             validate_state_root(nested.clone()).expect("existing state root should pass");
         let expected = fs::canonicalize(&nested).expect("existing state root should canonicalize");
+
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn validate_state_root_preserves_missing_segment_order() {
+        let temp_dir = TestDir::new("simard-state-root-order");
+        let requested = temp_dir.path().join("level1").join("level2").join("level3");
+
+        let resolved =
+            validate_state_root(requested).expect("missing state root path should resolve safely");
+        let expected = fs::canonicalize(temp_dir.path())
+            .expect("existing ancestor should canonicalize")
+            .join("level1")
+            .join("level2")
+            .join("level3");
 
         assert_eq!(resolved, expected);
     }

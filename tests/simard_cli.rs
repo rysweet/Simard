@@ -157,12 +157,14 @@ fn simard_engineer_run_drives_the_bounded_engineer_loop_from_the_primary_cli() {
 
 #[test]
 fn simard_engineer_terminal_exposes_the_terminal_backed_engineer_surface() {
+    let state_root = TempDirGuard::new("simard-cli-terminal");
     let objective = "working-directory: .\ncommand: pwd\ncommand: printf \"terminal-cli-ok\\n\"";
     let simard_output = Command::new(env!("CARGO_BIN_EXE_simard"))
         .arg("engineer")
         .arg("terminal")
         .arg("single-process")
         .arg(objective)
+        .arg(state_root.path())
         .output()
         .expect("simard engineer terminal should launch");
     let simard_rendered = rendered_output(&simard_output);
@@ -175,6 +177,7 @@ fn simard_engineer_terminal_exposes_the_terminal_backed_engineer_surface() {
         "Selected base type: terminal-shell",
         "Adapter implementation: terminal-shell::local-pty",
         "terminal-cli-ok",
+        &format!("State root: {}", state_root.path().display()),
     ] {
         assert!(
             simard_rendered.contains(expected),
@@ -186,6 +189,7 @@ fn simard_engineer_terminal_exposes_the_terminal_backed_engineer_surface() {
         .arg("terminal-run")
         .arg("single-process")
         .arg(objective)
+        .arg(state_root.path())
         .output()
         .expect("legacy terminal-run should launch");
     let legacy_rendered = rendered_output(&legacy_output);
@@ -198,6 +202,16 @@ fn simard_engineer_terminal_exposes_the_terminal_backed_engineer_surface() {
         simard_rendered, legacy_rendered,
         "the canonical terminal engineer surface should preserve the legacy terminal-run output exactly until operators migrate"
     );
+    for expected in [
+        "memory_records.json",
+        "evidence_records.json",
+        "latest_handoff.json",
+    ] {
+        assert!(
+            state_root.path().join(expected).is_file(),
+            "terminal engineer mode should persist {expected} under the selected state root"
+        );
+    }
 }
 
 #[test]
