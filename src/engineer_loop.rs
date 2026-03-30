@@ -17,6 +17,7 @@ use crate::session::{SessionPhase, SessionRecord, UuidSessionIdGenerator};
 const ENGINEER_IDENTITY: &str = "simard-engineer";
 const ENGINEER_BASE_TYPE: &str = "terminal-shell";
 const EXECUTION_SCOPE: &str = "local-only";
+const MAX_CARRIED_MEETING_DECISIONS: usize = 3;
 const CLEARED_GIT_ENV_VARS: &[&str] = &[
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -36,6 +37,7 @@ pub struct RepoInspection {
     pub worktree_dirty: bool,
     pub changed_files: Vec<String>,
     pub active_goals: Vec<GoalRecord>,
+    pub carried_meeting_decisions: Vec<String>,
     pub architecture_gap_summary: String,
 }
 
@@ -123,6 +125,7 @@ fn inspect_workspace(workspace_root: &Path, state_root: &Path) -> SimardResult<R
     let worktree_dirty = !changed_files.is_empty();
     let active_goals =
         FileBackedGoalStore::try_new(state_root.join("goal_records.json"))?.active_top_goals(5)?;
+    let carried_meeting_decisions = load_carried_meeting_decisions(state_root)?;
 
     Ok(RepoInspection {
         workspace_root,
@@ -136,8 +139,41 @@ fn inspect_workspace(workspace_root: &Path, state_root: &Path) -> SimardResult<R
         worktree_dirty,
         changed_files,
         active_goals,
+        carried_meeting_decisions,
         architecture_gap_summary: architecture_gap_summary(&repo_root)?,
     })
+}
+
+fn load_carried_meeting_decisions(state_root: &Path) -> SimardResult<Vec<String>> {
+    let memory_store = FileBackedMemoryStore::try_new(state_root.join("memory_records.json"))?;
+    let mut carried = memory_store
+        .list(MemoryScope::Decision)?
+        .into_iter()
+        .filter_map(|record| match is_meeting_decision_record(&record.value) {
+            true => Some(record.value),
+            false => None,
+        })
+        .collect::<Vec<_>>();
+
+    if carried.len() > MAX_CARRIED_MEETING_DECISIONS {
+        carried = carried.split_off(carried.len() - MAX_CARRIED_MEETING_DECISIONS);
+    }
+
+    Ok(carried)
+}
+
+fn is_meeting_decision_record(value: &str) -> bool {
+    [
+        "agenda=",
+        "updates=",
+        "decisions=",
+        "risks=",
+        "next_steps=",
+        "open_questions=",
+        "goals=",
+    ]
+    .into_iter()
+    .all(|fragment| value.contains(fragment))
 }
 
 fn architecture_gap_summary(repo_root: &Path) -> SimardResult<String> {
@@ -181,10 +217,26 @@ fn architecture_gap_summary(repo_root: &Path) -> SimardResult<String> {
 }
 
 fn select_engineer_action(inspection: &RepoInspection) -> SimardResult<SelectedEngineerAction> {
+    let carry_forward_note = if inspection.carried_meeting_decisions.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " Shared state root also carries {} meeting decision record{}, so the engineer loop keeps that handoff visible while choosing the next safe repo-native action.",
+            inspection.carried_meeting_decisions.len(),
+            if inspection.carried_meeting_decisions.len() == 1 {
+                ""
+            } else {
+                "s"
+            }
+        )
+    };
+
     if inspection.repo_root.join("Cargo.toml").is_file() {
         return Ok(SelectedEngineerAction {
             label: "cargo-metadata-scan".to_string(),
-            rationale: "Detected a Rust workspace via Cargo.toml, so the next honest v1 action is a local argv-only cargo metadata scan that inspects the workspace graph without pretending remote orchestration exists.".to_string(),
+            rationale: format!(
+                "Detected a Rust workspace via Cargo.toml, so the next honest v1 action is a local argv-only cargo metadata scan that inspects the workspace graph without pretending remote orchestration exists.{carry_forward_note}"
+            ),
             argv: vec![
                 "cargo".to_string(),
                 "metadata".to_string(),
@@ -198,8 +250,14 @@ fn select_engineer_action(inspection: &RepoInspection) -> SimardResult<SelectedE
     if inspection.repo_root.join(".git").exists() {
         return Ok(SelectedEngineerAction {
             label: "git-tracked-file-scan".to_string(),
-            rationale: "No repo-native language manifest was detected, so the loop falls back to a local argv-only scan of tracked files instead of inventing unsupported tooling.".to_string(),
-            argv: vec!["git".to_string(), "ls-files".to_string(), "--cached".to_string()],
+            rationale: format!(
+                "No repo-native language manifest was detected, so the loop falls back to a local argv-only scan of tracked files instead of inventing unsupported tooling.{carry_forward_note}"
+            ),
+            argv: vec![
+                "git".to_string(),
+                "ls-files".to_string(),
+                "--cached".to_string(),
+            ],
         });
     }
 
@@ -286,6 +344,17 @@ fn verify_engineer_action(
         });
     }
     checks.push(format!("active-goals={}", post.active_goals.len()));
+
+    if post.carried_meeting_decisions != inspection.carried_meeting_decisions {
+        return Err(SimardError::VerificationFailed {
+            reason: "carried meeting decision memory changed during a non-mutating local engineer action"
+                .to_string(),
+        });
+    }
+    checks.push(format!(
+        "carried-meeting-decisions={}",
+        post.carried_meeting_decisions.len()
+    ));
 
     match action.selected.label.as_str() {
         "cargo-metadata-scan" => {
@@ -424,6 +493,14 @@ fn persist_engineer_loop_artifacts(
                     .join(", ")
             }
         ),
+        format!(
+            "carried-meeting-decisions={}",
+            if inspection.carried_meeting_decisions.is_empty() {
+                "<none>".to_string()
+            } else {
+                inspection.carried_meeting_decisions.join(" || ")
+            }
+        ),
         format!("architecture-gap={}", inspection.architecture_gap_summary),
         format!("execution-scope={EXECUTION_SCOPE}"),
         format!("selected-action={}", action.selected.label),
@@ -455,7 +532,7 @@ fn persist_engineer_loop_artifacts(
         key: summary_key.clone(),
         scope: MemoryScope::SessionSummary,
         value: format!(
-            "engineer-loop-summary | repo-root={} | repo-branch={} | worktree-dirty={} | active-goals={} | selected-action={} | verification-status={} | execution-scope={EXECUTION_SCOPE}",
+            "engineer-loop-summary | repo-root={} | repo-branch={} | worktree-dirty={} | active-goals={} | carried-meeting-decisions={} | selected-action={} | verification-status={} | execution-scope={EXECUTION_SCOPE}",
             inspection.repo_root.display(),
             inspection.branch,
             inspection.worktree_dirty,
@@ -469,6 +546,7 @@ fn persist_engineer_loop_artifacts(
                     .collect::<Vec<_>>()
                     .join(", ")
             },
+            inspection.carried_meeting_decisions.len(),
             action.selected.label,
             verification.status
         ),
@@ -482,8 +560,10 @@ fn persist_engineer_loop_artifacts(
         key: decision_key.clone(),
         scope: MemoryScope::Decision,
         value: format!(
-            "engineer-loop-decision | {} | {}",
-            action.selected.rationale, verification.summary
+            "engineer-loop-decision | carried-meeting-decisions={} | {} | {}",
+            inspection.carried_meeting_decisions.len(),
+            action.selected.rationale,
+            verification.summary
         ),
         session_id: session.id.clone(),
         recorded_in: SessionPhase::Persistence,

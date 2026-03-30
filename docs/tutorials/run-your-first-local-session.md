@@ -7,6 +7,7 @@ owner: simard
 doc_type: tutorial
 related:
   - ../index.md
+  - ../howto/carry-meeting-decisions-into-engineer-sessions.md
   - ../howto/configure-bootstrap-and-inspect-reflection.md
   - ../reference/runtime-contracts.md
 ---
@@ -20,6 +21,7 @@ This tutorial follows the runtime path that exists in the repository today.
 - How the local runtime starts with explicit configuration
 - How explicit opt-in defaults behave
 - What reflection reports after a run
+- How meeting decisions flow into later engineer sessions
 - How durable goal stewardship flows into later sessions
 - How runtime node, mailbox, and backend wiring appear in reflection
 - What stop semantics look like in practice
@@ -126,7 +128,56 @@ Selected action: cargo-metadata-scan
 Verification status: verified
 ```
 
-**Checkpoint**: Simard is now doing more than opening a shell. It is inspecting repo state, choosing a bounded repo-native action, verifying that repo grounding stayed stable, and persisting truthful memory/evidence for the loop. When a shared state root already contains durable goals, the same probe also reports the active top-goal set.
+**Checkpoint**: Simard is now doing more than opening a shell. It is inspecting repo state, choosing a bounded repo-native action, verifying that repo grounding stayed stable, and persisting truthful memory/evidence for the loop. When a shared state root already contains durable goals or meeting decision memory, the same probe also reports the active top-goal set and up to the three most recent carried meeting records.
+
+### Variation: carry meeting decisions into the engineer loop
+
+Use the same explicit state root for a facilitator run and a later engineer-loop run:
+
+```bash
+STATE_ROOT="$(mktemp -d /tmp/simard-meeting-handoff.XXXXXX)"
+
+MEETING_OBJECTIVE="$(cat <<'EOF'
+agenda: align the next Simard workstream
+decision: preserve meeting-to-engineer continuity
+risk: workflow routing is still unreliable
+next-step: keep durable priorities visible
+open-question: how aggressively should Simard reprioritize?
+goal: Preserve meeting handoff | priority=1 | status=active | rationale=meeting decisions must shape later work
+goal: Keep outside-in verification strong | priority=2 | status=active | rationale=operator confidence depends on real product exercise
+EOF
+)"
+
+cargo run --quiet --bin simard_operator_probe -- \
+  meeting-run local-harness single-process \
+  "$MEETING_OBJECTIVE" \
+  "$STATE_ROOT"
+
+cargo run --quiet --bin simard_operator_probe -- \
+  engineer-loop-run single-process . \
+  $'inspect the repository state\nrun one safe local engineering action\nverify the outcome explicitly\npersist truthful local evidence and memory' \
+  "$STATE_ROOT"
+```
+
+Look for these lines in the second command output:
+
+```text
+Probe mode: engineer-loop-run
+Repo root: /path/to/repo
+Active goals count: 2
+Active goal 1: p1 [active] Preserve meeting handoff
+Active goal 2: p2 [active] Keep outside-in verification strong
+Carried meeting decisions: 1
+Carried meeting decision 1: agenda=align the next Simard workstream; updates=[]; decisions=[preserve meeting-to-engineer continuity]; risks=[workflow routing is still unreliable]; next_steps=[keep durable priorities visible]; open_questions=[how aggressively should Simard reprioritize?]; goals=[p1:active:Preserve meeting handoff:meeting decisions must shape later work | p2:active:Keep outside-in verification strong:operator confidence depends on real product exercise]
+Execution scope: local-only
+Selected action: cargo-metadata-scan
+Verification status: verified
+State root: /tmp/simard-meeting-handoff.XXXXXX
+```
+
+The probe also prints repo branch and HEAD, worktree state, the architecture-gap summary, the selected action command, and the verification summary between those lines.
+
+**Checkpoint**: this is the Phase 4 product seam now present in the repo. Meeting mode contributes durable decision memory, and the later engineer loop carries that advisory context forward without claiming that the meeting itself performed implementation work. If the shared state root contains more than three meeting records, the engineer loop currently surfaces only the three most recent ones.
 
 ## Step 3: Curate durable top goals and reuse them in later sessions
 

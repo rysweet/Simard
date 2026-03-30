@@ -17,6 +17,7 @@ This docs set describes the runtime behavior that exists in this repository toda
 - [Tutorial: Run your first local session](./tutorials/run-your-first-local-session.md) - Walk the local runtime flow end to end.
 - [Tutorial: Run your first benchmark gym suite](./tutorials/run-your-first-benchmark-gym.md) - Run the shipped starter benchmark suite and inspect the emitted artifacts.
 - [How to configure bootstrap and inspect reflection](./howto/configure-bootstrap-and-inspect-reflection.md) - Verify bootstrap inputs and inspect the truthful reflection surface.
+- [How to carry meeting decisions into engineer sessions](./howto/carry-meeting-decisions-into-engineer-sessions.md) - Persist meeting records under a shared state root and confirm that later engineer-loop runs carry forward up to the three most recent ones.
 - [Runtime contracts reference](./reference/runtime-contracts.md) - Look up the current public API and error contracts.
 - [Concept: truthful runtime metadata](./concepts/truthful-runtime-metadata.md) - Read the design rationale behind the stricter contract.
 
@@ -33,7 +34,7 @@ Today Simard provides:
 - a dedicated `simard-goal-curator` identity that persists durable backlog entries and exposes the active top 5 goals through reflection
 - a dedicated `simard-improvement-curator` identity that consumes persisted review artifacts, promotes explicitly approved proposals into durable active or proposed priorities, and keeps the loop operator-reviewable
 - `single-process` for all builtin base types plus loopback `multi-process` execution for `rusty-clawd`, with `terminal-shell` intentionally limited to local single-process runs and unsupported pairs failing explicitly
-- a local-first engineer loop probe that inspects repo state, runs one explicit safe engineering action, verifies the outcome, persists truthful local evidence/memory, and reports the active goal set without pretending remote orchestration already exists
+- a local-first engineer loop probe that inspects repo state, runs one explicit safe engineering action, verifies the outcome, persists truthful local evidence/memory, reports the active goal set, and surfaces up to the three most recent carried meeting decisions separately without pretending remote orchestration already exists
 - a starter benchmark gym suite that exercises all current builtin base-type selections plus a composite identity session through `cargo run --quiet --bin simard-gym -- run-suite starter`
 - benchmark artifacts written under `target/simard-gym/`, including per-scenario JSON and text summaries, a dedicated review artifact, and a suite summary
 - `ManifestContract { entrypoint, composition, precedence, provenance, freshness }`

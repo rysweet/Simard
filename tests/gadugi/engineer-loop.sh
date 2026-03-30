@@ -24,6 +24,7 @@ printf '%s\n' "$OUTPUT" | grep -F "Repo root: $ROOT" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Repo branch: " >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Worktree dirty: $EXPECTED_DIRTY" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Execution scope: local-only" >/dev/null
+printf '%s\n' "$OUTPUT" | grep -F "Carried meeting decisions: 0" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Selected action: " >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Action status: success" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Verification status: verified" >/dev/null

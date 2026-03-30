@@ -446,6 +446,13 @@ fn run_engineer_loop_probe(
     for (index, goal) in run.inspection.active_goals.iter().enumerate() {
         println!("Active goal {}: {}", index + 1, goal.concise_label());
     }
+    println!(
+        "Carried meeting decisions: {}",
+        run.inspection.carried_meeting_decisions.len()
+    );
+    for (index, decision) in run.inspection.carried_meeting_decisions.iter().enumerate() {
+        println!("Carried meeting decision {}: {}", index + 1, decision);
+    }
     println!("Gap summary: {}", run.inspection.architecture_gap_summary);
     println!("Execution scope: {}", run.execution_scope);
     println!("Selected action: {}", run.action.selected.label);
