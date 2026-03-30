@@ -1417,6 +1417,10 @@ struct TerminalReadView {
     working_directory: String,
     command_count: String,
     wait_count: String,
+    step_count: usize,
+    steps: Vec<String>,
+    checkpoints: Vec<String>,
+    last_output_line: Option<String>,
     transcript_preview: String,
     memory_record_count: usize,
     evidence_record_count: usize,
@@ -1599,6 +1603,17 @@ impl TerminalReadView {
             )
             .unwrap_or("0")
             .to_string(),
+            step_count: terminal_evidence_values(&handoff.evidence_records, "terminal-step-").len(),
+            steps: terminal_evidence_values(&handoff.evidence_records, "terminal-step-"),
+            checkpoints: terminal_evidence_values(
+                &handoff.evidence_records,
+                "terminal-checkpoint-",
+            ),
+            last_output_line: optional_terminal_evidence_value(
+                &handoff.evidence_records,
+                "terminal-last-output-line=",
+            )
+            .map(ToOwned::to_owned),
             transcript_preview: required_terminal_evidence_value(
                 &handoff.evidence_records,
                 "terminal-transcript-preview=",
@@ -1622,6 +1637,25 @@ impl TerminalReadView {
         print_text("Working directory", &self.working_directory);
         print_text("Terminal command count", &self.command_count);
         print_text("Terminal wait count", &self.wait_count);
+        println!("Terminal steps count: {}", self.step_count);
+        if self.steps.is_empty() {
+            println!("Terminal steps: <none>");
+        } else {
+            for (index, step) in self.steps.iter().enumerate() {
+                print_text(&format!("Terminal step {}", index + 1), step);
+            }
+        }
+        println!("Terminal checkpoints count: {}", self.checkpoints.len());
+        if self.checkpoints.is_empty() {
+            println!("Terminal checkpoints: <none>");
+        } else {
+            for (index, checkpoint) in self.checkpoints.iter().enumerate() {
+                print_text(&format!("Terminal checkpoint {}", index + 1), checkpoint);
+            }
+        }
+        if let Some(last_output_line) = &self.last_output_line {
+            print_text("Terminal last output line", last_output_line);
+        }
         print_text("Terminal transcript preview", &self.transcript_preview);
         println!("Memory records: {}", self.memory_record_count);
         println!("Evidence records: {}", self.evidence_record_count);
@@ -1681,6 +1715,21 @@ fn optional_terminal_evidence_value<'a>(
         .iter()
         .rev()
         .find_map(|record| record.detail.strip_prefix(prefix))
+}
+
+fn terminal_evidence_values(evidence_records: &[EvidenceRecord], prefix: &str) -> Vec<String> {
+    evidence_records
+        .iter()
+        .filter_map(|record| record.detail.split_once('='))
+        .filter(|(label, _)| {
+            label.starts_with(prefix)
+                && label[prefix.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_ascii_digit())
+        })
+        .map(|(_, value)| value.to_string())
+        .collect()
 }
 
 fn parse_engineer_summary_list(raw: &str, separator: &str) -> Vec<String> {

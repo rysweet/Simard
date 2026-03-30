@@ -176,8 +176,9 @@ The contract is intentionally explicit:
 - any explicit `state-root` must already exist as a directory before readback begins
 - `terminal-read` requires readable regular-file `latest_handoff.json`, `memory_records.json`, and `evidence_records.json`; symlinked artifacts are rejected
 - `latest_handoff.json` is authoritative for identity, selected base type, topology, session phase, redacted objective metadata, and the persisted terminal evidence summary tied to the latest terminal session
+- persisted terminal evidence may include ordered terminal step lines, satisfied wait checkpoints, and the last observed output line so operators can inspect how a bounded interactive session was driven instead of relying only on aggregate counters
 - operator-visible strings are sanitized before printing so persisted terminal control sequences and secret-shaped values are not replayed
-- output order stays deterministic: runtime header, handoff session summary, adapter details, shell details, transcript summary, durable record counts
+- output order stays deterministic: runtime header, handoff session summary, adapter details, shell details, step/checkpoint audit trail, transcript summary, durable record counts
 - the command performs no mutation, replay, resume, or execution
 - invalid state roots, missing files, unreadable storage, and malformed persisted terminal data fail explicitly
 

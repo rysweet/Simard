@@ -715,6 +715,18 @@ fn bootstrap_supports_terminal_shell_execution() {
     assert!(
         terminal_evidence
             .iter()
+            .any(|detail| detail == &"terminal-step-count=2"),
+        "terminal evidence should report the terminal step count"
+    );
+    assert!(
+        terminal_evidence
+            .iter()
+            .any(|detail| detail == &"terminal-last-output-line=terminal-foundation-ok"),
+        "terminal evidence should preserve the last visible terminal output line"
+    );
+    assert!(
+        terminal_evidence
+            .iter()
             .any(|detail| detail.contains("terminal-foundation-ok")),
         "terminal transcript evidence should keep a preview of real terminal output"
     );

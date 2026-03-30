@@ -9,7 +9,7 @@ use crate::base_types::{
     BaseTypeDescriptor, BaseTypeOutcome, BaseTypeSessionRequest, BaseTypeTurnInput,
 };
 use crate::error::{SimardError, SimardResult};
-use crate::sanitization::objective_metadata;
+use crate::sanitization::{objective_metadata, sanitize_terminal_text};
 
 const DEFAULT_SHELL: &str = "/usr/bin/bash";
 const PTY_LAUNCHER: &str = "script";
@@ -120,6 +120,26 @@ pub fn execute_terminal_turn(
     let objective_summary = objective_metadata(&input.objective);
     let input_count = spec.input_count();
     let wait_count = spec.wait_count();
+    let step_evidence = terminal_step_evidence(&spec.steps);
+    let checkpoint_evidence = terminal_checkpoint_evidence(&spec.steps);
+    let last_output_line = terminal_last_output_line(&transcript, &spec.steps);
+    let mut evidence = vec![
+        format!("selected-base-type={}", descriptor.id),
+        format!("backend-implementation={}", descriptor.backend.identity),
+        format!("shell={}", spec.shell),
+        format!("terminal-working-directory={}", working_directory.display()),
+        format!("terminal-command-count={input_count}"),
+        format!("terminal-wait-count={wait_count}"),
+        format!("terminal-step-count={}", spec.steps.len()),
+        format!("terminal-transcript-preview={transcript_preview}"),
+        format!("runtime-node={}", request.runtime_node),
+        format!("mailbox-address={}", request.mailbox_address),
+    ];
+    evidence.extend(step_evidence);
+    evidence.extend(checkpoint_evidence);
+    if let Some(last_output_line) = last_output_line {
+        evidence.push(format!("terminal-last-output-line={last_output_line}"));
+    }
 
     Ok(BaseTypeOutcome {
         plan: format!(
@@ -143,17 +163,7 @@ pub fn execute_terminal_turn(
             input_count,
             wait_count,
         ),
-        evidence: vec![
-            format!("selected-base-type={}", descriptor.id),
-            format!("backend-implementation={}", descriptor.backend.identity),
-            format!("shell={}", spec.shell),
-            format!("terminal-working-directory={}", working_directory.display()),
-            format!("terminal-command-count={input_count}"),
-            format!("terminal-wait-count={wait_count}"),
-            format!("terminal-transcript-preview={transcript_preview}"),
-            format!("runtime-node={}", request.runtime_node),
-            format!("mailbox-address={}", request.mailbox_address),
-        ],
+        evidence,
     })
 }
 
@@ -403,16 +413,7 @@ fn open_exclusive_temp_file(path: &Path, base_type: &str) -> SimardResult<File> 
 }
 
 fn transcript_preview(transcript: &str) -> String {
-    let mut normalized = transcript
-        .lines()
-        .map(str::trim)
-        .filter(|line| {
-            !line.is_empty()
-                && !line.starts_with("Script started on ")
-                && !line.starts_with("Script done on ")
-        })
-        .collect::<Vec<_>>()
-        .join(" | ");
+    let mut normalized = transcript_content_lines(transcript).join(" | ");
 
     if normalized.len() > 512 {
         normalized.truncate(512);
@@ -422,9 +423,107 @@ fn transcript_preview(transcript: &str) -> String {
     normalized
 }
 
+fn terminal_step_evidence(steps: &[TerminalStep]) -> Vec<String> {
+    steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| {
+            format!(
+                "terminal-step-{}={}",
+                index + 1,
+                compact_terminal_evidence_value(&render_terminal_step(step), 160)
+            )
+        })
+        .collect()
+}
+
+fn terminal_checkpoint_evidence(steps: &[TerminalStep]) -> Vec<String> {
+    steps
+        .iter()
+        .filter_map(|step| match step {
+            TerminalStep::WaitFor(expected) => Some(expected.as_str()),
+            TerminalStep::Input(_) => None,
+        })
+        .enumerate()
+        .map(|(index, expected)| {
+            format!(
+                "terminal-checkpoint-{}={}",
+                index + 1,
+                compact_terminal_evidence_value(expected, 160)
+            )
+        })
+        .collect()
+}
+
+fn terminal_last_output_line(transcript: &str, steps: &[TerminalStep]) -> Option<String> {
+    let input_commands = steps
+        .iter()
+        .filter_map(|step| match step {
+            TerminalStep::Input(command) => Some(sanitize_terminal_text(command)),
+            TerminalStep::WaitFor(_) => None,
+        })
+        .collect::<Vec<_>>();
+    transcript_content_lines(transcript)
+        .into_iter()
+        .rev()
+        .map(sanitize_terminal_text)
+        .find(|line| is_meaningful_terminal_output(line, &input_commands))
+        .map(|line| compact_terminal_evidence_value(&line, 160))
+}
+
+fn is_meaningful_terminal_output(line: &str, input_commands: &[String]) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty()
+        || trimmed == "exit"
+        || trimmed.ends_with("$ exit")
+        || trimmed.ends_with("# exit")
+    {
+        return false;
+    }
+
+    !input_commands.iter().any(|command| {
+        trimmed == command
+            || trimmed.ends_with(&format!("$ {command}"))
+            || trimmed.ends_with(&format!("# {command}"))
+    })
+}
+
+fn transcript_content_lines(transcript: &str) -> Vec<&str> {
+    transcript
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty()
+                && !line.starts_with("Script started on ")
+                && !line.starts_with("Script done on ")
+        })
+        .collect()
+}
+
+fn render_terminal_step(step: &TerminalStep) -> String {
+    match step {
+        TerminalStep::Input(command) => format!("input: {command}"),
+        TerminalStep::WaitFor(expected) => format!("wait-for: {expected}"),
+    }
+}
+
+fn compact_terminal_evidence_value(raw: &str, limit: usize) -> String {
+    let mut normalized = sanitize_terminal_text(raw)
+        .replace('\n', "\\n")
+        .replace('\t', "\\t");
+    if normalized.len() > limit {
+        normalized.truncate(limit);
+        normalized.push_str("...");
+    }
+    normalized
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{TerminalStep, TerminalTurnSpec, normalize_shell};
+    use super::{
+        TerminalStep, TerminalTurnSpec, compact_terminal_evidence_value, normalize_shell,
+        terminal_checkpoint_evidence, terminal_last_output_line, terminal_step_evidence,
+    };
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -591,5 +690,55 @@ mod tests {
         );
         assert_eq!(spec.input_count(), 2);
         assert_eq!(spec.wait_count(), 1);
+    }
+
+    #[test]
+    fn terminal_step_and_checkpoint_evidence_preserve_operator_visible_flow() {
+        let steps = vec![
+            TerminalStep::Input("printf \"ready\\n\"".to_string()),
+            TerminalStep::WaitFor("ready".to_string()),
+            TerminalStep::Input("/status".to_string()),
+        ];
+
+        assert_eq!(
+            terminal_step_evidence(&steps),
+            vec![
+                "terminal-step-1=input: printf \"ready\\n\"".to_string(),
+                "terminal-step-2=wait-for: ready".to_string(),
+                "terminal-step-3=input: /status".to_string(),
+            ]
+        );
+        assert_eq!(
+            terminal_checkpoint_evidence(&steps),
+            vec!["terminal-checkpoint-1=ready".to_string()]
+        );
+    }
+
+    #[test]
+    fn terminal_last_output_line_ignores_script_preamble_and_sanitizes_control_text() {
+        let transcript = "Script started on 2025-03-29 12:00:00+00:00 [COMMAND=\"/usr/bin/bash --noprofile --norc -i\" <not executed on terminal>]\nterminal-ready\n\u{1b}[32mterminal-ok\u{1b}[0m\nScript done on 2025-03-29 12:00:01+00:00 [COMMAND_EXIT_CODE=\"0\"]";
+        assert_eq!(
+            terminal_last_output_line(transcript, &[]),
+            Some("terminal-ok".to_string())
+        );
+    }
+
+    #[test]
+    fn terminal_last_output_line_ignores_prompt_wrapped_inputs_and_exit() {
+        let transcript = "pwd\nprintf \"terminal-foundation-ok\\n\"\nbash-5.2$ pwd\n/home/azureuser/src/Simard\nbash-5.2$ printf \"terminal-foundation-ok\\n\"\nterminal-foundation-ok\nbash-5.2$ exit";
+        let steps = vec![
+            TerminalStep::Input("pwd".to_string()),
+            TerminalStep::Input("printf \"terminal-foundation-ok\\n\"".to_string()),
+        ];
+        assert_eq!(
+            terminal_last_output_line(transcript, &steps),
+            Some("terminal-foundation-ok".to_string())
+        );
+    }
+
+    #[test]
+    fn compact_terminal_evidence_value_replaces_newlines_and_truncates() {
+        let raw = "line1\nline2\tline3";
+        assert_eq!(compact_terminal_evidence_value(raw, 12), "line1\\nline2...");
     }
 }

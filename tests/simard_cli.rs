@@ -668,6 +668,10 @@ command: printf \"terminal-cli-ok\\n\"";
     for expected in [
         "Selected base type: terminal-shell",
         "Adapter implementation: terminal-shell::local-pty",
+        "Terminal evidence: terminal-step-count=3",
+        "Terminal evidence: terminal-step-2=wait-for: terminal-cli-ready",
+        "Terminal evidence: terminal-checkpoint-1=terminal-cli-ready",
+        "Terminal evidence: terminal-last-output-line=terminal-cli-ok",
         "Terminal evidence: terminal-wait-count=1",
         "terminal-cli-ok",
         &format!("State root: {}", state_root.path().display()),
@@ -769,6 +773,13 @@ input: printf \"terminal-read-ok\\n\"";
         "Adapter implementation: terminal-shell::local-pty",
         "Terminal command count: 2",
         "Terminal wait count: 1",
+        "Terminal steps count: 3",
+        "Terminal step 1: input: printf \"terminal-read-ready\\n\"",
+        "Terminal step 2: wait-for: terminal-read-ready",
+        "Terminal step 3: input: printf \"terminal-read-ok\\n\"",
+        "Terminal checkpoints count: 1",
+        "Terminal checkpoint 1: terminal-read-ready",
+        "Terminal last output line: terminal-read-ok",
         "terminal-read-ok",
     ] {
         assert!(
