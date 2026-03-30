@@ -61,6 +61,7 @@ Bare `simard` prints this operator surface directly.
 | --- | --- |
 | `simard engineer run ...` | `simard_operator_probe engineer-loop-run ...` |
 | `simard engineer terminal ...` | `simard_operator_probe terminal-run ...` |
+| `simard engineer terminal-read ...` | `simard_operator_probe terminal-read ...` |
 | `simard engineer read ...` | `simard_operator_probe engineer-read ...` |
 | `simard meeting run ...` | `simard_operator_probe meeting-run ...` |
 | `simard meeting read ...` | `simard_operator_probe meeting-read ...` |
@@ -194,6 +195,32 @@ simard engineer terminal single-process $'working-directory: .
 command: printf "terminal-foundation-ready\n"
 wait-for: terminal-foundation-ready
 command: printf "terminal-foundation-ok\n"' "$STATE_ROOT"
+```
+
+### `simard engineer terminal-read <topology> [state-root]`
+
+This is the read-only audit companion to `simard engineer terminal`. It inspects the latest persisted terminal session state without replaying commands or resuming the PTY session.
+
+Behavior:
+
+- reuses the same canonical default durable root as `engineer terminal` when `[state-root]` is omitted
+- requires any explicit `state-root` to already exist as a directory
+- requires `latest_handoff.json`, `memory_records.json`, and `evidence_records.json` to already exist as readable regular files; symlinked artifacts are rejected
+- treats `latest_handoff.json` as authoritative for session identity, selected base type, topology, session phase, redacted objective metadata, and the persisted terminal evidence summary
+- renders terminal shell, working directory, command count, wait count, and transcript preview in stable operator-visible order
+- strips terminal control sequences and secret-shaped values from displayed output before printing it
+- fails explicitly for invalid `state-root` values and for missing, unreadable, or malformed persisted terminal state
+
+When `[state-root]` is omitted, the command reuses the same canonical durable root that `engineer terminal` already writes:
+
+```text
+target/operator-probe-state/terminal-run/simard-engineer/terminal-shell/<topology>
+```
+
+Example:
+
+```bash
+simard engineer terminal-read single-process "$STATE_ROOT"
 ```
 
 ### `simard meeting run <base-type> <topology> <structured-objective> [state-root]`

@@ -37,6 +37,7 @@ Simard does **not** expose:
 | bounded engineer loop | `simard engineer run ...` | `simard_operator_probe engineer-loop-run ...` |
 | engineer state readback | `simard engineer read ...` | `simard_operator_probe engineer-read ...` |
 | terminal-backed engineer substrate | `simard engineer terminal ...` | `simard_operator_probe terminal-run ...` |
+| terminal session readback | `simard engineer terminal-read ...` | `simard_operator_probe terminal-read ...` |
 | meeting mode | `simard meeting run ...` | `simard_operator_probe meeting-run ...` |
 | meeting state readback | `simard meeting read ...` | `simard_operator_probe meeting-read ...` |
 | goal-curation mode | `simard goal-curation run ...` | `simard_operator_probe goal-curation-run ...` |
@@ -53,6 +54,7 @@ The shipped operator-facing command tree is:
 - `simard engineer run <topology> <workspace-root> <objective> [state-root]`
 - `simard engineer read <topology> [state-root]`
 - `simard engineer terminal <topology> <objective> [state-root]`
+- `simard engineer terminal-read <topology> [state-root]`
 - `simard meeting run <base-type> <topology> <structured-objective> [state-root]`
 - `simard meeting read <base-type> <topology> [state-root]`
 - `simard goal-curation run <base-type> <topology> <structured-objective> [state-root]`
@@ -158,6 +160,26 @@ This substrate exposes the real `terminal-shell` base type on the primary CLI:
 - terminal evidence lines remain operator-visible
 - unsatisfied wait checkpoints fail explicitly instead of silently replaying the rest of the objective and claiming success
 - unsupported topology and invalid state-root choices still fail explicitly
+
+#### Terminal session readback
+
+Canonical entrypoint: `simard engineer terminal-read <topology> [state-root]`
+
+Compatibility surface: `simard_operator_probe terminal-read <topology> [state-root]`
+
+This is the read-only audit companion to `simard engineer terminal`. It exists to inspect the durable terminal-session artifacts that `engineer terminal` already writes.
+
+The contract is intentionally explicit:
+
+- `engineer terminal` remains the only execution path for terminal-backed engineer work
+- `terminal-read` reuses the same validated default state root as `engineer terminal` when `[state-root]` is omitted
+- any explicit `state-root` must already exist as a directory before readback begins
+- `terminal-read` requires readable regular-file `latest_handoff.json`, `memory_records.json`, and `evidence_records.json`; symlinked artifacts are rejected
+- `latest_handoff.json` is authoritative for identity, selected base type, topology, session phase, redacted objective metadata, and the persisted terminal evidence summary tied to the latest terminal session
+- operator-visible strings are sanitized before printing so persisted terminal control sequences and secret-shaped values are not replayed
+- output order stays deterministic: runtime header, handoff session summary, adapter details, shell details, transcript summary, durable record counts
+- the command performs no mutation, replay, resume, or execution
+- invalid state roots, missing files, unreadable storage, and malformed persisted terminal data fail explicitly
 
 ### Meeting mode
 

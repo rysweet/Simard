@@ -349,6 +349,10 @@ fn simard_help_documents_engineer_read_as_the_durable_engineer_audit_surface() {
         rendered.contains("engineer read <topology> [state-root]"),
         "simard help should document the canonical read-only engineer audit workflow:\n{rendered}"
     );
+    assert!(
+        rendered.contains("engineer terminal-read <topology> [state-root]"),
+        "simard help should document the canonical read-only terminal audit workflow:\n{rendered}"
+    );
 }
 
 #[test]
@@ -699,6 +703,83 @@ command: printf \"terminal-cli-ok\\n\"";
         assert!(
             state_root.path().join(expected).is_file(),
             "terminal engineer mode should persist {expected} under the selected state root"
+        );
+    }
+}
+
+#[test]
+fn simard_engineer_terminal_read_replays_persisted_terminal_state_and_matches_probe_parity() {
+    let state_root = TempDirGuard::new("simard-cli-terminal-read");
+    let objective = "\
+working-directory: .\n\
+command: printf \"terminal-read-ready\\n\"\n\
+wait-for: terminal-read-ready\n\
+input: printf \"terminal-read-ok\\n\"";
+    let run_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("terminal")
+        .arg("single-process")
+        .arg(objective)
+        .arg(state_root.path())
+        .output()
+        .expect("simard engineer terminal should seed durable terminal state");
+    let run_rendered = rendered_output(&run_output);
+
+    assert!(
+        run_output.status.success(),
+        "terminal engineer mode should succeed before terminal readback:\n{run_rendered}"
+    );
+
+    let simard_read_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("terminal-read")
+        .arg("single-process")
+        .arg(state_root.path())
+        .output()
+        .expect("simard engineer terminal-read should launch");
+    let simard_read_rendered = rendered_output(&simard_read_output);
+
+    let probe_read_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .arg("terminal-read")
+        .arg("single-process")
+        .arg(state_root.path())
+        .output()
+        .expect("simard_operator_probe terminal-read should launch");
+    let probe_read_rendered = rendered_output(&probe_read_output);
+
+    assert!(
+        simard_read_output.status.success(),
+        "terminal-read should expose persisted terminal session state through the canonical CLI:\n{simard_read_rendered}"
+    );
+    assert!(
+        probe_read_output.status.success(),
+        "the compatibility terminal-read probe should remain available while operators migrate:\n{probe_read_rendered}"
+    );
+    assert_eq!(
+        simard_read_rendered, probe_read_rendered,
+        "terminal-read should preserve probe parity so the canonical and compatibility surfaces do not drift"
+    );
+    for expected in [
+        "Probe mode: terminal-read",
+        "Identity: simard-engineer",
+        "Selected base type: terminal-shell",
+        "Topology: single-process",
+        &format!("State root: {}", state_root.path().display()),
+        "Session phase: complete",
+        "Adapter implementation: terminal-shell::local-pty",
+        "Terminal command count: 2",
+        "Terminal wait count: 1",
+        "terminal-read-ok",
+    ] {
+        assert!(
+            simard_read_rendered.contains(expected),
+            "terminal-read should surface '{expected}' for operators:\n{simard_read_rendered}"
+        );
+    }
+    for forbidden in ['\u{1b}', '\u{7}'] {
+        assert!(
+            !simard_read_rendered.contains(forbidden),
+            "terminal-read should sanitize persisted terminal output before printing it:\n{simard_read_rendered}"
         );
     }
 }

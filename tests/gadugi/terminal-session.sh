@@ -24,6 +24,19 @@ printf '%s\n' "$OUTPUT" | grep -F "Terminal evidence: terminal-command-count=2" 
 printf '%s\n' "$OUTPUT" | grep -F "Terminal evidence: terminal-wait-count=1" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "terminal-foundation-ok" >/dev/null
 
+READ_OUTPUT="$(
+  cargo run --quiet --bin simard -- \
+    engineer terminal-read single-process
+)"
+
+printf '%s\n' "$READ_OUTPUT"
+
+printf '%s\n' "$READ_OUTPUT" | grep -F "Probe mode: terminal-read" >/dev/null
+printf '%s\n' "$READ_OUTPUT" | grep -F "Selected base type: terminal-shell" >/dev/null
+printf '%s\n' "$READ_OUTPUT" | grep -F "Terminal command count: 2" >/dev/null
+printf '%s\n' "$READ_OUTPUT" | grep -F "Terminal wait count: 1" >/dev/null
+printf '%s\n' "$READ_OUTPUT" | grep -F "terminal-foundation-ok" >/dev/null
+
 MARKER="$(mktemp /tmp/simard-terminal-injection.XXXXXX)"
 rm -f "$MARKER"
 BAD_OBJECTIVE="$(printf 'shell: /usr/bin/bash$(printf pwned>%s)\ncommand: pwd\n' "$MARKER")"
