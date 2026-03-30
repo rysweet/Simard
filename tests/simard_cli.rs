@@ -9,6 +9,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -88,6 +89,20 @@ fn normalize_benchmark_run_output(rendered: &str) -> String {
     )
 }
 
+fn goal_curation_default_root_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn default_goal_curation_state_root(base_type: &str, topology: &str) -> PathBuf {
+    repo_root()
+        .join("target/operator-probe-state")
+        .join("goal-curation-run")
+        .join("simard-goal-curator")
+        .join(base_type)
+        .join(topology)
+}
+
 fn write_legacy_benchmark_report(command_dir: &Path, scenario_id: &str, session_id: &str) {
     let report_dir = command_dir
         .join("target/simard-gym")
@@ -140,7 +155,26 @@ impl TempDirGuard {
     }
 }
 
+struct CleanupDirGuard {
+    path: PathBuf,
+}
+
+impl CleanupDirGuard {
+    fn new(path: PathBuf) -> Self {
+        let _ = fs::remove_dir_all(&path);
+        Self { path }
+    }
+}
+
 impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        if self.path.exists() {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+impl Drop for CleanupDirGuard {
     fn drop(&mut self) {
         if self.path.exists() {
             let _ = fs::remove_dir_all(&self.path);
@@ -200,6 +234,24 @@ fn bare_simard_shows_unified_help_instead_of_bootstrap_env_errors() {
     assert!(
         !rendered.contains("SIMARD_PROMPT_ROOT"),
         "bare simard should not fall back to the legacy env-only bootstrap path:\n{rendered}"
+    );
+}
+
+#[test]
+fn simard_help_documents_goal_curation_read_as_the_durable_register_inspection_surface() {
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("--help")
+        .output()
+        .expect("simard help should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        output.status.success(),
+        "simard help should stay readable while the durable goal register command is added:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("goal-curation read <base-type> <topology> [state-root]"),
+        "simard help should document the canonical read-only goal register workflow:\n{rendered}"
     );
 }
 
@@ -382,6 +434,343 @@ goal: Track future remote orchestration | priority=6 | status=active | rationale
     assert!(
         !goal_rendered.contains("Track future remote orchestration"),
         "goal-curation mode should omit lower-priority active goals from the top-five surface:\n{goal_rendered}"
+    );
+}
+
+#[test]
+fn simard_goal_curation_read_reuses_the_run_default_state_root_and_sanitizes_control_sequences() {
+    let _lock = goal_curation_default_root_lock()
+        .lock()
+        .expect("goal-curation default root test lock should not be poisoned");
+    let state_root = default_goal_curation_state_root("local-harness", "single-process");
+    let _cleanup = CleanupDirGuard::new(state_root.clone());
+    let goal_objective = "goal: Keep \u{1b}]8;;https://example.invalid\u{7}active\u{1b}]8;;\u{7}\u{1} priorities inspectable | priority=1 | status=active | rationale=operators need a safe register view";
+
+    let run_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("goal-curation")
+        .arg("run")
+        .arg("local-harness")
+        .arg("single-process")
+        .arg(goal_objective)
+        .output()
+        .expect("simard goal-curation run should launch with its default state root");
+    let run_rendered = rendered_output(&run_output);
+
+    assert!(
+        run_output.status.success(),
+        "goal-curation run should succeed with its canonical default state root:\n{run_rendered}"
+    );
+    assert!(
+        run_rendered.contains(&format!("State root: {}", state_root.display())),
+        "goal-curation run should surface the canonical default durable root it writes:\n{run_rendered}"
+    );
+
+    let read_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("goal-curation")
+        .arg("read")
+        .arg("local-harness")
+        .arg("single-process")
+        .output()
+        .expect("simard goal-curation read should launch with its default state root");
+    let read_rendered = rendered_output(&read_output);
+
+    assert!(
+        read_output.status.success(),
+        "goal-curation read should inspect the same canonical default durable root that run populates:\n{read_rendered}"
+    );
+    assert!(
+        read_rendered.contains(&format!("State root: {}", state_root.display())),
+        "goal-curation read should reuse the canonical default durable root from goal-curation run:\n{read_rendered}"
+    );
+    assert!(
+        read_rendered.contains("Active goals count: 1")
+            && read_rendered
+                .contains("Active goal 1: p1 [active] Keep active priorities inspectable"),
+        "goal-curation read should surface the record persisted by goal-curation run even when no explicit state root is passed:\n{read_rendered}"
+    );
+    for forbidden in ['\u{1b}', '\u{7}', '\u{1}'] {
+        assert!(
+            !read_rendered.contains(forbidden),
+            "goal-curation read should strip terminal control characters before printing persisted goal text:\n{read_rendered}"
+        );
+    }
+}
+
+#[test]
+fn simard_goal_curation_read_lists_the_durable_register_across_all_statuses() {
+    let state_root = TempDirGuard::new("simard-cli-goal-curation-read");
+    let goal_objective = "\
+goal: Keep \u{1b}[31mactive\u{1b}[0m priorities inspectable | priority=1 | status=active | rationale=operators need a safe register view\n\
+goal: Stage the next backlog slice | priority=2 | status=proposed | rationale=show backlog shape across statuses\n\
+goal: Pause brittle experiments | priority=3 | status=paused | rationale=work is blocked pending better infra\n\
+goal: Close shipped benchmark truthfulness work | priority=4 | status=completed | rationale=done work should remain inspectable\n\
+goal: Preserve operator-visible stewardship | priority=5 | status=active | rationale=active priorities still need top-five carryover";
+
+    let run_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("goal-curation")
+        .arg("run")
+        .arg("local-harness")
+        .arg("single-process")
+        .arg(goal_objective)
+        .arg(state_root.path())
+        .output()
+        .expect("simard goal-curation run should launch");
+    let run_rendered = rendered_output(&run_output);
+
+    assert!(
+        run_output.status.success(),
+        "goal-curation run should remain available for durable state setup:\n{run_rendered}"
+    );
+    assert!(
+        run_rendered.contains("Active goals count: 2"),
+        "goal-curation run should keep its shipped active-only top-five summary:\n{run_rendered}"
+    );
+    assert!(
+        !run_rendered.contains("Stage the next backlog slice"),
+        "goal-curation run should stay focused on the active top-five surface instead of becoming the inspection workflow:\n{run_rendered}"
+    );
+
+    let read_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("goal-curation")
+        .arg("read")
+        .arg("local-harness")
+        .arg("single-process")
+        .arg(state_root.path())
+        .output()
+        .expect("simard goal-curation read should launch");
+    let read_rendered = rendered_output(&read_output);
+
+    assert!(
+        read_output.status.success(),
+        "goal-curation read should expose the durable goal register through the canonical CLI:\n{read_rendered}"
+    );
+    assert!(
+        read_rendered.contains("Goal register: durable"),
+        "goal-curation read should identify the durable register it is surfacing:\n{read_rendered}"
+    );
+    assert!(
+        read_rendered.contains(&format!("State root: {}", state_root.path().display())),
+        "goal-curation read should tell operators which state root was inspected:\n{read_rendered}"
+    );
+    for expected in [
+        "Active goals count: 2",
+        "Proposed goals count: 1",
+        "Paused goals count: 1",
+        "Completed goals count: 1",
+        "Active goal 1: p1 [active] Keep active priorities inspectable",
+        "Active goal 2: p5 [active] Preserve operator-visible stewardship",
+        "Proposed goal 1: p2 [proposed] Stage the next backlog slice",
+        "Paused goal 1: p3 [paused] Pause brittle experiments",
+        "Completed goal 1: p4 [completed] Close shipped benchmark truthfulness work",
+    ] {
+        assert!(
+            read_rendered.contains(expected),
+            "goal-curation read should surface '{expected}' for operators:\n{read_rendered}"
+        );
+    }
+    assert!(
+        !read_rendered.contains('\u{1b}'),
+        "goal-curation read should sanitize persisted goal text before printing it:\n{read_rendered}"
+    );
+
+    let active_index = read_rendered
+        .find("Active goals count: 2")
+        .expect("active section should be present");
+    let proposed_index = read_rendered
+        .find("Proposed goals count: 1")
+        .expect("proposed section should be present");
+    let paused_index = read_rendered
+        .find("Paused goals count: 1")
+        .expect("paused section should be present");
+    let completed_index = read_rendered
+        .find("Completed goals count: 1")
+        .expect("completed section should be present");
+    assert!(
+        active_index < proposed_index
+            && proposed_index < paused_index
+            && paused_index < completed_index,
+        "goal-curation read should present statuses in fixed operator order active -> proposed -> paused -> completed:\n{read_rendered}"
+    );
+}
+
+#[test]
+fn simard_goal_curation_read_rejects_absolute_base_type_and_topology_segments() {
+    let absolute_base_type = repo_root().join("absolute-base-type-segment");
+    let base_type_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("goal-curation")
+        .arg("read")
+        .arg(&absolute_base_type)
+        .arg("single-process")
+        .output()
+        .expect("goal-curation read absolute-base-type check should launch");
+    let base_type_rendered = rendered_output(&base_type_output);
+
+    assert!(
+        !base_type_output.status.success(),
+        "goal-curation read must fail when an absolute base-type segment is used to derive the default state root:\n{base_type_rendered}"
+    );
+    assert!(
+        base_type_rendered.contains("no adapter is registered for base type"),
+        "goal-curation read should reject absolute base-type segments through base-type validation instead of treating them like filesystem paths:\n{base_type_rendered}"
+    );
+    assert!(
+        !base_type_rendered.contains("Goal register: durable"),
+        "goal-curation read must fail before any register rendering when the default path inputs are invalid:\n{base_type_rendered}"
+    );
+
+    let absolute_topology = repo_root().join("absolute-topology-segment");
+    let topology_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("goal-curation")
+        .arg("read")
+        .arg("local-harness")
+        .arg(&absolute_topology)
+        .output()
+        .expect("goal-curation read absolute-topology check should launch");
+    let topology_rendered = rendered_output(&topology_output);
+
+    assert!(
+        !topology_output.status.success(),
+        "goal-curation read must fail when an absolute topology segment is used to derive the default state root:\n{topology_rendered}"
+    );
+    assert!(
+        topology_rendered.contains("expected 'single-process', 'multi-process', or 'distributed'"),
+        "goal-curation read should reject absolute topology segments through topology validation instead of treating them like filesystem paths:\n{topology_rendered}"
+    );
+    assert!(
+        !topology_rendered.contains("Goal register: durable"),
+        "goal-curation read must fail before any register rendering when the default topology is invalid:\n{topology_rendered}"
+    );
+}
+
+#[test]
+fn simard_goal_curation_read_shows_explicit_zero_state_sections_for_an_empty_register() {
+    let state_root = TempDirGuard::new("simard-cli-goal-curation-read-empty");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("goal-curation")
+        .arg("read")
+        .arg("local-harness")
+        .arg("single-process")
+        .arg(state_root.path())
+        .output()
+        .expect("simard goal-curation read should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        output.status.success(),
+        "goal-curation read should treat a missing durable goal file as an empty register, not a crash:\n{rendered}"
+    );
+    for expected in [
+        "Goal register: durable",
+        "Active goals count: 0",
+        "Proposed goals count: 0",
+        "Paused goals count: 0",
+        "Completed goals count: 0",
+        "Active goals: <none>",
+        "Proposed goals: <none>",
+        "Paused goals: <none>",
+        "Completed goals: <none>",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "goal-curation read should make empty sections explicit with '{expected}':\n{rendered}"
+        );
+    }
+}
+
+#[test]
+fn simard_goal_curation_read_rejects_invalid_state_roots_before_any_store_access() {
+    let temp_dir = TempDirGuard::new("simard-cli-goal-curation-read-invalid-root");
+    let bad_parent_dir_root = temp_dir.path().join("../escape");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("goal-curation")
+        .arg("read")
+        .arg("local-harness")
+        .arg("single-process")
+        .arg(&bad_parent_dir_root)
+        .output()
+        .expect("goal-curation read invalid-state-root check should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        !output.status.success(),
+        "goal-curation read must fail visibly for invalid state roots:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("must not contain '..'"),
+        "goal-curation read should explain why a traversal root was rejected:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("InvalidStateRoot") || rendered.contains("invalid state root"),
+        "goal-curation read should keep state-root validation explicit:\n{rendered}"
+    );
+}
+
+#[test]
+fn simard_goal_curation_read_fails_closed_for_malformed_goal_store_contents() {
+    let state_root = TempDirGuard::new("simard-cli-goal-curation-read-malformed-store");
+    fs::write(
+        state_root.path().join("goal_records.json"),
+        "{ not-valid-json",
+    )
+    .expect("malformed goal store fixture should be written");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("goal-curation")
+        .arg("read")
+        .arg("local-harness")
+        .arg("single-process")
+        .arg(state_root.path())
+        .output()
+        .expect("goal-curation read malformed-store check should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        !output.status.success(),
+        "goal-curation read must fail closed when the durable goal store is malformed:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("persistent store 'goals' failed during 'deserialize'"),
+        "goal-curation read should surface the durable store boundary instead of silently pretending the register is empty:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("Active goals count: 0"),
+        "goal-curation read should not quietly degrade malformed state into an empty success:\n{rendered}"
+    );
+}
+
+#[test]
+fn simard_goal_curation_read_sanitizes_explicit_runtime_labels_before_printing() {
+    let state_root = TempDirGuard::new("simard-cli-goal-curation-read-sanitized-labels");
+    let base_type = "local-harness\u{1b}[31m-injected";
+    let topology = "single-process\u{1b}]8;;https://example.invalid\u{7}-linked\u{1b}]8;;\u{7}";
+
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("goal-curation")
+        .arg("read")
+        .arg(base_type)
+        .arg(topology)
+        .arg(state_root.path())
+        .output()
+        .expect("goal-curation read sanitization check should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        output.status.success(),
+        "goal-curation read should still succeed with an explicit state root while sanitizing operator-visible labels:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains('\u{1b}'),
+        "goal-curation read should strip terminal control sequences from explicit runtime labels:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Selected base type: local-harness-injected"),
+        "goal-curation read should sanitize the base-type label before printing it:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Topology: single-process-linked"),
+        "goal-curation read should sanitize the topology label before printing it:\n{rendered}"
     );
 }
 
@@ -886,9 +1275,8 @@ fn simard_gym_rejects_unregistered_scenarios_before_accessing_artifacts() {
             "gym {subcommand} must reject unregistered scenario ids visibly:\n{rendered}"
         );
         assert!(
-            rendered.contains("BenchmarkScenarioNotFound")
-                && rendered.contains("../repo-exploration-local"),
-            "gym {subcommand} should reject invalid scenario ids with an explicit registry lookup failure:\n{rendered}"
+            rendered.contains("benchmark scenario '../repo-exploration-local' is not registered"),
+            "gym {subcommand} should reject invalid scenario ids with the restored single-line operator-facing error contract:\n{rendered}"
         );
     }
 

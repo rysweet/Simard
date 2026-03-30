@@ -11,32 +11,75 @@ pub fn objective_metadata(objective: &str) -> String {
 }
 
 pub fn sanitize_terminal_text(raw: &str) -> String {
-    redact_secret_values(&strip_ansi_sequences(raw))
+    redact_secret_values(&strip_terminal_control_sequences(raw))
 }
 
-fn strip_ansi_sequences(raw: &str) -> String {
+fn strip_terminal_control_sequences(raw: &str) -> String {
     let mut sanitized = String::with_capacity(raw.len());
     let mut chars = raw.chars().peekable();
 
     while let Some(ch) = chars.next() {
-        if ch == '\u{1b}'
-            && let Some('[') = chars.peek().copied()
-        {
-            chars.next();
-            for next in chars.by_ref() {
-                if ('@'..='~').contains(&next) {
-                    break;
+        if ch == '\u{1b}' {
+            match chars.peek().copied() {
+                Some('[') => {
+                    chars.next();
+                    for next in chars.by_ref() {
+                        if ('@'..='~').contains(&next) {
+                            break;
+                        }
+                    }
+                    continue;
                 }
+                Some(']') => {
+                    chars.next();
+                    strip_string_terminator_sequence(&mut chars);
+                    continue;
+                }
+                Some('P' | 'X' | '^' | '_') => {
+                    chars.next();
+                    strip_escape_terminated_sequence(&mut chars);
+                    continue;
+                }
+                Some(_) => {
+                    chars.next();
+                    continue;
+                }
+                None => continue,
             }
+        }
+
+        if matches!(ch, '\n' | '\t') {
+            sanitized.push(ch);
             continue;
         }
 
-        if ch != '\r' {
+        if !ch.is_control() {
             sanitized.push(ch);
         }
     }
 
     sanitized
+}
+
+fn strip_string_terminator_sequence(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    while let Some(next) = chars.next() {
+        if next == '\u{7}' {
+            break;
+        }
+        if next == '\u{1b}' && matches!(chars.peek().copied(), Some('\\')) {
+            chars.next();
+            break;
+        }
+    }
+}
+
+fn strip_escape_terminated_sequence(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    while let Some(next) = chars.next() {
+        if next == '\u{1b}' && matches!(chars.peek().copied(), Some('\\')) {
+            chars.next();
+            break;
+        }
+    }
 }
 
 fn redact_secret_values(raw: &str) -> String {
@@ -78,6 +121,12 @@ mod tests {
     fn terminal_sanitization_strips_ansi_sequences() {
         let raw = "\u{1b}[32mgreen\u{1b}[0m\r\nplain";
         assert_eq!(sanitize_terminal_text(raw), "green\nplain");
+    }
+
+    #[test]
+    fn terminal_sanitization_strips_osc_and_other_controls() {
+        let raw = "\u{1b}]8;;https://example.invalid\u{7}linked\u{1b}]8;;\u{7}\u{1} text";
+        assert_eq!(sanitize_terminal_text(raw), "linked text");
     }
 
     #[test]

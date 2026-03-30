@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 
 use crate::operator_commands::{
-    run_bootstrap_probe, run_engineer_loop_probe, run_goal_curation_probe, run_gym_compare,
-    run_gym_list, run_gym_scenario, run_gym_suite, run_improvement_curation_probe,
-    run_meeting_probe, run_review_probe, run_review_read_probe, run_terminal_probe,
+    run_bootstrap_probe, run_engineer_loop_probe, run_goal_curation_probe,
+    run_goal_curation_read_probe, run_gym_compare, run_gym_list, run_gym_scenario, run_gym_suite,
+    run_improvement_curation_probe, run_meeting_probe, run_review_probe, run_review_read_probe,
+    run_terminal_probe,
 };
 
 const OPERATOR_CLI_HELP: &str = "\
@@ -14,6 +15,7 @@ Product modes:
   engineer terminal <topology> <objective> [state-root]
   meeting run <base-type> <topology> <objective> [state-root]
   goal-curation run <base-type> <topology> <objective> [state-root]
+  goal-curation read <base-type> <topology> [state-root]
   improvement-curation run <base-type> <topology> <objective> [state-root]
   gym list
   gym run <scenario-id>
@@ -121,6 +123,13 @@ fn dispatch_goal_curation_command(
             let state_root = next_optional_path(&mut args);
             reject_extra_args(args)?;
             run_goal_curation_probe(&base_type, &topology, &objective, state_root)
+        }
+        "read" => {
+            let base_type = next_required(&mut args, "base type")?;
+            let topology = next_required(&mut args, "topology")?;
+            let state_root = next_optional_path(&mut args);
+            reject_extra_args(args)?;
+            run_goal_curation_read_probe(&base_type, &topology, state_root)
         }
         other => Err(format!("unsupported command 'goal-curation {other}'").into()),
     }
