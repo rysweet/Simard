@@ -594,6 +594,55 @@ goal: Preserve operator-visible stewardship | priority=5 | status=active | ratio
 }
 
 #[test]
+fn simard_goal_curation_read_keeps_operator_visible_paths_and_titles_with_security_words() {
+    let state_root = TempDirGuard::new("simard-cli-goal-curation-read-secret");
+    let goal_objective = "goal: Secret scanning follow-up | priority=1 | status=active | rationale=operators still need readable titles and paths";
+
+    let run_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("goal-curation")
+        .arg("run")
+        .arg("local-harness")
+        .arg("single-process")
+        .arg(goal_objective)
+        .arg(state_root.path())
+        .output()
+        .expect("simard goal-curation run should launch");
+    let run_rendered = rendered_output(&run_output);
+
+    assert!(
+        run_output.status.success(),
+        "goal-curation run should succeed when goal text contains routine security vocabulary:\n{run_rendered}"
+    );
+
+    let read_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("goal-curation")
+        .arg("read")
+        .arg("local-harness")
+        .arg("single-process")
+        .arg(state_root.path())
+        .output()
+        .expect("simard goal-curation read should launch");
+    let read_rendered = rendered_output(&read_output);
+
+    assert!(
+        read_output.status.success(),
+        "goal-curation read should still succeed when operator-visible text contains routine security vocabulary:\n{read_rendered}"
+    );
+    assert!(
+        read_rendered.contains(&format!("State root: {}", state_root.path().display())),
+        "goal-curation read should keep the inspected state root visible even when the path contains 'secret':\n{read_rendered}"
+    );
+    assert!(
+        read_rendered.contains("Active goal 1: p1 [active] Secret scanning follow-up"),
+        "goal-curation read should not redact ordinary goal titles that happen to contain the word 'secret':\n{read_rendered}"
+    );
+    assert!(
+        !read_rendered.contains("[REDACTED]"),
+        "goal-curation read should reserve redaction for actual secret-bearing fields, not normal operator data:\n{read_rendered}"
+    );
+}
+
+#[test]
 fn simard_goal_curation_read_rejects_absolute_base_type_and_topology_segments() {
     let absolute_base_type = repo_root().join("absolute-base-type-segment");
     let base_type_output = Command::new(env!("CARGO_BIN_EXE_simard"))

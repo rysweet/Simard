@@ -83,34 +83,61 @@ fn strip_escape_terminated_sequence(chars: &mut std::iter::Peekable<std::str::Ch
 }
 
 fn redact_secret_values(raw: &str) -> String {
-    let markers = [
-        "token",
-        "secret",
-        "password",
-        "passwd",
-        "api_key",
-        "apikey",
-        "authorization",
-        "bearer ",
-    ];
-
     raw.lines()
-        .map(|line| {
-            let lowered = line.to_ascii_lowercase();
-            if markers.iter().any(|marker| lowered.contains(marker)) {
-                if let Some((prefix, _)) = line.split_once('=') {
-                    return format!("{prefix}=[REDACTED]");
-                }
-                if let Some((prefix, _)) = line.split_once(':') {
-                    return format!("{prefix}: [REDACTED]");
-                }
-                return "[REDACTED]".to_string();
-            }
-
-            line.to_string()
-        })
+        .map(redact_secret_line)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn redact_secret_line(line: &str) -> String {
+    if let Some((prefix, _)) = line.split_once('=') {
+        if is_sensitive_key(prefix) {
+            return format!("{prefix}=[REDACTED]");
+        }
+    }
+
+    if let Some((prefix, _)) = line.split_once(':') {
+        if is_sensitive_key(prefix) {
+            return format!("{prefix}: [REDACTED]");
+        }
+    }
+
+    if line
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("bearer ")
+    {
+        return "[REDACTED]".to_string();
+    }
+
+    line.to_string()
+}
+
+fn is_sensitive_key(prefix: &str) -> bool {
+    let normalized = prefix
+        .trim()
+        .chars()
+        .filter_map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                Some(ch.to_ascii_lowercase())
+            } else if matches!(ch, '_' | '-' | ' ') {
+                Some('_')
+            } else {
+                None
+            }
+        })
+        .collect::<String>();
+
+    matches!(
+        normalized.as_str(),
+        "token" | "secret" | "password" | "passwd" | "api_key" | "apikey" | "authorization"
+    ) || normalized.ends_with("_token")
+        || normalized.ends_with("_secret")
+        || normalized.ends_with("_password")
+        || normalized.ends_with("_passwd")
+        || normalized.ends_with("_api_key")
+        || normalized.ends_with("_apikey")
+        || normalized.ends_with("_authorization")
 }
 
 #[cfg(test)]
@@ -136,5 +163,14 @@ mod tests {
             sanitize_terminal_text(raw),
             "token=[REDACTED]\nAuthorization: [REDACTED]\nplain"
         );
+    }
+
+    #[test]
+    fn terminal_sanitization_keeps_normal_operator_text_with_security_words() {
+        let raw = "\
+State root: /tmp/simard-secret-path.12345
+Active goal 1: p1 [active] Secret scanning follow-up
+Rationale: operators need inspectable paths and titles";
+        assert_eq!(sanitize_terminal_text(raw), raw);
     }
 }
