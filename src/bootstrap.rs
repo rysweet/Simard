@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::fmt::{self, Display, Formatter};
-use std::path::Path;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use crate::agent_program::{
@@ -114,6 +114,111 @@ impl BootstrapInputs {
     }
 }
 
+pub(crate) fn validate_state_root(path: impl AsRef<Path>) -> SimardResult<PathBuf> {
+    let raw_path = path.as_ref();
+    if raw_path.as_os_str().is_empty() {
+        return Err(SimardError::InvalidStateRoot {
+            path: raw_path.to_path_buf(),
+            reason: "state root must not be empty".to_string(),
+        });
+    }
+
+    if raw_path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(SimardError::InvalidStateRoot {
+            path: raw_path.to_path_buf(),
+            reason: "state root must not contain '..' path segments".to_string(),
+        });
+    }
+
+    let absolute_path = if raw_path.is_absolute() {
+        raw_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| SimardError::InvalidStateRoot {
+                path: raw_path.to_path_buf(),
+                reason: format!("current working directory could not be resolved: {error}"),
+            })?
+            .join(raw_path)
+    };
+
+    let (existing_root, missing_segments) = split_existing_prefix(&absolute_path)?;
+    let metadata =
+        fs::symlink_metadata(&existing_root).map_err(|error| SimardError::InvalidStateRoot {
+            path: raw_path.to_path_buf(),
+            reason: format!(
+                "existing state root ancestor '{}' could not be inspected: {error}",
+                existing_root.display()
+            ),
+        })?;
+
+    if metadata.file_type().is_symlink() {
+        return Err(SimardError::InvalidStateRoot {
+            path: raw_path.to_path_buf(),
+            reason: "state root must not be a symlink".to_string(),
+        });
+    }
+    if !metadata.is_dir() {
+        return Err(SimardError::InvalidStateRoot {
+            path: raw_path.to_path_buf(),
+            reason: "state root must resolve to a directory".to_string(),
+        });
+    }
+
+    let mut canonical =
+        fs::canonicalize(&existing_root).map_err(|error| SimardError::InvalidStateRoot {
+            path: raw_path.to_path_buf(),
+            reason: format!(
+                "state root ancestor '{}' could not be canonicalized: {error}",
+                existing_root.display()
+            ),
+        })?;
+    for segment in missing_segments {
+        canonical.push(segment);
+    }
+
+    Ok(canonical)
+}
+
+fn split_existing_prefix(path: &Path) -> SimardResult<(PathBuf, Vec<OsString>)> {
+    let mut existing = path.to_path_buf();
+    let mut missing_segments = Vec::new();
+
+    loop {
+        match fs::symlink_metadata(&existing) {
+            Ok(_) => return Ok((existing, missing_segments)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let segment =
+                    existing
+                        .file_name()
+                        .ok_or_else(|| SimardError::InvalidStateRoot {
+                            path: path.to_path_buf(),
+                            reason: "state root must stay under an existing directory".to_string(),
+                        })?;
+                missing_segments.push(segment.to_os_string());
+                existing = existing
+                    .parent()
+                    .ok_or_else(|| SimardError::InvalidStateRoot {
+                        path: path.to_path_buf(),
+                        reason: "state root must stay under an existing directory".to_string(),
+                    })?
+                    .to_path_buf();
+            }
+            Err(error) => {
+                return Err(SimardError::InvalidStateRoot {
+                    path: path.to_path_buf(),
+                    reason: format!(
+                        "state root '{}' could not be inspected: {error}",
+                        existing.display()
+                    ),
+                });
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BootstrapConfig {
     pub mode: BootstrapMode,
@@ -213,11 +318,13 @@ impl BootstrapConfig {
         };
         let state_root = match inputs.state_root {
             Some(path) => ConfigValue {
-                value: path,
+                value: validate_state_root(path)?,
                 source: ConfigValueSource::Environment("SIMARD_STATE_ROOT"),
             },
             None if mode == BootstrapMode::BuiltinDefaults => ConfigValue {
-                value: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(DEFAULT_STATE_ROOT),
+                value: validate_state_root(
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(DEFAULT_STATE_ROOT),
+                )?,
                 source: ConfigValueSource::ExplicitOptIn("SIMARD_BOOTSTRAP_MODE"),
             },
             None => {
@@ -549,16 +656,48 @@ fn register_builtin_base_type(
 mod tests {
     #[cfg(unix)]
     use std::ffi::OsString;
+    use std::fs;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{LOCAL_BASE_TYPE, builtin_base_type_registry_for_manifest, decode_utf8_env_value};
+    use super::{
+        LOCAL_BASE_TYPE, builtin_base_type_registry_for_manifest, decode_utf8_env_value,
+        validate_state_root,
+    };
     use crate::base_types::{BaseTypeFactory, BaseTypeId, RustyClawdAdapter};
     use crate::error::SimardError;
     use crate::identity::{
         BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader, ManifestContract,
     };
     use crate::metadata::{Freshness, Provenance};
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(label: &str) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock should be after unix epoch")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!("{label}-{unique}"));
+            fs::create_dir_all(&path).expect("test directory should be created");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
 
     #[cfg(unix)]
     #[test]
@@ -612,6 +751,74 @@ mod tests {
                 .descriptor()
                 .backend
                 .identity
+        );
+    }
+
+    #[test]
+    fn validate_state_root_rejects_parent_directory_segments() {
+        let error = validate_state_root(PathBuf::from("../outside-state"))
+            .expect_err("state root traversal should fail");
+
+        assert_eq!(
+            error,
+            SimardError::InvalidStateRoot {
+                path: PathBuf::from("../outside-state"),
+                reason: "state root must not contain '..' path segments".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn validate_state_root_canonicalizes_safe_existing_directories() {
+        let temp_dir = TestDir::new("simard-state-root");
+        let nested = temp_dir.path().join("nested");
+        fs::create_dir_all(&nested).expect("nested directory should exist");
+
+        let resolved =
+            validate_state_root(nested.clone()).expect("existing state root should pass");
+        let expected = fs::canonicalize(&nested).expect("existing state root should canonicalize");
+
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn validate_state_root_rejects_existing_files() {
+        let temp_dir = TestDir::new("simard-state-root-file");
+        let file_path = temp_dir.path().join("state-root.txt");
+        fs::write(&file_path, "not a directory").expect("file should be written");
+
+        let error =
+            validate_state_root(file_path.clone()).expect_err("state root file should fail");
+
+        assert_eq!(
+            error,
+            SimardError::InvalidStateRoot {
+                path: file_path,
+                reason: "state root must resolve to a directory".to_string(),
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_state_root_rejects_symlink_roots() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = TestDir::new("simard-state-root-symlink");
+        let real_dir = temp_dir.path().join("real");
+        let link_dir = temp_dir.path().join("link");
+        fs::create_dir_all(&real_dir).expect("real directory should exist");
+        symlink(&real_dir, &link_dir).expect("symlink should be created");
+
+        let error =
+            validate_state_root(link_dir.clone()).expect_err("symlink state root should fail");
+
+        assert_eq!(
+            error,
+            SimardError::InvalidStateRoot {
+                path: link_dir,
+                reason: "state root must not be a symlink".to_string(),
+            }
         );
     }
 }

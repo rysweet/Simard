@@ -126,6 +126,10 @@ pub enum SimardError {
     VerificationFailed {
         reason: String,
     },
+    InvalidStateRoot {
+        path: PathBuf,
+        reason: String,
+    },
     PersistentStoreIo {
         store: String,
         action: String,
@@ -137,6 +141,10 @@ pub enum SimardError {
     },
     BenchmarkSuiteNotFound {
         suite_id: String,
+    },
+    BenchmarkComparisonUnavailable {
+        scenario_id: String,
+        reason: String,
     },
     ArtifactIo {
         path: PathBuf,
@@ -291,6 +299,9 @@ impl Display for SimardError {
             Self::VerificationFailed { reason } => {
                 write!(f, "engineer loop verification failed: {reason}")
             }
+            Self::InvalidStateRoot { path, reason } => {
+                write!(f, "invalid state root '{}': {reason}", path.display())
+            }
             Self::PersistentStoreIo {
                 store,
                 action,
@@ -306,6 +317,13 @@ impl Display for SimardError {
             Self::BenchmarkSuiteNotFound { suite_id } => {
                 write!(f, "benchmark suite '{suite_id}' is not registered")
             }
+            Self::BenchmarkComparisonUnavailable {
+                scenario_id,
+                reason,
+            } => write!(
+                f,
+                "benchmark comparison for scenario '{scenario_id}' is unavailable: {reason}"
+            ),
             Self::ArtifactIo { path: _, reason } => {
                 write!(f, "failed to read or write benchmark artifact: {reason}")
             }

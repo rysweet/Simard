@@ -1,6 +1,6 @@
 ---
 title: Simard documentation
-description: Start here for the current executable surfaces, the planned unified `simard` CLI, runtime contracts, and benchmark flow.
+description: Start here for the shipped `simard` operator CLI, compatibility binaries, runtime contracts, and benchmark flow.
 last_updated: 2026-03-30
 review_schedule: as-needed
 owner: simard
@@ -8,50 +8,23 @@ owner: simard
 
 # Simard documentation
 
-Simard is in a transition state.
+`simard` is the canonical operator-facing CLI.
 
-Today:
-
-- `simard` is a thin bootstrap entrypoint configured through environment variables
-- `simard_operator_probe` exposes the current engineer, meeting, goal-curation, improvement-curation, and review commands
-- `simard-gym` exposes the current benchmark CLI
-
-The product architecture targets a unified `simard` CLI with namespaces for `engineer`, `meeting`, `goal-curation`, `improvement-curation`, `gym`, `review`, and `bootstrap`. The docs below call out clearly whether something is current or planned so they do not overstate what ships today.
+The shipped command tree covers `engineer`, `meeting`, `goal-curation`, `improvement-curation`, `gym`, `review`, and `bootstrap` from one binary. The legacy `simard_operator_probe` and `simard-gym` binaries remain available as compatibility surfaces while operators migrate, but the primary product surface is now `simard ...`.
 
 ## Start here
 
-- [Tutorial: Run your first local session](./tutorials/run-your-first-local-session.md) - Exercise the current local-session flows through today's binaries and see how they map to the planned unified CLI.
-- [Tutorial: Run your first benchmark gym suite](./tutorials/run-your-first-benchmark-gym.md) - Run the shipped starter benchmark suite through `simard-gym` today and see the planned `simard gym` mapping.
-- [How to configure bootstrap and inspect reflection](./howto/configure-bootstrap-and-inspect-reflection.md) - Verify the current bootstrap entrypoint, inspect the truthful runtime snapshot, and see the planned bootstrap subcommand.
+- [Tutorial: Run your first local session](./tutorials/run-your-first-local-session.md) - Exercise the local runtime through the primary CLI.
+- [Tutorial: Run your first benchmark gym suite](./tutorials/run-your-first-benchmark-gym.md) - Run the shipped starter benchmark suite.
+- [How to configure bootstrap and inspect reflection](./howto/configure-bootstrap-and-inspect-reflection.md) - Bootstrap an explicit runtime selection and inspect the truthful runtime snapshot.
 - [How to carry meeting decisions into engineer sessions](./howto/carry-meeting-decisions-into-engineer-sessions.md) - Persist meeting records under a shared state root and confirm later engineer runs carry them forward.
-- [Simard CLI reference](./reference/simard-cli.md) - Look up the planned unified command tree together with the current runnable command mappings.
-- [Runtime contracts reference](./reference/runtime-contracts.md) - Look up the current executable contracts, the in-process runtime contract, and the planned unified CLI surface.
+- [Simard CLI reference](./reference/simard-cli.md) - Look up the shipped command tree and compatibility mappings.
+- [Runtime contracts reference](./reference/runtime-contracts.md) - Look up executable contracts and lifecycle guarantees.
 - [Concept: truthful runtime metadata](./concepts/truthful-runtime-metadata.md) - Read the design rationale behind the stricter runtime contract.
 
-## Current executable surfaces
+## Canonical executable surface
 
-Simard currently guarantees these operator-visible entrypoints:
-
-- `simard` boots a local session from environment variables and prints the reflected startup summary
-- `simard_operator_probe` runs the current multi-mode compatibility commands:
-  - `bootstrap-run`
-  - `engineer-loop-run`
-  - `terminal-run`
-  - `meeting-run`
-  - `goal-curation-run`
-  - `improvement-curation-run`
-  - `review-run`
-  - `review-read`
-- `simard-gym` runs the shipped benchmark commands:
-  - `list`
-  - `run <scenario-id>`
-  - `run-suite <suite-id>`
-
-These binaries already exercise real runtime behavior. They are not placeholders.
-
-## Planned operator surface
-
-The feature Simard is being built toward is a unified CLI shaped like this:
+Simard guarantees these operator-visible namespaces on the primary binary:
 
 - `simard engineer ...`
 - `simard meeting ...`
@@ -61,15 +34,18 @@ The feature Simard is being built toward is a unified CLI shaped like this:
 - `simard review ...`
 - `simard bootstrap ...`
 
-Until `src/main.rs` dispatches that tree directly, the reference and tutorial docs keep both surfaces visible.
+Bare `simard` prints the unified help text instead of attempting a hidden environment-only bootstrap fallback.
+
+## Compatibility binaries
+
+The compatibility binaries remain shipped, but they are no longer the canonical entrypoint:
+
+- `simard_operator_probe` preserves the legacy multi-mode probe commands
+- `simard-gym` preserves the legacy benchmark binary
+
+Use them only when you need compatibility with older scripts or exact legacy output.
 
 ## Running from source
-
-The examples in this docs set use the installed binary names when they refer to current executables:
-
-- `simard`
-- `simard_operator_probe`
-- `simard-gym`
 
 From the repository root, the corresponding Cargo commands are:
 
@@ -91,7 +67,7 @@ Those hooks enforce `cargo fmt --all -- --check`, `cargo clippy --all-targets --
 
 If you are new to Simard, start with the [local session tutorial](./tutorials/run-your-first-local-session.md).
 
-If you need exact current-to-planned command mappings, use the [Simard CLI reference](./reference/simard-cli.md).
+If you need exact commands, use the [Simard CLI reference](./reference/simard-cli.md).
 
 If you need exact field names or lifecycle errors, use the [runtime contracts reference](./reference/runtime-contracts.md).
 

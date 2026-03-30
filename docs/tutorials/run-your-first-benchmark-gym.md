@@ -1,6 +1,6 @@
 ---
 title: "Tutorial: Run your first benchmark gym suite"
-description: Exercise the shipped Simard gym scenarios through `simard-gym` today and understand the planned `simard gym` surface.
+description: Exercise the shipped Simard benchmark scenarios through the canonical `simard gym` surface and understand where the legacy `simard-gym` binary still fits.
 last_updated: 2026-03-30
 review_schedule: as-needed
 owner: simard
@@ -14,28 +14,28 @@ related:
 
 # Tutorial: Run your first benchmark gym suite
 
-This tutorial exercises the benchmark surface as it exists today through `simard-gym`, then maps that flow to the planned `simard gym` namespace.
+This tutorial exercises the benchmark surface through the canonical `simard gym` namespace.
 
 ## What you'll learn
 
-- how to list the shipped benchmark scenarios today
+- how to list the shipped benchmark scenarios
 - how to run the starter suite across the current builtin base-type selections
 - where Simard writes benchmark artifacts
-- how the current `simard-gym` binary maps to the planned unified CLI
+- when you might still reach for the compatibility `simard-gym` binary
 
 ## Prerequisites
 
 - Rust and Cargo installed
 - a shell in the repository root
 
-All runnable examples below use the current benchmark executable surface exactly.
+All runnable examples below use the canonical benchmark surface.
 
 ## Step 1: List the shipped benchmark scenarios
 
 The starter suite is intentionally small and curated.
 
 ```bash
-cargo run --quiet --bin simard-gym -- list
+cargo run --quiet -- gym list
 ```
 
 You should see four scenarios:
@@ -54,18 +54,14 @@ Together they cover:
 - `rusty-clawd`
 - both `single-process` and loopback `multi-process`
 
-**Planned unified equivalent**:
-
-```bash
-simard gym list
-```
+If you need exact legacy output for an older script, `cargo run --quiet --bin simard-gym -- list` still works as a compatibility surface.
 
 ## Step 2: Run the starter benchmark suite
 
-Run the full shipped suite like an operator would today:
+Run the full shipped suite like an operator would:
 
 ```bash
-cargo run --quiet --bin simard-gym -- run-suite starter
+cargo run --quiet -- gym run-suite starter
 ```
 
 You should see output shaped like:
@@ -78,12 +74,6 @@ Suite passed: true
 - safe-code-change-rusty-clawd: passed (target/simard-gym/...)
 - composite-session-review: passed (target/simard-gym/...)
 Suite artifact report: target/simard-gym/suites/starter.json
-```
-
-**Planned unified equivalent**:
-
-```bash
-simard gym run-suite starter
 ```
 
 ## Step 3: Inspect the generated artifacts
@@ -114,7 +104,7 @@ Those artifacts record:
 You can also run a single scenario:
 
 ```bash
-cargo run --quiet --bin simard-gym -- run safe-code-change-rusty-clawd
+cargo run --quiet -- gym run safe-code-change-rusty-clawd
 ```
 
 That command prints the scenario result plus the exact artifact paths for the scenario run.
@@ -129,13 +119,27 @@ Open the JSON artifact and look for:
 - `scorecard.human_review_notes`
 - `scorecard.measurement_notes`
 
-**Planned unified equivalent**:
+## Step 5: Compare the latest two runs for one scenario
+
+Once a scenario has been executed at least twice, you can ask Simard to compare the latest two completed runs directly:
 
 ```bash
-simard gym run safe-code-change-rusty-clawd
+cargo run --quiet -- gym compare safe-code-change-rusty-clawd
 ```
 
-## Step 5: Understand the current measurement boundary
+You should see output shaped like:
+
+```text
+Scenario: safe-code-change-rusty-clawd
+Comparison status: unchanged
+Current report: target/simard-gym/safe-code-change-rusty-clawd/...
+Previous report: target/simard-gym/safe-code-change-rusty-clawd/...
+Comparison artifact report: target/simard-gym/comparisons/safe-code-change-rusty-clawd/...
+```
+
+That surface gives operators a lightweight regression check without manually diffing JSON.
+
+## Step 6: Understand the current measurement boundary
 
 The current benchmark foundation is real, but intentionally modest.
 
@@ -159,13 +163,14 @@ Those gaps are recorded in the emitted `measurement_notes` instead of being hidd
 
 You now know how to:
 
-- list the shipped benchmark scenarios through the current `simard-gym` binary
+- list the shipped benchmark scenarios through `simard gym`
 - run the starter benchmark suite
 - inspect the emitted benchmark artifacts
-- map the current benchmark binary to the planned `simard gym` namespace
+- compare the latest two runs for a shipped scenario
+- use the compatibility `simard-gym` binary only when an older script still depends on it
 
 ## Next steps
 
 - Use the [local session tutorial](./run-your-first-local-session.md) to compare ordinary runtime execution with benchmark execution.
-- Use the [Simard CLI reference](../reference/simard-cli.md) when you need the exact current-to-planned command mapping.
+- Use the [Simard CLI reference](../reference/simard-cli.md) when you need the exact command tree and compatibility mapping.
 - Use the [runtime contracts reference](../reference/runtime-contracts.md) when you need the exact public contract details.

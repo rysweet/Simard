@@ -1,19 +1,41 @@
 use std::path::PathBuf;
 
 use crate::operator_commands::{
-    run_bootstrap_probe, run_engineer_loop_probe, run_goal_curation_probe, run_gym_list,
-    run_gym_scenario, run_gym_suite, run_improvement_curation_probe, run_meeting_probe,
-    run_review_probe, run_review_read_probe,
+    run_bootstrap_probe, run_engineer_loop_probe, run_goal_curation_probe, run_gym_compare,
+    run_gym_list, run_gym_scenario, run_gym_suite, run_improvement_curation_probe,
+    run_meeting_probe, run_review_probe, run_review_read_probe,
 };
+
+const OPERATOR_CLI_HELP: &str = "\
+Simard unified operator CLI
+
+Product modes:
+  engineer run <topology> <workspace-root> <objective> [state-root]
+  meeting run <base-type> <topology> <objective> [state-root]
+  goal-curation run <base-type> <topology> <objective> [state-root]
+  improvement-curation run <base-type> <topology> <objective> [state-root]
+  gym list
+  gym run <scenario-id>
+  gym compare <scenario-id>
+  gym run-suite <suite-id>
+
+Operator utilities:
+  review run <base-type> <topology> <objective> [state-root]
+  review read <base-type> <topology> [state-root]
+  bootstrap run <identity> <base-type> <topology> <objective> [state-root]
+
+Compatibility binaries remain available: simard_operator_probe, simard-gym
+";
 
 pub fn dispatch_operator_cli<I>(args: I) -> Result<(), Box<dyn std::error::Error>>
 where
     I: IntoIterator<Item = String>,
 {
     let mut args = args.into_iter();
-    let command = args
-        .next()
-        .ok_or_else(|| operator_cli_usage().to_string())?;
+    let Some(command) = args.next() else {
+        print!("{}", operator_cli_help());
+        return Ok(());
+    };
 
     if matches!(command.as_str(), "--help" | "-h" | "help") {
         print!("{}", operator_cli_help());
@@ -36,28 +58,8 @@ pub fn operator_cli_usage() -> &'static str {
     "usage: simard <engineer|meeting|goal-curation|improvement-curation|gym|review|bootstrap> ..."
 }
 
-pub fn operator_cli_help() -> String {
-    [
-        "Simard unified operator CLI",
-        "",
-        "Product modes:",
-        "  engineer run <topology> <workspace-root> <objective> [state-root]",
-        "  meeting run <base-type> <topology> <objective> [state-root]",
-        "  goal-curation run <base-type> <topology> <objective> [state-root]",
-        "  improvement-curation run <base-type> <topology> <objective> [state-root]",
-        "  gym list",
-        "  gym run <scenario-id>",
-        "  gym run-suite <suite-id>",
-        "",
-        "Operator utilities:",
-        "  review run <base-type> <topology> <objective> [state-root]",
-        "  review read <base-type> <topology> [state-root]",
-        "  bootstrap run <identity> <base-type> <topology> <objective> [state-root]",
-        "",
-        "Compatibility binaries remain available: simard_operator_probe, simard-gym",
-    ]
-    .join("\n")
-        + "\n"
+pub fn operator_cli_help() -> &'static str {
+    OPERATOR_CLI_HELP
 }
 
 fn dispatch_engineer_command(
@@ -170,6 +172,11 @@ fn dispatch_gym_command(
             let scenario_id = next_required(&mut args, "scenario id")?;
             reject_extra_args(args)?;
             run_gym_scenario(&scenario_id)
+        }
+        "compare" => {
+            let scenario_id = next_required(&mut args, "scenario id")?;
+            reject_extra_args(args)?;
+            run_gym_compare(&scenario_id)
         }
         "run-suite" => {
             let suite_id = next_required(&mut args, "suite id")?;

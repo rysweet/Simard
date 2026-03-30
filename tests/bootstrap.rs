@@ -302,11 +302,12 @@ fn main_does_not_print_objective_derived_runtime_details() {
 }
 
 #[test]
-fn main_reports_selected_base_type_and_runtime_implementation_separately() {
+fn main_routes_through_the_unified_operator_cli() {
     let main_rs = include_str!("../src/main.rs");
 
-    assert!(main_rs.contains("Bootstrap selection:"));
-    assert!(main_rs.contains("Adapter implementation:"));
+    assert!(main_rs.contains("dispatch_operator_cli"));
+    assert!(!main_rs.contains("Bootstrap selection:"));
+    assert!(!main_rs.contains("Adapter implementation:"));
 }
 
 #[test]
