@@ -353,6 +353,10 @@ fn simard_help_documents_engineer_read_as_the_durable_engineer_audit_surface() {
         rendered.contains("engineer terminal-read <topology> [state-root]"),
         "simard help should document the canonical read-only terminal audit workflow:\n{rendered}"
     );
+    assert!(
+        rendered.contains("engineer terminal-file <topology> <objective-file> [state-root]"),
+        "simard help should document the file-backed terminal session workflow:\n{rendered}"
+    );
 }
 
 #[test]
@@ -714,6 +718,87 @@ command: printf \"terminal-cli-ok\\n\"";
             "terminal engineer mode should persist {expected} under the selected state root"
         );
     }
+}
+
+#[test]
+fn simard_engineer_terminal_file_runs_a_bounded_terminal_session_from_a_recipe_file() {
+    let state_root = TempDirGuard::new("simard-cli-terminal-file");
+    let objective_dir = TempDirGuard::new("simard-cli-terminal-file-objective");
+    let objective_path = objective_dir.path().join("session.simard-terminal");
+    fs::write(
+        &objective_path,
+        "working-directory: .\ncommand: printf \"terminal-file-ready\\n\"\nwait-for: terminal-file-ready\ninput: printf \"terminal-file-ok\\n\"",
+    )
+    .expect("terminal objective file should be written");
+
+    let simard_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("terminal-file")
+        .arg("single-process")
+        .arg(&objective_path)
+        .arg(state_root.path())
+        .output()
+        .expect("simard engineer terminal-file should launch");
+    let simard_rendered = rendered_output(&simard_output);
+
+    assert!(
+        simard_output.status.success(),
+        "terminal-file should expose the same bounded terminal substrate through a reusable file-backed recipe:\n{simard_rendered}"
+    );
+    for expected in [
+        "Selected base type: terminal-shell",
+        "Terminal steps count: 3",
+        "Terminal checkpoint 1: terminal-file-ready",
+        "Terminal last output line: terminal-file-ok",
+        "terminal-file-ok",
+    ] {
+        assert!(
+            simard_rendered.contains(expected),
+            "terminal-file should surface '{expected}' for operators:\n{simard_rendered}"
+        );
+    }
+
+    let legacy_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .arg("terminal-run-file")
+        .arg("single-process")
+        .arg(&objective_path)
+        .arg(state_root.path())
+        .output()
+        .expect("legacy terminal-run-file should launch");
+    let legacy_rendered = rendered_output(&legacy_output);
+
+    assert!(
+        legacy_output.status.success(),
+        "terminal-run-file compatibility path should remain available while operators migrate:\n{legacy_rendered}"
+    );
+    assert_eq!(
+        simard_rendered, legacy_rendered,
+        "terminal-file should preserve terminal-run-file parity so canonical and compatibility surfaces stay aligned"
+    );
+}
+
+#[test]
+fn simard_engineer_terminal_file_rejects_missing_or_unreadable_recipe_files() {
+    let state_root = TempDirGuard::new("simard-cli-terminal-file-missing");
+    let missing_path = state_root.path().join("missing.simard-terminal");
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("terminal-file")
+        .arg("single-process")
+        .arg(&missing_path)
+        .arg(state_root.path())
+        .output()
+        .expect("simard engineer terminal-file missing-path case should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        !output.status.success(),
+        "terminal-file must fail when the recipe file cannot be inspected:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("terminal objective file") && rendered.contains("could not be inspected"),
+        "terminal-file should explain why the requested recipe file could not be loaded:\n{rendered}"
+    );
 }
 
 #[test]

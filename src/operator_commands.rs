@@ -74,6 +74,13 @@ where
             reject_extra_args(args)?;
             run_terminal_probe(&topology, &objective, state_root)?;
         }
+        "terminal-run-file" => {
+            let topology = next_required(&mut args, "topology")?;
+            let objective_path = next_required(&mut args, "objective file")?;
+            let state_root = next_optional_path(&mut args);
+            reject_extra_args(args)?;
+            run_terminal_probe_from_file(&topology, Path::new(&objective_path), state_root)?;
+        }
         "terminal-read" => {
             let topology = next_required(&mut args, "topology")?;
             let state_root = next_optional_path(&mut args);
@@ -490,6 +497,15 @@ pub fn run_terminal_probe(
         &execution.outcome.reflection.summary,
     );
     Ok(())
+}
+
+pub fn run_terminal_probe_from_file(
+    topology: &str,
+    objective_path: &Path,
+    state_root_override: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let objective = load_terminal_objective_file(objective_path)?;
+    run_terminal_probe(topology, &objective, state_root_override)
 }
 
 pub fn run_terminal_read_probe(
@@ -1797,6 +1813,37 @@ fn next_required(
 
 fn next_optional_path(args: &mut impl Iterator<Item = String>) -> Option<PathBuf> {
     args.next().map(PathBuf::from)
+}
+
+fn load_terminal_objective_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        format!(
+            "terminal objective file '{}' could not be inspected: {error}",
+            path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "terminal objective file '{}' must be a regular file, not a symlink",
+            path.display()
+        )
+        .into());
+    }
+    if !metadata.is_file() {
+        return Err(format!(
+            "terminal objective file '{}' must be a regular file",
+            path.display()
+        )
+        .into());
+    }
+
+    fs::read_to_string(path).map_err(|error| {
+        format!(
+            "terminal objective file '{}' could not be read as UTF-8 text: {error}",
+            path.display()
+        )
+        .into()
+    })
 }
 
 fn reject_extra_args(

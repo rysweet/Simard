@@ -222,6 +222,20 @@ Look for:
 - `Terminal last output line: terminal-foundation-ok`
 - `Terminal transcript preview:`
 
+If you want to keep a reusable interactive session recipe on disk instead of packing it into one CLI string, use the file-backed entrypoint:
+
+```bash
+cat > /tmp/simard-terminal.recipe <<'EOF'
+working-directory: .
+command: printf "terminal-file-ready\n"
+wait-for: terminal-file-ready
+input: printf "terminal-file-ok\n"
+EOF
+
+cargo run --quiet -- \
+  engineer terminal-file single-process /tmp/simard-terminal.recipe "$STATE_ROOT"
+```
+
 ## Summary
 
 You now know how to:
