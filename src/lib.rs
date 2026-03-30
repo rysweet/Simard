@@ -81,7 +81,7 @@ pub use operator_commands::{
     run_goal_curation_read_probe, run_gym_compare, run_gym_list, run_gym_scenario, run_gym_suite,
     run_handoff_probe, run_improvement_curation_probe, run_improvement_curation_read_probe,
     run_meeting_probe, run_meeting_read_probe, run_review_probe, run_review_read_probe,
-    run_terminal_probe,
+    run_terminal_probe, run_terminal_read_probe,
 };
 pub use prompt_assets::{
     FilePromptAssetStore, InMemoryPromptAssetStore, PromptAsset, PromptAssetId, PromptAssetRef,

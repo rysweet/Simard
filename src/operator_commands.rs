@@ -74,6 +74,12 @@ where
             reject_extra_args(args)?;
             run_terminal_probe(&topology, &objective, state_root)?;
         }
+        "terminal-read" => {
+            let topology = next_required(&mut args, "topology")?;
+            let state_root = next_optional_path(&mut args);
+            reject_extra_args(args)?;
+            run_terminal_read_probe(&topology, state_root)?;
+        }
         "engineer-loop-run" => {
             let topology = next_required(&mut args, "topology")?;
             let workspace_root = next_required(&mut args, "workspace root")?;
@@ -511,6 +517,16 @@ pub fn run_terminal_probe(
     }
     print_text("Execution summary", &execution.outcome.execution_summary);
     print_text("Reflection summary", &execution.outcome.reflection.summary);
+    Ok(())
+}
+
+pub fn run_terminal_read_probe(
+    topology: &str,
+    state_root_override: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let state_root = resolved_terminal_read_state_root(state_root_override, topology)?;
+    let view = TerminalReadView::load(state_root)?;
+    view.print();
     Ok(())
 }
 
@@ -1137,6 +1153,21 @@ fn resolved_engineer_read_state_root(
     Ok(state_root)
 }
 
+fn resolved_terminal_read_state_root(
+    explicit: Option<PathBuf>,
+    topology: &str,
+) -> crate::SimardResult<PathBuf> {
+    let state_root = resolved_state_root(
+        explicit,
+        "simard-engineer",
+        "terminal-shell",
+        topology,
+        "terminal-run",
+    )?;
+    validate_terminal_read_state_root(&state_root)?;
+    Ok(state_root)
+}
+
 fn resolved_meeting_read_state_root(
     explicit: Option<PathBuf>,
     base_type: &str,
@@ -1165,6 +1196,11 @@ fn validate_meeting_read_state_root(state_root: &Path) -> crate::SimardResult<()
 
 fn validate_engineer_read_state_root(state_root: &Path) -> crate::SimardResult<()> {
     validated_engineer_read_artifacts(state_root)?;
+    Ok(())
+}
+
+fn validate_terminal_read_state_root(state_root: &Path) -> crate::SimardResult<()> {
+    validated_terminal_read_artifacts(state_root)?;
     Ok(())
 }
 
@@ -1308,6 +1344,29 @@ fn validated_engineer_read_artifacts(
     })
 }
 
+fn validated_terminal_read_artifacts(
+    state_root: &Path,
+) -> crate::SimardResult<EngineerReadArtifacts> {
+    validate_existing_read_state_root_root("terminal read", state_root)?;
+    Ok(EngineerReadArtifacts {
+        handoff_path: require_existing_read_file_for_mode(
+            "terminal read",
+            state_root,
+            &state_root.join("latest_handoff.json"),
+        )?,
+        memory_path: require_existing_read_file_for_mode(
+            "terminal read",
+            state_root,
+            &state_root.join("memory_records.json"),
+        )?,
+        evidence_path: require_existing_read_file_for_mode(
+            "terminal read",
+            state_root,
+            &state_root.join("evidence_records.json"),
+        )?,
+    })
+}
+
 fn parse_runtime_topology(value: &str) -> crate::SimardResult<RuntimeTopology> {
     match value {
         "single-process" => Ok(RuntimeTopology::SingleProcess),
@@ -1342,6 +1401,23 @@ struct EngineerReadView {
     changed_files_after_action: String,
     verification_status: String,
     verification_summary: String,
+    memory_record_count: usize,
+    evidence_record_count: usize,
+}
+
+struct TerminalReadView {
+    state_root: PathBuf,
+    identity: String,
+    selected_base_type: String,
+    topology: String,
+    session_phase: String,
+    objective_metadata: String,
+    adapter_implementation: String,
+    shell: String,
+    working_directory: String,
+    command_count: String,
+    wait_count: String,
+    transcript_preview: String,
     memory_record_count: usize,
     evidence_record_count: usize,
 }
@@ -1478,6 +1554,80 @@ impl EngineerReadView {
     }
 }
 
+impl TerminalReadView {
+    fn load(state_root: PathBuf) -> crate::SimardResult<Self> {
+        let artifacts = validated_terminal_read_artifacts(&state_root)?;
+        let handoff = latest_engineer_handoff(&artifacts.handoff_path)?;
+        let session = handoff.session.as_ref().ok_or_else(|| {
+            crate::SimardError::InvalidHandoffSnapshot {
+                field: "session".to_string(),
+                reason: "terminal read requires latest_handoff.json to contain a persisted session snapshot"
+                    .to_string(),
+            }
+        })?;
+
+        FileBackedMemoryStore::try_new(artifacts.memory_path)?;
+        FileBackedEvidenceStore::try_new(artifacts.evidence_path)?;
+
+        Ok(Self {
+            state_root,
+            identity: handoff.identity_name,
+            selected_base_type: handoff.selected_base_type.to_string(),
+            topology: handoff.topology.to_string(),
+            session_phase: session.phase.to_string(),
+            objective_metadata: render_redacted_objective_metadata(&session.objective)?,
+            adapter_implementation: required_terminal_evidence_value(
+                &handoff.evidence_records,
+                "backend-implementation=",
+            )?
+            .to_string(),
+            shell: required_terminal_evidence_value(&handoff.evidence_records, "shell=")?
+                .to_string(),
+            working_directory: required_terminal_evidence_value(
+                &handoff.evidence_records,
+                "terminal-working-directory=",
+            )?
+            .to_string(),
+            command_count: required_terminal_evidence_value(
+                &handoff.evidence_records,
+                "terminal-command-count=",
+            )?
+            .to_string(),
+            wait_count: optional_terminal_evidence_value(
+                &handoff.evidence_records,
+                "terminal-wait-count=",
+            )
+            .unwrap_or("0")
+            .to_string(),
+            transcript_preview: required_terminal_evidence_value(
+                &handoff.evidence_records,
+                "terminal-transcript-preview=",
+            )?
+            .to_string(),
+            memory_record_count: handoff.memory_records.len(),
+            evidence_record_count: handoff.evidence_records.len(),
+        })
+    }
+
+    fn print(&self) {
+        println!("Probe mode: terminal-read");
+        print_text("Identity", &self.identity);
+        print_text("Selected base type", &self.selected_base_type);
+        print_text("Topology", &self.topology);
+        print_display("State root", self.state_root.display());
+        print_text("Session phase", &self.session_phase);
+        print_text("Objective metadata", &self.objective_metadata);
+        print_text("Adapter implementation", &self.adapter_implementation);
+        print_text("Shell", &self.shell);
+        print_text("Working directory", &self.working_directory);
+        print_text("Terminal command count", &self.command_count);
+        print_text("Terminal wait count", &self.wait_count);
+        print_text("Terminal transcript preview", &self.transcript_preview);
+        println!("Memory records: {}", self.memory_record_count);
+        println!("Evidence records: {}", self.evidence_record_count);
+    }
+}
+
 fn latest_engineer_handoff(handoff_path: &Path) -> crate::SimardResult<RuntimeHandoffSnapshot> {
     FileBackedHandoffStore::try_new(handoff_path)?
         .latest()?
@@ -1504,6 +1654,33 @@ fn required_engineer_evidence_value<'a>(
                 prefix.trim_end_matches('=')
             ),
         })
+}
+
+fn required_terminal_evidence_value<'a>(
+    evidence_records: &'a [EvidenceRecord],
+    prefix: &str,
+) -> crate::SimardResult<&'a str> {
+    evidence_records
+        .iter()
+        .rev()
+        .find_map(|record| record.detail.strip_prefix(prefix))
+        .ok_or_else(|| crate::SimardError::InvalidHandoffSnapshot {
+            field: prefix.trim_end_matches('=').to_string(),
+            reason: format!(
+                "terminal read requires latest_handoff.json to carry persisted terminal evidence '{}' for operator output",
+                prefix.trim_end_matches('=')
+            ),
+        })
+}
+
+fn optional_terminal_evidence_value<'a>(
+    evidence_records: &'a [EvidenceRecord],
+    prefix: &str,
+) -> Option<&'a str> {
+    evidence_records
+        .iter()
+        .rev()
+        .find_map(|record| record.detail.strip_prefix(prefix))
 }
 
 fn parse_engineer_summary_list(raw: &str, separator: &str) -> Vec<String> {
