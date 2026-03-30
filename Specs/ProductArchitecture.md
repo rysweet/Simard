@@ -93,7 +93,7 @@ The following are explicitly out of scope for v1.
 Simard should be treated as a focused engineering runtime with five user-visible modes:
 
 1. Engineer mode
-   Simard accepts a concrete task, inspects the local repo, plans the work, executes through terminal actions, and reports outcomes with evidence.
+   Simard accepts a concrete task, inspects the local repo, forms a bounded plan with explicit verification steps, executes through terminal actions, and reports outcomes with evidence. The shipped v1 slice now supports both read-only repo inspection actions and one narrow structured file edit on a clean repo.
 
 2. Meeting mode
    Simard helps humans think, decide, and record architecture or planning outcomes, but does not silently drift into implementation without an explicit handoff.
@@ -238,6 +238,12 @@ The engineer loop should look like:
 
 This loop is simple by design.
 If Simard needs a more complicated execution flow, that complexity should emerge from orchestration primitives rather than one giant opaque prompt.
+
+The current shipped v1 engineer-loop slice stays intentionally narrow:
+
+- default behavior remains a read-only repo-native inspection action
+- a bounded mutating path exists only for explicit structured objectives with `edit-file:`, `replace:`, `with:`, and `verify-contains:` directives
+- the mutating path requires a clean repo, exactly one expected changed file, and explicit content verification before success is reported
 
 ## Memory Architecture
 

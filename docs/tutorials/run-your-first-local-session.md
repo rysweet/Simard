@@ -109,7 +109,7 @@ Terminal evidence: terminal-command-count=2
 
 ### Variation: exercise the local-first engineer loop
 
-Use the shipped operator probe to inspect the repo, run one explicit safe engineering action, and verify the result:
+Use the shipped operator probe to inspect the repo, print a short plan, run one explicit bounded engineering action, and verify the result:
 
 ```bash
 cargo run --quiet --bin simard_operator_probe -- \
@@ -124,11 +124,54 @@ Probe mode: engineer-loop-run
 Repo root: /path/to/repo
 Active goals count: 0
 Execution scope: local-only
+Action plan: Inspect the repo ...
 Selected action: cargo-metadata-scan
+Changed files after action: <none>
 Verification status: verified
 ```
 
-**Checkpoint**: Simard is now doing more than opening a shell. It is inspecting repo state, choosing a bounded repo-native action, verifying that repo grounding stayed stable, and persisting truthful memory/evidence for the loop. When a shared state root already contains durable goals or meeting decision memory, the same probe also reports the active top-goal set and up to the three most recent carried meeting records.
+**Checkpoint**: Simard is now doing more than opening a shell. It is inspecting repo state, producing a bounded execution plan, choosing a repo-native action, verifying the result explicitly, and persisting truthful memory/evidence for the loop. When a shared state root already contains durable goals or meeting decision memory, the same probe also reports the active top-goal set and up to the three most recent carried meeting records.
+
+### Variation: exercise one bounded structured edit
+
+On a clean repository, you can also drive one explicit file change through the public operator surface:
+
+```bash
+SIMARD_ROOT="$PWD"
+TMP_REPO="$(mktemp -d /tmp/simard-edit-demo.XXXXXX)"
+cd "$TMP_REPO"
+git init -b main
+git config user.name "Simard Demo"
+git config user.email "simard-demo@example.com"
+cat > README.md <<'EOF'
+# Demo Repo
+
+Current status: TODO
+EOF
+git add README.md
+git commit -m "initial fixture"
+
+cd "$SIMARD_ROOT"
+
+cargo run --quiet --bin simard_operator_probe -- \
+  engineer-loop-run single-process "$TMP_REPO" \
+  "$(cat <<'EOF'
+edit-file: README.md
+replace: Current status: TODO
+with: Current status: DONE
+verify-contains: Current status: DONE
+EOF
+)"
+```
+
+Look for:
+
+- `Selected action: structured-text-replace`
+- `Action plan: ...`
+- `Changed files after action: README.md`
+- `Verification status: verified`
+
+Then confirm `README.md` now contains `Current status: DONE`.
 
 ### Variation: carry meeting decisions into the engineer loop
 

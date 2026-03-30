@@ -236,7 +236,7 @@ This is the honest v1 terminal slice: Simard can drive a real local PTY-backed s
 
 ## 7. Exercise the local-first engineer loop
 
-Use the operator probe when you want Simard to inspect a repo, choose one safe local engineering action, verify the outcome, and persist truthful local artifacts:
+Use the operator probe when you want Simard to inspect a repo, print a short plan with explicit verification steps, choose one bounded local engineering action, verify the outcome, and persist truthful local artifacts:
 
 ```bash
 cargo run --quiet --bin simard_operator_probe -- \
@@ -250,11 +250,14 @@ Look for:
 - `Repo root: ...`
 - `Active goals count: ...`
 - `Execution scope: local-only`
+- `Action plan: ...`
+- `Verification steps: ...`
 - `Selected action: cargo-metadata-scan` (or another explicit local-first action)
 - `Action status: success`
+- `Changed files after action: <none>` (or one expected repo-relative path for a bounded structured edit)
 - `Verification status: verified`
 
-This is the current honest v1 engineer-loop slice: Simard inspects the local repo, reads the active durable goals for context, performs one bounded repo-native action, verifies that the repo grounding stayed stable, and persists durable memory/evidence, but it does not claim remote execution or autonomous multi-step coding yet.
+This is the current honest v1 engineer-loop slice: Simard inspects the local repo, reads the active durable goals for context, forms a short plan, performs one bounded repo-native action, verifies the result explicitly, and persists durable memory/evidence. The default path is still a read-only repo scan. On a clean repo, you can also supply a narrow structured edit objective with `edit-file:`, `replace:`, `with:`, and `verify-contains:` lines to exercise one explicit file mutation. Simard still does not claim remote execution or open-ended autonomous multi-step coding yet.
 
 When you pass the same explicit state root that an earlier `meeting-run` used, this same probe also prints `Carried meeting decisions: N` and up to the three most recent `Carried meeting decision <index>:` lines.
 

@@ -90,8 +90,25 @@ A bare `agenda:` or `topic:` line without any persistable structured outputs doe
 That output is additive. It does not replace the existing engineer-loop fields:
 
 - `Active goals count` and `Active goal <index>:` still reflect durable goal stewardship
-- `Selected action`, `Action status`, and `Verification status` still describe the bounded engineer-loop execution
+- `Action plan` and `Verification steps` expose the bounded execution plan Simard formed before acting
+- `Selected action`, `Action status`, `Changed files after action`, and `Verification status` still describe the bounded engineer-loop execution
 - carried meeting decisions remain advisory planning context, not implicit code execution
+
+The current bounded engineer loop supports two honest action shapes:
+
+- a read-only repo-native scan such as `cargo-metadata-scan` or `git-tracked-file-scan`
+- one explicit structured text replacement on a clean repo when the objective includes all of:
+  - `edit-file: <repo-relative path>`
+  - `replace: <existing text>`
+  - `with: <replacement text>`
+  - `verify-contains: <required post-edit text>`
+
+That structured edit path is intentionally narrow:
+
+- the target path must stay inside the selected repo
+- the repo must start clean so Simard does not overwrite unrelated user changes
+- only one expected changed file is allowed
+- verification must confirm both file content and git-visible change state
 
 The goal-curation path is intentionally narrow too:
 
@@ -168,6 +185,7 @@ The meeting-to-engineer handoff uses CLI arguments rather than environment varia
 - passing the same explicit directory to both commands is the supported way to make meeting decisions visible in later engineer-loop runs
 - the carryover surface is intentionally bounded: `engineer-loop-run` reports at most the three most recent persisted meeting records from that shared state root
 - if you omit the shared state root, the probes still run, but there is no guaranteed cross-session carryover contract
+- if you want the bounded edit path instead of the default read-only scan, pass a structured objective containing `edit-file:`, `replace:`, `with:`, and `verify-contains:` lines
 
 ### Current builtin base-type registrations
 
