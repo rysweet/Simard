@@ -49,9 +49,11 @@ pub use goals::{
     FileBackedGoalStore, GoalRecord, GoalStatus, GoalStore, GoalUpdate, InMemoryGoalStore,
 };
 pub use gym::{
-    BenchmarkArtifactPaths, BenchmarkCheckResult, BenchmarkRunReport, BenchmarkScenario,
-    BenchmarkSuiteReport, BenchmarkSuiteScenarioSummary, benchmark_scenarios, default_output_root,
-    run_benchmark_scenario, run_benchmark_suite,
+    BenchmarkArtifactPaths, BenchmarkCheckResult, BenchmarkComparisonArtifactPaths,
+    BenchmarkComparisonDelta, BenchmarkComparisonReport, BenchmarkComparisonRunSummary,
+    BenchmarkComparisonStatus, BenchmarkRunReport, BenchmarkScenario, BenchmarkSuiteReport,
+    BenchmarkSuiteScenarioSummary, benchmark_scenarios, compare_latest_benchmark_runs,
+    default_output_root, run_benchmark_scenario, run_benchmark_suite,
 };
 pub use handoff::{
     FileBackedHandoffStore, InMemoryHandoffStore, RuntimeHandoffSnapshot, RuntimeHandoffStore,
@@ -68,9 +70,9 @@ pub use metadata::{BackendDescriptor, Freshness, FreshnessState, Provenance};
 pub use operator_cli::{dispatch_operator_cli, operator_cli_help, operator_cli_usage};
 pub use operator_commands::{
     dispatch_legacy_gym_cli, dispatch_operator_probe, gym_usage, run_bootstrap_probe,
-    run_engineer_loop_probe, run_goal_curation_probe, run_gym_list, run_gym_scenario,
-    run_gym_suite, run_handoff_probe, run_improvement_curation_probe, run_meeting_probe,
-    run_review_probe, run_review_read_probe, run_terminal_probe,
+    run_engineer_loop_probe, run_goal_curation_probe, run_gym_compare, run_gym_list,
+    run_gym_scenario, run_gym_suite, run_handoff_probe, run_improvement_curation_probe,
+    run_meeting_probe, run_review_probe, run_review_read_probe, run_terminal_probe,
 };
 pub use prompt_assets::{
     FilePromptAssetStore, InMemoryPromptAssetStore, PromptAsset, PromptAssetId, PromptAssetRef,

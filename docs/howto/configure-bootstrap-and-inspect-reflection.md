@@ -1,6 +1,6 @@
 ---
 title: "How to configure bootstrap and inspect reflection"
-description: Verify the current `simard` bootstrap entrypoint, inspect the truthful reflection snapshot exposed by the runtime, and understand the planned bootstrap subcommand.
+description: Bootstrap an explicit runtime selection through `simard bootstrap run`, inspect the truthful reflection snapshot, and validate the bounded engineer surfaces that hang off the same runtime contract.
 last_updated: 2026-03-30
 review_schedule: as-needed
 owner: simard
@@ -22,50 +22,36 @@ Use this guide when you need to answer two questions:
 
 ## Status
 
-Today, the real `simard` binary bootstraps directly from `SIMARD_*` environment variables.
+The canonical bootstrap surface is now `simard bootstrap run ...`.
 
-The future `simard bootstrap run ...` subcommand is planned, not shipped yet.
+The old zero-argument `simard` bootstrap fallback is gone. Operators must pass the runtime selection explicitly. The terminal-backed engineer substrate still lives on the compatibility binary because that subcommand has not moved onto the canonical CLI yet.
 
 ## Prerequisites
 
 - [ ] You are in the repository root
-- [ ] `cargo run --quiet --` works locally when the required `SIMARD_*` variables are set
+- [ ] `cargo run --quiet -- bootstrap run ...` works locally
 - [ ] You know which identity, base type, topology, and state root you want to inspect
 
-## 1. Use explicit bootstrap configuration by default
+## 1. Bootstrap explicitly by default
 
-Provide the prompt root, identity, base type, topology, objective, and state root yourself.
+Provide the identity, base type, topology, objective, and state root yourself.
 
 For the builtin identities in this repo, the current scaffold accepts `local-harness`, `rusty-clawd`, or `copilot-sdk` as explicit base-type choices everywhere, and `simard-engineer` additionally accepts `terminal-shell` for a real local PTY-backed shell session. `rusty-clawd` is a distinct session backend, `terminal-shell` is intentionally local-only, and `copilot-sdk` remains an explicit alias of `local-harness`.
 
 ```bash
-SIMARD_PROMPT_ROOT="$PWD/prompt_assets" \
-SIMARD_IDENTITY=simard-engineer \
-SIMARD_BASE_TYPE=local-harness \
-SIMARD_RUNTIME_TOPOLOGY=single-process \
-SIMARD_OBJECTIVE="verify current reflection metadata" \
-SIMARD_STATE_ROOT="$PWD/target/simard-state" \
-cargo run --quiet --
+cargo run --quiet --   bootstrap run simard-engineer local-harness single-process   "verify current reflection metadata"   "$PWD/target/simard-state"
 ```
 
 Look for output shaped like this:
 
 ```text
-Simard local runtime executed successfully.
-Bootstrap mode: explicit-config
-Bootstrap selection: identity=simard-engineer, base_type=local-harness, topology=single-process
+Probe mode: bootstrap-run
+Identity: simard-engineer
+Selected base type: local-harness
+Topology: single-process
 State root: /.../target/simard-state
-Snapshot: state=ready, topology=single-process, base_type=local-harness
-Adapter implementation: local-harness
-Shutdown: stopped
-```
-
-Planned unified equivalent:
-
-```bash
-simard bootstrap run simard-engineer local-harness single-process \
-  "verify current reflection metadata" \
-  "$PWD/target/simard-state"
+Execution summary: ...
+Reflection summary: ...
 ```
 
 In the current bootstrap contract:
@@ -73,27 +59,22 @@ In the current bootstrap contract:
 - missing required bootstrap inputs fail explicitly
 - unsupported identity and base-type combinations fail explicitly
 - unsupported topology and base-type combinations fail explicitly
-- no missing value is replaced after startup unless you deliberately opted into builtin defaults
+- state roots are validated before persistence is touched
+- no missing value is replaced through a hidden bootstrap fallback
 
 ### Variation: exercise a non-default builtin base type
 
 Use this when you want to prove that bootstrap is not silently snapping back to `local-harness`.
 
 ```bash
-SIMARD_PROMPT_ROOT="$PWD/prompt_assets" \
-SIMARD_IDENTITY=simard-engineer \
-SIMARD_BASE_TYPE=copilot-sdk \
-SIMARD_RUNTIME_TOPOLOGY=single-process \
-SIMARD_OBJECTIVE="verify copilot-sdk bootstrap selection" \
-SIMARD_STATE_ROOT="$PWD/target/simard-state" \
-cargo run --quiet --
+cargo run --quiet --   bootstrap run simard-engineer copilot-sdk single-process   "verify copilot-sdk bootstrap selection"   "$PWD/target/simard-state"
 ```
 
 Look for these lines:
 
 ```text
-Bootstrap selection: identity=simard-engineer, base_type=copilot-sdk, topology=single-process
-Snapshot: state=ready, topology=single-process, base_type=copilot-sdk
+Selected base type: copilot-sdk
+Topology: single-process
 Adapter implementation: local-harness
 ```
 
@@ -152,48 +133,41 @@ assert_eq!(snapshot.evidence_backend.identity, "evidence::json-file-store");
 
 If you launched with `copilot-sdk`, `snapshot.selected_base_type` still shows the alias you chose while `snapshot.adapter_backend.identity` remains `local-harness`. If you launched with `rusty-clawd`, reflection reports `snapshot.adapter_backend.identity == "rusty-clawd::session-backend"`. If you launch the engineer identity with `terminal-shell`, reflection reports `snapshot.adapter_backend.identity == "terminal-shell::local-pty"`, `snapshot.adapter_capabilities` includes `terminal-session`, and `snapshot.adapter_supported_topologies == ["single-process"]`.
 
-## 3. Exercise the terminal-backed engineer path
+## 3. Exercise the terminal-backed engineer substrate
 
-Today, use the compatibility binary when you want to validate the terminal-backed engineer substrate directly:
+The terminal-backed engineer substrate is still compatibility-only:
 
 ```bash
-cargo run --quiet --bin simard_operator_probe -- \
-  terminal-run single-process \
-  $'working-directory: .\ncommand: pwd\ncommand: printf "terminal-foundation-ok\\n"'
+cargo run --quiet --bin simard_operator_probe --   terminal-run single-process   $'working-directory: .
+command: pwd
+command: printf "terminal-foundation-ok\n"'
 ```
 
 Look for:
 
-- `Mode: engineer`
 - `Selected base type: terminal-shell`
 - `Adapter implementation: terminal-shell::local-pty`
-- `Terminal evidence: terminal-command-count=2`
+- `Terminal evidence lines: 2`
 - a transcript preview containing `terminal-foundation-ok`
-
-Planned unified equivalent:
-
-```bash
-simard engineer terminal single-process \
-  $'working-directory: .\ncommand: pwd\ncommand: printf "terminal-foundation-ok\\n"'
-```
 
 This is the honest terminal slice: Simard can drive a real local PTY-backed shell session through the runtime, but it does not claim remote hosts or distributed terminal control.
 
 ## 4. Exercise the bounded engineer path
 
-Today, use the compatibility binary when you want Simard to inspect a repo, print a short plan with explicit verification steps, choose one bounded local engineering action, verify the outcome, and persist truthful local artifacts:
+Use the canonical CLI when you want Simard to inspect a repo, print a short plan with explicit verification steps, choose one bounded local engineering action, verify the outcome, and persist truthful local artifacts:
 
 ```bash
 STATE_ROOT="$PWD/target/simard-state"
-ENGINEER_OBJECTIVE=$'inspect the repository state\nrun one safe local engineering action\nverify the outcome explicitly\npersist truthful local evidence and memory'
+ENGINEER_OBJECTIVE=$'inspect the repository state
+run one safe local engineering action
+verify the outcome explicitly
+persist truthful local evidence and memory'
 
-cargo run --quiet --bin simard_operator_probe -- \
-  engineer-loop-run single-process "$PWD" "$ENGINEER_OBJECTIVE" "$STATE_ROOT"
+cargo run --quiet --   engineer run single-process "$PWD" "$ENGINEER_OBJECTIVE" "$STATE_ROOT"
 ```
 
 Look for:
 
-- `Mode: engineer`
 - `Repo root: ...`
 - `Active goals count: ...`
 - `Execution scope: local-only`
@@ -206,58 +180,26 @@ Look for:
 
 When you pass the same explicit state root that an earlier `meeting` run used, this same command also prints `Carried meeting decisions: N` and up to the three most recent `Carried meeting decision <index>:` lines.
 
-Planned unified equivalent:
+## 5. Builtin defaults are no longer an operator CLI path
 
-```bash
-simard engineer run single-process "$PWD" "$ENGINEER_OBJECTIVE" "$STATE_ROOT"
-```
+`BootstrapConfig` still understands `builtin-defaults` internally, but the operator-facing CLI no longer exposes a hidden zero-argument startup mode. If you want a local session through the CLI, pass the selection explicitly with `simard bootstrap run ...`.
 
-## 5. Opt in to builtin defaults only when you mean it
+That keeps the public surface honest:
 
-For local bootstrap, Simard supports explicit opt-in defaults.
-
-```bash
-SIMARD_BOOTSTRAP_MODE=builtin-defaults cargo run --quiet --
-```
-
-In that mode:
-
-- builtin prompt assets come from the repository prompt asset set
-- builtin state root resolves to `target/simard-state`
-- builtin identity resolves to `simard-engineer`
-- builtin base type resolves to `local-harness`
-- builtin topology resolves to `single-process`
-- configuration sources are recorded as explicit opt-in, not silent recovery
-
-Planned unified equivalent:
-
-```bash
-simard bootstrap run simard-engineer local-harness single-process "bootstrap the Simard engineer loop"
-```
-
-Builtin defaults are startup choices. They are not runtime recovery behavior.
+- startup choices stay visible at the call site
+- durable state roots stay explicit
+- help output remains stable when `simard` is launched with no arguments
 
 ## Troubleshooting
 
 ### Missing required bootstrap config
 
-**Symptom**: startup fails before the runtime is composed.
+**Symptom**: the command fails before the runtime is composed.
 
-**Solution**:
-
-```bash
-export SIMARD_PROMPT_ROOT="$PWD/prompt_assets"
-export SIMARD_IDENTITY=simard-engineer
-export SIMARD_BASE_TYPE=local-harness
-export SIMARD_RUNTIME_TOPOLOGY=single-process
-export SIMARD_OBJECTIVE="verify current reflection metadata"
-cargo run --quiet --
-```
-
-Or opt in explicitly:
+**Solution**: pass the missing positional bootstrap arguments explicitly:
 
 ```bash
-export SIMARD_BOOTSTRAP_MODE=builtin-defaults
+cargo run --quiet --   bootstrap run simard-engineer local-harness single-process   "verify current reflection metadata"   "$PWD/target/simard-state"
 ```
 
 ### Base type or topology selection fails

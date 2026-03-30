@@ -1,12 +1,14 @@
 use std::path::{Path, PathBuf};
 
+use crate::bootstrap::validate_state_root;
+use crate::sanitization::sanitize_terminal_text;
 use crate::{
     BootstrapConfig, BootstrapInputs, FileBackedMemoryStore, MemoryRecord, MemoryScope,
     MemoryStore, ReflectiveRuntime, ReviewRequest, ReviewTargetKind, RuntimeTopology,
     assemble_local_runtime_from_handoff, benchmark_scenarios, build_review_artifact,
-    default_output_root, latest_local_handoff, latest_review_artifact, persist_review_artifact,
-    render_review_context_directives, run_benchmark_scenario, run_benchmark_suite,
-    run_local_engineer_loop, run_local_session,
+    compare_latest_benchmark_runs, default_output_root, latest_local_handoff,
+    latest_review_artifact, persist_review_artifact, render_review_context_directives,
+    run_benchmark_scenario, run_benchmark_suite, run_local_engineer_loop, run_local_session,
 };
 
 pub fn dispatch_operator_probe<I>(args: I) -> Result<(), Box<dyn std::error::Error>>
@@ -115,6 +117,11 @@ where
             reject_extra_args(args)?;
             run_gym_scenario(&scenario_id)?;
         }
+        "compare" => {
+            let scenario_id = next_required(&mut args, "scenario id")?;
+            reject_extra_args(args)?;
+            run_gym_compare(&scenario_id)?;
+        }
         "run-suite" => {
             let suite_id = next_required(&mut args, "suite id")?;
             reject_extra_args(args)?;
@@ -127,7 +134,7 @@ where
 }
 
 pub fn gym_usage() -> &'static str {
-    "usage: simard-gym <list|run <scenario-id>|run-suite <suite-id>>"
+    "usage: simard-gym <list|run <scenario-id>|compare <scenario-id>|run-suite <suite-id>>"
 }
 
 pub fn run_bootstrap_probe(
@@ -146,7 +153,7 @@ pub fn run_bootstrap_probe(
             base_type,
             topology,
             "bootstrap-run",
-        )),
+        )?),
         identity: Some(identity.to_string()),
         base_type: Some(base_type.to_string()),
         topology: Some(topology.to_string()),
@@ -181,14 +188,11 @@ pub fn run_bootstrap_probe(
         "Transport backend: {}",
         execution.snapshot.transport_backend.identity
     );
-    println!("State root: {}", config.state_root_path().display());
+    print_display("State root", config.state_root_path().display());
     println!("Session phase: {}", execution.outcome.session.phase);
     println!("Shutdown: {}", execution.stopped_snapshot.runtime_state);
-    println!("Execution summary: {}", execution.outcome.execution_summary);
-    println!(
-        "Reflection summary: {}",
-        execution.outcome.reflection.summary
-    );
+    print_text("Execution summary", &execution.outcome.execution_summary);
+    print_text("Reflection summary", &execution.outcome.reflection.summary);
     Ok(())
 }
 
@@ -201,12 +205,12 @@ pub fn run_handoff_probe(
     let config = BootstrapConfig::resolve(BootstrapInputs {
         prompt_root: Some(prompt_root()),
         objective: Some(objective.to_string()),
-        state_root: Some(state_root(
+        state_root: Some(validate_state_root(state_root(
             identity,
             base_type,
             topology,
             "handoff-roundtrip",
-        )),
+        ))?),
         identity: Some(identity.to_string()),
         base_type: Some(base_type.to_string()),
         topology: Some(topology.to_string()),
@@ -219,7 +223,7 @@ pub fn run_handoff_probe(
     let restored_snapshot = restored.snapshot()?;
 
     println!("Probe mode: handoff-roundtrip");
-    println!("State root: {}", config.state_root_path().display());
+    print_display("State root", config.state_root_path().display());
     println!("Identity: {}", restored_snapshot.identity_name);
     println!(
         "Identity components: {}",
@@ -261,7 +265,7 @@ pub fn run_handoff_probe(
         "Restored transport backend: {}",
         restored_snapshot.transport_backend.identity
     );
-    println!("Execution summary: {}", execution.outcome.execution_summary);
+    print_text("Execution summary", &execution.outcome.execution_summary);
     Ok(())
 }
 
@@ -281,7 +285,7 @@ pub fn run_meeting_probe(
             base_type,
             topology,
             "meeting-run",
-        )),
+        )?),
         identity: Some(identity.to_string()),
         base_type: Some(base_type.to_string()),
         topology: Some(topology.to_string()),
@@ -304,7 +308,7 @@ pub fn run_meeting_probe(
         execution.snapshot.selected_base_type
     );
     println!("Topology: {}", execution.snapshot.topology);
-    println!("State root: {}", config.state_root_path().display());
+    print_display("State root", config.state_root_path().display());
     println!("Session phase: {}", execution.outcome.session.phase);
     println!("Decision records: {}", decision_records.len());
     println!(
@@ -312,16 +316,13 @@ pub fn run_meeting_probe(
         execution.snapshot.active_goal_count
     );
     for (index, goal) in execution.snapshot.active_goals.iter().enumerate() {
-        println!("Active goal {}: {}", index + 1, goal);
+        print_text(&format!("Active goal {}", index + 1), goal);
     }
     for (index, value) in decision_records.iter().enumerate() {
-        println!("Decision record {}: {}", index + 1, value);
+        print_text(&format!("Decision record {}", index + 1), value);
     }
-    println!("Execution summary: {}", execution.outcome.execution_summary);
-    println!(
-        "Reflection summary: {}",
-        execution.outcome.reflection.summary
-    );
+    print_text("Execution summary", &execution.outcome.execution_summary);
+    print_text("Reflection summary", &execution.outcome.reflection.summary);
     Ok(())
 }
 
@@ -341,7 +342,7 @@ pub fn run_goal_curation_probe(
             base_type,
             topology,
             "goal-curation-run",
-        )),
+        )?),
         identity: Some(identity.to_string()),
         base_type: Some(base_type.to_string()),
         topology: Some(topology.to_string()),
@@ -356,20 +357,17 @@ pub fn run_goal_curation_probe(
         execution.snapshot.selected_base_type
     );
     println!("Topology: {}", execution.snapshot.topology);
-    println!("State root: {}", config.state_root_path().display());
+    print_display("State root", config.state_root_path().display());
     println!("Session phase: {}", execution.outcome.session.phase);
     println!(
         "Active goals count: {}",
         execution.snapshot.active_goal_count
     );
     for (index, goal) in execution.snapshot.active_goals.iter().enumerate() {
-        println!("Active goal {}: {}", index + 1, goal);
+        print_text(&format!("Active goal {}", index + 1), goal);
     }
-    println!("Execution summary: {}", execution.outcome.execution_summary);
-    println!(
-        "Reflection summary: {}",
-        execution.outcome.reflection.summary
-    );
+    print_text("Execution summary", &execution.outcome.execution_summary);
+    print_text("Reflection summary", &execution.outcome.reflection.summary);
     Ok(())
 }
 
@@ -382,7 +380,12 @@ pub fn run_terminal_probe(
     let config = BootstrapConfig::resolve(BootstrapInputs {
         prompt_root: Some(prompt_root()),
         objective: Some(objective.to_string()),
-        state_root: Some(state_root(identity, base_type, topology, "terminal-run")),
+        state_root: Some(validate_state_root(state_root(
+            identity,
+            base_type,
+            topology,
+            "terminal-run",
+        ))?),
         identity: Some(identity.to_string()),
         base_type: Some(base_type.to_string()),
         topology: Some(topology.to_string()),
@@ -417,17 +420,14 @@ pub fn run_terminal_probe(
         "Adapter capabilities: {}",
         execution.snapshot.adapter_capabilities.join(", ")
     );
-    println!("State root: {}", config.state_root_path().display());
+    print_display("State root", config.state_root_path().display());
     println!("Session phase: {}", execution.outcome.session.phase);
     println!("Terminal evidence lines: {}", terminal_evidence.len());
     for detail in terminal_evidence {
-        println!("Terminal evidence: {detail}");
+        print_text("Terminal evidence", &detail);
     }
-    println!("Execution summary: {}", execution.outcome.execution_summary);
-    println!(
-        "Reflection summary: {}",
-        execution.outcome.reflection.summary
-    );
+    print_text("Execution summary", &execution.outcome.execution_summary);
+    print_text("Reflection summary", &execution.outcome.reflection.summary);
     Ok(())
 }
 
@@ -444,14 +444,14 @@ pub fn run_engineer_loop_probe(
         "terminal-shell",
         topology,
         "engineer-loop-run",
-    );
+    )?;
     let run = run_local_engineer_loop(workspace_root, objective, runtime_topology, &state_root)
         .map_err(|error| format!("{error}"))?;
 
     println!("Probe mode: engineer-loop-run");
-    println!("Repo root: {}", run.inspection.repo_root.display());
-    println!("Repo branch: {}", run.inspection.branch);
-    println!("Repo head: {}", run.inspection.head);
+    print_display("Repo root", run.inspection.repo_root.display());
+    print_text("Repo branch", &run.inspection.branch);
+    print_text("Repo head", &run.inspection.head);
     println!("Worktree dirty: {}", run.inspection.worktree_dirty);
     println!(
         "Changed files: {}",
@@ -463,25 +463,25 @@ pub fn run_engineer_loop_probe(
     );
     println!("Active goals count: {}", run.inspection.active_goals.len());
     for (index, goal) in run.inspection.active_goals.iter().enumerate() {
-        println!("Active goal {}: {}", index + 1, goal.concise_label());
+        print_text(&format!("Active goal {}", index + 1), goal.concise_label());
     }
     println!(
         "Carried meeting decisions: {}",
         run.inspection.carried_meeting_decisions.len()
     );
     for (index, decision) in run.inspection.carried_meeting_decisions.iter().enumerate() {
-        println!("Carried meeting decision {}: {}", index + 1, decision);
+        print_text(&format!("Carried meeting decision {}", index + 1), decision);
     }
-    println!("Gap summary: {}", run.inspection.architecture_gap_summary);
-    println!("Execution scope: {}", run.execution_scope);
-    println!("Selected action: {}", run.action.selected.label);
-    println!("Action plan: {}", run.action.selected.plan_summary);
-    println!(
-        "Verification steps: {}",
-        run.action.selected.verification_steps.join(" || ")
+    print_text("Gap summary", &run.inspection.architecture_gap_summary);
+    print_text("Execution scope", &run.execution_scope);
+    print_text("Selected action", &run.action.selected.label);
+    print_text("Action plan", &run.action.selected.plan_summary);
+    print_text(
+        "Verification steps",
+        run.action.selected.verification_steps.join(" || "),
     );
-    println!("Action rationale: {}", run.action.selected.rationale);
-    println!("Action command: {}", run.action.selected.argv.join(" "));
+    print_text("Action rationale", &run.action.selected.rationale);
+    print_text("Action command", run.action.selected.argv.join(" "));
     println!("Action status: success");
     println!(
         "Changed files after action: {}",
@@ -492,8 +492,8 @@ pub fn run_engineer_loop_probe(
         }
     );
     println!("Verification status: {}", run.verification.status);
-    println!("Verification summary: {}", run.verification.summary);
-    println!("State root: {}", run.state_root.display());
+    print_text("Verification summary", &run.verification.summary);
+    print_display("State root", run.state_root.display());
     Ok(())
 }
 
@@ -511,7 +511,7 @@ pub fn run_review_probe(
             state_root_override,
             base_type,
             topology,
-        )),
+        )?),
         identity: Some(identity.to_string()),
         base_type: Some(base_type.to_string()),
         topology: Some(topology.to_string()),
@@ -556,26 +556,23 @@ pub fn run_review_probe(
         execution.snapshot.selected_base_type
     );
     println!("Topology: {}", execution.snapshot.topology);
-    println!("State root: {}", config.state_root_path().display());
+    print_display("State root", config.state_root_path().display());
     println!("Session phase: {}", execution.outcome.session.phase);
-    println!("Review artifact: {}", review_artifact_path.display());
+    print_display("Review artifact", review_artifact_path.display());
     println!("Review proposals: {}", review.proposals.len());
     for (index, proposal) in review.proposals.iter().enumerate() {
         println!(
             "Proposal {}: [{}] {} => {}",
             index + 1,
             proposal.category,
-            proposal.title,
-            proposal.suggested_change
+            sanitize_terminal_text(&proposal.title),
+            sanitize_terminal_text(&proposal.suggested_change)
         );
     }
     println!("Decision records: {}", decision_records.len());
-    println!("Review record key: {}", review_key);
-    println!("Execution summary: {}", execution.outcome.execution_summary);
-    println!(
-        "Reflection summary: {}",
-        execution.outcome.reflection.summary
-    );
+    print_text("Review record key", &review_key);
+    print_text("Execution summary", &execution.outcome.execution_summary);
+    print_text("Reflection summary", &execution.outcome.reflection.summary);
     Ok(())
 }
 
@@ -584,7 +581,7 @@ pub fn run_review_read_probe(
     topology: &str,
     state_root_override: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let state_root = resolved_review_state_root(state_root_override, base_type, topology);
+    let state_root = resolved_review_state_root(state_root_override, base_type, topology)?;
     let (review_artifact_path, review) =
         latest_review_artifact(&state_root)?.ok_or("expected persisted review artifact")?;
     let memory_store = FileBackedMemoryStore::try_new(state_root.join("memory_records.json"))?;
@@ -598,23 +595,23 @@ pub fn run_review_read_probe(
     println!("Identity: {}", review.identity_name);
     println!("Selected base type: {}", review.selected_base_type);
     println!("Topology: {}", review.topology);
-    println!("State root: {}", state_root.display());
-    println!("Latest review artifact: {}", review_artifact_path.display());
-    println!("Latest review target: {}", review.target_label);
-    println!("Latest review summary: {}", review.summary);
+    print_display("State root", state_root.display());
+    print_display("Latest review artifact", review_artifact_path.display());
+    print_text("Latest review target", &review.target_label);
+    print_text("Latest review summary", &review.summary);
     println!("Review proposals: {}", review.proposals.len());
     for (index, proposal) in review.proposals.iter().enumerate() {
         println!(
             "Proposal {}: [{}] {} => {}",
             index + 1,
             proposal.category,
-            proposal.title,
-            proposal.suggested_change
+            sanitize_terminal_text(&proposal.title),
+            sanitize_terminal_text(&proposal.suggested_change)
         );
     }
     println!("Decision review records: {}", decision_records.len());
     if let Some(record) = decision_records.last() {
-        println!("Latest decision review record: {}", record.value);
+        print_text("Latest decision review record", &record.value);
     }
     Ok(())
 }
@@ -625,7 +622,7 @@ pub fn run_improvement_curation_probe(
     operator_objective: &str,
     state_root_override: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let state_root = resolved_review_state_root(state_root_override, base_type, topology);
+    let state_root = resolved_review_state_root(state_root_override, base_type, topology)?;
     let (review_artifact_path, review) =
         latest_review_artifact(&state_root)?.ok_or("expected persisted review artifact")?;
     let objective = format!(
@@ -659,10 +656,10 @@ pub fn run_improvement_curation_probe(
         execution.snapshot.selected_base_type
     );
     println!("Topology: {}", execution.snapshot.topology);
-    println!("State root: {}", config.state_root_path().display());
-    println!("Review artifact: {}", review_artifact_path.display());
-    println!("Review id: {}", review.review_id);
-    println!("Review target: {}", review.target_label);
+    print_display("State root", config.state_root_path().display());
+    print_display("Review artifact", review_artifact_path.display());
+    print_text("Review id", &review.review_id);
+    print_text("Review target", &review.target_label);
     println!("Review proposals: {}", review.proposals.len());
     println!("Approved proposals: {}", plan.approvals.len());
     for (index, approval) in plan.approvals.iter().enumerate() {
@@ -671,7 +668,7 @@ pub fn run_improvement_curation_probe(
             index + 1,
             approval.priority,
             approval.status,
-            approval.title
+            sanitize_terminal_text(&approval.title)
         );
     }
     println!("Deferred proposals: {}", plan.deferrals.len());
@@ -679,8 +676,8 @@ pub fn run_improvement_curation_probe(
         println!(
             "Deferred proposal {}: {} ({})",
             index + 1,
-            deferral.title,
-            deferral.rationale
+            sanitize_terminal_text(&deferral.title),
+            sanitize_terminal_text(&deferral.rationale)
         );
     }
     println!(
@@ -688,24 +685,21 @@ pub fn run_improvement_curation_probe(
         execution.snapshot.active_goal_count
     );
     for (index, goal) in execution.snapshot.active_goals.iter().enumerate() {
-        println!("Active goal {}: {}", index + 1, goal);
+        print_text(&format!("Active goal {}", index + 1), goal);
     }
     println!(
         "Proposed goals count: {}",
         execution.snapshot.proposed_goal_count
     );
     for (index, goal) in execution.snapshot.proposed_goals.iter().enumerate() {
-        println!("Proposed goal {}: {}", index + 1, goal);
+        print_text(&format!("Proposed goal {}", index + 1), goal);
     }
     println!("Decision records: {}", improvement_records.len());
     if let Some(record) = improvement_records.last() {
-        println!("Latest improvement record: {}", record.value);
+        print_text("Latest improvement record", &record.value);
     }
-    println!("Execution summary: {}", execution.outcome.execution_summary);
-    println!(
-        "Reflection summary: {}",
-        execution.outcome.reflection.summary
-    );
+    print_text("Execution summary", &execution.outcome.execution_summary);
+    print_text("Reflection summary", &execution.outcome.reflection.summary);
     Ok(())
 }
 
@@ -734,6 +728,48 @@ pub fn run_gym_scenario(scenario_id: &str) -> Result<(), Box<dyn std::error::Err
     println!("Artifact report: {}", report.artifacts.report_json);
     println!("Artifact summary: {}", report.artifacts.report_txt);
     println!("Review artifact: {}", report.artifacts.review_json);
+    Ok(())
+}
+
+pub fn run_gym_compare(scenario_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let report = compare_latest_benchmark_runs(scenario_id, default_output_root())?;
+    println!("Scenario: {}", report.scenario_id);
+    println!("Comparison status: {}", report.status);
+    print_text("Comparison summary", &report.summary);
+    println!("Current session: {}", report.current.session_id);
+    println!("Current passed: {}", report.current.passed);
+    println!(
+        "Current checks passed: {}/{}",
+        report.current.correctness_checks_passed, report.current.correctness_checks_total
+    );
+    println!("Current report: {}", report.current.report_json);
+    println!("Previous session: {}", report.previous.session_id);
+    println!("Previous passed: {}", report.previous.passed);
+    println!(
+        "Previous checks passed: {}/{}",
+        report.previous.correctness_checks_passed, report.previous.correctness_checks_total
+    );
+    println!("Previous report: {}", report.previous.report_json);
+    println!(
+        "Delta correctness checks passed: {:+}",
+        report.delta.correctness_checks_passed
+    );
+    println!(
+        "Delta exported memory records: {:+}",
+        report.delta.exported_memory_records
+    );
+    println!(
+        "Delta exported evidence records: {:+}",
+        report.delta.exported_evidence_records
+    );
+    println!(
+        "Comparison artifact report: {}",
+        report.artifact_paths.report_json
+    );
+    println!(
+        "Comparison artifact summary: {}",
+        report.artifact_paths.report_txt
+    );
     Ok(())
 }
 
@@ -772,15 +808,17 @@ fn resolved_state_root(
     base_type: &str,
     topology: &str,
     probe: &str,
-) -> PathBuf {
-    explicit.unwrap_or_else(|| state_root(identity, base_type, topology, probe))
+) -> crate::SimardResult<PathBuf> {
+    validate_state_root(
+        explicit.unwrap_or_else(|| state_root(identity, base_type, topology, probe)),
+    )
 }
 
 fn resolved_review_state_root(
     explicit: Option<PathBuf>,
     base_type: &str,
     topology: &str,
-) -> PathBuf {
+) -> crate::SimardResult<PathBuf> {
     resolved_state_root(
         explicit,
         "simard-engineer",
@@ -823,4 +861,12 @@ fn reject_extra_args(
         return Err(format!("unexpected trailing arguments: {}", extras.join(" ")).into());
     }
     Ok(())
+}
+
+fn print_text(label: &str, value: impl AsRef<str>) {
+    println!("{label}: {}", sanitize_terminal_text(value.as_ref()));
+}
+
+fn print_display(label: &str, value: impl std::fmt::Display) {
+    println!("{label}: {}", sanitize_terminal_text(&value.to_string()));
 }

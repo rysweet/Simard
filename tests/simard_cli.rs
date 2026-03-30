@@ -11,6 +11,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::thread;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn repo_root() -> PathBuf {
@@ -73,6 +75,7 @@ fn simard_help_surfaces_the_five_product_modes_and_operator_utilities() {
         "goal-curation",
         "improvement-curation",
         "gym",
+        "compare",
         "review",
         "bootstrap",
     ] {
@@ -84,6 +87,27 @@ fn simard_help_surfaces_the_five_product_modes_and_operator_utilities() {
     assert!(
         !rendered.contains("SIMARD_PROMPT_ROOT"),
         "help should not fall through to the legacy env-only bootstrap entrypoint:\n{rendered}"
+    );
+}
+
+#[test]
+fn bare_simard_shows_unified_help_instead_of_bootstrap_env_errors() {
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .output()
+        .expect("bare simard should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        output.status.success(),
+        "bare simard should stay on the unified CLI surface:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Simard unified operator CLI"),
+        "bare simard should show the operator help text:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("SIMARD_PROMPT_ROOT"),
+        "bare simard should not fall back to the legacy env-only bootstrap path:\n{rendered}"
     );
 }
 
@@ -211,6 +235,118 @@ goal: Track future remote orchestration | priority=6 | status=active | rationale
 }
 
 #[test]
+fn simard_rejects_invalid_state_roots_before_any_persistence_write() {
+    let temp_dir = TempDirGuard::new("simard-cli-invalid-state-root");
+    let bad_parent_dir_root = temp_dir.path().join("../escape");
+    let traversal_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("meeting")
+        .arg("run")
+        .arg("local-harness")
+        .arg("single-process")
+        .arg("decision: keep the state root honest")
+        .arg(&bad_parent_dir_root)
+        .output()
+        .expect("traversal rejection should launch");
+    let traversal_rendered = rendered_output(&traversal_output);
+
+    assert!(
+        !traversal_output.status.success(),
+        "state-root traversal must fail visibly:\n{traversal_rendered}"
+    );
+    assert!(
+        traversal_rendered.contains("must not contain '..'"),
+        "state-root traversal should explain why the path was rejected:\n{traversal_rendered}"
+    );
+    assert!(
+        traversal_rendered.contains("InvalidStateRoot")
+            || traversal_rendered.contains("invalid state root"),
+        "state-root validation should stay explicit about the failing contract:\n{traversal_rendered}"
+    );
+
+    let file_path = temp_dir.path().join("not-a-directory");
+    fs::write(&file_path, "file").expect("state-root file should be created");
+    let file_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("meeting")
+        .arg("run")
+        .arg("local-harness")
+        .arg("single-process")
+        .arg("decision: keep the state root honest")
+        .arg(&file_path)
+        .output()
+        .expect("file rejection should launch");
+    let file_rendered = rendered_output(&file_output);
+
+    assert!(
+        !file_output.status.success(),
+        "non-directory state roots must fail visibly:\n{file_rendered}"
+    );
+    assert!(
+        file_rendered.contains("state root must resolve to a directory"),
+        "existing file state roots should be rejected explicitly:\n{file_rendered}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn simard_rejects_symlink_state_roots() {
+    use std::os::unix::fs::symlink;
+
+    let temp_dir = TempDirGuard::new("simard-cli-symlink-state-root");
+    let real_dir = temp_dir.path().join("real");
+    let link_dir = temp_dir.path().join("link");
+    fs::create_dir_all(&real_dir).expect("real state directory should be created");
+    symlink(&real_dir, &link_dir).expect("symlink state root should be created");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("review")
+        .arg("read")
+        .arg("local-harness")
+        .arg("single-process")
+        .arg(&link_dir)
+        .output()
+        .expect("symlink rejection should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        !output.status.success(),
+        "symlink state roots must fail visibly:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("state root must not be a symlink"),
+        "symlink state roots should be rejected explicitly:\n{rendered}"
+    );
+}
+
+#[test]
+fn simard_sanitizes_persisted_operator_output_before_printing() {
+    let state_root = TempDirGuard::new("simard-cli-sanitized-output");
+    let objective = "decision: keep \u{1b}[31mred\u{1b}[0m output safe";
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("meeting")
+        .arg("run")
+        .arg("local-harness")
+        .arg("single-process")
+        .arg(objective)
+        .arg(state_root.path())
+        .output()
+        .expect("meeting sanitization check should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        output.status.success(),
+        "meeting mode should still succeed while sanitizing operator output:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains('\u{1b}'),
+        "operator-visible output should strip ANSI escape sequences:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("decisions=[keep red output safe]"),
+        "persisted decision records should be rendered in sanitized form:\n{rendered}"
+    );
+}
+
+#[test]
 fn simard_review_and_improvement_curation_share_one_operator_facing_cli() {
     let state_root = TempDirGuard::new("simard-cli-improvement-curation");
 
@@ -319,6 +455,76 @@ fn simard_gym_list_matches_the_legacy_benchmark_binary_for_compatibility() {
     assert_eq!(
         simard_rendered, legacy_rendered,
         "the unified gym surface should preserve the legacy list output exactly until operators migrate"
+    );
+}
+
+#[test]
+fn simard_gym_compare_reports_the_latest_two_runs_and_matches_legacy_binary() {
+    let first_run = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("gym")
+        .arg("run")
+        .arg("repo-exploration-local")
+        .output()
+        .expect("first gym scenario run should launch");
+    let first_rendered = rendered_output(&first_run);
+    assert!(
+        first_run.status.success(),
+        "first benchmark run should succeed before comparison:\n{first_rendered}"
+    );
+
+    thread::sleep(Duration::from_millis(5));
+
+    let second_run = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("gym")
+        .arg("run")
+        .arg("repo-exploration-local")
+        .output()
+        .expect("second gym scenario run should launch");
+    let second_rendered = rendered_output(&second_run);
+    assert!(
+        second_run.status.success(),
+        "second benchmark run should succeed before comparison:\n{second_rendered}"
+    );
+
+    let simard_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("gym")
+        .arg("compare")
+        .arg("repo-exploration-local")
+        .output()
+        .expect("simard gym compare should launch");
+    let simard_rendered = rendered_output(&simard_output);
+
+    assert!(
+        simard_output.status.success(),
+        "gym compare should surface the latest two scenario runs through the primary CLI:\n{simard_rendered}"
+    );
+    for expected in [
+        "Scenario: repo-exploration-local",
+        "Comparison status: unchanged",
+        "Current report: target/simard-gym/repo-exploration-local/",
+        "Previous report: target/simard-gym/repo-exploration-local/",
+        "Comparison artifact report: target/simard-gym/comparisons/repo-exploration-local/",
+    ] {
+        assert!(
+            simard_rendered.contains(expected),
+            "gym compare should surface '{expected}' for operators:\n{simard_rendered}"
+        );
+    }
+
+    let legacy_output = Command::new(env!("CARGO_BIN_EXE_simard-gym"))
+        .arg("compare")
+        .arg("repo-exploration-local")
+        .output()
+        .expect("legacy simard-gym compare should launch");
+    let legacy_rendered = rendered_output(&legacy_output);
+
+    assert!(
+        legacy_output.status.success(),
+        "legacy simard-gym compare should remain functional while the unified CLI becomes canonical:\n{legacy_rendered}"
+    );
+    assert_eq!(
+        simard_rendered, legacy_rendered,
+        "the unified compare surface should preserve the legacy compare output exactly until operators migrate"
     );
 }
 

@@ -1,6 +1,6 @@
 ---
 title: "How to carry meeting decisions into engineer sessions"
-description: Persist concise meeting records under a shared state root and verify that later engineer sessions carry them forward, using today's binaries and the planned unified CLI mapping.
+description: Persist concise meeting records under a shared state root and verify that later engineer sessions carry them forward through the canonical `simard` CLI.
 last_updated: 2026-03-30
 review_schedule: as-needed
 owner: simard
@@ -19,14 +19,12 @@ Use this guide when you want to prove one specific product seam: a meeting run c
 
 ## Status
 
-The handoff behavior is real today through `simard_operator_probe`.
-
-The future `simard meeting run ...` and `simard engineer run ...` entrypoints are planned, not shipped yet.
+The handoff behavior is shipped on the canonical `simard` CLI.
 
 ## Prerequisites
 
 - [ ] You are in the repository root
-- [ ] `cargo run --quiet --bin simard_operator_probe -- ...` works locally
+- [ ] `cargo run --quiet -- ...` works locally
 - [ ] You want a local file-backed handoff, not a network service or remote orchestrator
 
 ## 1. Pick one explicit state root for both commands
@@ -39,9 +37,9 @@ STATE_ROOT="$(mktemp -d /tmp/simard-meeting-handoff.XXXXXX)"
 
 Keep that shell variable for the rest of this guide.
 
-## 2. Capture a structured meeting record through today's operator surface
+## 2. Capture a structured meeting record
 
-Run `meeting-run` with a real structured objective. A carried meeting record is persisted when the objective includes any persistable structured output such as `update:`, `decision:`, `risk:`, `next-step:`, `open-question:`, or structured `goal:` lines. This example uses all of them.
+Run `meeting run` with a real structured objective. A carried meeting record is persisted when the objective includes any persistable structured output such as `update:`, `decision:`, `risk:`, `next-step:`, `open-question:`, or structured `goal:` lines. This example uses all of them.
 
 ```bash
 MEETING_OBJECTIVE="$(cat <<'EOF'
@@ -55,26 +53,16 @@ goal: Keep outside-in verification strong | priority=2 | status=active | rationa
 EOF
 )"
 
-cargo run --quiet --bin simard_operator_probe -- \
-  meeting-run local-harness single-process \
-  "$MEETING_OBJECTIVE" \
-  "$STATE_ROOT"
+cargo run --quiet --   meeting run local-harness single-process   "$MEETING_OBJECTIVE"   "$STATE_ROOT"
 ```
 
 Look for output like this:
 
 ```text
-Mode: meeting
 Identity: simard-meeting
 Decision records: 1
 Active goals count: 2
 Active goal 1: p1 [active] Preserve meeting handoff
-```
-
-Planned unified equivalent:
-
-```bash
-simard meeting run local-harness single-process "$MEETING_OBJECTIVE" "$STATE_ROOT"
 ```
 
 This run writes one concise meeting record and goal state under `STATE_ROOT`. It does not run code or mutate the repository.
@@ -84,29 +72,23 @@ This run writes one concise meeting record and goal state under `STATE_ROOT`. It
 Now point the engineer loop at the same repository and the same `STATE_ROOT`.
 
 ```bash
-ENGINEER_OBJECTIVE=$'inspect the repository state\nrun one safe local engineering action\nverify the outcome explicitly\npersist truthful local evidence and memory'
+ENGINEER_OBJECTIVE=$'inspect the repository state
+run one safe local engineering action
+verify the outcome explicitly
+persist truthful local evidence and memory'
 
-cargo run --quiet --bin simard_operator_probe -- \
-  engineer-loop-run single-process "$PWD" "$ENGINEER_OBJECTIVE" "$STATE_ROOT"
+cargo run --quiet --   engineer run single-process "$PWD" "$ENGINEER_OBJECTIVE" "$STATE_ROOT"
 ```
 
 Look for output like this:
 
 ```text
-Mode: engineer
 Repo root: /path/to/repo
 Active goals count: 2
 Active goal 1: p1 [active] Preserve meeting handoff
 Active goal 2: p2 [active] Keep outside-in verification strong
 Carried meeting decisions: 1
-Carried meeting decision 1: agenda=align the next Simard workstream; updates=[]; decisions=[preserve meeting-to-engineer continuity]; risks=[workflow routing is still unreliable]; next_steps=[keep durable priorities visible]; open_questions=[how aggressively should Simard reprioritize?]; goals=[p1:active:Preserve meeting handoff:meeting decisions must shape later work | p2:active:Keep outside-in verification strong:operator confidence depends on real product exercise]
 Verification status: verified
-```
-
-Planned unified equivalent:
-
-```bash
-simard engineer run single-process "$PWD" "$ENGINEER_OBJECTIVE" "$STATE_ROOT"
 ```
 
 The important contract is additive:
@@ -121,9 +103,9 @@ The important contract is additive:
 
 For predictable handoff behavior, keep these rules in mind:
 
-- pass the same explicit `state-root` argument to both `meeting-run` and `engineer-loop-run`
-- keep `meeting-run` on a supported facilitator pairing such as `local-harness single-process`
-- keep `engineer-loop-run` pointed at a real repository path for `workspace-root`
+- pass the same explicit `state-root` argument to both `meeting run` and `engineer run`
+- keep `meeting run` on a supported facilitator pairing such as `local-harness single-process`
+- keep `engineer run` pointed at a real repository path for `workspace-root`
 - expect the engineer loop to surface at most the three most recent carried meeting records, not an unbounded history dump
 - treat carried meeting decisions as advisory context only; they do not auto-edit code or silently rewrite goals
 
@@ -147,6 +129,6 @@ That is outside this feature's contract. The handoff is only complete when the l
 
 ## Related reading
 
-- For the broader current-to-planned command mapping, see [Simard CLI reference](../reference/simard-cli.md).
+- For the exact command tree and compatibility surfaces, see [Simard CLI reference](../reference/simard-cli.md).
 - For the broader runtime contract, see [Runtime contracts reference](../reference/runtime-contracts.md).
-- For a longer end-to-end walk through the current binaries, see [Tutorial: Run your first local session](../tutorials/run-your-first-local-session.md).
+- For a longer end-to-end walk through the current operator flows, see [Tutorial: Run your first local session](../tutorials/run-your-first-local-session.md).

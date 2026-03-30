@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::bootstrap::builtin_base_type_registry_for_manifest;
 use crate::error::{SimardError, SimardResult};
@@ -50,7 +50,7 @@ impl Display for BenchmarkClass {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct BenchmarkScenario {
     pub id: &'static str,
     pub title: &'static str,
@@ -151,53 +151,149 @@ pub struct BenchmarkSuiteReport {
     pub artifact_path: String,
 }
 
-pub fn benchmark_scenarios() -> Vec<BenchmarkScenario> {
-    vec![
-        BenchmarkScenario {
-            id: "repo-exploration-local",
-            title: "Repo exploration on local harness",
-            description: "Exercise a bounded repo-exploration task through the gym identity on the single-process local harness.",
-            class: BenchmarkClass::RepoExploration,
-            identity: "simard-gym",
-            base_type: "local-harness",
-            topology: RuntimeTopology::SingleProcess,
-            objective: "Inspect repository structure, identify likely extension points, and summarize where benchmark and runtime changes should land.",
-            expected_min_runtime_evidence: 3,
-        },
-        BenchmarkScenario {
-            id: "docs-refresh-copilot",
-            title: "Documentation refresh through copilot-sdk alias",
-            description: "Exercise a documentation-oriented benchmark while preserving the explicit copilot-sdk selection and honest local-harness implementation identity.",
-            class: BenchmarkClass::Documentation,
-            identity: "simard-gym",
-            base_type: "copilot-sdk",
-            topology: RuntimeTopology::SingleProcess,
-            objective: "Produce a concise documentation-oriented execution summary for the current repository state and report the relevant reflected runtime contracts.",
-            expected_min_runtime_evidence: 3,
-        },
-        BenchmarkScenario {
-            id: "safe-code-change-rusty-clawd",
-            title: "Safe code change style task on rusty-clawd",
-            description: "Exercise a bounded safe-change objective on the distinct rusty-clawd backend through the loopback multi-process topology.",
-            class: BenchmarkClass::SafeCodeChange,
-            identity: "simard-gym",
-            base_type: "rusty-clawd",
-            topology: RuntimeTopology::MultiProcess,
-            objective: "Plan a narrow, reviewable runtime change and summarize the exact evidence an operator would inspect before approving it.",
-            expected_min_runtime_evidence: 4,
-        },
-        BenchmarkScenario {
-            id: "composite-session-review",
-            title: "Composite identity session quality review",
-            description: "Exercise the composite engineer identity as a session-quality benchmark so the starter suite covers the shipped composite identity as well as the dedicated gym identity.",
-            class: BenchmarkClass::SessionQuality,
-            identity: "simard-composite-engineer",
-            base_type: "local-harness",
-            topology: RuntimeTopology::SingleProcess,
-            objective: "Run a disciplined bounded engineering session, preserve evidence, and produce a concise operator-facing summary of what happened.",
-            expected_min_runtime_evidence: 3,
-        },
-    ]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BenchmarkComparisonStatus {
+    Improved,
+    Unchanged,
+    Regressed,
+}
+
+impl Display for BenchmarkComparisonStatus {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Self::Improved => "improved",
+            Self::Unchanged => "unchanged",
+            Self::Regressed => "regressed",
+        };
+        f.write_str(label)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct BenchmarkComparisonRunSummary {
+    pub suite_id: String,
+    pub session_id: String,
+    pub run_started_at_unix_ms: u128,
+    pub passed: bool,
+    pub correctness_checks_passed: usize,
+    pub correctness_checks_total: usize,
+    pub evidence_quality: String,
+    pub exported_memory_records: usize,
+    pub exported_evidence_records: usize,
+    pub report_json: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct BenchmarkComparisonDelta {
+    pub correctness_checks_passed: i64,
+    pub exported_memory_records: i64,
+    pub exported_evidence_records: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct BenchmarkComparisonArtifactPaths {
+    pub report_json: String,
+    pub report_txt: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct BenchmarkComparisonReport {
+    pub scenario_id: String,
+    pub scenario_title: String,
+    pub status: BenchmarkComparisonStatus,
+    pub summary: String,
+    pub current: BenchmarkComparisonRunSummary,
+    pub previous: BenchmarkComparisonRunSummary,
+    pub delta: BenchmarkComparisonDelta,
+    pub artifact_paths: BenchmarkComparisonArtifactPaths,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct StoredBenchmarkScenario {
+    id: String,
+    title: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct StoredBenchmarkScorecard {
+    correctness_checks_passed: usize,
+    correctness_checks_total: usize,
+    evidence_quality: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct StoredBenchmarkHandoffReport {
+    exported_memory_records: usize,
+    exported_evidence_records: usize,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct StoredBenchmarkRunReport {
+    suite_id: String,
+    scenario: StoredBenchmarkScenario,
+    session_id: String,
+    run_started_at_unix_ms: u128,
+    passed: bool,
+    scorecard: StoredBenchmarkScorecard,
+    handoff: StoredBenchmarkHandoffReport,
+}
+
+#[derive(Clone, Debug)]
+struct StoredBenchmarkRunArtifact {
+    report_path: PathBuf,
+    report: StoredBenchmarkRunReport,
+}
+
+const BENCHMARK_SCENARIOS: [BenchmarkScenario; 4] = [
+    BenchmarkScenario {
+        id: "repo-exploration-local",
+        title: "Repo exploration on local harness",
+        description: "Exercise a bounded repo-exploration task through the gym identity on the single-process local harness.",
+        class: BenchmarkClass::RepoExploration,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Inspect repository structure, identify likely extension points, and summarize where benchmark and runtime changes should land.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "docs-refresh-copilot",
+        title: "Documentation refresh through copilot-sdk alias",
+        description: "Exercise a documentation-oriented benchmark while preserving the explicit copilot-sdk selection and honest local-harness implementation identity.",
+        class: BenchmarkClass::Documentation,
+        identity: "simard-gym",
+        base_type: "copilot-sdk",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Produce a concise documentation-oriented execution summary for the current repository state and report the relevant reflected runtime contracts.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "safe-code-change-rusty-clawd",
+        title: "Safe code change style task on rusty-clawd",
+        description: "Exercise a bounded safe-change objective on the distinct rusty-clawd backend through the loopback multi-process topology.",
+        class: BenchmarkClass::SafeCodeChange,
+        identity: "simard-gym",
+        base_type: "rusty-clawd",
+        topology: RuntimeTopology::MultiProcess,
+        objective: "Plan a narrow, reviewable runtime change and summarize the exact evidence an operator would inspect before approving it.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "composite-session-review",
+        title: "Composite identity session quality review",
+        description: "Exercise the composite engineer identity as a session-quality benchmark so the starter suite covers the shipped composite identity as well as the dedicated gym identity.",
+        class: BenchmarkClass::SessionQuality,
+        identity: "simard-composite-engineer",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Run a disciplined bounded engineering session, preserve evidence, and produce a concise operator-facing summary of what happened.",
+        expected_min_runtime_evidence: 3,
+    },
+];
+
+pub fn benchmark_scenarios() -> &'static [BenchmarkScenario] {
+    &BENCHMARK_SCENARIOS
 }
 
 pub fn run_benchmark_scenario(
@@ -205,7 +301,8 @@ pub fn run_benchmark_scenario(
     output_root: impl AsRef<Path>,
 ) -> SimardResult<BenchmarkRunReport> {
     let scenario = benchmark_scenarios()
-        .into_iter()
+        .iter()
+        .copied()
         .find(|candidate| candidate.id == scenario_id)
         .ok_or_else(|| SimardError::BenchmarkScenarioNotFound {
             scenario_id: scenario_id.to_string(),
@@ -228,7 +325,7 @@ pub fn run_benchmark_suite(
     let mut scenario_summaries = Vec::new();
     let mut suite_passed = true;
 
-    for scenario in benchmark_scenarios() {
+    for scenario in benchmark_scenarios().iter().copied() {
         let report = execute_scenario(scenario, suite_id, output_root)?;
         suite_passed &= report.passed;
         scenario_summaries.push(BenchmarkSuiteScenarioSummary {
@@ -251,6 +348,66 @@ pub fn run_benchmark_suite(
     };
     write_json(&suite_artifact, &suite_report)?;
     Ok(suite_report)
+}
+
+pub fn compare_latest_benchmark_runs(
+    scenario_id: &str,
+    output_root: impl AsRef<Path>,
+) -> SimardResult<BenchmarkComparisonReport> {
+    let output_root = output_root.as_ref();
+    let mut reports = load_scenario_run_reports(scenario_id, output_root)?;
+    if reports.len() < 2 {
+        return Err(SimardError::BenchmarkComparisonUnavailable {
+            scenario_id: scenario_id.to_string(),
+            reason: format!(
+                "need at least two completed runs under '{}'",
+                display_path(&output_root.join(scenario_id))
+            ),
+        });
+    }
+    reports.sort_by_key(|entry| entry.report.run_started_at_unix_ms);
+    let current = reports.pop().expect("checked length >= 2");
+    let previous = reports.pop().expect("checked length >= 2");
+
+    let current_summary = summarize_stored_run(&current);
+    let previous_summary = summarize_stored_run(&previous);
+    let delta = BenchmarkComparisonDelta {
+        correctness_checks_passed: current_summary.correctness_checks_passed as i64
+            - previous_summary.correctness_checks_passed as i64,
+        exported_memory_records: current_summary.exported_memory_records as i64
+            - previous_summary.exported_memory_records as i64,
+        exported_evidence_records: current_summary.exported_evidence_records as i64
+            - previous_summary.exported_evidence_records as i64,
+    };
+    let status = compare_runs(&current_summary, &previous_summary);
+    let summary = render_comparison_summary(status, &current_summary, &previous_summary, &delta);
+
+    let comparison_dir = output_root
+        .join("comparisons")
+        .join(scenario_id)
+        .join(format!(
+            "{}-vs-{}",
+            current_summary.session_id, previous_summary.session_id
+        ));
+    create_dir_all(&comparison_dir)?;
+    let report_json = comparison_dir.join("report.json");
+    let report_txt = comparison_dir.join("report.txt");
+    let report = BenchmarkComparisonReport {
+        scenario_id: current.report.scenario.id,
+        scenario_title: current.report.scenario.title,
+        status,
+        summary,
+        current: current_summary,
+        previous: previous_summary,
+        delta,
+        artifact_paths: BenchmarkComparisonArtifactPaths {
+            report_json: display_path(&report_json),
+            report_txt: display_path(&report_txt),
+        },
+    };
+    write_json(&report_json, &report)?;
+    write_text(&report_txt, render_text_comparison_report(&report))?;
+    Ok(report)
 }
 
 fn execute_scenario(
@@ -601,6 +758,42 @@ fn render_text_report(report: &BenchmarkRunReport) -> String {
     lines.join("\n")
 }
 
+fn render_text_comparison_report(report: &BenchmarkComparisonReport) -> String {
+    [
+        format!(
+            "Scenario: {} ({})",
+            report.scenario_id, report.scenario_title
+        ),
+        format!("Comparison status: {}", report.status),
+        format!("Summary: {}", report.summary),
+        format!("Current session: {}", report.current.session_id),
+        format!("Current report: {}", report.current.report_json),
+        format!(
+            "Current checks passed: {}/{}",
+            report.current.correctness_checks_passed, report.current.correctness_checks_total
+        ),
+        format!("Previous session: {}", report.previous.session_id),
+        format!("Previous report: {}", report.previous.report_json),
+        format!(
+            "Previous checks passed: {}/{}",
+            report.previous.correctness_checks_passed, report.previous.correctness_checks_total
+        ),
+        format!(
+            "Delta correctness checks passed: {:+}",
+            report.delta.correctness_checks_passed
+        ),
+        format!(
+            "Delta exported memory records: {:+}",
+            report.delta.exported_memory_records
+        ),
+        format!(
+            "Delta exported evidence records: {:+}",
+            report.delta.exported_evidence_records
+        ),
+    ]
+    .join("\n")
+}
+
 fn create_dir_all(path: &Path) -> SimardResult<()> {
     fs::create_dir_all(path).map_err(|error| SimardError::ArtifactIo {
         path: path.to_path_buf(),
@@ -624,6 +817,149 @@ fn write_text(path: &Path, contents: String) -> SimardResult<()> {
         path: path.to_path_buf(),
         reason: error.to_string(),
     })
+}
+
+fn load_scenario_run_reports(
+    scenario_id: &str,
+    output_root: &Path,
+) -> SimardResult<Vec<StoredBenchmarkRunArtifact>> {
+    let scenario_dir = output_root.join(scenario_id);
+    let entries = match fs::read_dir(&scenario_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Vec::new());
+        }
+        Err(error) => {
+            return Err(SimardError::ArtifactIo {
+                path: scenario_dir,
+                reason: error.to_string(),
+            });
+        }
+    };
+    let mut reports = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| SimardError::ArtifactIo {
+            path: scenario_dir.clone(),
+            reason: error.to_string(),
+        })?;
+        let report_path = entry.path().join("report.json");
+        if !report_path.is_file() {
+            continue;
+        }
+        let report = load_stored_run_report(&report_path)?;
+        if report.scenario.id == scenario_id {
+            reports.push(StoredBenchmarkRunArtifact {
+                report_path,
+                report,
+            });
+        }
+    }
+    Ok(reports)
+}
+
+fn load_stored_run_report(path: &Path) -> SimardResult<StoredBenchmarkRunReport> {
+    let raw = fs::read_to_string(path).map_err(|error| SimardError::ArtifactIo {
+        path: path.to_path_buf(),
+        reason: error.to_string(),
+    })?;
+    serde_json::from_str(&raw).map_err(|error| SimardError::ArtifactIo {
+        path: path.to_path_buf(),
+        reason: format!("invalid benchmark report JSON: {error}"),
+    })
+}
+
+fn summarize_stored_run(run: &StoredBenchmarkRunArtifact) -> BenchmarkComparisonRunSummary {
+    BenchmarkComparisonRunSummary {
+        suite_id: run.report.suite_id.clone(),
+        session_id: run.report.session_id.clone(),
+        run_started_at_unix_ms: run.report.run_started_at_unix_ms,
+        passed: run.report.passed,
+        correctness_checks_passed: run.report.scorecard.correctness_checks_passed,
+        correctness_checks_total: run.report.scorecard.correctness_checks_total,
+        evidence_quality: run.report.scorecard.evidence_quality.clone(),
+        exported_memory_records: run.report.handoff.exported_memory_records,
+        exported_evidence_records: run.report.handoff.exported_evidence_records,
+        report_json: display_path(&run.report_path),
+    }
+}
+
+fn compare_runs(
+    current: &BenchmarkComparisonRunSummary,
+    previous: &BenchmarkComparisonRunSummary,
+) -> BenchmarkComparisonStatus {
+    if current.passed != previous.passed {
+        return if current.passed {
+            BenchmarkComparisonStatus::Improved
+        } else {
+            BenchmarkComparisonStatus::Regressed
+        };
+    }
+    if current.correctness_checks_passed != previous.correctness_checks_passed {
+        return if current.correctness_checks_passed > previous.correctness_checks_passed {
+            BenchmarkComparisonStatus::Improved
+        } else {
+            BenchmarkComparisonStatus::Regressed
+        };
+    }
+    if current.exported_evidence_records != previous.exported_evidence_records {
+        return if current.exported_evidence_records > previous.exported_evidence_records {
+            BenchmarkComparisonStatus::Improved
+        } else {
+            BenchmarkComparisonStatus::Regressed
+        };
+    }
+    if current.exported_memory_records != previous.exported_memory_records {
+        return if current.exported_memory_records > previous.exported_memory_records {
+            BenchmarkComparisonStatus::Improved
+        } else {
+            BenchmarkComparisonStatus::Regressed
+        };
+    }
+    match evidence_quality_rank(&current.evidence_quality)
+        .cmp(&evidence_quality_rank(&previous.evidence_quality))
+    {
+        std::cmp::Ordering::Greater => BenchmarkComparisonStatus::Improved,
+        std::cmp::Ordering::Less => BenchmarkComparisonStatus::Regressed,
+        std::cmp::Ordering::Equal => BenchmarkComparisonStatus::Unchanged,
+    }
+}
+
+fn evidence_quality_rank(value: &str) -> u8 {
+    match value {
+        "sufficient" => 2,
+        "thin" => 1,
+        _ => 0,
+    }
+}
+
+fn render_comparison_summary(
+    status: BenchmarkComparisonStatus,
+    current: &BenchmarkComparisonRunSummary,
+    previous: &BenchmarkComparisonRunSummary,
+    delta: &BenchmarkComparisonDelta,
+) -> String {
+    match status {
+        BenchmarkComparisonStatus::Improved => format!(
+            "latest run improved from session '{}' to '{}' with check delta {:+}, memory delta {:+}, and evidence delta {:+}",
+            previous.session_id,
+            current.session_id,
+            delta.correctness_checks_passed,
+            delta.exported_memory_records,
+            delta.exported_evidence_records
+        ),
+        BenchmarkComparisonStatus::Regressed => format!(
+            "latest run regressed from session '{}' to '{}' with check delta {:+}, memory delta {:+}, and evidence delta {:+}",
+            previous.session_id,
+            current.session_id,
+            delta.correctness_checks_passed,
+            delta.exported_memory_records,
+            delta.exported_evidence_records
+        ),
+        BenchmarkComparisonStatus::Unchanged => format!(
+            "latest run matched session '{}' on pass/fail status, checks, memory, and evidence counts",
+            previous.session_id
+        ),
+    }
 }
 
 fn display_path(path: &Path) -> String {
