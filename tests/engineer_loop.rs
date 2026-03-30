@@ -40,11 +40,49 @@ fn rendered_output(output: &Output) -> String {
     format!("{stdout}{stderr}")
 }
 
+fn run_command(cwd: &Path, argv: &[&str]) -> Output {
+    let (program, args) = argv.split_first().expect("argv should include a program");
+    Command::new(program)
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("command should launch")
+}
+
 fn output_field<'a>(output: &'a str, label: &str) -> &'a str {
     output
         .lines()
         .find_map(|line| line.strip_prefix(label).map(str::trim))
         .unwrap_or_else(|| panic!("missing output field '{label}' in:\n{output}"))
+}
+
+fn init_fixture_repo(label: &str) -> TempDirGuard {
+    let repo = TempDirGuard::new(label);
+    let readme_path = repo.path().join("README.md");
+    fs::write(&readme_path, "# Demo Repo\n\nCurrent status: TODO\n")
+        .expect("fixture file should be written");
+
+    let init = run_command(repo.path(), &["git", "init", "-b", "main"]);
+    assert!(init.status.success(), "git init should succeed");
+    let config_name = run_command(repo.path(), &["git", "config", "user.name", "Simard Test"]);
+    assert!(
+        config_name.status.success(),
+        "git user.name should configure"
+    );
+    let config_email = run_command(
+        repo.path(),
+        &["git", "config", "user.email", "simard-tests@example.com"],
+    );
+    assert!(
+        config_email.status.success(),
+        "git user.email should configure"
+    );
+    let add = run_command(repo.path(), &["git", "add", "README.md"]);
+    assert!(add.status.success(), "git add should succeed");
+    let commit = run_command(repo.path(), &["git", "commit", "-m", "initial fixture"]);
+    assert!(commit.status.success(), "git commit should succeed");
+
+    repo
 }
 
 struct TempDirGuard {
@@ -134,8 +172,20 @@ fn engineer_loop_probe_reports_repo_state_runs_verified_action_and_persists_trut
         "engineer-loop probe should report the grounded engineering action it chose:\n{rendered}"
     );
     assert!(
+        rendered.contains("Action plan: "),
+        "engineer-loop probe should surface a short execution plan:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Verification steps: "),
+        "engineer-loop probe should surface explicit verification steps:\n{rendered}"
+    );
+    assert!(
         rendered.contains("Action status: success"),
         "engineer-loop probe should report the action result explicitly:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Changed files after action: <none>"),
+        "non-mutating engineer-loop runs should say when they changed nothing:\n{rendered}"
     );
     assert!(
         rendered.contains("Verification status: verified"),
@@ -180,6 +230,14 @@ fn engineer_loop_probe_reports_repo_state_runs_verified_action_and_persists_trut
         "evidence payload should preserve the chosen engineering action:\n{evidence_payload}"
     );
     assert!(
+        evidence_payload.contains("action-plan="),
+        "evidence payload should preserve the bounded execution plan:\n{evidence_payload}"
+    );
+    assert!(
+        evidence_payload.contains("action-verification-steps="),
+        "evidence payload should preserve explicit verification steps:\n{evidence_payload}"
+    );
+    assert!(
         evidence_payload.contains("verification-status=verified"),
         "evidence payload should preserve verification status:\n{evidence_payload}"
     );
@@ -194,5 +252,128 @@ fn engineer_loop_probe_reports_repo_state_runs_verified_action_and_persists_trut
     assert!(
         evidence_payload.contains("carried-meeting-decisions=<none>"),
         "evidence payload should preserve whether prior meeting decisions were available:\n{evidence_payload}"
+    );
+}
+
+#[test]
+fn engineer_loop_probe_can_apply_a_bounded_structured_text_edit_on_a_clean_repo() {
+    let repo = init_fixture_repo("simard-engineer-loop-edit-fixture");
+    let state_root = TempDirGuard::new("simard-engineer-loop-edit-state");
+    let objective = "\
+edit-file: README.md
+replace: Current status: TODO
+with: Current status: DONE
+verify-contains: Current status: DONE";
+
+    let output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .arg("engineer-loop-run")
+        .arg("single-process")
+        .arg(repo.path())
+        .arg(objective)
+        .arg(state_root.path())
+        .output()
+        .expect("engineer-loop edit probe should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        output.status.success(),
+        "bounded structured edit should succeed:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Selected action: structured-text-replace"),
+        "probe should reveal the bounded edit action:\n{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "Action plan: Inspect the clean repo, replace the requested text once in 'README.md'"
+        ),
+        "probe should expose the edit plan:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Changed files after action: README.md"),
+        "probe should expose the changed file:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Verification status: verified"),
+        "bounded edit should still verify explicitly:\n{rendered}"
+    );
+    assert!(
+        rendered
+            .contains("Verification steps: confirm 'README.md' contains 'Current status: DONE'"),
+        "probe should show the concrete verification step:\n{rendered}"
+    );
+
+    let readme_payload = fs::read_to_string(repo.path().join("README.md"))
+        .expect("edited readme should be readable");
+    assert!(
+        readme_payload.contains("Current status: DONE"),
+        "bounded edit should update the target file:\n{readme_payload}"
+    );
+
+    let status = run_command(
+        repo.path(),
+        &["git", "status", "--short", "--untracked-files=all"],
+    );
+    let status_rendered = rendered_output(&status);
+    assert!(
+        status.status.success(),
+        "git status should succeed in fixture repo:\n{status_rendered}"
+    );
+    assert!(
+        status_rendered.contains(" M README.md") || status_rendered.contains("M  README.md"),
+        "fixture repo should show the bounded edit in git status:\n{status_rendered}"
+    );
+
+    let evidence_payload = fs::read_to_string(state_root.path().join("evidence_records.json"))
+        .expect("bounded edit evidence should be readable");
+    assert!(
+        evidence_payload.contains("selected-action=structured-text-replace"),
+        "evidence should preserve the selected bounded edit action:\n{evidence_payload}"
+    );
+    assert!(
+        evidence_payload.contains("changed-files-after-action=README.md"),
+        "evidence should preserve the changed file:\n{evidence_payload}"
+    );
+    assert!(
+        evidence_payload.contains("verify-contains=README.md::Current status: DONE")
+            || evidence_payload.contains("Current status: DONE"),
+        "evidence should preserve the verification trace:\n{evidence_payload}"
+    );
+}
+
+#[test]
+fn engineer_loop_probe_fails_visibly_when_structured_replacement_target_is_missing() {
+    let repo = init_fixture_repo("simard-engineer-loop-edit-miss");
+    let state_root = TempDirGuard::new("simard-engineer-loop-edit-miss-state");
+    let objective = "\
+edit-file: README.md
+replace: Current status: MISSING
+with: Current status: DONE
+verify-contains: Current status: DONE";
+
+    let output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .arg("engineer-loop-run")
+        .arg("single-process")
+        .arg(repo.path())
+        .arg(objective)
+        .arg(state_root.path())
+        .output()
+        .expect("engineer-loop failing edit probe should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        !output.status.success(),
+        "missing replacement target should fail visibly:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("replacement target was not found in 'README.md'"),
+        "failure should explain why the bounded edit could not proceed:\n{rendered}"
+    );
+
+    let readme_payload = fs::read_to_string(repo.path().join("README.md"))
+        .expect("fixture readme should remain readable");
+    assert!(
+        readme_payload.contains("Current status: TODO"),
+        "failed bounded edit should not mutate the file:\n{readme_payload}"
     );
 }

@@ -456,9 +456,22 @@ fn run_engineer_loop_probe(
     println!("Gap summary: {}", run.inspection.architecture_gap_summary);
     println!("Execution scope: {}", run.execution_scope);
     println!("Selected action: {}", run.action.selected.label);
+    println!("Action plan: {}", run.action.selected.plan_summary);
+    println!(
+        "Verification steps: {}",
+        run.action.selected.verification_steps.join(" || ")
+    );
     println!("Action rationale: {}", run.action.selected.rationale);
     println!("Action command: {}", run.action.selected.argv.join(" "));
     println!("Action status: success");
+    println!(
+        "Changed files after action: {}",
+        if run.action.changed_files.is_empty() {
+            "<none>".to_string()
+        } else {
+            run.action.changed_files.join(", ")
+        }
+    );
     println!("Verification status: {}", run.verification.status);
     println!("Verification summary: {}", run.verification.summary);
     println!("State root: {}", run.state_root.display());

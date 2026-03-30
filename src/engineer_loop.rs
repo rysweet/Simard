@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use serde_json::Value;
@@ -42,10 +42,28 @@ pub struct RepoInspection {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct StructuredEditRequest {
+    relative_path: String,
+    search: String,
+    replacement: String,
+    verify_contains: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum EngineerActionKind {
+    ReadOnlyScan,
+    StructuredTextReplace(StructuredEditRequest),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SelectedEngineerAction {
     pub label: String,
     pub rationale: String,
     pub argv: Vec<String>,
+    pub plan_summary: String,
+    pub verification_steps: Vec<String>,
+    pub expected_changed_files: Vec<String>,
+    kind: EngineerActionKind,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -54,6 +72,7 @@ pub struct ExecutedEngineerAction {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
+    pub changed_files: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -80,7 +99,7 @@ pub fn run_local_engineer_loop(
 ) -> SimardResult<EngineerLoopRun> {
     let state_root = state_root.into();
     let inspection = inspect_workspace(workspace_root.as_ref(), &state_root)?;
-    let selected_action = select_engineer_action(&inspection)?;
+    let selected_action = select_engineer_action(&inspection, objective)?;
     let action = execute_engineer_action(&inspection.repo_root, selected_action)?;
     let verification = verify_engineer_action(&inspection, &action, &state_root)?;
     persist_engineer_loop_artifacts(
@@ -216,7 +235,10 @@ fn architecture_gap_summary(repo_root: &Path) -> SimardResult<String> {
     })
 }
 
-fn select_engineer_action(inspection: &RepoInspection) -> SimardResult<SelectedEngineerAction> {
+fn select_engineer_action(
+    inspection: &RepoInspection,
+    objective: &str,
+) -> SimardResult<SelectedEngineerAction> {
     let carry_forward_note = if inspection.carried_meeting_decisions.is_empty() {
         String::new()
     } else {
@@ -231,6 +253,45 @@ fn select_engineer_action(inspection: &RepoInspection) -> SimardResult<SelectedE
         )
     };
 
+    if let Some(edit_request) = parse_structured_edit_request(objective)? {
+        if inspection.worktree_dirty {
+            return Err(SimardError::UnsupportedEngineerAction {
+                reason: "structured text replacement objectives require a clean git worktree so Simard does not overwrite unrelated local changes".to_string(),
+            });
+        }
+        let relative_path = validate_repo_relative_path(&edit_request.relative_path)?;
+        let verify_contains = edit_request.verify_contains.clone();
+        return Ok(SelectedEngineerAction {
+            label: "structured-text-replace".to_string(),
+            rationale: format!(
+                "Objective includes explicit edit-file/replace/with/verify-contains directives, so the next honest bounded engineer action is to update '{}' once, then verify the requested text is present and visible through git state.{carry_forward_note}",
+                relative_path
+            ),
+            argv: vec![
+                "simard-structured-edit".to_string(),
+                relative_path.clone(),
+                "replace-once".to_string(),
+            ],
+            plan_summary: format!(
+                "Inspect the clean repo, replace the requested text once in '{}', then verify the file content and git state reflect exactly that bounded local change.",
+                relative_path
+            ),
+            verification_steps: vec![
+                format!("confirm '{}' contains '{}'", relative_path, verify_contains),
+                format!(
+                    "confirm git status reports '{}' as the only changed file",
+                    relative_path
+                ),
+                "confirm carried meeting decisions and active goals stayed stable".to_string(),
+            ],
+            expected_changed_files: vec![relative_path.clone()],
+            kind: EngineerActionKind::StructuredTextReplace(StructuredEditRequest {
+                relative_path,
+                ..edit_request
+            }),
+        });
+    }
+
     if inspection.repo_root.join("Cargo.toml").is_file() {
         return Ok(SelectedEngineerAction {
             label: "cargo-metadata-scan".to_string(),
@@ -244,6 +305,16 @@ fn select_engineer_action(inspection: &RepoInspection) -> SimardResult<SelectedE
                 "1".to_string(),
                 "--no-deps".to_string(),
             ],
+            plan_summary:
+                "Inspect the repo, query Cargo metadata without mutating files, and verify repo grounding stayed stable."
+                    .to_string(),
+            verification_steps: vec![
+                "confirm cargo metadata returns valid workspace JSON".to_string(),
+                "confirm repo root, branch, HEAD, and worktree state stayed stable".to_string(),
+                "confirm carried meeting decisions and active goals stayed stable".to_string(),
+            ],
+            expected_changed_files: Vec::new(),
+            kind: EngineerActionKind::ReadOnlyScan,
         });
     }
 
@@ -258,6 +329,16 @@ fn select_engineer_action(inspection: &RepoInspection) -> SimardResult<SelectedE
                 "ls-files".to_string(),
                 "--cached".to_string(),
             ],
+            plan_summary:
+                "Inspect the repo, enumerate tracked files without mutating content, and verify repo grounding stayed stable."
+                    .to_string(),
+            verification_steps: vec![
+                "confirm at least one tracked file is reported".to_string(),
+                "confirm repo root, branch, HEAD, and worktree state stayed stable".to_string(),
+                "confirm carried meeting decisions and active goals stayed stable".to_string(),
+            ],
+            expected_changed_files: Vec::new(),
+            kind: EngineerActionKind::ReadOnlyScan,
         });
     }
 
@@ -273,14 +354,60 @@ fn execute_engineer_action(
     repo_root: &Path,
     selected: SelectedEngineerAction,
 ) -> SimardResult<ExecutedEngineerAction> {
-    let argv = selected.argv.iter().map(String::as_str).collect::<Vec<_>>();
-    let output = run_command(repo_root, &argv)?;
-    Ok(ExecutedEngineerAction {
-        selected,
-        exit_code: output.status.code().unwrap_or_default(),
-        stdout: sanitize_terminal_text(&output.stdout),
-        stderr: sanitize_terminal_text(&output.stderr),
-    })
+    match selected.kind.clone() {
+        EngineerActionKind::ReadOnlyScan => {
+            let argv = selected.argv.iter().map(String::as_str).collect::<Vec<_>>();
+            let output = run_command(repo_root, &argv)?;
+            Ok(ExecutedEngineerAction {
+                selected,
+                exit_code: output.status.code().unwrap_or_default(),
+                stdout: sanitize_terminal_text(&output.stdout),
+                stderr: sanitize_terminal_text(&output.stderr),
+                changed_files: Vec::new(),
+            })
+        }
+        EngineerActionKind::StructuredTextReplace(edit_request) => {
+            let target_path = repo_root.join(&edit_request.relative_path);
+            let current = fs::read_to_string(&target_path).map_err(|error| {
+                SimardError::ActionExecutionFailed {
+                    action: selected.argv.join(" "),
+                    reason: format!(
+                        "could not read '{}' before applying the bounded edit: {error}",
+                        target_path.display()
+                    ),
+                }
+            })?;
+            let updated = current.replacen(&edit_request.search, &edit_request.replacement, 1);
+            if updated == current {
+                return Err(SimardError::ActionExecutionFailed {
+                    action: selected.argv.join(" "),
+                    reason: format!(
+                        "replacement target was not found in '{}'",
+                        edit_request.relative_path
+                    ),
+                });
+            }
+            fs::write(&target_path, updated).map_err(|error| {
+                SimardError::ActionExecutionFailed {
+                    action: selected.argv.join(" "),
+                    reason: format!(
+                        "could not write '{}' after applying the bounded edit: {error}",
+                        target_path.display()
+                    ),
+                }
+            })?;
+            Ok(ExecutedEngineerAction {
+                selected,
+                exit_code: 0,
+                stdout: format!(
+                    "updated '{}' with one structured replacement",
+                    edit_request.relative_path
+                ),
+                stderr: String::new(),
+                changed_files: vec![edit_request.relative_path.clone()],
+            })
+        }
+    }
 }
 
 fn verify_engineer_action(
@@ -328,15 +455,48 @@ fn verify_engineer_action(
     }
     checks.push(format!("repo-branch={}", post.branch));
 
-    if post.worktree_dirty != inspection.worktree_dirty
-        || post.changed_files != inspection.changed_files
-    {
-        return Err(SimardError::VerificationFailed {
-            reason: "worktree state changed during a non-mutating local engineer action"
-                .to_string(),
-        });
+    match &action.selected.kind {
+        EngineerActionKind::ReadOnlyScan => {
+            if post.worktree_dirty != inspection.worktree_dirty
+                || post.changed_files != inspection.changed_files
+            {
+                return Err(SimardError::VerificationFailed {
+                    reason: "worktree state changed during a non-mutating local engineer action"
+                        .to_string(),
+                });
+            }
+            checks.push(format!("worktree-dirty={}", post.worktree_dirty));
+            checks.push("changed-files-after-action=<none>".to_string());
+        }
+        EngineerActionKind::StructuredTextReplace(_) => {
+            if !post.worktree_dirty {
+                return Err(SimardError::VerificationFailed {
+                    reason: "bounded edit succeeded but the repo still appears clean".to_string(),
+                });
+            }
+            if post.changed_files != action.selected.expected_changed_files {
+                return Err(SimardError::VerificationFailed {
+                    reason: format!(
+                        "bounded edit changed unexpected files: expected {:?}, got {:?}",
+                        action.selected.expected_changed_files, post.changed_files
+                    ),
+                });
+            }
+            if action.changed_files != action.selected.expected_changed_files {
+                return Err(SimardError::VerificationFailed {
+                    reason: format!(
+                        "executed action reported changed files {:?}, expected {:?}",
+                        action.changed_files, action.selected.expected_changed_files
+                    ),
+                });
+            }
+            checks.push(format!("worktree-dirty={}", post.worktree_dirty));
+            checks.push(format!(
+                "changed-files-after-action={}",
+                post.changed_files.join(", ")
+            ));
+        }
     }
-    checks.push(format!("worktree-dirty={}", post.worktree_dirty));
     if post.active_goals != inspection.active_goals {
         return Err(SimardError::VerificationFailed {
             reason: "active goal set changed during a non-mutating local engineer action"
@@ -356,33 +516,107 @@ fn verify_engineer_action(
         post.carried_meeting_decisions.len()
     ));
 
-    match action.selected.label.as_str() {
-        "cargo-metadata-scan" => {
-            verify_cargo_metadata(&inspection.repo_root, &action.stdout, &mut checks)?
-        }
-        "git-tracked-file-scan" => {
-            if action.stdout.lines().next().is_none() {
+    match &action.selected.kind {
+        EngineerActionKind::ReadOnlyScan => match action.selected.label.as_str() {
+            "cargo-metadata-scan" => {
+                verify_cargo_metadata(&inspection.repo_root, &action.stdout, &mut checks)?
+            }
+            "git-tracked-file-scan" => {
+                if action.stdout.lines().next().is_none() {
+                    return Err(SimardError::VerificationFailed {
+                        reason: "git tracked-file scan returned no tracked files".to_string(),
+                    });
+                }
+                checks.push("tracked-files-present=true".to_string());
+            }
+            other => {
                 return Err(SimardError::VerificationFailed {
-                    reason: "git tracked-file scan returned no tracked files".to_string(),
+                    reason: format!("verification rules are missing for selected action '{other}'"),
                 });
             }
-            checks.push("tracked-files-present=true".to_string());
-        }
-        other => {
-            return Err(SimardError::VerificationFailed {
-                reason: format!("verification rules are missing for selected action '{other}'"),
-            });
-        }
+        },
+        EngineerActionKind::StructuredTextReplace(edit_request) => verify_structured_text_replace(
+            &inspection.repo_root,
+            edit_request,
+            &action.stdout,
+            &mut checks,
+        )?,
     }
 
     Ok(VerificationReport {
         status: "verified".to_string(),
-        summary: format!(
-            "Verified local-only engineer action '{}' against stable repo grounding, unchanged worktree state, and explicit repo-native action checks.",
-            action.selected.label
-        ),
+        summary: match &action.selected.kind {
+            EngineerActionKind::ReadOnlyScan => format!(
+                "Verified local-only engineer action '{}' against stable repo grounding, unchanged worktree state, and explicit repo-native action checks.",
+                action.selected.label
+            ),
+            EngineerActionKind::StructuredTextReplace(edit_request) => format!(
+                "Verified bounded local engineer edit '{}' by checking '{}' for the requested content, confirming the expected git-visible file change, and preserving stable repo grounding.",
+                action.selected.label, edit_request.relative_path
+            ),
+        },
         checks,
     })
+}
+
+fn verify_structured_text_replace(
+    repo_root: &Path,
+    edit_request: &StructuredEditRequest,
+    action_stdout: &str,
+    checks: &mut Vec<String>,
+) -> SimardResult<()> {
+    let target_path = repo_root.join(&edit_request.relative_path);
+    let current =
+        fs::read_to_string(&target_path).map_err(|error| SimardError::VerificationFailed {
+            reason: format!(
+                "could not read '{}' while verifying the bounded edit: {error}",
+                target_path.display()
+            ),
+        })?;
+    if !current.contains(&edit_request.verify_contains) {
+        return Err(SimardError::VerificationFailed {
+            reason: format!(
+                "'{}' does not contain required verification text '{}'",
+                edit_request.relative_path, edit_request.verify_contains
+            ),
+        });
+    }
+    checks.push(format!(
+        "verify-contains={}::{}",
+        edit_request.relative_path, edit_request.verify_contains
+    ));
+
+    let diff = run_command(
+        repo_root,
+        &["git", "diff", "--", edit_request.relative_path.as_str()],
+    )?;
+    if diff.stdout.trim().is_empty() {
+        return Err(SimardError::VerificationFailed {
+            reason: format!(
+                "git diff returned no visible change for '{}'",
+                edit_request.relative_path
+            ),
+        });
+    }
+    if !diff.stdout.contains(&edit_request.replacement)
+        && !diff.stdout.contains(&edit_request.verify_contains)
+    {
+        return Err(SimardError::VerificationFailed {
+            reason: format!(
+                "git diff for '{}' did not contain the replacement or verification text",
+                edit_request.relative_path
+            ),
+        });
+    }
+    checks.push(format!("git-diff-visible={}", edit_request.relative_path));
+
+    if !action_stdout.contains(&edit_request.relative_path) {
+        return Err(SimardError::VerificationFailed {
+            reason: "structured edit action output did not identify the changed file".to_string(),
+        });
+    }
+    checks.push("action-output-identifies-changed-file=true".to_string());
+    Ok(())
 }
 
 fn verify_cargo_metadata(
@@ -504,10 +738,23 @@ fn persist_engineer_loop_artifacts(
         format!("architecture-gap={}", inspection.architecture_gap_summary),
         format!("execution-scope={EXECUTION_SCOPE}"),
         format!("selected-action={}", action.selected.label),
+        format!("action-plan={}", action.selected.plan_summary),
+        format!(
+            "action-verification-steps={}",
+            action.selected.verification_steps.join(" || ")
+        ),
         format!("selected-action-rationale={}", action.selected.rationale),
         format!("action-command={}", action.selected.argv.join(" ")),
         "action-status=success".to_string(),
         format!("action-exit-code={}", action.exit_code),
+        format!(
+            "changed-files-after-action={}",
+            if action.changed_files.is_empty() {
+                "<none>".to_string()
+            } else {
+                action.changed_files.join(", ")
+            }
+        ),
         format!("verification-status={}", verification.status),
         format!("verification-summary={}", verification.summary),
     ];
@@ -585,6 +832,92 @@ fn persist_engineer_loop_artifacts(
     };
     handoff_store.save(handoff)?;
     Ok(())
+}
+
+fn parse_structured_edit_request(objective: &str) -> SimardResult<Option<StructuredEditRequest>> {
+    let mut relative_path = None;
+    let mut search = None;
+    let mut replacement = None;
+    let mut verify_contains = None;
+    let mut saw_edit_directive = false;
+
+    for line in objective.lines() {
+        let trimmed = line.trim();
+        if let Some(value) = trimmed.strip_prefix("edit-file:") {
+            saw_edit_directive = true;
+            relative_path = Some(non_empty_objective_value("edit-file", value)?);
+        } else if let Some(value) = trimmed.strip_prefix("replace:") {
+            saw_edit_directive = true;
+            search = Some(non_empty_objective_value("replace", value)?);
+        } else if let Some(value) = trimmed.strip_prefix("with:") {
+            saw_edit_directive = true;
+            replacement = Some(non_empty_objective_value("with", value)?);
+        } else if let Some(value) = trimmed.strip_prefix("verify-contains:") {
+            saw_edit_directive = true;
+            verify_contains = Some(non_empty_objective_value("verify-contains", value)?);
+        }
+    }
+
+    if !saw_edit_directive {
+        return Ok(None);
+    }
+
+    match (relative_path, search, replacement, verify_contains) {
+        (Some(relative_path), Some(search), Some(replacement), Some(verify_contains)) => {
+            Ok(Some(StructuredEditRequest {
+                relative_path,
+                search,
+                replacement,
+                verify_contains,
+            }))
+        }
+        _ => Err(SimardError::UnsupportedEngineerAction {
+            reason: "structured edit objectives must include non-empty edit-file:, replace:, with:, and verify-contains: lines".to_string(),
+        }),
+    }
+}
+
+fn non_empty_objective_value(field: &str, value: &str) -> SimardResult<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(SimardError::UnsupportedEngineerAction {
+            reason: format!("structured edit objective field '{field}' cannot be empty"),
+        });
+    }
+    Ok(trimmed.to_string())
+}
+
+fn validate_repo_relative_path(relative_path: &str) -> SimardResult<String> {
+    let path = Path::new(relative_path);
+    if path.is_absolute() {
+        return Err(SimardError::UnsupportedEngineerAction {
+            reason: "structured edit target paths must stay relative to the selected repo"
+                .to_string(),
+        });
+    }
+
+    let mut normalized = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(segment) => normalized.push(segment.to_string_lossy().into_owned()),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(SimardError::UnsupportedEngineerAction {
+                    reason: "structured edit target paths must not escape the selected repo"
+                        .to_string(),
+                });
+            }
+        }
+    }
+
+    if normalized.is_empty() {
+        return Err(SimardError::UnsupportedEngineerAction {
+            reason: "structured edit target paths must identify a file under the selected repo"
+                .to_string(),
+        });
+    }
+
+    Ok(normalized.join("/"))
 }
 
 struct CommandOutput {
@@ -690,7 +1023,7 @@ fn parse_status_paths(stdout: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_status_paths;
+    use super::{parse_status_paths, parse_structured_edit_request, validate_repo_relative_path};
 
     #[test]
     fn git_status_paths_strip_status_prefixes() {
@@ -703,6 +1036,28 @@ mod tests {
                 "tests/engineer_loop.rs".to_string(),
                 "docs/index.md".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn structured_edit_request_requires_complete_directives() {
+        let error = parse_structured_edit_request("edit-file: docs/demo.txt\nreplace: before\n")
+            .expect_err("incomplete structured edit directives should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("structured edit objectives must include non-empty"),
+            "error should explain the missing directives: {error}"
+        );
+    }
+
+    #[test]
+    fn structured_edit_paths_must_stay_repo_relative() {
+        let error = validate_repo_relative_path("../outside.txt")
+            .expect_err("parent escapes should be rejected");
+        assert!(
+            error.to_string().contains("must not escape"),
+            "error should explain the rejected path: {error}"
         );
     }
 }
