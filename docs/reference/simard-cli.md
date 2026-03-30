@@ -1,6 +1,6 @@
 ---
 title: Simard CLI reference
-description: Reference for the shipped `simard` command tree and the legacy compatibility binaries that still expose the same runtime behaviors.
+description: Reference for the shipped `simard` command tree and the legacy compatibility binaries that still expose selected older runtime behaviors.
 last_updated: 2026-03-30
 review_schedule: as-needed
 owner: simard
@@ -8,6 +8,7 @@ doc_type: reference
 related:
   - ../index.md
   - ./runtime-contracts.md
+  - ../howto/inspect-durable-goal-register.md
   - ../howto/configure-bootstrap-and-inspect-reflection.md
   - ../howto/carry-meeting-decisions-into-engineer-sessions.md
   - ../tutorials/run-your-first-local-session.md
@@ -19,7 +20,9 @@ related:
 
 The legacy `simard_operator_probe` and `simard-gym` binaries still ship for compatibility, but new operator workflows should use `simard ...`.
 
-## Command tree
+This page distinguishes shipped commands from compatibility surfaces. When a compatibility surface is listed as `none`, the command is canonical-only.
+
+## Shipped command tree
 
 ```text
 simard
@@ -29,7 +32,8 @@ simard
 |- meeting
 |  `- run <base-type> <topology> <structured-objective> [state-root]
 |- goal-curation
-|  `- run <base-type> <topology> <structured-objective> [state-root]
+|  |- run <base-type> <topology> <structured-objective> [state-root]
+|  `- read <base-type> <topology> [state-root]
 |- improvement-curation
 |  `- run <base-type> <topology> <structured-objective> [state-root]
 |- gym
@@ -54,6 +58,7 @@ Bare `simard` prints this unified help surface.
 | `simard engineer terminal ...` | `simard_operator_probe terminal-run ...` |
 | `simard meeting run ...` | `simard_operator_probe meeting-run ...` |
 | `simard goal-curation run ...` | `simard_operator_probe goal-curation-run ...` |
+| `simard goal-curation read ...` | none |
 | `simard improvement-curation run ...` | `simard_operator_probe improvement-curation-run ...` |
 | `simard review run ...` | `simard_operator_probe review-run ...` |
 | `simard review read ...` | `simard_operator_probe review-read ...` |
@@ -162,6 +167,51 @@ Example:
 
 ```bash
 simard goal-curation run local-harness single-process   "goal: Keep Simard's top 5 goals current | priority=1 | status=active | rationale=long-horizon stewardship is a shipped product responsibility"   "$STATE_ROOT"
+```
+
+`goal-curation run` is the mutation path. It curates durable goal state and still surfaces the active top-five summary for quick operator feedback.
+
+When `[state-root]` is omitted, `goal-curation run` writes under the canonical durable root for the selected shipped runtime pairing:
+
+```text
+target/operator-probe-state/goal-curation-run/simard-goal-curator/<base-type>/<topology>
+```
+
+### `simard goal-curation read <base-type> <topology> [state-root]`
+
+Reads the stored durable goal register without mutating it.
+
+Key behavior:
+
+- loads the stored goal register from the validated `state-root`
+- reuses the same canonical default durable root as `goal-curation run` when `[state-root]` is omitted
+- validates `base-type` and `topology` before deriving that default root
+- prints sections in this fixed order: `active`, `proposed`, `paused`, `completed`
+- includes explicit zero-state lines for empty sections
+- strips terminal control sequences from persisted goal text before printing it
+- preserves `goal-curation run` as the only curation workflow
+- fails explicitly for invalid `state-root` values and unreadable or malformed durable goal state
+
+Example:
+
+```bash
+simard goal-curation read local-harness single-process "$STATE_ROOT"
+```
+
+You should see output shaped like:
+
+```text
+Goal register: durable
+State root: /tmp/simard-goal-register.XXXXXX
+Active goals count: 2
+Active goal 1: p1 [active] Keep Simard's top 5 goals current
+Active goal 2: p2 [active] Preserve meeting-to-engineer continuity
+Proposed goals count: 1
+Proposed goal 1: p3 [proposed] Promote benchmark drift alerts
+Paused goals count: 1
+Paused goal 1: p4 [paused] Expand multi-process orchestration carefully
+Completed goals count: 1
+Completed goal 1: p5 [completed] Ship the canonical bootstrap contract
 ```
 
 ### `simard improvement-curation run <base-type> <topology> <structured-objective> [state-root]`

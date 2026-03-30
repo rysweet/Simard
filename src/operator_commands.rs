@@ -1,14 +1,18 @@
 use std::path::{Path, PathBuf};
 
+use crate::base_types::BaseTypeId;
 use crate::bootstrap::validate_state_root;
+use crate::goals::{FileBackedGoalStore, GoalRecord, GoalStatus, GoalStore};
 use crate::sanitization::sanitize_terminal_text;
 use crate::{
-    BootstrapConfig, BootstrapInputs, FileBackedMemoryStore, MemoryRecord, MemoryScope,
-    MemoryStore, ReflectiveRuntime, ReviewRequest, ReviewTargetKind, RuntimeTopology,
+    BootstrapConfig, BootstrapInputs, BuiltinIdentityLoader, FileBackedMemoryStore, Freshness,
+    IdentityLoadRequest, IdentityLoader, ManifestContract, MemoryRecord, MemoryScope, MemoryStore,
+    Provenance, ReflectiveRuntime, ReviewRequest, ReviewTargetKind, RuntimeTopology,
     assemble_local_runtime_from_handoff, benchmark_scenarios, build_review_artifact,
-    compare_latest_benchmark_runs, default_output_root, latest_local_handoff,
-    latest_review_artifact, persist_review_artifact, render_review_context_directives,
-    run_benchmark_scenario, run_benchmark_suite, run_local_engineer_loop, run_local_session,
+    builtin_base_type_registry_for_manifest, compare_latest_benchmark_runs, default_output_root,
+    latest_local_handoff, latest_review_artifact, persist_review_artifact,
+    render_review_context_directives, run_benchmark_scenario, run_benchmark_suite,
+    run_local_engineer_loop, run_local_session,
 };
 
 pub fn dispatch_operator_probe<I>(args: I) -> Result<(), Box<dyn std::error::Error>>
@@ -206,12 +210,13 @@ pub fn run_handoff_probe(
     let config = BootstrapConfig::resolve(BootstrapInputs {
         prompt_root: Some(prompt_root()),
         objective: Some(objective.to_string()),
-        state_root: Some(validate_state_root(state_root(
+        state_root: Some(resolved_state_root(
+            None,
             identity,
             base_type,
             topology,
             "handoff-roundtrip",
-        ))?),
+        )?),
         identity: Some(identity.to_string()),
         base_type: Some(base_type.to_string()),
         topology: Some(topology.to_string()),
@@ -337,12 +342,10 @@ pub fn run_goal_curation_probe(
     let config = BootstrapConfig::resolve(BootstrapInputs {
         prompt_root: Some(prompt_root()),
         objective: Some(objective.to_string()),
-        state_root: Some(resolved_state_root(
+        state_root: Some(resolved_goal_curation_state_root(
             state_root_override,
-            identity,
             base_type,
             topology,
-            "goal-curation-run",
         )?),
         identity: Some(identity.to_string()),
         base_type: Some(base_type.to_string()),
@@ -369,6 +372,24 @@ pub fn run_goal_curation_probe(
     }
     print_text("Execution summary", &execution.outcome.execution_summary);
     print_text("Reflection summary", &execution.outcome.reflection.summary);
+    Ok(())
+}
+
+pub fn run_goal_curation_read_probe(
+    base_type: &str,
+    topology: &str,
+    state_root_override: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let state_root = resolved_goal_curation_state_root(state_root_override, base_type, topology)?;
+    let goal_store = FileBackedGoalStore::try_new(state_root.join("goal_records.json"))?;
+    let goal_records = goal_store.list()?;
+    let register = GoalRegisterView::from_records(goal_records);
+
+    println!("Goal register: durable");
+    print_text("Selected base type", base_type);
+    print_text("Topology", topology);
+    print_display("State root", state_root.display());
+    register.print();
     Ok(())
 }
 
@@ -837,13 +858,79 @@ fn prompt_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")
 }
 
-fn state_root(identity: &str, base_type: &str, topology: &str, probe: &str) -> PathBuf {
+fn state_root(
+    identity: &str,
+    base_type: &BaseTypeId,
+    topology: RuntimeTopology,
+    probe: &str,
+) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target/operator-probe-state")
         .join(probe)
         .join(identity)
-        .join(base_type)
-        .join(topology)
+        .join(base_type.as_str())
+        .join(topology.to_string())
+}
+
+fn resolved_goal_curation_state_root(
+    explicit: Option<PathBuf>,
+    base_type: &str,
+    topology: &str,
+) -> crate::SimardResult<PathBuf> {
+    resolved_state_root(
+        explicit,
+        "simard-goal-curator",
+        base_type,
+        topology,
+        "goal-curation-run",
+    )
+}
+
+struct ValidatedRuntimeSegments {
+    base_type: BaseTypeId,
+    topology: RuntimeTopology,
+}
+
+fn validated_runtime_segments(
+    identity: &str,
+    base_type: &str,
+    topology: &str,
+) -> crate::SimardResult<ValidatedRuntimeSegments> {
+    let topology = parse_runtime_topology(topology)?;
+    let contract = ManifestContract::new(
+        concat!(module_path!(), "::validated_runtime_segments"),
+        "operator-cli -> identity-loader -> base-type-registry",
+        vec![
+            format!("identity:{identity}"),
+            format!("base-type:{base_type}"),
+            format!("topology:{topology}"),
+        ],
+        Provenance::runtime(format!("operator-cli/default-state-root/{identity}")),
+        Freshness::now()?,
+    )?;
+    let manifest = BuiltinIdentityLoader.load(&IdentityLoadRequest::new(
+        identity,
+        env!("CARGO_PKG_VERSION"),
+        contract,
+    ))?;
+    let base_types = builtin_base_type_registry_for_manifest(&manifest)?;
+    let requested_base_type = BaseTypeId::new(base_type);
+    let factory = base_types.get(&requested_base_type).ok_or_else(|| {
+        crate::SimardError::AdapterNotRegistered {
+            base_type: base_type.to_string(),
+        }
+    })?;
+    if !factory.descriptor().supports_topology(topology) {
+        return Err(crate::SimardError::UnsupportedTopology {
+            base_type: base_type.to_string(),
+            topology,
+        });
+    }
+
+    Ok(ValidatedRuntimeSegments {
+        base_type: factory.descriptor().id.clone(),
+        topology,
+    })
 }
 
 fn resolved_state_root(
@@ -853,9 +940,18 @@ fn resolved_state_root(
     topology: &str,
     probe: &str,
 ) -> crate::SimardResult<PathBuf> {
-    validate_state_root(
-        explicit.unwrap_or_else(|| state_root(identity, base_type, topology, probe)),
-    )
+    match explicit {
+        Some(path) => validate_state_root(path),
+        None => {
+            let segments = validated_runtime_segments(identity, base_type, topology)?;
+            validate_state_root(state_root(
+                identity,
+                &segments.base_type,
+                segments.topology,
+                probe,
+            ))
+        }
+    }
 }
 
 fn resolved_review_state_root(
@@ -872,15 +968,16 @@ fn resolved_review_state_root(
     )
 }
 
-fn parse_runtime_topology(value: &str) -> Result<RuntimeTopology, Box<dyn std::error::Error>> {
+fn parse_runtime_topology(value: &str) -> crate::SimardResult<RuntimeTopology> {
     match value {
         "single-process" => Ok(RuntimeTopology::SingleProcess),
         "multi-process" => Ok(RuntimeTopology::MultiProcess),
         "distributed" => Ok(RuntimeTopology::Distributed),
-        other => Err(format!(
-            "unsupported runtime topology '{other}'; expected single-process, multi-process, or distributed"
-        )
-        .into()),
+        other => Err(crate::SimardError::InvalidConfigValue {
+            key: "SIMARD_RUNTIME_TOPOLOGY".to_string(),
+            value: other.to_string(),
+            help: "expected 'single-process', 'multi-process', or 'distributed'".to_string(),
+        }),
     }
 }
 
@@ -913,4 +1010,85 @@ fn print_text(label: &str, value: impl AsRef<str>) {
 
 fn print_display(label: &str, value: impl std::fmt::Display) {
     println!("{label}: {}", sanitize_terminal_text(&value.to_string()));
+}
+
+struct GoalRegisterView {
+    sections: [GoalRegisterSection; 4],
+}
+
+impl GoalRegisterView {
+    fn from_records(records: Vec<GoalRecord>) -> Self {
+        let mut active = Vec::new();
+        let mut proposed = Vec::new();
+        let mut paused = Vec::new();
+        let mut completed = Vec::new();
+
+        for record in records {
+            match record.status {
+                GoalStatus::Active => active.push(record),
+                GoalStatus::Proposed => proposed.push(record),
+                GoalStatus::Paused => paused.push(record),
+                GoalStatus::Completed => completed.push(record),
+            }
+        }
+
+        Self {
+            sections: [
+                GoalRegisterSection::new(GoalStatus::Active, active),
+                GoalRegisterSection::new(GoalStatus::Proposed, proposed),
+                GoalRegisterSection::new(GoalStatus::Paused, paused),
+                GoalRegisterSection::new(GoalStatus::Completed, completed),
+            ],
+        }
+    }
+
+    fn print(&self) {
+        for section in &self.sections {
+            section.print();
+        }
+    }
+}
+
+struct GoalRegisterSection {
+    heading: &'static str,
+    label: &'static str,
+    goals: Vec<GoalRecord>,
+}
+
+impl GoalRegisterSection {
+    fn new(status: GoalStatus, mut goals: Vec<GoalRecord>) -> Self {
+        goals.sort_by(|left, right| {
+            left.priority
+                .cmp(&right.priority)
+                .then(left.title.cmp(&right.title))
+                .then(left.slug.cmp(&right.slug))
+        });
+        let (heading, label) = match status {
+            GoalStatus::Active => ("Active", "Active goals"),
+            GoalStatus::Proposed => ("Proposed", "Proposed goals"),
+            GoalStatus::Paused => ("Paused", "Paused goals"),
+            GoalStatus::Completed => ("Completed", "Completed goals"),
+        };
+
+        Self {
+            heading,
+            label,
+            goals,
+        }
+    }
+
+    fn print(&self) {
+        println!("{} count: {}", self.label, self.goals.len());
+        if self.goals.is_empty() {
+            println!("{}: <none>", self.label);
+            return;
+        }
+
+        for (index, goal) in self.goals.iter().enumerate() {
+            print_text(
+                &format!("{} goal {}", self.heading, index + 1),
+                goal.concise_label(),
+            );
+        }
+    }
 }
