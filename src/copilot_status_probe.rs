@@ -15,12 +15,17 @@ pub(crate) enum CopilotStatusProbeResult {
     },
 }
 
+pub(crate) const COPILOT_PROMPT_RECIPE_NAME: &str = "copilot-prompt-check";
 pub(crate) const COPILOT_STATUS_RECIPE_NAME: &str = "copilot-status-check";
 pub(crate) const COPILOT_STATUS_SIGNAL: &str = "GitHub Copilot CLI";
 const COPILOT_STATUS_COMMAND: &str = "amplihack copilot -- --version";
 
 pub(crate) fn is_copilot_status_recipe(recipe_name: &str) -> bool {
     recipe_name == COPILOT_STATUS_RECIPE_NAME
+}
+
+pub(crate) fn is_copilot_guarded_recipe(recipe_name: &str) -> bool {
+    is_copilot_status_recipe(recipe_name) || recipe_name == COPILOT_PROMPT_RECIPE_NAME
 }
 
 pub(crate) fn probe_local_copilot_status() -> CopilotStatusProbeResult {

@@ -288,11 +288,13 @@ Runs one of the built-in named terminal session recipes through the same bounded
 Behavior:
 
 - loads a named recipe from `prompt_assets/simard/terminal_recipes/*.simard-terminal`
-- currently ships `foundation-check` for the minimal bounded PTY sanity path and `copilot-status-check` for a bounded local Copilot wrapper availability probe
+- currently ships `foundation-check` for the minimal bounded PTY sanity path, `copilot-status-check` for a bounded local Copilot wrapper availability probe, and `copilot-prompt-check` for a bounded real interactive prompt-start-and-exit path
 - preserves the same structured terminal audit trail, mode-scoped terminal handoff, and engineer-next-step guidance as the other terminal session surfaces
 - fails explicitly when the requested recipe name is unknown or invalid
 - `copilot-status-check` is intentionally narrow: it only runs the fixed local argv `amplihack copilot -- --version`
 - `copilot-status-check` does not inspect GitHub auth state, does not open an interactive Copilot session, and fails closed when `amplihack` is missing or the expected version signal is absent
+- `copilot-prompt-check` is the first truthful interactive Copilot slice: it starts `amplihack copilot`, waits for the real prompt guidance text, sends `/exit`, and waits for the resume hint before succeeding
+- `copilot-prompt-check` still does not submit a task, inspect auth state, or claim general Copilot orchestration beyond prompt reachability and clean exit
 - keeps `simard_operator_probe terminal-recipe-run ...` available for compatibility
 
 Example:
@@ -300,6 +302,7 @@ Example:
 ```bash
 simard engineer terminal-recipe-list
 simard engineer terminal-recipe-show foundation-check
+simard engineer terminal-recipe-show copilot-prompt-check
 simard engineer terminal-recipe-show copilot-status-check
 simard engineer terminal-recipe single-process foundation-check "$STATE_ROOT"
 ```

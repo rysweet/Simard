@@ -59,8 +59,10 @@ cargo run --quiet -- engineer terminal-recipe-show foundation-check
 Look for:
 
 - `foundation-check`
+- `copilot-prompt-check`
 - `copilot-status-check`
 - a real bounded recipe asset with `working-directory:`, `command:`, and `wait-for:` lines
+- `copilot-prompt-check` should show a real `amplihack copilot` launch plus a bounded `/exit`, while `copilot-status-check` remains the narrower `--version` probe
 
 **Checkpoint**: you can discover and inspect the shipped terminal recipes without claiming repo-grounded planning or verification happened yet.
 

@@ -255,9 +255,11 @@ This is the discoverable built-in recipe companion to inline and file-backed ter
 - unknown or invalid recipe names fail explicitly
 - `terminal-recipe-show` is read-only and prints the shipped recipe asset contents
 - `terminal-recipe` executes the same bounded `terminal-shell` substrate as `engineer terminal` and `engineer terminal-file`
-- the shipped built-ins currently include `foundation-check` and `copilot-status-check`
+- the shipped built-ins currently include `foundation-check`, `copilot-status-check`, and `copilot-prompt-check`
 - `copilot-status-check` is a bounded local availability probe only: it runs `amplihack copilot -- --version`, requires the expected `GitHub Copilot CLI` version signal, and fails closed when that signal cannot be produced
 - `copilot-status-check` must not claim interactive Copilot control, remote orchestration, or authenticated GitHub state inspection
+- `copilot-prompt-check` is a bounded interactive prompt reachability check: it launches `amplihack copilot`, waits for the visible prompt guidance text, sends `/exit`, and requires the resume hint before success
+- `copilot-prompt-check` must not claim task execution, slash-command compatibility beyond `/exit`, remote orchestration, or authenticated GitHub state inspection
 - the selected recipe name is preserved into the terminal continuity summary that later engineer surfaces may render from the same state root
 
 ### Meeting mode

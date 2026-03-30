@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::base_types::BaseTypeId;
 use crate::bootstrap::validate_state_root;
 use crate::copilot_status_probe::{
-    CopilotStatusProbeResult, is_copilot_status_recipe, probe_local_copilot_status,
+    CopilotStatusProbeResult, is_copilot_guarded_recipe, probe_local_copilot_status,
 };
 use crate::goals::{FileBackedGoalStore, GoalRecord, GoalStatus, GoalStore};
 use crate::improvements::PersistedImprovementRecord;
@@ -1097,7 +1097,7 @@ fn prompt_root() -> PathBuf {
 }
 
 fn ensure_terminal_recipe_is_runnable(recipe_name: &str) -> crate::SimardResult<()> {
-    if !is_copilot_status_recipe(recipe_name) {
+    if !is_copilot_guarded_recipe(recipe_name) {
         return Ok(());
     }
 
