@@ -483,40 +483,12 @@ pub fn run_terminal_probe(
 
     let execution = run_local_session(&config)?;
     let exported = latest_local_handoff(&config)?.ok_or("expected durable terminal handoff")?;
-    let terminal_evidence = exported
-        .evidence_records
-        .iter()
-        .filter(|record| {
-            record.detail.starts_with("shell=")
-                || record.detail.starts_with("terminal-")
-                || record.detail.starts_with("backend-implementation=")
-        })
-        .map(|record| record.detail.clone())
-        .collect::<Vec<_>>();
-
-    println!("Probe mode: terminal-run");
-    println!("Identity: {}", execution.snapshot.identity_name);
-    println!(
-        "Selected base type: {}",
-        execution.snapshot.selected_base_type
+    let view = TerminalReadView::from_handoff(config.state_root_path().to_path_buf(), exported)?;
+    view.print_terminal_run(
+        &execution.snapshot.adapter_capabilities,
+        &execution.outcome.execution_summary,
+        &execution.outcome.reflection.summary,
     );
-    println!("Topology: {}", execution.snapshot.topology);
-    println!(
-        "Adapter implementation: {}",
-        execution.snapshot.adapter_backend.identity
-    );
-    println!(
-        "Adapter capabilities: {}",
-        execution.snapshot.adapter_capabilities.join(", ")
-    );
-    print_display("State root", config.state_root_path().display());
-    println!("Session phase: {}", execution.outcome.session.phase);
-    println!("Terminal evidence lines: {}", terminal_evidence.len());
-    for detail in terminal_evidence {
-        print_text("Terminal evidence", &detail);
-    }
-    print_text("Execution summary", &execution.outcome.execution_summary);
-    print_text("Reflection summary", &execution.outcome.reflection.summary);
     Ok(())
 }
 
@@ -1562,6 +1534,17 @@ impl TerminalReadView {
     fn load(state_root: PathBuf) -> crate::SimardResult<Self> {
         let artifacts = validated_terminal_read_artifacts(&state_root)?;
         let handoff = latest_engineer_handoff(&artifacts.handoff_path)?;
+
+        FileBackedMemoryStore::try_new(artifacts.memory_path)?;
+        FileBackedEvidenceStore::try_new(artifacts.evidence_path)?;
+
+        Self::from_handoff(state_root, handoff)
+    }
+
+    fn from_handoff(
+        state_root: PathBuf,
+        handoff: RuntimeHandoffSnapshot,
+    ) -> crate::SimardResult<Self> {
         let session = handoff.session.as_ref().ok_or_else(|| {
             crate::SimardError::InvalidHandoffSnapshot {
                 field: "session".to_string(),
@@ -1569,9 +1552,6 @@ impl TerminalReadView {
                     .to_string(),
             }
         })?;
-
-        FileBackedMemoryStore::try_new(artifacts.memory_path)?;
-        FileBackedEvidenceStore::try_new(artifacts.evidence_path)?;
 
         Ok(Self {
             state_root,
@@ -1626,6 +1606,25 @@ impl TerminalReadView {
 
     fn print(&self) {
         println!("Probe mode: terminal-read");
+        self.print_terminal_audit_header();
+        self.print_terminal_audit_body();
+    }
+
+    fn print_terminal_run(
+        &self,
+        adapter_capabilities: &[String],
+        execution_summary: &str,
+        reflection_summary: &str,
+    ) {
+        println!("Probe mode: terminal-run");
+        self.print_terminal_audit_header();
+        print_text("Adapter capabilities", adapter_capabilities.join(", "));
+        self.print_terminal_audit_body();
+        print_text("Execution summary", execution_summary);
+        print_text("Reflection summary", reflection_summary);
+    }
+
+    fn print_terminal_audit_header(&self) {
         print_text("Identity", &self.identity);
         print_text("Selected base type", &self.selected_base_type);
         print_text("Topology", &self.topology);
@@ -1633,6 +1632,9 @@ impl TerminalReadView {
         print_text("Session phase", &self.session_phase);
         print_text("Objective metadata", &self.objective_metadata);
         print_text("Adapter implementation", &self.adapter_implementation);
+    }
+
+    fn print_terminal_audit_body(&self) {
         print_text("Shell", &self.shell);
         print_text("Working directory", &self.working_directory);
         print_text("Terminal command count", &self.command_count);

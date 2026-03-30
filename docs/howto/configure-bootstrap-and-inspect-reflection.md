@@ -147,7 +147,9 @@ Look for:
 
 - `Selected base type: terminal-shell`
 - `Adapter implementation: terminal-shell::local-pty`
-- `Terminal evidence lines: 2`
+- `Terminal steps count: 2`
+- `Terminal step 1: input: pwd`
+- `Terminal last output line: terminal-foundation-ok`
 - a transcript preview containing `terminal-foundation-ok`
 
 This is the honest terminal slice: Simard can drive a real local PTY-backed shell session through the runtime, but it does not claim remote hosts or distributed terminal control.

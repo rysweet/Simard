@@ -214,6 +214,14 @@ command: pwd
 command: printf "terminal-foundation-ok\n"'   "$STATE_ROOT"
 ```
 
+Look for:
+
+- `Adapter implementation: terminal-shell::local-pty`
+- `Terminal steps count: 2`
+- `Terminal step 1: input: pwd`
+- `Terminal last output line: terminal-foundation-ok`
+- `Terminal transcript preview:`
+
 ## Summary
 
 You now know how to:
