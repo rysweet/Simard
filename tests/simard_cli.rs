@@ -280,6 +280,32 @@ fn write_fake_amplihack(binary_dir: &Path, body: &str) -> PathBuf {
     binary_path
 }
 
+fn fake_amplihack_with_interactive_copilot_body() -> &'static str {
+    r##"#!/usr/bin/env bash
+set -euo pipefail
+if [ "$#" -eq 3 ] && [ "$1" = "copilot" ] && [ "$2" = "--" ] && [ "$3" = "--version" ]; then
+  printf 'GitHub Copilot CLI 9.9.9-test.\n'
+  exit 0
+fi
+if [ "$#" -eq 1 ] && [ "$1" = "copilot" ]; then
+  printf 'GitHub Copilot v1.0.14-test.\n'
+  printf 'Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts\n'
+  while IFS= read -r line; do
+    if [ "$line" = "/exit" ]; then
+      printf 'Resume any session with copilot --resume\n'
+      exit 0
+    fi
+    printf 'Unknown command: %s\n' "$line"
+  done
+  exit 0
+fi
+printf 'unexpected args:' >&2
+printf ' %s' "$@" >&2
+printf '\n' >&2
+exit 64
+"##
+}
+
 #[test]
 fn simard_help_surfaces_the_five_product_modes_and_operator_utilities() {
     let output = Command::new(env!("CARGO_BIN_EXE_simard"))
@@ -903,7 +929,8 @@ fn simard_engineer_terminal_recipe_list_and_show_surface_builtin_named_recipes()
         "terminal-recipe-list should expose built-in named session recipes:\n{list_rendered}"
     );
     for expected in [
-        "Terminal recipes: 2",
+        "Terminal recipes: 3",
+        "copilot-prompt-check",
         "foundation-check",
         "copilot-status-check",
         "simard/terminal_recipes/foundation-check.simard-terminal",
@@ -1115,6 +1142,132 @@ fn simard_engineer_terminal_recipe_runs_truthful_copilot_status_probe_with_probe
     assert_eq!(
         simard_normalized, legacy_normalized,
         "copilot-status-check should preserve compatibility parity with terminal-recipe-run"
+    );
+}
+
+#[test]
+fn simard_engineer_terminal_recipe_show_surfaces_truthful_copilot_prompt_contents() {
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("terminal-recipe-show")
+        .arg("copilot-prompt-check")
+        .output()
+        .expect("simard engineer terminal-recipe-show copilot-prompt-check should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        output.status.success(),
+        "terminal-recipe-show should print the truthful Copilot prompt recipe:\n{rendered}"
+    );
+    for expected in [
+        "Terminal recipe: copilot-prompt-check",
+        "Recipe asset: simard/terminal_recipes/copilot-prompt-check.simard-terminal",
+        "wait-timeout-seconds: 45",
+        "command: amplihack copilot",
+        "wait-for: Type @ to mention files",
+        "input: /exit",
+        "wait-for: Resume any session with copilot --resume",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "terminal-recipe-show should surface '{expected}':\n{rendered}"
+        );
+    }
+}
+
+#[test]
+fn simard_engineer_terminal_recipe_runs_truthful_copilot_prompt_check_with_probe_parity() {
+    let fake_bin = TempDirGuard::new("simard-cli-fake-amplihack-interactive");
+    write_fake_amplihack(
+        fake_bin.path(),
+        fake_amplihack_with_interactive_copilot_body(),
+    );
+    let path = path_with_prepend(fake_bin.path());
+    let state_root = TempDirGuard::new("simard-cli-copilot-prompt-recipe");
+    let simard_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("terminal-recipe")
+        .arg("single-process")
+        .arg("copilot-prompt-check")
+        .arg(state_root.path())
+        .env("PATH", &path)
+        .output()
+        .expect("simard engineer terminal-recipe copilot-prompt-check should launch");
+    let simard_rendered = rendered_output(&simard_output);
+
+    assert!(
+        simard_output.status.success(),
+        "copilot-prompt-check should execute a truthful bounded Copilot prompt flow:\n{simard_rendered}"
+    );
+    for expected in [
+        "Selected base type: terminal-shell",
+        "Terminal checkpoint 1: Type @ to mention files",
+        "Terminal checkpoint 2: Resume any session with copilot --resume",
+        "Terminal wait timeout seconds: 45",
+        "Resume any session with copilot --resume",
+    ] {
+        assert!(
+            simard_rendered.contains(expected),
+            "copilot-prompt-check should surface '{expected}':\n{simard_rendered}"
+        );
+    }
+
+    let legacy_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .arg("terminal-recipe-run")
+        .arg("single-process")
+        .arg("copilot-prompt-check")
+        .arg(state_root.path())
+        .env("PATH", &path)
+        .output()
+        .expect("legacy terminal-recipe-run copilot-prompt-check should launch");
+    let legacy_rendered = rendered_output(&legacy_output);
+
+    assert!(
+        legacy_output.status.success(),
+        "legacy copilot-prompt-check compatibility path should remain available:\n{legacy_rendered}"
+    );
+    let simard_normalized = replace_output_line_value(
+        &simard_rendered,
+        "Terminal transcript preview: ",
+        "<preview>",
+    );
+    let legacy_normalized = replace_output_line_value(
+        &legacy_rendered,
+        "Terminal transcript preview: ",
+        "<preview>",
+    );
+    assert_eq!(
+        simard_normalized, legacy_normalized,
+        "copilot-prompt-check should preserve compatibility parity with terminal-recipe-run"
+    );
+}
+
+#[test]
+fn simard_engineer_terminal_recipe_copilot_prompt_check_fails_closed_when_amplihack_is_missing() {
+    let empty_bin = TempDirGuard::new("simard-cli-empty-path-interactive");
+    let state_root = TempDirGuard::new("simard-cli-copilot-prompt-missing");
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("terminal-recipe")
+        .arg("single-process")
+        .arg("copilot-prompt-check")
+        .arg(state_root.path())
+        .env("PATH", empty_bin.path())
+        .output()
+        .expect("simard engineer terminal-recipe missing amplihack should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        !output.status.success(),
+        "copilot-prompt-check must fail closed when amplihack is unavailable:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("amplihack-binary-missing"),
+        "copilot-prompt-check should explain why the bounded interactive recipe cannot run:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("required executable 'amplihack' is not available on PATH"),
+        "copilot-prompt-check should preserve the explicit absence detail:\n{rendered}"
     );
 }
 

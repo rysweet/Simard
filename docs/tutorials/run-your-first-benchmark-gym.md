@@ -57,6 +57,8 @@ Together they cover:
 - `terminal-shell`
 - both `single-process` and loopback `multi-process`
 
+`interactive-terminal-driving` is intentionally a generic terminal-shell benchmark. It validates PTY-driven prompt/input sequencing without pretending to be a real `amplihack copilot` session.
+
 If you need exact legacy output for an older script, `cargo run --quiet --bin simard-gym -- list` still works as a compatibility surface.
 
 ## Step 2: Run the starter benchmark suite

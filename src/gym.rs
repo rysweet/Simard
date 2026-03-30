@@ -376,12 +376,12 @@ const BENCHMARK_SCENARIOS: [BenchmarkScenario; 5] = [
     BenchmarkScenario {
         id: "interactive-terminal-driving",
         title: "Interactive terminal driving on terminal-shell",
-        description: "Exercise the engineer identity through the terminal-shell base type by launching a nested interactive child process, waiting for prompts, and sending bounded follow-up inputs like an operator driving a copilot-style terminal tool.",
+        description: "Exercise the engineer identity through the terminal-shell base type by launching a bounded interactive child process, waiting for prompts, and sending follow-up inputs like an operator validating generic PTY-driven control flow.",
         class: BenchmarkClass::SessionQuality,
         identity: "simard-engineer",
         base_type: "terminal-shell",
         topology: RuntimeTopology::SingleProcess,
-        objective: "working-directory: .\ncommand: sh -c 'printf \"copilot-ready\\n\"; while IFS= read -r line; do if [ \"$line\" = \"/status\" ]; then printf \"mode: ready\\n\"; elif [ \"$line\" = \"/exit\" ]; then printf \"bye\\n\"; break; else printf \"echo:%s\\n\" \"$line\"; fi; done'\nwait-for: copilot-ready\ninput: /status\nwait-for: mode: ready\ninput: /exit\nwait-for: bye",
+        objective: "working-directory: .\ncommand: sh -c 'printf \"terminal-ready\\n\"; while IFS= read -r line; do if [ \"$line\" = \"ack\" ]; then printf \"terminal-ack\\n\"; elif [ \"$line\" = \"exit\" ]; then printf \"terminal-bye\\n\"; break; else printf \"echo:%s\\n\" \"$line\"; fi; done'\nwait-for: terminal-ready\ninput: ack\nwait-for: terminal-ack\ninput: exit\nwait-for: terminal-bye",
         expected_min_runtime_evidence: 6,
     },
 ];

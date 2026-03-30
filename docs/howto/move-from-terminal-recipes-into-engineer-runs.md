@@ -53,8 +53,8 @@ The important contract here is visibility:
 - `terminal-recipe-list` shows what Simard ships today
 - `terminal-recipe-show` prints the real bounded recipe contents
 - neither command starts engineer mode or claims repo-grounded verification happened
-- today that includes a minimal `foundation-check` recipe and a bounded `copilot-status-check` recipe that only probes local `amplihack copilot -- --version`
-- the Copilot probe is deliberately fail-closed: missing `amplihack`, a non-zero probe exit, or a missing `GitHub Copilot CLI` version line stops the recipe instead of pretending an interactive Copilot session exists
+- today that includes a minimal `foundation-check` recipe, a bounded `copilot-status-check` recipe that only probes local `amplihack copilot -- --version`, and a bounded `copilot-prompt-check` recipe that starts the real interactive Copilot CLI, waits for the visible prompt text, then exits cleanly via `/exit`
+- both Copilot recipes are deliberately fail-closed: missing `amplihack`, a non-zero version probe exit, or a missing `GitHub Copilot CLI` version line stops the recipe instead of pretending unsupported interactive control exists
 
 ## 3. Run the terminal recipe through the canonical CLI
 
