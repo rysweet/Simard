@@ -642,7 +642,11 @@ goal: Preserve \u{1b}]8;;https://example.invalid\u{7}meeting handoff\u{1b}]8;;\u
 #[test]
 fn simard_engineer_terminal_exposes_the_terminal_backed_engineer_surface() {
     let state_root = TempDirGuard::new("simard-cli-terminal");
-    let objective = "working-directory: .\ncommand: pwd\ncommand: printf \"terminal-cli-ok\\n\"";
+    let objective = "\
+working-directory: .\n\
+command: printf \"terminal-cli-ready\\n\"\n\
+wait-for: terminal-cli-ready\n\
+command: printf \"terminal-cli-ok\\n\"";
     let simard_output = Command::new(env!("CARGO_BIN_EXE_simard"))
         .arg("engineer")
         .arg("terminal")
@@ -660,6 +664,7 @@ fn simard_engineer_terminal_exposes_the_terminal_backed_engineer_surface() {
     for expected in [
         "Selected base type: terminal-shell",
         "Adapter implementation: terminal-shell::local-pty",
+        "Terminal evidence: terminal-wait-count=1",
         "terminal-cli-ok",
         &format!("State root: {}", state_root.path().display()),
     ] {
@@ -696,6 +701,35 @@ fn simard_engineer_terminal_exposes_the_terminal_backed_engineer_surface() {
             "terminal engineer mode should persist {expected} under the selected state root"
         );
     }
+}
+
+#[test]
+fn simard_engineer_terminal_fails_closed_when_wait_for_output_never_arrives() {
+    let state_root = TempDirGuard::new("simard-cli-terminal-wait-timeout");
+    let objective = "\
+working-directory: .\n\
+command: printf \"terminal-cli-ok\\n\"\n\
+wait-for: terminal-cli-missing";
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("terminal")
+        .arg("single-process")
+        .arg(objective)
+        .arg(state_root.path())
+        .output()
+        .expect("simard engineer terminal timeout case should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        !output.status.success(),
+        "terminal engineer mode must fail when a wait-for checkpoint is never satisfied:\n{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "terminal-shell did not emit expected output 'terminal-cli-missing' within 5s"
+        ),
+        "terminal engineer mode should explain which expected output never arrived:\n{rendered}"
+    );
 }
 
 #[test]

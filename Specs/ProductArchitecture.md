@@ -244,6 +244,7 @@ The current shipped v1 engineer-loop slice stays intentionally narrow:
 - default behavior remains a read-only repo-native inspection action
 - a bounded mutating path exists only for explicit structured objectives with `edit-file:`, `replace:`, `with:`, and `verify-contains:` directives
 - the mutating path requires a clean repo, exactly one expected changed file, and explicit content verification before success is reported
+- the terminal-backed engineer substrate now supports bounded interactive checkpoints with `wait-for:` / `expect:` directives so a local PTY session can pause for expected output before sending the next terminal line
 
 ## Memory Architecture
 

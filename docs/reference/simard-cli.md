@@ -179,8 +179,10 @@ requiring the legacy probe binary.
 Key behavior:
 
 - selects the `terminal-shell` base type explicitly
+- accepts bounded terminal objectives with `command:`/`input:` lines plus `wait-for:` or `expect:` checkpoints so a run can pause for expected output before sending the next line
 - preserves truthful adapter reflection and terminal evidence output
 - fails visibly for unsupported topology and invalid state-root inputs
+- fails explicitly if a requested wait checkpoint never appears instead of pretending the terminal interaction succeeded
 - keeps `simard_operator_probe terminal-run ...` available for compatibility
 
 Example:
@@ -189,7 +191,8 @@ Example:
 STATE_ROOT="$(mktemp -d /tmp/simard-terminal.XXXXXX)"
 
 simard engineer terminal single-process $'working-directory: .
-command: pwd
+command: printf "terminal-foundation-ready\n"
+wait-for: terminal-foundation-ready
 command: printf "terminal-foundation-ok\n"' "$STATE_ROOT"
 ```
 
