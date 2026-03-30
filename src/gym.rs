@@ -110,7 +110,7 @@ pub struct BenchmarkScorecard {
     pub correctness_checks_passed: usize,
     pub correctness_checks_total: usize,
     pub unnecessary_action_count: Option<u32>,
-    pub retry_count: u32,
+    pub retry_count: Option<u32>,
     pub human_review_notes: Vec<String>,
     pub measurement_notes: Vec<String>,
 }
@@ -179,6 +179,8 @@ pub struct BenchmarkComparisonRunSummary {
     pub correctness_checks_passed: usize,
     pub correctness_checks_total: usize,
     pub evidence_quality: String,
+    pub unnecessary_action_count: Option<u32>,
+    pub retry_count: Option<u32>,
     pub exported_memory_records: usize,
     pub exported_evidence_records: usize,
     pub report_json: String,
@@ -187,6 +189,8 @@ pub struct BenchmarkComparisonRunSummary {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct BenchmarkComparisonDelta {
     pub correctness_checks_passed: i64,
+    pub unnecessary_action_count: Option<i64>,
+    pub retry_count: Option<i64>,
     pub exported_memory_records: i64,
     pub exported_evidence_records: i64,
 }
@@ -220,6 +224,10 @@ struct StoredBenchmarkScorecard {
     correctness_checks_passed: usize,
     correctness_checks_total: usize,
     evidence_quality: String,
+    #[serde(default)]
+    unnecessary_action_count: Option<u32>,
+    #[serde(default)]
+    retry_count: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -243,6 +251,81 @@ struct StoredBenchmarkRunReport {
 struct StoredBenchmarkRunArtifact {
     report_path: PathBuf,
     report: StoredBenchmarkRunReport,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BenchmarkAttemptClassification {
+    Primary,
+    Retry,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BenchmarkAttemptFact {
+    classification: Option<BenchmarkAttemptClassification>,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BenchmarkActionClassification {
+    Required,
+    Unnecessary,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BenchmarkActionFact {
+    classification: Option<BenchmarkActionClassification>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct BenchmarkMetricFacts {
+    attempts: Vec<BenchmarkAttemptFact>,
+    actions: Vec<BenchmarkActionFact>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DerivedBenchmarkMetrics {
+    unnecessary_action_count: Option<u32>,
+    retry_count: Option<u32>,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl BenchmarkMetricFacts {
+    fn record_primary_attempt(&mut self) {
+        self.attempts.push(BenchmarkAttemptFact {
+            classification: Some(BenchmarkAttemptClassification::Primary),
+        });
+    }
+
+    fn record_retry_attempt(&mut self) {
+        self.attempts.push(BenchmarkAttemptFact {
+            classification: Some(BenchmarkAttemptClassification::Retry),
+        });
+    }
+
+    fn record_unmeasured_attempt(&mut self) {
+        self.attempts.push(BenchmarkAttemptFact {
+            classification: None,
+        });
+    }
+
+    fn record_required_action(&mut self) {
+        self.actions.push(BenchmarkActionFact {
+            classification: Some(BenchmarkActionClassification::Required),
+        });
+    }
+
+    fn record_unnecessary_action(&mut self) {
+        self.actions.push(BenchmarkActionFact {
+            classification: Some(BenchmarkActionClassification::Unnecessary),
+        });
+    }
+
+    fn record_unmeasured_action(&mut self) {
+        self.actions.push(BenchmarkActionFact {
+            classification: None,
+        });
+    }
 }
 
 const BENCHMARK_SCENARIOS: [BenchmarkScenario; 4] = [
@@ -296,17 +379,21 @@ pub fn benchmark_scenarios() -> &'static [BenchmarkScenario] {
     &BENCHMARK_SCENARIOS
 }
 
-pub fn run_benchmark_scenario(
-    scenario_id: &str,
-    output_root: impl AsRef<Path>,
-) -> SimardResult<BenchmarkRunReport> {
-    let scenario = benchmark_scenarios()
+fn resolve_benchmark_scenario(scenario_id: &str) -> SimardResult<BenchmarkScenario> {
+    benchmark_scenarios()
         .iter()
         .copied()
         .find(|candidate| candidate.id == scenario_id)
         .ok_or_else(|| SimardError::BenchmarkScenarioNotFound {
             scenario_id: scenario_id.to_string(),
-        })?;
+        })
+}
+
+pub fn run_benchmark_scenario(
+    scenario_id: &str,
+    output_root: impl AsRef<Path>,
+) -> SimardResult<BenchmarkRunReport> {
+    let scenario = resolve_benchmark_scenario(scenario_id)?;
     execute_scenario(scenario, STARTER_SUITE_ID, output_root.as_ref())
 }
 
@@ -354,18 +441,24 @@ pub fn compare_latest_benchmark_runs(
     scenario_id: &str,
     output_root: impl AsRef<Path>,
 ) -> SimardResult<BenchmarkComparisonReport> {
+    let scenario = resolve_benchmark_scenario(scenario_id)?;
     let output_root = output_root.as_ref();
-    let mut reports = load_scenario_run_reports(scenario_id, output_root)?;
+    let mut reports = load_scenario_run_reports(scenario.id, output_root)?;
     if reports.len() < 2 {
         return Err(SimardError::BenchmarkComparisonUnavailable {
-            scenario_id: scenario_id.to_string(),
+            scenario_id: scenario.id.to_string(),
             reason: format!(
                 "need at least two completed runs under '{}'",
-                display_path(&output_root.join(scenario_id))
+                display_path(&output_root.join(scenario.id))
             ),
         });
     }
-    reports.sort_by_key(|entry| entry.report.run_started_at_unix_ms);
+    reports.sort_by_key(|entry| {
+        (
+            entry.report.run_started_at_unix_ms,
+            entry.report.session_id.as_str().to_owned(),
+        )
+    });
     let current = reports.pop().expect("checked length >= 2");
     let previous = reports.pop().expect("checked length >= 2");
 
@@ -374,6 +467,14 @@ pub fn compare_latest_benchmark_runs(
     let delta = BenchmarkComparisonDelta {
         correctness_checks_passed: current_summary.correctness_checks_passed as i64
             - previous_summary.correctness_checks_passed as i64,
+        unnecessary_action_count: benchmark_count_delta(
+            current_summary.unnecessary_action_count,
+            previous_summary.unnecessary_action_count,
+        ),
+        retry_count: benchmark_count_delta(
+            current_summary.retry_count,
+            previous_summary.retry_count,
+        ),
         exported_memory_records: current_summary.exported_memory_records as i64
             - previous_summary.exported_memory_records as i64,
         exported_evidence_records: current_summary.exported_evidence_records as i64
@@ -384,7 +485,7 @@ pub fn compare_latest_benchmark_runs(
 
     let comparison_dir = output_root
         .join("comparisons")
-        .join(scenario_id)
+        .join(scenario.id)
         .join(format!(
             "{}-vs-{}",
             current_summary.session_id, previous_summary.session_id
@@ -420,6 +521,7 @@ fn execute_scenario(
     let prompt_store = Arc::new(FilePromptAssetStore::new(prompt_root));
     let memory_store = Arc::new(InMemoryMemoryStore::try_default()?);
     let evidence_store = Arc::new(InMemoryEvidenceStore::try_default()?);
+    let mut metric_facts = BenchmarkMetricFacts::default();
 
     let contract = ManifestContract::new(
         "simard::gym::run_benchmark_scenario",
@@ -456,8 +558,12 @@ fn execute_scenario(
     )?;
 
     runtime.start()?;
+    metric_facts.record_required_action();
     let outcome = runtime.run(scenario.objective.to_string())?;
+    metric_facts.record_primary_attempt();
+    metric_facts.record_required_action();
     let ready_snapshot = runtime.snapshot()?;
+    metric_facts.record_required_action();
 
     let benchmark_memory_key = format!("{}-benchmark-summary", outcome.session.id);
     memory_store.put(MemoryRecord {
@@ -470,6 +576,7 @@ fn execute_scenario(
         session_id: outcome.session.id.clone(),
         recorded_in: SessionPhase::Complete,
     })?;
+    metric_facts.record_required_action();
 
     let benchmark_evidence_id = format!("{}-benchmark-capture", outcome.session.id);
     evidence_store.record(EvidenceRecord {
@@ -482,13 +589,19 @@ fn execute_scenario(
         ),
         source: EvidenceSource::Runtime,
     })?;
+    metric_facts.record_required_action();
 
     let exported = runtime.export_handoff()?;
+    metric_facts.record_required_action();
     let restored = restore_from_handoff(&manifest, &request, &exported)?;
+    metric_facts.record_required_action();
     let restored_snapshot = restored.snapshot()?;
+    metric_facts.record_required_action();
 
     runtime.stop()?;
+    metric_facts.record_required_action();
     let stopped_snapshot = runtime.snapshot()?;
+    metric_facts.record_required_action();
 
     let checks = vec![
         BenchmarkCheckResult {
@@ -575,10 +688,10 @@ fn execute_scenario(
     let report_json = run_dir.join("report.json");
     let report_txt = run_dir.join("report.txt");
     let review_json = run_dir.join("review.json");
+    let derived_metrics = derive_benchmark_metrics(&metric_facts);
     let measurement_notes = vec![
         "v1 benchmark foundation derives evidence from runtime, memory, and handoff artifacts rather than a task-specific code-change judge".to_string(),
-        "unnecessary_action_count remains unmeasured until the benchmark runner can classify shell/tool actions directly".to_string(),
-        "retry_count is currently zero because the benchmark runner does not yet re-plan or retry failed scenarios automatically".to_string(),
+        "Attempt and action metrics derive from benchmark-controlled gym-runner facts only; they intentionally do not classify arbitrary adapter-level subcommands inside the scenario objective.".to_string(),
     ];
     let review = build_review_artifact(
         ReviewRequest {
@@ -613,8 +726,8 @@ fn execute_scenario(
             },
             correctness_checks_passed: checks.iter().filter(|check| check.passed).count(),
             correctness_checks_total: checks.len(),
-            unnecessary_action_count: None,
-            retry_count: 0,
+            unnecessary_action_count: derived_metrics.unnecessary_action_count,
+            retry_count: derived_metrics.retry_count,
             human_review_notes: review
                 .proposals
                 .iter()
@@ -735,6 +848,14 @@ fn render_text_report(report: &BenchmarkRunReport) -> String {
             "Checks passed: {}/{}",
             report.scorecard.correctness_checks_passed, report.scorecard.correctness_checks_total
         ),
+        format!(
+            "Unnecessary actions: {}",
+            render_benchmark_count(report.scorecard.unnecessary_action_count)
+        ),
+        format!(
+            "Retry count: {}",
+            render_benchmark_count(report.scorecard.retry_count)
+        ),
         format!("Plan: {}", report.plan),
         format!("Execution summary: {}", report.execution_summary),
         format!("Reflection summary: {}", report.reflection_summary),
@@ -769,11 +890,27 @@ fn render_text_comparison_report(report: &BenchmarkComparisonReport) -> String {
         format!("Current session: {}", report.current.session_id),
         format!("Current report: {}", report.current.report_json),
         format!(
+            "Current unnecessary actions: {}",
+            render_benchmark_count(report.current.unnecessary_action_count)
+        ),
+        format!(
+            "Current retry count: {}",
+            render_benchmark_count(report.current.retry_count)
+        ),
+        format!(
             "Current checks passed: {}/{}",
             report.current.correctness_checks_passed, report.current.correctness_checks_total
         ),
         format!("Previous session: {}", report.previous.session_id),
         format!("Previous report: {}", report.previous.report_json),
+        format!(
+            "Previous unnecessary actions: {}",
+            render_benchmark_count(report.previous.unnecessary_action_count)
+        ),
+        format!(
+            "Previous retry count: {}",
+            render_benchmark_count(report.previous.retry_count)
+        ),
         format!(
             "Previous checks passed: {}/{}",
             report.previous.correctness_checks_passed, report.previous.correctness_checks_total
@@ -781,6 +918,14 @@ fn render_text_comparison_report(report: &BenchmarkComparisonReport) -> String {
         format!(
             "Delta correctness checks passed: {:+}",
             report.delta.correctness_checks_passed
+        ),
+        format!(
+            "Delta unnecessary actions: {}",
+            render_benchmark_delta(report.delta.unnecessary_action_count)
+        ),
+        format!(
+            "Delta retry count: {}",
+            render_benchmark_delta(report.delta.retry_count)
         ),
         format!(
             "Delta exported memory records: {:+}",
@@ -877,6 +1022,8 @@ fn summarize_stored_run(run: &StoredBenchmarkRunArtifact) -> BenchmarkComparison
         correctness_checks_passed: run.report.scorecard.correctness_checks_passed,
         correctness_checks_total: run.report.scorecard.correctness_checks_total,
         evidence_quality: run.report.scorecard.evidence_quality.clone(),
+        unnecessary_action_count: run.report.scorecard.unnecessary_action_count,
+        retry_count: run.report.scorecard.retry_count,
         exported_memory_records: run.report.handoff.exported_memory_records,
         exported_evidence_records: run.report.handoff.exported_evidence_records,
         report_json: display_path(&run.report_path),
@@ -915,6 +1062,15 @@ fn compare_runs(
             BenchmarkComparisonStatus::Regressed
         };
     }
+    if let Some(status) = compare_lower_is_better(
+        current.unnecessary_action_count,
+        previous.unnecessary_action_count,
+    ) {
+        return status;
+    }
+    if let Some(status) = compare_lower_is_better(current.retry_count, previous.retry_count) {
+        return status;
+    }
     match evidence_quality_rank(&current.evidence_quality)
         .cmp(&evidence_quality_rank(&previous.evidence_quality))
     {
@@ -938,27 +1094,91 @@ fn render_comparison_summary(
     previous: &BenchmarkComparisonRunSummary,
     delta: &BenchmarkComparisonDelta,
 ) -> String {
+    let unnecessary_action_delta = render_benchmark_delta(delta.unnecessary_action_count);
+    let retry_delta = render_benchmark_delta(delta.retry_count);
     match status {
         BenchmarkComparisonStatus::Improved => format!(
-            "latest run improved from session '{}' to '{}' with check delta {:+}, memory delta {:+}, and evidence delta {:+}",
+            "latest run improved from session '{}' to '{}' with check delta {:+}, unnecessary-action delta {}, retry delta {}, memory delta {:+}, and evidence delta {:+}",
             previous.session_id,
             current.session_id,
             delta.correctness_checks_passed,
+            unnecessary_action_delta,
+            retry_delta,
             delta.exported_memory_records,
             delta.exported_evidence_records
         ),
         BenchmarkComparisonStatus::Regressed => format!(
-            "latest run regressed from session '{}' to '{}' with check delta {:+}, memory delta {:+}, and evidence delta {:+}",
+            "latest run regressed from session '{}' to '{}' with check delta {:+}, unnecessary-action delta {}, retry delta {}, memory delta {:+}, and evidence delta {:+}",
             previous.session_id,
             current.session_id,
             delta.correctness_checks_passed,
+            unnecessary_action_delta,
+            retry_delta,
             delta.exported_memory_records,
             delta.exported_evidence_records
         ),
         BenchmarkComparisonStatus::Unchanged => format!(
-            "latest run matched session '{}' on pass/fail status, checks, memory, and evidence counts",
-            previous.session_id
+            "latest run matched session '{}' on pass/fail status and checks, with unnecessary-action delta {}, retry delta {}, memory delta {:+}, and evidence delta {:+}",
+            previous.session_id,
+            unnecessary_action_delta,
+            retry_delta,
+            delta.exported_memory_records,
+            delta.exported_evidence_records
         ),
+    }
+}
+
+fn derive_benchmark_metrics(facts: &BenchmarkMetricFacts) -> DerivedBenchmarkMetrics {
+    DerivedBenchmarkMetrics {
+        unnecessary_action_count: facts.actions.iter().try_fold(0_u32, |count, fact| {
+            match fact.classification {
+                Some(BenchmarkActionClassification::Required) => Some(count),
+                Some(BenchmarkActionClassification::Unnecessary) => count.checked_add(1),
+                None => None,
+            }
+        }),
+        retry_count: facts.attempts.iter().try_fold(0_u32, |count, fact| {
+            match fact.classification {
+                Some(BenchmarkAttemptClassification::Primary) => Some(count),
+                Some(BenchmarkAttemptClassification::Retry) => count.checked_add(1),
+                None => None,
+            }
+        }),
+    }
+}
+
+fn benchmark_count_delta(current: Option<u32>, previous: Option<u32>) -> Option<i64> {
+    match (current, previous) {
+        (Some(current), Some(previous)) => Some(current as i64 - previous as i64),
+        _ => None,
+    }
+}
+
+fn compare_lower_is_better(
+    current: Option<u32>,
+    previous: Option<u32>,
+) -> Option<BenchmarkComparisonStatus> {
+    match (current, previous) {
+        (Some(current), Some(previous)) if current != previous => Some(if current < previous {
+            BenchmarkComparisonStatus::Improved
+        } else {
+            BenchmarkComparisonStatus::Regressed
+        }),
+        _ => None,
+    }
+}
+
+pub(crate) fn render_benchmark_count(value: Option<u32>) -> String {
+    match value {
+        Some(value) => value.to_string(),
+        None => "unmeasured".to_string(),
+    }
+}
+
+pub(crate) fn render_benchmark_delta(value: Option<i64>) -> String {
+    match value {
+        Some(value) => format!("{value:+}"),
+        None => "unmeasured".to_string(),
     }
 }
 
@@ -977,4 +1197,38 @@ fn now_unix_ms() -> SimardResult<u128> {
 
 pub fn default_output_root() -> PathBuf {
     PathBuf::from(DEFAULT_OUTPUT_ROOT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BenchmarkMetricFacts, derive_benchmark_metrics};
+
+    #[test]
+    fn metric_derivation_counts_retries_and_unnecessary_actions_from_recorded_facts() {
+        let mut facts = BenchmarkMetricFacts::default();
+        facts.record_primary_attempt();
+        facts.record_retry_attempt();
+        facts.record_required_action();
+        facts.record_unnecessary_action();
+        facts.record_unnecessary_action();
+
+        let derived = derive_benchmark_metrics(&facts);
+
+        assert_eq!(derived.retry_count, Some(1));
+        assert_eq!(derived.unnecessary_action_count, Some(2));
+    }
+
+    #[test]
+    fn metric_derivation_returns_unmeasured_when_facts_are_incomplete() {
+        let mut facts = BenchmarkMetricFacts::default();
+        facts.record_primary_attempt();
+        facts.record_unmeasured_attempt();
+        facts.record_required_action();
+        facts.record_unmeasured_action();
+
+        let derived = derive_benchmark_metrics(&facts);
+
+        assert_eq!(derived.retry_count, None);
+        assert_eq!(derived.unnecessary_action_count, None);
+    }
 }

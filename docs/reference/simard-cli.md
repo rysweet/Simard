@@ -185,7 +185,43 @@ Lists the shipped benchmark scenarios.
 
 ### `simard gym run <scenario-id>`
 
-Runs one benchmark scenario and prints the generated artifact paths.
+Runs one benchmark scenario and prints the operator-facing text report for that run.
+
+Key behavior today:
+
+- persists `report.json`, `report.txt`, and `review.json` under `target/simard-gym/<scenario-id>/<session-id>/`
+- preserves exact operator-visible output parity with `simard-gym run <scenario-id>`
+- requires no extra configuration beyond the selected scenario id
+
+The current counting boundary is:
+
+- `unnecessary_action_count`: benchmark-runner-observed benchmark-controlled action boundaries beyond the single scenario execution path required by the current v1 harness
+- `retry_count`: benchmark-runner-observed re-attempts of the same scenario work inside one benchmark run
+
+Fresh runs now persist values derived from those benchmark-controlled facts under `scorecard.unnecessary_action_count` and `scorecard.retry_count`, surface them through the CLI, and stop emitting fresh review proposals, `human_review_notes`, or `measurement_notes` that claim those fields are "not measured". Older or incomplete artifacts should surface `unmeasured` instead of fabricated zeroes.
+
+Example:
+
+```bash
+cargo run --quiet -- gym run repo-exploration-local
+```
+
+You should see output shaped like:
+
+```text
+Scenario: repo-exploration-local
+Suite: starter
+Session: session-...
+Passed: true
+Checks passed: 8/8
+Unnecessary actions: 0
+Retry count: 0
+Artifact report: target/simard-gym/repo-exploration-local/.../report.json
+Artifact summary: target/simard-gym/repo-exploration-local/.../report.txt
+Review artifact: target/simard-gym/repo-exploration-local/.../review.json
+```
+
+The detailed per-run text artifact at `Artifact summary:` also includes the identity, base type, topology, plan, execution summary, reflection summary, and the same metric lines.
 
 ### `simard gym compare <scenario-id>`
 
@@ -196,12 +232,66 @@ The comparison contract is intentionally explicit:
 - it fails visibly if fewer than two completed runs exist for the scenario
 - it classifies the latest run as `improved`, `unchanged`, or `regressed`
 - it writes JSON and text comparison artifacts under `target/simard-gym/comparisons/<scenario-id>/`
+- it preserves exact operator-visible output parity with `simard-gym compare <scenario-id>`
+- it reports current, previous, and delta values for `unnecessary_action_count` and `retry_count`
+- it validates the scenario id against the shipped benchmark registry before reading any scenario directory
+- those metric lines render `unmeasured` explicitly when either compared artifact predates the new measurements instead of fabricating `0`
+
+Example:
+
+```bash
+cargo run --quiet -- gym compare repo-exploration-local
+```
+
+You should see output shaped like:
+
+```text
+Scenario: repo-exploration-local
+Comparison status: unchanged
+Comparison summary: latest run matched session '...' on pass/fail status and checks, with unnecessary-action delta +0, retry delta +0, memory delta +0, and evidence delta +0
+Current session: ...
+Current passed: true
+Current checks passed: 8/8
+Current report: target/simard-gym/repo-exploration-local/.../report.json
+Current unnecessary actions: 0
+Current retry count: 0
+Previous session: ...
+Previous passed: true
+Previous checks passed: 8/8
+Previous report: target/simard-gym/repo-exploration-local/.../report.json
+Previous unnecessary actions: 0
+Previous retry count: 0
+Delta correctness checks passed: +0
+Delta unnecessary actions: +0
+Delta retry count: +0
+Delta exported memory records: +0
+Delta exported evidence records: +0
+Comparison artifact report: target/simard-gym/comparisons/repo-exploration-local/.../report.json
+Comparison artifact summary: target/simard-gym/comparisons/repo-exploration-local/.../report.txt
+```
+
+Only comparisons that involve older artifacts should show `unmeasured` for those metric lines.
 
 ### `simard gym run-suite <suite-id>`
 
 Runs a benchmark suite.
 
 Artifacts are written under `target/simard-gym/`.
+
+Each scenario run within the suite emits the same scorecard fields as `simard gym run <scenario-id>`, so single-run reports and suite-generated reports remain directly comparable.
+
+## Benchmark gym configuration
+
+The benchmark metric reporting surface does not require feature flags or environment variables.
+
+The public operator contract is:
+
+- pass a scenario id to `simard gym run <scenario-id>` or `simard gym compare <scenario-id>`
+- pass a suite id to `simard gym run-suite <suite-id>`
+- read artifacts from the default output root `target/simard-gym/`
+- expect current reports to preserve exact parity with `simard-gym` today
+- expect fresh reports to include `scorecard.unnecessary_action_count` and `scorecard.retry_count`
+- expect comparisons against legacy reports to remain readable through explicit `unmeasured` output
 
 ### `simard review run <base-type> <topology> <objective> [state-root]`
 

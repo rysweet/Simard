@@ -165,6 +165,7 @@ Canonical entrypoints:
 
 - `simard gym list`
 - `simard gym run <scenario-id>`
+- `simard gym compare <scenario-id>`
 - `simard gym run-suite <suite-id>`
 
 Compatibility surface: `simard-gym ...`
@@ -178,10 +179,32 @@ The gym currently benchmarks scenarios built around:
 
 Artifacts are written under `target/simard-gym/` as JSON and text reports plus a `review.json` artifact for each scenario run.
 
+> [!IMPORTANT]
+> Fresh benchmark runs now derive `unnecessary_action_count` and `retry_count` from benchmark-controlled attempt and action facts captured by the gym runner. Older artifacts, or any future report that lacks enough benchmark facts, should surface `unmeasured` instead of inventing `0`.
+
+Fresh per-run reports expose these public scorecard fields under `scorecard`:
+
+- `correctness_checks_passed`
+- `correctness_checks_total`
+- `evidence_quality`
+- `unnecessary_action_count`
+- `retry_count`
+- `human_review_notes`
+- `measurement_notes`
+
+The current counting boundary is:
+
+- `unnecessary_action_count`: benchmark-runner-observed benchmark-controlled action boundaries that do not advance the intended scenario execution or verification path
+- `retry_count`: benchmark-runner-observed re-attempts of the same scenario work inside one benchmark run
+
+Fresh benchmark runs persist those derived values in `report.json`, surface them on the CLI, and stop generating review proposals, `human_review_notes`, or `measurement_notes` that claim the metrics are "not measured". Older or incomplete artifacts should render `unmeasured` instead of a fabricated zero.
+
 The gym also supports persisted run-to-run comparison for a single scenario:
 
 - `simard gym compare <scenario-id>` compares the latest two completed runs
 - comparison results are classified as `improved`, `unchanged`, or `regressed`
+- comparison output includes current, previous, and delta values for `unnecessary_action_count` and `retry_count`
+- if one side of the comparison comes from an older artifact that lacks either field, compare renders that value and its delta as `unmeasured` instead of inventing `0`
 - comparison artifacts are written under `target/simard-gym/comparisons/<scenario-id>/`
 
 ### Bootstrap contract

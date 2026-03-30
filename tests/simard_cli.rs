@@ -13,6 +13,8 @@ use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde_json::{Value, json};
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -25,6 +27,97 @@ fn rendered_output(output: &Output) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     format!("{stdout}{stderr}")
+}
+
+fn output_line_value<'a>(rendered: &'a str, prefix: &str) -> Option<&'a str> {
+    rendered
+        .lines()
+        .find_map(|line| line.strip_prefix(prefix).map(str::trim))
+}
+
+fn load_json(path: impl AsRef<Path>) -> Value {
+    serde_json::from_str(&fs::read_to_string(path.as_ref()).expect("artifact should be readable"))
+        .expect("artifact should deserialize as JSON")
+}
+
+fn command_in_dir(binary_path: &str, dir: &Path) -> Command {
+    let mut command = Command::new(binary_path);
+    command.current_dir(dir);
+    command
+}
+
+fn resolve_cli_artifact_path(command_dir: &Path, surfaced_path: &str) -> PathBuf {
+    let surfaced_path = Path::new(surfaced_path);
+    if surfaced_path.is_absolute() {
+        surfaced_path.to_path_buf()
+    } else {
+        command_dir.join(surfaced_path)
+    }
+}
+
+fn replace_output_line_value(rendered: &str, prefix: &str, replacement: &str) -> String {
+    rendered
+        .lines()
+        .map(|line| {
+            if line.starts_with(prefix) {
+                format!("{prefix}{replacement}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn normalize_benchmark_run_output(rendered: &str) -> String {
+    let rendered = replace_output_line_value(rendered, "Session: ", "<session>");
+    let rendered = replace_output_line_value(
+        &rendered,
+        "Artifact report: ",
+        "target/simard-gym/repo-exploration-local/<session>/report.json",
+    );
+    let rendered = replace_output_line_value(
+        &rendered,
+        "Artifact summary: ",
+        "target/simard-gym/repo-exploration-local/<session>/report.txt",
+    );
+    replace_output_line_value(
+        &rendered,
+        "Review artifact: ",
+        "target/simard-gym/repo-exploration-local/<session>/review.json",
+    )
+}
+
+fn write_legacy_benchmark_report(command_dir: &Path, scenario_id: &str, session_id: &str) {
+    let report_dir = command_dir
+        .join("target/simard-gym")
+        .join(scenario_id)
+        .join(session_id);
+    fs::create_dir_all(&report_dir).expect("legacy benchmark artifact directory should exist");
+    fs::write(
+        report_dir.join("report.json"),
+        serde_json::to_string_pretty(&json!({
+            "suite_id": "starter",
+            "scenario": {
+                "id": scenario_id,
+                "title": "Repo exploration on local harness",
+            },
+            "session_id": session_id,
+            "run_started_at_unix_ms": 1_u128,
+            "passed": true,
+            "scorecard": {
+                "correctness_checks_passed": 8,
+                "correctness_checks_total": 8,
+                "evidence_quality": "sufficient"
+            },
+            "handoff": {
+                "exported_memory_records": 3,
+                "exported_evidence_records": 4
+            }
+        }))
+        .expect("legacy benchmark report should serialize"),
+    )
+    .expect("legacy benchmark report should be written");
 }
 
 struct TempDirGuard {
@@ -517,8 +610,129 @@ fn simard_gym_list_matches_the_legacy_benchmark_binary_for_compatibility() {
 }
 
 #[test]
+fn simard_gym_run_surfaces_measured_action_and_retry_metrics_and_persists_them_truthfully() {
+    let artifact_root = TempDirGuard::new("simard-cli-gym-run");
+    let output = command_in_dir(env!("CARGO_BIN_EXE_simard"), artifact_root.path())
+        .arg("gym")
+        .arg("run")
+        .arg("repo-exploration-local")
+        .output()
+        .expect("simard gym run should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        output.status.success(),
+        "gym run should succeed on the primary operator surface:\n{rendered}"
+    );
+    for expected in ["Unnecessary actions:", "Retry count:"] {
+        assert!(
+            rendered.contains(expected),
+            "gym run should surface '{expected}' through the operator-facing CLI instead of hiding the metric in artifacts only:\n{rendered}"
+        );
+    }
+
+    let report_path = output_line_value(&rendered, "Artifact report: ")
+        .expect("gym run should surface the report.json artifact path");
+    let review_path = output_line_value(&rendered, "Review artifact: ")
+        .expect("gym run should surface the review.json artifact path");
+    let report = load_json(resolve_cli_artifact_path(artifact_root.path(), report_path));
+    let review = load_json(resolve_cli_artifact_path(artifact_root.path(), review_path));
+
+    assert!(
+        report["scorecard"]["unnecessary_action_count"].is_number(),
+        "fresh benchmark runs should persist a measured unnecessary_action_count instead of null:\n{}",
+        serde_json::to_string_pretty(&report).expect("report should render")
+    );
+    assert!(
+        report["scorecard"]["retry_count"].is_number(),
+        "fresh benchmark runs should persist retry_count as a structured number:\n{}",
+        serde_json::to_string_pretty(&report).expect("report should render")
+    );
+
+    let measurement_notes = report["scorecard"]["measurement_notes"]
+        .as_array()
+        .expect("scorecard.measurement_notes should be an array");
+    assert!(
+        !measurement_notes
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|note| {
+                note.contains("unnecessary_action_count") || note.contains("retry_count")
+            }),
+        "fresh benchmark runs should stop persisting legacy metric-gap notes once these fields are measured:\n{}",
+        serde_json::to_string_pretty(&report).expect("report should render")
+    );
+
+    let human_review_notes = report["scorecard"]["human_review_notes"]
+        .as_array()
+        .expect("scorecard.human_review_notes should be an array");
+    assert!(
+        !human_review_notes
+            .iter()
+            .filter_map(Value::as_str)
+            .any(
+                |note| note.contains("Measure unnecessary action count explicitly")
+                    || note.contains("Track bounded retries in benchmark runs")
+            ),
+        "fresh benchmark runs should stop echoing stale metric-gap proposals into the scorecard:\n{}",
+        serde_json::to_string_pretty(&report).expect("report should render")
+    );
+
+    let proposal_titles = review["proposals"]
+        .as_array()
+        .expect("review.proposals should be an array")
+        .iter()
+        .filter_map(|proposal| proposal.get("title").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert!(
+        !proposal_titles.contains(&"Measure unnecessary action count explicitly"),
+        "fresh benchmark review artifacts should stop proposing work for unnecessary_action_count once the metric is measured:\n{}",
+        serde_json::to_string_pretty(&review).expect("review should render")
+    );
+    assert!(
+        !proposal_titles.contains(&"Track bounded retries in benchmark runs"),
+        "fresh benchmark review artifacts should stop proposing work for retry_count once the metric is measured:\n{}",
+        serde_json::to_string_pretty(&review).expect("review should render")
+    );
+}
+
+#[test]
+fn simard_gym_run_matches_legacy_binary_output_shape() {
+    let artifact_root = TempDirGuard::new("simard-cli-gym-run-parity");
+    let simard_output = command_in_dir(env!("CARGO_BIN_EXE_simard"), artifact_root.path())
+        .arg("gym")
+        .arg("run")
+        .arg("repo-exploration-local")
+        .output()
+        .expect("simard gym run should launch");
+    let simard_rendered = rendered_output(&simard_output);
+    assert!(
+        simard_output.status.success(),
+        "simard gym run should succeed before parity comparison:\n{simard_rendered}"
+    );
+
+    let legacy_output = command_in_dir(env!("CARGO_BIN_EXE_simard-gym"), artifact_root.path())
+        .arg("run")
+        .arg("repo-exploration-local")
+        .output()
+        .expect("legacy simard-gym run should launch");
+    let legacy_rendered = rendered_output(&legacy_output);
+    assert!(
+        legacy_output.status.success(),
+        "legacy simard-gym run should succeed before parity comparison:\n{legacy_rendered}"
+    );
+
+    assert_eq!(
+        normalize_benchmark_run_output(&simard_rendered),
+        normalize_benchmark_run_output(&legacy_rendered),
+        "the canonical simard gym run output should preserve the legacy operator-visible shape aside from run-specific session ids and artifact paths"
+    );
+}
+
+#[test]
 fn simard_gym_compare_reports_the_latest_two_runs_and_matches_legacy_binary() {
-    let first_run = Command::new(env!("CARGO_BIN_EXE_simard"))
+    let artifact_root = TempDirGuard::new("simard-cli-gym-compare");
+    let first_run = command_in_dir(env!("CARGO_BIN_EXE_simard"), artifact_root.path())
         .arg("gym")
         .arg("run")
         .arg("repo-exploration-local")
@@ -532,7 +746,7 @@ fn simard_gym_compare_reports_the_latest_two_runs_and_matches_legacy_binary() {
 
     thread::sleep(Duration::from_millis(5));
 
-    let second_run = Command::new(env!("CARGO_BIN_EXE_simard"))
+    let second_run = command_in_dir(env!("CARGO_BIN_EXE_simard"), artifact_root.path())
         .arg("gym")
         .arg("run")
         .arg("repo-exploration-local")
@@ -544,7 +758,7 @@ fn simard_gym_compare_reports_the_latest_two_runs_and_matches_legacy_binary() {
         "second benchmark run should succeed before comparison:\n{second_rendered}"
     );
 
-    let simard_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+    let simard_output = command_in_dir(env!("CARGO_BIN_EXE_simard"), artifact_root.path())
         .arg("gym")
         .arg("compare")
         .arg("repo-exploration-local")
@@ -560,7 +774,13 @@ fn simard_gym_compare_reports_the_latest_two_runs_and_matches_legacy_binary() {
         "Scenario: repo-exploration-local",
         "Comparison status: unchanged",
         "Current report: target/simard-gym/repo-exploration-local/",
+        "Current unnecessary actions:",
+        "Current retry count:",
         "Previous report: target/simard-gym/repo-exploration-local/",
+        "Previous unnecessary actions:",
+        "Previous retry count:",
+        "Delta unnecessary actions:",
+        "Delta retry count:",
         "Comparison artifact report: target/simard-gym/comparisons/repo-exploration-local/",
     ] {
         assert!(
@@ -569,7 +789,7 @@ fn simard_gym_compare_reports_the_latest_two_runs_and_matches_legacy_binary() {
         );
     }
 
-    let legacy_output = Command::new(env!("CARGO_BIN_EXE_simard-gym"))
+    let legacy_output = command_in_dir(env!("CARGO_BIN_EXE_simard-gym"), artifact_root.path())
         .arg("compare")
         .arg("repo-exploration-local")
         .output()
@@ -583,6 +803,98 @@ fn simard_gym_compare_reports_the_latest_two_runs_and_matches_legacy_binary() {
     assert_eq!(
         simard_rendered, legacy_rendered,
         "the unified compare surface should preserve the legacy compare output exactly until operators migrate"
+    );
+}
+
+#[test]
+fn simard_gym_compare_renders_unmeasured_for_legacy_artifacts_on_public_cli() {
+    let artifact_root = TempDirGuard::new("simard-cli-gym-legacy-compare");
+    write_legacy_benchmark_report(
+        artifact_root.path(),
+        "repo-exploration-local",
+        "legacy-session",
+    );
+
+    let fresh_run = command_in_dir(env!("CARGO_BIN_EXE_simard"), artifact_root.path())
+        .arg("gym")
+        .arg("run")
+        .arg("repo-exploration-local")
+        .output()
+        .expect("fresh gym run should launch");
+    let fresh_rendered = rendered_output(&fresh_run);
+    assert!(
+        fresh_run.status.success(),
+        "fresh benchmark run should succeed before comparing against a legacy artifact:\n{fresh_rendered}"
+    );
+
+    let simard_output = command_in_dir(env!("CARGO_BIN_EXE_simard"), artifact_root.path())
+        .arg("gym")
+        .arg("compare")
+        .arg("repo-exploration-local")
+        .output()
+        .expect("simard gym compare should launch");
+    let simard_rendered = rendered_output(&simard_output);
+    assert!(
+        simard_output.status.success(),
+        "simard gym compare should succeed when one artifact predates the new metric fields:\n{simard_rendered}"
+    );
+    for expected in [
+        "Current unnecessary actions: 0",
+        "Current retry count: 0",
+        "Previous unnecessary actions: unmeasured",
+        "Previous retry count: unmeasured",
+        "Delta unnecessary actions: unmeasured",
+        "Delta retry count: unmeasured",
+    ] {
+        assert!(
+            simard_rendered.contains(expected),
+            "simard gym compare should surface '{expected}' instead of fabricating zeroes for legacy artifacts:\n{simard_rendered}"
+        );
+    }
+
+    let legacy_output = command_in_dir(env!("CARGO_BIN_EXE_simard-gym"), artifact_root.path())
+        .arg("compare")
+        .arg("repo-exploration-local")
+        .output()
+        .expect("legacy simard-gym compare should launch");
+    let legacy_rendered = rendered_output(&legacy_output);
+    assert!(
+        legacy_output.status.success(),
+        "legacy simard-gym compare should succeed against the same legacy artifact set:\n{legacy_rendered}"
+    );
+    assert_eq!(
+        simard_rendered, legacy_rendered,
+        "the canonical compare surface should match the legacy compare output even when rendering unmeasured legacy metric fields"
+    );
+}
+
+#[test]
+fn simard_gym_rejects_unregistered_scenarios_before_accessing_artifacts() {
+    let artifact_root = TempDirGuard::new("simard-cli-gym-invalid-scenario");
+
+    for subcommand in ["run", "compare"] {
+        let output = command_in_dir(env!("CARGO_BIN_EXE_simard"), artifact_root.path())
+            .arg("gym")
+            .arg(subcommand)
+            .arg("../repo-exploration-local")
+            .output()
+            .expect("invalid benchmark scenario should launch");
+        let rendered = rendered_output(&output);
+
+        assert!(
+            !output.status.success(),
+            "gym {subcommand} must reject unregistered scenario ids visibly:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("BenchmarkScenarioNotFound")
+                && rendered.contains("../repo-exploration-local"),
+            "gym {subcommand} should reject invalid scenario ids with an explicit registry lookup failure:\n{rendered}"
+        );
+    }
+
+    assert!(
+        !artifact_root.path().join("target/simard-gym").exists(),
+        "invalid scenario ids should fail before the CLI touches benchmark artifact storage"
     );
 }
 

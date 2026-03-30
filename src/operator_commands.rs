@@ -720,58 +720,99 @@ pub fn run_gym_list() -> Result<(), Box<dyn std::error::Error>> {
 
 pub fn run_gym_scenario(scenario_id: &str) -> Result<(), Box<dyn std::error::Error>> {
     let report = run_benchmark_scenario(scenario_id, default_output_root())?;
-    println!("Scenario: {}", report.scenario.id);
-    println!("Suite: {}", report.suite_id);
-    println!("Session: {}", report.session_id);
-    println!("Passed: {}", report.passed);
-    println!(
-        "Checks passed: {}/{}",
-        report.scorecard.correctness_checks_passed, report.scorecard.correctness_checks_total
+    print_text("Scenario", report.scenario.id);
+    print_text("Suite", &report.suite_id);
+    print_text("Session", &report.session_id);
+    print_display("Passed", report.passed);
+    print_display(
+        "Checks passed",
+        format!(
+            "{}/{}",
+            report.scorecard.correctness_checks_passed, report.scorecard.correctness_checks_total
+        ),
     );
-    println!("Artifact report: {}", report.artifacts.report_json);
-    println!("Artifact summary: {}", report.artifacts.report_txt);
-    println!("Review artifact: {}", report.artifacts.review_json);
+    print_display(
+        "Unnecessary actions",
+        crate::gym::render_benchmark_count(report.scorecard.unnecessary_action_count),
+    );
+    print_display(
+        "Retry count",
+        crate::gym::render_benchmark_count(report.scorecard.retry_count),
+    );
+    print_text("Artifact report", &report.artifacts.report_json);
+    print_text("Artifact summary", &report.artifacts.report_txt);
+    print_text("Review artifact", &report.artifacts.review_json);
     Ok(())
 }
 
 pub fn run_gym_compare(scenario_id: &str) -> Result<(), Box<dyn std::error::Error>> {
     let report = compare_latest_benchmark_runs(scenario_id, default_output_root())?;
-    println!("Scenario: {}", report.scenario_id);
-    println!("Comparison status: {}", report.status);
+    print_text("Scenario", &report.scenario_id);
+    print_display("Comparison status", report.status);
     print_text("Comparison summary", &report.summary);
-    println!("Current session: {}", report.current.session_id);
-    println!("Current passed: {}", report.current.passed);
-    println!(
-        "Current checks passed: {}/{}",
-        report.current.correctness_checks_passed, report.current.correctness_checks_total
+    print_text("Current session", &report.current.session_id);
+    print_display("Current passed", report.current.passed);
+    print_display(
+        "Current checks passed",
+        format!(
+            "{}/{}",
+            report.current.correctness_checks_passed, report.current.correctness_checks_total
+        ),
     );
-    println!("Current report: {}", report.current.report_json);
-    println!("Previous session: {}", report.previous.session_id);
-    println!("Previous passed: {}", report.previous.passed);
-    println!(
-        "Previous checks passed: {}/{}",
-        report.previous.correctness_checks_passed, report.previous.correctness_checks_total
+    print_text("Current report", &report.current.report_json);
+    print_display(
+        "Current unnecessary actions",
+        crate::gym::render_benchmark_count(report.current.unnecessary_action_count),
     );
-    println!("Previous report: {}", report.previous.report_json);
-    println!(
-        "Delta correctness checks passed: {:+}",
-        report.delta.correctness_checks_passed
+    print_display(
+        "Current retry count",
+        crate::gym::render_benchmark_count(report.current.retry_count),
     );
-    println!(
-        "Delta exported memory records: {:+}",
-        report.delta.exported_memory_records
+    print_text("Previous session", &report.previous.session_id);
+    print_display("Previous passed", report.previous.passed);
+    print_display(
+        "Previous checks passed",
+        format!(
+            "{}/{}",
+            report.previous.correctness_checks_passed, report.previous.correctness_checks_total
+        ),
     );
-    println!(
-        "Delta exported evidence records: {:+}",
-        report.delta.exported_evidence_records
+    print_text("Previous report", &report.previous.report_json);
+    print_display(
+        "Previous unnecessary actions",
+        crate::gym::render_benchmark_count(report.previous.unnecessary_action_count),
     );
-    println!(
-        "Comparison artifact report: {}",
-        report.artifact_paths.report_json
+    print_display(
+        "Previous retry count",
+        crate::gym::render_benchmark_count(report.previous.retry_count),
     );
-    println!(
-        "Comparison artifact summary: {}",
-        report.artifact_paths.report_txt
+    print_display(
+        "Delta correctness checks passed",
+        format!("{:+}", report.delta.correctness_checks_passed),
+    );
+    print_display(
+        "Delta unnecessary actions",
+        crate::gym::render_benchmark_delta(report.delta.unnecessary_action_count),
+    );
+    print_display(
+        "Delta retry count",
+        crate::gym::render_benchmark_delta(report.delta.retry_count),
+    );
+    print_display(
+        "Delta exported memory records",
+        format!("{:+}", report.delta.exported_memory_records),
+    );
+    print_display(
+        "Delta exported evidence records",
+        format!("{:+}", report.delta.exported_evidence_records),
+    );
+    print_text(
+        "Comparison artifact report",
+        &report.artifact_paths.report_json,
+    );
+    print_text(
+        "Comparison artifact summary",
+        &report.artifact_paths.report_txt,
     );
     Ok(())
 }
