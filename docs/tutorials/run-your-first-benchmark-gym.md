@@ -95,9 +95,12 @@ Those artifacts record:
 - scenario metadata
 - the selected identity, base type, and topology
 - runtime and handoff summaries
+- scorecard metrics including `correctness_checks_passed`, `correctness_checks_total`, `unnecessary_action_count`, and `retry_count`
 - review proposals linked to persisted evidence
 - correctness checks and whether they passed
-- measurement notes that explain what the current v1 gym does not yet infer automatically
+- `measurement_notes` that describe the current metric scope without pretending fresh runs are unmeasured
+
+Fresh runs now populate `scorecard.unnecessary_action_count` and `scorecard.retry_count` from benchmark-controlled attempt and action facts and stop emitting fresh review proposals, `scorecard.human_review_notes`, or `scorecard.measurement_notes` entries that say those metrics are "not measured". Older or incomplete artifacts should show `unmeasured` instead of fabricated zeroes.
 
 ## Step 4: Inspect one scenario report directly
 
@@ -107,7 +110,24 @@ You can also run a single scenario:
 cargo run --quiet -- gym run safe-code-change-rusty-clawd
 ```
 
-That command prints the scenario result plus the exact artifact paths for the scenario run.
+That command prints the scenario result and the persisted artifact paths directly on the operator-facing CLI.
+
+You should see output shaped like:
+
+```text
+Scenario: safe-code-change-rusty-clawd
+Suite: starter
+Session: session-...
+Passed: true
+Checks passed: 8/8
+Unnecessary actions: 0
+Retry count: 0
+Artifact report: target/simard-gym/safe-code-change-rusty-clawd/.../report.json
+Artifact summary: target/simard-gym/safe-code-change-rusty-clawd/.../report.txt
+Review artifact: target/simard-gym/safe-code-change-rusty-clawd/.../review.json
+```
+
+The detailed text artifact at `Artifact summary:` contains the full benchmark report, including identity, base type, topology, plan, execution summary, reflection summary, and the same metric values.
 
 Open the JSON artifact and look for:
 
@@ -116,6 +136,8 @@ Open the JSON artifact and look for:
 - `runtime`
 - `handoff`
 - `artifacts.review_json`
+- `scorecard.unnecessary_action_count`
+- `scorecard.retry_count`
 - `scorecard.human_review_notes`
 - `scorecard.measurement_notes`
 
@@ -132,16 +154,35 @@ You should see output shaped like:
 ```text
 Scenario: safe-code-change-rusty-clawd
 Comparison status: unchanged
+Comparison summary: ...
+Current session: ...
+Current passed: true
+Current checks passed: 8/8
 Current report: target/simard-gym/safe-code-change-rusty-clawd/...
+Current unnecessary actions: 0
+Current retry count: 0
+Previous session: ...
+Previous passed: true
+Previous checks passed: 8/8
 Previous report: target/simard-gym/safe-code-change-rusty-clawd/...
+Previous unnecessary actions: 0
+Previous retry count: 0
+Delta correctness checks passed: +0
+Delta unnecessary actions: +0
+Delta retry count: +0
+Delta exported memory records: +0
+Delta exported evidence records: +0
 Comparison artifact report: target/simard-gym/comparisons/safe-code-change-rusty-clawd/...
+Comparison artifact summary: target/simard-gym/comparisons/safe-code-change-rusty-clawd/...
 ```
 
 That surface gives operators a lightweight regression check without manually diffing JSON.
 
+If one of the two runs comes from an older `report.json` artifact that predates these fields, the metric lines stay readable and print `unmeasured` for the missing value and delta instead of inventing a zero.
+
 ## Step 6: Understand the current measurement boundary
 
-The current benchmark foundation is real, but intentionally modest.
+The current benchmark foundation is real and intentionally scoped.
 
 Today it verifies:
 
@@ -151,13 +192,18 @@ Today it verifies:
 - handoff export and restore continuity
 - coverage across all shipped base-type selections and the composite identity
 
-Today it does **not** yet infer:
+The current metric boundary extends that foundation with:
+
+- truthful `unnecessary_action_count` scoring from benchmark-runner-observed benchmark-controlled action boundaries that fall outside the current scenario execution path
+- truthful `retry_count` scoring from benchmark-runner-observed re-attempt counts inside one scenario run
+
+Today it does **not** replace:
 
 - a task-specific semantic judge for code correctness
-- automatic unnecessary action counting
-- autonomous retry-and-replan loops inside the gym runner
+- operator review of whether a completed task was actually the right task
+- explicit inspection of execution summaries, reflection summaries, and persisted evidence
 
-Those gaps are recorded in the emitted `measurement_notes` instead of being hidden.
+Those remaining boundaries are recorded in `measurement_notes` instead of being hidden. After the metric update lands, fresh runs should keep `measurement_notes` for the remaining scope boundaries only, not for these two metric fields.
 
 ## Summary
 
@@ -166,7 +212,8 @@ You now know how to:
 - list the shipped benchmark scenarios through `simard gym`
 - run the starter benchmark suite
 - inspect the emitted benchmark artifacts
-- compare the latest two runs for a shipped scenario
+- see where `unnecessary_action_count` and `retry_count` appear in the shipped CLI and artifacts
+- compare the latest two runs for a shipped scenario and understand the current metric additions
 - use the compatibility `simard-gym` binary only when an older script still depends on it
 
 ## Next steps
