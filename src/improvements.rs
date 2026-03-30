@@ -177,6 +177,164 @@ impl ImprovementPromotionPlan {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PersistedImprovementApproval {
+    pub priority: u8,
+    pub status: GoalStatus,
+    pub title: String,
+}
+
+impl PersistedImprovementApproval {
+    pub fn concise_label(&self) -> String {
+        format!("p{} [{}] {}", self.priority, self.status, self.title)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PersistedImprovementRecord {
+    pub review_id: String,
+    pub review_target: String,
+    pub approved_proposals: Vec<PersistedImprovementApproval>,
+    pub deferred_proposals: Vec<DeferredImprovement>,
+    pub selected_base_type: Option<String>,
+    pub topology: Option<String>,
+    pub outcome: Option<String>,
+}
+
+impl PersistedImprovementRecord {
+    pub fn parse(raw: &str) -> SimardResult<Self> {
+        let pairs = parse_persisted_record_pairs(raw)?;
+        let mut seen = BTreeSet::new();
+        let mut review_id = None;
+        let mut review_target = None;
+        let mut approved_proposals = None;
+        let mut approval_count = None;
+        let mut deferred_proposals = None;
+        let mut deferral_count = None;
+        let mut selected_base_type = None;
+        let mut topology = None;
+        let mut outcome = None;
+
+        for (field, value) in pairs {
+            if !seen.insert(field) {
+                return Err(SimardError::InvalidImprovementRecord {
+                    field: field.to_string(),
+                    reason: "field cannot appear more than once".to_string(),
+                });
+            }
+
+            match field {
+                "review" => review_id = Some(required_improvement_field("review", value)?),
+                "target" => review_target = Some(required_improvement_field("target", value)?),
+                "approvals" => {
+                    if value.trim_start().starts_with('[') {
+                        approved_proposals =
+                            Some(parse_persisted_approval_list("approvals", value)?);
+                    } else {
+                        approval_count = Some(parse_non_negative_count("approvals", value)?);
+                    }
+                }
+                "approved_goals" => {
+                    approved_proposals =
+                        Some(parse_persisted_approval_list("approved_goals", value)?);
+                }
+                "deferred" => {
+                    deferred_proposals = Some(parse_persisted_deferral_list("deferred", value)?);
+                }
+                "deferrals" => {
+                    deferral_count = Some(parse_non_negative_count("deferrals", value)?);
+                }
+                "selected-base-type" => {
+                    selected_base_type =
+                        Some(required_improvement_field("selected-base-type", value)?)
+                }
+                "topology" => topology = Some(required_improvement_field("topology", value)?),
+                "outcome" => outcome = Some(required_improvement_field("outcome", value)?),
+                other => {
+                    return Err(SimardError::InvalidImprovementRecord {
+                        field: other.to_string(),
+                        reason: "unsupported persisted improvement field".to_string(),
+                    });
+                }
+            }
+        }
+
+        let approved_proposals =
+            approved_proposals.ok_or_else(|| SimardError::InvalidImprovementRecord {
+                field: "approvals".to_string(),
+                reason: "approved proposal list is required".to_string(),
+            })?;
+        let deferred_proposals =
+            deferred_proposals.ok_or_else(|| SimardError::InvalidImprovementRecord {
+                field: "deferred".to_string(),
+                reason: "deferred proposal list is required".to_string(),
+            })?;
+
+        if let Some(expected_count) = approval_count
+            && expected_count != approved_proposals.len()
+        {
+            return Err(SimardError::InvalidImprovementRecord {
+                field: "approvals".to_string(),
+                reason: format!(
+                    "approval count {expected_count} does not match approved proposal list length {}",
+                    approved_proposals.len()
+                ),
+            });
+        }
+        if let Some(expected_count) = deferral_count
+            && expected_count != deferred_proposals.len()
+        {
+            return Err(SimardError::InvalidImprovementRecord {
+                field: "deferrals".to_string(),
+                reason: format!(
+                    "deferral count {expected_count} does not match deferred proposal list length {}",
+                    deferred_proposals.len()
+                ),
+            });
+        }
+
+        Ok(Self {
+            review_id: review_id.ok_or_else(|| SimardError::InvalidImprovementRecord {
+                field: "review".to_string(),
+                reason: "review id is required".to_string(),
+            })?,
+            review_target: review_target.ok_or_else(|| SimardError::InvalidImprovementRecord {
+                field: "target".to_string(),
+                reason: "review target is required".to_string(),
+            })?,
+            approved_proposals,
+            deferred_proposals,
+            selected_base_type,
+            topology,
+            outcome,
+        })
+    }
+
+    pub fn concise_record(&self) -> String {
+        format!(
+            "review={} target={} approvals=[{}] deferred=[{}]",
+            self.review_id,
+            self.review_target,
+            self.approved_proposal_summaries().join(" | "),
+            self.deferred_proposal_summaries().join(" | "),
+        )
+    }
+
+    pub fn approved_proposal_summaries(&self) -> Vec<String> {
+        self.approved_proposals
+            .iter()
+            .map(PersistedImprovementApproval::concise_label)
+            .collect()
+    }
+
+    pub fn deferred_proposal_summaries(&self) -> Vec<String> {
+        self.deferred_proposals
+            .iter()
+            .map(|deferral| format!("{} ({})", deferral.title, deferral.rationale))
+            .collect()
+    }
+}
+
 pub fn render_review_context_directives(review: &ReviewArtifact) -> String {
     let mut lines = vec![
         format!("review-id: {}", sanitize_directive_value(&review.review_id)),
@@ -387,6 +545,365 @@ fn parse_deferral_directive(raw: &str) -> SimardResult<DeferredImprovement> {
     Ok(DeferredImprovement { title, rationale })
 }
 
+fn parse_persisted_record_pairs(raw: &str) -> SimardResult<Vec<(&str, &str)>> {
+    let mut trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(SimardError::InvalidImprovementRecord {
+            field: "record".to_string(),
+            reason: "persisted improvement record cannot be empty".to_string(),
+        });
+    }
+    if let Some(stripped) = trimmed.strip_prefix("improvement-curation-record") {
+        trimmed = stripped.trim_start();
+        if let Some(stripped) = trimmed.strip_prefix('|') {
+            trimmed = stripped.trim_start();
+        }
+    }
+
+    let mut pairs = Vec::new();
+    let mut cursor = 0;
+    while cursor < trimmed.len() {
+        cursor = skip_record_separators(trimmed, cursor);
+        if cursor >= trimmed.len() {
+            break;
+        }
+
+        let key_start = cursor;
+        while cursor < trimmed.len() {
+            let ch = trimmed[cursor..]
+                .chars()
+                .next()
+                .expect("cursor should remain on a valid char boundary");
+            if ch == '=' || ch.is_whitespace() || ch == '|' {
+                break;
+            }
+            cursor += ch.len_utf8();
+        }
+        if cursor >= trimmed.len() || !trimmed[cursor..].starts_with('=') {
+            return Err(SimardError::InvalidImprovementRecord {
+                field: "record".to_string(),
+                reason: format!(
+                    "expected key=value segment near '{}'",
+                    trimmed[key_start..].trim()
+                ),
+            });
+        }
+
+        let field = trimmed[key_start..cursor].trim();
+        cursor += 1;
+        let value_start = cursor;
+        let value;
+        if trimmed[value_start..].starts_with('[') {
+            let (parsed, next_cursor) = read_bracketed_value(trimmed, value_start)?;
+            value = parsed;
+            cursor = next_cursor;
+        } else {
+            while cursor < trimmed.len() {
+                let ch = trimmed[cursor..]
+                    .chars()
+                    .next()
+                    .expect("cursor should remain on a valid char boundary");
+                if ch == '|' {
+                    break;
+                }
+                if ch.is_whitespace() {
+                    let next_cursor = skip_spaces(trimmed, cursor);
+                    if looks_like_field_start(trimmed, next_cursor) {
+                        break;
+                    }
+                    cursor = next_cursor;
+                    continue;
+                }
+                cursor += ch.len_utf8();
+            }
+            value = trimmed[value_start..cursor].trim();
+        }
+
+        if field.is_empty() {
+            return Err(SimardError::InvalidImprovementRecord {
+                field: "record".to_string(),
+                reason: "persisted improvement record contains an empty field name".to_string(),
+            });
+        }
+        if value.is_empty() {
+            return Err(SimardError::InvalidImprovementRecord {
+                field: field.to_string(),
+                reason: "value cannot be empty".to_string(),
+            });
+        }
+        pairs.push((field, value));
+    }
+
+    if pairs.is_empty() {
+        return Err(SimardError::InvalidImprovementRecord {
+            field: "record".to_string(),
+            reason: "persisted improvement record contained no key=value fields".to_string(),
+        });
+    }
+
+    Ok(pairs)
+}
+
+fn parse_persisted_approval_list(
+    field: &str,
+    raw: &str,
+) -> SimardResult<Vec<PersistedImprovementApproval>> {
+    parse_bracketed_list(field, raw)?
+        .into_iter()
+        .map(|entry| parse_persisted_approval_entry(field, &entry))
+        .collect()
+}
+
+fn parse_persisted_approval_entry(
+    field: &str,
+    raw: &str,
+) -> SimardResult<PersistedImprovementApproval> {
+    let trimmed = raw.trim();
+    let Some(rest) = trimmed.strip_prefix('p') else {
+        return Err(SimardError::InvalidImprovementRecord {
+            field: field.to_string(),
+            reason: format!(
+                "approval entry '{trimmed}' must start with p<priority> [status] title"
+            ),
+        });
+    };
+    let digit_count = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    if digit_count == 0 {
+        return Err(SimardError::InvalidImprovementRecord {
+            field: field.to_string(),
+            reason: format!("approval entry '{trimmed}' is missing a numeric priority"),
+        });
+    }
+    let priority =
+        rest[..digit_count]
+            .parse::<u8>()
+            .map_err(|_| SimardError::InvalidImprovementRecord {
+                field: field.to_string(),
+                reason: format!("approval entry '{trimmed}' has an invalid priority"),
+            })?;
+    if priority == 0 {
+        return Err(SimardError::InvalidImprovementRecord {
+            field: field.to_string(),
+            reason: format!("approval entry '{trimmed}' must use priority 1 or greater"),
+        });
+    }
+
+    let rest = rest[digit_count..].trim_start();
+    let Some(status_rest) = rest.strip_prefix('[') else {
+        return Err(SimardError::InvalidImprovementRecord {
+            field: field.to_string(),
+            reason: format!("approval entry '{trimmed}' is missing [status]"),
+        });
+    };
+    let Some((status_raw, title_raw)) = status_rest.split_once(']') else {
+        return Err(SimardError::InvalidImprovementRecord {
+            field: field.to_string(),
+            reason: format!("approval entry '{trimmed}' has an unterminated [status]"),
+        });
+    };
+    let status = GoalStatus::parse(status_raw.trim()).ok_or_else(|| {
+        SimardError::InvalidImprovementRecord {
+            field: field.to_string(),
+            reason: format!("approval entry '{trimmed}' uses an unsupported status"),
+        }
+    })?;
+
+    Ok(PersistedImprovementApproval {
+        priority,
+        status,
+        title: required_improvement_field(field, title_raw)?,
+    })
+}
+
+fn parse_persisted_deferral_list(field: &str, raw: &str) -> SimardResult<Vec<DeferredImprovement>> {
+    parse_bracketed_list(field, raw)?
+        .into_iter()
+        .map(|entry| parse_persisted_deferral_entry(field, &entry))
+        .collect()
+}
+
+fn parse_persisted_deferral_entry(field: &str, raw: &str) -> SimardResult<DeferredImprovement> {
+    let trimmed = raw.trim();
+    let Some(stripped) = trimmed.strip_suffix(')') else {
+        return Err(SimardError::InvalidImprovementRecord {
+            field: field.to_string(),
+            reason: format!("deferred entry '{trimmed}' must end with '(rationale)'"),
+        });
+    };
+    let Some((title, rationale)) = stripped.rsplit_once(" (") else {
+        return Err(SimardError::InvalidImprovementRecord {
+            field: field.to_string(),
+            reason: format!("deferred entry '{trimmed}' must include a rationale"),
+        });
+    };
+    Ok(DeferredImprovement {
+        title: required_improvement_field(field, title)?,
+        rationale: required_improvement_field(field, rationale)?,
+    })
+}
+
+fn parse_bracketed_list(field: &str, raw: &str) -> SimardResult<Vec<String>> {
+    let trimmed = raw.trim();
+    let Some(inner) = trimmed
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+    else {
+        return Err(SimardError::InvalidImprovementRecord {
+            field: field.to_string(),
+            reason: "value must use bracketed list syntax".to_string(),
+        });
+    };
+    let inner = inner.trim();
+    if inner.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut items = Vec::new();
+    let mut current = String::new();
+    let mut bracket_depth = 0usize;
+    let chars = inner.chars().peekable();
+    for ch in chars {
+        match ch {
+            '[' => {
+                bracket_depth += 1;
+                current.push(ch);
+            }
+            ']' => {
+                if bracket_depth == 0 {
+                    return Err(SimardError::InvalidImprovementRecord {
+                        field: field.to_string(),
+                        reason: "list contains an unexpected closing bracket".to_string(),
+                    });
+                }
+                bracket_depth -= 1;
+                current.push(ch);
+            }
+            '|' if bracket_depth == 0 => {
+                let item = current.trim();
+                if item.is_empty() {
+                    return Err(SimardError::InvalidImprovementRecord {
+                        field: field.to_string(),
+                        reason: "list contains an empty item".to_string(),
+                    });
+                }
+                items.push(item.to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if bracket_depth != 0 {
+        return Err(SimardError::InvalidImprovementRecord {
+            field: field.to_string(),
+            reason: "list contains an unterminated bracket".to_string(),
+        });
+    }
+
+    let item = current.trim();
+    if item.is_empty() {
+        return Err(SimardError::InvalidImprovementRecord {
+            field: field.to_string(),
+            reason: "list contains an empty item".to_string(),
+        });
+    }
+    items.push(item.to_string());
+    Ok(items)
+}
+
+fn parse_non_negative_count(field: &str, raw: &str) -> SimardResult<usize> {
+    raw.trim()
+        .parse::<usize>()
+        .map_err(|_| SimardError::InvalidImprovementRecord {
+            field: field.to_string(),
+            reason: "value must be a non-negative integer or bracketed list".to_string(),
+        })
+}
+
+fn read_bracketed_value(raw: &str, start: usize) -> SimardResult<(&str, usize)> {
+    let mut cursor = start;
+    let mut depth = 0usize;
+    while cursor < raw.len() {
+        let ch = raw[cursor..]
+            .chars()
+            .next()
+            .expect("cursor should remain on a valid char boundary");
+        match ch {
+            '[' => depth += 1,
+            ']' => {
+                depth =
+                    depth
+                        .checked_sub(1)
+                        .ok_or_else(|| SimardError::InvalidImprovementRecord {
+                            field: "record".to_string(),
+                            reason:
+                                "persisted improvement record has an unexpected closing bracket"
+                                    .to_string(),
+                        })?;
+                if depth == 0 {
+                    cursor += ch.len_utf8();
+                    return Ok((&raw[start..cursor], cursor));
+                }
+            }
+            _ => {}
+        }
+        cursor += ch.len_utf8();
+    }
+
+    Err(SimardError::InvalidImprovementRecord {
+        field: "record".to_string(),
+        reason: "persisted improvement record has an unterminated bracketed list".to_string(),
+    })
+}
+
+fn skip_record_separators(raw: &str, mut cursor: usize) -> usize {
+    while cursor < raw.len() {
+        let ch = raw[cursor..]
+            .chars()
+            .next()
+            .expect("cursor should remain on a valid char boundary");
+        if ch == '|' || ch.is_whitespace() {
+            cursor += ch.len_utf8();
+            continue;
+        }
+        break;
+    }
+    cursor
+}
+
+fn skip_spaces(raw: &str, mut cursor: usize) -> usize {
+    while cursor < raw.len() {
+        let ch = raw[cursor..]
+            .chars()
+            .next()
+            .expect("cursor should remain on a valid char boundary");
+        if ch.is_whitespace() {
+            cursor += ch.len_utf8();
+            continue;
+        }
+        break;
+    }
+    cursor
+}
+
+fn looks_like_field_start(raw: &str, cursor: usize) -> bool {
+    let tail = &raw[cursor..];
+    let mut seen_any = false;
+    for ch in tail.chars() {
+        if ch == '=' {
+            return seen_any;
+        }
+        if ch == '|' || ch.is_whitespace() {
+            return false;
+        }
+        if !ch.is_ascii_alphanumeric() && ch != '-' {
+            return false;
+        }
+        seen_any = true;
+    }
+    false
+}
+
 fn required_improvement_field(field: &str, value: impl AsRef<str>) -> SimardResult<String> {
     let trimmed = value.as_ref().trim();
     if trimmed.is_empty() {
@@ -494,5 +1011,47 @@ approve: Missing proposal | priority=1 | status=active | rationale=bad";
         assert!(directives.contains("review-id: session-1-review"));
         assert!(directives.contains("proposal: Capture denser execution evidence"));
         assert!(directives.contains("evidence=phase-1 ;; phase-2"));
+    }
+
+    #[test]
+    fn parses_persisted_improvement_record_for_readback() {
+        let record = PersistedImprovementRecord::parse(
+            "review=session-42-review target=operator-review approvals=[p1 [active] Capture denser execution evidence] deferred=[Promote this pattern into a repeatable benchmark (wait for the next benchmark planning pass)]",
+        )
+        .expect("persisted improvement record should parse");
+
+        assert_eq!(record.review_id, "session-42-review");
+        assert_eq!(record.review_target, "operator-review");
+        assert_eq!(record.approved_proposals.len(), 1);
+        assert_eq!(
+            record.approved_proposals[0].concise_label(),
+            "p1 [active] Capture denser execution evidence"
+        );
+        assert_eq!(
+            record.deferred_proposal_summaries(),
+            vec![
+                "Promote this pattern into a repeatable benchmark (wait for the next benchmark planning pass)"
+            ]
+        );
+        assert_eq!(
+            record.concise_record(),
+            "review=session-42-review target=operator-review approvals=[p1 [active] Capture denser execution evidence] deferred=[Promote this pattern into a repeatable benchmark (wait for the next benchmark planning pass)]"
+        );
+    }
+
+    #[test]
+    fn rejects_persisted_improvement_record_with_malformed_approvals() {
+        let error = PersistedImprovementRecord::parse(
+            "review=session-42-review target=operator-review approvals=not-a-list deferred=[]",
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            SimardError::InvalidImprovementRecord {
+                field: "approvals".to_string(),
+                reason: "value must be a non-negative integer or bracketed list".to_string(),
+            }
+        );
     }
 }
