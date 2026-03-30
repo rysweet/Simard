@@ -1,0 +1,4 @@
+working-directory: .
+command: printf "terminal-recipe-ready\n"
+wait-for: terminal-recipe-ready
+input: printf "terminal-recipe-ok\n"

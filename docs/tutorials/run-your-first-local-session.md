@@ -236,6 +236,14 @@ cargo run --quiet -- \
   engineer terminal-file single-process /tmp/simard-terminal.recipe "$STATE_ROOT"
 ```
 
+Simard also ships named built-in terminal recipes when you want reusable sessions without managing your own temp file:
+
+```bash
+cargo run --quiet -- engineer terminal-recipe-list
+cargo run --quiet -- engineer terminal-recipe-show foundation-check
+cargo run --quiet -- engineer terminal-recipe single-process foundation-check "$STATE_ROOT"
+```
+
 ## Summary
 
 You now know how to:

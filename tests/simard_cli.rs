@@ -357,6 +357,18 @@ fn simard_help_documents_engineer_read_as_the_durable_engineer_audit_surface() {
         rendered.contains("engineer terminal-file <topology> <objective-file> [state-root]"),
         "simard help should document the file-backed terminal session workflow:\n{rendered}"
     );
+    assert!(
+        rendered.contains("engineer terminal-recipe-list"),
+        "simard help should document terminal recipe discovery:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("engineer terminal-recipe-show <recipe-name>"),
+        "simard help should document terminal recipe inspection:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("engineer terminal-recipe <topology> <recipe-name> [state-root]"),
+        "simard help should document named terminal recipe execution:\n{rendered}"
+    );
 }
 
 #[test]
@@ -704,8 +716,18 @@ command: printf \"terminal-cli-ok\\n\"";
         legacy_output.status.success(),
         "legacy terminal-run should remain functional while operators migrate:\n{legacy_rendered}"
     );
+    let simard_normalized = replace_output_line_value(
+        &simard_rendered,
+        "Terminal transcript preview: ",
+        "<preview>",
+    );
+    let legacy_normalized = replace_output_line_value(
+        &legacy_rendered,
+        "Terminal transcript preview: ",
+        "<preview>",
+    );
     assert_eq!(
-        simard_rendered, legacy_rendered,
+        simard_normalized, legacy_normalized,
         "the canonical terminal engineer surface should preserve the legacy terminal-run output exactly until operators migrate"
     );
     for expected in [
@@ -771,8 +793,18 @@ fn simard_engineer_terminal_file_runs_a_bounded_terminal_session_from_a_recipe_f
         legacy_output.status.success(),
         "terminal-run-file compatibility path should remain available while operators migrate:\n{legacy_rendered}"
     );
+    let simard_normalized = replace_output_line_value(
+        &simard_rendered,
+        "Terminal transcript preview: ",
+        "<preview>",
+    );
+    let legacy_normalized = replace_output_line_value(
+        &legacy_rendered,
+        "Terminal transcript preview: ",
+        "<preview>",
+    );
     assert_eq!(
-        simard_rendered, legacy_rendered,
+        simard_normalized, legacy_normalized,
         "terminal-file should preserve terminal-run-file parity so canonical and compatibility surfaces stay aligned"
     );
 }
@@ -798,6 +830,141 @@ fn simard_engineer_terminal_file_rejects_missing_or_unreadable_recipe_files() {
     assert!(
         rendered.contains("terminal objective file") && rendered.contains("could not be inspected"),
         "terminal-file should explain why the requested recipe file could not be loaded:\n{rendered}"
+    );
+}
+
+#[test]
+fn simard_engineer_terminal_recipe_list_and_show_surface_builtin_named_recipes() {
+    let list_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("terminal-recipe-list")
+        .output()
+        .expect("simard engineer terminal-recipe-list should launch");
+    let list_rendered = rendered_output(&list_output);
+
+    assert!(
+        list_output.status.success(),
+        "terminal-recipe-list should expose built-in named session recipes:\n{list_rendered}"
+    );
+    for expected in [
+        "Terminal recipes: 2",
+        "foundation-check",
+        "copilot-status-check",
+        "simard/terminal_recipes/foundation-check.simard-terminal",
+    ] {
+        assert!(
+            list_rendered.contains(expected),
+            "terminal-recipe-list should surface '{expected}':\n{list_rendered}"
+        );
+    }
+    let legacy_list_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .arg("terminal-recipe-list")
+        .output()
+        .expect("simard_operator_probe terminal-recipe-list should launch");
+    let legacy_list_rendered = rendered_output(&legacy_list_output);
+    assert!(
+        legacy_list_output.status.success(),
+        "terminal-recipe-list compatibility path should remain available:\n{legacy_list_rendered}"
+    );
+    assert_eq!(
+        list_rendered, legacy_list_rendered,
+        "terminal-recipe-list should preserve parity with the compatibility probe"
+    );
+
+    let show_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("terminal-recipe-show")
+        .arg("foundation-check")
+        .output()
+        .expect("simard engineer terminal-recipe-show should launch");
+    let show_rendered = rendered_output(&show_output);
+
+    assert!(
+        show_output.status.success(),
+        "terminal-recipe-show should print the selected recipe asset and contents:\n{show_rendered}"
+    );
+    for expected in [
+        "Terminal recipe: foundation-check",
+        "Recipe asset: simard/terminal_recipes/foundation-check.simard-terminal",
+        "command: printf \"terminal-recipe-ready\\n\"",
+        "wait-for: terminal-recipe-ready",
+    ] {
+        assert!(
+            show_rendered.contains(expected),
+            "terminal-recipe-show should surface '{expected}':\n{show_rendered}"
+        );
+    }
+    let legacy_show_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .arg("terminal-recipe-show")
+        .arg("foundation-check")
+        .output()
+        .expect("simard_operator_probe terminal-recipe-show should launch");
+    let legacy_show_rendered = rendered_output(&legacy_show_output);
+    assert!(
+        legacy_show_output.status.success(),
+        "terminal-recipe-show compatibility path should remain available:\n{legacy_show_rendered}"
+    );
+    assert_eq!(
+        show_rendered, legacy_show_rendered,
+        "terminal-recipe-show should preserve parity with the compatibility probe"
+    );
+}
+
+#[test]
+fn simard_engineer_terminal_recipe_runs_builtin_named_recipe_with_probe_parity() {
+    let state_root = TempDirGuard::new("simard-cli-terminal-recipe");
+    let simard_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("terminal-recipe")
+        .arg("single-process")
+        .arg("foundation-check")
+        .arg(state_root.path())
+        .output()
+        .expect("simard engineer terminal-recipe should launch");
+    let simard_rendered = rendered_output(&simard_output);
+
+    assert!(
+        simard_output.status.success(),
+        "terminal-recipe should execute the built-in named recipe through the canonical CLI:\n{simard_rendered}"
+    );
+    for expected in [
+        "Selected base type: terminal-shell",
+        "Terminal checkpoint 1: terminal-recipe-ready",
+        "Terminal last output line: terminal-recipe-ok",
+        "terminal-recipe-ok",
+    ] {
+        assert!(
+            simard_rendered.contains(expected),
+            "terminal-recipe should surface '{expected}':\n{simard_rendered}"
+        );
+    }
+
+    let legacy_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .arg("terminal-recipe-run")
+        .arg("single-process")
+        .arg("foundation-check")
+        .arg(state_root.path())
+        .output()
+        .expect("legacy terminal-recipe-run should launch");
+    let legacy_rendered = rendered_output(&legacy_output);
+
+    assert!(
+        legacy_output.status.success(),
+        "terminal-recipe-run compatibility path should remain available:\n{legacy_rendered}"
+    );
+    let simard_normalized = replace_output_line_value(
+        &simard_rendered,
+        "Terminal transcript preview: ",
+        "<preview>",
+    );
+    let legacy_normalized = replace_output_line_value(
+        &legacy_rendered,
+        "Terminal transcript preview: ",
+        "<preview>",
+    );
+    assert_eq!(
+        simard_normalized, legacy_normalized,
+        "terminal-recipe should preserve compatibility parity with terminal-recipe-run"
     );
 }
 

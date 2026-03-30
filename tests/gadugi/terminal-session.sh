@@ -47,6 +47,24 @@ printf '%s\n' "$FILE_OUTPUT" | grep -F "Terminal steps count: 3" >/dev/null
 printf '%s\n' "$FILE_OUTPUT" | grep -F "Terminal checkpoint 1: terminal-file-ready" >/dev/null
 printf '%s\n' "$FILE_OUTPUT" | grep -F "Terminal last output line: terminal-file-ok" >/dev/null
 
+RECIPE_LIST_OUTPUT="$(
+  cargo run --quiet --bin simard -- \
+    engineer terminal-recipe-list
+)"
+
+printf '%s\n' "$RECIPE_LIST_OUTPUT"
+printf '%s\n' "$RECIPE_LIST_OUTPUT" | grep -F "foundation-check" >/dev/null
+printf '%s\n' "$RECIPE_LIST_OUTPUT" | grep -F "copilot-status-check" >/dev/null
+
+RECIPE_RUN_OUTPUT="$(
+  cargo run --quiet --bin simard -- \
+    engineer terminal-recipe single-process foundation-check
+)"
+
+printf '%s\n' "$RECIPE_RUN_OUTPUT"
+printf '%s\n' "$RECIPE_RUN_OUTPUT" | grep -F "Terminal checkpoint 1: terminal-recipe-ready" >/dev/null
+printf '%s\n' "$RECIPE_RUN_OUTPUT" | grep -F "Terminal last output line: terminal-recipe-ok" >/dev/null
+
 READ_OUTPUT="$(
   cargo run --quiet --bin simard -- \
     engineer terminal-read single-process
@@ -59,9 +77,9 @@ printf '%s\n' "$READ_OUTPUT" | grep -F "Selected base type: terminal-shell" >/de
 printf '%s\n' "$READ_OUTPUT" | grep -F "Terminal command count: 2" >/dev/null
 printf '%s\n' "$READ_OUTPUT" | grep -F "Terminal wait count: 1" >/dev/null
 printf '%s\n' "$READ_OUTPUT" | grep -F "Terminal steps count: 3" >/dev/null
-printf '%s\n' "$READ_OUTPUT" | grep -F "Terminal checkpoint 1: terminal-foundation-ready" >/dev/null
-printf '%s\n' "$READ_OUTPUT" | grep -F "Terminal last output line: terminal-foundation-ok" >/dev/null
-printf '%s\n' "$READ_OUTPUT" | grep -F "terminal-foundation-ok" >/dev/null
+printf '%s\n' "$READ_OUTPUT" | grep -F "Terminal checkpoint 1: terminal-recipe-ready" >/dev/null
+printf '%s\n' "$READ_OUTPUT" | grep -F "Terminal last output line: terminal-recipe-ok" >/dev/null
+printf '%s\n' "$READ_OUTPUT" | grep -F "terminal-recipe-ok" >/dev/null
 
 MARKER="$(mktemp /tmp/simard-terminal-injection.XXXXXX)"
 rm -f "$MARKER"

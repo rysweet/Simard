@@ -38,6 +38,7 @@ Simard does **not** expose:
 | engineer state readback | `simard engineer read ...` | `simard_operator_probe engineer-read ...` |
 | terminal-backed engineer substrate | `simard engineer terminal ...` | `simard_operator_probe terminal-run ...` |
 | file-backed terminal engineer substrate | `simard engineer terminal-file ...` | `simard_operator_probe terminal-run-file ...` |
+| named terminal recipe execution | `simard engineer terminal-recipe ...` | `simard_operator_probe terminal-recipe-run ...` |
 | terminal session readback | `simard engineer terminal-read ...` | `simard_operator_probe terminal-read ...` |
 | meeting mode | `simard meeting run ...` | `simard_operator_probe meeting-run ...` |
 | meeting state readback | `simard meeting read ...` | `simard_operator_probe meeting-read ...` |
@@ -56,6 +57,9 @@ The shipped operator-facing command tree is:
 - `simard engineer read <topology> [state-root]`
 - `simard engineer terminal <topology> <objective> [state-root]`
 - `simard engineer terminal-file <topology> <objective-file> [state-root]`
+- `simard engineer terminal-recipe-list`
+- `simard engineer terminal-recipe-show <recipe-name>`
+- `simard engineer terminal-recipe <topology> <recipe-name> [state-root]`
 - `simard engineer terminal-read <topology> [state-root]`
 - `simard meeting run <base-type> <topology> <structured-objective> [state-root]`
 - `simard meeting read <base-type> <topology> [state-root]`
@@ -196,6 +200,28 @@ This is the reusable authoring companion to `simard engineer terminal`.
 - `<objective-file>` must exist as a readable UTF-8 regular file; symlinks and other file kinds are rejected explicitly
 - the loaded file contents remain subject to the same shell validation, wait-checkpoint behavior, sanitization, and durable state contracts as inline terminal objectives
 - the run surface and `terminal-read` continue to present the same structured terminal audit trail
+
+#### Named terminal recipe execution
+
+Canonical entrypoints:
+
+- `simard engineer terminal-recipe-list`
+- `simard engineer terminal-recipe-show <recipe-name>`
+- `simard engineer terminal-recipe <topology> <recipe-name> [state-root]`
+
+Compatibility surface:
+
+- `simard_operator_probe terminal-recipe-list`
+- `simard_operator_probe terminal-recipe-show <recipe-name>`
+- `simard_operator_probe terminal-recipe-run <topology> <recipe-name> [state-root]`
+
+This is the discoverable built-in recipe companion to inline and file-backed terminal execution.
+
+- recipes live under `prompt_assets/simard/terminal_recipes/*.simard-terminal`
+- recipe names are limited to lowercase ASCII letters, digits, and hyphens
+- unknown or invalid recipe names fail explicitly
+- `terminal-recipe-show` is read-only and prints the shipped recipe asset contents
+- `terminal-recipe` executes the same bounded `terminal-shell` substrate as `engineer terminal` and `engineer terminal-file`
 
 ### Meeting mode
 
