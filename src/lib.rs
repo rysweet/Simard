@@ -14,6 +14,8 @@ pub mod gym;
 pub mod handoff;
 pub mod identity;
 pub mod improvements;
+pub mod knowledge_bridge;
+pub mod knowledge_context;
 pub mod meetings;
 pub mod memory;
 pub mod metadata;
@@ -80,6 +82,10 @@ pub use improvements::{
     ImprovementPromotionPlan, PersistedImprovementApproval, PersistedImprovementRecord,
     render_review_context_directives,
 };
+pub use knowledge_bridge::{
+    KnowledgeBridge, KnowledgePackInfo, KnowledgeQueryResult, KnowledgeSource,
+};
+pub use knowledge_context::{PlanningContext, enrich_planning_context};
 pub use meetings::{
     PersistedMeetingGoalUpdate, PersistedMeetingRecord, looks_like_persisted_meeting_record,
 };
