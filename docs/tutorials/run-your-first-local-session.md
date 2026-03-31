@@ -39,6 +39,8 @@ Use `simard` as the canonical operator-facing CLI. `simard_operator_probe` and `
 
 All runnable examples below use Cargo so they match the current executable surface exactly.
 
+If disk is tight or you are juggling many Simard worktrees, you can swap `cargo ...` for `scripts/cargo-low-space ...`. That wrapper reuses one shared `target-shared/` directory across worktrees and disables the heaviest debug/incremental defaults unless you opt back in. See [How to reclaim disk space and run low-space Rust builds](../howto/reclaim-disk-space-and-run-low-space-rust-builds.md).
+
 ## Step 1: Create one explicit durable state root
 
 Use one state root for the whole tutorial so later steps can read the same meeting, goal, evidence, and review state.

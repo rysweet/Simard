@@ -20,6 +20,7 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [How to move from terminal recipes into engineer runs](./howto/move-from-terminal-recipes-into-engineer-runs.md) - Start with a discoverable terminal recipe, then continue into the repo-grounded engineer loop through the same explicit state root.
 - [Tutorial: Run your first benchmark gym suite](./tutorials/run-your-first-benchmark-gym.md) - Run the shipped starter benchmark suite.
 - [How to configure bootstrap and inspect reflection](./howto/configure-bootstrap-and-inspect-reflection.md) - Bootstrap an explicit runtime selection and inspect the truthful runtime snapshot.
+- [How to reclaim disk space and run low-space Rust builds](./howto/reclaim-disk-space-and-run-low-space-rust-builds.md) - Reclaim stale build artifacts and run Cargo through one shared low-space target dir across worktrees.
 - [How to carry meeting decisions into engineer sessions](./howto/carry-meeting-decisions-into-engineer-sessions.md) - Persist meeting records under a shared state root and confirm later engineer runs carry them forward.
 - [How to inspect meeting records](./howto/inspect-meeting-records.md) - Read back the latest durable meeting record without mutating stored state.
 - [How to inspect improvement-curation state](./howto/inspect-improvement-curation-state.md) - Read back the latest approved, deferred, and promoted improvement state without mutation.
@@ -57,6 +58,8 @@ From the repository root, the corresponding Cargo commands are:
 - `cargo run --quiet -- ...` for `simard`
 - `cargo run --quiet --bin simard_operator_probe -- ...` for `simard_operator_probe`
 - `cargo run --quiet --bin simard-gym -- ...` for `simard-gym`
+
+If you are tight on disk or working across many Simard worktrees, prefer `scripts/cargo-low-space ...` for local builds and use `scripts/reclaim-build-space` to preview or delete stale build artifact directories.
 
 ## Contributor verification
 
