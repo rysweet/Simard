@@ -1,7 +1,7 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -16,7 +16,7 @@ const PTY_LAUNCHER: &str = "script";
 const WAIT_STEP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum TerminalStep {
+pub(crate) enum TerminalStep {
     Input(String),
     WaitFor(String),
 }
@@ -42,6 +42,102 @@ impl TranscriptGuard {
 impl Drop for TranscriptGuard {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum TerminalWaitStatus {
+    Satisfied,
+    ExitedEarly(ExitStatus),
+    TimedOut,
+}
+
+#[derive(Debug)]
+pub(crate) struct TerminalSessionCapture {
+    pub transcript: String,
+    pub exit_status: ExitStatus,
+}
+
+pub(crate) struct PtyTerminalSession {
+    base_type: String,
+    child: Child,
+    stdin: Option<BufWriter<ChildStdin>>,
+    transcript_path: PathBuf,
+    transcript_guard: TranscriptGuard,
+    _workflow_restore_guards: Vec<WorkflowRestoreGuard>,
+    final_status: Option<ExitStatus>,
+}
+
+enum WorkflowRestoreSnapshot {
+    Missing,
+    Present(Vec<u8>),
+}
+
+struct WorkflowRestoreGuard {
+    path: PathBuf,
+    snapshot: WorkflowRestoreSnapshot,
+}
+
+impl WorkflowRestoreGuard {
+    fn capture(path: PathBuf, base_type: &str) -> SimardResult<Self> {
+        let snapshot = match fs::read(&path) {
+            Ok(contents) => WorkflowRestoreSnapshot::Present(contents),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                WorkflowRestoreSnapshot::Missing
+            }
+            Err(error) => {
+                return Err(SimardError::AdapterInvocationFailed {
+                    base_type: base_type.to_string(),
+                    reason: format!(
+                        "failed to snapshot workflow-only file '{}' before terminal launch: {error}",
+                        path.display()
+                    ),
+                });
+            }
+        };
+        Ok(Self { path, snapshot })
+    }
+
+    fn restore(&self) {
+        for _ in 0..5 {
+            match &self.snapshot {
+                WorkflowRestoreSnapshot::Present(contents) => {
+                    if let Some(parent) = self.path.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    let current = fs::read(&self.path).ok();
+                    if current.as_deref() != Some(contents.as_slice()) {
+                        let _ = fs::write(&self.path, contents);
+                    }
+                }
+                WorkflowRestoreSnapshot::Missing => {
+                    if self.path.exists() {
+                        let _ = fs::remove_file(&self.path);
+                    }
+                }
+            }
+
+            if self.matches_snapshot() {
+                break;
+            }
+
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    fn matches_snapshot(&self) -> bool {
+        match &self.snapshot {
+            WorkflowRestoreSnapshot::Present(contents) => fs::read(&self.path)
+                .map(|current| current == *contents)
+                .unwrap_or(false),
+            WorkflowRestoreSnapshot::Missing => !self.path.exists(),
+        }
+    }
+}
+
+impl Drop for WorkflowRestoreGuard {
+    fn drop(&mut self) {
+        self.restore();
     }
 }
 
@@ -252,7 +348,10 @@ fn normalize_shell(value: &str, base_type: &str) -> SimardResult<String> {
     Ok(shell.to_string())
 }
 
-fn resolve_working_directory(path: Option<&Path>, base_type: &str) -> SimardResult<PathBuf> {
+pub(crate) fn resolve_working_directory(
+    path: Option<&Path>,
+    base_type: &str,
+) -> SimardResult<PathBuf> {
     let cwd = match path {
         Some(path) if path.is_absolute() => path.to_path_buf(),
         Some(path) => std::env::current_dir()
@@ -285,130 +384,245 @@ fn run_terminal_script(
     spec: &TerminalTurnSpec,
     working_directory: &Path,
 ) -> SimardResult<String> {
-    let launch_command = format!("{} --noprofile --norc -i", spec.shell);
-    let transcript_path = unique_transcript_path("transcript");
-    let _transcript_guard = TranscriptGuard::new(transcript_path.clone());
-    let _transcript_file = open_exclusive_temp_file(&transcript_path, base_type)?;
-    let mut child = Command::new(PTY_LAUNCHER)
-        .arg("-qefc")
-        .arg(&launch_command)
-        .arg(&transcript_path)
-        .current_dir(working_directory)
-        .env("TERM", "dumb")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| SimardError::AdapterInvocationFailed {
-            base_type: base_type.to_string(),
-            reason: format!("failed to launch local PTY shell via '{PTY_LAUNCHER}': {error}"),
-        })?;
+    let _workflow_restore_guards =
+        capture_workflow_restore_guards_for_steps(base_type, &spec.steps, working_directory)?;
+    let mut session = PtyTerminalSession::launch(base_type, &spec.shell, working_directory)?;
+    for step in &spec.steps {
+        match step {
+            TerminalStep::Input(command) => session.send_input(command)?,
+            TerminalStep::WaitFor(expected) => {
+                match session.wait_for_output(expected, spec.wait_timeout)? {
+                    TerminalWaitStatus::Satisfied => {}
+                    TerminalWaitStatus::ExitedEarly(status) => {
+                        return Err(SimardError::AdapterInvocationFailed {
+                            base_type: base_type.to_string(),
+                            reason: format!(
+                                "terminal-shell session exited with status {status} before expected output '{expected}' appeared"
+                            ),
+                        });
+                    }
+                    TerminalWaitStatus::TimedOut => {
+                        return Err(SimardError::AdapterInvocationFailed {
+                            base_type: base_type.to_string(),
+                            reason: format!(
+                                "terminal-shell did not emit expected output '{expected}' within {}s",
+                                spec.wait_timeout.as_secs()
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
 
-    {
-        let mut stdin = child
+    let capture = session.finish()?;
+    if !capture.exit_status.success() {
+        return Err(SimardError::AdapterInvocationFailed {
+            base_type: base_type.to_string(),
+            reason: format!(
+                "terminal-shell session exited with status {}",
+                capture.exit_status
+            ),
+        });
+    }
+
+    Ok(capture.transcript)
+}
+
+impl PtyTerminalSession {
+    pub(crate) fn launch(
+        base_type: &str,
+        shell: &str,
+        working_directory: &Path,
+    ) -> SimardResult<Self> {
+        let launch_command = format!("{shell} --noprofile --norc -i");
+        Self::launch_command(base_type, &launch_command, working_directory)
+    }
+
+    pub(crate) fn launch_command(
+        base_type: &str,
+        launch_command: &str,
+        working_directory: &Path,
+    ) -> SimardResult<Self> {
+        let transcript_path = unique_transcript_path("transcript");
+        let transcript_guard = TranscriptGuard::new(transcript_path.clone());
+        let _transcript_file = open_exclusive_temp_file(&transcript_path, base_type)?;
+        let workflow_restore_guards =
+            capture_workflow_restore_guards(base_type, launch_command, working_directory)?;
+        let mut child = Command::new(PTY_LAUNCHER)
+            .arg("-qefc")
+            .arg(launch_command)
+            .arg(&transcript_path)
+            .current_dir(working_directory)
+            .env("TERM", "dumb")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| SimardError::AdapterInvocationFailed {
+                base_type: base_type.to_string(),
+                reason: format!("failed to launch local PTY shell via '{PTY_LAUNCHER}': {error}"),
+            })?;
+        let stdin = child
             .stdin
             .take()
             .ok_or_else(|| SimardError::AdapterInvocationFailed {
                 base_type: base_type.to_string(),
                 reason: "terminal-shell session did not expose stdin".to_string(),
             })?;
-        for step in &spec.steps {
-            match step {
-                TerminalStep::Input(command) => {
-                    writeln!(stdin, "{command}").map_err(|error| {
-                        SimardError::AdapterInvocationFailed {
-                            base_type: base_type.to_string(),
-                            reason: format!("failed to write terminal command input: {error}"),
-                        }
-                    })?;
-                    stdin
-                        .flush()
-                        .map_err(|error| SimardError::AdapterInvocationFailed {
-                            base_type: base_type.to_string(),
-                            reason: format!("failed to flush terminal command input: {error}"),
-                        })?;
-                }
-                TerminalStep::WaitFor(expected) => wait_for_transcript(
-                    base_type,
-                    &mut child,
-                    &transcript_path,
-                    expected,
-                    spec.wait_timeout,
-                )?,
-            }
-        }
-    }
 
-    let output =
-        child
-            .wait_with_output()
-            .map_err(|error| SimardError::AdapterInvocationFailed {
-                base_type: base_type.to_string(),
-                reason: format!("terminal-shell session failed while waiting for output: {error}"),
-            })?;
-
-    if !output.status.success() {
-        return Err(SimardError::AdapterInvocationFailed {
+        Ok(Self {
             base_type: base_type.to_string(),
-            reason: format!(
-                "terminal-shell session exited with status {}",
-                output.status
-            ),
-        });
+            child,
+            stdin: Some(BufWriter::new(stdin)),
+            transcript_path,
+            transcript_guard,
+            _workflow_restore_guards: workflow_restore_guards,
+            final_status: None,
+        })
     }
 
-    fs::read_to_string(&transcript_path).map_err(|error| SimardError::AdapterInvocationFailed {
-        base_type: base_type.to_string(),
-        reason: format!(
-            "failed to read terminal transcript '{}': {error}",
-            transcript_path.display()
-        ),
-    })
-}
+    pub(crate) fn send_input(&mut self, command: &str) -> SimardResult<()> {
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| SimardError::AdapterInvocationFailed {
+                base_type: self.base_type.clone(),
+                reason: "terminal-shell session stdin is already closed".to_string(),
+            })?;
+        writeln!(stdin, "{command}").map_err(|error| SimardError::AdapterInvocationFailed {
+            base_type: self.base_type.clone(),
+            reason: format!("failed to write terminal command input: {error}"),
+        })?;
+        stdin
+            .flush()
+            .map_err(|error| SimardError::AdapterInvocationFailed {
+                base_type: self.base_type.clone(),
+                reason: format!("failed to flush terminal command input: {error}"),
+            })
+    }
 
-fn wait_for_transcript(
-    base_type: &str,
-    child: &mut std::process::Child,
-    transcript_path: &Path,
-    expected: &str,
-    timeout: Duration,
-) -> SimardResult<()> {
-    let start = Instant::now();
-    loop {
-        if fs::read_to_string(transcript_path)
-            .map(|transcript| transcript.contains(expected))
-            .unwrap_or(false)
-        {
-            return Ok(());
+    pub(crate) fn wait_for_output(
+        &mut self,
+        expected: &str,
+        timeout: Duration,
+    ) -> SimardResult<TerminalWaitStatus> {
+        let start = Instant::now();
+        loop {
+            if self
+                .read_transcript()
+                .map(|transcript| transcript.contains(expected))
+                .unwrap_or(false)
+            {
+                return Ok(TerminalWaitStatus::Satisfied);
+            }
+
+            if let Some(status) = self.poll_status()? {
+                return Ok(TerminalWaitStatus::ExitedEarly(status));
+            }
+
+            if start.elapsed() >= timeout {
+                return Ok(TerminalWaitStatus::TimedOut);
+            }
+
+            thread::sleep(Duration::from_millis(50));
         }
+    }
 
-        if let Some(status) =
-            child
+    pub(crate) fn read_transcript(&self) -> SimardResult<String> {
+        fs::read_to_string(&self.transcript_path).map_err(|error| {
+            SimardError::AdapterInvocationFailed {
+                base_type: self.base_type.clone(),
+                reason: format!(
+                    "failed to read terminal transcript '{}': {error}",
+                    self.transcript_path.display()
+                ),
+            }
+        })
+    }
+
+    pub(crate) fn terminate(&mut self) -> SimardResult<()> {
+        self.close_stdin()?;
+
+        if self.final_status.is_none() && self.poll_status()?.is_none() {
+            self.child
+                .kill()
+                .map_err(|error| SimardError::AdapterInvocationFailed {
+                    base_type: self.base_type.clone(),
+                    reason: format!("failed to stop local PTY shell session: {error}"),
+                })?;
+            self.final_status =
+                Some(
+                    self.child
+                        .wait()
+                        .map_err(|error| SimardError::AdapterInvocationFailed {
+                            base_type: self.base_type.clone(),
+                            reason: format!("failed to reap local PTY shell session: {error}"),
+                        })?,
+                );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish(mut self) -> SimardResult<TerminalSessionCapture> {
+        if self.final_status.is_none() {
+            self.close_stdin()?;
+        }
+        let exit_status = match self.final_status.take() {
+            Some(status) => status,
+            None => self
+                .child
+                .wait()
+                .map_err(|error| SimardError::AdapterInvocationFailed {
+                    base_type: self.base_type.clone(),
+                    reason: format!(
+                        "terminal-shell session failed while waiting for output: {error}"
+                    ),
+                })?,
+        };
+        let transcript = self.read_transcript()?;
+        let _ = &self.transcript_guard;
+        Ok(TerminalSessionCapture {
+            transcript,
+            exit_status,
+        })
+    }
+
+    pub(crate) fn status(&mut self) -> SimardResult<Option<ExitStatus>> {
+        self.poll_status()
+    }
+
+    fn close_stdin(&mut self) -> SimardResult<()> {
+        if let Some(mut stdin) = self.stdin.take() {
+            stdin
+                .flush()
+                .map_err(|error| SimardError::AdapterInvocationFailed {
+                    base_type: self.base_type.clone(),
+                    reason: format!(
+                        "failed to flush terminal command input before completion: {error}"
+                    ),
+                })?;
+            drop(stdin);
+        }
+        Ok(())
+    }
+
+    fn poll_status(&mut self) -> SimardResult<Option<ExitStatus>> {
+        if let Some(status) = self.final_status {
+            return Ok(Some(status));
+        }
+        let status =
+            self.child
                 .try_wait()
                 .map_err(|error| SimardError::AdapterInvocationFailed {
-                    base_type: base_type.to_string(),
+                    base_type: self.base_type.clone(),
                     reason: format!("failed to poll terminal-shell session state: {error}"),
-                })?
-        {
-            return Err(SimardError::AdapterInvocationFailed {
-                base_type: base_type.to_string(),
-                reason: format!(
-                    "terminal-shell session exited with status {status} before expected output '{expected}' appeared"
-                ),
-            });
+                })?;
+        if let Some(status) = status {
+            self.final_status = Some(status);
+            return Ok(Some(status));
         }
-
-        if start.elapsed() >= timeout {
-            return Err(SimardError::AdapterInvocationFailed {
-                base_type: base_type.to_string(),
-                reason: format!(
-                    "terminal-shell did not emit expected output '{expected}' within {}s",
-                    timeout.as_secs()
-                ),
-            });
-        }
-
-        thread::sleep(Duration::from_millis(50));
+        Ok(None)
     }
 }
 
@@ -421,6 +635,54 @@ fn unique_transcript_path(label: &str) -> PathBuf {
         "simard-terminal-shell-{label}-{}-{nanos}.log",
         std::process::id()
     ))
+}
+
+fn capture_workflow_restore_guards(
+    base_type: &str,
+    launch_command: &str,
+    working_directory: &Path,
+) -> SimardResult<Vec<WorkflowRestoreGuard>> {
+    if !is_amplihack_copilot_command(launch_command) {
+        return Ok(Vec::new());
+    }
+
+    [
+        ".claude/context/PROJECT.md",
+        ".claude/context/PROJECT.md.bak",
+    ]
+    .into_iter()
+    .map(|relative_path| {
+        WorkflowRestoreGuard::capture(working_directory.join(relative_path), base_type)
+    })
+    .collect()
+}
+
+fn capture_workflow_restore_guards_for_steps(
+    base_type: &str,
+    steps: &[TerminalStep],
+    working_directory: &Path,
+) -> SimardResult<Vec<WorkflowRestoreGuard>> {
+    if !steps.iter().any(|step| match step {
+        TerminalStep::Input(command) => is_amplihack_copilot_command(command),
+        TerminalStep::WaitFor(_) => false,
+    }) {
+        return Ok(Vec::new());
+    }
+
+    [
+        ".claude/context/PROJECT.md",
+        ".claude/context/PROJECT.md.bak",
+    ]
+    .into_iter()
+    .map(|relative_path| {
+        WorkflowRestoreGuard::capture(working_directory.join(relative_path), base_type)
+    })
+    .collect()
+}
+
+fn is_amplihack_copilot_command(launch_command: &str) -> bool {
+    let mut parts = launch_command.split_whitespace();
+    matches!(parts.next(), Some("amplihack")) && matches!(parts.next(), Some("copilot"))
 }
 
 fn open_exclusive_temp_file(path: &Path, base_type: &str) -> SimardResult<File> {
@@ -442,8 +704,9 @@ fn open_exclusive_temp_file(path: &Path, base_type: &str) -> SimardResult<File> 
         })
 }
 
-fn transcript_preview(transcript: &str) -> String {
-    let mut normalized = transcript_content_lines(transcript).join(" | ");
+pub(crate) fn transcript_preview(transcript: &str) -> String {
+    let sanitized = sanitize_terminal_text(transcript);
+    let mut normalized = transcript_content_lines(&sanitized).join(" | ");
 
     if normalized.len() > 512 {
         normalized.truncate(512);
@@ -453,7 +716,7 @@ fn transcript_preview(transcript: &str) -> String {
     normalized
 }
 
-fn terminal_step_evidence(steps: &[TerminalStep]) -> Vec<String> {
+pub(crate) fn terminal_step_evidence(steps: &[TerminalStep]) -> Vec<String> {
     steps
         .iter()
         .enumerate()
@@ -467,7 +730,7 @@ fn terminal_step_evidence(steps: &[TerminalStep]) -> Vec<String> {
         .collect()
 }
 
-fn terminal_checkpoint_evidence(steps: &[TerminalStep]) -> Vec<String> {
+pub(crate) fn terminal_checkpoint_evidence(steps: &[TerminalStep]) -> Vec<String> {
     steps
         .iter()
         .filter_map(|step| match step {
@@ -485,7 +748,10 @@ fn terminal_checkpoint_evidence(steps: &[TerminalStep]) -> Vec<String> {
         .collect()
 }
 
-fn terminal_last_output_line(transcript: &str, steps: &[TerminalStep]) -> Option<String> {
+pub(crate) fn terminal_last_output_line(
+    transcript: &str,
+    steps: &[TerminalStep],
+) -> Option<String> {
     let input_commands = steps
         .iter()
         .filter_map(|step| match step {
@@ -518,26 +784,26 @@ fn is_meaningful_terminal_output(line: &str, input_commands: &[String]) -> bool 
     })
 }
 
-fn transcript_content_lines(transcript: &str) -> Vec<&str> {
-    transcript
-        .lines()
-        .map(str::trim)
-        .filter(|line| {
-            !line.is_empty()
-                && !line.starts_with("Script started on ")
-                && !line.starts_with("Script done on ")
-        })
-        .collect()
+pub(crate) fn transcript_content_lines_iter(transcript: &str) -> impl Iterator<Item = &str> + '_ {
+    transcript.lines().map(str::trim).filter(|line| {
+        !line.is_empty()
+            && !line.starts_with("Script started on ")
+            && !line.starts_with("Script done on ")
+    })
 }
 
-fn render_terminal_step(step: &TerminalStep) -> String {
+pub(crate) fn transcript_content_lines(transcript: &str) -> Vec<&str> {
+    transcript_content_lines_iter(transcript).collect()
+}
+
+pub(crate) fn render_terminal_step(step: &TerminalStep) -> String {
     match step {
         TerminalStep::Input(command) => format!("input: {command}"),
         TerminalStep::WaitFor(expected) => format!("wait-for: {expected}"),
     }
 }
 
-fn compact_terminal_evidence_value(raw: &str, limit: usize) -> String {
+pub(crate) fn compact_terminal_evidence_value(raw: &str, limit: usize) -> String {
     let mut normalized = sanitize_terminal_text(raw)
         .replace('\n', "\\n")
         .replace('\t', "\\t");
@@ -551,8 +817,10 @@ fn compact_terminal_evidence_value(raw: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        TerminalStep, TerminalTurnSpec, compact_terminal_evidence_value, normalize_shell,
-        terminal_checkpoint_evidence, terminal_last_output_line, terminal_step_evidence,
+        TerminalStep, TerminalTurnSpec, WorkflowRestoreGuard,
+        capture_workflow_restore_guards_for_steps, compact_terminal_evidence_value,
+        is_amplihack_copilot_command, normalize_shell, terminal_checkpoint_evidence,
+        terminal_last_output_line, terminal_step_evidence, transcript_preview,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -653,6 +921,18 @@ mod tests {
     }
 
     #[test]
+    fn transcript_preview_redacts_secret_like_lines() {
+        let preview = transcript_preview(
+            "Script started on 2026-03-30\nAuthorization: Bearer top-secret\nplain output\ntoken=abc123\nScript done on 2026-03-30",
+        );
+
+        assert_eq!(
+            preview,
+            "Authorization: [REDACTED] | plain output | token=[REDACTED]"
+        );
+    }
+
+    #[test]
     fn normalize_shell_rejects_empty_or_whitespace_only_values() {
         for shell in ["", "   ", "\t", "/usr/bin/bash whoami"] {
             assert_invalid_shell(
@@ -731,6 +1011,74 @@ mod tests {
         .expect("terminal turn should parse");
 
         assert_eq!(spec.wait_timeout, std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn detects_amplihack_copilot_commands_for_workflow_restore() {
+        assert!(is_amplihack_copilot_command("amplihack copilot"));
+        assert!(is_amplihack_copilot_command(
+            "amplihack copilot -- --version"
+        ));
+        assert!(!is_amplihack_copilot_command("amplihack status"));
+        assert!(!is_amplihack_copilot_command("printf 'amplihack copilot'"));
+    }
+
+    #[test]
+    fn detects_amplihack_copilot_input_steps_for_workflow_restore() {
+        let root = unique_test_path("workflow-restore-step-root");
+        fs::create_dir(&root).unwrap();
+        let _root_guard = TempPathGuard::directory(root.clone());
+
+        let guards = capture_workflow_restore_guards_for_steps(
+            "terminal-shell",
+            &[
+                TerminalStep::Input("amplihack copilot".to_string()),
+                TerminalStep::Input("/exit".to_string()),
+            ],
+            &root,
+        )
+        .unwrap();
+        assert_eq!(guards.len(), 2);
+
+        let no_guards = capture_workflow_restore_guards_for_steps(
+            "terminal-shell",
+            &[TerminalStep::Input("printf ready\\n".to_string())],
+            &root,
+        )
+        .unwrap();
+        assert!(no_guards.is_empty());
+    }
+
+    #[test]
+    fn workflow_restore_guard_restores_original_file_contents_on_drop() {
+        let root = unique_test_path("workflow-restore-root");
+        fs::create_dir(&root).unwrap();
+        let _root_guard = TempPathGuard::directory(root.clone());
+        let file = root.join("PROJECT.md");
+        let _file_guard = TempPathGuard::file(file.clone());
+        fs::write(&file, "original\n").unwrap();
+
+        {
+            let _guard = WorkflowRestoreGuard::capture(file.clone(), "terminal-shell").unwrap();
+            fs::write(&file, "mutated\n").unwrap();
+        }
+
+        assert_eq!(fs::read_to_string(&file).unwrap(), "original\n");
+    }
+
+    #[test]
+    fn workflow_restore_guard_removes_created_file_when_snapshot_was_missing() {
+        let root = unique_test_path("workflow-restore-missing");
+        fs::create_dir(&root).unwrap();
+        let _root_guard = TempPathGuard::directory(root.clone());
+        let file = root.join("PROJECT.md.bak");
+
+        {
+            let _guard = WorkflowRestoreGuard::capture(file.clone(), "terminal-shell").unwrap();
+            fs::write(&file, "created-by-launcher\n").unwrap();
+        }
+
+        assert!(!file.exists());
     }
 
     #[test]

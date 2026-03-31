@@ -1,6 +1,6 @@
 ---
 title: Simard CLI reference
-description: Reference for the shipped `simard` command tree, the shared-state-root bridge between bounded terminal sessions and the repo-grounded engineer loop, the `engineer read` audit companion, and the legacy compatibility binaries that still expose selected older runtime behaviors.
+description: Reference for the shipped `simard` command tree, the shared-state-root bridge between terminal sessions and the repo-grounded engineer loop, the `engineer read` audit companion, the shipped bounded `engineer copilot-submit` contract, and the legacy compatibility binaries that still expose selected older runtime behaviors.
 last_updated: 2026-03-30
 review_schedule: as-needed
 owner: simard
@@ -37,6 +37,7 @@ simard
 |  |- terminal-recipe-list
 |  |- terminal-recipe-show <recipe-name>
 |  |- terminal-recipe <topology> <recipe-name> [state-root]
+|  |- copilot-submit <topology> [state-root] [--json]
 |  `- terminal-read <topology> [state-root]
 |- meeting
 |  |- run <base-type> <topology> <structured-objective> [state-root]
@@ -82,6 +83,8 @@ Bare `simard` prints this operator surface directly.
 | `simard bootstrap run ...` | `simard_operator_probe bootstrap-run ...` |
 | `simard gym ...` | `simard-gym ...` |
 
+Shipped terminal surface: `simard engineer copilot-submit <topology> [state-root] [--json]`. It has no compatibility surface and is documented later on this page as the bounded one-shot local Copilot submission contract.
+
 ## Shared state-root contract
 
 When a command accepts `[state-root]`, Simard validates it before any persistence write or read that depends on durable operator state.
@@ -96,10 +99,12 @@ Safe state roots are canonicalized once and then reused for the rest of the comm
 
 ## Terminal-to-engineer bridge
 
-The `simard engineer ...` namespace now exposes two distinct operator-visible surfaces:
+The `simard engineer ...` namespace now exposes two distinct shipped operator-visible surfaces:
 
 - `engineer terminal`, `engineer terminal-file`, `engineer terminal-recipe`, and `engineer terminal-read` are bounded local terminal session surfaces
 - `engineer run` and `engineer read` are the repo-grounded engineer loop and its read-only audit companion
+
+`engineer copilot-submit` now sits on the terminal-session side of that boundary as a stricter one-shot local Copilot submission surface.
 
 The bridge between them is explicit and local-only:
 
@@ -231,7 +236,7 @@ Key behavior:
 
 - selects the `terminal-shell` base type explicitly
 - accepts bounded terminal objectives with `command:`/`input:` lines plus `wait-for:` or `expect:` checkpoints so a run can pause for expected output before sending the next line
-- preserves truthful adapter reflection and now renders the terminal audit trail directly on the run surface, including ordered terminal steps, satisfied checkpoints, the last visible output line, and a sanitized transcript preview
+- preserves truthful adapter reflection and now renders the terminal audit trail directly on the run surface, including ordered terminal steps, observed checkpoints, the last visible output line, and a sanitized transcript preview
 - prints explicit next-step guidance for continuing into `engineer run` with the same `state-root`
 - persists `latest_terminal_handoff.json` and compatibility `latest_handoff.json` under the shared root
 - fails visibly for unsupported topology and invalid state-root inputs
@@ -288,7 +293,7 @@ Runs one of the built-in named terminal session recipes through the same bounded
 Behavior:
 
 - loads a named recipe from `prompt_assets/simard/terminal_recipes/*.simard-terminal`
-- currently ships `foundation-check` for the minimal bounded PTY sanity path, `copilot-status-check` for a bounded local Copilot wrapper availability probe, and `copilot-prompt-check` for a bounded real interactive prompt-start-and-exit path
+- currently ships `foundation-check` for the minimal bounded PTY sanity path, `copilot-status-check` for a bounded local Copilot wrapper availability probe, and `copilot-prompt-check` for a bounded real interactive prompt-start-and-exit path; the stricter one-shot task submission slice is the dedicated `engineer copilot-submit` command documented below
 - preserves the same structured terminal audit trail, mode-scoped terminal handoff, and engineer-next-step guidance as the other terminal session surfaces
 - fails explicitly when the requested recipe name is unknown or invalid
 - `copilot-status-check` is intentionally narrow: it only runs the fixed local argv `amplihack copilot -- --version`
@@ -307,6 +312,60 @@ simard engineer terminal-recipe-show copilot-status-check
 simard engineer terminal-recipe single-process foundation-check "$STATE_ROOT"
 ```
 
+### `simard engineer copilot-submit <topology> [state-root] [--json]`
+
+This command ships as one bounded truthful local Copilot task-submission attempt that reuses the same `terminal-shell` PTY substrate as the other terminal surfaces.
+
+Behavior:
+
+- launch the real local argv `amplihack copilot` in the current repository context only
+- use the checked-in flow contract at `prompt_assets/simard/terminal_recipes/copilot-submit.json`
+- accept no `workspace-root`, no free-form objective, and no arbitrary task text; the submitted payload must stay fixed and built in
+- restore workflow-only `.claude/context/PROJECT.md` and `.claude/context/PROJECT.md.bak` to their pre-launch contents when the Copilot wrapper rewrites them, so truthful terminal probing does not leave repo dirt behind
+- validate `topology` and `[state-root]` with the same rules as the other terminal session surfaces; the first implementation only needs `single-process`
+- require the exact ordered visible startup checkpoints from the flow asset, including `Describe a task to get started.` and the guidance line `Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts`
+- submit the fixed payload once after startup checkpoints are satisfied, then observe the visible submit hint from the checked-in flow contract
+- declare `success` only when the live PTY transcript satisfies a supportable checked-in post-submit contract after terminal control sequences are stripped from the visible text; the current shipped flow intentionally fails closed before claiming that because the real UI exposes `ctrl+s run command` rather than a truthful newline submission path
+- return `unsupported` when the Copilot process launched but the visible prompt flow exited early, drifted, stalled after partial visible startup evidence, required folder trust confirmation, required the visible submit hotkey Simard cannot drive through this line-input PTY surface, or surfaced wrapper-specific launch errors
+- reserve `runtime-failure` for Simard-side command failures such as invalid inputs, local launch failures, or persistence/readback failures before a trustworthy submit result can be claimed
+- classify startup timeouts after partial visible startup evidence as `unsupported` with `missing-startup-banner`, `missing-guidance-checkpoint`, `workflow-wrapper-noise`, or `unexpected-startup-text`; only zero-evidence startup timeouts stay `runtime-failure`
+- persist the same terminal-scoped handoff artifacts as the other terminal surfaces on `success` and on any `unsupported` result that captured truthful terminal evidence; a `runtime-failure` may leave partial audit data but must not invent a complete submit summary
+- reserve `reason_code` for `unsupported`; `success` carries none, and `runtime-failure` remains an explicit CLI error unless the implementation later publishes a separate failure-code contract
+- keep `--json` as a formatting choice only; it must not broaden capability or relax checkpoint matching
+- keep `copilot-status-check` and `copilot-prompt-check` unchanged as the narrower probe surfaces
+- avoid GitHub auth inspection, arbitrary slash-command support, worktree creation or reuse, and any claim of general Copilot orchestration beyond this one checked-in flow
+
+Explicit unsupported reason codes:
+
+- `process-exited-early`
+- `unexpected-startup-text`
+- `missing-startup-banner`
+- `missing-guidance-checkpoint`
+- `trust-confirmation-required`
+- `submit-hotkey-required`
+- `copilot-wrapper-error`
+- `workflow-wrapper-noise`
+
+Invocation:
+
+```bash
+simard engineer copilot-submit single-process "$STATE_ROOT"
+simard engineer copilot-submit single-process "$STATE_ROOT" --json
+```
+
+The eventual operator-visible and `--json` outputs should make these facts explicit without inventing broader capability:
+
+- the mode boundary is terminal
+- the selected base type is `terminal-shell`
+- the checked-in flow asset and fixed payload identifier are visible
+- the final outcome is `success`, `unsupported`, or `runtime-failure`, but the current shipped flow is expected to return `unsupported` until Simard can truthfully drive the observed submit gesture
+- `ordered_steps` records only the launch, waits, and fixed payload step the PTY path actually reached before the flow stopped; startup drift must not pretend the payload step ran
+- any `unsupported` result carries one of the explicit reason codes above
+- the ordered steps, observed checkpoints, last meaningful output line, and transcript preview remain auditable
+- later `terminal-read` and `engineer run` surfaces can point back to the same terminal-scoped handoff artifact when truthful continuity exists
+
+If you only need local wrapper availability or prompt reachability, keep using `copilot-status-check` or `copilot-prompt-check` instead.
+
 ### `simard engineer terminal-read <topology> [state-root]`
 
 This is the read-only audit companion to `simard engineer terminal`. It inspects the latest persisted terminal session state without replaying commands or resuming the PTY session.
@@ -319,6 +378,7 @@ Behavior:
 - prefers `latest_terminal_handoff.json` as the authoritative terminal readback artifact and falls back to `latest_handoff.json` only when the terminal-scoped handoff is absent
 - prints which handoff artifact was used so terminal readback stays operator-visible
 - renders mode boundary, terminal shell, working directory, command count, wait count, ordered terminal steps, satisfied wait checkpoints, last output line, transcript preview, and engineer-next-step guidance in stable operator-visible order
+- when `engineer copilot-submit` persisted truthful audit data, the same readback exposes the Copilot flow asset, submit outcome, fixed payload identifier, and any explicit unsupported reason code
 - strips terminal control sequences and secret-shaped values from displayed output before printing it
 - fails explicitly for invalid `state-root` values and for missing, unreadable, or malformed persisted terminal state
 
@@ -741,4 +801,5 @@ Simard fails explicitly for these common operator-facing cases:
 - missing or invalid workspace root
 - missing persisted review state for `review read`
 - nested-worktree or repo-root drift detected during engineer-mode execution
+- planned Copilot submit contract should report `unsupported` with `process-exited-early`, `unexpected-startup-text`, `missing-startup-banner`, `missing-guidance-checkpoint`, `trust-confirmation-required`, `submit-hotkey-required`, `copilot-wrapper-error`, or `workflow-wrapper-noise` when the visible prompt flow drifts after launch
 - structured edit requested on a dirty repo

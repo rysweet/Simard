@@ -97,8 +97,9 @@ Simard should be treated as a focused engineering runtime with five user-visible
 
    Under the `simard engineer ...` namespace, v1 now exposes two distinct operator-visible surfaces that must stay honest about their boundary:
 
-   - `engineer terminal`, `engineer terminal-file`, `engineer terminal-recipe`, and `engineer terminal-read` are bounded local terminal session surfaces with checkpointed transcript audit
+   - `engineer terminal`, `engineer terminal-file`, `engineer terminal-recipe`, and `engineer terminal-read` are the shipped bounded local terminal session surfaces with checkpointed transcript audit
    - `engineer run` and `engineer read` are the separate repo-grounded engineer loop and its read-only audit companion
+- `engineer copilot-submit` now sits on the terminal-session side of that boundary rather than blurring into engineer-mode orchestration
 
    Reusing the same explicit `state-root` bridges those surfaces through local persisted summaries only. That bridge must never imply hidden orchestration, automatic continuation, or unsupported external Copilot/amplihack execution.
 
@@ -260,6 +261,9 @@ The current shipped v1 engineer-loop slice stays intentionally narrow:
 - Simard now also ships named built-in terminal recipes so operators can discover, inspect, and rerun common interactive session flows without inventing ad hoc shell strings or temp files each time
 - the shipped `copilot-status-check` recipe is a truthful bounded local status probe: it only runs `amplihack copilot -- --version`, requires the `GitHub Copilot CLI` version signal, and fails closed instead of simulating an interactive Copilot session
 - the shipped `copilot-prompt-check` recipe is the first truthful interactive Copilot slice: it starts the real `amplihack copilot` CLI, waits for the visible prompt guidance text, sends `/exit`, and requires the resume hint before success
+- the shipped `engineer copilot-submit` surface is the bounded truthful local Copilot slice: it launches the real `amplihack copilot` CLI through the same PTY path, requires the exact ordered visible startup checkpoints from the checked-in flow contract, records the visible submit hint when it appears, returns `unsupported` when the live flow requires trust confirmation, a non-line-input submit gesture, wrapper-specific flags, or other prompt drift, and reserves `runtime-failure` for Simard-side execution failures instead of simulating Copilot behavior
+- Copilot-backed PTY launches must restore workflow-only `.claude/context/PROJECT.md` and `.claude/context/PROJECT.md.bak` files to their pre-launch contents so wrapper setup noise does not masquerade as repository work
+- `engineer copilot-submit` must not accept arbitrary task text, must not inspect remote auth state, must not create or reuse worktrees, and must not claim general Copilot orchestration beyond that one checked-in flow
 - those terminal surfaces are now an explicit on-ramp into the repo-grounded engineer loop when operators reuse the same `state-root`, but the later engineer run must still inspect the repository, form its own short plan, execute bounded local work, and verify explicitly
 - the bridge is descriptive continuity only: terminal-derived working directory, transcript snippets, or recipe metadata may inform operator readback, but they must not become authority for engineer action selection or workspace targeting
 
@@ -283,7 +287,7 @@ When one explicit `state-root` is reused across the terminal session surfaces an
 
 The concrete v1 handoff contract is:
 
-- `latest_terminal_handoff.json` is authoritative for `engineer terminal`, `engineer terminal-file`, `engineer terminal-recipe`, and `engineer terminal-read`
+- `latest_terminal_handoff.json` is authoritative for `engineer terminal`, `engineer terminal-file`, `engineer terminal-recipe`, `engineer copilot-submit`, and `engineer terminal-read`
 - `latest_engineer_handoff.json` is authoritative for `engineer run` and `engineer read`
 - `latest_handoff.json` exists only as a compatibility fallback when the relevant mode-scoped handoff file is absent
 - mode-scoped readback must report which artifact it used and render in a deterministic operator-visible order: runtime header, handoff session summary, adapter details, shell or repo details, action/checkpoint audit, transcript or continuity summary, explicit next-step guidance, durable record counts

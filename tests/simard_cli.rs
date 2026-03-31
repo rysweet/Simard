@@ -51,6 +51,10 @@ fn write_json(path: impl AsRef<Path>, value: &Value) {
     .expect("artifact should be written");
 }
 
+fn load_stdout_json(output: &Output) -> Value {
+    serde_json::from_slice(&output.stdout).expect("command stdout should deserialize as JSON")
+}
+
 fn replace_handoff_evidence_detail(handoff: &mut Value, prefix: &str, replacement: &str) {
     let evidence_records = handoff["evidence_records"]
         .as_array_mut()
@@ -304,6 +308,173 @@ printf ' %s' "$@" >&2
 printf '\n' >&2
 exit 64
 "##
+}
+
+fn fake_amplihack_with_interactive_copilot_workflow_contamination_body() -> &'static str {
+    r##"#!/usr/bin/env bash
+set -euo pipefail
+if [ "$#" -eq 3 ] && [ "$1" = "copilot" ] && [ "$2" = "--" ] && [ "$3" = "--version" ]; then
+  printf 'GitHub Copilot CLI 9.9.9-test.\n'
+  exit 0
+fi
+if [ "$#" -eq 1 ] && [ "$1" = "copilot" ]; then
+  mkdir -p .claude/context
+  printf 'workflow placeholder\n' > .claude/context/PROJECT.md
+  printf 'workflow placeholder backup\n' > .claude/context/PROJECT.md.bak
+  printf 'GitHub Copilot v1.0.14-test.\n'
+  printf 'Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts\n'
+  while IFS= read -r line; do
+    if [ "$line" = "/exit" ]; then
+      printf 'Resume any session with copilot --resume\n'
+      exit 0
+    fi
+    printf 'Unknown command: %s\n' "$line"
+  done
+  exit 0
+fi
+printf 'unexpected args:' >&2
+printf ' %s' "$@" >&2
+printf '\n' >&2
+exit 64
+"##
+}
+
+fn fake_amplihack_with_copilot_submit_body(case_name: &str) -> String {
+    let submit_flow = match case_name {
+        "submit-hotkey-required" => {
+            r#"  printf 'Describe a task to get started.\n'
+  printf 'Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts\n'
+  while IFS= read -r line; do
+    if [ -z "$line" ]; then
+      continue
+    fi
+    if [ "$line" = "/exit" ]; then
+      printf 'Unexpected early exit during task submission\n'
+      exit 9
+    fi
+    printf 'ctrl+s run command\n'
+    exit 0
+  done
+  printf 'No task payload received\n'
+  exit 10"#
+        }
+        "submit-hotkey-required-ansi" => {
+            r#"  printf '\033[36mDescribe a task to get started.\033[0m\n'
+  printf '\033[32mType @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts\033[0m\n'
+  while IFS= read -r line; do
+    if [ -z "$line" ]; then
+      continue
+    fi
+    printf '\033[33mctrl+s run command\033[0m\n'
+    exit 0
+  done
+  printf 'No task payload received\n'
+  exit 10"#
+        }
+        "process-exited-early" => {
+            r#"  printf 'Describe a task to get started.\n'
+  printf 'Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts\n'
+  exit 0"#
+        }
+        "unexpected-startup-text" => {
+            r#"  printf 'Different startup guidance\n'
+  exit 0"#
+        }
+        "missing-startup-banner" => {
+            r#"  printf 'Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts\n'
+  exit 0"#
+        }
+        "missing-guidance-checkpoint" => {
+            r#"  printf 'Describe a task to get started.\n'
+  exit 0"#
+        }
+        "startup-reversed-order" => {
+            r#"  printf 'Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts\n'
+  printf 'Describe a task to get started.\n'
+  exit 0"#
+        }
+        "guidance-checkpoint-drift" => {
+            r#"  printf 'Describe a task to get started.\n'
+  printf 'Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts (beta)\n'
+  exit 0"#
+        }
+        "guidance-checkpoint-drift-awaits-input" => {
+            r#"  printf 'Describe a task to get started.\n'
+  printf 'Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts (beta)\n'
+  while IFS= read -r line; do
+    if [ -z "$line" ]; then
+      continue
+    fi
+    if [ -n "${SIMARD_FAKE_COPILOT_INPUT_LOG:-}" ]; then
+      printf '%s\n' "$line" >> "$SIMARD_FAKE_COPILOT_INPUT_LOG"
+    fi
+    exit 91
+  done
+  exit 0"#
+        }
+        "startup-banner-replayed" => {
+            r#"  printf 'Describe a task to get started.\n'
+  printf 'Describe a task to get started.\n'
+  printf 'Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts\n'
+  exit 0"#
+        }
+        "trust-confirmation-required" => {
+            r#"  printf 'Do you trust the files in this folder?\n'
+  exit 0"#
+        }
+        "copilot-wrapper-error" => {
+            r#"  printf "unknown option '--dangerously-skip-permissions'\n"
+  exit 64"#
+        }
+        "submit-hotkey-required-secret-preview" => {
+            r#"  printf 'Describe a task to get started.\n'
+  printf 'Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts\n'
+  while IFS= read -r line; do
+    if [ -z "$line" ]; then
+      continue
+    fi
+    printf 'Authorization: Bearer top-secret-value\n'
+    printf 'token=abc123\n'
+    printf 'ctrl+s run command\n'
+    exit 0
+  done
+  exit 12"#
+        }
+        "submit-hotkey-required-workflow-contamination" => {
+            r#"  mkdir -p .claude/context
+  printf 'workflow placeholder\n' > .claude/context/PROJECT.md
+  printf 'workflow placeholder backup\n' > .claude/context/PROJECT.md.bak
+  printf 'Describe a task to get started.\n'
+  printf 'Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts\n'
+  while IFS= read -r line; do
+    if [ -z "$line" ]; then
+      continue
+    fi
+    printf 'ctrl+s run command\n'
+    exit 0
+  done
+  exit 13"#
+        }
+        other => panic!("unknown fake copilot submit case '{other}'"),
+    };
+
+    format!(
+        r##"#!/usr/bin/env bash
+set -euo pipefail
+if [ "$#" -eq 3 ] && [ "$1" = "copilot" ] && [ "$2" = "--" ] && [ "$3" = "--version" ]; then
+  printf 'GitHub Copilot CLI 9.9.9-test.\n'
+  exit 0
+fi
+if [ "$#" -eq 1 ] && [ "$1" = "copilot" ]; then
+  printf 'GitHub Copilot v1.0.14-test.\n'
+{submit_flow}
+fi
+printf 'unexpected args:' >&2
+printf ' %s' "$@" >&2
+printf '\n' >&2
+exit 64
+"##
+    )
 }
 
 #[test]
@@ -1243,6 +1414,57 @@ fn simard_engineer_terminal_recipe_runs_truthful_copilot_prompt_check_with_probe
 }
 
 #[test]
+fn simard_engineer_terminal_recipe_restores_workflow_only_claude_files_for_copilot_prompt_check() {
+    let fake_bin = TempDirGuard::new("simard-cli-fake-amplihack-interactive-workflow");
+    write_fake_amplihack(
+        fake_bin.path(),
+        fake_amplihack_with_interactive_copilot_workflow_contamination_body(),
+    );
+    let path = path_with_prepend(fake_bin.path());
+    let project_root = TempDirGuard::new("simard-cli-copilot-prompt-workflow-project");
+    std::fs::create_dir_all(project_root.path().join(".claude/context"))
+        .expect("temp project should create .claude/context");
+    std::fs::write(
+        project_root.path().join(".claude/context/PROJECT.md"),
+        "original prompt project context\n",
+    )
+    .expect("temp project should seed PROJECT.md");
+    std::fs::write(
+        project_root.path().join(".claude/context/PROJECT.md.bak"),
+        "original prompt project backup\n",
+    )
+    .expect("temp project should seed PROJECT.md.bak");
+    let state_root = TempDirGuard::new("simard-cli-copilot-prompt-workflow-state");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("terminal-recipe")
+        .arg("single-process")
+        .arg("copilot-prompt-check")
+        .arg(state_root.path())
+        .env("PATH", &path)
+        .current_dir(project_root.path())
+        .output()
+        .expect("simard engineer terminal-recipe copilot-prompt-check workflow path should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        output.status.success(),
+        "copilot-prompt-check should still succeed while restoring workflow-only wrapper file churn:\n{rendered}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(project_root.path().join(".claude/context/PROJECT.md"))
+            .expect("PROJECT.md should remain readable after prompt check"),
+        "original prompt project context\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(project_root.path().join(".claude/context/PROJECT.md.bak"))
+            .expect("PROJECT.md.bak should remain readable after prompt check"),
+        "original prompt project backup\n"
+    );
+}
+
+#[test]
 fn simard_engineer_terminal_recipe_copilot_prompt_check_fails_closed_when_amplihack_is_missing() {
     let empty_bin = TempDirGuard::new("simard-cli-empty-path-interactive");
     let state_root = TempDirGuard::new("simard-cli-copilot-prompt-missing");
@@ -1298,6 +1520,525 @@ fn simard_engineer_terminal_recipe_fails_closed_when_amplihack_is_missing() {
         rendered.contains("required executable 'amplihack' is not available on PATH"),
         "copilot-status-check should preserve the explicit absence detail:\n{rendered}"
     );
+}
+
+#[test]
+fn simard_help_documents_copilot_submit_as_a_dedicated_engineer_surface() {
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("--help")
+        .output()
+        .expect("simard help should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        output.status.success(),
+        "simard help should stay readable while the bounded Copilot submit surface is added:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("engineer copilot-submit <topology> [state-root] [--json]"),
+        "simard help should advertise the dedicated bounded Copilot submit signature:\n{rendered}"
+    );
+}
+
+#[test]
+fn simard_engineer_copilot_submit_rejects_trailing_task_text() {
+    let state_root = TempDirGuard::new("simard-cli-copilot-submit-extra-args");
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("copilot-submit")
+        .arg("single-process")
+        .arg(state_root.path())
+        .arg("free-form-task-text-is-not-allowed")
+        .output()
+        .expect("simard engineer copilot-submit arity validation should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        !output.status.success(),
+        "copilot-submit must fail when callers try to smuggle arbitrary task text through the CLI:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("unexpected trailing arguments")
+            && rendered.contains("free-form-task-text-is-not-allowed"),
+        "copilot-submit should reject extra task text explicitly instead of widening the bounded submit contract:\n{rendered}"
+    );
+}
+
+#[test]
+fn simard_engineer_copilot_submit_returns_machine_readable_unsupported_summary() {
+    let fake_bin = TempDirGuard::new("simard-cli-fake-amplihack-copilot-submit-hotkey");
+    write_fake_amplihack(
+        fake_bin.path(),
+        &fake_amplihack_with_copilot_submit_body("submit-hotkey-required"),
+    );
+    let path = path_with_prepend(fake_bin.path());
+    let state_root = TempDirGuard::new("simard-cli-copilot-submit-hotkey");
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("copilot-submit")
+        .arg("single-process")
+        .arg(state_root.path())
+        .arg("--json")
+        .env("PATH", &path)
+        .output()
+        .expect("simard engineer copilot-submit hotkey path should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        !output.status.success(),
+        "copilot-submit should fail closed when the real visible flow reaches a submit hotkey Simard cannot drive truthfully:\n{rendered}"
+    );
+
+    let payload = load_stdout_json(&output);
+    assert_eq!(payload["selected_base_type"], "terminal-shell");
+    assert_eq!(
+        payload["flow_asset"],
+        "simard/terminal_recipes/copilot-submit.json"
+    );
+    assert_eq!(payload["outcome"], "unsupported");
+    assert_eq!(payload["reason_code"], "submit-hotkey-required");
+    assert_eq!(payload["payload_id"], "simard-local-task-submit-ready-v1");
+    assert!(
+        payload["payload_id"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()),
+        "copilot-submit JSON should expose a non-empty fixed payload identifier:\n{payload}"
+    );
+    assert!(
+        payload["ordered_steps"]
+            .as_array()
+            .is_some_and(|steps| !steps.is_empty()),
+        "copilot-submit JSON should expose the ordered terminal steps it actually executed:\n{payload}"
+    );
+    assert_eq!(
+        payload["ordered_steps"],
+        json!([
+            "launch: amplihack copilot",
+            "wait-for: Describe a task to get started.",
+            "wait-for: Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts",
+            "input: Reply with the text READY and do not run any commands or modify any files.",
+            "wait-for: ctrl+s run command"
+        ])
+    );
+    assert!(
+        payload["observed_checkpoints"]
+            .as_array()
+            .is_some_and(|checkpoints| checkpoints.len() >= 3),
+        "copilot-submit JSON should expose the startup checkpoints plus the visible submit hint it reached before failing closed:\n{payload}"
+    );
+    assert_eq!(payload["last_meaningful_output_line"], "ctrl+s run command");
+    assert!(
+        payload["transcript_preview"]
+            .as_str()
+            .is_some_and(
+                |preview| preview.contains("Describe a task to get started.")
+                    && preview.contains("Type @ to mention files")
+                    && preview.contains("ctrl+s run command")
+            ),
+        "copilot-submit JSON should preserve a sanitized transcript preview anchored in the real visible prompt and submit-hint output:\n{payload}"
+    );
+}
+
+#[test]
+fn simard_engineer_copilot_submit_reports_explicit_unsupported_reason_codes() {
+    let cases = [
+        ("submit-hotkey-required", "submit-hotkey-required"),
+        ("process-exited-early", "process-exited-early"),
+        ("unexpected-startup-text", "unexpected-startup-text"),
+        ("missing-startup-banner", "missing-startup-banner"),
+        ("missing-guidance-checkpoint", "missing-guidance-checkpoint"),
+        ("startup-reversed-order", "unexpected-startup-text"),
+        ("startup-banner-replayed", "unexpected-startup-text"),
+        ("guidance-checkpoint-drift", "missing-guidance-checkpoint"),
+        ("trust-confirmation-required", "trust-confirmation-required"),
+        ("copilot-wrapper-error", "copilot-wrapper-error"),
+    ];
+
+    for (case_name, expected_reason_code) in cases {
+        let fake_bin = TempDirGuard::new(&format!(
+            "simard-cli-fake-amplihack-copilot-submit-{case_name}"
+        ));
+        write_fake_amplihack(
+            fake_bin.path(),
+            &fake_amplihack_with_copilot_submit_body(case_name),
+        );
+        let path = path_with_prepend(fake_bin.path());
+        let state_root = TempDirGuard::new(&format!("simard-cli-copilot-submit-{case_name}"));
+        let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+            .arg("engineer")
+            .arg("copilot-submit")
+            .arg("single-process")
+            .arg(state_root.path())
+            .arg("--json")
+            .env("PATH", &path)
+            .output()
+            .expect("simard engineer copilot-submit unsupported path should launch");
+        let rendered = rendered_output(&output);
+
+        assert!(
+            !output.status.success(),
+            "copilot-submit should fail non-zero when the live Copilot prompt flow is unsupported ({case_name}):\n{rendered}"
+        );
+        assert!(
+            !output.stdout.is_empty(),
+            "unsupported copilot-submit results should still emit machine-readable JSON on stdout ({case_name}):\n{rendered}"
+        );
+
+        let payload = load_stdout_json(&output);
+        assert_eq!(
+            payload["flow_asset"],
+            "simard/terminal_recipes/copilot-submit.json"
+        );
+        assert_eq!(payload["outcome"], "unsupported");
+        assert_eq!(payload["reason_code"], expected_reason_code);
+        assert!(
+            payload["ordered_steps"]
+                .as_array()
+                .is_some_and(|steps| !steps.is_empty()),
+            "unsupported copilot-submit results should still expose the ordered attempted steps:\n{payload}"
+        );
+        assert!(
+            payload["transcript_preview"]
+                .as_str()
+                .is_some_and(|preview| !preview.is_empty()),
+            "unsupported copilot-submit results should keep truthful transcript evidence from the live PTY session:\n{payload}"
+        );
+    }
+}
+
+#[test]
+fn simard_engineer_copilot_submit_redacts_secret_like_transcript_preview_lines() {
+    let fake_bin = TempDirGuard::new("simard-cli-fake-amplihack-copilot-submit-secret-preview");
+    write_fake_amplihack(
+        fake_bin.path(),
+        &fake_amplihack_with_copilot_submit_body("submit-hotkey-required-secret-preview"),
+    );
+    let path = path_with_prepend(fake_bin.path());
+    let state_root = TempDirGuard::new("simard-cli-copilot-submit-secret-preview");
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("copilot-submit")
+        .arg("single-process")
+        .arg(state_root.path())
+        .arg("--json")
+        .env("PATH", &path)
+        .output()
+        .expect("simard engineer copilot-submit secret preview path should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        !output.status.success(),
+        "copilot-submit should still fail closed when the visible flow only reaches a submit hotkey, even if transcript output contains secret-shaped lines that must be redacted:\n{rendered}"
+    );
+
+    let payload = load_stdout_json(&output);
+    assert_eq!(payload["reason_code"], "submit-hotkey-required");
+    let preview = payload["transcript_preview"]
+        .as_str()
+        .expect("copilot-submit JSON should include a transcript preview");
+    assert!(
+        preview.contains("Authorization: [REDACTED]")
+            && preview.contains("token=[REDACTED]")
+            && !preview.contains("top-secret-value")
+            && !preview.contains("abc123"),
+        "copilot-submit transcript preview should redact secret-like output before persisting evidence:\n{payload}"
+    );
+}
+
+#[test]
+fn simard_engineer_copilot_submit_accepts_ansi_decorated_visible_checkpoints() {
+    let fake_bin = TempDirGuard::new("simard-cli-fake-amplihack-copilot-submit-ansi");
+    write_fake_amplihack(
+        fake_bin.path(),
+        &fake_amplihack_with_copilot_submit_body("submit-hotkey-required-ansi"),
+    );
+    let path = path_with_prepend(fake_bin.path());
+    let state_root = TempDirGuard::new("simard-cli-copilot-submit-ansi");
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("copilot-submit")
+        .arg("single-process")
+        .arg(state_root.path())
+        .arg("--json")
+        .env("PATH", &path)
+        .output()
+        .expect("simard engineer copilot-submit ANSI path should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        !output.status.success(),
+        "copilot-submit should still fail closed after terminal sanitization when the visible flow reaches a submit hotkey it cannot drive:\n{rendered}"
+    );
+
+    let payload = load_stdout_json(&output);
+    let preview = payload["transcript_preview"]
+        .as_str()
+        .expect("copilot-submit JSON should include a transcript preview");
+    assert_eq!(payload["outcome"], "unsupported");
+    assert_eq!(payload["reason_code"], "submit-hotkey-required");
+    assert_eq!(payload["last_meaningful_output_line"], "ctrl+s run command");
+    assert!(
+        preview.contains("Describe a task to get started.")
+            && preview.contains("Type @ to mention files")
+            && preview.contains("ctrl+s run command")
+            && !preview.contains('\u{1b}'),
+        "copilot-submit should persist sanitized visible transcript evidence even when the PTY emits ANSI control sequences:\n{payload}"
+    );
+}
+
+#[test]
+fn simard_engineer_copilot_submit_persists_truthful_observed_checkpoints() {
+    let fake_bin = TempDirGuard::new("simard-cli-fake-amplihack-copilot-submit-drift");
+    write_fake_amplihack(
+        fake_bin.path(),
+        &fake_amplihack_with_copilot_submit_body("guidance-checkpoint-drift"),
+    );
+    let path = path_with_prepend(fake_bin.path());
+    let state_root = TempDirGuard::new("simard-cli-copilot-submit-drift");
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("copilot-submit")
+        .arg("single-process")
+        .arg(state_root.path())
+        .arg("--json")
+        .env("PATH", &path)
+        .output()
+        .expect("simard engineer copilot-submit drift path should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        !output.status.success(),
+        "copilot-submit should fail closed when the visible guidance checkpoint drifts from the contract:\n{rendered}"
+    );
+
+    let payload = load_stdout_json(&output);
+    assert_eq!(payload["outcome"], "unsupported");
+    assert_eq!(payload["reason_code"], "missing-guidance-checkpoint");
+    assert_eq!(
+        payload["observed_checkpoints"],
+        json!(["Describe a task to get started."])
+    );
+    assert!(
+        payload["transcript_preview"].as_str().is_some_and(|preview| {
+            preview.contains(
+                "Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts (beta)"
+            ) && !preview.contains("ctrl+s run command")
+        }),
+        "drifted startup guidance must not advance into the submit phase:\n{payload}"
+    );
+
+    let handoff = load_json(state_root.path().join("latest_terminal_handoff.json"));
+    assert_eq!(
+        handoff["copilot_submit_audit"]["observed_checkpoints"],
+        json!(["Describe a task to get started."])
+    );
+}
+
+#[test]
+fn simard_engineer_copilot_submit_restores_workflow_only_claude_files() {
+    let fake_bin =
+        TempDirGuard::new("simard-cli-fake-amplihack-copilot-submit-workflow-contamination");
+    write_fake_amplihack(
+        fake_bin.path(),
+        &fake_amplihack_with_copilot_submit_body("submit-hotkey-required-workflow-contamination"),
+    );
+    let path = path_with_prepend(fake_bin.path());
+    let project_root = TempDirGuard::new("simard-cli-copilot-submit-workflow-project");
+    std::fs::create_dir_all(project_root.path().join(".claude/context"))
+        .expect("temp project should create .claude/context");
+    std::fs::write(
+        project_root.path().join(".claude/context/PROJECT.md"),
+        "original project context\n",
+    )
+    .expect("temp project should seed PROJECT.md");
+    std::fs::write(
+        project_root.path().join(".claude/context/PROJECT.md.bak"),
+        "original project backup\n",
+    )
+    .expect("temp project should seed PROJECT.md.bak");
+
+    let state_root = TempDirGuard::new("simard-cli-copilot-submit-workflow-state");
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("copilot-submit")
+        .arg("single-process")
+        .arg(state_root.path())
+        .arg("--json")
+        .env("PATH", &path)
+        .current_dir(project_root.path())
+        .output()
+        .expect("simard engineer copilot-submit workflow contamination path should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        !output.status.success(),
+        "copilot-submit should still fail closed on the visible submit hotkey while restoring workflow-only wrapper file churn:\n{rendered}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(project_root.path().join(".claude/context/PROJECT.md"))
+            .expect("PROJECT.md should remain readable after run"),
+        "original project context\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(project_root.path().join(".claude/context/PROJECT.md.bak"))
+            .expect("PROJECT.md.bak should remain readable after run"),
+        "original project backup\n"
+    );
+}
+
+#[test]
+fn simard_engineer_copilot_submit_preserves_observed_checkpoint_order_for_reordered_startup() {
+    let fake_bin = TempDirGuard::new("simard-cli-fake-amplihack-copilot-submit-reordered");
+    write_fake_amplihack(
+        fake_bin.path(),
+        &fake_amplihack_with_copilot_submit_body("startup-reversed-order"),
+    );
+    let path = path_with_prepend(fake_bin.path());
+    let state_root = TempDirGuard::new("simard-cli-copilot-submit-reordered");
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("copilot-submit")
+        .arg("single-process")
+        .arg(state_root.path())
+        .arg("--json")
+        .env("PATH", &path)
+        .output()
+        .expect("simard engineer copilot-submit reordered startup path should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        !output.status.success(),
+        "copilot-submit should fail closed when startup checkpoints are observed in the wrong order:\n{rendered}"
+    );
+
+    let payload = load_stdout_json(&output);
+    assert_eq!(payload["reason_code"], "unexpected-startup-text");
+    assert_eq!(
+        payload["observed_checkpoints"],
+        json!([
+            "Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts",
+            "Describe a task to get started."
+        ])
+    );
+
+    let handoff = load_json(state_root.path().join("latest_terminal_handoff.json"));
+    assert_eq!(
+        handoff["copilot_submit_audit"]["observed_checkpoints"],
+        json!([
+            "Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts",
+            "Describe a task to get started."
+        ])
+    );
+}
+
+#[test]
+fn simard_engineer_copilot_submit_does_not_send_payload_after_startup_drift() {
+    let fake_bin = TempDirGuard::new("simard-cli-fake-amplihack-copilot-submit-no-input");
+    write_fake_amplihack(
+        fake_bin.path(),
+        &fake_amplihack_with_copilot_submit_body("guidance-checkpoint-drift-awaits-input"),
+    );
+    let path = path_with_prepend(fake_bin.path());
+    let state_root = TempDirGuard::new("simard-cli-copilot-submit-no-input");
+    let input_log = state_root.path().join("copilot-input.log");
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("copilot-submit")
+        .arg("single-process")
+        .arg(state_root.path())
+        .arg("--json")
+        .env("PATH", &path)
+        .env("SIMARD_FAKE_COPILOT_INPUT_LOG", &input_log)
+        .output()
+        .expect("simard engineer copilot-submit no-input path should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        !output.status.success(),
+        "copilot-submit should fail closed when startup guidance drifts before submission:\n{rendered}"
+    );
+
+    let payload = load_stdout_json(&output);
+    assert_eq!(payload["reason_code"], "missing-guidance-checkpoint");
+    assert_eq!(
+        payload["ordered_steps"],
+        json!([
+            "launch: amplihack copilot",
+            "wait-for: Describe a task to get started.",
+            "wait-for: Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts"
+        ]),
+        "copilot-submit must only persist the steps it actually reached before startup drift stopped the flow:\n{payload}"
+    );
+    assert!(
+        !input_log.exists()
+            || std::fs::read_to_string(&input_log)
+                .expect("fake copilot input log should be readable when created")
+                .trim()
+                .is_empty(),
+        "copilot-submit must not send its fixed payload when startup validation fails:\n{payload}"
+    );
+
+    let handoff = load_json(state_root.path().join("latest_terminal_handoff.json"));
+    assert_eq!(
+        handoff["copilot_submit_audit"]["ordered_steps"],
+        json!([
+            "launch: amplihack copilot",
+            "wait-for: Describe a task to get started.",
+            "wait-for: Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts"
+        ])
+    );
+}
+
+#[test]
+fn simard_engineer_terminal_read_surfaces_persisted_copilot_submit_audit() {
+    let fake_bin = TempDirGuard::new("simard-cli-fake-amplihack-copilot-submit-readback");
+    write_fake_amplihack(
+        fake_bin.path(),
+        &fake_amplihack_with_copilot_submit_body("submit-hotkey-required"),
+    );
+    let path = path_with_prepend(fake_bin.path());
+    let state_root = TempDirGuard::new("simard-cli-copilot-submit-readback");
+    let submit_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("copilot-submit")
+        .arg("single-process")
+        .arg(state_root.path())
+        .arg("--json")
+        .env("PATH", &path)
+        .output()
+        .expect("simard engineer copilot-submit unsupported readback fixture should launch");
+    let submit_rendered = rendered_output(&submit_output);
+
+    assert!(
+        !submit_output.status.success(),
+        "copilot-submit should produce an unsupported fixture before terminal readback is exercised:\n{submit_rendered}"
+    );
+
+    let read_output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("terminal-read")
+        .arg("single-process")
+        .arg(state_root.path())
+        .output()
+        .expect("simard engineer terminal-read should launch after copilot-submit");
+    let read_rendered = rendered_output(&read_output);
+
+    assert!(
+        read_output.status.success(),
+        "terminal-read should surface persisted copilot-submit audit evidence when truthful terminal output was captured:\n{read_rendered}"
+    );
+    for expected in [
+        "Copilot flow asset: simard/terminal_recipes/copilot-submit.json",
+        "Copilot submit outcome: unsupported",
+        "Copilot reason code: submit-hotkey-required",
+        "Copilot payload id: ",
+        "Terminal last output line: ctrl+s run command",
+    ] {
+        assert!(
+            read_rendered.contains(expected),
+            "terminal-read should surface '{expected}' for persisted copilot-submit audit evidence:\n{read_rendered}"
+        );
+    }
 }
 
 #[test]

@@ -844,6 +844,7 @@ fn persist_engineer_loop_artifacts(
         session: Some(session.redacted_for_handoff()),
         memory_records: memory_store.list_for_session(&session.id)?,
         evidence_records: evidence_store.list_for_session(&session.id)?,
+        copilot_submit_audit: None,
     };
     persist_handoff_artifacts(state_root, ScopedHandoffMode::Engineer, &handoff)?;
     Ok(())

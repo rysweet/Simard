@@ -1,6 +1,6 @@
 ---
 title: Runtime contracts reference
-description: Reference for the shipped Simard executable surfaces, the shared-state-root bridge between bounded terminal sessions and the repo-grounded engineer loop, the `engineer read` audit contract, compatibility binaries, and the in-process runtime contracts that back them.
+description: Reference for the shipped Simard executable surfaces, the shared-state-root bridge between terminal sessions and the repo-grounded engineer loop, the `engineer read` audit contract, the shipped bounded `engineer copilot-submit` contract, compatibility binaries, and the in-process runtime contracts that back them.
 last_updated: 2026-03-30
 review_schedule: as-needed
 owner: simard
@@ -40,6 +40,7 @@ Simard does **not** expose:
 | terminal-backed engineer substrate | `simard engineer terminal ...` | `simard_operator_probe terminal-run ...` |
 | file-backed terminal engineer substrate | `simard engineer terminal-file ...` | `simard_operator_probe terminal-run-file ...` |
 | named terminal recipe execution | `simard engineer terminal-recipe ...` | `simard_operator_probe terminal-recipe-run ...` |
+| bounded Copilot task submission | `simard engineer copilot-submit ...` | none |
 | terminal session readback | `simard engineer terminal-read ...` | `simard_operator_probe terminal-read ...` |
 | meeting mode | `simard meeting run ...` | `simard_operator_probe meeting-run ...` |
 | meeting state readback | `simard meeting read ...` | `simard_operator_probe meeting-read ...` |
@@ -61,6 +62,7 @@ The shipped operator-facing command tree is:
 - `simard engineer terminal-recipe-list`
 - `simard engineer terminal-recipe-show <recipe-name>`
 - `simard engineer terminal-recipe <topology> <recipe-name> [state-root]`
+- `simard engineer copilot-submit <topology> [state-root] [--json]`
 - `simard engineer terminal-read <topology> [state-root]`
 - `simard meeting run <base-type> <topology> <structured-objective> [state-root]`
 - `simard meeting read <base-type> <topology> [state-root]`
@@ -75,6 +77,8 @@ The shipped operator-facing command tree is:
 - `simard review run <base-type> <topology> <objective> [state-root]`
 - `simard review read <base-type> <topology> [state-root]`
 - `simard bootstrap run <identity> <base-type> <topology> <objective> [state-root]`
+
+Shipped terminal contract: `simard engineer copilot-submit <topology> [state-root] [--json]`. It is documented below as the bounded one-shot local Copilot submission surface.
 
 Bare `simard` prints help for that tree instead of attempting a hidden bootstrap fallback.
 
@@ -191,7 +195,7 @@ This substrate exposes the real `terminal-shell` base type on the primary CLI:
 - the selected base type remains `terminal-shell`
 - reflection still reports `terminal-shell::local-pty` as the adapter implementation
 - terminal objectives may include `command:` / `input:` lines and explicit `wait-for:` / `expect:` checkpoints so bounded interactive terminal turns can pause for expected output before sending the next line
-- the run surface now renders the same structured terminal audit shape as `terminal-read`: shell details, command/wait counts, ordered steps, satisfied checkpoints, last meaningful output line, and sanitized transcript preview
+- the run surface now renders the same structured terminal audit shape as `terminal-read`: shell details, command/wait counts, ordered steps, observed checkpoints, last meaningful output line, and sanitized transcript preview
 - the run surface prints explicit boundary guidance showing that terminal mode is a bounded local session surface and that continuing into engineer mode still requires an explicit later `engineer run`
 - the run persists `latest_terminal_handoff.json` plus compatibility `latest_handoff.json` under the shared root
 - unsatisfied wait checkpoints fail explicitly instead of silently replaying the rest of the objective and claiming success
@@ -215,6 +219,7 @@ The contract is intentionally explicit:
 - `latest_handoff.json` is used only as a compatibility fallback when the terminal-scoped handoff is absent
 - the rendered output includes which handoff file was used
 - persisted terminal evidence may include ordered terminal step lines, satisfied wait checkpoints, and the last observed output line so operators can inspect how a bounded interactive session was driven instead of relying only on aggregate counters
+- when `engineer copilot-submit` persisted truthful audit data, the same readback exposes the Copilot flow asset, fixed payload identifier, outcome, and any explicit unsupported reason code
 - the rendered output also includes explicit engineer-next-step guidance so the bridge into repo-grounded engineer work stays operator-visible
 - operator-visible strings are sanitized before printing so persisted terminal control sequences and secret-shaped values are not replayed
 - output order stays deterministic: runtime header, handoff session summary, adapter details, shell details, step/checkpoint audit trail, transcript summary, continuation guidance, durable record counts
@@ -255,12 +260,35 @@ This is the discoverable built-in recipe companion to inline and file-backed ter
 - unknown or invalid recipe names fail explicitly
 - `terminal-recipe-show` is read-only and prints the shipped recipe asset contents
 - `terminal-recipe` executes the same bounded `terminal-shell` substrate as `engineer terminal` and `engineer terminal-file`
-- the shipped built-ins currently include `foundation-check`, `copilot-status-check`, and `copilot-prompt-check`
+- the shipped built-ins currently include `foundation-check`, `copilot-status-check`, and `copilot-prompt-check`; the stricter task-submission slice is the dedicated `engineer copilot-submit` command documented below
 - `copilot-status-check` is a bounded local availability probe only: it runs `amplihack copilot -- --version`, requires the expected `GitHub Copilot CLI` version signal, and fails closed when that signal cannot be produced
 - `copilot-status-check` must not claim interactive Copilot control, remote orchestration, or authenticated GitHub state inspection
 - `copilot-prompt-check` is a bounded interactive prompt reachability check: it launches `amplihack copilot`, waits for the visible prompt guidance text, sends `/exit`, and requires the resume hint before success
 - `copilot-prompt-check` must not claim task execution, slash-command compatibility beyond `/exit`, remote orchestration, or authenticated GitHub state inspection
 - the selected recipe name is preserved into the terminal continuity summary that later engineer surfaces may render from the same state root
+
+#### Dedicated Copilot task submission
+
+Canonical entrypoint: `simard engineer copilot-submit <topology> [state-root] [--json]`
+
+This command ships as the next bounded local Copilot slice after `copilot-prompt-check`, and it narrows the contract further than `engineer terminal` or `engineer terminal-recipe`.
+
+- it always launches the real local argv `amplihack copilot` in the current repository context already selected by the operator
+- it loads one checked-in flow contract from `prompt_assets/simard/terminal_recipes/copilot-submit.json`
+- it must accept no free-form task text, no custom prompt asset, no `workspace-root`, and no worktree reuse
+- when the Copilot wrapper rewrites workflow-only `.claude/context/PROJECT.md` or `.claude/context/PROJECT.md.bak`, Simard must restore those tracked files to their pre-launch contents before returning so PTY validation does not dirty the repo
+- it submits exactly one fixed built-in payload only after the checked-in startup checkpoints are visible
+- startup succeeds only when the live PTY transcript satisfies the ordered visible startup checkpoints from the flow contract, including `Describe a task to get started.` and the guidance line `Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts`
+- the current honest flow contract records the visible `ctrl+s run command` submit hint instead of pretending newline-based submission exists on this PTY path
+- overall `success` is determined only from exact ordered checkpoints observed in the live PTY transcript after terminal control sequences are stripped from the visible text; there is no simulated Copilot output, no fuzzy matching, and no hidden control-path submission
+- `unsupported` means the Copilot process launched but the visible prompt flow exited early, drifted, stalled after partial visible startup evidence, required folder trust confirmation, required a non-line-input submit gesture, exposed wrapper-specific launch errors, or otherwise failed to reach a supportable checked-in flow
+- `runtime-failure` stays reserved for Simard-side failures such as invalid inputs, local launch failures, or persistence/readback errors before a trustworthy submit result can be claimed
+- startup timeouts after partial visible startup evidence must classify as `unsupported` with `missing-startup-banner`, `missing-guidance-checkpoint`, `workflow-wrapper-noise`, or `unexpected-startup-text`; only zero-evidence startup timeouts remain `runtime-failure`
+- explicit unsupported reason codes are `process-exited-early`, `unexpected-startup-text`, `missing-startup-banner`, `missing-guidance-checkpoint`, `trust-confirmation-required`, `submit-hotkey-required`, `copilot-wrapper-error`, and `workflow-wrapper-noise`
+- `success` and `unsupported` write `latest_terminal_handoff.json` plus compatibility `latest_handoff.json` when truthful terminal evidence was captured; `runtime-failure` may leave partial evidence but must not invent a complete submit summary
+- additive audit persistence includes the flow asset, fixed payload identifier, ordered steps actually reached before the stop point, observed checkpoints, last meaningful output line, sanitized transcript preview, outcome, and optional unsupported reason code
+- `--json` renders that same contract as a machine-readable summary without changing runtime behavior or broadening capability
+- `copilot-status-check` and `copilot-prompt-check` remain separate narrower probes and must keep their current contracts unchanged
 
 ### Meeting mode
 
