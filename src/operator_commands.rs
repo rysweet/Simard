@@ -8,27 +8,31 @@ use crate::copilot_status_probe::{
     CopilotStatusProbeResult, is_copilot_guarded_recipe, probe_local_copilot_status,
 };
 use crate::copilot_task_submit::{CopilotSubmitRun, run_copilot_submit};
-use crate::goals::{FileBackedGoalStore, GoalRecord, GoalStatus, GoalStore};
-use crate::improvements::PersistedImprovementRecord;
-use crate::meetings::PersistedMeetingRecord;
+use crate::goals::{GoalRecord, GoalStatus};
 use crate::prompt_assets::{FilePromptAssetStore, PromptAsset, PromptAssetRef, PromptAssetStore};
+use crate::reflection::ReflectiveRuntime;
 use crate::sanitization::sanitize_terminal_text;
-use crate::terminal_engineer_bridge::{
-    ENGINEER_HANDOFF_FILE_NAME, ENGINEER_MODE_BOUNDARY, SHARED_DEFAULT_STATE_ROOT_SOURCE,
-    SHARED_EXPLICIT_STATE_ROOT_SOURCE, ScopedHandoffMode, TERMINAL_HANDOFF_FILE_NAME,
-    TERMINAL_MODE_BOUNDARY, TerminalBridgeContext, load_runtime_handoff_snapshot,
-    persist_handoff_artifacts, scoped_handoff_path, select_handoff_artifact_for_read,
-};
+use crate::terminal_engineer_bridge::{TERMINAL_MODE_BOUNDARY, TerminalBridgeContext};
 use crate::{
-    BootstrapConfig, BootstrapInputs, BuiltinIdentityLoader, CopilotSubmitAudit, EvidenceRecord,
-    FileBackedEvidenceStore, FileBackedMemoryStore, Freshness, IdentityLoadRequest, IdentityLoader,
-    ManifestContract, MemoryRecord, MemoryScope, MemoryStore, Provenance, ReflectiveRuntime,
-    ReviewRequest, ReviewTargetKind, RuntimeHandoffSnapshot, RuntimeTopology,
-    assemble_local_runtime_from_handoff, benchmark_scenarios, build_review_artifact,
-    builtin_base_type_registry_for_manifest, compare_latest_benchmark_runs, default_output_root,
-    latest_local_handoff, latest_review_artifact, persist_review_artifact,
-    render_review_context_directives, review_artifacts_dir, run_benchmark_scenario,
-    run_benchmark_suite, run_local_engineer_loop, run_local_session,
+    BootstrapConfig, BootstrapInputs, BuiltinIdentityLoader, Freshness, IdentityLoadRequest,
+    IdentityLoader, ManifestContract, Provenance, RuntimeTopology,
+    assemble_local_runtime_from_handoff, builtin_base_type_registry_for_manifest,
+    latest_local_handoff, review_artifacts_dir, run_local_session,
+};
+
+// Re-export all public functions from sub-modules so callers don't break.
+pub use crate::operator_commands_engineer::{run_engineer_loop_probe, run_engineer_read_probe};
+pub use crate::operator_commands_gym::{
+    run_gym_compare, run_gym_list, run_gym_scenario, run_gym_suite,
+};
+pub use crate::operator_commands_meeting::{
+    run_goal_curation_probe, run_goal_curation_read_probe, run_improvement_curation_probe,
+    run_improvement_curation_read_probe, run_meeting_probe, run_meeting_read_probe,
+};
+pub use crate::operator_commands_review::{run_review_probe, run_review_read_probe};
+pub use crate::operator_commands_terminal::{
+    run_terminal_probe, run_terminal_probe_from_file, run_terminal_read_probe,
+    run_terminal_recipe_list_probe, run_terminal_recipe_probe, run_terminal_recipe_show_probe,
 };
 
 pub fn dispatch_operator_probe<I>(args: I) -> Result<(), Box<dyn std::error::Error>>
@@ -340,265 +344,6 @@ pub fn run_handoff_probe(
     Ok(())
 }
 
-pub fn run_meeting_probe(
-    base_type: &str,
-    topology: &str,
-    objective: &str,
-    state_root_override: Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let identity = "simard-meeting";
-    let config = BootstrapConfig::resolve(BootstrapInputs {
-        prompt_root: Some(prompt_root()),
-        objective: Some(objective.to_string()),
-        state_root: Some(resolved_state_root(
-            state_root_override,
-            identity,
-            base_type,
-            topology,
-            "meeting-run",
-        )?),
-        identity: Some(identity.to_string()),
-        base_type: Some(base_type.to_string()),
-        topology: Some(topology.to_string()),
-        ..BootstrapInputs::default()
-    })?;
-
-    let execution = run_local_session(&config)?;
-    let exported = latest_local_handoff(&config)?.ok_or("expected durable meeting handoff")?;
-    let decision_records = exported
-        .memory_records
-        .iter()
-        .filter(|record| record.scope == MemoryScope::Decision)
-        .map(|record| record.value.clone())
-        .collect::<Vec<_>>();
-
-    println!("Probe mode: meeting-run");
-    println!("Identity: {}", execution.snapshot.identity_name);
-    println!(
-        "Selected base type: {}",
-        execution.snapshot.selected_base_type
-    );
-    println!("Topology: {}", execution.snapshot.topology);
-    print_display("State root", config.state_root_path().display());
-    println!("Session phase: {}", execution.outcome.session.phase);
-    println!("Decision records: {}", decision_records.len());
-    println!(
-        "Active goals count: {}",
-        execution.snapshot.active_goal_count
-    );
-    for (index, goal) in execution.snapshot.active_goals.iter().enumerate() {
-        print_text(&format!("Active goal {}", index + 1), goal);
-    }
-    for (index, value) in decision_records.iter().enumerate() {
-        print_text(&format!("Decision record {}", index + 1), value);
-    }
-    print_text("Execution summary", &execution.outcome.execution_summary);
-    print_text("Reflection summary", &execution.outcome.reflection.summary);
-    Ok(())
-}
-
-pub fn run_meeting_read_probe(
-    base_type: &str,
-    topology: &str,
-    state_root_override: Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let state_root = resolved_meeting_read_state_root(state_root_override, base_type, topology)?;
-    let memory_store = FileBackedMemoryStore::try_new(state_root.join("memory_records.json"))?;
-    let meeting_records = memory_store
-        .list(MemoryScope::Decision)?
-        .into_iter()
-        .filter(|record| crate::looks_like_persisted_meeting_record(&record.value))
-        .collect::<Vec<_>>();
-    let latest_record = meeting_records
-        .last()
-        .ok_or("expected persisted meeting decision record")?;
-    let parsed_record =
-        PersistedMeetingRecord::parse(&latest_record.value).map_err(|error| format!("{error}"))?;
-
-    println!("Probe mode: meeting-read");
-    println!("Identity: simard-meeting");
-    print_text("Selected base type", base_type);
-    print_text("Topology", topology);
-    print_display("State root", state_root.display());
-    println!("Meeting records: {}", meeting_records.len());
-    print_text("Latest agenda", &parsed_record.agenda);
-    print_string_section("Updates", &parsed_record.updates);
-    print_string_section("Decisions", &parsed_record.decisions);
-    print_string_section("Risks", &parsed_record.risks);
-    print_string_section("Next steps", &parsed_record.next_steps);
-    print_string_section("Open questions", &parsed_record.open_questions);
-    print_meeting_goal_section(&parsed_record.goals);
-    print_text("Latest meeting record", &latest_record.value);
-    Ok(())
-}
-
-pub fn run_goal_curation_probe(
-    base_type: &str,
-    topology: &str,
-    objective: &str,
-    state_root_override: Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let identity = "simard-goal-curator";
-    let config = BootstrapConfig::resolve(BootstrapInputs {
-        prompt_root: Some(prompt_root()),
-        objective: Some(objective.to_string()),
-        state_root: Some(resolved_goal_curation_state_root(
-            state_root_override,
-            base_type,
-            topology,
-        )?),
-        identity: Some(identity.to_string()),
-        base_type: Some(base_type.to_string()),
-        topology: Some(topology.to_string()),
-        ..BootstrapInputs::default()
-    })?;
-
-    let execution = run_local_session(&config)?;
-    println!("Probe mode: goal-curation-run");
-    println!("Identity: {}", execution.snapshot.identity_name);
-    println!(
-        "Selected base type: {}",
-        execution.snapshot.selected_base_type
-    );
-    println!("Topology: {}", execution.snapshot.topology);
-    print_display("State root", config.state_root_path().display());
-    println!("Session phase: {}", execution.outcome.session.phase);
-    println!(
-        "Active goals count: {}",
-        execution.snapshot.active_goal_count
-    );
-    for (index, goal) in execution.snapshot.active_goals.iter().enumerate() {
-        print_text(&format!("Active goal {}", index + 1), goal);
-    }
-    print_text("Execution summary", &execution.outcome.execution_summary);
-    print_text("Reflection summary", &execution.outcome.reflection.summary);
-    Ok(())
-}
-
-pub fn run_goal_curation_read_probe(
-    base_type: &str,
-    topology: &str,
-    state_root_override: Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let state_root = resolved_goal_curation_state_root(state_root_override, base_type, topology)?;
-    let goal_store = FileBackedGoalStore::try_new(state_root.join("goal_records.json"))?;
-    let goal_records = goal_store.list()?;
-    let register = GoalRegisterView::from_records(goal_records);
-
-    println!("Goal register: durable");
-    print_text("Selected base type", base_type);
-    print_text("Topology", topology);
-    print_display("State root", state_root.display());
-    register.print();
-    Ok(())
-}
-
-pub fn run_terminal_probe(
-    topology: &str,
-    objective: &str,
-    state_root_override: Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let identity = "simard-engineer";
-    let base_type = "terminal-shell";
-    let state_root_was_explicit = state_root_override.is_some();
-    let config = BootstrapConfig::resolve(BootstrapInputs {
-        prompt_root: Some(prompt_root()),
-        objective: Some(objective.to_string()),
-        state_root: Some(resolved_state_root(
-            state_root_override,
-            identity,
-            base_type,
-            topology,
-            "terminal-run",
-        )?),
-        identity: Some(identity.to_string()),
-        base_type: Some(base_type.to_string()),
-        topology: Some(topology.to_string()),
-        ..BootstrapInputs::default()
-    })?;
-
-    let execution = run_local_session(&config)?;
-    let exported = latest_local_handoff(&config)?.ok_or("expected durable terminal handoff")?;
-    persist_handoff_artifacts(
-        config.state_root_path(),
-        ScopedHandoffMode::Terminal,
-        &exported,
-    )?;
-    let handoff_source = scoped_handoff_path(config.state_root_path(), ScopedHandoffMode::Terminal)
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("latest_terminal_handoff.json")
-        .to_string();
-    let continuity_source = if state_root_was_explicit {
-        SHARED_EXPLICIT_STATE_ROOT_SOURCE
-    } else {
-        SHARED_DEFAULT_STATE_ROOT_SOURCE
-    };
-    let view = TerminalReadView::from_handoff(
-        config.state_root_path().to_path_buf(),
-        exported,
-        handoff_source,
-        Some(continuity_source.to_string()),
-    )?;
-    view.print_terminal_run(
-        &execution.snapshot.adapter_capabilities,
-        &execution.outcome.execution_summary,
-        &execution.outcome.reflection.summary,
-    );
-    Ok(())
-}
-
-pub fn run_terminal_probe_from_file(
-    topology: &str,
-    objective_path: &Path,
-    state_root_override: Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let objective = load_terminal_objective_file(objective_path)?;
-    run_terminal_probe(topology, &objective, state_root_override)
-}
-
-pub fn run_terminal_read_probe(
-    topology: &str,
-    state_root_override: Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let state_root = resolved_terminal_read_state_root(state_root_override, topology)?;
-    let view = TerminalReadView::load(state_root)?;
-    view.print();
-    Ok(())
-}
-
-pub fn run_terminal_recipe_list_probe() -> Result<(), Box<dyn std::error::Error>> {
-    let recipes = list_terminal_recipe_descriptors()?;
-    println!("Terminal recipes: {}", recipes.len());
-    for (index, recipe) in recipes.iter().enumerate() {
-        print_text(
-            &format!("Terminal recipe {}", index + 1),
-            format!(
-                "{} ({})",
-                recipe.name,
-                recipe.reference.relative_path.display()
-            ),
-        );
-    }
-    Ok(())
-}
-
-pub fn run_terminal_recipe_show_probe(recipe_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let recipe = load_terminal_recipe(recipe_name)?;
-    print_terminal_recipe(recipe_name, &recipe);
-    Ok(())
-}
-
-pub fn run_terminal_recipe_probe(
-    topology: &str,
-    recipe_name: &str,
-    state_root_override: Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    ensure_terminal_recipe_is_runnable(recipe_name)?;
-    let recipe = load_terminal_recipe(recipe_name)?;
-    run_terminal_probe(topology, &recipe.contents, state_root_override)
-}
-
 pub fn run_copilot_submit_probe(
     topology: &str,
     state_root_override: Option<PathBuf>,
@@ -631,639 +376,25 @@ pub fn run_copilot_submit_probe(
     }
 }
 
-pub fn run_engineer_loop_probe(
-    topology: &str,
-    workspace_root: &Path,
-    objective: &str,
-    state_root_override: Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let runtime_topology = parse_runtime_topology(topology)?;
-    let state_root_was_explicit = state_root_override.is_some();
-    let state_root = resolved_state_root(
-        state_root_override,
-        "simard-engineer",
-        "terminal-shell",
-        topology,
-        "engineer-loop-run",
-    )?;
-    let run = run_local_engineer_loop(workspace_root, objective, runtime_topology, &state_root)
-        .map_err(|error| format!("{error}"))?;
+// --- Shared helpers used by sub-modules ---
 
-    println!("Probe mode: engineer-loop-run");
-    print_text("Mode boundary", ENGINEER_MODE_BOUNDARY);
-    print_display("Repo root", run.inspection.repo_root.display());
-    print_text("Repo branch", &run.inspection.branch);
-    print_text("Repo head", &run.inspection.head);
-    println!("Worktree dirty: {}", run.inspection.worktree_dirty);
-    println!(
-        "Changed files: {}",
-        if run.inspection.changed_files.is_empty() {
-            "<none>".to_string()
-        } else {
-            run.inspection.changed_files.join(", ")
-        }
-    );
-    println!("Active goals count: {}", run.inspection.active_goals.len());
-    for (index, goal) in run.inspection.active_goals.iter().enumerate() {
-        print_text(&format!("Active goal {}", index + 1), goal.concise_label());
-    }
-    println!(
-        "Carried meeting decisions: {}",
-        run.inspection.carried_meeting_decisions.len()
-    );
-    for (index, decision) in run.inspection.carried_meeting_decisions.iter().enumerate() {
-        print_text(&format!("Carried meeting decision {}", index + 1), decision);
-    }
-    print_terminal_bridge_section(
-        run.terminal_bridge_context.as_ref(),
-        if state_root_was_explicit {
-            SHARED_EXPLICIT_STATE_ROOT_SOURCE
-        } else {
-            SHARED_DEFAULT_STATE_ROOT_SOURCE
-        },
-    );
-    print_text("Gap summary", &run.inspection.architecture_gap_summary);
-    print_text("Execution scope", &run.execution_scope);
-    print_text("Selected action", &run.action.selected.label);
-    print_text("Action plan", &run.action.selected.plan_summary);
-    print_text(
-        "Verification steps",
-        run.action.selected.verification_steps.join(" || "),
-    );
-    print_text("Action rationale", &run.action.selected.rationale);
-    print_text("Action command", run.action.selected.argv.join(" "));
-    println!("Action status: success");
-    println!(
-        "Changed files after action: {}",
-        if run.action.changed_files.is_empty() {
-            "<none>".to_string()
-        } else {
-            run.action.changed_files.join(", ")
-        }
-    );
-    println!("Verification status: {}", run.verification.status);
-    print_text("Verification summary", &run.verification.summary);
-    print_display("State root", run.state_root.display());
-    Ok(())
-}
-
-pub fn run_engineer_read_probe(
-    topology: &str,
-    state_root_override: Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let state_root = resolved_engineer_read_state_root(state_root_override, topology)?;
-    let view = EngineerReadView::load(state_root)?;
-    view.print();
-    Ok(())
-}
-
-pub fn run_review_probe(
-    base_type: &str,
-    topology: &str,
-    objective: &str,
-    state_root_override: Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let identity = "simard-engineer";
-    let config = BootstrapConfig::resolve(BootstrapInputs {
-        prompt_root: Some(prompt_root()),
-        objective: Some(objective.to_string()),
-        state_root: Some(resolved_review_state_root(
-            state_root_override,
-            base_type,
-            topology,
-        )?),
-        identity: Some(identity.to_string()),
-        base_type: Some(base_type.to_string()),
-        topology: Some(topology.to_string()),
-        ..BootstrapInputs::default()
-    })?;
-
-    let execution = run_local_session(&config)?;
-    let exported = latest_local_handoff(&config)?.ok_or("expected durable review handoff")?;
-    let review = build_review_artifact(
-        ReviewRequest {
-            target_kind: ReviewTargetKind::Session,
-            target_label: "operator-review".to_string(),
-            execution_summary: execution.outcome.execution_summary.clone(),
-            reflection_summary: execution.outcome.reflection.summary.clone(),
-            measurement_notes: Vec::new(),
-            signals: Vec::new(),
-        },
-        &exported,
-    )?;
-    let review_artifact_path = persist_review_artifact(config.state_root_path(), &review)?;
-    let session_id = exported
-        .session
-        .as_ref()
-        .ok_or("expected session boundary in review handoff")?
-        .id
-        .clone();
-    let memory_store = FileBackedMemoryStore::try_new(config.memory_store_path())?;
-    let review_key = format!("{}-review-record", session_id);
-    memory_store.put(MemoryRecord {
-        key: review_key.clone(),
-        scope: MemoryScope::Decision,
-        value: review.concise_record(),
-        session_id,
-        recorded_in: crate::SessionPhase::Complete,
-    })?;
-    let decision_records = memory_store.list(MemoryScope::Decision)?;
-
-    println!("Probe mode: review-run");
-    println!("Identity: {}", execution.snapshot.identity_name);
-    println!(
-        "Selected base type: {}",
-        execution.snapshot.selected_base_type
-    );
-    println!("Topology: {}", execution.snapshot.topology);
-    print_display("State root", config.state_root_path().display());
-    println!("Session phase: {}", execution.outcome.session.phase);
-    print_display("Review artifact", review_artifact_path.display());
-    println!("Review proposals: {}", review.proposals.len());
-    for (index, proposal) in review.proposals.iter().enumerate() {
-        println!(
-            "Proposal {}: [{}] {} => {}",
-            index + 1,
-            proposal.category,
-            sanitize_terminal_text(&proposal.title),
-            sanitize_terminal_text(&proposal.suggested_change)
-        );
-    }
-    println!("Decision records: {}", decision_records.len());
-    print_text("Review record key", &review_key);
-    print_text("Execution summary", &execution.outcome.execution_summary);
-    print_text("Reflection summary", &execution.outcome.reflection.summary);
-    Ok(())
-}
-
-pub fn run_review_read_probe(
-    base_type: &str,
-    topology: &str,
-    state_root_override: Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let state_root = resolved_review_state_root(state_root_override, base_type, topology)?;
-    let (review_artifact_path, review) =
-        latest_review_artifact(&state_root)?.ok_or("expected persisted review artifact")?;
-    let memory_store = FileBackedMemoryStore::try_new(state_root.join("memory_records.json"))?;
-    let decision_records = memory_store
-        .list(MemoryScope::Decision)?
-        .into_iter()
-        .filter(|record| record.value.starts_with("review-summary |"))
-        .collect::<Vec<_>>();
-
-    println!("Probe mode: review-read");
-    println!("Identity: {}", review.identity_name);
-    println!("Selected base type: {}", review.selected_base_type);
-    println!("Topology: {}", review.topology);
-    print_display("State root", state_root.display());
-    print_display("Latest review artifact", review_artifact_path.display());
-    print_text("Latest review target", &review.target_label);
-    print_text("Latest review summary", &review.summary);
-    println!("Review proposals: {}", review.proposals.len());
-    for (index, proposal) in review.proposals.iter().enumerate() {
-        println!(
-            "Proposal {}: [{}] {} => {}",
-            index + 1,
-            proposal.category,
-            sanitize_terminal_text(&proposal.title),
-            sanitize_terminal_text(&proposal.suggested_change)
-        );
-    }
-    println!("Decision review records: {}", decision_records.len());
-    if let Some(record) = decision_records.last() {
-        print_text("Latest decision review record", &record.value);
-    }
-    Ok(())
-}
-
-pub fn run_improvement_curation_probe(
-    base_type: &str,
-    topology: &str,
-    operator_objective: &str,
-    state_root_override: Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let state_root = resolved_review_state_root(state_root_override, base_type, topology)?;
-    let (review_artifact_path, review) =
-        latest_review_artifact(&state_root)?.ok_or("expected persisted review artifact")?;
-    let objective = format!(
-        "{}\n{}",
-        render_review_context_directives(&review),
-        operator_objective
-    );
-    let config = BootstrapConfig::resolve(BootstrapInputs {
-        prompt_root: Some(prompt_root()),
-        objective: Some(objective.clone()),
-        state_root: Some(state_root.clone()),
-        identity: Some("simard-improvement-curator".to_string()),
-        base_type: Some(base_type.to_string()),
-        topology: Some(topology.to_string()),
-        ..BootstrapInputs::default()
-    })?;
-
-    let execution = run_local_session(&config)?;
-    let plan = crate::ImprovementPromotionPlan::parse(&objective)?;
-    let memory_store = FileBackedMemoryStore::try_new(config.memory_store_path())?;
-    let improvement_records = memory_store
-        .list(MemoryScope::Decision)?
-        .into_iter()
-        .filter(|record| record.key.ends_with("improvement-curation-record"))
-        .collect::<Vec<_>>();
-
-    println!("Probe mode: improvement-curation-run");
-    println!("Identity: {}", execution.snapshot.identity_name);
-    println!(
-        "Selected base type: {}",
-        execution.snapshot.selected_base_type
-    );
-    println!("Topology: {}", execution.snapshot.topology);
-    print_display("State root", config.state_root_path().display());
-    print_display("Review artifact", review_artifact_path.display());
-    print_text("Review id", &review.review_id);
-    print_text("Review target", &review.target_label);
-    println!("Review proposals: {}", review.proposals.len());
-    println!("Approved proposals: {}", plan.approvals.len());
-    for (index, approval) in plan.approvals.iter().enumerate() {
-        println!(
-            "Approved proposal {}: p{} [{}] {}",
-            index + 1,
-            approval.priority,
-            approval.status,
-            sanitize_terminal_text(&approval.title)
-        );
-    }
-    println!("Deferred proposals: {}", plan.deferrals.len());
-    for (index, deferral) in plan.deferrals.iter().enumerate() {
-        println!(
-            "Deferred proposal {}: {} ({})",
-            index + 1,
-            sanitize_terminal_text(&deferral.title),
-            sanitize_terminal_text(&deferral.rationale)
-        );
-    }
-    println!(
-        "Active goals count: {}",
-        execution.snapshot.active_goal_count
-    );
-    for (index, goal) in execution.snapshot.active_goals.iter().enumerate() {
-        print_text(&format!("Active goal {}", index + 1), goal);
-    }
-    println!(
-        "Proposed goals count: {}",
-        execution.snapshot.proposed_goal_count
-    );
-    for (index, goal) in execution.snapshot.proposed_goals.iter().enumerate() {
-        print_text(&format!("Proposed goal {}", index + 1), goal);
-    }
-    println!("Decision records: {}", improvement_records.len());
-    if let Some(record) = improvement_records.last() {
-        print_text("Latest improvement record", &record.value);
-    }
-    print_text("Execution summary", &execution.outcome.execution_summary);
-    print_text("Reflection summary", &execution.outcome.reflection.summary);
-    Ok(())
-}
-
-pub fn run_improvement_curation_read_probe(
-    base_type: &str,
-    topology: &str,
-    state_root_override: Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let state_root =
-        resolved_improvement_curation_read_state_root(state_root_override, base_type, topology)?;
-    let (review_artifact_path, review) =
-        latest_review_artifact(&state_root)?.ok_or("expected persisted review artifact")?;
-    let memory_store = FileBackedMemoryStore::try_new(state_root.join("memory_records.json"))?;
-    let latest_record = memory_store
-        .list(MemoryScope::Decision)?
-        .into_iter()
-        .rfind(|record| record.key.ends_with("improvement-curation-record"))
-        .ok_or("expected persisted improvement decision record")?;
-    let parsed_record = PersistedImprovementRecord::parse(&latest_record.value)
-        .map_err(|error| format!("{error}"))?;
-    let goal_store = FileBackedGoalStore::try_new(state_root.join("goal_records.json"))?;
-    let goal_records = goal_store.list()?;
-
-    println!("Probe mode: improvement-curation-read");
-    println!("Identity: simard-improvement-curator");
-    print_text(
-        "Selected base type",
-        parsed_record
-            .selected_base_type
-            .as_deref()
-            .unwrap_or(&review.selected_base_type),
-    );
-    print_text(
-        "Topology",
-        parsed_record
-            .topology
-            .as_deref()
-            .unwrap_or(&review.topology),
-    );
-    print_display("State root", state_root.display());
-    print_display("Latest review artifact", review_artifact_path.display());
-    print_text("Review id", &review.review_id);
-    print_text("Review target", &review.target_label);
-    println!("Review proposals: {}", review.proposals.len());
-    println!(
-        "Approved proposals: {}",
-        parsed_record.approved_proposals.len()
-    );
-    if parsed_record.approved_proposals.is_empty() {
-        println!("Approved proposals: <none>");
-    } else {
-        for (index, approval) in parsed_record.approved_proposals.iter().enumerate() {
-            print_text(
-                &format!("Approved proposal {}", index + 1),
-                approval.concise_label(),
-            );
-        }
-    }
-    println!(
-        "Deferred proposals: {}",
-        parsed_record.deferred_proposals.len()
-    );
-    if parsed_record.deferred_proposals.is_empty() {
-        println!("Deferred proposals: <none>");
-    } else {
-        for (index, deferral) in parsed_record.deferred_proposals.iter().enumerate() {
-            print_text(
-                &format!("Deferred proposal {}", index + 1),
-                format!("{} ({})", deferral.title, deferral.rationale),
-            );
-        }
-    }
-    print_goal_section(&goal_records, GoalStatus::Active, "Active");
-    print_goal_section(&goal_records, GoalStatus::Proposed, "Proposed");
-    print_text("Latest improvement record", parsed_record.concise_record());
-    Ok(())
-}
-
-pub fn run_gym_list() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Simard benchmark scenarios:");
-    for scenario in benchmark_scenarios() {
-        println!(
-            "- {} | class={} | identity={} | base_type={} | topology={}",
-            scenario.id, scenario.class, scenario.identity, scenario.base_type, scenario.topology
-        );
-        println!("  {}", scenario.title);
-    }
-    Ok(())
-}
-
-pub fn run_gym_scenario(scenario_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let report = run_benchmark_scenario(scenario_id, default_output_root())?;
-    print_text("Scenario", report.scenario.id);
-    print_text("Suite", &report.suite_id);
-    print_text("Session", &report.session_id);
-    print_display("Passed", report.passed);
-    print_display(
-        "Checks passed",
-        format!(
-            "{}/{}",
-            report.scorecard.correctness_checks_passed, report.scorecard.correctness_checks_total
-        ),
-    );
-    print_display(
-        "Unnecessary actions",
-        crate::gym::render_benchmark_count(report.scorecard.unnecessary_action_count),
-    );
-    print_display(
-        "Retry count",
-        crate::gym::render_benchmark_count(report.scorecard.retry_count),
-    );
-    print_text("Artifact report", &report.artifacts.report_json);
-    print_text("Artifact summary", &report.artifacts.report_txt);
-    print_text("Review artifact", &report.artifacts.review_json);
-    Ok(())
-}
-
-pub fn run_gym_compare(scenario_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let report = compare_latest_benchmark_runs(scenario_id, default_output_root())?;
-    print_text("Scenario", &report.scenario_id);
-    print_display("Comparison status", report.status);
-    print_text("Comparison summary", &report.summary);
-    print_text("Current session", &report.current.session_id);
-    print_display("Current passed", report.current.passed);
-    print_display(
-        "Current checks passed",
-        format!(
-            "{}/{}",
-            report.current.correctness_checks_passed, report.current.correctness_checks_total
-        ),
-    );
-    print_text("Current report", &report.current.report_json);
-    print_display(
-        "Current unnecessary actions",
-        crate::gym::render_benchmark_count(report.current.unnecessary_action_count),
-    );
-    print_display(
-        "Current retry count",
-        crate::gym::render_benchmark_count(report.current.retry_count),
-    );
-    print_text("Previous session", &report.previous.session_id);
-    print_display("Previous passed", report.previous.passed);
-    print_display(
-        "Previous checks passed",
-        format!(
-            "{}/{}",
-            report.previous.correctness_checks_passed, report.previous.correctness_checks_total
-        ),
-    );
-    print_text("Previous report", &report.previous.report_json);
-    print_display(
-        "Previous unnecessary actions",
-        crate::gym::render_benchmark_count(report.previous.unnecessary_action_count),
-    );
-    print_display(
-        "Previous retry count",
-        crate::gym::render_benchmark_count(report.previous.retry_count),
-    );
-    print_display(
-        "Delta correctness checks passed",
-        format!("{:+}", report.delta.correctness_checks_passed),
-    );
-    print_display(
-        "Delta unnecessary actions",
-        crate::gym::render_benchmark_delta(report.delta.unnecessary_action_count),
-    );
-    print_display(
-        "Delta retry count",
-        crate::gym::render_benchmark_delta(report.delta.retry_count),
-    );
-    print_display(
-        "Delta exported memory records",
-        format!("{:+}", report.delta.exported_memory_records),
-    );
-    print_display(
-        "Delta exported evidence records",
-        format!("{:+}", report.delta.exported_evidence_records),
-    );
-    print_text(
-        "Comparison artifact report",
-        &report.artifact_paths.report_json,
-    );
-    print_text(
-        "Comparison artifact summary",
-        &report.artifact_paths.report_txt,
-    );
-    Ok(())
-}
-
-pub fn run_gym_suite(suite_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let report = run_benchmark_suite(suite_id, default_output_root())?;
-    println!("Suite: {}", report.suite_id);
-    println!("Suite passed: {}", report.passed);
-    for scenario in &report.scenarios {
-        println!(
-            "- {}: {} ({})",
-            scenario.scenario_id,
-            if scenario.passed { "passed" } else { "failed" },
-            scenario.report_json
-        );
-    }
-    println!("Suite artifact report: {}", report.artifact_path);
-    Ok(())
-}
-
-fn prompt_root() -> PathBuf {
+pub(crate) fn prompt_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")
 }
 
-fn ensure_terminal_recipe_is_runnable(recipe_name: &str) -> crate::SimardResult<()> {
-    if !is_copilot_guarded_recipe(recipe_name) {
-        return Ok(());
-    }
-
-    match probe_local_copilot_status() {
-        CopilotStatusProbeResult::Available { .. } => Ok(()),
-        CopilotStatusProbeResult::Unavailable {
-            reason_code,
-            detail,
-        }
-        | CopilotStatusProbeResult::Unsupported {
-            reason_code,
-            detail,
-        } => Err(crate::SimardError::ActionExecutionFailed {
-            action: recipe_name.to_string(),
-            reason: format!("{reason_code}: {detail}"),
-        }),
-    }
+pub(crate) struct EngineerReadArtifacts {
+    pub(crate) handoff_path: PathBuf,
+    pub(crate) handoff_file_name: String,
+    pub(crate) memory_path: PathBuf,
+    pub(crate) evidence_path: PathBuf,
 }
 
-const TERMINAL_RECIPE_DIRECTORY: &str = "simard/terminal_recipes";
-const TERMINAL_RECIPE_EXTENSION: &str = "simard-terminal";
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct TerminalRecipeDescriptor {
-    name: String,
-    reference: PromptAssetRef,
+pub(crate) struct ValidatedRuntimeSegments {
+    pub(crate) base_type: BaseTypeId,
+    pub(crate) topology: RuntimeTopology,
 }
 
-fn list_terminal_recipe_descriptors() -> crate::SimardResult<Vec<TerminalRecipeDescriptor>> {
-    let recipe_root = prompt_root().join(TERMINAL_RECIPE_DIRECTORY);
-    let entries =
-        fs::read_dir(&recipe_root).map_err(|error| crate::SimardError::PromptAssetRead {
-            path: recipe_root.clone(),
-            reason: error.to_string(),
-        })?;
-    let mut recipes = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|error| crate::SimardError::PromptAssetRead {
-            path: recipe_root.clone(),
-            reason: error.to_string(),
-        })?;
-        let entry_path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|error| crate::SimardError::PromptAssetRead {
-                path: entry_path.clone(),
-                reason: error.to_string(),
-            })?;
-        if !file_type.is_file()
-            || entry_path.extension() != Some(OsStr::new(TERMINAL_RECIPE_EXTENSION))
-        {
-            continue;
-        }
-        let Some(stem) = entry_path.file_stem().and_then(|value| value.to_str()) else {
-            continue;
-        };
-        recipes.push(TerminalRecipeDescriptor {
-            name: stem.to_string(),
-            reference: terminal_recipe_reference(stem)?,
-        });
-    }
-    recipes.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(recipes)
-}
-
-fn load_terminal_recipe(recipe_name: &str) -> crate::SimardResult<PromptAsset> {
-    let reference = terminal_recipe_reference(recipe_name)?;
-    FilePromptAssetStore::new(prompt_root()).load(&reference)
-}
-
-fn terminal_recipe_reference(recipe_name: &str) -> crate::SimardResult<PromptAssetRef> {
-    if recipe_name.is_empty()
-        || !recipe_name
-            .chars()
-            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
-    {
-        return Err(crate::SimardError::InvalidPromptAssetPath {
-            asset_id: format!("terminal-recipe:{recipe_name}"),
-            path: PathBuf::from(recipe_name),
-            reason: "recipe names may only use lowercase ASCII letters, digits, and hyphens"
-                .to_string(),
-        });
-    }
-    Ok(PromptAssetRef::new(
-        format!("terminal-recipe:{recipe_name}"),
-        PathBuf::from(TERMINAL_RECIPE_DIRECTORY)
-            .join(format!("{recipe_name}.{TERMINAL_RECIPE_EXTENSION}")),
-    ))
-}
-
-fn print_terminal_recipe(recipe_name: &str, recipe: &PromptAsset) {
-    print_text("Terminal recipe", recipe_name);
-    print_display("Recipe asset", recipe.relative_path.display());
-    println!("Recipe contents:");
-    for line in sanitize_terminal_text(&recipe.contents).lines() {
-        println!("{line}");
-    }
-}
-
-fn state_root(
-    identity: &str,
-    base_type: &BaseTypeId,
-    topology: RuntimeTopology,
-    probe: &str,
-) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target/operator-probe-state")
-        .join(probe)
-        .join(identity)
-        .join(base_type.as_str())
-        .join(topology.to_string())
-}
-
-fn resolved_goal_curation_state_root(
-    explicit: Option<PathBuf>,
-    base_type: &str,
-    topology: &str,
-) -> crate::SimardResult<PathBuf> {
-    resolved_state_root(
-        explicit,
-        "simard-goal-curator",
-        base_type,
-        topology,
-        "goal-curation-run",
-    )
-}
-
-struct ValidatedRuntimeSegments {
-    base_type: BaseTypeId,
-    topology: RuntimeTopology,
-}
-
-fn validated_runtime_segments(
+pub(crate) fn validated_runtime_segments(
     identity: &str,
     base_type: &str,
     topology: &str,
@@ -1305,7 +436,21 @@ fn validated_runtime_segments(
     })
 }
 
-fn resolved_state_root(
+fn state_root(
+    identity: &str,
+    base_type: &BaseTypeId,
+    topology: RuntimeTopology,
+    probe: &str,
+) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target/operator-probe-state")
+        .join(probe)
+        .join(identity)
+        .join(base_type.as_str())
+        .join(topology.to_string())
+}
+
+pub(crate) fn resolved_state_root(
     explicit: Option<PathBuf>,
     identity: &str,
     base_type: &str,
@@ -1326,7 +471,21 @@ fn resolved_state_root(
     }
 }
 
-fn resolved_review_state_root(
+pub(crate) fn resolved_goal_curation_state_root(
+    explicit: Option<PathBuf>,
+    base_type: &str,
+    topology: &str,
+) -> crate::SimardResult<PathBuf> {
+    resolved_state_root(
+        explicit,
+        "simard-goal-curator",
+        base_type,
+        topology,
+        "goal-curation-run",
+    )
+}
+
+pub(crate) fn resolved_review_state_root(
     explicit: Option<PathBuf>,
     base_type: &str,
     topology: &str,
@@ -1340,7 +499,7 @@ fn resolved_review_state_root(
     )
 }
 
-fn resolved_improvement_curation_read_state_root(
+pub(crate) fn resolved_improvement_curation_read_state_root(
     explicit: Option<PathBuf>,
     base_type: &str,
     topology: &str,
@@ -1350,7 +509,7 @@ fn resolved_improvement_curation_read_state_root(
     Ok(state_root)
 }
 
-fn resolved_engineer_read_state_root(
+pub(crate) fn resolved_engineer_read_state_root(
     explicit: Option<PathBuf>,
     topology: &str,
 ) -> crate::SimardResult<PathBuf> {
@@ -1365,7 +524,7 @@ fn resolved_engineer_read_state_root(
     Ok(state_root)
 }
 
-fn resolved_terminal_read_state_root(
+pub(crate) fn resolved_terminal_read_state_root(
     explicit: Option<PathBuf>,
     topology: &str,
 ) -> crate::SimardResult<PathBuf> {
@@ -1380,7 +539,7 @@ fn resolved_terminal_read_state_root(
     Ok(state_root)
 }
 
-fn resolved_meeting_read_state_root(
+pub(crate) fn resolved_meeting_read_state_root(
     explicit: Option<PathBuf>,
     base_type: &str,
     topology: &str,
@@ -1438,7 +597,7 @@ fn validate_improvement_curation_read_state_root(state_root: &Path) -> crate::Si
     Ok(())
 }
 
-fn validate_existing_read_state_root_root(
+pub(crate) fn validate_existing_read_state_root_root(
     mode_label: &str,
     state_root: &Path,
 ) -> crate::SimardResult<()> {
@@ -1490,7 +649,7 @@ fn require_existing_read_directory_for_mode(
     })
 }
 
-fn require_existing_read_file_for_mode(
+pub(crate) fn require_existing_read_file_for_mode(
     mode_label: &str,
     state_root: &Path,
     path: &Path,
@@ -1527,58 +686,7 @@ fn artifact_name(path: &Path) -> &str {
         .unwrap_or("file")
 }
 
-struct EngineerReadArtifacts {
-    handoff_path: PathBuf,
-    handoff_file_name: String,
-    memory_path: PathBuf,
-    evidence_path: PathBuf,
-}
-
-fn validated_engineer_read_artifacts(
-    state_root: &Path,
-) -> crate::SimardResult<EngineerReadArtifacts> {
-    validate_existing_read_state_root_root("engineer read", state_root)?;
-    let selected_handoff =
-        select_handoff_artifact_for_read(state_root, ScopedHandoffMode::Engineer, "engineer read")?;
-    Ok(EngineerReadArtifacts {
-        handoff_path: selected_handoff.path,
-        handoff_file_name: selected_handoff.file_name.to_string(),
-        memory_path: require_existing_read_file_for_mode(
-            "engineer read",
-            state_root,
-            &state_root.join("memory_records.json"),
-        )?,
-        evidence_path: require_existing_read_file_for_mode(
-            "engineer read",
-            state_root,
-            &state_root.join("evidence_records.json"),
-        )?,
-    })
-}
-
-fn validated_terminal_read_artifacts(
-    state_root: &Path,
-) -> crate::SimardResult<EngineerReadArtifacts> {
-    validate_existing_read_state_root_root("terminal read", state_root)?;
-    let selected_handoff =
-        select_handoff_artifact_for_read(state_root, ScopedHandoffMode::Terminal, "terminal read")?;
-    Ok(EngineerReadArtifacts {
-        handoff_path: selected_handoff.path,
-        handoff_file_name: selected_handoff.file_name.to_string(),
-        memory_path: require_existing_read_file_for_mode(
-            "terminal read",
-            state_root,
-            &state_root.join("memory_records.json"),
-        )?,
-        evidence_path: require_existing_read_file_for_mode(
-            "terminal read",
-            state_root,
-            &state_root.join("evidence_records.json"),
-        )?,
-    })
-}
-
-fn parse_runtime_topology(value: &str) -> crate::SimardResult<RuntimeTopology> {
+pub(crate) fn parse_runtime_topology(value: &str) -> crate::SimardResult<RuntimeTopology> {
     match value {
         "single-process" => Ok(RuntimeTopology::SingleProcess),
         "multi-process" => Ok(RuntimeTopology::MultiProcess),
@@ -1591,540 +699,15 @@ fn parse_runtime_topology(value: &str) -> crate::SimardResult<RuntimeTopology> {
     }
 }
 
-struct EngineerReadView {
-    state_root: PathBuf,
-    handoff_source: String,
-    identity: String,
-    selected_base_type: String,
-    topology: String,
-    session_phase: String,
-    objective_metadata: String,
-    repo_root: PathBuf,
-    repo_branch: String,
-    repo_head: String,
-    worktree_dirty: String,
-    changed_files: String,
-    active_goals: Vec<String>,
-    carried_meeting_decisions: Vec<String>,
-    selected_action: String,
-    action_plan: String,
-    verification_steps: String,
-    action_status: String,
-    changed_files_after_action: String,
-    verification_status: String,
-    verification_summary: String,
-    terminal_bridge_context: Option<TerminalBridgeContext>,
-    memory_record_count: usize,
-    evidence_record_count: usize,
+pub(crate) fn print_text(label: &str, value: impl AsRef<str>) {
+    println!("{label}: {}", sanitize_terminal_text(value.as_ref()));
 }
 
-struct TerminalReadView {
-    state_root: PathBuf,
-    handoff_source: String,
-    identity: String,
-    selected_base_type: String,
-    topology: String,
-    session_phase: String,
-    objective_metadata: String,
-    adapter_implementation: String,
-    shell: String,
-    working_directory: String,
-    command_count: String,
-    wait_count: String,
-    wait_timeout_seconds: String,
-    step_count: usize,
-    steps: Vec<String>,
-    checkpoints: Vec<String>,
-    last_output_line: Option<String>,
-    transcript_preview: String,
-    continuity_source: Option<String>,
-    copilot_submit_audit: Option<CopilotSubmitAudit>,
-    memory_record_count: usize,
-    evidence_record_count: usize,
+pub(crate) fn print_display(label: &str, value: impl std::fmt::Display) {
+    println!("{label}: {}", sanitize_terminal_text(&value.to_string()));
 }
 
-impl EngineerReadView {
-    fn load(state_root: PathBuf) -> crate::SimardResult<Self> {
-        let artifacts = validated_engineer_read_artifacts(&state_root)?;
-        let handoff_source = artifacts.handoff_file_name.clone();
-        let handoff = load_runtime_handoff_snapshot(
-            &crate::terminal_engineer_bridge::SelectedHandoffArtifact {
-                path: artifacts.handoff_path.clone(),
-                file_name: match handoff_source.as_str() {
-                    ENGINEER_HANDOFF_FILE_NAME => ENGINEER_HANDOFF_FILE_NAME,
-                    _ => crate::terminal_engineer_bridge::COMPATIBILITY_HANDOFF_FILE_NAME,
-                },
-            },
-            "engineer read",
-        )?;
-        let session =
-            handoff
-                .session
-                .as_ref()
-                .ok_or_else(|| crate::SimardError::InvalidHandoffSnapshot {
-                    field: "session".to_string(),
-                    reason: format!(
-                        "engineer read requires {} to contain a persisted session snapshot",
-                        artifacts.handoff_file_name
-                    )
-                    .to_string(),
-                })?;
-
-        FileBackedMemoryStore::try_new(artifacts.memory_path)?;
-        FileBackedEvidenceStore::try_new(artifacts.evidence_path)?;
-
-        Ok(Self {
-            state_root,
-            handoff_source: handoff_source.clone(),
-            identity: handoff.identity_name,
-            selected_base_type: handoff.selected_base_type.to_string(),
-            topology: handoff.topology.to_string(),
-            session_phase: session.phase.to_string(),
-            objective_metadata: render_redacted_objective_metadata(&session.objective)?,
-            repo_root: PathBuf::from(required_engineer_evidence_value(
-                &handoff.evidence_records,
-                "repo-root=",
-                &handoff_source,
-            )?),
-            repo_branch: required_engineer_evidence_value(
-                &handoff.evidence_records,
-                "repo-branch=",
-                &handoff_source,
-            )?
-            .to_string(),
-            repo_head: required_engineer_evidence_value(
-                &handoff.evidence_records,
-                "repo-head=",
-                &handoff_source,
-            )?
-            .to_string(),
-            worktree_dirty: required_engineer_evidence_value(
-                &handoff.evidence_records,
-                "worktree-dirty=",
-                &handoff_source,
-            )?
-            .to_string(),
-            changed_files: required_engineer_evidence_value(
-                &handoff.evidence_records,
-                "changed-files=",
-                &handoff_source,
-            )?
-            .to_string(),
-            active_goals: parse_engineer_summary_list(
-                required_engineer_evidence_value(
-                    &handoff.evidence_records,
-                    "active-goals=",
-                    &handoff_source,
-                )?,
-                ", ",
-            ),
-            carried_meeting_decisions: parse_carried_meeting_decisions(
-                required_engineer_evidence_value(
-                    &handoff.evidence_records,
-                    "carried-meeting-decisions=",
-                    &handoff_source,
-                )?,
-            )?,
-            selected_action: required_engineer_evidence_value(
-                &handoff.evidence_records,
-                "selected-action=",
-                &handoff_source,
-            )?
-            .to_string(),
-            action_plan: required_engineer_evidence_value(
-                &handoff.evidence_records,
-                "action-plan=",
-                &handoff_source,
-            )?
-            .to_string(),
-            verification_steps: required_engineer_evidence_value(
-                &handoff.evidence_records,
-                "action-verification-steps=",
-                &handoff_source,
-            )?
-            .to_string(),
-            action_status: required_engineer_evidence_value(
-                &handoff.evidence_records,
-                "action-status=",
-                &handoff_source,
-            )?
-            .to_string(),
-            changed_files_after_action: required_engineer_evidence_value(
-                &handoff.evidence_records,
-                "changed-files-after-action=",
-                &handoff_source,
-            )?
-            .to_string(),
-            verification_status: required_engineer_evidence_value(
-                &handoff.evidence_records,
-                "verification-status=",
-                &handoff_source,
-            )?
-            .to_string(),
-            verification_summary: required_engineer_evidence_value(
-                &handoff.evidence_records,
-                "verification-summary=",
-                &handoff_source,
-            )?
-            .to_string(),
-            terminal_bridge_context: TerminalBridgeContext::from_engineer_evidence(
-                &handoff.evidence_records,
-            )?,
-            memory_record_count: handoff.memory_records.len(),
-            evidence_record_count: handoff.evidence_records.len(),
-        })
-    }
-
-    fn print(&self) {
-        println!("Probe mode: engineer-read");
-        print_text("Engineer handoff source", &self.handoff_source);
-        print_text("Mode boundary", ENGINEER_MODE_BOUNDARY);
-        print_text("Identity", &self.identity);
-        print_text("Selected base type", &self.selected_base_type);
-        print_text("Topology", &self.topology);
-        print_display("State root", self.state_root.display());
-        print_text("Session phase", &self.session_phase);
-        print_text("Objective metadata", &self.objective_metadata);
-        print_display("Repo root", self.repo_root.display());
-        print_text("Repo branch", &self.repo_branch);
-        print_text("Repo head", &self.repo_head);
-        print_text("Worktree dirty", &self.worktree_dirty);
-        print_text("Changed files", &self.changed_files);
-        println!("Active goals count: {}", self.active_goals.len());
-        for (index, goal) in self.active_goals.iter().enumerate() {
-            print_text(&format!("Active goal {}", index + 1), goal);
-        }
-        println!(
-            "Carried meeting decisions: {}",
-            self.carried_meeting_decisions.len()
-        );
-        for (index, decision) in self.carried_meeting_decisions.iter().enumerate() {
-            print_text(&format!("Carried meeting decision {}", index + 1), decision);
-        }
-        print_terminal_bridge_section(
-            self.terminal_bridge_context.as_ref(),
-            self.terminal_bridge_context
-                .as_ref()
-                .map(|context| context.continuity_source.as_str())
-                .unwrap_or(SHARED_DEFAULT_STATE_ROOT_SOURCE),
-        );
-        print_text("Selected action", &self.selected_action);
-        print_text("Action plan", &self.action_plan);
-        print_text("Verification steps", &self.verification_steps);
-        print_text("Action status", &self.action_status);
-        print_text(
-            "Changed files after action",
-            &self.changed_files_after_action,
-        );
-        print_text("Verification status", &self.verification_status);
-        print_text("Verification summary", &self.verification_summary);
-        println!("Memory records: {}", self.memory_record_count);
-        println!("Evidence records: {}", self.evidence_record_count);
-    }
-}
-
-impl TerminalReadView {
-    fn load(state_root: PathBuf) -> crate::SimardResult<Self> {
-        let artifacts = validated_terminal_read_artifacts(&state_root)?;
-        let handoff = load_runtime_handoff_snapshot(
-            &crate::terminal_engineer_bridge::SelectedHandoffArtifact {
-                path: artifacts.handoff_path.clone(),
-                file_name: match artifacts.handoff_file_name.as_str() {
-                    TERMINAL_HANDOFF_FILE_NAME => TERMINAL_HANDOFF_FILE_NAME,
-                    _ => crate::terminal_engineer_bridge::COMPATIBILITY_HANDOFF_FILE_NAME,
-                },
-            },
-            "terminal read",
-        )?;
-
-        FileBackedMemoryStore::try_new(artifacts.memory_path)?;
-        FileBackedEvidenceStore::try_new(artifacts.evidence_path)?;
-
-        Self::from_handoff(state_root, handoff, artifacts.handoff_file_name, None)
-    }
-
-    fn from_handoff(
-        state_root: PathBuf,
-        handoff: RuntimeHandoffSnapshot,
-        handoff_source: String,
-        continuity_source: Option<String>,
-    ) -> crate::SimardResult<Self> {
-        let handoff_source_label = handoff_source.clone();
-        let session = handoff.session.as_ref().ok_or_else(|| {
-            crate::SimardError::InvalidHandoffSnapshot {
-                field: "session".to_string(),
-                reason: format!(
-                    "terminal read requires {handoff_source} to contain a persisted session snapshot"
-                )
-                    .to_string(),
-            }
-        })?;
-
-        Ok(Self {
-            state_root,
-            handoff_source,
-            identity: handoff.identity_name,
-            selected_base_type: handoff.selected_base_type.to_string(),
-            topology: handoff.topology.to_string(),
-            session_phase: session.phase.to_string(),
-            objective_metadata: render_redacted_objective_metadata(&session.objective)?,
-            adapter_implementation: required_terminal_evidence_value(
-                &handoff.evidence_records,
-                "backend-implementation=",
-                &handoff_source_label,
-            )?
-            .to_string(),
-            shell: required_terminal_evidence_value(
-                &handoff.evidence_records,
-                "shell=",
-                &handoff_source_label,
-            )?
-            .to_string(),
-            working_directory: required_terminal_evidence_value(
-                &handoff.evidence_records,
-                "terminal-working-directory=",
-                &handoff_source_label,
-            )?
-            .to_string(),
-            command_count: required_terminal_evidence_value(
-                &handoff.evidence_records,
-                "terminal-command-count=",
-                &handoff_source_label,
-            )?
-            .to_string(),
-            wait_count: optional_terminal_evidence_value(
-                &handoff.evidence_records,
-                "terminal-wait-count=",
-            )
-            .unwrap_or("0")
-            .to_string(),
-            wait_timeout_seconds: optional_terminal_evidence_value(
-                &handoff.evidence_records,
-                "terminal-wait-timeout-seconds=",
-            )
-            .unwrap_or("5")
-            .to_string(),
-            step_count: terminal_evidence_values(&handoff.evidence_records, "terminal-step-").len(),
-            steps: terminal_evidence_values(&handoff.evidence_records, "terminal-step-"),
-            checkpoints: terminal_evidence_values(
-                &handoff.evidence_records,
-                "terminal-checkpoint-",
-            ),
-            last_output_line: optional_terminal_evidence_value(
-                &handoff.evidence_records,
-                "terminal-last-output-line=",
-            )
-            .map(ToOwned::to_owned),
-            transcript_preview: required_terminal_evidence_value(
-                &handoff.evidence_records,
-                "terminal-transcript-preview=",
-                &handoff_source_label,
-            )?
-            .to_string(),
-            continuity_source,
-            copilot_submit_audit: handoff.copilot_submit_audit,
-            memory_record_count: handoff.memory_records.len(),
-            evidence_record_count: handoff.evidence_records.len(),
-        })
-    }
-
-    fn print(&self) {
-        println!("Probe mode: terminal-read");
-        self.print_terminal_audit_header();
-        self.print_terminal_audit_body();
-    }
-
-    fn print_terminal_run(
-        &self,
-        adapter_capabilities: &[String],
-        execution_summary: &str,
-        reflection_summary: &str,
-    ) {
-        println!("Probe mode: terminal-run");
-        self.print_terminal_audit_header();
-        print_text("Adapter capabilities", adapter_capabilities.join(", "));
-        self.print_terminal_audit_body();
-        print_text("Execution summary", execution_summary);
-        print_text("Reflection summary", reflection_summary);
-    }
-
-    fn print_terminal_audit_header(&self) {
-        print_text("Terminal handoff source", &self.handoff_source);
-        print_text("Mode boundary", TERMINAL_MODE_BOUNDARY);
-        print_text("Identity", &self.identity);
-        print_text("Selected base type", &self.selected_base_type);
-        print_text("Topology", &self.topology);
-        print_display("State root", self.state_root.display());
-        print_text("Session phase", &self.session_phase);
-        print_text("Objective metadata", &self.objective_metadata);
-        print_text("Adapter implementation", &self.adapter_implementation);
-    }
-
-    fn print_terminal_audit_body(&self) {
-        print_text("Shell", &self.shell);
-        print_text("Working directory", &self.working_directory);
-        print_text("Terminal command count", &self.command_count);
-        print_text("Terminal wait count", &self.wait_count);
-        print_text("Terminal wait timeout seconds", &self.wait_timeout_seconds);
-        println!("Terminal steps count: {}", self.step_count);
-        if self.steps.is_empty() {
-            println!("Terminal steps: <none>");
-        } else {
-            for (index, step) in self.steps.iter().enumerate() {
-                print_text(&format!("Terminal step {}", index + 1), step);
-            }
-        }
-        println!("Terminal checkpoints count: {}", self.checkpoints.len());
-        if self.checkpoints.is_empty() {
-            println!("Terminal checkpoints: <none>");
-        } else {
-            for (index, checkpoint) in self.checkpoints.iter().enumerate() {
-                print_text(&format!("Terminal checkpoint {}", index + 1), checkpoint);
-            }
-        }
-        if let Some(last_output_line) = &self.last_output_line {
-            print_text("Terminal last output line", last_output_line);
-        }
-        print_text("Terminal transcript preview", &self.transcript_preview);
-        if let Some(audit) = &self.copilot_submit_audit {
-            print_text("Copilot flow asset", &audit.flow_asset);
-            print_text("Copilot submit outcome", &audit.outcome);
-            if let Some(reason_code) = &audit.reason_code {
-                print_text("Copilot reason code", reason_code);
-            }
-            print_text("Copilot payload id", &audit.payload_id);
-        }
-        if let Some(continuity_source) = &self.continuity_source {
-            print_text("Next step source", continuity_source);
-        }
-        println!("Next steps count: 1");
-        println!(
-            "Next step 1: run 'simard engineer run <topology> <workspace-root> <objective> {}' to start the separate repo-grounded bounded loop",
-            self.state_root.display()
-        );
-        println!("Memory records: {}", self.memory_record_count);
-        println!("Evidence records: {}", self.evidence_record_count);
-    }
-}
-
-fn required_engineer_evidence_value<'a>(
-    evidence_records: &'a [EvidenceRecord],
-    prefix: &str,
-    handoff_source: &str,
-) -> crate::SimardResult<&'a str> {
-    evidence_records
-        .iter()
-        .rev()
-        .find_map(|record| record.detail.strip_prefix(prefix))
-        .ok_or_else(|| crate::SimardError::InvalidHandoffSnapshot {
-            field: prefix.trim_end_matches('=').to_string(),
-            reason: format!(
-                "engineer read requires {handoff_source} to carry persisted engineer evidence '{}' for operator output",
-                prefix.trim_end_matches('=')
-            ),
-        })
-}
-
-fn required_terminal_evidence_value<'a>(
-    evidence_records: &'a [EvidenceRecord],
-    prefix: &str,
-    handoff_source: &str,
-) -> crate::SimardResult<&'a str> {
-    evidence_records
-        .iter()
-        .rev()
-        .find_map(|record| record.detail.strip_prefix(prefix))
-        .ok_or_else(|| crate::SimardError::InvalidHandoffSnapshot {
-            field: prefix.trim_end_matches('=').to_string(),
-            reason: format!(
-                "terminal read requires {handoff_source} to carry persisted terminal evidence '{}' for operator output",
-                prefix.trim_end_matches('=')
-            ),
-        })
-}
-
-fn optional_terminal_evidence_value<'a>(
-    evidence_records: &'a [EvidenceRecord],
-    prefix: &str,
-) -> Option<&'a str> {
-    evidence_records
-        .iter()
-        .rev()
-        .find_map(|record| record.detail.strip_prefix(prefix))
-}
-
-fn terminal_evidence_values(evidence_records: &[EvidenceRecord], prefix: &str) -> Vec<String> {
-    evidence_records
-        .iter()
-        .filter_map(|record| record.detail.split_once('='))
-        .filter(|(label, _)| {
-            label.starts_with(prefix)
-                && label[prefix.len()..]
-                    .chars()
-                    .next()
-                    .is_some_and(|ch| ch.is_ascii_digit())
-        })
-        .map(|(_, value)| value.to_string())
-        .collect()
-}
-
-fn parse_engineer_summary_list(raw: &str, separator: &str) -> Vec<String> {
-    if raw == "<none>" {
-        return Vec::new();
-    }
-
-    raw.split(separator)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
-}
-
-fn parse_carried_meeting_decisions(raw: &str) -> crate::SimardResult<Vec<String>> {
-    if raw == "<none>" {
-        return Ok(Vec::new());
-    }
-
-    let persisted_records = raw
-        .split(" || ")
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>();
-    if persisted_records.is_empty() {
-        return Err(crate::SimardError::InvalidHandoffSnapshot {
-            field: "carried-meeting-decisions".to_string(),
-            reason: format!(
-                "engineer read requires {ENGINEER_HANDOFF_FILE_NAME} or {} to carry at least one persisted meeting record or '<none>' for carried-meeting-decisions",
-                crate::terminal_engineer_bridge::COMPATIBILITY_HANDOFF_FILE_NAME
-            ),
-        });
-    }
-
-    let mut decisions = Vec::new();
-    for persisted_record in persisted_records {
-        let record = PersistedMeetingRecord::parse(persisted_record).map_err(|error| {
-            crate::SimardError::InvalidHandoffSnapshot {
-                field: "carried-meeting-decisions".to_string(),
-                reason: format!(
-                    "engineer read requires valid persisted meeting records for carried-meeting-decisions: {error}"
-                ),
-            }
-        })?;
-        decisions.extend(record.decisions);
-    }
-    Ok(decisions)
-}
-
-fn render_redacted_objective_metadata(value: &str) -> crate::SimardResult<String> {
-    crate::sanitization::normalize_objective_metadata(value).ok_or_else(|| {
-        crate::SimardError::InvalidHandoffSnapshot {
-            field: "session.objective".to_string(),
-            reason: "engineer read requires a trusted handoff artifact to persist objective metadata as objective-metadata(chars=<n>, words=<n>, lines=<n>)".to_string(),
-        }
-    })
-}
-
-fn print_terminal_bridge_section(
+pub(crate) fn print_terminal_bridge_section(
     terminal_bridge_context: Option<&TerminalBridgeContext>,
     default_source: &str,
 ) {
@@ -2210,7 +793,75 @@ fn next_optional_path(args: &mut impl Iterator<Item = String>) -> Option<PathBuf
     args.next().map(PathBuf::from)
 }
 
-fn load_terminal_objective_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+fn reject_extra_args(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(extra) = args.next() {
+        let mut extras = vec![extra];
+        extras.extend(args);
+        return Err(format!("unexpected trailing arguments: {}", extras.join(" ")).into());
+    }
+    Ok(())
+}
+
+pub(crate) fn render_redacted_objective_metadata(value: &str) -> crate::SimardResult<String> {
+    crate::sanitization::normalize_objective_metadata(value).ok_or_else(|| {
+        crate::SimardError::InvalidHandoffSnapshot {
+            field: "session.objective".to_string(),
+            reason: "engineer read requires a trusted handoff artifact to persist objective metadata as objective-metadata(chars=<n>, words=<n>, lines=<n>)".to_string(),
+        }
+    })
+}
+
+pub(crate) fn required_terminal_evidence_value<'a>(
+    evidence_records: &'a [crate::EvidenceRecord],
+    prefix: &str,
+    handoff_source: &str,
+) -> crate::SimardResult<&'a str> {
+    evidence_records
+        .iter()
+        .rev()
+        .find_map(|record| record.detail.strip_prefix(prefix))
+        .ok_or_else(|| crate::SimardError::InvalidHandoffSnapshot {
+            field: prefix.trim_end_matches('=').to_string(),
+            reason: format!(
+                "terminal read requires {handoff_source} to carry persisted terminal evidence '{}' for operator output",
+                prefix.trim_end_matches('=')
+            ),
+        })
+}
+
+pub(crate) fn optional_terminal_evidence_value<'a>(
+    evidence_records: &'a [crate::EvidenceRecord],
+    prefix: &str,
+) -> Option<&'a str> {
+    evidence_records
+        .iter()
+        .rev()
+        .find_map(|record| record.detail.strip_prefix(prefix))
+}
+
+pub(crate) fn terminal_evidence_values(
+    evidence_records: &[crate::EvidenceRecord],
+    prefix: &str,
+) -> Vec<String> {
+    evidence_records
+        .iter()
+        .filter_map(|record| record.detail.split_once('='))
+        .filter(|(label, _)| {
+            label.starts_with(prefix)
+                && label[prefix.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_ascii_digit())
+        })
+        .map(|(_, value)| value.to_string())
+        .collect()
+}
+
+pub(crate) fn load_terminal_objective_file(
+    path: &Path,
+) -> Result<String, Box<dyn std::error::Error>> {
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         format!(
             "terminal objective file '{}' could not be inspected: {error}",
@@ -2241,26 +892,57 @@ fn load_terminal_objective_file(path: &Path) -> Result<String, Box<dyn std::erro
     })
 }
 
-fn reject_extra_args(
-    mut args: impl Iterator<Item = String>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(extra) = args.next() {
-        let mut extras = vec![extra];
-        extras.extend(args);
-        return Err(format!("unexpected trailing arguments: {}", extras.join(" ")).into());
-    }
-    Ok(())
+pub(crate) fn validated_terminal_read_artifacts(
+    state_root: &Path,
+) -> crate::SimardResult<EngineerReadArtifacts> {
+    validate_existing_read_state_root_root("terminal read", state_root)?;
+    let selected_handoff = crate::terminal_engineer_bridge::select_handoff_artifact_for_read(
+        state_root,
+        crate::terminal_engineer_bridge::ScopedHandoffMode::Terminal,
+        "terminal read",
+    )?;
+    Ok(EngineerReadArtifacts {
+        handoff_path: selected_handoff.path,
+        handoff_file_name: selected_handoff.file_name.to_string(),
+        memory_path: require_existing_read_file_for_mode(
+            "terminal read",
+            state_root,
+            &state_root.join("memory_records.json"),
+        )?,
+        evidence_path: require_existing_read_file_for_mode(
+            "terminal read",
+            state_root,
+            &state_root.join("evidence_records.json"),
+        )?,
+    })
 }
 
-fn print_text(label: &str, value: impl AsRef<str>) {
-    println!("{label}: {}", sanitize_terminal_text(value.as_ref()));
+pub(crate) fn validated_engineer_read_artifacts(
+    state_root: &Path,
+) -> crate::SimardResult<EngineerReadArtifacts> {
+    validate_existing_read_state_root_root("engineer read", state_root)?;
+    let selected_handoff = crate::terminal_engineer_bridge::select_handoff_artifact_for_read(
+        state_root,
+        crate::terminal_engineer_bridge::ScopedHandoffMode::Engineer,
+        "engineer read",
+    )?;
+    Ok(EngineerReadArtifacts {
+        handoff_path: selected_handoff.path,
+        handoff_file_name: selected_handoff.file_name.to_string(),
+        memory_path: require_existing_read_file_for_mode(
+            "engineer read",
+            state_root,
+            &state_root.join("memory_records.json"),
+        )?,
+        evidence_path: require_existing_read_file_for_mode(
+            "engineer read",
+            state_root,
+            &state_root.join("evidence_records.json"),
+        )?,
+    })
 }
 
-fn print_display(label: &str, value: impl std::fmt::Display) {
-    println!("{label}: {}", sanitize_terminal_text(&value.to_string()));
-}
-
-fn print_string_section(label: &str, values: &[String]) {
+pub(crate) fn print_string_section(label: &str, values: &[String]) {
     println!("{label} count: {}", values.len());
     if values.is_empty() {
         println!("{label}: <none>");
@@ -2273,7 +955,7 @@ fn print_string_section(label: &str, values: &[String]) {
     }
 }
 
-fn print_meeting_goal_section(goals: &[crate::PersistedMeetingGoalUpdate]) {
+pub(crate) fn print_meeting_goal_section(goals: &[crate::PersistedMeetingGoalUpdate]) {
     println!("Goal updates count: {}", goals.len());
     if goals.is_empty() {
         println!("Goal updates: <none>");
@@ -2285,7 +967,11 @@ fn print_meeting_goal_section(goals: &[crate::PersistedMeetingGoalUpdate]) {
     }
 }
 
-fn print_goal_section(records: &[GoalRecord], status: GoalStatus, heading: &'static str) {
+pub(crate) fn print_goal_section(
+    records: &[GoalRecord],
+    status: GoalStatus,
+    heading: &'static str,
+) {
     let mut matching = records
         .iter()
         .filter(|record| record.status == status)
@@ -2310,12 +996,12 @@ fn print_goal_section(records: &[GoalRecord], status: GoalStatus, heading: &'sta
     }
 }
 
-struct GoalRegisterView {
+pub(crate) struct GoalRegisterView {
     sections: [GoalRegisterSection; 4],
 }
 
 impl GoalRegisterView {
-    fn from_records(records: Vec<GoalRecord>) -> Self {
+    pub(crate) fn from_records(records: Vec<GoalRecord>) -> Self {
         let mut active = Vec::new();
         let mut proposed = Vec::new();
         let mut paused = Vec::new();
@@ -2340,7 +1026,7 @@ impl GoalRegisterView {
         }
     }
 
-    fn print(&self) {
+    pub(crate) fn print(&self) {
         for section in &self.sections {
             section.print();
         }
@@ -2388,5 +1074,107 @@ impl GoalRegisterSection {
                 goal.concise_label(),
             );
         }
+    }
+}
+
+pub(crate) fn ensure_terminal_recipe_is_runnable(recipe_name: &str) -> crate::SimardResult<()> {
+    if !is_copilot_guarded_recipe(recipe_name) {
+        return Ok(());
+    }
+
+    match probe_local_copilot_status() {
+        CopilotStatusProbeResult::Available { .. } => Ok(()),
+        CopilotStatusProbeResult::Unavailable {
+            reason_code,
+            detail,
+        }
+        | CopilotStatusProbeResult::Unsupported {
+            reason_code,
+            detail,
+        } => Err(crate::SimardError::ActionExecutionFailed {
+            action: recipe_name.to_string(),
+            reason: format!("{reason_code}: {detail}"),
+        }),
+    }
+}
+
+const TERMINAL_RECIPE_DIRECTORY: &str = "simard/terminal_recipes";
+const TERMINAL_RECIPE_EXTENSION: &str = "simard-terminal";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TerminalRecipeDescriptor {
+    pub(crate) name: String,
+    pub(crate) reference: PromptAssetRef,
+}
+
+pub(crate) fn list_terminal_recipe_descriptors()
+-> crate::SimardResult<Vec<TerminalRecipeDescriptor>> {
+    let recipe_root = prompt_root().join(TERMINAL_RECIPE_DIRECTORY);
+    let entries =
+        fs::read_dir(&recipe_root).map_err(|error| crate::SimardError::PromptAssetRead {
+            path: recipe_root.clone(),
+            reason: error.to_string(),
+        })?;
+    let mut recipes = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| crate::SimardError::PromptAssetRead {
+            path: recipe_root.clone(),
+            reason: error.to_string(),
+        })?;
+        let entry_path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| crate::SimardError::PromptAssetRead {
+                path: entry_path.clone(),
+                reason: error.to_string(),
+            })?;
+        if !file_type.is_file()
+            || entry_path.extension() != Some(OsStr::new(TERMINAL_RECIPE_EXTENSION))
+        {
+            continue;
+        }
+        let Some(stem) = entry_path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        recipes.push(TerminalRecipeDescriptor {
+            name: stem.to_string(),
+            reference: terminal_recipe_reference(stem)?,
+        });
+    }
+    recipes.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(recipes)
+}
+
+pub(crate) fn load_terminal_recipe(recipe_name: &str) -> crate::SimardResult<PromptAsset> {
+    let reference = terminal_recipe_reference(recipe_name)?;
+    FilePromptAssetStore::new(prompt_root()).load(&reference)
+}
+
+fn terminal_recipe_reference(recipe_name: &str) -> crate::SimardResult<PromptAssetRef> {
+    if recipe_name.is_empty()
+        || !recipe_name
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+    {
+        return Err(crate::SimardError::InvalidPromptAssetPath {
+            asset_id: format!("terminal-recipe:{recipe_name}"),
+            path: PathBuf::from(recipe_name),
+            reason: "recipe names may only use lowercase ASCII letters, digits, and hyphens"
+                .to_string(),
+        });
+    }
+    Ok(PromptAssetRef::new(
+        format!("terminal-recipe:{recipe_name}"),
+        PathBuf::from(TERMINAL_RECIPE_DIRECTORY)
+            .join(format!("{recipe_name}.{TERMINAL_RECIPE_EXTENSION}")),
+    ))
+}
+
+pub(crate) fn print_terminal_recipe(recipe_name: &str, recipe: &PromptAsset) {
+    print_text("Terminal recipe", recipe_name);
+    print_display("Recipe asset", recipe.relative_path.display());
+    println!("Recipe contents:");
+    for line in sanitize_terminal_text(&recipe.contents).lines() {
+        println!("{line}");
     }
 }
