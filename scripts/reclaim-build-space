@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'EOF'
+usage: scripts/reclaim-build-space [--apply] [--include-current]
+
+Preview or remove Rust build artifact directories under the shared Simard git common dir.
+
+By default this script:
+  - previews candidate directories only
+  - includes the repo-level target/ and target-shared/
+  - includes per-worktree target/ directories
+  - keeps the current worktree target/ unless --include-current is passed
+
+Use --apply to delete the listed directories.
+EOF
+}
+
+apply=0
+include_current=0
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --apply)
+      apply=1
+      ;;
+    --include-current)
+      include_current=1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage
+      exit 64
+      ;;
+  esac
+  shift
+done
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "${script_dir}/.." && pwd)"
+common_dir="$(git -C "${repo_root}" rev-parse --git-common-dir 2>/dev/null || printf '%s/.git' "${repo_root}")"
+common_dir="$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "${common_dir}")"
+common_root="$(dirname -- "${common_dir}")"
+current_root="$(git -C "${repo_root}" rev-parse --show-toplevel 2>/dev/null || printf '%s' "${repo_root}")"
+
+mapfile -t candidates < <(
+  {
+    printf '%s\n' "${common_root}/target"
+    printf '%s\n' "${common_root}/target-shared"
+    find "${common_root}/worktrees" -type d -name target -print 2>/dev/null
+  } | awk '!seen[$0]++'
+)
+
+selected=()
+total_k=0
+for path in "${candidates[@]}"; do
+  [ -d "${path}" ] || continue
+  if [ "${include_current}" -ne 1 ] && [ "${path}" = "${current_root}/target" ]; then
+    continue
+  fi
+  size_k="$(du -sk "${path}" | awk '{print $1}')"
+  total_k=$((total_k + size_k))
+  selected+=("${path}")
+done
+
+if [ "${#selected[@]}" -eq 0 ]; then
+  echo "No build artifact directories matched the current selection." >&2
+  exit 0
+fi
+
+echo "Build artifact directories:"
+for path in "${selected[@]}"; do
+  printf '  %8s  %s\n' "$(du -sh "${path}" | awk '{print $1}')" "${path}"
+done
+printf '  %8s  total\n' "$(numfmt --to=iec --suffix=B "$((total_k * 1024))")"
+
+if [ "${apply}" -ne 1 ]; then
+  echo
+  echo "Preview only. Re-run with --apply to delete these directories." >&2
+  exit 0
+fi
+
+for path in "${selected[@]}"; do
+  rm -rf -- "${path}"
+done
+
+echo
+echo "Removed ${#selected[@]} build artifact director$( [ "${#selected[@]}" -eq 1 ] && printf 'y' || printf 'ies' )." >&2
