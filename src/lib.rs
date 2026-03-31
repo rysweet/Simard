@@ -1,4 +1,7 @@
+pub mod agent_goal_assignment;
 pub mod agent_program;
+pub mod agent_roles;
+pub mod agent_supervisor;
 pub mod base_type_copilot;
 pub mod base_type_harness;
 pub mod base_type_turn;
@@ -18,6 +21,7 @@ pub mod gym_bridge;
 pub mod gym_scoring;
 pub mod handoff;
 pub mod identity;
+pub mod identity_composition;
 pub mod improvements;
 pub mod knowledge_bridge;
 pub mod knowledge_context;
@@ -40,9 +44,17 @@ pub mod session;
 pub mod terminal_engineer_bridge;
 mod terminal_session;
 
+pub use agent_goal_assignment::{
+    SubordinateProgress, assign_goal, poll_progress, read_assigned_goal, report_progress,
+};
 pub use agent_program::{
     AgentProgram, AgentProgramContext, AgentProgramMemoryRecord, ImprovementCuratorProgram,
     MeetingFacilitatorProgram, ObjectiveRelayProgram,
+};
+pub use agent_roles::{AgentRole, identity_for_role, role_for_objective};
+pub use agent_supervisor::{
+    HeartbeatStatus, SubordinateConfig, SubordinateHandle, check_heartbeat, kill_subordinate,
+    spawn_subordinate,
 };
 pub use base_type_copilot::{CopilotAdapterConfig, CopilotSdkAdapter, parse_copilot_response};
 pub use base_type_harness::{HarnessConfig, RealLocalHarnessAdapter};
@@ -98,6 +110,9 @@ pub use handoff::{
 pub use identity::{
     BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader, IdentityManifest, ManifestContract,
     MemoryPolicy, OperatingMode,
+};
+pub use identity_composition::{
+    CompositeIdentity, SubordinateIdentity, compose_identity, max_subordinate_depth,
 };
 pub use improvements::{
     ImprovementPromotionPlan, PersistedImprovementApproval, PersistedImprovementRecord,
