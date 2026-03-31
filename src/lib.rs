@@ -1,6 +1,9 @@
 pub mod agent_program;
 pub mod base_types;
 pub mod bootstrap;
+pub mod bridge;
+pub mod bridge_circuit;
+pub mod bridge_subprocess;
 mod copilot_status_probe;
 mod copilot_task_submit;
 pub mod engineer_loop;
@@ -41,6 +44,12 @@ pub use bootstrap::{
     bootstrap_entrypoint, builtin_base_type_registry_for_manifest, latest_local_handoff,
     run_local_session,
 };
+pub use bridge::{
+    BridgeErrorPayload, BridgeHealth, BridgeId, BridgeRequest, BridgeResponse, BridgeTransport,
+    new_request_id, unpack_bridge_response,
+};
+pub use bridge_circuit::{CircuitBreakerConfig, CircuitBreakerTransport, CircuitState};
+pub use bridge_subprocess::{InMemoryBridgeTransport, SubprocessBridgeTransport};
 pub use engineer_loop::{
     EngineerLoopRun, ExecutedEngineerAction, RepoInspection, SelectedEngineerAction,
     VerificationReport, run_local_engineer_loop,
