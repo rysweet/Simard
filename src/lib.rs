@@ -9,6 +9,7 @@ pub mod base_types;
 pub mod bootstrap;
 pub mod bridge;
 pub mod bridge_circuit;
+pub mod bridge_launcher;
 pub mod bridge_subprocess;
 mod copilot_status_probe;
 mod copilot_task_submit;
@@ -161,7 +162,7 @@ pub use memory::{
     FileBackedMemoryStore, InMemoryMemoryStore, MemoryRecord, MemoryScope, MemoryStore,
 };
 pub use memory_bridge::CognitiveMemoryBridge;
-pub use memory_bridge_adapter::CognitiveBridgeMemoryAdapter;
+pub use memory_bridge_adapter::CognitiveBridgeMemoryStore;
 pub use memory_cognitive::{
     CognitiveEpisode, CognitiveFact, CognitiveProcedure, CognitiveProspective,
     CognitiveSensoryItem, CognitiveStatistics, CognitiveWorkingSlot,

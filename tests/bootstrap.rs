@@ -381,9 +381,11 @@ fn bootstrap_persists_durable_state_and_restores_latest_handoff() {
     );
     assert_eq!(restored_snapshot.memory_records, 2);
     assert_eq!(restored_snapshot.evidence_records, 4);
-    assert_eq!(
-        restored_snapshot.memory_backend.identity,
-        "memory::json-file-store"
+    assert!(
+        restored_snapshot.memory_backend.identity == "memory::json-file-store"
+            || restored_snapshot.memory_backend.identity == "memory::cognitive-bridge",
+        "memory backend should be json-file-store or cognitive-bridge, got: {}",
+        restored_snapshot.memory_backend.identity
     );
     assert_eq!(
         restored_snapshot.evidence_backend.identity,

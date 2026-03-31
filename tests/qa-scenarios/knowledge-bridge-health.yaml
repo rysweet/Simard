@@ -1,0 +1,9 @@
+name: simard-knowledge-bridge-health
+app_type: cli
+description: Verify Python knowledge bridge starts and responds to health
+steps:
+  - action: run
+    command: "echo '{\"id\":\"1\",\"method\":\"bridge.health\",\"params\":{}}' | python3 python/simard_knowledge_bridge.py"
+    timeout: 15s
+  - action: expect_stdout
+    contains: '"healthy":true'

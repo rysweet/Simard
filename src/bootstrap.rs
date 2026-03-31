@@ -11,6 +11,7 @@ use crate::agent_program::{
 use crate::base_types::{
     BaseTypeId, LocalProcessHarnessAdapter, RustyClawdAdapter, TerminalShellAdapter,
 };
+use crate::bridge_launcher::{find_python_dir, launch_memory_bridge};
 use crate::error::{SimardError, SimardResult};
 use crate::evidence::{EvidenceStore, FileBackedEvidenceStore};
 use crate::goals::{FileBackedGoalStore, GoalStore};
@@ -20,7 +21,7 @@ use crate::identity::{
     OperatingMode,
 };
 use crate::memory::{FileBackedMemoryStore, MemoryStore};
-use crate::memory_bridge_adapter::CognitiveBridgeMemoryAdapter;
+use crate::memory_bridge_adapter::CognitiveBridgeMemoryStore;
 use crate::metadata::{Freshness, Provenance};
 use crate::prompt_assets::{FilePromptAssetStore, PromptAssetStore};
 use crate::reflection::{ReflectionSnapshot, ReflectiveRuntime};
@@ -90,29 +91,6 @@ pub struct ConfigValue<T> {
     pub source: ConfigValueSource,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum MemoryBackend {
-    /// JSON file-backed memory store (default).
-    #[default]
-    JsonFile,
-    /// Cognitive memory via Python bridge subprocess (Kuzu graph DB).
-    CognitiveBridge,
-}
-
-impl MemoryBackend {
-    fn parse(raw: Option<String>) -> SimardResult<Self> {
-        match raw.as_deref() {
-            None | Some("json-file") => Ok(Self::JsonFile),
-            Some("cognitive-bridge") => Ok(Self::CognitiveBridge),
-            Some(value) => Err(SimardError::InvalidConfigValue {
-                key: "SIMARD_MEMORY_BACKEND".to_string(),
-                value: value.to_string(),
-                help: "expected 'json-file' or 'cognitive-bridge'".to_string(),
-            }),
-        }
-    }
-}
-
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BootstrapInputs {
     pub prompt_root: Option<PathBuf>,
@@ -122,7 +100,6 @@ pub struct BootstrapInputs {
     pub identity: Option<String>,
     pub base_type: Option<String>,
     pub topology: Option<String>,
-    pub memory_backend: Option<String>,
 }
 
 impl BootstrapInputs {
@@ -135,7 +112,6 @@ impl BootstrapInputs {
             identity: read_optional_utf8_env("SIMARD_IDENTITY")?,
             base_type: read_optional_utf8_env("SIMARD_BASE_TYPE")?,
             topology: read_optional_utf8_env("SIMARD_RUNTIME_TOPOLOGY")?,
-            memory_backend: read_optional_utf8_env("SIMARD_MEMORY_BACKEND")?,
         })
     }
 }
@@ -257,7 +233,6 @@ pub struct BootstrapConfig {
     pub state_root: ConfigValue<PathBuf>,
     pub selected_base_type: ConfigValue<BaseTypeId>,
     pub topology: ConfigValue<RuntimeTopology>,
-    pub memory_backend: MemoryBackend,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -366,8 +341,6 @@ impl BootstrapConfig {
             }
         };
 
-        let memory_backend = MemoryBackend::parse(inputs.memory_backend)?;
-
         Ok(Self {
             mode,
             identity: match inputs.identity {
@@ -387,7 +360,6 @@ impl BootstrapConfig {
             state_root,
             selected_base_type,
             topology,
-            memory_backend,
         })
     }
 
@@ -400,42 +372,40 @@ impl BootstrapConfig {
             format!("prompt-root:{}", self.prompt_root.source),
             format!("state-root:{}", self.state_root.source),
             format!("objective:{}", self.objective.source),
-            format!("memory-backend:{:?}", self.memory_backend),
         ]
     }
 }
 
-/// Build the memory store based on the configured backend.
+/// Build the memory store, attempting cognitive bridge first with file fallback.
 ///
-/// - `JsonFile`: uses `FileBackedMemoryStore` with a JSON file in the state root.
-/// - `CognitiveBridge`: spawns a Python subprocess running the cognitive memory
-///   bridge server, wrapping it in a circuit breaker and the `CognitiveBridgeMemoryAdapter`.
+/// Only launches the memory bridge — knowledge and gym bridges are launched
+/// on-demand by subsystems that need them, avoiding unnecessary subprocess spawns.
 fn build_memory_store(config: &BootstrapConfig) -> SimardResult<Arc<dyn MemoryStore>> {
-    match config.memory_backend {
-        MemoryBackend::JsonFile => Ok(Arc::new(FileBackedMemoryStore::try_new(
+    let bridge = find_python_dir().ok().and_then(|python_dir| {
+        let db_path = config.state_root.value.join("cognitive_memory");
+        launch_memory_bridge(&config.identity, &db_path, &python_dir).ok()
+    });
+
+    if let Some(bridge) = bridge {
+        eprintln!("[simard] cognitive memory bridge active — using Kuzu backend");
+        let store = CognitiveBridgeMemoryStore::new(bridge, config.memory_store_path())?;
+        Ok(Arc::new(store))
+    } else {
+        eprintln!("[simard] cognitive memory bridge unavailable — using JSON file backend");
+        Ok(Arc::new(FileBackedMemoryStore::try_new(
             config.memory_store_path(),
-        )?)),
-        MemoryBackend::CognitiveBridge => {
-            let script_path = config.cognitive_bridge_script_path();
-            let db_path = config.state_root.value.join("cognitive_memory.kuzu");
-            let transport = crate::bridge_subprocess::SubprocessBridgeTransport::new(
-                "cognitive-memory",
-                &script_path,
-                vec![
-                    "--db-path".to_string(),
-                    db_path.to_string_lossy().to_string(),
-                ],
-                std::time::Duration::from_secs(30),
-            );
-            let circuit = crate::bridge_circuit::CircuitBreakerTransport::with_defaults(transport);
-            Ok(Arc::new(CognitiveBridgeMemoryAdapter::new(Box::new(
-                circuit,
-            ))?))
-        }
+        )?))
     }
 }
 
-pub fn assemble_local_runtime(config: &BootstrapConfig) -> SimardResult<LocalRuntime> {
+/// Resolved runtime pieces shared by fresh and handoff assembly paths.
+struct AssembledParts {
+    ports: RuntimePorts,
+    request: RuntimeRequest,
+}
+
+/// Build all runtime components from a bootstrap config.
+fn assemble_parts(config: &BootstrapConfig) -> SimardResult<AssembledParts> {
     let prompt_store = Arc::new(FilePromptAssetStore::new(config.prompt_root.value.clone()));
     let memory_store = build_memory_store(config)?;
     let evidence_store = Arc::new(FileBackedEvidenceStore::try_new(
@@ -463,7 +433,6 @@ pub fn assemble_local_runtime(config: &BootstrapConfig) -> SimardResult<LocalRun
         contract,
     ))?;
     let base_types = builtin_base_type_registry_for_manifest(&manifest)?;
-
     let request = RuntimeRequest::new(
         manifest,
         config.selected_base_type.value.clone(),
@@ -471,73 +440,31 @@ pub fn assemble_local_runtime(config: &BootstrapConfig) -> SimardResult<LocalRun
     );
     let agent_program = agent_program_for_manifest(&request.manifest)?;
 
-    LocalRuntime::compose(
-        runtime_ports_for_topology(
-            prompt_store,
-            memory_store,
-            evidence_store,
-            goal_store,
-            handoff_store,
-            base_types,
-            config.topology.value,
-            agent_program,
-        )?,
-        request,
-    )
+    let ports = runtime_ports_for_topology(
+        prompt_store,
+        memory_store,
+        evidence_store,
+        goal_store,
+        handoff_store,
+        base_types,
+        config.topology.value,
+        agent_program,
+    )?;
+
+    Ok(AssembledParts { ports, request })
+}
+
+pub fn assemble_local_runtime(config: &BootstrapConfig) -> SimardResult<LocalRuntime> {
+    let parts = assemble_parts(config)?;
+    LocalRuntime::compose(parts.ports, parts.request)
 }
 
 pub fn assemble_local_runtime_from_handoff(
     config: &BootstrapConfig,
     snapshot: RuntimeHandoffSnapshot,
 ) -> SimardResult<LocalRuntime> {
-    let prompt_store = Arc::new(FilePromptAssetStore::new(config.prompt_root.value.clone()));
-    let memory_store = build_memory_store(config)?;
-    let evidence_store = Arc::new(FileBackedEvidenceStore::try_new(
-        config.evidence_store_path(),
-    )?);
-    let goal_store = Arc::new(FileBackedGoalStore::try_new(config.goal_store_path())?);
-    let handoff_store = Arc::new(FileBackedHandoffStore::try_new(
-        config.handoff_store_path(),
-    )?);
-
-    let contract = ManifestContract::new(
-        bootstrap_entrypoint(),
-        "bootstrap-config -> identity-loader -> runtime-ports -> local-runtime",
-        config.manifest_precedence(),
-        Provenance::new(
-            "bootstrap",
-            format!("{}:{}", bootstrap_entrypoint(), config.identity),
-        ),
-        Freshness::now()?,
-    )?;
-
-    let manifest = BuiltinIdentityLoader.load(&IdentityLoadRequest::new(
-        config.identity.clone(),
-        env!("CARGO_PKG_VERSION"),
-        contract,
-    ))?;
-    let base_types = builtin_base_type_registry_for_manifest(&manifest)?;
-    let request = RuntimeRequest::new(
-        manifest,
-        config.selected_base_type.value.clone(),
-        config.topology.value,
-    );
-    let agent_program = agent_program_for_manifest(&request.manifest)?;
-
-    LocalRuntime::compose_from_handoff(
-        runtime_ports_for_topology(
-            prompt_store,
-            memory_store,
-            evidence_store,
-            goal_store,
-            handoff_store,
-            base_types,
-            config.topology.value,
-            agent_program,
-        )?,
-        request,
-        snapshot,
-    )
+    let parts = assemble_parts(config)?;
+    LocalRuntime::compose_from_handoff(parts.ports, parts.request, snapshot)
 }
 
 pub fn run_local_session(config: &BootstrapConfig) -> SimardResult<LocalSessionExecution> {
@@ -682,21 +609,6 @@ impl BootstrapConfig {
 
     pub fn state_root_path(&self) -> &Path {
         &self.state_root.value
-    }
-
-    /// Path to the Python bridge server script for cognitive memory.
-    ///
-    /// Looks for `SIMARD_COGNITIVE_BRIDGE_SCRIPT` env var first, then falls
-    /// back to `bridge_servers/cognitive_memory_bridge.py` relative to the
-    /// cargo manifest directory.
-    pub fn cognitive_bridge_script_path(&self) -> PathBuf {
-        std::env::var_os("SIMARD_COGNITIVE_BRIDGE_SCRIPT")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("bridge_servers")
-                    .join("cognitive_memory_bridge.py")
-            })
     }
 }
 
