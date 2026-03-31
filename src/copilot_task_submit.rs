@@ -12,12 +12,12 @@ use crate::identity::OperatingMode;
 use crate::memory::{FileBackedMemoryStore, MemoryRecord, MemoryScope, MemoryStore};
 use crate::prompt_assets::{FilePromptAssetStore, PromptAssetRef, PromptAssetStore};
 use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeState, RuntimeTopology};
+use crate::sanitization::sanitize_terminal_text;
 use crate::session::{SessionPhase, SessionRecord, UuidSessionIdGenerator};
 use crate::terminal_engineer_bridge::{ScopedHandoffMode, persist_handoff_artifacts};
 use crate::terminal_session::{
     PtyTerminalSession, TerminalSessionCapture, TerminalStep, compact_terminal_evidence_value,
-    render_terminal_step, resolve_working_directory, terminal_last_output_line, transcript_preview,
-    transcript_visible_content_lines_iter,
+    render_terminal_step, resolve_working_directory,
 };
 
 const COPILOT_SUBMIT_ACTION: &str = "copilot-submit";
@@ -290,10 +290,6 @@ impl TranscriptCheckpointScan {
         self.has_checkpoint(PositiveCheckpointKind::PostSubmitCheckpoint)
     }
 
-    fn has_non_startup_checkpoints(&self) -> bool {
-        self.has_submit_hint() || self.has_post_submit_checkpoint()
-    }
-
     fn has_ordered_startup_sequence(&self) -> bool {
         matches!(
             (
@@ -367,7 +363,7 @@ fn observe_startup(
     let timeout = flow.wait_timeout();
     loop {
         let transcript = session.read_transcript()?;
-        let scan = scan_transcript_lines(transcript_visible_content_lines_iter(&transcript), flow);
+        let scan = scan_transcript(&transcript, flow);
         let exited = session.status()?.is_some();
         let status = classify_startup(&scan, exited);
         let ordered_steps = scan.startup_ordered_steps(flow);
@@ -428,7 +424,7 @@ fn observe_submit(
     let timeout = flow.wait_timeout();
     loop {
         let transcript = session.read_transcript()?;
-        let scan = scan_transcript_lines(transcript_visible_content_lines_iter(&transcript), flow);
+        let scan = scan_transcript(&transcript, flow);
         let exited = session.status()?.is_some();
         let ordered_steps = scan.submit_ordered_steps(flow);
         let observed_checkpoints = scan.observed_checkpoints();
@@ -473,7 +469,7 @@ fn classify_startup(scan: &TranscriptCheckpointScan, exited: bool) -> StartupSta
         return StartupStatus::Unsupported("trust-confirmation-required");
     }
 
-    if scan.has_non_startup_checkpoints() {
+    if scan.has_post_submit_checkpoint() {
         return StartupStatus::Unsupported("unexpected-startup-text");
     }
 
@@ -481,6 +477,14 @@ fn classify_startup(scan: &TranscriptCheckpointScan, exited: bool) -> StartupSta
         || (scan.has_banner() && scan.has_guidance() && !scan.has_ordered_startup_sequence())
     {
         return StartupStatus::Unsupported("unexpected-startup-text");
+    }
+
+    if scan.has_ordered_startup_sequence() {
+        return if exited {
+            StartupStatus::Unsupported("process-exited-early")
+        } else {
+            StartupStatus::Ready
+        };
     }
 
     if scan.has_other_lines {
@@ -491,14 +495,6 @@ fn classify_startup(scan: &TranscriptCheckpointScan, exited: bool) -> StartupSta
             return StartupStatus::Unsupported("missing-guidance-checkpoint");
         }
         return StartupStatus::Unsupported("unexpected-startup-text");
-    }
-
-    if scan.has_ordered_startup_sequence() {
-        return if exited {
-            StartupStatus::Unsupported("process-exited-early")
-        } else {
-            StartupStatus::Ready
-        };
     }
 
     if exited {
@@ -523,7 +519,7 @@ fn classify_startup_timeout(scan: &TranscriptCheckpointScan) -> Option<&'static 
         return Some("trust-confirmation-required");
     }
 
-    if scan.has_non_startup_checkpoints() {
+    if scan.has_post_submit_checkpoint() {
         return Some("unexpected-startup-text");
     }
 
@@ -531,6 +527,10 @@ fn classify_startup_timeout(scan: &TranscriptCheckpointScan) -> Option<&'static 
         || (scan.has_banner() && scan.has_guidance() && !scan.has_ordered_startup_sequence())
     {
         return Some("unexpected-startup-text");
+    }
+
+    if scan.has_ordered_startup_sequence() {
+        return None;
     }
 
     if scan.has_banner() && !scan.has_guidance() {
@@ -641,9 +641,9 @@ fn persist_report(inputs: PersistReportInputs<'_>) -> SimardResult<CopilotSubmit
         session.advance(phase)?;
     }
 
-    let last_meaningful_output_line =
-        terminal_last_output_line(transcript, &[TerminalStep::Input(flow.payload.clone())]);
-    let transcript_preview = transcript_preview(transcript);
+    let visible_fragments = copilot_visible_fragments(transcript, flow);
+    let last_meaningful_output_line = copilot_last_meaningful_output_line(&visible_fragments, flow);
+    let transcript_preview = copilot_transcript_preview(&visible_fragments, flow);
     let audit = CopilotSubmitAudit {
         flow_asset: COPILOT_SUBMIT_FLOW_ASSET_PATH.to_string(),
         payload_id: flow.payload_id.clone(),
@@ -850,6 +850,145 @@ where
     scan
 }
 
+fn scan_transcript(transcript: &str, flow: &CopilotSubmitFlowAsset) -> TranscriptCheckpointScan {
+    scan_transcript_lines(copilot_visible_fragments(transcript, flow), flow)
+}
+
+fn copilot_visible_fragments(transcript: &str, flow: &CopilotSubmitFlowAsset) -> Vec<String> {
+    transcript
+        .lines()
+        .filter_map(|line| {
+            let sanitized = sanitize_terminal_text(line);
+            let trimmed = sanitized.trim();
+            (!trimmed.is_empty()
+                && !trimmed.starts_with("Script started on ")
+                && !trimmed.starts_with("Script done on "))
+            .then_some(sanitized)
+        })
+        .flat_map(|line| split_visible_fragment_candidates(&line))
+        .filter_map(|fragment| canonicalize_visible_fragment(&fragment, flow))
+        .collect()
+}
+
+fn split_visible_fragment_candidates(line: &str) -> Vec<String> {
+    let mut normalized = String::with_capacity(line.len());
+    for ch in line.chars() {
+        if matches!(
+            ch,
+            '╭' | '╮'
+                | '╰'
+                | '╯'
+                | '│'
+                | '─'
+                | '❯'
+                | '●'
+                | '◉'
+                | '◎'
+                | '○'
+                | '·'
+                | '█'
+                | '▘'
+                | '▝'
+                | '▔'
+        ) {
+            normalized.push('\n');
+        } else if ch == '\u{200b}' {
+            normalized.push(' ');
+        } else {
+            normalized.push(ch);
+        }
+    }
+
+    normalized
+        .lines()
+        .map(|segment| segment.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|segment| !segment.is_empty())
+        .collect()
+}
+
+fn canonicalize_visible_fragment(fragment: &str, flow: &CopilotSubmitFlowAsset) -> Option<String> {
+    if fragment == flow.startup_banner {
+        return Some(flow.startup_banner.clone());
+    }
+    if fragment == flow.guidance_checkpoint {
+        return Some(flow.guidance_checkpoint.clone());
+    }
+    if fragment.contains(&flow.submit_hint) {
+        return Some(flow.submit_hint.clone());
+    }
+    if flow
+        .post_submit_checkpoint
+        .as_ref()
+        .is_some_and(|checkpoint| fragment == checkpoint)
+    {
+        return flow.post_submit_checkpoint.clone();
+    }
+    if flow
+        .trust_prompt
+        .as_ref()
+        .is_some_and(|prompt| fragment == prompt)
+    {
+        return flow.trust_prompt.clone();
+    }
+    if flow
+        .wrapper_error_signal
+        .as_ref()
+        .is_some_and(|signal| fragment == signal)
+    {
+        return flow.wrapper_error_signal.clone();
+    }
+    if is_ignorable_copilot_ui_fragment(fragment) {
+        return None;
+    }
+    Some(fragment.to_string())
+}
+
+fn is_ignorable_copilot_ui_fragment(fragment: &str) -> bool {
+    fragment.eq("GitHub Copilot")
+        || fragment.starts_with("GitHub Copilot v")
+        || fragment.starts_with("itHub Copilot")
+        || fragment.starts_with("Tip:")
+        || fragment == "Copilot uses AI, so always check for mistakes."
+        || fragment.contains("Loading environment:")
+        || fragment.contains("Environment loaded:")
+        || fragment.contains("Remote session disabled:")
+        || fragment.contains("switch mode")
+        || fragment.contains("Unlimited reqs.")
+        || fragment == "GPT-5.4"
+        || fragment == "GPT-5.4 (high)"
+        || fragment.contains("[⎇ ")
+}
+
+fn copilot_last_meaningful_output_line(
+    visible_fragments: &[String],
+    flow: &CopilotSubmitFlowAsset,
+) -> Option<String> {
+    visible_fragments
+        .iter()
+        .rev()
+        .find(|fragment| !fragment.contains(&flow.payload))
+        .map(|fragment| compact_terminal_evidence_value(fragment, 160))
+}
+
+fn copilot_transcript_preview(
+    visible_fragments: &[String],
+    flow: &CopilotSubmitFlowAsset,
+) -> String {
+    let mut normalized = visible_fragments
+        .iter()
+        .filter(|fragment| !fragment.contains(&flow.payload))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" | ");
+
+    if normalized.len() > 512 {
+        normalized.truncate(512);
+        normalized.push_str("...");
+    }
+
+    normalized
+}
+
 fn finalize_session(
     mut session: PtyTerminalSession,
     terminate: bool,
@@ -887,7 +1026,7 @@ mod tests {
 
     use super::{
         CopilotSubmitFlowAsset, StartupStatus, SubmitStatus, classify_startup,
-        classify_startup_timeout, classify_submit, scan_transcript_lines,
+        classify_startup_timeout, classify_submit, scan_transcript, scan_transcript_lines,
     };
 
     fn flow() -> CopilotSubmitFlowAsset {
@@ -905,7 +1044,25 @@ mod tests {
             wrapper_error_signal: Some(
                 "unknown option '--dangerously-skip-permissions'".to_string(),
             ),
-            workflow_noise_signals: vec!["✅ Copied".to_string(), "GitHub Copilot v".to_string()],
+            workflow_noise_signals: vec![
+                "✅ Copied".to_string(),
+                "🔐 Set execute permissions".to_string(),
+                "💾 Backup created at".to_string(),
+                "📋 Found existing settings.json".to_string(),
+                "🔒 XPIA security hooks directory found".to_string(),
+                "🔒 XPIA security hooks configured".to_string(),
+                "✅ Settings updated".to_string(),
+                "✓ Rust recipe runner available".to_string(),
+                "✓ Disabled GitHub MCP server to save context tokens - using gh CLI instead"
+                    .to_string(),
+                "Using gh CLI with account:".to_string(),
+                "To re-enable GitHub MCP, just ask:".to_string(),
+                "✓ XPIA security defender ready".to_string(),
+                "✓ Staged".to_string(),
+                "✓ Registered amplihack as Copilot CLI plugin".to_string(),
+                "INFO:amplihack.security.".to_string(),
+                "GitHub Copilot v".to_string(),
+            ],
             payload_id: "simard-local-task-submit-ready-v1".to_string(),
             payload: "fixed payload".to_string(),
         }
@@ -1028,8 +1185,54 @@ mod tests {
             Some("workflow-wrapper-noise")
         );
         assert_eq!(
+            classify_startup_timeout(&scan_transcript_lines(
+                [
+                    "💾 Backup created at /tmp/settings.json.backup.123",
+                    "📋 Found existing settings.json",
+                    "🔒 XPIA security hooks directory found",
+                    "🔒 XPIA security hooks configured (3 hooks)",
+                    "✅ Settings updated (4 hooks configured)",
+                    "✓ Rust recipe runner available",
+                    "✓ Disabled GitHub MCP server to save context tokens - using gh CLI instead",
+                    "Using gh CLI with account: rysweet",
+                    "To re-enable GitHub MCP, just ask: 'please use the GitHub MCP server'",
+                    "✓ XPIA security defender ready (/home/azureuser/.amplihack/bin/xpia-defend)",
+                    "✓ Registered amplihack as Copilot CLI plugin (~/.copilot/installed-plugins/amplihack@local/)",
+                ],
+                &flow,
+            )),
+            Some("workflow-wrapper-noise")
+        );
+        assert_eq!(
             classify_startup_timeout(&scan_transcript_lines(std::iter::empty::<&str>(), &flow)),
             None
+        );
+    }
+
+    #[test]
+    fn scan_transcript_extracts_real_copilot_tui_checkpoints() {
+        let flow = flow();
+        let transcript = "\
+INFO:amplihack.security.xpia_defender:XPIA Defender initialized with security level: SecurityLevel.MEDIUM\n\
+✓ Registered amplihack as Copilot CLI plugin (~/.copilot/installed-plugins/amplihack@local/)\n\
+itHub Copilot\u{7}╭────────────────╮│  ╰─╯╰─╯  GitHub Copilot v1.0.14-0 ││  █ ▘▝ █  Describe a task to get started. ││  Tip: /experimental Show available experimental features ││  Copilot uses AI, so always check for mistakes. │╰────────────────╯● Loading environment: 2 custom instructions, 1 plugin\n\
+❯  Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts──────────────── shift+tab switch mode · ctrl+s run command \u{200b} Unlimited reqs.\n";
+        let scan = scan_transcript(transcript, &flow);
+
+        assert!(scan.has_banner());
+        assert!(scan.has_guidance());
+        assert!(scan.has_submit_hint());
+        assert!(!scan.has_wrapper_error);
+        assert!(!scan.has_trust_prompt);
+        assert!(!scan.has_other_lines);
+        assert_eq!(
+            scan.observed_checkpoints(),
+            vec![
+                "Describe a task to get started.".to_string(),
+                "Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts"
+                    .to_string(),
+                "ctrl+s run command".to_string(),
+            ]
         );
     }
 }

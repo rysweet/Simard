@@ -665,20 +665,8 @@ pub(crate) fn transcript_content_lines_iter(transcript: &str) -> impl Iterator<I
     })
 }
 
-pub(crate) fn transcript_visible_content_lines_iter(
-    transcript: &str,
-) -> impl Iterator<Item = String> + '_ {
-    transcript_content_lines_iter(transcript)
-        .map(sanitize_visible_terminal_line)
-        .filter(|line| !line.is_empty())
-}
-
 pub(crate) fn transcript_content_lines(transcript: &str) -> Vec<&str> {
     transcript_content_lines_iter(transcript).collect()
-}
-
-fn sanitize_visible_terminal_line(raw: &str) -> String {
-    sanitize_terminal_text(raw).trim().to_string()
 }
 
 pub(crate) fn render_terminal_step(step: &TerminalStep) -> String {
