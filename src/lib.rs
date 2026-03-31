@@ -37,6 +37,9 @@ pub mod operator_commands;
 mod persistence;
 pub mod prompt_assets;
 pub mod reflection;
+pub mod remote_azlin;
+pub mod remote_session;
+pub mod remote_transfer;
 pub mod review;
 pub mod runtime;
 mod sanitization;
@@ -153,6 +156,9 @@ pub use prompt_assets::{
     PromptAssetStore,
 };
 pub use reflection::{ReflectionReport, ReflectionSnapshot, ReflectiveRuntime};
+pub use remote_azlin::{AzlinConfig, AzlinExecutor, AzlinVm, RealAzlinExecutor};
+pub use remote_session::{RemoteConfig, RemoteSession, RemoteStatus};
+pub use remote_transfer::MemorySnapshot;
 pub use review::{
     ImprovementProposal, ReviewArtifact, ReviewRequest, ReviewSignal, ReviewTargetKind,
     build_review_artifact, latest_review_artifact, load_review_artifact, persist_review_artifact,
