@@ -18,6 +18,10 @@ pub mod knowledge_bridge;
 pub mod knowledge_context;
 pub mod meetings;
 pub mod memory;
+pub mod memory_bridge;
+pub mod memory_cognitive;
+pub mod memory_consolidation;
+pub mod memory_hive;
 pub mod metadata;
 pub mod operator_cli;
 pub mod operator_commands;
@@ -92,6 +96,16 @@ pub use meetings::{
 pub use memory::{
     FileBackedMemoryStore, InMemoryMemoryStore, MemoryRecord, MemoryScope, MemoryStore,
 };
+pub use memory_bridge::CognitiveMemoryBridge;
+pub use memory_cognitive::{
+    CognitiveEpisode, CognitiveFact, CognitiveProcedure, CognitiveProspective,
+    CognitiveSensoryItem, CognitiveStatistics, CognitiveWorkingSlot,
+};
+pub use memory_consolidation::{
+    FactExtraction, PreparedContext, execution_memory_operations, intake_memory_operations,
+    persistence_memory_operations, preparation_memory_operations, reflection_memory_operations,
+};
+pub use memory_hive::{HiveConfig, hive_config_from_identity};
 pub use metadata::{BackendDescriptor, Freshness, FreshnessState, Provenance};
 pub use operator_cli::{dispatch_operator_cli, operator_cli_help, operator_cli_usage};
 pub use operator_commands::{
