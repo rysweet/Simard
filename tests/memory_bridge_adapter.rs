@@ -62,6 +62,7 @@ fn make_record(
 // ---------- Scenario 1: Adapter stores and retrieves by scope ----------
 
 #[test]
+#[ignore] // Requires Python + Kuzu
 fn live_adapter_put_and_list_by_scope() {
     let fixture = TestFixture::new("adapter-scope");
     let session = test_session_id();
@@ -108,6 +109,7 @@ fn live_adapter_put_and_list_by_scope() {
 // ---------- Scenario 2: Dedup by key ----------
 
 #[test]
+#[ignore] // Requires Python + Kuzu
 fn live_adapter_deduplicates_by_key() {
     let fixture = TestFixture::new("adapter-dedup");
     let session = test_session_id();
@@ -135,6 +137,7 @@ fn live_adapter_deduplicates_by_key() {
 // ---------- Scenario 3: Session isolation ----------
 
 #[test]
+#[ignore] // Requires Python + Kuzu
 fn live_adapter_session_isolation() {
     let fixture = TestFixture::new("adapter-session");
     let session_a = test_session_id();
@@ -200,6 +203,7 @@ fn live_adapter_session_isolation() {
 // ---------- Scenario 4: Descriptor identifies cognitive backend ----------
 
 #[test]
+#[ignore] // Requires Python + Kuzu
 fn live_adapter_descriptor_identifies_backend() {
     let fixture = TestFixture::new("adapter-desc");
     let desc = fixture.store.descriptor();
@@ -213,6 +217,7 @@ fn live_adapter_descriptor_identifies_backend() {
 // ---------- Scenario 5: Full lifecycle (put, list, count, overwrite) ----------
 
 #[test]
+#[ignore] // Requires Python + Kuzu
 fn live_adapter_full_lifecycle() {
     let fixture = TestFixture::new("adapter-lifecycle");
     let session = test_session_id();
