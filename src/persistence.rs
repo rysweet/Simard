@@ -33,10 +33,15 @@ impl TempFileGuard {
         &self.path
     }
 
-    fn file_mut(&mut self) -> &mut File {
+    fn file_mut(&mut self) -> SimardResult<&mut File> {
         self.file
             .as_mut()
-            .expect("temporary persistence file should stay open until rename")
+            .ok_or_else(|| SimardError::PersistentStoreIo {
+                store: String::new(),
+                action: "write".to_string(),
+                path: self.path.clone(),
+                reason: "temporary persistence file was already closed".to_string(),
+            })
     }
 
     fn close(&mut self) {
@@ -112,7 +117,7 @@ where
         })?;
     let mut temp_file = TempFileGuard::new(store, path)?;
     temp_file
-        .file_mut()
+        .file_mut()?
         .write_all(&payload)
         .map_err(|error| SimardError::PersistentStoreIo {
             store: store.to_string(),
@@ -121,7 +126,7 @@ where
             reason: error.to_string(),
         })?;
     temp_file
-        .file_mut()
+        .file_mut()?
         .sync_all()
         .map_err(|error| SimardError::PersistentStoreIo {
             store: store.to_string(),
@@ -278,6 +283,7 @@ mod tests {
                 TempFileGuard::new("memory", &store_path).expect("temp file guard should open");
             temp_file
                 .file_mut()
+                .expect("temp file should still be open")
                 .write_all(br#"["pending"]"#)
                 .expect("temporary payload should be writable");
             let temp_path = temp_file.path().to_path_buf();

@@ -154,9 +154,13 @@ fn validate_backlog_item(item: &BacklogItem) -> SimardResult<()> {
 /// snapshot stored as a semantic fact and falls back to an empty board.
 pub fn load_goal_board(bridge: &CognitiveMemoryBridge) -> SimardResult<GoalBoard> {
     let facts = bridge.search_facts("goal-board:snapshot", 1, 0.0)?;
-    if let Some(fact) = facts.first()
-        && let Ok(board) = serde_json::from_str::<GoalBoard>(&fact.content)
-    {
+    if let Some(fact) = facts.first() {
+        let board = serde_json::from_str::<GoalBoard>(&fact.content).map_err(|e| {
+            SimardError::InvalidGoalRecord {
+                field: "board".to_string(),
+                reason: format!("failed to deserialize goal board: {e}"),
+            }
+        })?;
         return Ok(board);
     }
     Ok(GoalBoard::new())

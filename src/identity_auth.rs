@@ -86,11 +86,13 @@ fn required_field(field: &str, value: String) -> SimardResult<String> {
 }
 
 fn validate_email(email: &str) -> SimardResult<()> {
-    if !email.contains('@') {
+    let parts: Vec<&str> = email.splitn(2, '@').collect();
+    if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() || !parts[1].contains('.') {
         return Err(SimardError::InvalidConfigValue {
             key: "commit_email".to_string(),
             value: email.to_string(),
-            help: "commit_email must contain '@'".to_string(),
+            help: "commit_email must have a non-empty local part, '@', and a domain with a '.'"
+                .to_string(),
         });
     }
     Ok(())

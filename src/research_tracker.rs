@@ -103,7 +103,7 @@ impl ResearchTracker {
 
 fn required_field(field: &str, value: &str) -> SimardResult<()> {
     if value.trim().is_empty() {
-        return Err(SimardError::InvalidGoalRecord {
+        return Err(SimardError::InvalidResearchRecord {
             field: field.to_string(),
             reason: "value cannot be empty".to_string(),
         });
@@ -116,7 +116,7 @@ fn validate_topic(topic: &ResearchTopic) -> SimardResult<()> {
     required_field("research_topic.title", &topic.title)?;
     required_field("research_topic.source", &topic.source)?;
     if topic.priority == 0 {
-        return Err(SimardError::InvalidGoalRecord {
+        return Err(SimardError::InvalidResearchRecord {
             field: "research_topic.priority".to_string(),
             reason: "priority must be at least 1".to_string(),
         });
@@ -127,7 +127,7 @@ fn validate_topic(topic: &ResearchTopic) -> SimardResult<()> {
 fn validate_watch(watch: &DeveloperWatch) -> SimardResult<()> {
     required_field("developer_watch.github_id", &watch.github_id)?;
     if watch.focus_areas.is_empty() {
-        return Err(SimardError::InvalidGoalRecord {
+        return Err(SimardError::InvalidResearchRecord {
             field: "developer_watch.focus_areas".to_string(),
             reason: "at least one focus area is required".to_string(),
         });

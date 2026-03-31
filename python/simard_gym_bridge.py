@@ -93,6 +93,13 @@ def _extract_dimensions(grades: list[dict]) -> dict[str, float]:
     dims = _zero_dims()
     dims["factual_accuracy"] = avg
     dims["specificity"] = avg
+    # temporal_awareness: derive from grades that include a temporal score,
+    # fall back to None when the data source does not provide it.
+    temporal = [g["temporal_awareness"] for g in grades if "temporal_awareness" in g]
+    dims["temporal_awareness"] = sum(temporal) / len(temporal) if temporal else None
+    # source_attribution: derive from grades that include an attribution score.
+    attribution = [g["source_attribution"] for g in grades if "source_attribution" in g]
+    dims["source_attribution"] = sum(attribution) / len(attribution) if attribution else None
     metacog = [
         g["metacognition"]["overall"]
         for g in grades

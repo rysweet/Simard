@@ -118,11 +118,33 @@ pub fn azlin_create(
     let mut args = vec!["create", name];
     let region_flag;
     if let Some(ref region) = config.region {
+        if !region
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(SimardError::InvalidConfigValue {
+                key: "region".to_string(),
+                value: region.to_string(),
+                help: "region must contain only alphanumeric characters, hyphens, and underscores"
+                    .to_string(),
+            });
+        }
         region_flag = format!("--region={region}");
         args.push(&region_flag);
     }
     let size_flag;
     if let Some(ref size) = config.size {
+        if !size
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(SimardError::InvalidConfigValue {
+                key: "size".to_string(),
+                value: size.to_string(),
+                help: "size must contain only alphanumeric characters, hyphens, and underscores"
+                    .to_string(),
+            });
+        }
         size_flag = format!("--size={size}");
         args.push(&size_flag);
     }
