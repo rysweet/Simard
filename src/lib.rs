@@ -15,16 +15,19 @@ mod copilot_task_submit;
 pub mod engineer_loop;
 pub mod error;
 pub mod evidence;
+pub mod goal_curation;
 pub mod goals;
 pub mod gym;
 pub mod gym_bridge;
 pub mod gym_scoring;
 pub mod handoff;
 pub mod identity;
+pub mod identity_auth;
 pub mod identity_composition;
 pub mod improvements;
 pub mod knowledge_bridge;
 pub mod knowledge_context;
+pub mod meeting_facilitator;
 pub mod meetings;
 pub mod memory;
 pub mod memory_bridge;
@@ -40,6 +43,7 @@ pub mod reflection;
 pub mod remote_azlin;
 pub mod remote_session;
 pub mod remote_transfer;
+pub mod research_tracker;
 pub mod review;
 pub mod runtime;
 mod sanitization;
@@ -92,6 +96,11 @@ pub use error::{SimardError, SimardResult};
 pub use evidence::{
     EvidenceRecord, EvidenceSource, EvidenceStore, FileBackedEvidenceStore, InMemoryEvidenceStore,
 };
+pub use goal_curation::{
+    ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS, add_active_goal,
+    add_backlog_item, archive_completed, load_goal_board, persist_board, promote_to_active,
+    update_goal_progress,
+};
 pub use goals::{
     FileBackedGoalStore, GoalRecord, GoalStatus, GoalStore, GoalUpdate, InMemoryGoalStore,
 };
@@ -116,6 +125,10 @@ pub use identity::{
     BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader, IdentityManifest, ManifestContract,
     MemoryPolicy, OperatingMode,
 };
+pub use identity_auth::{
+    AuthIdentity, DualIdentityConfig, env_for_identity, identity_for_operation,
+    validate_identity_for_operation,
+};
 pub use identity_composition::{
     CompositeIdentity, SubordinateIdentity, compose_identity, max_subordinate_depth,
 };
@@ -127,6 +140,10 @@ pub use knowledge_bridge::{
     KnowledgeBridge, KnowledgePackInfo, KnowledgeQueryResult, KnowledgeSource,
 };
 pub use knowledge_context::{PlanningContext, enrich_planning_context};
+pub use meeting_facilitator::{
+    ActionItem, MeetingDecision, MeetingSession, MeetingSessionStatus, add_note, close_meeting,
+    record_action_item, record_decision, start_meeting,
+};
 pub use meetings::{
     PersistedMeetingGoalUpdate, PersistedMeetingRecord, looks_like_persisted_meeting_record,
 };
@@ -161,6 +178,10 @@ pub use reflection::{ReflectionReport, ReflectionSnapshot, ReflectiveRuntime};
 pub use remote_azlin::{AzlinConfig, AzlinExecutor, AzlinVm, RealAzlinExecutor};
 pub use remote_session::{RemoteConfig, RemoteSession, RemoteStatus};
 pub use remote_transfer::MemorySnapshot;
+pub use research_tracker::{
+    DeveloperWatch, ResearchStatus, ResearchTopic, ResearchTracker, add_research_topic,
+    load_research_topics, track_developer, update_topic_status,
+};
 pub use review::{
     ImprovementProposal, ReviewArtifact, ReviewRequest, ReviewSignal, ReviewTargetKind,
     build_review_artifact, latest_review_artifact, load_review_artifact, persist_review_artifact,
