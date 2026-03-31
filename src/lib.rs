@@ -14,6 +14,8 @@ pub mod error;
 pub mod evidence;
 pub mod goals;
 pub mod gym;
+pub mod gym_bridge;
+pub mod gym_scoring;
 pub mod handoff;
 pub mod identity;
 pub mod improvements;
@@ -82,6 +84,12 @@ pub use gym::{
     BenchmarkComparisonStatus, BenchmarkRunReport, BenchmarkScenario, BenchmarkSuiteReport,
     BenchmarkSuiteScenarioSummary, benchmark_scenarios, compare_latest_benchmark_runs,
     default_output_root, run_benchmark_scenario, run_benchmark_suite,
+};
+pub use gym_bridge::{GymBridge, GymScenario, GymScenarioResult, GymSuiteResult, ScoreDimensions};
+pub use gym_scoring::{
+    DimensionTrend, GymSuiteScore, ImprovementTrend, Regression, RegressionSeverity,
+    TrendDirection, aggregate_suite_scores, detect_regression, suite_score_from_result,
+    track_improvement,
 };
 pub use handoff::{
     CopilotSubmitAudit, FileBackedHandoffStore, InMemoryHandoffStore, RuntimeHandoffSnapshot,
