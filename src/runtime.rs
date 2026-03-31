@@ -671,6 +671,7 @@ impl RuntimeKernel {
                 .map(SessionRecord::redacted_for_handoff),
             memory_records,
             evidence_records,
+            copilot_submit_audit: None,
         };
         self.ports.handoff_store.save(snapshot.clone())?;
         Ok(snapshot)

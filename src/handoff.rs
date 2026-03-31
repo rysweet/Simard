@@ -14,6 +14,23 @@ use crate::session::SessionRecord;
 
 const HANDOFF_STORE_NAME: &str = "handoff";
 
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CopilotSubmitAudit {
+    pub flow_asset: String,
+    pub payload_id: String,
+    pub outcome: String,
+    #[serde(default)]
+    pub reason_code: Option<String>,
+    #[serde(default)]
+    pub ordered_steps: Vec<String>,
+    #[serde(default)]
+    pub satisfied_checkpoints: Vec<String>,
+    #[serde(default)]
+    pub last_meaningful_output_line: Option<String>,
+    #[serde(default)]
+    pub transcript_preview: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeHandoffSnapshot {
     pub exported_state: RuntimeState,
@@ -25,6 +42,8 @@ pub struct RuntimeHandoffSnapshot {
     pub session: Option<SessionRecord>,
     pub memory_records: Vec<MemoryRecord>,
     pub evidence_records: Vec<EvidenceRecord>,
+    #[serde(default)]
+    pub copilot_submit_audit: Option<CopilotSubmitAudit>,
 }
 
 pub trait RuntimeHandoffStore: Send + Sync {

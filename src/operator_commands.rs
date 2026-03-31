@@ -7,6 +7,7 @@ use crate::bootstrap::validate_state_root;
 use crate::copilot_status_probe::{
     CopilotStatusProbeResult, is_copilot_guarded_recipe, probe_local_copilot_status,
 };
+use crate::copilot_task_submit::{CopilotSubmitRun, run_copilot_submit};
 use crate::goals::{FileBackedGoalStore, GoalRecord, GoalStatus, GoalStore};
 use crate::improvements::PersistedImprovementRecord;
 use crate::meetings::PersistedMeetingRecord;
@@ -19,7 +20,7 @@ use crate::terminal_engineer_bridge::{
     persist_handoff_artifacts, scoped_handoff_path, select_handoff_artifact_for_read,
 };
 use crate::{
-    BootstrapConfig, BootstrapInputs, BuiltinIdentityLoader, EvidenceRecord,
+    BootstrapConfig, BootstrapInputs, BuiltinIdentityLoader, CopilotSubmitAudit, EvidenceRecord,
     FileBackedEvidenceStore, FileBackedMemoryStore, Freshness, IdentityLoadRequest, IdentityLoader,
     ManifestContract, MemoryRecord, MemoryScope, MemoryStore, Provenance, ReflectiveRuntime,
     ReviewRequest, ReviewTargetKind, RuntimeHandoffSnapshot, RuntimeTopology,
@@ -596,6 +597,38 @@ pub fn run_terminal_recipe_probe(
     ensure_terminal_recipe_is_runnable(recipe_name)?;
     let recipe = load_terminal_recipe(recipe_name)?;
     run_terminal_probe(topology, &recipe.contents, state_root_override)
+}
+
+pub fn run_copilot_submit_probe(
+    topology: &str,
+    state_root_override: Option<PathBuf>,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let runtime_topology = parse_runtime_topology(topology)?;
+    let state_root = resolved_state_root(
+        state_root_override,
+        "simard-engineer",
+        "terminal-shell",
+        topology,
+        "terminal-run",
+    )?;
+    match run_copilot_submit(runtime_topology, &state_root)? {
+        CopilotSubmitRun::Success(report) => {
+            print_copilot_submit_report(&state_root, topology, &report, json_output)?;
+            Ok(())
+        }
+        CopilotSubmitRun::Unsupported(report) => {
+            print_copilot_submit_report(&state_root, topology, &report, json_output)?;
+            Err(crate::SimardError::ActionExecutionFailed {
+                action: "copilot-submit".to_string(),
+                reason: format!(
+                    "unsupported: {}",
+                    report.reason_code.as_deref().unwrap_or("unknown-reason")
+                ),
+            }
+            .into())
+        }
+    }
 }
 
 pub fn run_engineer_loop_probe(
@@ -1605,6 +1638,7 @@ struct TerminalReadView {
     last_output_line: Option<String>,
     transcript_preview: String,
     continuity_source: Option<String>,
+    copilot_submit_audit: Option<CopilotSubmitAudit>,
     memory_record_count: usize,
     evidence_record_count: usize,
 }
@@ -1888,6 +1922,7 @@ impl TerminalReadView {
             )?
             .to_string(),
             continuity_source,
+            copilot_submit_audit: handoff.copilot_submit_audit,
             memory_record_count: handoff.memory_records.len(),
             evidence_record_count: handoff.evidence_records.len(),
         })
@@ -1951,6 +1986,14 @@ impl TerminalReadView {
             print_text("Terminal last output line", last_output_line);
         }
         print_text("Terminal transcript preview", &self.transcript_preview);
+        if let Some(audit) = &self.copilot_submit_audit {
+            print_text("Copilot flow asset", &audit.flow_asset);
+            print_text("Copilot submit outcome", &audit.outcome);
+            if let Some(reason_code) = &audit.reason_code {
+                print_text("Copilot reason code", reason_code);
+            }
+            print_text("Copilot payload id", &audit.payload_id);
+        }
         if let Some(continuity_source) = &self.continuity_source {
             print_text("Next step source", continuity_source);
         }
@@ -2108,6 +2151,48 @@ fn print_terminal_bridge_section(
             print_text("Terminal continuity source", default_source);
         }
     }
+}
+
+fn print_copilot_submit_report(
+    state_root: &Path,
+    topology: &str,
+    report: &crate::copilot_task_submit::CopilotSubmitReport,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(report)?);
+        return Ok(());
+    }
+
+    println!("Probe mode: copilot-submit");
+    print_text("Selected base type", &report.selected_base_type);
+    print_text("Topology", topology);
+    print_display("State root", state_root.display());
+    print_text("Copilot flow asset", &report.flow_asset);
+    print_text("Copilot submit outcome", report.outcome.as_str());
+    if let Some(reason_code) = &report.reason_code {
+        print_text("Copilot reason code", reason_code);
+    }
+    print_text("Copilot payload id", &report.payload_id);
+    println!(
+        "Copilot ordered steps count: {}",
+        report.ordered_steps.len()
+    );
+    for (index, step) in report.ordered_steps.iter().enumerate() {
+        print_text(&format!("Copilot step {}", index + 1), step);
+    }
+    println!(
+        "Copilot satisfied checkpoints count: {}",
+        report.satisfied_checkpoints.len()
+    );
+    for (index, checkpoint) in report.satisfied_checkpoints.iter().enumerate() {
+        print_text(&format!("Copilot checkpoint {}", index + 1), checkpoint);
+    }
+    if let Some(last_output_line) = &report.last_meaningful_output_line {
+        print_text("Terminal last output line", last_output_line);
+    }
+    print_text("Terminal transcript preview", &report.transcript_preview);
+    Ok(())
 }
 
 fn next_required(

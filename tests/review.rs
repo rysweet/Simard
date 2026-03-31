@@ -61,6 +61,7 @@ fn fixture_handoff() -> RuntimeHandoffSnapshot {
                 source: EvidenceSource::Runtime,
             },
         ],
+        copilot_submit_audit: None,
     }
 }
 

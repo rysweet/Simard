@@ -1,6 +1,6 @@
 ---
 title: "Tutorial: Run your first local session"
-description: Exercise the shipped local-session flows through the canonical `simard` CLI, starting with discoverable terminal recipes and then continuing into the repo-grounded engineer loop through one explicit state root.
+description: Exercise the shipped local-session flows through the canonical `simard` CLI and review where the bounded `engineer copilot-submit` slice fits before continuing into the repo-grounded engineer loop through one explicit state root.
 last_updated: 2026-03-30
 review_schedule: as-needed
 owner: simard
@@ -19,14 +19,14 @@ related:
 
 This tutorial exercises the shipped local-session flows through the canonical `simard` CLI.
 
-The first half focuses on the honest bridge from bounded terminal recipes into the repo-grounded engineer loop. The later steps show how meeting, goal, review, improvement, bootstrap, and gym surfaces still fit into the same local operator story.
+The first half focuses on the honest bridge from bounded terminal recipes into the repo-grounded engineer loop. It now includes the shipped bounded `engineer copilot-submit` slice so you can see where that stricter one-shot Copilot handoff fits before the later repo-grounded engineer run. The later steps show how meeting, goal, review, improvement, bootstrap, and gym surfaces still fit into the same local operator story.
 
 Use `simard` as the canonical operator-facing CLI. `simard_operator_probe` and `simard-gym` remain compatibility surfaces for older scripts, and `engineer terminal*` plus `engineer run/read` still share one honest local state model while remaining separate operator-visible modes.
 
 ## What you'll learn
 
 - how to run the bounded engineer loop against a local repo
-- how to start from a discoverable terminal recipe and continue into the engineer loop through the same explicit `state-root`
+- how to start from a discoverable terminal recipe, run the bounded `engineer copilot-submit` flow through the same explicit `state-root`, and then continue into the engineer loop
 - how meeting mode carries durable decision context into later engineer runs
 - how goal curation, review, and improvement curation reuse explicit durable state roots
 - how bootstrap and benchmark flows fit into the same operator-facing CLI story
@@ -35,6 +35,7 @@ Use `simard` as the canonical operator-facing CLI. `simard_operator_probe` and `
 
 - Rust and Cargo installed
 - a shell in the repository root
+- `amplihack` available on `PATH` if you want to exercise the Copilot slices
 - a clean working tree if you want to exercise the structured edit path later
 
 All runnable examples below use Cargo so they match the current executable surface exactly.
@@ -53,37 +54,36 @@ Start on the bounded local terminal surface, not the engineer loop.
 
 ```bash
 cargo run --quiet -- engineer terminal-recipe-list
-cargo run --quiet -- engineer terminal-recipe-show foundation-check
+cargo run --quiet -- engineer terminal-recipe-show copilot-prompt-check
+cargo run --quiet -- engineer terminal-recipe-show copilot-status-check
 ```
 
 Look for:
 
-- `foundation-check`
 - `copilot-prompt-check`
 - `copilot-status-check`
 - a real bounded recipe asset with `working-directory:`, `command:`, and `wait-for:` lines
 - `copilot-prompt-check` should show a real `amplihack copilot` launch plus a bounded `/exit`, while `copilot-status-check` remains the narrower `--version` probe
+- the `copilot-submit` flow is intentionally not part of `terminal-recipe-list`; it stays a dedicated command because it submits exactly one checked-in payload and nothing else
 
-**Checkpoint**: you can discover and inspect the shipped terminal recipes without claiming repo-grounded planning or verification happened yet.
+**Checkpoint**: you can discover and inspect the shipped prompt-only Copilot probes without claiming repo-grounded planning, task submission, or verification happened yet.
 
-## Step 3: Run the terminal recipe through the canonical CLI
+## Step 3: Run the shipped bounded Copilot prompt slice
 
 ```bash
 cargo run --quiet -- \
-  engineer terminal-recipe single-process foundation-check "$STATE_ROOT"
+  engineer terminal-recipe single-process copilot-prompt-check "$STATE_ROOT"
 ```
 
-Look for output shaped like this:
+Look for:
 
-```text
-Mode boundary: terminal
-Terminal recipe source: foundation-check
-Terminal steps count: 2
-Terminal last output line: terminal-recipe-ok
-Engineer next step: simard engineer run <topology> <workspace-root> <objective> <same-state-root>
-```
+- `Probe mode: terminal-run`
+- `Mode boundary: terminal`
+- the visible prompt guidance line `Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts`
+- the visible resume hint `Resume any session with copilot --resume`
+- `Next step 1: run 'simard engineer run <topology> <workspace-root> <objective> <same-state-root>'`
 
-**Checkpoint**: Simard ran one bounded local terminal session, persisted truthful terminal artifacts, and showed an explicit next-step path into the engineer loop without pretending that transition happened automatically.
+**Checkpoint**: Simard launched the real local `amplihack copilot` session, waited for the visible prompt guidance text, exited cleanly through the bounded prompt-check recipe, persisted truthful terminal artifacts, and showed an explicit next-step path into the engineer loop without pretending task submission happened.
 
 ## Step 4: Read back the stored terminal session
 
@@ -97,13 +97,29 @@ Look for:
 - `Probe mode: terminal-read`
 - `Terminal handoff source: latest_terminal_handoff.json`
 - `Mode boundary: terminal`
-- `Terminal recipe source: foundation-check`
-- `Terminal last output line: terminal-recipe-ok`
-- `Engineer next step: simard engineer run <topology> <workspace-root> <objective> <same-state-root>`
+- `Terminal last output line:`
+- `Terminal transcript preview:`
+- `Next step 1: run 'simard engineer run <topology> <workspace-root> <objective> <same-state-root>'`
 
-**Checkpoint**: the terminal readback stays read-only, and the bridge guidance is coming from durable local state rather than from a hidden resume system.
+**Checkpoint**: the terminal readback stays read-only, and the bridge guidance plus prompt-check audit are coming from durable local state rather than from a hidden resume system.
 
-## Step 5: Continue into engineer mode through the same state root
+## Step 5: Run the bounded `engineer copilot-submit` slice
+
+`engineer copilot-submit` sits between the prompt-check step above and the repo-grounded engineer run below as a stricter one-shot local submit path.
+
+```bash
+cargo run --quiet -- \
+  engineer copilot-submit single-process "$STATE_ROOT" --json
+```
+
+The contract is intentionally narrow:
+
+- `success` is reserved for a future checked-in flow where Simard can truthfully observe a real post-submit checkpoint after sending the fixed payload
+- today, the honest local result is usually `unsupported`: the visible Copilot UI can require folder trust confirmation, emit wrapper noise before the prompt, or surface the visible `ctrl+s run command` submit hint that this line-input PTY path cannot drive truthfully
+- `runtime-failure` is reserved for Simard-side failures such as invalid inputs, local launch failures, or persistence/readback errors before a trustworthy submit summary can be claimed
+- the command still submits one checked-in fixed payload only, and it must not accept arbitrary task text, inspect remote auth state, create or reuse worktrees, or claim general Copilot orchestration
+
+## Step 6: Continue into engineer mode through the same state root
 
 ```bash
 ENGINEER_OBJECTIVE=$'inspect the repository state
@@ -121,15 +137,15 @@ Mode boundary: engineer
 Repo root: /path/to/repo
 Terminal continuity available: yes
 Terminal continuity source: latest_terminal_handoff.json
-Terminal recipe source: foundation-check
+Terminal continuity last output line: <line from the prior terminal session>
 Action plan: Inspect the repo ...
 Selected action: cargo-metadata-scan
 Verification status: verified
 ```
 
-**Checkpoint**: Simard inspected the repo, preserved the v1 engineer contract, and rendered terminal continuity as descriptive context only.
+**Checkpoint**: Simard inspected the repo, preserved the v1 engineer contract, and rendered the earlier terminal continuity as descriptive context only.
 
-## Step 6: Read back the engineer audit trail
+## Step 7: Read back the engineer audit trail
 
 ```bash
 cargo run --quiet -- \
@@ -147,7 +163,7 @@ Look for:
 
 **Checkpoint**: `engineer read` prefers the engineer-scoped handoff, keeps the terminal continuity section separate, and never replays raw objective text.
 
-## Step 7: Capture a meeting record in the same state root
+## Step 8: Capture a meeting record in the same state root
 
 ```bash
 MEETING_OBJECTIVE="$(cat <<'EOF'
@@ -189,7 +205,7 @@ Look for:
 - `Decision 1: preserve meeting-to-engineer continuity`
 - `Goal update 1: p1 [active] Preserve meeting handoff`
 
-## Step 8: Re-run engineer mode and confirm carryover
+## Step 9: Re-run engineer mode and confirm carryover
 
 Use the same repo and the same state root again.
 
@@ -209,7 +225,7 @@ Verification status: verified
 
 **Checkpoint**: meeting mode and engineer mode now share durable planning context through one explicit state root.
 
-## Step 9: Curate durable goals directly
+## Step 10: Curate durable goals directly
 
 You can also update the goal register without running a meeting first.
 
@@ -229,7 +245,7 @@ Look for:
 
 **Checkpoint**: durable backlog stewardship is its own operator-visible mode, not an engineer-loop side effect.
 
-## Step 10: Generate a review artifact, curate one approval and one deferral, then read the stored improvement state
+## Step 11: Generate a review artifact, curate one approval and one deferral, then read the stored improvement state
 
 First persist the latest review artifact:
 
@@ -270,7 +286,7 @@ Look for:
 - `Deferred proposal 1: Promote this pattern into a repeatable benchmark (hold this until the next benchmark planning pass)`
 - `Latest improvement record: review=`
 
-## Step 11: Exercise bootstrap and benchmark discovery
+## Step 12: Exercise bootstrap and benchmark discovery
 
 Bootstrap and benchmark execution both live on the canonical CLI:
 

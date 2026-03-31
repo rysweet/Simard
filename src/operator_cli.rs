@@ -1,12 +1,13 @@
 use std::path::PathBuf;
 
 use crate::operator_commands::{
-    run_bootstrap_probe, run_engineer_loop_probe, run_engineer_read_probe, run_goal_curation_probe,
-    run_goal_curation_read_probe, run_gym_compare, run_gym_list, run_gym_scenario, run_gym_suite,
-    run_improvement_curation_probe, run_improvement_curation_read_probe, run_meeting_probe,
-    run_meeting_read_probe, run_review_probe, run_review_read_probe, run_terminal_probe,
-    run_terminal_probe_from_file, run_terminal_read_probe, run_terminal_recipe_list_probe,
-    run_terminal_recipe_probe, run_terminal_recipe_show_probe,
+    run_bootstrap_probe, run_copilot_submit_probe, run_engineer_loop_probe,
+    run_engineer_read_probe, run_goal_curation_probe, run_goal_curation_read_probe,
+    run_gym_compare, run_gym_list, run_gym_scenario, run_gym_suite, run_improvement_curation_probe,
+    run_improvement_curation_read_probe, run_meeting_probe, run_meeting_read_probe,
+    run_review_probe, run_review_read_probe, run_terminal_probe, run_terminal_probe_from_file,
+    run_terminal_read_probe, run_terminal_recipe_list_probe, run_terminal_recipe_probe,
+    run_terminal_recipe_show_probe,
 };
 
 const OPERATOR_CLI_HELP: &str = "\
@@ -19,6 +20,7 @@ Product modes:
   engineer terminal-recipe-list
   engineer terminal-recipe-show <recipe-name>
   engineer terminal-recipe <topology> <recipe-name> [state-root]
+  engineer copilot-submit <topology> [state-root] [--json]
   engineer terminal-read <topology> [state-root]
   engineer read <topology> [state-root]
   meeting run <base-type> <topology> <objective> [state-root]
@@ -128,6 +130,12 @@ fn dispatch_engineer_command(
             let state_root = next_optional_path(&mut args);
             reject_extra_args(args)?;
             run_terminal_recipe_probe(&topology, &recipe_name, state_root)
+        }
+        "copilot-submit" => {
+            let topology = next_required(&mut args, "topology")?;
+            let trailing = args.collect::<Vec<_>>();
+            let (state_root, json_output) = parse_state_root_and_json(trailing)?;
+            run_copilot_submit_probe(&topology, state_root, json_output)
         }
         "read" => {
             let topology = next_required(&mut args, "topology")?;
@@ -302,4 +310,16 @@ fn reject_extra_args(
         return Err(format!("unexpected trailing arguments: {}", extras.join(" ")).into());
     }
     Ok(())
+}
+
+fn parse_state_root_and_json(
+    trailing: Vec<String>,
+) -> Result<(Option<PathBuf>, bool), Box<dyn std::error::Error>> {
+    match trailing.as_slice() {
+        [] => Ok((None, false)),
+        [flag] if flag == "--json" => Ok((None, true)),
+        [state_root] => Ok((Some(PathBuf::from(state_root)), false)),
+        [state_root, flag] if flag == "--json" => Ok((Some(PathBuf::from(state_root)), true)),
+        _ => Err(format!("unexpected trailing arguments: {}", trailing.join(" ")).into()),
+    }
 }
