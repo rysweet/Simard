@@ -577,3 +577,139 @@ impl BaseTypeSession for LocalProcessHarnessSession {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::prompt_assets::PromptAssetRef;
+    use crate::session::SessionId;
+
+    #[test]
+    fn capability_set_collects_unique_capabilities() {
+        let caps = capability_set([
+            BaseTypeCapability::Memory,
+            BaseTypeCapability::Evidence,
+            BaseTypeCapability::Memory,
+        ]);
+        assert_eq!(caps.len(), 2);
+        assert!(caps.contains(&BaseTypeCapability::Memory));
+        assert!(caps.contains(&BaseTypeCapability::Evidence));
+    }
+
+    #[test]
+    fn base_type_id_display_and_from() {
+        let id = BaseTypeId::new("test-adapter");
+        assert_eq!(id.to_string(), "test-adapter");
+        assert_eq!(id.as_str(), "test-adapter");
+        let from: BaseTypeId = "test-adapter".into();
+        assert_eq!(from, id);
+    }
+
+    #[test]
+    fn local_harness_adapter_supports_single_process_only() {
+        let adapter = LocalProcessHarnessAdapter::single_process("test-local").unwrap();
+        let desc = adapter.descriptor();
+        assert!(desc.supports_topology(RuntimeTopology::SingleProcess));
+        assert!(!desc.supports_topology(RuntimeTopology::MultiProcess));
+    }
+
+    #[test]
+    fn rusty_clawd_adapter_supports_single_and_multi_process() {
+        let adapter = RustyClawdAdapter::registered("rusty-clawd").unwrap();
+        let desc = adapter.descriptor();
+        assert!(desc.supports_topology(RuntimeTopology::SingleProcess));
+        assert!(desc.supports_topology(RuntimeTopology::MultiProcess));
+        assert!(!desc.supports_topology(RuntimeTopology::Distributed));
+    }
+
+    #[test]
+    fn open_session_rejects_unsupported_topology() {
+        let adapter = LocalProcessHarnessAdapter::single_process("test-local").unwrap();
+        let session_id = SessionId::parse("session-00000000-0000-0000-0000-000000000001").unwrap();
+        let result = adapter.open_session(BaseTypeSessionRequest {
+            session_id,
+            mode: OperatingMode::Engineer,
+            topology: RuntimeTopology::MultiProcess,
+            prompt_assets: vec![],
+            runtime_node: RuntimeNodeId::local(),
+            mailbox_address: RuntimeAddress::local(&RuntimeNodeId::local()),
+        });
+        assert!(matches!(
+            result,
+            Err(SimardError::UnsupportedTopology { .. })
+        ));
+    }
+
+    #[test]
+    fn session_lifecycle_open_run_close() {
+        let adapter = LocalProcessHarnessAdapter::single_process("test-local").unwrap();
+        let session_id = SessionId::parse("session-00000000-0000-0000-0000-000000000001").unwrap();
+        let mut session = adapter
+            .open_session(BaseTypeSessionRequest {
+                session_id,
+                mode: OperatingMode::Engineer,
+                topology: RuntimeTopology::SingleProcess,
+                prompt_assets: vec![PromptAssetRef::new("sys", "sys.md")],
+                runtime_node: RuntimeNodeId::local(),
+                mailbox_address: RuntimeAddress::local(&RuntimeNodeId::local()),
+            })
+            .unwrap();
+
+        session.open().unwrap();
+        let outcome = session
+            .run_turn(BaseTypeTurnInput {
+                objective: "test objective".to_string(),
+            })
+            .unwrap();
+        assert!(!outcome.execution_summary.is_empty());
+        assert!(!outcome.evidence.is_empty());
+        session.close().unwrap();
+    }
+
+    #[test]
+    fn session_rejects_run_before_open() {
+        let adapter = LocalProcessHarnessAdapter::single_process("test-local").unwrap();
+        let session_id = SessionId::parse("session-00000000-0000-0000-0000-000000000001").unwrap();
+        let mut session = adapter
+            .open_session(BaseTypeSessionRequest {
+                session_id,
+                mode: OperatingMode::Engineer,
+                topology: RuntimeTopology::SingleProcess,
+                prompt_assets: vec![],
+                runtime_node: RuntimeNodeId::local(),
+                mailbox_address: RuntimeAddress::local(&RuntimeNodeId::local()),
+            })
+            .unwrap();
+        let err = session
+            .run_turn(BaseTypeTurnInput {
+                objective: "test".to_string(),
+            })
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SimardError::InvalidBaseTypeSessionState { .. }
+        ));
+    }
+
+    #[test]
+    fn session_rejects_double_open() {
+        let adapter = RustyClawdAdapter::registered("rusty-clawd").unwrap();
+        let session_id = SessionId::parse("session-00000000-0000-0000-0000-000000000001").unwrap();
+        let mut session = adapter
+            .open_session(BaseTypeSessionRequest {
+                session_id,
+                mode: OperatingMode::Engineer,
+                topology: RuntimeTopology::SingleProcess,
+                prompt_assets: vec![],
+                runtime_node: RuntimeNodeId::local(),
+                mailbox_address: RuntimeAddress::local(&RuntimeNodeId::local()),
+            })
+            .unwrap();
+        session.open().unwrap();
+        let err = session.open().unwrap_err();
+        assert!(matches!(
+            err,
+            SimardError::InvalidBaseTypeSessionState { .. }
+        ));
+    }
+}

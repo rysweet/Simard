@@ -519,3 +519,178 @@ impl IdentityLoader for BuiltinIdentityLoader {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metadata::{Freshness, Provenance};
+
+    fn test_contract() -> ManifestContract {
+        ManifestContract::new(
+            "test::entrypoint",
+            "a -> b",
+            vec!["key:value".to_string()],
+            Provenance::new("test-source", "test-locator"),
+            Freshness::now().unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn operating_mode_display_covers_all_variants() {
+        assert_eq!(OperatingMode::Engineer.to_string(), "engineer");
+        assert_eq!(OperatingMode::Meeting.to_string(), "meeting");
+        assert_eq!(OperatingMode::Curator.to_string(), "curator");
+        assert_eq!(OperatingMode::Improvement.to_string(), "improvement");
+        assert_eq!(OperatingMode::Gym.to_string(), "gym");
+    }
+
+    #[test]
+    fn default_memory_policy_validates_successfully() {
+        MemoryPolicy::default().validate().unwrap();
+    }
+
+    #[test]
+    fn memory_policy_rejects_project_writes() {
+        let policy = MemoryPolicy {
+            allow_project_writes: true,
+            summary_scope: MemoryScope::SessionSummary,
+        };
+        let err = policy.validate().unwrap_err();
+        assert!(matches!(err, SimardError::UnsupportedMemoryPolicy { .. }));
+    }
+
+    #[test]
+    fn manifest_contract_requires_rust_style_entrypoint() {
+        let err = ManifestContract::new(
+            "no-colons",
+            "a -> b",
+            vec!["key:value".to_string()],
+            Provenance::new("test-source", "test-locator"),
+            Freshness::now().unwrap(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            SimardError::InvalidManifestContract { field, .. } if field == "entrypoint"
+        ));
+    }
+
+    #[test]
+    fn manifest_contract_rejects_placeholder_entrypoint() {
+        let err = ManifestContract::new(
+            "inline-manifest",
+            "a -> b",
+            vec!["key:value".to_string()],
+            Provenance::new("test-source", "test-locator"),
+            Freshness::now().unwrap(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, SimardError::InvalidManifestContract { .. }));
+    }
+
+    #[test]
+    fn manifest_contract_requires_composition_chain() {
+        let err = ManifestContract::new(
+            "test::entrypoint",
+            "no arrow",
+            vec!["key:value".to_string()],
+            Provenance::new("test-source", "test-locator"),
+            Freshness::now().unwrap(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            SimardError::InvalidManifestContract { field, .. } if field == "composition"
+        ));
+    }
+
+    #[test]
+    fn manifest_contract_rejects_empty_precedence() {
+        let err = ManifestContract::new(
+            "test::entrypoint",
+            "a -> b",
+            vec![],
+            Provenance::new("test-source", "test-locator"),
+            Freshness::now().unwrap(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            SimardError::InvalidManifestContract { field, .. } if field == "precedence"
+        ));
+    }
+
+    #[test]
+    fn manifest_contract_rejects_duplicate_precedence() {
+        let err = ManifestContract::new(
+            "test::entrypoint",
+            "a -> b",
+            vec!["key:value".to_string(), "key:value".to_string()],
+            Provenance::new("test-source", "test-locator"),
+            Freshness::now().unwrap(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, SimardError::InvalidManifestContract { .. }));
+    }
+
+    #[test]
+    fn manifest_contract_rejects_inline_provenance() {
+        let err = ManifestContract::new(
+            "test::entrypoint",
+            "a -> b",
+            vec!["key:value".to_string()],
+            Provenance::new("inline", "test-locator"),
+            Freshness::now().unwrap(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            SimardError::InvalidManifestContract { field, .. } if field == "provenance.source"
+        ));
+    }
+
+    #[test]
+    fn identity_manifest_supports_base_type_check() {
+        let manifest = IdentityManifest::new(
+            "test-identity",
+            "0.1.0",
+            vec![],
+            vec![BaseTypeId::new("local-harness")],
+            capability_set([]),
+            OperatingMode::Engineer,
+            MemoryPolicy::default(),
+            test_contract(),
+        )
+        .unwrap();
+        assert!(manifest.supports_base_type(&BaseTypeId::new("local-harness")));
+        assert!(!manifest.supports_base_type(&BaseTypeId::new("unknown")));
+    }
+
+    #[test]
+    fn builtin_loader_loads_engineer_identity() {
+        let loader = BuiltinIdentityLoader;
+        let manifest = loader
+            .load(&IdentityLoadRequest::new(
+                "simard-engineer",
+                "0.1.0",
+                test_contract(),
+            ))
+            .unwrap();
+        assert_eq!(manifest.name, "simard-engineer");
+        assert_eq!(manifest.default_mode, OperatingMode::Engineer);
+    }
+
+    #[test]
+    fn builtin_loader_rejects_unknown_identity() {
+        let loader = BuiltinIdentityLoader;
+        let err = loader
+            .load(&IdentityLoadRequest::new(
+                "unknown",
+                "0.1.0",
+                test_contract(),
+            ))
+            .unwrap_err();
+        assert!(matches!(err, SimardError::UnknownIdentity { .. }));
+    }
+}
