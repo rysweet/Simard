@@ -97,6 +97,8 @@ pub enum ActionKind {
     RunImprovement,
     ConsolidateMemory,
     ResearchQuery,
+    RunGymEval,
+    BuildSkill,
 }
 
 impl Display for ActionKind {
@@ -106,6 +108,8 @@ impl Display for ActionKind {
             Self::RunImprovement => f.write_str("run-improvement"),
             Self::ConsolidateMemory => f.write_str("consolidate-memory"),
             Self::ResearchQuery => f.write_str("research-query"),
+            Self::RunGymEval => f.write_str("run-gym-eval"),
+            Self::BuildSkill => f.write_str("build-skill"),
         }
     }
 }
@@ -268,43 +272,15 @@ pub fn decide(priorities: &[Priority], config: &OodaConfig) -> SimardResult<Vec<
 }
 
 /// Act: dispatch actions. Failures are per-action, not cycle-wide (Pillar 11).
-pub fn act(actions: &[PlannedAction], bridges: &OodaBridges) -> SimardResult<Vec<ActionOutcome>> {
-    let mut outcomes = Vec::with_capacity(actions.len());
-    for action in actions {
-        let outcome = match action.kind {
-            ActionKind::ConsolidateMemory => match bridges.memory.consolidate_episodes(20) {
-                Ok(_) => ActionOutcome {
-                    action: action.clone(),
-                    success: true,
-                    detail: "consolidated up to 20 episodes".to_string(),
-                },
-                Err(e) => ActionOutcome {
-                    action: action.clone(),
-                    success: false,
-                    detail: format!("consolidation failed: {e}"),
-                },
-            },
-            ActionKind::ResearchQuery => match bridges.knowledge.list_packs() {
-                Ok(packs) => ActionOutcome {
-                    action: action.clone(),
-                    success: true,
-                    detail: format!("found {} knowledge packs", packs.len()),
-                },
-                Err(e) => ActionOutcome {
-                    action: action.clone(),
-                    success: false,
-                    detail: format!("knowledge query failed: {e}"),
-                },
-            },
-            ActionKind::AdvanceGoal | ActionKind::RunImprovement => ActionOutcome {
-                action: action.clone(),
-                success: true,
-                detail: format!("queued {} for scheduling", action.kind),
-            },
-        };
-        outcomes.push(outcome);
-    }
-    Ok(outcomes)
+///
+/// Delegates to [`crate::ooda_actions::dispatch_actions`] which calls the
+/// real subsystems (gym bridge, supervisor, skill builder, etc.).
+pub fn act(
+    actions: &[PlannedAction],
+    bridges: &OodaBridges,
+    state: &mut OodaState,
+) -> SimardResult<Vec<ActionOutcome>> {
+    crate::ooda_actions::dispatch_actions(actions, bridges, state)
 }
 
 /// Run one complete OODA cycle: Observe -> Orient -> Decide -> Act.
@@ -326,7 +302,7 @@ pub fn run_ooda_cycle(
     state.current_phase = OodaPhase::Decide;
     let planned_actions = decide(&priorities, config)?;
     state.current_phase = OodaPhase::Act;
-    let outcomes = act(&planned_actions, bridges)?;
+    let outcomes = act(&planned_actions, bridges, state)?;
     state.cycle_count += 1;
     state.last_observation = Some(observation.clone());
     Ok(CycleReport {

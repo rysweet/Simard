@@ -35,6 +35,7 @@ pub mod memory_cognitive;
 pub mod memory_consolidation;
 pub mod memory_hive;
 pub mod metadata;
+pub mod ooda_actions;
 pub mod ooda_loop;
 pub mod ooda_scheduler;
 pub mod operator_cli;
@@ -163,6 +164,7 @@ pub use memory_consolidation::{
     persistence_memory_operations, preparation_memory_operations, reflection_memory_operations,
 };
 pub use memory_hive::{HiveConfig, hive_config_from_identity};
+pub use ooda_actions::dispatch_actions;
 pub use ooda_loop::{
     ActionKind, ActionOutcome, CycleReport, GoalSnapshot, Observation, OodaBridges, OodaConfig,
     OodaPhase, OodaState, PlannedAction, Priority, act, decide, observe, orient, run_ooda_cycle,
