@@ -198,6 +198,10 @@ mod tests {
         let ctx = enrich_planning_context("anything", &bridge).unwrap();
         assert!(ctx.is_empty());
         assert!(ctx.pack_sources.is_empty());
+        assert!(
+            ctx.degraded,
+            "context should be marked degraded when bridge is unavailable"
+        );
     }
 
     #[test]
@@ -205,6 +209,7 @@ mod tests {
         let bridge = KnowledgeBridge::new(Box::new(mock_transport()));
         let ctx = enrich_planning_context("xyzzy plugh", &bridge).unwrap();
         assert!(ctx.is_empty());
+        assert!(!ctx.degraded, "no packs matched but bridge was healthy");
     }
 
     #[test]

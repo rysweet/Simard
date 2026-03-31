@@ -108,7 +108,7 @@ impl SubprocessBridgeTransport {
         Ok(state
             .child
             .as_mut()
-            .expect("child was set on the previous line"))
+            .expect("child was set in the guard above"))
     }
 
     fn send_request(child: &mut ManagedChild, request: &BridgeRequest) -> SimardResult<()> {
