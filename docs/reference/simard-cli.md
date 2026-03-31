@@ -236,7 +236,7 @@ Key behavior:
 
 - selects the `terminal-shell` base type explicitly
 - accepts bounded terminal objectives with `command:`/`input:` lines plus `wait-for:` or `expect:` checkpoints so a run can pause for expected output before sending the next line
-- preserves truthful adapter reflection and now renders the terminal audit trail directly on the run surface, including ordered terminal steps, satisfied checkpoints, the last visible output line, and a sanitized transcript preview
+- preserves truthful adapter reflection and now renders the terminal audit trail directly on the run surface, including ordered terminal steps, observed checkpoints, the last visible output line, and a sanitized transcript preview
 - prints explicit next-step guidance for continuing into `engineer run` with the same `state-root`
 - persists `latest_terminal_handoff.json` and compatibility `latest_handoff.json` under the shared root
 - fails visibly for unsupported topology and invalid state-root inputs
@@ -358,8 +358,9 @@ The eventual operator-visible and `--json` outputs should make these facts expli
 - the selected base type is `terminal-shell`
 - the checked-in flow asset and fixed payload identifier are visible
 - the final outcome is `success`, `unsupported`, or `runtime-failure`, but the current shipped flow is expected to return `unsupported` until Simard can truthfully drive the observed submit gesture
+- `ordered_steps` records only the launch, waits, and fixed payload step the PTY path actually reached before the flow stopped; startup drift must not pretend the payload step ran
 - any `unsupported` result carries one of the explicit reason codes above
-- the ordered steps, satisfied checkpoints, last meaningful output line, and transcript preview remain auditable
+- the ordered steps, observed checkpoints, last meaningful output line, and transcript preview remain auditable
 - later `terminal-read` and `engineer run` surfaces can point back to the same terminal-scoped handoff artifact when truthful continuity exists
 
 If you only need local wrapper availability or prompt reachability, keep using `copilot-status-check` or `copilot-prompt-check` instead.

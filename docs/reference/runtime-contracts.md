@@ -195,7 +195,7 @@ This substrate exposes the real `terminal-shell` base type on the primary CLI:
 - the selected base type remains `terminal-shell`
 - reflection still reports `terminal-shell::local-pty` as the adapter implementation
 - terminal objectives may include `command:` / `input:` lines and explicit `wait-for:` / `expect:` checkpoints so bounded interactive terminal turns can pause for expected output before sending the next line
-- the run surface now renders the same structured terminal audit shape as `terminal-read`: shell details, command/wait counts, ordered steps, satisfied checkpoints, last meaningful output line, and sanitized transcript preview
+- the run surface now renders the same structured terminal audit shape as `terminal-read`: shell details, command/wait counts, ordered steps, observed checkpoints, last meaningful output line, and sanitized transcript preview
 - the run surface prints explicit boundary guidance showing that terminal mode is a bounded local session surface and that continuing into engineer mode still requires an explicit later `engineer run`
 - the run persists `latest_terminal_handoff.json` plus compatibility `latest_handoff.json` under the shared root
 - unsatisfied wait checkpoints fail explicitly instead of silently replaying the rest of the objective and claiming success
@@ -285,7 +285,7 @@ This command ships as the next bounded local Copilot slice after `copilot-prompt
 - startup timeouts after partial visible startup evidence must classify as `unsupported` with `missing-startup-banner`, `missing-guidance-checkpoint`, `workflow-wrapper-noise`, or `unexpected-startup-text`; only zero-evidence startup timeouts remain `runtime-failure`
 - explicit unsupported reason codes are `process-exited-early`, `unexpected-startup-text`, `missing-startup-banner`, `missing-guidance-checkpoint`, `trust-confirmation-required`, `submit-hotkey-required`, `copilot-wrapper-error`, and `workflow-wrapper-noise`
 - `success` and `unsupported` write `latest_terminal_handoff.json` plus compatibility `latest_handoff.json` when truthful terminal evidence was captured; `runtime-failure` may leave partial evidence but must not invent a complete submit summary
-- additive audit persistence includes the flow asset, fixed payload identifier, ordered steps, satisfied checkpoints, last meaningful output line, sanitized transcript preview, outcome, and optional unsupported reason code
+- additive audit persistence includes the flow asset, fixed payload identifier, ordered steps actually reached before the stop point, observed checkpoints, last meaningful output line, sanitized transcript preview, outcome, and optional unsupported reason code
 - `--json` renders that same contract as a machine-readable summary without changing runtime behavior or broadening capability
 - `copilot-status-check` and `copilot-prompt-check` remain separate narrower probes and must keep their current contracts unchanged
 

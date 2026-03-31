@@ -23,8 +23,8 @@ pub struct CopilotSubmitAudit {
     pub reason_code: Option<String>,
     #[serde(default)]
     pub ordered_steps: Vec<String>,
-    #[serde(default)]
-    pub satisfied_checkpoints: Vec<String>,
+    #[serde(default, alias = "satisfied_checkpoints")]
+    pub observed_checkpoints: Vec<String>,
     #[serde(default)]
     pub last_meaningful_output_line: Option<String>,
     #[serde(default)]

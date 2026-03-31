@@ -2182,11 +2182,14 @@ fn print_copilot_submit_report(
         print_text(&format!("Copilot step {}", index + 1), step);
     }
     println!(
-        "Copilot satisfied checkpoints count: {}",
-        report.satisfied_checkpoints.len()
+        "Copilot observed checkpoints count: {}",
+        report.observed_checkpoints.len()
     );
-    for (index, checkpoint) in report.satisfied_checkpoints.iter().enumerate() {
-        print_text(&format!("Copilot checkpoint {}", index + 1), checkpoint);
+    for (index, checkpoint) in report.observed_checkpoints.iter().enumerate() {
+        print_text(
+            &format!("Copilot observed checkpoint {}", index + 1),
+            checkpoint,
+        );
     }
     if let Some(last_output_line) = &report.last_meaningful_output_line {
         print_text("Terminal last output line", last_output_line);

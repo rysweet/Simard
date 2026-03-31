@@ -54,7 +54,7 @@ pub(crate) struct CopilotSubmitReport {
     pub reason_code: Option<String>,
     pub payload_id: String,
     pub ordered_steps: Vec<String>,
-    pub satisfied_checkpoints: Vec<String>,
+    pub observed_checkpoints: Vec<String>,
     pub last_meaningful_output_line: Option<String>,
     pub transcript_preview: String,
 }
@@ -105,20 +105,30 @@ impl CopilotSubmitFlowAsset {
         Duration::from_secs(self.wait_timeout_seconds)
     }
 
-    fn ordered_steps(&self) -> Vec<String> {
-        let mut steps = vec![
-            format!("launch: {}", self.launch_command),
-            render_terminal_step(&TerminalStep::WaitFor(self.startup_banner.clone())),
-            render_terminal_step(&TerminalStep::WaitFor(self.guidance_checkpoint.clone())),
-            render_terminal_step(&TerminalStep::Input(self.payload.clone())),
-            render_terminal_step(&TerminalStep::WaitFor(self.submit_hint.clone())),
-        ];
-        if let Some(post_submit_checkpoint) = &self.post_submit_checkpoint {
-            steps.push(render_terminal_step(&TerminalStep::WaitFor(
-                post_submit_checkpoint.clone(),
-            )));
-        }
-        steps
+    fn launch_step(&self) -> String {
+        format!("launch: {}", self.launch_command)
+    }
+
+    fn startup_banner_step(&self) -> String {
+        render_terminal_step(&TerminalStep::WaitFor(self.startup_banner.clone()))
+    }
+
+    fn guidance_step(&self) -> String {
+        render_terminal_step(&TerminalStep::WaitFor(self.guidance_checkpoint.clone()))
+    }
+
+    fn payload_step(&self) -> String {
+        render_terminal_step(&TerminalStep::Input(self.payload.clone()))
+    }
+
+    fn submit_hint_step(&self) -> String {
+        render_terminal_step(&TerminalStep::WaitFor(self.submit_hint.clone()))
+    }
+
+    fn post_submit_step(&self) -> Option<String> {
+        self.post_submit_checkpoint
+            .as_ref()
+            .map(|checkpoint| render_terminal_step(&TerminalStep::WaitFor(checkpoint.clone())))
     }
 }
 
@@ -146,7 +156,6 @@ pub(crate) fn run_copilot_submit(
         Some(flow.working_directory.as_path()),
         COPILOT_SUBMIT_BASE_TYPE,
     )?;
-    let ordered_steps = flow.ordered_steps();
     let mut session = PtyTerminalSession::launch_command(
         COPILOT_SUBMIT_BASE_TYPE,
         &flow.launch_command,
@@ -160,8 +169,8 @@ pub(crate) fn run_copilot_submit(
             state_root,
             topology,
             flow: &flow,
-            ordered_steps: &ordered_steps,
-            satisfied_checkpoints: startup.satisfied_checkpoints,
+            ordered_steps: startup.ordered_steps,
+            observed_checkpoints: startup.observed_checkpoints,
             transcript: &capture.transcript,
             outcome: CopilotSubmitOutcome::Unsupported,
             reason_code: Some(reason_code.to_string()),
@@ -171,7 +180,7 @@ pub(crate) fn run_copilot_submit(
     }
 
     session.send_input(&flow.payload)?;
-    let submit = observe_submit(&mut session, &flow, startup.satisfied_checkpoints)?;
+    let submit = observe_submit(&mut session, &flow)?;
     let capture = finalize_session(session, submit.terminate)?;
     let outcome = match submit.status {
         SubmitStatus::Success => CopilotSubmitOutcome::Success,
@@ -191,8 +200,8 @@ pub(crate) fn run_copilot_submit(
         state_root,
         topology,
         flow: &flow,
-        ordered_steps: &ordered_steps,
-        satisfied_checkpoints: submit.satisfied_checkpoints,
+        ordered_steps: submit.ordered_steps,
+        observed_checkpoints: submit.observed_checkpoints,
         transcript: &capture.transcript,
         outcome,
         reason_code,
@@ -207,40 +216,146 @@ pub(crate) fn run_copilot_submit(
 
 struct StartupObservation {
     status: StartupStatus,
-    satisfied_checkpoints: Vec<String>,
+    ordered_steps: Vec<String>,
+    observed_checkpoints: Vec<String>,
     terminate: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct TranscriptCheckpointScan {
-    has_banner: bool,
-    has_guidance: bool,
-    has_submit_hint: bool,
-    has_post_submit_checkpoint: bool,
+    observed_checkpoints: Vec<ObservedCheckpoint>,
     has_trust_prompt: bool,
     has_wrapper_error: bool,
     has_workflow_noise: bool,
     has_other_lines: bool,
+    has_startup_sequence_drift: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PositiveCheckpointKind {
+    StartupBanner,
+    Guidance,
+    SubmitHint,
+    PostSubmitCheckpoint,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ObservedCheckpoint {
+    kind: PositiveCheckpointKind,
+    line: String,
+    index: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StartupCheckpointState {
+    ExpectBanner,
+    ExpectGuidance,
+    Complete,
 }
 
 impl TranscriptCheckpointScan {
+    fn record_checkpoint(&mut self, kind: PositiveCheckpointKind, line: &str, index: usize) {
+        self.observed_checkpoints.push(ObservedCheckpoint {
+            kind,
+            line: line.to_string(),
+            index,
+        });
+    }
+
+    fn has_checkpoint(&self, kind: PositiveCheckpointKind) -> bool {
+        self.observed_checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.kind == kind)
+    }
+
+    fn checkpoint_index(&self, kind: PositiveCheckpointKind) -> Option<usize> {
+        self.observed_checkpoints
+            .iter()
+            .find_map(|checkpoint| (checkpoint.kind == kind).then_some(checkpoint.index))
+    }
+
+    fn has_banner(&self) -> bool {
+        self.has_checkpoint(PositiveCheckpointKind::StartupBanner)
+    }
+
+    fn has_guidance(&self) -> bool {
+        self.has_checkpoint(PositiveCheckpointKind::Guidance)
+    }
+
+    fn has_submit_hint(&self) -> bool {
+        self.has_checkpoint(PositiveCheckpointKind::SubmitHint)
+    }
+
+    fn has_post_submit_checkpoint(&self) -> bool {
+        self.has_checkpoint(PositiveCheckpointKind::PostSubmitCheckpoint)
+    }
+
+    fn has_non_startup_checkpoints(&self) -> bool {
+        self.has_submit_hint() || self.has_post_submit_checkpoint()
+    }
+
+    fn has_ordered_startup_sequence(&self) -> bool {
+        matches!(
+            (
+                self.checkpoint_index(PositiveCheckpointKind::StartupBanner),
+                self.checkpoint_index(PositiveCheckpointKind::Guidance),
+            ),
+            (Some(banner_index), Some(guidance_index)) if banner_index < guidance_index
+        )
+    }
+
     fn has_visible_startup_evidence(&self) -> bool {
-        self.has_banner
-            || self.has_guidance
+        !self.observed_checkpoints.is_empty()
             || self.has_trust_prompt
             || self.has_wrapper_error
             || self.has_other_lines
     }
 
-    fn satisfied_startup_checkpoints(&self, flow: &CopilotSubmitFlowAsset) -> Vec<String> {
-        let mut checkpoints = Vec::with_capacity(2);
-        if self.has_banner {
-            checkpoints.push(flow.startup_banner.clone());
+    fn observed_checkpoints(&self) -> Vec<String> {
+        self.observed_checkpoints
+            .iter()
+            .map(|checkpoint| checkpoint.line.clone())
+            .collect()
+    }
+
+    fn observed_banner_before_guidance(&self) -> bool {
+        matches!(
+            (
+                self.checkpoint_index(PositiveCheckpointKind::StartupBanner),
+                self.checkpoint_index(PositiveCheckpointKind::Guidance),
+            ),
+            (Some(banner_index), Some(guidance_index)) if banner_index < guidance_index
+        ) || matches!(
+            (
+                self.checkpoint_index(PositiveCheckpointKind::StartupBanner),
+                self.checkpoint_index(PositiveCheckpointKind::Guidance),
+            ),
+            (Some(_), None)
+        )
+    }
+
+    fn startup_ordered_steps(&self, flow: &CopilotSubmitFlowAsset) -> Vec<String> {
+        let mut steps = vec![flow.launch_step(), flow.startup_banner_step()];
+        if self.observed_banner_before_guidance() {
+            steps.push(flow.guidance_step());
         }
-        if self.has_guidance {
-            checkpoints.push(flow.guidance_checkpoint.clone());
+        steps
+    }
+
+    fn submit_ordered_steps(&self, flow: &CopilotSubmitFlowAsset) -> Vec<String> {
+        let mut steps = vec![
+            flow.launch_step(),
+            flow.startup_banner_step(),
+            flow.guidance_step(),
+            flow.payload_step(),
+            flow.submit_hint_step(),
+        ];
+        if (self.has_submit_hint() || self.has_post_submit_checkpoint())
+            && let Some(post_submit_step) = flow.post_submit_step()
+        {
+            steps.push(post_submit_step);
         }
-        checkpoints
+        steps
     }
 }
 
@@ -255,19 +370,22 @@ fn observe_startup(
         let scan = scan_transcript_lines(transcript_visible_content_lines_iter(&transcript), flow);
         let exited = session.status()?.is_some();
         let status = classify_startup(&scan, exited);
-        let satisfied_checkpoints = scan.satisfied_startup_checkpoints(flow);
+        let ordered_steps = scan.startup_ordered_steps(flow);
+        let observed_checkpoints = scan.observed_checkpoints();
         match status {
             StartupStatus::Ready => {
                 return Ok(StartupObservation {
                     status,
-                    satisfied_checkpoints,
+                    ordered_steps,
+                    observed_checkpoints,
                     terminate: false,
                 });
             }
             StartupStatus::Unsupported(reason_code) => {
                 return Ok(StartupObservation {
                     status: StartupStatus::Unsupported(reason_code),
-                    satisfied_checkpoints,
+                    ordered_steps,
+                    observed_checkpoints,
                     terminate: !exited,
                 });
             }
@@ -276,7 +394,8 @@ fn observe_startup(
                     if let Some(reason_code) = classify_startup_timeout(&scan) {
                         return Ok(StartupObservation {
                             status: StartupStatus::Unsupported(reason_code),
-                            satisfied_checkpoints,
+                            ordered_steps,
+                            observed_checkpoints,
                             terminate: !exited,
                         });
                     }
@@ -296,49 +415,37 @@ fn observe_startup(
 
 struct SubmitObservation {
     status: SubmitStatus,
-    satisfied_checkpoints: Vec<String>,
+    ordered_steps: Vec<String>,
+    observed_checkpoints: Vec<String>,
     terminate: bool,
 }
 
 fn observe_submit(
     session: &mut PtyTerminalSession,
     flow: &CopilotSubmitFlowAsset,
-    mut satisfied_checkpoints: Vec<String>,
 ) -> SimardResult<SubmitObservation> {
     let start = Instant::now();
     let timeout = flow.wait_timeout();
-    let mut recorded_post_submit_checkpoint = satisfied_checkpoints
-        .iter()
-        .any(|checkpoint| flow.post_submit_checkpoint.as_ref() == Some(checkpoint));
-    let mut recorded_submit_hint = satisfied_checkpoints
-        .iter()
-        .any(|checkpoint| checkpoint == &flow.submit_hint);
     loop {
         let transcript = session.read_transcript()?;
         let scan = scan_transcript_lines(transcript_visible_content_lines_iter(&transcript), flow);
         let exited = session.status()?.is_some();
-        if scan.has_submit_hint && !recorded_submit_hint {
-            satisfied_checkpoints.push(flow.submit_hint.clone());
-            recorded_submit_hint = true;
-        }
-        if scan.has_post_submit_checkpoint && !recorded_post_submit_checkpoint {
-            if let Some(post_submit_checkpoint) = &flow.post_submit_checkpoint {
-                satisfied_checkpoints.push(post_submit_checkpoint.clone());
-            }
-            recorded_post_submit_checkpoint = true;
-        }
+        let ordered_steps = scan.submit_ordered_steps(flow);
+        let observed_checkpoints = scan.observed_checkpoints();
         match classify_submit(&scan, exited) {
             SubmitStatus::Success => {
                 return Ok(SubmitObservation {
                     status: SubmitStatus::Success,
-                    satisfied_checkpoints,
+                    ordered_steps,
+                    observed_checkpoints,
                     terminate: true,
                 });
             }
             SubmitStatus::Unsupported(reason_code) => {
                 return Ok(SubmitObservation {
                     status: SubmitStatus::Unsupported(reason_code),
-                    satisfied_checkpoints,
+                    ordered_steps,
+                    observed_checkpoints,
                     terminate: !exited,
                 });
             }
@@ -346,7 +453,8 @@ fn observe_submit(
                 if start.elapsed() >= timeout {
                     return Ok(SubmitObservation {
                         status: SubmitStatus::Unsupported(classify_submit_timeout(&scan, flow)),
-                        satisfied_checkpoints,
+                        ordered_steps,
+                        observed_checkpoints,
                         terminate: true,
                     });
                 }
@@ -365,17 +473,27 @@ fn classify_startup(scan: &TranscriptCheckpointScan, exited: bool) -> StartupSta
         return StartupStatus::Unsupported("trust-confirmation-required");
     }
 
+    if scan.has_non_startup_checkpoints() {
+        return StartupStatus::Unsupported("unexpected-startup-text");
+    }
+
+    if scan.has_startup_sequence_drift
+        || (scan.has_banner() && scan.has_guidance() && !scan.has_ordered_startup_sequence())
+    {
+        return StartupStatus::Unsupported("unexpected-startup-text");
+    }
+
     if scan.has_other_lines {
-        if scan.has_guidance && !scan.has_banner {
+        if scan.has_guidance() && !scan.has_banner() {
             return StartupStatus::Unsupported("missing-startup-banner");
         }
-        if scan.has_banner && !scan.has_guidance {
+        if scan.has_banner() && !scan.has_guidance() {
             return StartupStatus::Unsupported("missing-guidance-checkpoint");
         }
         return StartupStatus::Unsupported("unexpected-startup-text");
     }
 
-    if scan.has_banner && scan.has_guidance {
+    if scan.has_ordered_startup_sequence() {
         return if exited {
             StartupStatus::Unsupported("process-exited-early")
         } else {
@@ -384,10 +502,10 @@ fn classify_startup(scan: &TranscriptCheckpointScan, exited: bool) -> StartupSta
     }
 
     if exited {
-        if scan.has_guidance && !scan.has_banner && !scan.has_other_lines {
+        if scan.has_guidance() && !scan.has_banner() && !scan.has_other_lines {
             return StartupStatus::Unsupported("missing-startup-banner");
         }
-        if scan.has_banner && !scan.has_guidance && !scan.has_other_lines {
+        if scan.has_banner() && !scan.has_guidance() && !scan.has_other_lines {
             return StartupStatus::Unsupported("missing-guidance-checkpoint");
         }
         return StartupStatus::Unsupported("process-exited-early");
@@ -405,11 +523,21 @@ fn classify_startup_timeout(scan: &TranscriptCheckpointScan) -> Option<&'static 
         return Some("trust-confirmation-required");
     }
 
-    if scan.has_banner && !scan.has_guidance {
+    if scan.has_non_startup_checkpoints() {
+        return Some("unexpected-startup-text");
+    }
+
+    if scan.has_startup_sequence_drift
+        || (scan.has_banner() && scan.has_guidance() && !scan.has_ordered_startup_sequence())
+    {
+        return Some("unexpected-startup-text");
+    }
+
+    if scan.has_banner() && !scan.has_guidance() {
         return Some("missing-guidance-checkpoint");
     }
 
-    if scan.has_guidance && !scan.has_banner {
+    if scan.has_guidance() && !scan.has_banner() {
         return Some("missing-startup-banner");
     }
 
@@ -433,11 +561,11 @@ fn classify_submit(scan: &TranscriptCheckpointScan, exited: bool) -> SubmitStatu
         return SubmitStatus::Unsupported("trust-confirmation-required");
     }
 
-    if scan.has_post_submit_checkpoint {
+    if scan.has_post_submit_checkpoint() {
         return SubmitStatus::Success;
     }
 
-    if scan.has_submit_hint && exited {
+    if scan.has_submit_hint() && exited {
         return SubmitStatus::Unsupported("submit-hotkey-required");
     }
 
@@ -460,7 +588,7 @@ fn classify_submit_timeout(
         return "trust-confirmation-required";
     }
 
-    if scan.has_submit_hint {
+    if scan.has_submit_hint() {
         return "submit-hotkey-required";
     }
 
@@ -475,8 +603,8 @@ struct PersistReportInputs<'a> {
     state_root: &'a Path,
     topology: RuntimeTopology,
     flow: &'a CopilotSubmitFlowAsset,
-    ordered_steps: &'a [String],
-    satisfied_checkpoints: Vec<String>,
+    ordered_steps: Vec<String>,
+    observed_checkpoints: Vec<String>,
     transcript: &'a str,
     outcome: CopilotSubmitOutcome,
     reason_code: Option<String>,
@@ -489,7 +617,7 @@ fn persist_report(inputs: PersistReportInputs<'_>) -> SimardResult<CopilotSubmit
         topology,
         flow,
         ordered_steps,
-        satisfied_checkpoints,
+        observed_checkpoints,
         transcript,
         outcome,
         reason_code,
@@ -521,8 +649,8 @@ fn persist_report(inputs: PersistReportInputs<'_>) -> SimardResult<CopilotSubmit
         payload_id: flow.payload_id.clone(),
         outcome: outcome.as_str().to_string(),
         reason_code: reason_code.clone(),
-        ordered_steps: ordered_steps.to_vec(),
-        satisfied_checkpoints: satisfied_checkpoints.clone(),
+        ordered_steps: ordered_steps.clone(),
+        observed_checkpoints: observed_checkpoints.clone(),
         last_meaningful_output_line: last_meaningful_output_line.clone(),
         transcript_preview: transcript_preview.clone(),
     };
@@ -533,7 +661,7 @@ fn persist_report(inputs: PersistReportInputs<'_>) -> SimardResult<CopilotSubmit
         reason_code,
         payload_id: audit.payload_id.clone(),
         ordered_steps: audit.ordered_steps.clone(),
-        satisfied_checkpoints: audit.satisfied_checkpoints.clone(),
+        observed_checkpoints: audit.observed_checkpoints.clone(),
         last_meaningful_output_line: audit.last_meaningful_output_line.clone(),
         transcript_preview: audit.transcript_preview.clone(),
     };
@@ -557,7 +685,7 @@ fn persist_report(inputs: PersistReportInputs<'_>) -> SimardResult<CopilotSubmit
     let evidence_records = build_evidence_records(
         &session,
         flow,
-        ordered_steps,
+        &ordered_steps,
         &audit,
         working_directory,
         &runtime_address,
@@ -639,7 +767,7 @@ fn build_evidence_records(
             compact_terminal_evidence_value(step, 160)
         ));
     }
-    for (index, checkpoint) in audit.satisfied_checkpoints.iter().enumerate() {
+    for (index, checkpoint) in audit.observed_checkpoints.iter().enumerate() {
         details.push(format!(
             "terminal-checkpoint-{}={}",
             index + 1,
@@ -666,20 +794,37 @@ where
     S: AsRef<str>,
 {
     let mut scan = TranscriptCheckpointScan::default();
-    for line in lines {
+    let mut startup_state = StartupCheckpointState::ExpectBanner;
+    let mut saw_guidance_before_banner = false;
+    for (index, line) in lines.into_iter().enumerate() {
         let line = line.as_ref();
-        if line.contains(&flow.startup_banner) {
-            scan.has_banner = true;
-        } else if line.contains(&flow.guidance_checkpoint) {
-            scan.has_guidance = true;
-        } else if line.contains(&flow.submit_hint) {
-            scan.has_submit_hint = true;
+        if line == flow.startup_banner {
+            scan.record_checkpoint(PositiveCheckpointKind::StartupBanner, line, index);
+            if startup_state != StartupCheckpointState::ExpectBanner {
+                scan.has_startup_sequence_drift = true;
+            } else if saw_guidance_before_banner {
+                scan.has_startup_sequence_drift = true;
+                startup_state = StartupCheckpointState::ExpectGuidance;
+            } else {
+                startup_state = StartupCheckpointState::ExpectGuidance;
+            }
+        } else if line == flow.guidance_checkpoint {
+            scan.record_checkpoint(PositiveCheckpointKind::Guidance, line, index);
+            if startup_state == StartupCheckpointState::ExpectBanner {
+                saw_guidance_before_banner = true;
+            } else if startup_state != StartupCheckpointState::ExpectGuidance {
+                scan.has_startup_sequence_drift = true;
+            } else {
+                startup_state = StartupCheckpointState::Complete;
+            }
+        } else if line == flow.submit_hint {
+            scan.record_checkpoint(PositiveCheckpointKind::SubmitHint, line, index);
         } else if flow
             .post_submit_checkpoint
             .as_ref()
-            .is_some_and(|checkpoint| line.contains(checkpoint))
+            .is_some_and(|checkpoint| line == checkpoint)
         {
-            scan.has_post_submit_checkpoint = true;
+            scan.record_checkpoint(PositiveCheckpointKind::PostSubmitCheckpoint, line, index);
         } else if flow
             .trust_prompt
             .as_ref()
@@ -784,6 +929,19 @@ mod tests {
         ));
         assert!(matches!(
             classify_startup(
+                &scan_transcript_lines(
+                    [
+                        flow.guidance_checkpoint.as_str(),
+                        flow.startup_banner.as_str(),
+                    ],
+                    &flow,
+                ),
+                false,
+            ),
+            StartupStatus::Unsupported("unexpected-startup-text")
+        ));
+        assert!(matches!(
+            classify_startup(
                 &scan_transcript_lines([flow.guidance_checkpoint.as_str()], &flow,),
                 true,
             ),
@@ -795,6 +953,20 @@ mod tests {
                 true,
             ),
             StartupStatus::Unsupported("missing-guidance-checkpoint")
+        ));
+        assert!(matches!(
+            classify_startup(
+                &scan_transcript_lines(
+                    [
+                        flow.startup_banner.as_str(),
+                        flow.startup_banner.as_str(),
+                        flow.guidance_checkpoint.as_str(),
+                    ],
+                    &flow,
+                ),
+                false,
+            ),
+            StartupStatus::Unsupported("unexpected-startup-text")
         ));
     }
 
@@ -827,6 +999,16 @@ mod tests {
     fn classify_startup_timeout_preserves_explicit_reason_codes() {
         let flow = flow();
 
+        assert_eq!(
+            classify_startup_timeout(&scan_transcript_lines(
+                [
+                    flow.guidance_checkpoint.as_str(),
+                    flow.startup_banner.as_str(),
+                ],
+                &flow,
+            )),
+            Some("unexpected-startup-text")
+        );
         assert_eq!(
             classify_startup_timeout(&scan_transcript_lines(
                 [flow.startup_banner.as_str()],
