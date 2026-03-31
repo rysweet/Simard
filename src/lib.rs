@@ -31,6 +31,7 @@ pub mod meeting_facilitator;
 pub mod meetings;
 pub mod memory;
 pub mod memory_bridge;
+pub mod memory_bridge_adapter;
 pub mod memory_cognitive;
 pub mod memory_consolidation;
 pub mod memory_hive;
@@ -160,6 +161,7 @@ pub use memory::{
     FileBackedMemoryStore, InMemoryMemoryStore, MemoryRecord, MemoryScope, MemoryStore,
 };
 pub use memory_bridge::CognitiveMemoryBridge;
+pub use memory_bridge_adapter::CognitiveBridgeMemoryAdapter;
 pub use memory_cognitive::{
     CognitiveEpisode, CognitiveFact, CognitiveProcedure, CognitiveProspective,
     CognitiveSensoryItem, CognitiveStatistics, CognitiveWorkingSlot,
