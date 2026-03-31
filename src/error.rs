@@ -35,6 +35,10 @@ pub enum SimardError {
         field: String,
         reason: String,
     },
+    InvalidResearchRecord {
+        field: String,
+        reason: String,
+    },
     InvalidMeetingRecord {
         field: String,
         reason: String,
@@ -211,6 +215,9 @@ impl Display for SimardError {
             }
             Self::InvalidGoalRecord { field, reason } => {
                 write!(f, "invalid goal record field '{field}': {reason}")
+            }
+            Self::InvalidResearchRecord { field, reason } => {
+                write!(f, "invalid research record field '{field}': {reason}")
             }
             Self::InvalidMeetingRecord { field, reason } => {
                 write!(f, "invalid meeting record field '{field}': {reason}")

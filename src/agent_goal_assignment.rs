@@ -14,7 +14,7 @@ use std::fmt::{self, Display, Formatter};
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::SimardResult;
+use crate::error::{SimardError, SimardResult};
 use crate::memory_bridge::CognitiveMemoryBridge;
 use crate::session::SessionPhase;
 
@@ -175,12 +175,23 @@ pub fn poll_progress(
 ) -> SimardResult<Option<SubordinateProgress>> {
     let facts = bridge.search_facts(&sub_tag(sub_id), 10, 0.0)?;
 
-    let progress = facts
+    let fact = facts
         .into_iter()
-        .rfind(|f| f.concept == PROGRESS_CONCEPT && f.tags.contains(&sub_tag(sub_id)))
-        .and_then(|f| serde_json::from_str::<SubordinateProgress>(&f.content).ok());
+        .rfind(|f| f.concept == PROGRESS_CONCEPT && f.tags.contains(&sub_tag(sub_id)));
 
-    Ok(progress)
+    match fact {
+        None => Ok(None),
+        Some(f) => {
+            let progress =
+                serde_json::from_str::<SubordinateProgress>(&f.content).map_err(|e| {
+                    SimardError::InvalidGoalRecord {
+                        field: format!("progress:{sub_id}"),
+                        reason: format!("failed to deserialize subordinate progress: {e}"),
+                    }
+                })?;
+            Ok(Some(progress))
+        }
+    }
 }
 
 #[cfg(test)]

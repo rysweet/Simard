@@ -292,7 +292,14 @@ fn truncate_output(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.trim().to_string()
     } else {
-        format!("{}...", &s[..max_len].trim())
+        // Use char-boundary-safe truncation to avoid panic on multi-byte UTF-8.
+        let boundary = s
+            .char_indices()
+            .take_while(|(i, _)| *i < max_len)
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+        format!("{}...", s[..boundary].trim())
     }
 }
 
