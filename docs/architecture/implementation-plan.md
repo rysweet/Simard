@@ -8,7 +8,7 @@ doc_type: reference
 
 # Implementation Plan
 
-The full technical plan lives at [`Specs/IMPLEMENTATION_PLAN.md`](../../Specs/IMPLEMENTATION_PLAN.md) in the repository root. This page provides a high-level overview.
+The full technical plan lives at `Specs/IMPLEMENTATION_PLAN.md` in the repository root. This page provides a high-level overview.
 
 ## Parallelism Map
 

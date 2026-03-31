@@ -67,7 +67,7 @@ graph TB
 
 ## Core Principles
 
-Simard's architecture follows eleven pillars defined in the [ProductArchitecture spec](../../Specs/ProductArchitecture.md):
+Simard's architecture follows eleven pillars defined in the ProductArchitecture spec (`Specs/ProductArchitecture.md` in the repo root):
 
 1. **Terminal First** — not chat first. Simard drives real tools through PTY.
 2. **Explicit State** — no hidden magic. All state is file-backed and operator-visible.

@@ -52,11 +52,9 @@ nav:
     - Implementation Plan: architecture/implementation-plan.md
   - Concepts:
     - Truthful Runtime Metadata: concepts/truthful-runtime-metadata.md
-    - Topology-Neutral Runtime: concepts/topology-neutral-runtime-kernel.md
   - Tutorials:
     - First Local Session: tutorials/run-your-first-local-session.md
     - First Benchmark Suite: tutorials/run-your-first-benchmark-gym.md
-    - First Rusty-Clawd Mesh: tutorials/run-rusty-clawd-on-loopback-mesh.md
   - How-To Guides:
     - Terminal to Engineer: howto/move-from-terminal-recipes-into-engineer-runs.md
     - Bootstrap and Reflection: howto/configure-bootstrap-and-inspect-reflection.md
@@ -64,6 +62,7 @@ nav:
     - Inspect Meeting Records: howto/inspect-meeting-records.md
     - Inspect Improvements: howto/inspect-improvement-curation-state.md
     - Reclaim Disk Space: howto/reclaim-disk-space-and-run-low-space-rust-builds.md
+    - Inspect Goal Register: howto/inspect-durable-goal-register.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
     - Runtime Contracts: reference/runtime-contracts.md
