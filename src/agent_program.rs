@@ -714,3 +714,117 @@ fn format_goal_items(items: &[GoalUpdate]) -> String {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::SessionId;
+
+    fn test_context(objective: &str) -> AgentProgramContext {
+        AgentProgramContext {
+            session_id: SessionId::parse("session-00000000-0000-0000-0000-000000000001").unwrap(),
+            identity_name: "test-identity".to_string(),
+            mode: OperatingMode::Engineer,
+            selected_base_type: BaseTypeId::new("local-harness"),
+            topology: RuntimeTopology::SingleProcess,
+            runtime_node: RuntimeNodeId::local(),
+            mailbox_address: RuntimeAddress::local(&RuntimeNodeId::local()),
+            objective: objective.to_string(),
+            active_goals: vec![],
+        }
+    }
+
+    fn test_outcome() -> BaseTypeOutcome {
+        BaseTypeOutcome {
+            plan: "test plan".to_string(),
+            execution_summary: "executed successfully".to_string(),
+            evidence: vec!["evidence-1".to_string()],
+        }
+    }
+
+    #[test]
+    fn objective_relay_plan_turn_passes_objective_through() {
+        let program = ObjectiveRelayProgram::try_default().unwrap();
+        let context = test_context("build the widget");
+        let input = program.plan_turn(&context).unwrap();
+        assert!(input.objective.contains("build the widget"));
+    }
+
+    #[test]
+    fn objective_relay_appends_active_goals_to_objective() {
+        let program = ObjectiveRelayProgram::try_default().unwrap();
+        let mut context = test_context("build it");
+        context.active_goals = vec![GoalRecord {
+            slug: "ship-v1".to_string(),
+            title: "Ship v1".to_string(),
+            rationale: "deadline".to_string(),
+            status: GoalStatus::Active,
+            priority: 1,
+            owner_identity: "test".to_string(),
+            source_session_id: context.session_id.clone(),
+            updated_in: crate::session::SessionPhase::Persistence,
+        }];
+        let input = program.plan_turn(&context).unwrap();
+        assert!(input.objective.contains("Active top goals:"));
+        assert!(input.objective.contains("Ship v1"));
+    }
+
+    #[test]
+    fn objective_relay_reflection_summary_includes_identity() {
+        let program = ObjectiveRelayProgram::try_default().unwrap();
+        let context = test_context("test objective");
+        let summary = program
+            .reflection_summary(&context, &test_outcome())
+            .unwrap();
+        assert!(summary.contains(&program.descriptor().identity));
+        assert!(summary.contains("Outcome summary:"));
+    }
+
+    #[test]
+    fn objective_relay_persistence_summary_includes_metadata() {
+        let program = ObjectiveRelayProgram::try_default().unwrap();
+        let context = test_context("test objective");
+        let summary = program
+            .persistence_summary(&context, &test_outcome())
+            .unwrap();
+        assert!(summary.contains("objective-metadata("));
+        assert!(summary.contains("test plan"));
+    }
+
+    #[test]
+    fn meeting_facilitator_parses_structured_notes() {
+        let program = MeetingFacilitatorProgram::try_default().unwrap();
+        let context = test_context("agenda: Sprint planning\ndecision: Ship by Friday");
+        let input = program.plan_turn(&context).unwrap();
+        assert!(input.objective.contains("Sprint planning"));
+        assert!(input.objective.contains("decisions=1"));
+    }
+
+    #[test]
+    fn meeting_facilitator_reflection_includes_counts() {
+        let program = MeetingFacilitatorProgram::try_default().unwrap();
+        let context = test_context("agenda: Retro\nrisk: Scope creep\nnext-step: Write tests");
+        let summary = program
+            .reflection_summary(&context, &test_outcome())
+            .unwrap();
+        assert!(summary.contains("1 risks"));
+        assert!(summary.contains("1 next steps"));
+    }
+
+    #[test]
+    fn goal_curator_rejects_empty_input() {
+        let err = StructuredGoalPlan::parse("no goal lines here").unwrap_err();
+        assert!(matches!(err, SimardError::InvalidGoalRecord { .. }));
+    }
+
+    #[test]
+    fn goal_curator_parses_goals_with_attributes() {
+        let plan = StructuredGoalPlan::parse(
+            "goal: Ship v1 | priority=1 | status=active | rationale=deadline",
+        )
+        .unwrap();
+        assert_eq!(plan.goals.len(), 1);
+        assert_eq!(plan.goals[0].priority, 1);
+        assert_eq!(plan.goals[0].status, GoalStatus::Active);
+    }
+}
