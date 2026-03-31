@@ -35,6 +35,8 @@ pub mod memory_cognitive;
 pub mod memory_consolidation;
 pub mod memory_hive;
 pub mod metadata;
+pub mod ooda_loop;
+pub mod ooda_scheduler;
 pub mod operator_cli;
 pub mod operator_commands;
 mod persistence;
@@ -50,6 +52,7 @@ mod sanitization;
 pub mod self_improve;
 pub mod self_relaunch;
 pub mod session;
+pub mod skill_builder;
 pub mod terminal_engineer_bridge;
 mod terminal_session;
 
@@ -160,6 +163,16 @@ pub use memory_consolidation::{
     persistence_memory_operations, preparation_memory_operations, reflection_memory_operations,
 };
 pub use memory_hive::{HiveConfig, hive_config_from_identity};
+pub use ooda_loop::{
+    ActionKind, ActionOutcome, CycleReport, GoalSnapshot, Observation, OodaBridges, OodaConfig,
+    OodaPhase, OodaState, PlannedAction, Priority, act, decide, observe, orient, run_ooda_cycle,
+    summarize_cycle_report,
+};
+pub use ooda_scheduler::{
+    CompletedSlot, ScheduledAction, Scheduler, SchedulerSlot, SlotStatus, complete_slot,
+    drain_finished, fail_slot, poll_slots, schedule_actions, scheduler_summary, start_slot,
+};
+
 pub use metadata::{BackendDescriptor, Freshness, FreshnessState, Provenance};
 pub use operator_cli::{dispatch_operator_cli, operator_cli_help, operator_cli_usage};
 pub use operator_commands::{
@@ -204,6 +217,10 @@ pub use self_relaunch::{
 };
 pub use session::{
     SessionId, SessionIdGenerator, SessionPhase, SessionRecord, UuidSessionIdGenerator,
+};
+pub use skill_builder::{
+    SkillTemplate, extract_skill_candidates, generate_skill_definition, install_skill,
+    list_installed_skills,
 };
 pub use terminal_engineer_bridge::{
     ENGINEER_HANDOFF_FILE_NAME, ENGINEER_MODE_BOUNDARY, SHARED_DEFAULT_STATE_ROOT_SOURCE,
