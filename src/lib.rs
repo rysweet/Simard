@@ -9,6 +9,7 @@ pub mod base_types;
 pub mod bootstrap;
 pub mod bridge;
 pub mod bridge_circuit;
+pub mod bridge_launcher;
 pub mod bridge_subprocess;
 mod copilot_status_probe;
 mod copilot_task_submit;
