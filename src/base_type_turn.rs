@@ -33,6 +33,8 @@ pub struct TurnContext {
     pub memory_facts: Vec<CognitiveFact>,
     pub knowledge: Vec<KnowledgeQueryResult>,
     pub procedures: Vec<CognitiveProcedure>,
+    /// Sources that failed during enrichment, for honest degradation visibility.
+    pub degraded_sources: Vec<String>,
 }
 
 /// An action proposed by the LLM in its response.
@@ -47,33 +49,46 @@ pub struct ProposedAction {
 pub struct TurnOutput {
     pub actions: Vec<ProposedAction>,
     pub explanation: String,
-    pub confidence: f64,
+    /// None when the LLM did not provide a parseable confidence value.
+    pub confidence: Option<f64>,
 }
 
 /// Prepare a [`TurnContext`] by querying memory and knowledge bridges.
 ///
 /// Both bridges are optional. If a bridge call fails, the corresponding
-/// section is left empty rather than propagating the error — enrichment is
-/// best-effort.
+/// section is left empty and the failure is recorded in `degraded_sources`
+/// so callers can see what enrichment was skipped (Pillar 11: honest degradation).
 pub fn prepare_turn_context(
     objective: &str,
     memory_bridge: Option<&CognitiveMemoryBridge>,
     knowledge_bridge: Option<&KnowledgeBridge>,
 ) -> TurnContext {
+    let mut degraded_sources = Vec::new();
+
     let memory_facts = memory_bridge
         .and_then(|bridge| {
             bridge
                 .search_facts(objective, MAX_MEMORY_FACTS, MIN_FACT_CONFIDENCE)
+                .map_err(|e| degraded_sources.push(format!("memory-facts: {e}")))
                 .ok()
         })
         .unwrap_or_default();
 
     let procedures = memory_bridge
-        .and_then(|bridge| bridge.recall_procedure(objective, MAX_PROCEDURES).ok())
+        .and_then(|bridge| {
+            bridge
+                .recall_procedure(objective, MAX_PROCEDURES)
+                .map_err(|e| degraded_sources.push(format!("memory-procedures: {e}")))
+                .ok()
+        })
         .unwrap_or_default();
 
     let knowledge = knowledge_bridge
-        .and_then(|bridge| enrich_planning_context(objective, bridge).ok())
+        .and_then(|bridge| {
+            enrich_planning_context(objective, bridge)
+                .map_err(|e| degraded_sources.push(format!("knowledge: {e}")))
+                .ok()
+        })
         .map(|ctx| ctx.relevant_knowledge)
         .unwrap_or_default();
 
@@ -82,6 +97,7 @@ pub fn prepare_turn_context(
         memory_facts,
         knowledge,
         procedures,
+        degraded_sources,
     }
 }
 
@@ -233,7 +249,7 @@ pub fn parse_turn_output(raw: &str) -> SimardResult<TurnOutput> {
     Ok(TurnOutput {
         actions,
         explanation,
-        confidence: confidence.unwrap_or(0.5),
+        confidence,
     })
 }
 
@@ -259,6 +275,7 @@ mod tests {
             memory_facts: vec![],
             knowledge: vec![],
             procedures: vec![],
+            degraded_sources: vec![],
         };
         let prompt = format_turn_input(&ctx);
         assert!(prompt.contains("implement the widget"));
@@ -280,6 +297,7 @@ mod tests {
             }],
             knowledge: vec![],
             procedures: vec![],
+            degraded_sources: vec![],
         };
         let prompt = format_turn_input(&ctx);
         assert!(prompt.contains("## Relevant Memory Facts"));
@@ -300,7 +318,7 @@ CONFIDENCE: 0.85";
         assert_eq!(output.actions[0].kind, "create");
         assert_eq!(output.actions[1].kind, "test");
         assert!(output.explanation.contains("module"));
-        assert!((output.confidence - 0.85).abs() < f64::EPSILON);
+        assert!((output.confidence.unwrap() - 0.85).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -317,13 +335,13 @@ CONFIDENCE: 0.85";
         let output = parse_turn_output(raw).unwrap();
         assert!(output.actions.is_empty());
         assert!(output.explanation.contains("explanation"));
-        assert!((output.confidence - 0.5).abs() < f64::EPSILON);
+        assert!(output.confidence.is_none());
     }
 
     #[test]
     fn parse_turn_output_clamps_confidence() {
         let raw = "CONFIDENCE: 1.5";
         let output = parse_turn_output(raw).unwrap();
-        assert!((output.confidence - 1.0).abs() < f64::EPSILON);
+        assert!((output.confidence.unwrap() - 1.0).abs() < f64::EPSILON);
     }
 }

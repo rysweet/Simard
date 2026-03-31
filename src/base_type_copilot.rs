@@ -121,9 +121,7 @@ struct CopilotSdkSession {
     descriptor: BaseTypeDescriptor,
     config: CopilotAdapterConfig,
     request: BaseTypeSessionRequest,
-    #[allow(dead_code)]
     memory_bridge: Option<CognitiveMemoryBridge>,
-    #[allow(dead_code)]
     knowledge_bridge: Option<KnowledgeBridge>,
     is_open: bool,
     is_closed: bool,

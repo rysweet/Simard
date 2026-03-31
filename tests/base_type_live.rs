@@ -112,6 +112,7 @@ fn format_minimal_context() {
         memory_facts: vec![],
         knowledge: vec![],
         procedures: vec![],
+        degraded_sources: vec![],
     };
     let prompt = format_turn_input(&ctx);
     assert!(prompt.contains("## Objective"));
@@ -149,6 +150,7 @@ fn format_full_context() {
             prerequisites: vec!["database access".into()],
             usage_count: 3,
         }],
+        degraded_sources: vec![],
     };
     let prompt = format_turn_input(&ctx);
     assert!(prompt.contains("[indexing]"));
@@ -168,7 +170,7 @@ fn parse_well_formed_output() {
     assert_eq!(output.actions.len(), 2);
     assert_eq!(output.actions[0].kind, "create");
     assert!(output.explanation.contains("Both"));
-    assert!((output.confidence - 0.91).abs() < f64::EPSILON);
+    assert!((output.confidence.unwrap() - 0.91).abs() < f64::EPSILON);
 }
 
 #[test]
@@ -183,7 +185,7 @@ fn parse_output_case_insensitive() {
     let raw = "action: build \u{2014} Build the project\nexplanation: Needed.\nconfidence: 0.6";
     let output = parse_turn_output(raw).unwrap();
     assert_eq!(output.actions.len(), 1);
-    assert!((output.confidence - 0.6).abs() < f64::EPSILON);
+    assert!((output.confidence.unwrap() - 0.6).abs() < f64::EPSILON);
 }
 
 // -- Feral inputs --
@@ -199,21 +201,27 @@ fn feral_malformed_output_still_extracts_something() {
     let output = parse_turn_output("Just random text.").unwrap();
     assert!(output.actions.is_empty());
     assert!(!output.explanation.is_empty());
-    assert!((output.confidence - 0.5).abs() < f64::EPSILON);
+    assert!(
+        output.confidence.is_none(),
+        "missing CONFIDENCE line should yield None, not a default"
+    );
 }
 
 #[test]
 fn feral_confidence_out_of_range() {
     let o1 = parse_turn_output("CONFIDENCE: -5.0").unwrap();
-    assert!((o1.confidence - 0.0).abs() < f64::EPSILON);
+    assert!((o1.confidence.unwrap() - 0.0).abs() < f64::EPSILON);
     let o2 = parse_turn_output("CONFIDENCE: 999.0").unwrap();
-    assert!((o2.confidence - 1.0).abs() < f64::EPSILON);
+    assert!((o2.confidence.unwrap() - 1.0).abs() < f64::EPSILON);
 }
 
 #[test]
 fn feral_confidence_non_numeric() {
     let output = parse_turn_output("CONFIDENCE: very-high").unwrap();
-    assert!((output.confidence - 0.5).abs() < f64::EPSILON);
+    assert!(
+        output.confidence.is_none(),
+        "unparseable CONFIDENCE should yield None, not a default"
+    );
 }
 
 // -- Copilot adapter contract tests --
@@ -354,5 +362,5 @@ fn full_turn_round_trip() {
                      CONFIDENCE: 0.88";
     let output = parse_turn_output(simulated).unwrap();
     assert_eq!(output.actions.len(), 2);
-    assert!((output.confidence - 0.88).abs() < f64::EPSILON);
+    assert!((output.confidence.unwrap() - 0.88).abs() < f64::EPSILON);
 }
