@@ -16,6 +16,7 @@ fn test_db_path() -> PathBuf {
 }
 
 #[test]
+#[ignore] // Requires Python + Kuzu — run with: cargo test -- --ignored
 fn live_memory_bridge_stores_and_retrieves_fact() {
     let python_dir = find_python_dir().expect("python dir should exist");
     let db_path = test_db_path();
@@ -56,6 +57,7 @@ fn live_memory_bridge_stores_and_retrieves_fact() {
 }
 
 #[test]
+#[ignore] // Requires Python + Kuzu — run with: cargo test -- --ignored
 fn live_memory_bridge_working_memory_lifecycle() {
     let python_dir = find_python_dir().expect("python dir");
     let db_path = test_db_path();
@@ -87,6 +89,7 @@ fn live_memory_bridge_working_memory_lifecycle() {
 }
 
 #[test]
+#[ignore] // Requires Python + Kuzu — run with: cargo test -- --ignored
 fn live_memory_bridge_episode_and_consolidation() {
     let python_dir = find_python_dir().expect("python dir");
     let db_path = test_db_path();
@@ -117,6 +120,7 @@ fn live_memory_bridge_episode_and_consolidation() {
 }
 
 #[test]
+#[ignore] // Requires Python + Kuzu — run with: cargo test -- --ignored
 fn live_memory_bridge_procedure_store_and_recall() {
     let python_dir = find_python_dir().expect("python dir");
     let db_path = test_db_path();
