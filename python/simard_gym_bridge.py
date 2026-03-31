@@ -176,6 +176,8 @@ class GymBridgeServer(BridgeServer):
 
     def _handle_run_scenario(self, params: dict[str, Any]) -> dict[str, Any]:
         sid = params.get("scenario_id", "")
+        if any(bad in sid for bad in ("/", "\\", "..")):
+            return _fail_result(sid, f"scenario_id contains illegal path characters: '{sid}'")
         if sid == "long-horizon-memory":
             return self._run_long_horizon()
         if self._progressive is None:

@@ -19,8 +19,6 @@ pub struct AzlinConfig {
     pub region: Option<String>,
     /// VM size (e.g. "Standard_D4s_v3"). None uses azlin's default.
     pub size: Option<String>,
-    /// Optional SSH public key path. None uses azlin's default (~/.ssh/id_rsa.pub).
-    pub ssh_key_path: Option<String>,
 }
 
 /// Represents a VM managed by azlin.
@@ -275,7 +273,6 @@ mod tests {
         let config = AzlinConfig {
             region: Some("westus2".to_string()),
             size: Some("Standard_D4s_v3".to_string()),
-            ssh_key_path: None,
         };
         let vm = azlin_create("test-vm", &config, &executor).unwrap();
         assert_eq!(vm.status, "running");

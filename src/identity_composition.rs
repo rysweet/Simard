@@ -6,6 +6,7 @@
 //! assigned role and recursion depth limit.
 
 use std::fmt::{self, Display, Formatter};
+use std::sync::OnceLock;
 
 use crate::agent_roles::AgentRole;
 use crate::error::{SimardError, SimardResult};
@@ -14,6 +15,8 @@ use crate::identity::IdentityManifest;
 /// Maximum subordinate nesting depth from the environment, defaulting to 3.
 const ENV_MAX_DEPTH: &str = "SIMARD_MAX_SUBORDINATE_DEPTH";
 const DEFAULT_MAX_DEPTH: u32 = 3;
+/// Absolute upper bound for subordinate depth regardless of env config.
+const ABSOLUTE_MAX_DEPTH: u32 = 10;
 
 /// A subordinate's identity within a composition.
 ///
@@ -74,13 +77,19 @@ impl Display for CompositeIdentity {
 
 /// Read the maximum subordinate depth from the environment.
 ///
+/// The value is read once and cached for the lifetime of the process.
 /// Returns `SIMARD_MAX_SUBORDINATE_DEPTH` if set and valid, otherwise
-/// returns `DEFAULT_MAX_DEPTH` (3).
+/// returns `DEFAULT_MAX_DEPTH` (3). The result is always clamped to
+/// at most `ABSOLUTE_MAX_DEPTH` (10).
 pub fn max_subordinate_depth() -> u32 {
-    std::env::var(ENV_MAX_DEPTH)
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(DEFAULT_MAX_DEPTH)
+    static CACHED: OnceLock<u32> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var(ENV_MAX_DEPTH)
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(DEFAULT_MAX_DEPTH)
+            .min(ABSOLUTE_MAX_DEPTH)
+    })
 }
 
 /// Compose a primary identity with a set of subordinate identities.
