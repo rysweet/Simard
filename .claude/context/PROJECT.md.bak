@@ -10,7 +10,7 @@ Replace the sections below with information about your project.
 
 ---
 
-## Project: issue-56-implement-next-simard-block-after-bounded-engineer-loop
+## Project: simard-live
 
 ## Overview
 
@@ -26,6 +26,7 @@ Replace the sections below with information about your project.
 
 ### Technology Stack
 
+- **Language**: Python
 - **Language**: Rust
 - **Framework**: [Main framework if applicable]
 - **Database**: [Database system if applicable]
