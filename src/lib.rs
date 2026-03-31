@@ -1,4 +1,7 @@
 pub mod agent_program;
+pub mod base_type_copilot;
+pub mod base_type_harness;
+pub mod base_type_turn;
 pub mod base_types;
 pub mod bootstrap;
 pub mod bridge;
@@ -38,6 +41,12 @@ mod terminal_session;
 pub use agent_program::{
     AgentProgram, AgentProgramContext, AgentProgramMemoryRecord, ImprovementCuratorProgram,
     MeetingFacilitatorProgram, ObjectiveRelayProgram,
+};
+pub use base_type_copilot::{CopilotAdapterConfig, CopilotSdkAdapter, parse_copilot_response};
+pub use base_type_harness::{HarnessConfig, RealLocalHarnessAdapter};
+pub use base_type_turn::{
+    ProposedAction, TurnContext, TurnOutput, format_turn_input, parse_turn_output,
+    prepare_turn_context,
 };
 pub use base_types::{
     BaseTypeCapability, BaseTypeDescriptor, BaseTypeFactory, BaseTypeId, BaseTypeOutcome,
