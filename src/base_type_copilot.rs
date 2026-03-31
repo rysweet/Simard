@@ -56,7 +56,11 @@ impl CopilotSdkAdapter {
     }
 
     /// Create a new CopilotSdkAdapter with explicit configuration.
+    ///
+    /// The `config.command` is validated to reject shell metacharacters
+    /// (`;`, `|`, `&`, `` ` ``, `$`) for defense-in-depth.
     pub fn with_config(id: impl Into<String>, config: CopilotAdapterConfig) -> SimardResult<Self> {
+        validate_command(&config.command)?;
         let id = BaseTypeId::new(id);
         Ok(Self {
             descriptor: BaseTypeDescriptor {
@@ -279,6 +283,33 @@ pub fn parse_copilot_response(raw: &str) -> SimardResult<crate::base_type_turn::
     parse_turn_output(raw)
 }
 
+/// Validate that a command string does not contain shell metacharacters.
+///
+/// This is a defense-in-depth check. The command is an operator-configured
+/// value, not user input, but we reject obvious injection patterns to
+/// prevent accidental misconfiguration.
+fn validate_command(command: &str) -> SimardResult<()> {
+    const FORBIDDEN: &[char] = &[';', '|', '&', '`', '$'];
+    if let Some(ch) = command.chars().find(|c| FORBIDDEN.contains(c)) {
+        return Err(SimardError::InvalidConfigValue {
+            key: "command".to_string(),
+            value: command.to_string(),
+            help: format!(
+                "command contains forbidden shell metacharacter '{ch}'; \
+                 use a simple command without shell operators"
+            ),
+        });
+    }
+    if command.trim().is_empty() {
+        return Err(SimardError::InvalidConfigValue {
+            key: "command".to_string(),
+            value: command.to_string(),
+            help: "command must not be empty".to_string(),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,6 +373,27 @@ mod tests {
         let mut request = test_request();
         request.topology = RuntimeTopology::MultiProcess;
         let result = adapter.open_session(request);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn copilot_adapter_rejects_command_with_shell_metacharacters() {
+        let config = CopilotAdapterConfig {
+            command: "echo; rm -rf /".to_string(),
+            working_directory: None,
+        };
+        let result = CopilotSdkAdapter::with_config("copilot-inject", config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("forbidden"));
+    }
+
+    #[test]
+    fn copilot_adapter_rejects_empty_command() {
+        let config = CopilotAdapterConfig {
+            command: "  ".to_string(),
+            working_directory: None,
+        };
+        let result = CopilotSdkAdapter::with_config("copilot-empty", config);
         assert!(result.is_err());
     }
 

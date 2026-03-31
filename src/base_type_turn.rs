@@ -203,7 +203,7 @@ pub fn parse_turn_output(raw: &str) -> SimardResult<TurnOutput> {
 
         if let Some(rest) = strip_prefix_case_insensitive(line, ACTION_PREFIX) {
             let rest = rest.trim();
-            if let Some((kind, desc)) = rest.split_once('—').or_else(|| rest.split_once('-')) {
+            if let Some((kind, desc)) = rest.split_once('—').or_else(|| rest.split_once(" - ")) {
                 let kind = kind.trim().to_string();
                 let desc = desc.trim().to_string();
                 if !kind.is_empty() && !desc.is_empty() {
