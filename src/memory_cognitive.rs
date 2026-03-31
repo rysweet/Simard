@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 ///
 /// Maps to Python `SensoryItem`. The `expires_at` field is a Unix timestamp
 /// (seconds) after which the item may be pruned.
+///
+/// Used by future `get_recent_sensory` bridge method (Phase 3+).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct CognitiveSensoryItem {
     pub node_id: String,
     pub modality: String,
@@ -37,7 +40,10 @@ pub struct CognitiveWorkingSlot {
 ///
 /// Maps to Python `EpisodicMemory`. Episodes can be consolidated into
 /// summaries via `consolidate_episodes`.
+///
+/// Used by future `get_episodes` bridge method (Phase 3+).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct CognitiveEpisode {
     pub node_id: String,
     pub content: String,

@@ -137,16 +137,16 @@ class KnowledgeBridgeServer(BridgeServer):
             "confidence": confidence,
         }
 
-    def _handle_list_packs(self, _params: dict[str, Any]) -> list[dict[str, Any]]:
+    def _handle_list_packs(self, _params: dict[str, Any]) -> dict[str, Any]:
         """Handle knowledge.list_packs requests.
 
         Returns:
-            List of {name, description, article_count, section_count}.
+            {"packs": [{name, description, article_count, section_count}, ...]}.
         """
         self._ensure_registry()
         self._registry.refresh()
         packs = self._registry.list_packs()
-        return [_pack_info_dict(p) for p in packs]
+        return {"packs": [_pack_info_dict(p) for p in packs]}
 
     def _handle_pack_info(self, params: dict[str, Any]) -> dict[str, Any]:
         """Handle knowledge.pack_info requests.
