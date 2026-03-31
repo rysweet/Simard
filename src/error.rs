@@ -160,6 +160,26 @@ pub enum SimardError {
     ClockBeforeUnixEpoch {
         reason: String,
     },
+    BridgeSpawnFailed {
+        bridge: String,
+        reason: String,
+    },
+    BridgeTransportError {
+        bridge: String,
+        reason: String,
+    },
+    BridgeProtocolError {
+        bridge: String,
+        reason: String,
+    },
+    BridgeCallFailed {
+        bridge: String,
+        method: String,
+        reason: String,
+    },
+    BridgeCircuitOpen {
+        bridge: String,
+    },
 }
 
 pub type SimardResult<T> = Result<T, SimardError>;
@@ -339,6 +359,28 @@ impl Display for SimardError {
             }
             Self::ClockBeforeUnixEpoch { reason } => {
                 write!(f, "system clock is before UNIX epoch: {reason}")
+            }
+            Self::BridgeSpawnFailed { bridge, reason } => {
+                write!(f, "bridge '{bridge}' failed to spawn: {reason}")
+            }
+            Self::BridgeTransportError { bridge, reason } => {
+                write!(f, "bridge '{bridge}' transport error: {reason}")
+            }
+            Self::BridgeProtocolError { bridge, reason } => {
+                write!(f, "bridge '{bridge}' protocol error: {reason}")
+            }
+            Self::BridgeCallFailed {
+                bridge,
+                method,
+                reason,
+            } => {
+                write!(f, "bridge '{bridge}' call to '{method}' failed: {reason}")
+            }
+            Self::BridgeCircuitOpen { bridge } => {
+                write!(
+                    f,
+                    "bridge '{bridge}' circuit is open — calls are rejected until the bridge recovers"
+                )
             }
         }
     }
