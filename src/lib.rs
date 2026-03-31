@@ -40,6 +40,8 @@ pub mod reflection;
 pub mod review;
 pub mod runtime;
 mod sanitization;
+pub mod self_improve;
+pub mod self_relaunch;
 pub mod session;
 pub mod terminal_engineer_bridge;
 mod terminal_session;
@@ -164,6 +166,14 @@ pub use runtime::{
     RuntimeAddress, RuntimeKernel, RuntimeMailboxTransport, RuntimeNodeId, RuntimePorts,
     RuntimeRequest, RuntimeState, RuntimeSupervisor, RuntimeTopology, RuntimeTopologyDriver,
     SessionOutcome,
+};
+pub use self_improve::{
+    ImprovementConfig, ImprovementCycle, ImprovementDecision, ImprovementPhase, ProposedChange,
+    run_improvement_cycle, summarize_cycle,
+};
+pub use self_relaunch::{
+    GateResult, RelaunchConfig, RelaunchGate, all_gates_passed, build_canary, default_gates,
+    handover, verify_canary,
 };
 pub use session::{
     SessionId, SessionIdGenerator, SessionPhase, SessionRecord, UuidSessionIdGenerator,
