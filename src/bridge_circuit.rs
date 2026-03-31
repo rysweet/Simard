@@ -95,11 +95,11 @@ impl<T: BridgeTransport> CircuitBreakerTransport<T> {
             CircuitState::Closed => true,
             CircuitState::HalfOpen => true,
             CircuitState::Open => {
-                if let Some(last_failure) = state.last_failure_at {
-                    if last_failure.elapsed() >= self.config.cooldown {
-                        state.circuit = CircuitState::HalfOpen;
-                        return true;
-                    }
+                if let Some(last_failure) = state.last_failure_at
+                    && last_failure.elapsed() >= self.config.cooldown
+                {
+                    state.circuit = CircuitState::HalfOpen;
+                    return true;
                 }
                 false
             }

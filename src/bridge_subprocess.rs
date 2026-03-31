@@ -191,10 +191,10 @@ impl BridgeTransport for SubprocessBridgeTransport {
         let child = self.ensure_child(&mut state)?;
         Self::send_request(child, &request)?;
         let response = Self::read_response(child, &expected_id, self.timeout, &self.bridge_name)?;
-        if let Some(ref error) = response.error {
-            if error.code == BRIDGE_ERROR_TRANSPORT {
-                state.child = None;
-            }
+        if let Some(ref error) = response.error
+            && error.code == BRIDGE_ERROR_TRANSPORT
+        {
+            state.child = None;
         }
         Ok(response)
     }
@@ -217,14 +217,18 @@ impl BridgeTransport for SubprocessBridgeTransport {
 
 impl Drop for SubprocessBridgeTransport {
     fn drop(&mut self) {
-        if let Ok(mut state) = self.state.lock() {
-            if let Some(ref mut managed) = state.child {
-                let _ = managed.process.kill();
-                let _ = managed.process.wait();
-            }
+        if let Ok(mut state) = self.state.lock()
+            && let Some(ref mut managed) = state.child
+        {
+            let _ = managed.process.kill();
+            let _ = managed.process.wait();
         }
     }
 }
+
+/// Handler function type for in-memory bridge transports.
+type BridgeHandler =
+    dyn Fn(&str, &serde_json::Value) -> Result<serde_json::Value, BridgeErrorPayload> + Send + Sync;
 
 /// A bridge transport backed by an in-memory handler function, for testing.
 ///
@@ -232,11 +236,7 @@ impl Drop for SubprocessBridgeTransport {
 /// or an error payload.
 pub struct InMemoryBridgeTransport {
     bridge_name: String,
-    handler: Box<
-        dyn Fn(&str, &serde_json::Value) -> Result<serde_json::Value, BridgeErrorPayload>
-            + Send
-            + Sync,
-    >,
+    handler: Box<BridgeHandler>,
 }
 
 impl InMemoryBridgeTransport {
