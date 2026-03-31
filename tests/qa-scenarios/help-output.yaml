@@ -1,0 +1,19 @@
+name: simard-help
+app_type: cli
+description: Verify simard --help shows all command namespaces
+steps:
+  - action: run
+    command: "cargo run --quiet -- --help"
+    timeout: 15s
+  - action: expect_stdout
+    contains: "engineer run"
+  - action: expect_stdout
+    contains: "meeting run"
+  - action: expect_stdout
+    contains: "gym list"
+  - action: expect_stdout
+    contains: "goal-curation run"
+  - action: expect_stdout
+    contains: "review run"
+  - action: expect_stdout
+    contains: "bootstrap run"

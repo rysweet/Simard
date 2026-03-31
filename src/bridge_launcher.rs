@@ -5,6 +5,7 @@
 //! [`CircuitBreakerTransport`] for fault tolerance.
 
 use std::path::{Path, PathBuf};
+use std::sync::Once;
 use std::time::Duration;
 
 use crate::bridge::BridgeTransport;
@@ -58,11 +59,14 @@ fn build_python_path() -> String {
 }
 
 fn set_python_path() {
-    // SAFETY: We only call this during single-threaded bootstrap, before
-    // any bridge subprocesses are spawned.
-    unsafe {
-        std::env::set_var("PYTHONPATH", build_python_path());
-    }
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        // SAFETY: called exactly once during single-threaded bootstrap,
+        // before any bridge subprocesses are spawned.
+        unsafe {
+            std::env::set_var("PYTHONPATH", build_python_path());
+        }
+    });
 }
 
 fn make_transport(name: &str, script: &Path, extra_args: Vec<String>) -> Box<dyn BridgeTransport> {

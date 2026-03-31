@@ -162,7 +162,7 @@ pub use memory::{
     FileBackedMemoryStore, InMemoryMemoryStore, MemoryRecord, MemoryScope, MemoryStore,
 };
 pub use memory_bridge::CognitiveMemoryBridge;
-pub use memory_bridge_adapter::CognitiveBridgeMemoryAdapter;
+pub use memory_bridge_adapter::CognitiveBridgeMemoryStore;
 pub use memory_cognitive::{
     CognitiveEpisode, CognitiveFact, CognitiveProcedure, CognitiveProspective,
     CognitiveSensoryItem, CognitiveStatistics, CognitiveWorkingSlot,

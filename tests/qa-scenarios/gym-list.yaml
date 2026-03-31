@@ -1,0 +1,15 @@
+name: simard-gym-list
+app_type: cli
+description: Verify simard lists benchmark scenarios
+steps:
+  - action: run
+    command: "cargo run --quiet -- gym list"
+    timeout: 30s
+  - action: expect_stdout
+    contains: "Simard benchmark scenarios:"
+  - action: expect_stdout
+    contains: "repo-exploration-local"
+  - action: expect_stdout
+    contains: "interactive-terminal-driving"
+  - action: expect_exit_code
+    code: 0

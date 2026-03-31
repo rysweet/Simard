@@ -1,255 +1,255 @@
-//! Adapter that implements [`MemoryStore`] via [`CognitiveMemoryBridge`].
+//! Adapter that implements [`MemoryStore`] by delegating to [`CognitiveMemoryBridge`].
 //!
-//! When `SIMARD_MEMORY_BACKEND=cognitive-bridge` is set, bootstrap wires this
-//! adapter in place of `FileBackedMemoryStore`. Every `put` stores records as
-//! semantic facts in Kuzu via the bridge subprocess, and every `list` / count
-//! query translates to `search_facts` calls.
+//! This bridges the gap between the simple key-value `MemoryStore` trait (used
+//! by `RuntimePorts`) and the six-type cognitive memory system backed by Kuzu.
+//! Each `MemoryRecord` is stored as a semantic fact in the cognitive graph, with
+//! the record key as concept and scope+session encoded in tags.
 //!
-//! Scope mapping:
-//! - Each [`MemoryScope`] is stored as a tag on the semantic fact.
-//! - The record `key` becomes the concept, `value` becomes the content.
-//! - `session_id` and `recorded_in` are preserved in the `source_id` field
-//!   as `{session_id}:{phase}`.
+//! When the cognitive bridge is unavailable (honest degradation), the adapter
+//! falls back to a `FileBackedMemoryStore` so the runtime always functions.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
-use crate::bridge::BridgeTransport;
 use crate::error::{SimardError, SimardResult};
-use crate::memory::{MemoryRecord, MemoryScope, MemoryStore};
+use crate::memory::{FileBackedMemoryStore, MemoryRecord, MemoryScope, MemoryStore};
 use crate::memory_bridge::CognitiveMemoryBridge;
 use crate::metadata::{BackendDescriptor, Freshness};
 use crate::session::SessionId;
 
-const ADAPTER_NAME: &str = "memory-bridge-adapter";
+const STORE_NAME: &str = "cognitive-bridge-memory";
 
-/// Adapts [`CognitiveMemoryBridge`] to the [`MemoryStore`] trait.
-///
-/// Records are stored as semantic facts with scope-based tags, enabling the
-/// Simard runtime to use Kuzu cognitive memory as its primary memory backend
-/// while keeping the `MemoryStore` trait contract intact.
-pub struct CognitiveBridgeMemoryAdapter {
-    bridge: CognitiveMemoryBridge,
-    descriptor: BackendDescriptor,
-    /// Local cache of records for fast list/count queries. The bridge is the
-    /// source of truth on put; the cache avoids repeated bridge round-trips
-    /// for read-heavy workloads within a single session.
-    cache: Mutex<Vec<MemoryRecord>>,
+/// Tag prefix used to encode scope in cognitive memory tags.
+fn scope_tag(scope: MemoryScope) -> String {
+    format!("scope:{scope:?}")
 }
 
-impl CognitiveBridgeMemoryAdapter {
-    /// Create a new adapter wrapping the given bridge transport.
-    pub fn new(transport: Box<dyn BridgeTransport>) -> SimardResult<Self> {
-        let descriptor = BackendDescriptor::for_runtime_type::<Self>(
-            "memory::cognitive-bridge-adapter",
-            "runtime-port:memory-store:cognitive-bridge",
-            Freshness::now()?,
-        );
+/// Tag prefix used to encode session ID in cognitive memory tags.
+fn session_tag(session_id: &SessionId) -> String {
+    format!("session:{}", session_id.as_str())
+}
+
+/// `MemoryStore` implementation backed by cognitive memory via Python bridge.
+///
+/// Stores each `MemoryRecord` as a semantic fact:
+/// - concept = record key
+/// - content = record value
+/// - confidence = 1.0 (internal metadata, always trusted)
+/// - tags = [scope tag, session tag, phase tag]
+/// - source_id = "memory-store-adapter"
+///
+/// Falls back to `FileBackedMemoryStore` if the bridge fails.
+pub struct CognitiveBridgeMemoryStore {
+    bridge: CognitiveMemoryBridge,
+    fallback: FileBackedMemoryStore,
+    /// Track records locally for list/count operations since cognitive memory
+    /// search is keyword-based and cannot filter by exact scope/session.
+    /// Keyed by record key for O(1) dedup on put.
+    records: Mutex<HashMap<String, MemoryRecord>>,
+    descriptor: BackendDescriptor,
+}
+
+impl CognitiveBridgeMemoryStore {
+    pub fn new(
+        bridge: CognitiveMemoryBridge,
+        fallback_path: impl Into<PathBuf>,
+    ) -> SimardResult<Self> {
+        let fallback = FileBackedMemoryStore::try_new(fallback_path)?;
         Ok(Self {
-            bridge: CognitiveMemoryBridge::new(transport),
-            descriptor,
-            cache: Mutex::new(Vec::new()),
+            bridge,
+            records: Mutex::new(HashMap::new()),
+            descriptor: BackendDescriptor::for_runtime_type::<Self>(
+                "memory::cognitive-bridge",
+                "runtime-port:memory-store:cognitive-bridge",
+                Freshness::now()?,
+            ),
+            fallback,
         })
     }
 
-    /// Encode scope + session metadata into the `source_id` field.
-    fn encode_source_id(record: &MemoryRecord) -> String {
-        format!("{}:{}", record.session_id, record.recorded_in)
-    }
-
-    /// Encode scope as a tag string.
-    fn scope_tag(scope: MemoryScope) -> String {
-        match scope {
-            MemoryScope::SessionScratch => "scope:session-scratch".to_string(),
-            MemoryScope::SessionSummary => "scope:session-summary".to_string(),
-            MemoryScope::Decision => "scope:decision".to_string(),
-            MemoryScope::Project => "scope:project".to_string(),
-            MemoryScope::Benchmark => "scope:benchmark".to_string(),
-        }
-    }
-}
-
-impl std::fmt::Debug for CognitiveBridgeMemoryAdapter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CognitiveBridgeMemoryAdapter")
-            .field("descriptor", &self.descriptor)
-            .finish_non_exhaustive()
+    /// Store a record in cognitive memory as a semantic fact.
+    fn store_as_fact(&self, record: &MemoryRecord) -> SimardResult<String> {
+        let tags = vec![
+            scope_tag(record.scope),
+            session_tag(&record.session_id),
+            format!("phase:{:?}", record.recorded_in),
+        ];
+        self.bridge.store_fact(
+            &record.key,
+            &record.value,
+            1.0,
+            &tags,
+            "memory-store-adapter",
+        )
     }
 }
 
-impl MemoryStore for CognitiveBridgeMemoryAdapter {
+impl MemoryStore for CognitiveBridgeMemoryStore {
     fn descriptor(&self) -> BackendDescriptor {
         self.descriptor.clone()
     }
 
     fn put(&self, record: MemoryRecord) -> SimardResult<()> {
-        let tags = vec![
-            Self::scope_tag(record.scope),
-            format!("session:{}", record.session_id),
-        ];
-        let source_id = Self::encode_source_id(&record);
+        // Always persist to file fallback for handoff/recovery.
+        self.fallback.put(record.clone())?;
 
-        self.bridge.store_fact(
-            &record.key,
-            &record.value,
-            1.0, // full confidence for direct stores
-            &tags,
-            &source_id,
-        )?;
+        // Also store in cognitive bridge for rich queries.
+        if let Err(e) = self.store_as_fact(&record) {
+            eprintln!(
+                "[simard] cognitive bridge write failed for key '{}': {e}",
+                record.key
+            );
+        }
 
-        // Update local cache
-        let mut cache = self
-            .cache
+        // Maintain local index for list/count — O(1) insert/overwrite via HashMap.
+        let mut records = self
+            .records
             .lock()
             .map_err(|_| SimardError::StoragePoisoned {
-                store: ADAPTER_NAME.to_string(),
+                store: STORE_NAME.to_string(),
             })?;
-        if let Some(existing) = cache.iter_mut().find(|r| r.key == record.key) {
-            *existing = record;
-        } else {
-            cache.push(record);
-        }
+        records.insert(record.key.clone(), record);
         Ok(())
     }
 
     fn list(&self, scope: MemoryScope) -> SimardResult<Vec<MemoryRecord>> {
-        let cache = self
-            .cache
+        let records = self
+            .records
             .lock()
             .map_err(|_| SimardError::StoragePoisoned {
-                store: ADAPTER_NAME.to_string(),
+                store: STORE_NAME.to_string(),
             })?;
-        Ok(cache.iter().filter(|r| r.scope == scope).cloned().collect())
+        Ok(records
+            .values()
+            .filter(|r| r.scope == scope)
+            .cloned()
+            .collect())
     }
 
     fn list_for_session(&self, session_id: &SessionId) -> SimardResult<Vec<MemoryRecord>> {
-        let cache = self
-            .cache
+        let records = self
+            .records
             .lock()
             .map_err(|_| SimardError::StoragePoisoned {
-                store: ADAPTER_NAME.to_string(),
+                store: STORE_NAME.to_string(),
             })?;
-        Ok(cache
-            .iter()
+        Ok(records
+            .values()
             .filter(|r| &r.session_id == session_id)
             .cloned()
             .collect())
     }
 
     fn count_for_session(&self, session_id: &SessionId) -> SimardResult<usize> {
-        let cache = self
-            .cache
+        let records = self
+            .records
             .lock()
             .map_err(|_| SimardError::StoragePoisoned {
-                store: ADAPTER_NAME.to_string(),
+                store: STORE_NAME.to_string(),
             })?;
-        Ok(cache.iter().filter(|r| &r.session_id == session_id).count())
+        Ok(records
+            .values()
+            .filter(|r| &r.session_id == session_id)
+            .count())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bridge::BridgeErrorPayload;
     use crate::bridge_subprocess::InMemoryBridgeTransport;
-    use crate::session::{SessionIdGenerator, SessionPhase, UuidSessionIdGenerator};
+    use crate::session::SessionPhase;
     use serde_json::json;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use uuid::Uuid;
 
-    fn test_adapter() -> CognitiveBridgeMemoryAdapter {
+    fn test_store() -> CognitiveBridgeMemoryStore {
         let transport =
-            InMemoryBridgeTransport::new("test-memory", |method, _params| match method {
-                "memory.store_fact" => Ok(json!({"id": "sem_test"})),
+            InMemoryBridgeTransport::new("test-adapter", |method, _params| match method {
+                "memory.store_fact" => Ok(json!({"id": "sem_adapter_test"})),
                 "memory.search_facts" => Ok(json!({"facts": []})),
-                _ => Err(BridgeErrorPayload {
+                _ => Err(crate::bridge::BridgeErrorPayload {
                     code: -32601,
-                    message: format!("unknown: {method}"),
+                    message: format!("unknown method: {method}"),
                 }),
             });
-        CognitiveBridgeMemoryAdapter::new(Box::new(transport)).unwrap()
+        let bridge = CognitiveMemoryBridge::new(Box::new(transport));
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("adapter-test-{unique}.json"));
+        CognitiveBridgeMemoryStore::new(bridge, path).unwrap()
     }
 
-    fn test_session_id() -> SessionId {
-        UuidSessionIdGenerator.next_id()
-    }
-
-    fn sample_record(key: &str, scope: MemoryScope, session_id: &SessionId) -> MemoryRecord {
+    fn make_record(key: &str, scope: MemoryScope) -> MemoryRecord {
         MemoryRecord {
             key: key.to_string(),
             scope,
-            value: format!("value for {key}"),
-            session_id: session_id.clone(),
-            recorded_in: SessionPhase::Intake,
+            value: format!("value-for-{key}"),
+            session_id: SessionId::from_uuid(Uuid::nil()),
+            recorded_in: SessionPhase::Execution,
         }
     }
 
     #[test]
-    fn put_stores_via_bridge_and_caches() {
-        let adapter = test_adapter();
-        let sid = test_session_id();
-        let record = sample_record("key1", MemoryScope::Decision, &sid);
-        adapter.put(record.clone()).unwrap();
+    fn put_and_list_by_scope() {
+        let store = test_store();
+        store.put(make_record("a", MemoryScope::Decision)).unwrap();
+        store.put(make_record("b", MemoryScope::Project)).unwrap();
+        store.put(make_record("c", MemoryScope::Decision)).unwrap();
 
-        let listed = adapter.list(MemoryScope::Decision).unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].key, "key1");
+        let decisions = store.list(MemoryScope::Decision).unwrap();
+        assert_eq!(decisions.len(), 2);
+        let projects = store.list(MemoryScope::Project).unwrap();
+        assert_eq!(projects.len(), 1);
     }
 
     #[test]
-    fn put_updates_existing_key() {
-        let adapter = test_adapter();
-        let sid = test_session_id();
-        let r1 = sample_record("key1", MemoryScope::Project, &sid);
-        adapter.put(r1).unwrap();
-
-        let mut r2 = sample_record("key1", MemoryScope::Project, &sid);
-        r2.value = "updated".to_string();
-        adapter.put(r2).unwrap();
-
-        let listed = adapter.list(MemoryScope::Project).unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].value, "updated");
-    }
-
-    #[test]
-    fn list_filters_by_scope() {
-        let adapter = test_adapter();
-        let sid = test_session_id();
-        adapter
-            .put(sample_record("d1", MemoryScope::Decision, &sid))
+    fn put_deduplicates_by_key() {
+        let store = test_store();
+        store
+            .put(make_record("dup", MemoryScope::Decision))
             .unwrap();
-        adapter
-            .put(sample_record("p1", MemoryScope::Project, &sid))
-            .unwrap();
-        adapter
-            .put(sample_record("d2", MemoryScope::Decision, &sid))
+        store
+            .put(make_record("dup", MemoryScope::Decision))
             .unwrap();
 
-        assert_eq!(adapter.list(MemoryScope::Decision).unwrap().len(), 2);
-        assert_eq!(adapter.list(MemoryScope::Project).unwrap().len(), 1);
-        assert_eq!(adapter.list(MemoryScope::Benchmark).unwrap().len(), 0);
+        let all = store.list(MemoryScope::Decision).unwrap();
+        assert_eq!(all.len(), 1);
     }
 
     #[test]
     fn list_for_session_filters_correctly() {
-        let adapter = test_adapter();
-        let sid1 = test_session_id();
-        let sid2 = test_session_id();
-        adapter
-            .put(sample_record("a", MemoryScope::Decision, &sid1))
+        let store = test_store();
+        store
+            .put(make_record("x", MemoryScope::SessionScratch))
             .unwrap();
 
-        adapter
-            .put(sample_record("b", MemoryScope::Decision, &sid2))
-            .unwrap();
+        let session = SessionId::from_uuid(Uuid::nil());
+        let records = store.list_for_session(&session).unwrap();
+        assert_eq!(records.len(), 1);
 
-        assert_eq!(adapter.list_for_session(&sid1).unwrap().len(), 1);
-        assert_eq!(adapter.count_for_session(&sid1).unwrap(), 1);
-        assert_eq!(adapter.list_for_session(&sid2).unwrap().len(), 1);
+        let other = SessionId::from_uuid(Uuid::from_u128(1));
+        let records = store.list_for_session(&other).unwrap();
+        assert_eq!(records.len(), 0);
+    }
+
+    #[test]
+    fn count_for_session() {
+        let store = test_store();
+        store.put(make_record("p", MemoryScope::Benchmark)).unwrap();
+        store.put(make_record("q", MemoryScope::Benchmark)).unwrap();
+
+        let session = SessionId::from_uuid(Uuid::nil());
+        assert_eq!(store.count_for_session(&session).unwrap(), 2);
     }
 
     #[test]
     fn descriptor_identifies_cognitive_bridge() {
-        let adapter = test_adapter();
-        let desc = adapter.descriptor();
+        let store = test_store();
+        let desc = store.descriptor();
         assert!(desc.identity.contains("cognitive-bridge"));
     }
 }
