@@ -54,32 +54,34 @@ fn mock_knowledge_transport() -> InMemoryBridgeTransport {
                 "confidence": 0.82,
             }))
         }
-        "knowledge.list_packs" => Ok(serde_json::json!([
-            {
-                "name": "rust-expert",
-                "description": "Rust programming language ownership borrowing lifetimes",
-                "article_count": 150,
-                "section_count": 520,
-            },
-            {
-                "name": "python-expert",
-                "description": "Python programming language stdlib asyncio",
-                "article_count": 210,
-                "section_count": 890,
-            },
-            {
-                "name": "docker-expert",
-                "description": "Docker containers images Dockerfile",
-                "article_count": 75,
-                "section_count": 280,
-            },
-            {
-                "name": "kubernetes-expert",
-                "description": "Kubernetes k8s pods deployments services",
-                "article_count": 180,
-                "section_count": 650,
-            },
-        ])),
+        "knowledge.list_packs" => Ok(serde_json::json!({
+            "packs": [
+                {
+                    "name": "rust-expert",
+                    "description": "Rust programming language ownership borrowing lifetimes",
+                    "article_count": 150,
+                    "section_count": 520,
+                },
+                {
+                    "name": "python-expert",
+                    "description": "Python programming language stdlib asyncio",
+                    "article_count": 210,
+                    "section_count": 890,
+                },
+                {
+                    "name": "docker-expert",
+                    "description": "Docker containers images Dockerfile",
+                    "article_count": 75,
+                    "section_count": 280,
+                },
+                {
+                    "name": "kubernetes-expert",
+                    "description": "Kubernetes k8s pods deployments services",
+                    "article_count": 180,
+                    "section_count": 650,
+                },
+            ]
+        })),
         "knowledge.pack_info" => {
             let pack = params
                 .get("pack_name")
@@ -308,6 +310,7 @@ fn planning_context_empty_check() {
     let empty = PlanningContext {
         relevant_knowledge: vec![],
         pack_sources: vec![],
+        degraded: false,
     };
     assert!(empty.is_empty());
 }

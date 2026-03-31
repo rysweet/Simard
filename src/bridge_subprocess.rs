@@ -104,7 +104,11 @@ impl SubprocessBridgeTransport {
         if state.child.is_none() {
             state.child = Some(self.spawn_child()?);
         }
-        Ok(state.child.as_mut().unwrap())
+        // Safe: the `if` guard above guarantees `child` is `Some` at this point.
+        Ok(state
+            .child
+            .as_mut()
+            .expect("child was set on the previous line"))
     }
 
     fn send_request(child: &mut ManagedChild, request: &BridgeRequest) -> SimardResult<()> {

@@ -120,8 +120,15 @@ pub fn execution_memory_operations(
     bridge.record_sensory("pty-output", pty_output, 120)?;
 
     // Push a truncated version into working memory for immediate context.
+    // Use char-boundary-safe truncation to avoid panic on multi-byte UTF-8.
     let truncated = if pty_output.len() > 500 {
-        format!("{}...[truncated]", &pty_output[..500])
+        let boundary = pty_output
+            .char_indices()
+            .take_while(|(i, _)| *i < 500)
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+        format!("{}...[truncated]", &pty_output[..boundary])
     } else {
         pty_output.to_string()
     };
@@ -263,6 +270,23 @@ mod tests {
         reflection_memory_operations("transcript...", &facts, &test_session_id(), &bridge).unwrap();
         // 1 store_episode + 2 store_fact = 3
         assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn execution_truncates_multibyte_utf8_safely() {
+        let (bridge, _) = counting_bridge();
+        // Build a string with multi-byte chars that would panic with naive byte slicing.
+        // Each CJK char is 3 bytes; 200 chars = 600 bytes, exceeding the 500-byte threshold.
+        let cjk_output: String = std::iter::repeat_n('漢', 200).collect();
+        assert!(cjk_output.len() > 500);
+        // Must not panic.
+        execution_memory_operations(&cjk_output, &test_session_id(), &bridge).unwrap();
+    }
+
+    #[test]
+    fn execution_does_not_truncate_short_output() {
+        let (bridge, _) = counting_bridge();
+        execution_memory_operations("short", &test_session_id(), &bridge).unwrap();
     }
 
     #[test]

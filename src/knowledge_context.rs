@@ -21,6 +21,9 @@ pub struct PlanningContext {
     pub relevant_knowledge: Vec<KnowledgeQueryResult>,
     /// Names of packs that contributed knowledge.
     pub pack_sources: Vec<String>,
+    /// True when the knowledge bridge was unavailable or returned an error.
+    /// Distinguishes "no relevant packs" from "bridge was down."
+    pub degraded: bool,
 }
 
 impl PlanningContext {
@@ -50,6 +53,7 @@ pub fn enrich_planning_context(
             return Ok(PlanningContext {
                 relevant_knowledge: vec![],
                 pack_sources: vec![],
+                degraded: true,
             });
         }
     };
@@ -58,6 +62,7 @@ pub fn enrich_planning_context(
         return Ok(PlanningContext {
             relevant_knowledge: vec![],
             pack_sources: vec![],
+            degraded: false,
         });
     }
 
@@ -92,6 +97,7 @@ pub fn enrich_planning_context(
     Ok(PlanningContext {
         relevant_knowledge,
         pack_sources,
+        degraded: false,
     })
 }
 
@@ -126,26 +132,28 @@ mod tests {
                 "server_name": "simard-knowledge",
                 "healthy": true,
             })),
-            "knowledge.list_packs" => Ok(serde_json::json!([
-                {
-                    "name": "rust-expert",
-                    "description": "Rust programming language ownership borrowing",
-                    "article_count": 120,
-                    "section_count": 450,
-                },
-                {
-                    "name": "python-expert",
-                    "description": "Python programming language stdlib",
-                    "article_count": 200,
-                    "section_count": 800,
-                },
-                {
-                    "name": "docker-expert",
-                    "description": "Docker containers images",
-                    "article_count": 80,
-                    "section_count": 300,
-                },
-            ])),
+            "knowledge.list_packs" => Ok(serde_json::json!({
+                "packs": [
+                    {
+                        "name": "rust-expert",
+                        "description": "Rust programming language ownership borrowing",
+                        "article_count": 120,
+                        "section_count": 450,
+                    },
+                    {
+                        "name": "python-expert",
+                        "description": "Python programming language stdlib",
+                        "article_count": 200,
+                        "section_count": 800,
+                    },
+                    {
+                        "name": "docker-expert",
+                        "description": "Docker containers images",
+                        "article_count": 80,
+                        "section_count": 300,
+                    },
+                ]
+            })),
             "knowledge.query" => {
                 let pack = params
                     .get("pack_name")
@@ -228,8 +236,10 @@ mod tests {
         let ctx = PlanningContext {
             relevant_knowledge: vec![],
             pack_sources: vec![],
+            degraded: false,
         };
         assert!(ctx.is_empty());
+        assert!(!ctx.degraded);
     }
 
     #[test]

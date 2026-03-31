@@ -16,6 +16,12 @@ use crate::error::SimardResult;
 /// Name used in error messages for this bridge.
 const BRIDGE_NAME: &str = "knowledge";
 
+/// Wire-protocol wrapper for `list_packs` response consistency.
+#[derive(Deserialize)]
+struct ListPacksResponse {
+    packs: Vec<KnowledgePackInfo>,
+}
+
 /// Result of querying a knowledge pack with a natural-language question.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct KnowledgeQueryResult {
@@ -91,7 +97,9 @@ impl KnowledgeBridge {
     /// List all available knowledge packs.
     pub fn list_packs(&self) -> SimardResult<Vec<KnowledgePackInfo>> {
         let response = self.call("knowledge.list_packs", serde_json::json!({}))?;
-        unpack_bridge_response(BRIDGE_NAME, "knowledge.list_packs", response)
+        let wrapper: ListPacksResponse =
+            unpack_bridge_response(BRIDGE_NAME, "knowledge.list_packs", response)?;
+        Ok(wrapper.packs)
     }
 
     /// Get metadata for a specific pack.
@@ -160,20 +168,22 @@ mod tests {
                     "confidence": 0.85,
                 }))
             }
-            "knowledge.list_packs" => Ok(serde_json::json!([
-                {
-                    "name": "rust-expert",
-                    "description": "Rust programming knowledge",
-                    "article_count": 120,
-                    "section_count": 450,
-                },
-                {
-                    "name": "python-expert",
-                    "description": "Python programming knowledge",
-                    "article_count": 200,
-                    "section_count": 800,
-                },
-            ])),
+            "knowledge.list_packs" => Ok(serde_json::json!({
+                "packs": [
+                    {
+                        "name": "rust-expert",
+                        "description": "Rust programming knowledge",
+                        "article_count": 120,
+                        "section_count": 450,
+                    },
+                    {
+                        "name": "python-expert",
+                        "description": "Python programming knowledge",
+                        "article_count": 200,
+                        "section_count": 800,
+                    },
+                ]
+            })),
             "knowledge.pack_info" => {
                 let pack = params
                     .get("pack_name")
