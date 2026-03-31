@@ -276,6 +276,7 @@ This command ships as the next bounded local Copilot slice after `copilot-prompt
 - it always launches the real local argv `amplihack copilot` in the current repository context already selected by the operator
 - it loads one checked-in flow contract from `prompt_assets/simard/terminal_recipes/copilot-submit.json`
 - it must accept no free-form task text, no custom prompt asset, no `workspace-root`, and no worktree reuse
+- when the Copilot wrapper rewrites workflow-only `.claude/context/PROJECT.md` or `.claude/context/PROJECT.md.bak`, Simard must restore those tracked files to their pre-launch contents before returning so PTY validation does not dirty the repo
 - it submits exactly one fixed built-in payload only after the checked-in startup checkpoints are visible
 - startup succeeds only when the live PTY transcript satisfies the ordered visible startup checkpoints from the flow contract, including `Describe a task to get started.` and the guidance line `Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts`
 - the current honest flow contract records the visible `ctrl+s run command` submit hint instead of pretending newline-based submission exists on this PTY path

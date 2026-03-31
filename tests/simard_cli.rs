@@ -310,6 +310,35 @@ exit 64
 "##
 }
 
+fn fake_amplihack_with_interactive_copilot_workflow_contamination_body() -> &'static str {
+    r##"#!/usr/bin/env bash
+set -euo pipefail
+if [ "$#" -eq 3 ] && [ "$1" = "copilot" ] && [ "$2" = "--" ] && [ "$3" = "--version" ]; then
+  printf 'GitHub Copilot CLI 9.9.9-test.\n'
+  exit 0
+fi
+if [ "$#" -eq 1 ] && [ "$1" = "copilot" ]; then
+  mkdir -p .claude/context
+  printf 'workflow placeholder\n' > .claude/context/PROJECT.md
+  printf 'workflow placeholder backup\n' > .claude/context/PROJECT.md.bak
+  printf 'GitHub Copilot v1.0.14-test.\n'
+  printf 'Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts\n'
+  while IFS= read -r line; do
+    if [ "$line" = "/exit" ]; then
+      printf 'Resume any session with copilot --resume\n'
+      exit 0
+    fi
+    printf 'Unknown command: %s\n' "$line"
+  done
+  exit 0
+fi
+printf 'unexpected args:' >&2
+printf ' %s' "$@" >&2
+printf '\n' >&2
+exit 64
+"##
+}
+
 fn fake_amplihack_with_copilot_submit_body(case_name: &str) -> String {
     let submit_flow = match case_name {
         "submit-hotkey-required" => {
@@ -410,6 +439,21 @@ fn fake_amplihack_with_copilot_submit_body(case_name: &str) -> String {
     exit 0
   done
   exit 12"#
+        }
+        "submit-hotkey-required-workflow-contamination" => {
+            r#"  mkdir -p .claude/context
+  printf 'workflow placeholder\n' > .claude/context/PROJECT.md
+  printf 'workflow placeholder backup\n' > .claude/context/PROJECT.md.bak
+  printf 'Describe a task to get started.\n'
+  printf 'Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts\n'
+  while IFS= read -r line; do
+    if [ -z "$line" ]; then
+      continue
+    fi
+    printf 'ctrl+s run command\n'
+    exit 0
+  done
+  exit 13"#
         }
         other => panic!("unknown fake copilot submit case '{other}'"),
     };
@@ -1370,6 +1414,57 @@ fn simard_engineer_terminal_recipe_runs_truthful_copilot_prompt_check_with_probe
 }
 
 #[test]
+fn simard_engineer_terminal_recipe_restores_workflow_only_claude_files_for_copilot_prompt_check() {
+    let fake_bin = TempDirGuard::new("simard-cli-fake-amplihack-interactive-workflow");
+    write_fake_amplihack(
+        fake_bin.path(),
+        fake_amplihack_with_interactive_copilot_workflow_contamination_body(),
+    );
+    let path = path_with_prepend(fake_bin.path());
+    let project_root = TempDirGuard::new("simard-cli-copilot-prompt-workflow-project");
+    std::fs::create_dir_all(project_root.path().join(".claude/context"))
+        .expect("temp project should create .claude/context");
+    std::fs::write(
+        project_root.path().join(".claude/context/PROJECT.md"),
+        "original prompt project context\n",
+    )
+    .expect("temp project should seed PROJECT.md");
+    std::fs::write(
+        project_root.path().join(".claude/context/PROJECT.md.bak"),
+        "original prompt project backup\n",
+    )
+    .expect("temp project should seed PROJECT.md.bak");
+    let state_root = TempDirGuard::new("simard-cli-copilot-prompt-workflow-state");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("terminal-recipe")
+        .arg("single-process")
+        .arg("copilot-prompt-check")
+        .arg(state_root.path())
+        .env("PATH", &path)
+        .current_dir(project_root.path())
+        .output()
+        .expect("simard engineer terminal-recipe copilot-prompt-check workflow path should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        output.status.success(),
+        "copilot-prompt-check should still succeed while restoring workflow-only wrapper file churn:\n{rendered}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(project_root.path().join(".claude/context/PROJECT.md"))
+            .expect("PROJECT.md should remain readable after prompt check"),
+        "original prompt project context\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(project_root.path().join(".claude/context/PROJECT.md.bak"))
+            .expect("PROJECT.md.bak should remain readable after prompt check"),
+        "original prompt project backup\n"
+    );
+}
+
+#[test]
 fn simard_engineer_terminal_recipe_copilot_prompt_check_fails_closed_when_amplihack_is_missing() {
     let empty_bin = TempDirGuard::new("simard-cli-empty-path-interactive");
     let state_root = TempDirGuard::new("simard-cli-copilot-prompt-missing");
@@ -1736,6 +1831,58 @@ fn simard_engineer_copilot_submit_persists_truthful_observed_checkpoints() {
     assert_eq!(
         handoff["copilot_submit_audit"]["observed_checkpoints"],
         json!(["Describe a task to get started."])
+    );
+}
+
+#[test]
+fn simard_engineer_copilot_submit_restores_workflow_only_claude_files() {
+    let fake_bin =
+        TempDirGuard::new("simard-cli-fake-amplihack-copilot-submit-workflow-contamination");
+    write_fake_amplihack(
+        fake_bin.path(),
+        &fake_amplihack_with_copilot_submit_body("submit-hotkey-required-workflow-contamination"),
+    );
+    let path = path_with_prepend(fake_bin.path());
+    let project_root = TempDirGuard::new("simard-cli-copilot-submit-workflow-project");
+    std::fs::create_dir_all(project_root.path().join(".claude/context"))
+        .expect("temp project should create .claude/context");
+    std::fs::write(
+        project_root.path().join(".claude/context/PROJECT.md"),
+        "original project context\n",
+    )
+    .expect("temp project should seed PROJECT.md");
+    std::fs::write(
+        project_root.path().join(".claude/context/PROJECT.md.bak"),
+        "original project backup\n",
+    )
+    .expect("temp project should seed PROJECT.md.bak");
+
+    let state_root = TempDirGuard::new("simard-cli-copilot-submit-workflow-state");
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("engineer")
+        .arg("copilot-submit")
+        .arg("single-process")
+        .arg(state_root.path())
+        .arg("--json")
+        .env("PATH", &path)
+        .current_dir(project_root.path())
+        .output()
+        .expect("simard engineer copilot-submit workflow contamination path should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        !output.status.success(),
+        "copilot-submit should still fail closed on the visible submit hotkey while restoring workflow-only wrapper file churn:\n{rendered}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(project_root.path().join(".claude/context/PROJECT.md"))
+            .expect("PROJECT.md should remain readable after run"),
+        "original project context\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(project_root.path().join(".claude/context/PROJECT.md.bak"))
+            .expect("PROJECT.md.bak should remain readable after run"),
+        "original project backup\n"
     );
 }
 

@@ -321,6 +321,7 @@ Behavior:
 - launch the real local argv `amplihack copilot` in the current repository context only
 - use the checked-in flow contract at `prompt_assets/simard/terminal_recipes/copilot-submit.json`
 - accept no `workspace-root`, no free-form objective, and no arbitrary task text; the submitted payload must stay fixed and built in
+- restore workflow-only `.claude/context/PROJECT.md` and `.claude/context/PROJECT.md.bak` to their pre-launch contents when the Copilot wrapper rewrites them, so truthful terminal probing does not leave repo dirt behind
 - validate `topology` and `[state-root]` with the same rules as the other terminal session surfaces; the first implementation only needs `single-process`
 - require the exact ordered visible startup checkpoints from the flow asset, including `Describe a task to get started.` and the guidance line `Type @ to mention files, # for issues/PRs, / for commands, or ? for shortcuts`
 - submit the fixed payload once after startup checkpoints are satisfied, then observe the visible submit hint from the checked-in flow contract
