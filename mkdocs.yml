@@ -1,0 +1,70 @@
+site_name: Simard
+site_description: An autonomous engineer who drives and curates agentic coding systems
+site_url: https://rysweet.github.io/Simard/
+repo_url: https://github.com/rysweet/Simard
+repo_name: rysweet/Simard
+
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      primary: teal
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+    - scheme: default
+      primary: teal
+      accent: amber
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.highlight
+    - content.code.copy
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Architecture:
+    - Overview: architecture/overview.md
+    - Bridge Pattern: architecture/bridge-pattern.md
+    - Cognitive Memory: architecture/cognitive-memory.md
+    - Agent Composition: architecture/agent-composition.md
+    - Implementation Plan: architecture/implementation-plan.md
+  - Concepts:
+    - Truthful Runtime Metadata: concepts/truthful-runtime-metadata.md
+    - Topology-Neutral Runtime: concepts/topology-neutral-runtime-kernel.md
+  - Tutorials:
+    - First Local Session: tutorials/run-your-first-local-session.md
+    - First Benchmark Suite: tutorials/run-your-first-benchmark-gym.md
+    - First Rusty-Clawd Mesh: tutorials/run-rusty-clawd-on-loopback-mesh.md
+  - How-To Guides:
+    - Terminal to Engineer: howto/move-from-terminal-recipes-into-engineer-runs.md
+    - Bootstrap and Reflection: howto/configure-bootstrap-and-inspect-reflection.md
+    - Carry Meeting Decisions: howto/carry-meeting-decisions-into-engineer-sessions.md
+    - Inspect Meeting Records: howto/inspect-meeting-records.md
+    - Inspect Improvements: howto/inspect-improvement-curation-state.md
+    - Reclaim Disk Space: howto/reclaim-disk-space-and-run-low-space-rust-builds.md
+  - Reference:
+    - CLI Reference: reference/simard-cli.md
+    - Runtime Contracts: reference/runtime-contracts.md
+    - Bridge Wire Protocol: reference/bridge-wire-protocol.md
