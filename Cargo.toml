@@ -1,6 +1,6 @@
 [package]
 name = "simard"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 default-run = "simard"
 
@@ -25,4 +25,3 @@ libc = "0.2"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
-panic = "abort"
