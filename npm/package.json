@@ -1,0 +1,25 @@
+{
+  "name": "@rysweet/simard",
+  "version": "0.6.2",
+  "description": "Simard — autonomous engineer for agentic coding systems",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rysweet/Simard.git"
+  },
+  "bin": {
+    "simard": "bin.js"
+  },
+  "os": [
+    "linux",
+    "darwin",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "files": [
+    "bin.js"
+  ]
+}

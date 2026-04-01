@@ -13,6 +13,8 @@ use crate::operator_commands::{
 };
 use crate::operator_commands_meeting::run_meeting_repl_command;
 use crate::operator_commands_ooda::run_ooda_daemon;
+use crate::cmd_install::handle_install;
+use crate::cmd_self_update::handle_self_update;
 use crate::self_relaunch::{
     RelaunchConfig, all_gates_passed, build_canary, default_gates, handover, verify_canary,
 };
@@ -44,6 +46,8 @@ Product modes:
   ooda run [--cycles=N] [state-root]
   spawn <agent-name> <goal> <worktree-path> [--depth=N]
   handover [--canary-dir=PATH] [--manifest-dir=PATH]
+  update
+  install
 
 Operator utilities:
   review run <base-type> <topology> <objective> [state-root]
@@ -79,12 +83,20 @@ where
         "spawn" => dispatch_spawn_command(args),
         "handover" => dispatch_handover_command(args),
         "bootstrap" => dispatch_bootstrap_command(args),
+        "update" => {
+            reject_extra_args(args)?;
+            handle_self_update()
+        }
+        "install" => {
+            reject_extra_args(args)?;
+            handle_install()
+        }
         other => Err(format!("unsupported command '{other}'").into()),
     }
 }
 
 pub fn operator_cli_usage() -> &'static str {
-    "usage: simard <engineer|meeting|goal-curation|improvement-curation|gym|ooda|spawn|handover|review|bootstrap> ..."
+    "usage: simard <engineer|meeting|goal-curation|improvement-curation|gym|ooda|spawn|handover|update|install|review|bootstrap> ..."
 }
 
 pub fn operator_cli_help() -> &'static str {
@@ -447,5 +459,101 @@ fn parse_state_root_and_json(
         [state_root] => Ok((Some(PathBuf::from(state_root)), false)),
         [state_root, flag] if flag == "--json" => Ok((Some(PathBuf::from(state_root)), true)),
         _ => Err(format!("unexpected trailing arguments: {}", trailing.join(" ")).into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_help_text_contains_update_command() {
+        let help = operator_cli_help();
+        assert!(help.contains("update"), "help should mention 'update' command");
+    }
+
+    #[test]
+    fn test_help_text_contains_install_command() {
+        let help = operator_cli_help();
+        assert!(
+            help.contains("install"),
+            "help should mention 'install' command"
+        );
+    }
+
+    #[test]
+    fn test_usage_mentions_update_and_install() {
+        let usage = operator_cli_usage();
+        assert!(usage.contains("update"));
+        assert!(usage.contains("install"));
+    }
+
+    #[test]
+    fn test_unknown_command_returns_error() {
+        let result = dispatch_operator_cli(vec!["nonexistent-cmd".to_string()].into_iter());
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported command"));
+    }
+
+    #[test]
+    fn test_update_rejects_extra_args() {
+        let result = dispatch_operator_cli(
+            vec!["update".to_string(), "extra".to_string()].into_iter(),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unexpected trailing arguments"));
+    }
+
+    #[test]
+    fn test_install_rejects_extra_args() {
+        let result = dispatch_operator_cli(
+            vec!["install".to_string(), "extra".to_string()].into_iter(),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unexpected trailing arguments"));
+    }
+
+    #[test]
+    fn test_help_flag_does_not_error() {
+        let result = dispatch_operator_cli(vec!["--help".to_string()].into_iter());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_no_args_shows_help() {
+        let result = dispatch_operator_cli(std::iter::empty::<String>());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_state_root_and_json_empty() {
+        let (root, json) = parse_state_root_and_json(vec![]).unwrap();
+        assert!(root.is_none());
+        assert!(!json);
+    }
+
+    #[test]
+    fn test_parse_state_root_and_json_flag_only() {
+        let (root, json) = parse_state_root_and_json(vec!["--json".to_string()]).unwrap();
+        assert!(root.is_none());
+        assert!(json);
+    }
+
+    #[test]
+    fn test_parse_state_root_and_json_path_and_flag() {
+        let (root, json) =
+            parse_state_root_and_json(vec!["/tmp/state".to_string(), "--json".to_string()])
+                .unwrap();
+        assert_eq!(root.unwrap(), PathBuf::from("/tmp/state"));
+        assert!(json);
     }
 }

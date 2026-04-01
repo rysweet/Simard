@@ -1,3 +1,5 @@
+pub mod cmd_install;
+pub mod cmd_self_update;
 pub mod agent_goal_assignment;
 pub mod agent_program;
 pub mod agent_roles;

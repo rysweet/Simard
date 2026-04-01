@@ -14,7 +14,7 @@ Replace the sections below with information about your project.
 
 ## Overview
 
-[Brief description of what your project does]
+An autonomous engineer who drives and curates agentic coding systems. Named after [Suzanne Simard](https://en.wikipedia.org/wiki/Suzanne_Simard), the scientist who discovered how trees communicate through underground fungal networks.
 
 ## Architecture
 
@@ -27,6 +27,7 @@ Replace the sections below with information about your project.
 ### Technology Stack
 
 - **Language**: Python
+- **Language**: JavaScript/TypeScript
 - **Language**: Rust
 - **Framework**: [Main framework if applicable]
 - **Database**: [Database system if applicable]
