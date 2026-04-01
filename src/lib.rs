@@ -2,8 +2,12 @@ pub mod agent_goal_assignment;
 pub mod agent_program;
 pub mod agent_roles;
 pub mod agent_supervisor;
+pub mod base_type_claude_agent_sdk;
 pub mod base_type_copilot;
 pub mod base_type_harness;
+pub mod base_type_ms_agent;
+pub mod base_type_pending_sdk;
+pub mod base_type_rustyclawd;
 pub mod base_type_turn;
 pub mod base_types;
 pub mod bootstrap;
@@ -63,6 +67,8 @@ pub mod session;
 pub mod skill_builder;
 pub mod terminal_engineer_bridge;
 mod terminal_session;
+#[doc(hidden)]
+pub mod test_support;
 
 pub use agent_goal_assignment::{
     SubordinateProgress, assign_goal, poll_progress, read_assigned_goal, report_progress,
@@ -76,16 +82,21 @@ pub use agent_supervisor::{
     HeartbeatStatus, SubordinateConfig, SubordinateHandle, check_heartbeat, kill_subordinate,
     spawn_subordinate,
 };
+pub use base_type_claude_agent_sdk::{ClaudeAgentSdkAdapter, claude_agent_sdk_adapter};
 pub use base_type_copilot::{CopilotAdapterConfig, CopilotSdkAdapter, parse_copilot_response};
 pub use base_type_harness::{HarnessConfig, RealLocalHarnessAdapter};
+pub use base_type_ms_agent::{MsAgentFrameworkAdapter, ms_agent_framework_adapter};
+pub use base_type_pending_sdk::PendingSdkAdapter;
+pub use base_type_rustyclawd::RustyClawdAdapter;
 pub use base_type_turn::{
     ProposedAction, TurnContext, TurnOutput, format_turn_input, parse_turn_output,
     prepare_turn_context,
 };
 pub use base_types::{
     BaseTypeCapability, BaseTypeDescriptor, BaseTypeFactory, BaseTypeId, BaseTypeOutcome,
-    BaseTypeSession, BaseTypeSessionRequest, BaseTypeTurnInput, LocalProcessHarnessAdapter,
-    RustyClawdAdapter, TerminalShellAdapter, capability_set,
+    BaseTypeSession, BaseTypeSessionRequest, BaseTypeTurnInput, capability_set,
+    ensure_session_not_already_open, ensure_session_not_closed, ensure_session_open,
+    joined_prompt_ids, standard_session_capabilities,
 };
 pub use bootstrap::{
     BootstrapConfig, BootstrapInputs, BootstrapMode, ConfigValue, ConfigValueSource,
@@ -182,6 +193,7 @@ pub use ooda_scheduler::{
     CompletedSlot, ScheduledAction, Scheduler, SchedulerSlot, SlotStatus, complete_slot,
     drain_finished, fail_slot, poll_slots, schedule_actions, scheduler_summary, start_slot,
 };
+pub use test_support::TestAdapter;
 
 pub use metadata::{BackendDescriptor, Freshness, FreshnessState, Provenance};
 pub use operator_cli::{dispatch_operator_cli, operator_cli_help, operator_cli_usage};

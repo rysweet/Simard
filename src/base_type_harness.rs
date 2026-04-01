@@ -8,6 +8,7 @@
 use crate::base_types::{
     BaseTypeCapability, BaseTypeDescriptor, BaseTypeFactory, BaseTypeId, BaseTypeOutcome,
     BaseTypeSession, BaseTypeSessionRequest, BaseTypeTurnInput, capability_set,
+    ensure_session_not_already_open, ensure_session_not_closed, ensure_session_open,
 };
 use crate::error::{SimardError, SimardResult};
 use crate::metadata::{BackendDescriptor, Freshness};
@@ -56,7 +57,9 @@ impl RealLocalHarnessAdapter {
                 capabilities: capability_set([
                     BaseTypeCapability::PromptAssets,
                     BaseTypeCapability::SessionLifecycle,
+                    BaseTypeCapability::Memory,
                     BaseTypeCapability::Evidence,
+                    BaseTypeCapability::Reflection,
                     BaseTypeCapability::TerminalSession,
                 ]),
                 supported_topologies: [RuntimeTopology::SingleProcess].into_iter().collect(),
@@ -109,17 +112,6 @@ struct RealLocalHarnessSession {
 }
 
 impl RealLocalHarnessSession {
-    fn ensure_can(&self, action: &str) -> SimardResult<()> {
-        if self.is_closed {
-            return Err(SimardError::InvalidBaseTypeSessionState {
-                base_type: self.descriptor.id.to_string(),
-                action: action.to_string(),
-                reason: "session is already closed".to_string(),
-            });
-        }
-        Ok(())
-    }
-
     /// Build the terminal objective from the turn input and harness config.
     fn build_terminal_objective(&self, input: &BaseTypeTurnInput) -> String {
         let mut objective = String::new();
@@ -158,34 +150,20 @@ impl BaseTypeSession for RealLocalHarnessSession {
     }
 
     fn open(&mut self) -> SimardResult<()> {
-        self.ensure_can("open")?;
-        if self.is_open {
-            return Err(SimardError::InvalidBaseTypeSessionState {
-                base_type: self.descriptor.id.to_string(),
-                action: "open".to_string(),
-                reason: "session is already open".to_string(),
-            });
-        }
+        ensure_session_not_closed(&self.descriptor, self.is_closed, "open")?;
+        ensure_session_not_already_open(&self.descriptor, self.is_open)?;
         self.is_open = true;
         Ok(())
     }
 
     fn run_turn(&mut self, input: BaseTypeTurnInput) -> SimardResult<BaseTypeOutcome> {
-        self.ensure_can("run_turn")?;
-        if !self.is_open {
-            return Err(SimardError::InvalidBaseTypeSessionState {
-                base_type: self.descriptor.id.to_string(),
-                action: "run_turn".to_string(),
-                reason: "session must be opened before turns can run".to_string(),
-            });
-        }
+        ensure_session_not_closed(&self.descriptor, self.is_closed, "run_turn")?;
+        ensure_session_open(&self.descriptor, self.is_open, "run_turn")?;
 
         self.turn_count += 1;
 
         let terminal_objective = self.build_terminal_objective(&input);
-        let terminal_input = BaseTypeTurnInput {
-            objective: terminal_objective,
-        };
+        let terminal_input = BaseTypeTurnInput::objective_only(terminal_objective);
 
         let terminal_outcome =
             execute_terminal_turn(&self.descriptor, &self.request, &terminal_input).map_err(
@@ -213,14 +191,8 @@ impl BaseTypeSession for RealLocalHarnessSession {
     }
 
     fn close(&mut self) -> SimardResult<()> {
-        self.ensure_can("close")?;
-        if !self.is_open {
-            return Err(SimardError::InvalidBaseTypeSessionState {
-                base_type: self.descriptor.id.to_string(),
-                action: "close".to_string(),
-                reason: "session was never opened".to_string(),
-            });
-        }
+        ensure_session_not_closed(&self.descriptor, self.is_closed, "close")?;
+        ensure_session_open(&self.descriptor, self.is_open, "close")?;
         self.is_closed = true;
         Ok(())
     }
@@ -274,9 +246,7 @@ mod tests {
         let request = test_request();
         let mut session = adapter.open_session(request).unwrap();
 
-        let result = session.run_turn(BaseTypeTurnInput {
-            objective: "echo hello".to_string(),
-        });
+        let result = session.run_turn(BaseTypeTurnInput::objective_only("echo hello"));
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("must be opened"));
@@ -304,9 +274,7 @@ mod tests {
             is_closed: false,
             turn_count: 0,
         };
-        let input = BaseTypeTurnInput {
-            objective: "command: echo hello\nwait-for: hello".to_string(),
-        };
+        let input = BaseTypeTurnInput::objective_only("command: echo hello\nwait-for: hello");
         let objective = session.build_terminal_objective(&input);
         assert!(objective.contains("echo hello"));
         assert!(objective.contains("wait-for: hello"));
@@ -329,9 +297,7 @@ mod tests {
             is_closed: false,
             turn_count: 0,
         };
-        let input = BaseTypeTurnInput {
-            objective: "hello world".to_string(),
-        };
+        let input = BaseTypeTurnInput::objective_only("hello world");
         let objective = session.build_terminal_objective(&input);
         assert!(objective.contains("shell: /bin/sh"));
         assert!(objective.contains("working-directory: /tmp"));

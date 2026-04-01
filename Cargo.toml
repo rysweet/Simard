@@ -9,6 +9,10 @@ name = "simard-gym"
 path = "src/bin/simard_gym.rs"
 
 [dependencies]
+amplihack-memory = { path = "../amplihack-memory-lib/rust/amplihack-memory" }
+rustyclawd-core = { path = "../rustyclawd/crates/core" }
+rustyclawd-tools = { path = "../rustyclawd/crates/tools" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
+tokio = { version = "1", features = ["rt", "process", "io-util", "time"] }
 uuid = { version = "1.18.1", features = ["v7"] }

@@ -379,6 +379,8 @@ impl IdentityLoader for BuiltinIdentityLoader {
                     BaseTypeId::new("terminal-shell"),
                     BaseTypeId::new("rusty-clawd"),
                     BaseTypeId::new("copilot-sdk"),
+                    BaseTypeId::new("claude-agent-sdk"),
+                    BaseTypeId::new("ms-agent-framework"),
                 ],
                 capability_set([
                     BaseTypeCapability::PromptAssets,
@@ -402,6 +404,8 @@ impl IdentityLoader for BuiltinIdentityLoader {
                     BaseTypeId::new("local-harness"),
                     BaseTypeId::new("rusty-clawd"),
                     BaseTypeId::new("copilot-sdk"),
+                    BaseTypeId::new("claude-agent-sdk"),
+                    BaseTypeId::new("ms-agent-framework"),
                 ],
                 capability_set([
                     BaseTypeCapability::PromptAssets,
@@ -422,6 +426,8 @@ impl IdentityLoader for BuiltinIdentityLoader {
                     BaseTypeId::new("local-harness"),
                     BaseTypeId::new("rusty-clawd"),
                     BaseTypeId::new("copilot-sdk"),
+                    BaseTypeId::new("claude-agent-sdk"),
+                    BaseTypeId::new("ms-agent-framework"),
                 ],
                 capability_set([
                     BaseTypeCapability::PromptAssets,
@@ -445,6 +451,8 @@ impl IdentityLoader for BuiltinIdentityLoader {
                     BaseTypeId::new("local-harness"),
                     BaseTypeId::new("rusty-clawd"),
                     BaseTypeId::new("copilot-sdk"),
+                    BaseTypeId::new("claude-agent-sdk"),
+                    BaseTypeId::new("ms-agent-framework"),
                 ],
                 capability_set([
                     BaseTypeCapability::PromptAssets,
@@ -468,6 +476,8 @@ impl IdentityLoader for BuiltinIdentityLoader {
                     BaseTypeId::new("local-harness"),
                     BaseTypeId::new("rusty-clawd"),
                     BaseTypeId::new("copilot-sdk"),
+                    BaseTypeId::new("claude-agent-sdk"),
+                    BaseTypeId::new("ms-agent-framework"),
                 ],
                 capability_set([
                     BaseTypeCapability::PromptAssets,

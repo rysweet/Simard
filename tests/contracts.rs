@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use simard::{
     BaseTypeCapability, BaseTypeId, BaseTypeRegistry, IdentityManifest, InMemoryEvidenceStore,
-    InMemoryMemoryStore, InMemoryPromptAssetStore, LocalProcessHarnessAdapter, LocalRuntime,
-    ManifestContract, MemoryPolicy, MemoryScope, OperatingMode, PromptAsset, PromptAssetRef,
-    Provenance, RuntimePorts, RuntimeRequest, RuntimeTopology, SessionId, SessionIdGenerator,
-    SessionPhase, SessionRecord, SimardError, UuidSessionIdGenerator, capability_set,
+    InMemoryMemoryStore, InMemoryPromptAssetStore, LocalRuntime, ManifestContract, MemoryPolicy,
+    MemoryScope, OperatingMode, PromptAsset, PromptAssetRef, Provenance, RuntimePorts,
+    RuntimeRequest, RuntimeTopology, SessionId, SessionIdGenerator, SessionPhase, SessionRecord,
+    SimardError, TestAdapter, UuidSessionIdGenerator, capability_set,
 };
 use uuid::Uuid;
 
@@ -61,7 +61,7 @@ fn compose_rejects_missing_capability() {
     let evidence = Arc::new(InMemoryEvidenceStore::try_default().expect("store should initialize"));
     let mut base_types = BaseTypeRegistry::default();
     base_types.register(
-        LocalProcessHarnessAdapter::new(
+        TestAdapter::new(
             "limited-harness",
             "limited-harness",
             [
@@ -108,10 +108,8 @@ fn start_rejects_missing_prompt_asset() {
     let memory = Arc::new(InMemoryMemoryStore::try_default().expect("store should initialize"));
     let evidence = Arc::new(InMemoryEvidenceStore::try_default().expect("store should initialize"));
     let mut base_types = BaseTypeRegistry::default();
-    base_types.register(
-        LocalProcessHarnessAdapter::single_process("local-harness")
-            .expect("adapter should initialize"),
-    );
+    base_types
+        .register(TestAdapter::single_process("local-harness").expect("adapter should initialize"));
 
     let request = RuntimeRequest::new(
         manifest("local-harness"),
@@ -164,10 +162,8 @@ fn compose_rejects_manifest_supported_base_types_without_registered_adapters() {
     let memory = Arc::new(InMemoryMemoryStore::try_default().expect("store should initialize"));
     let evidence = Arc::new(InMemoryEvidenceStore::try_default().expect("store should initialize"));
     let mut base_types = BaseTypeRegistry::default();
-    base_types.register(
-        LocalProcessHarnessAdapter::single_process("local-harness")
-            .expect("adapter should initialize"),
-    );
+    base_types
+        .register(TestAdapter::single_process("local-harness").expect("adapter should initialize"));
 
     let request = RuntimeRequest::new(
         manifest("future-distributed-adapter"),
@@ -245,10 +241,8 @@ fn runtime_compose_rejects_project_write_policy_even_if_manifest_is_mutated() {
     let memory = Arc::new(InMemoryMemoryStore::try_default().expect("store should initialize"));
     let evidence = Arc::new(InMemoryEvidenceStore::try_default().expect("store should initialize"));
     let mut base_types = BaseTypeRegistry::default();
-    base_types.register(
-        LocalProcessHarnessAdapter::single_process("local-harness")
-            .expect("adapter should initialize"),
-    );
+    base_types
+        .register(TestAdapter::single_process("local-harness").expect("adapter should initialize"));
 
     let mut mutated_manifest = manifest("local-harness");
     mutated_manifest.memory_policy = MemoryPolicy {
@@ -321,10 +315,8 @@ fn runtime_uses_injected_session_id_strategy() {
     let memory = Arc::new(InMemoryMemoryStore::try_default().expect("store should initialize"));
     let evidence = Arc::new(InMemoryEvidenceStore::try_default().expect("store should initialize"));
     let mut base_types = BaseTypeRegistry::default();
-    base_types.register(
-        LocalProcessHarnessAdapter::single_process("local-harness")
-            .expect("adapter should initialize"),
-    );
+    base_types
+        .register(TestAdapter::single_process("local-harness").expect("adapter should initialize"));
 
     let request = RuntimeRequest::new(
         manifest("local-harness"),

@@ -95,7 +95,7 @@ impl AgentProgram for ObjectiveRelayProgram {
                 objective.push('\n');
             }
         }
-        Ok(BaseTypeTurnInput { objective })
+        Ok(BaseTypeTurnInput::objective_only(objective))
     }
 
     fn reflection_summary(
@@ -155,9 +155,7 @@ impl AgentProgram for MeetingFacilitatorProgram {
 
     fn plan_turn(&self, context: &AgentProgramContext) -> SimardResult<BaseTypeTurnInput> {
         let notes = StructuredMeetingNotes::parse(&context.objective)?;
-        Ok(BaseTypeTurnInput {
-            objective: notes.turn_objective(),
-        })
+        Ok(BaseTypeTurnInput::objective_only(notes.turn_objective()))
     }
 
     fn reflection_summary(
@@ -249,9 +247,9 @@ impl AgentProgram for GoalCuratorProgram {
 
     fn plan_turn(&self, context: &AgentProgramContext) -> SimardResult<BaseTypeTurnInput> {
         let plan = StructuredGoalPlan::parse(&context.objective)?;
-        Ok(BaseTypeTurnInput {
-            objective: plan.turn_objective(&context.active_goals),
-        })
+        Ok(BaseTypeTurnInput::objective_only(
+            plan.turn_objective(&context.active_goals),
+        ))
     }
 
     fn reflection_summary(
@@ -339,30 +337,28 @@ impl AgentProgram for ImprovementCuratorProgram {
 
     fn plan_turn(&self, context: &AgentProgramContext) -> SimardResult<BaseTypeTurnInput> {
         let plan = ImprovementPromotionPlan::parse(&context.objective)?;
-        Ok(BaseTypeTurnInput {
-            objective: format!(
-                "Review '{}' for '{}' contains {} proposal(s). Approve {} proposal(s), defer {} proposal(s), keep the promotion loop operator-reviewable, and preserve truthful durable priorities. Existing active goals in runtime state: {}.",
-                plan.review_id,
-                if plan.review_target.trim().is_empty() {
-                    "unknown-target".to_string()
-                } else {
-                    plan.review_target.clone()
-                },
-                plan.proposals.len(),
-                plan.approvals.len(),
-                plan.deferrals.len(),
-                if context.active_goals.is_empty() {
-                    "<none>".to_string()
-                } else {
-                    context
-                        .active_goals
-                        .iter()
-                        .map(GoalRecord::concise_label)
-                        .collect::<Vec<_>>()
-                        .join(" | ")
-                },
-            ),
-        })
+        Ok(BaseTypeTurnInput::objective_only(format!(
+            "Review '{}' for '{}' contains {} proposal(s). Approve {} proposal(s), defer {} proposal(s), keep the promotion loop operator-reviewable, and preserve truthful durable priorities. Existing active goals in runtime state: {}.",
+            plan.review_id,
+            if plan.review_target.trim().is_empty() {
+                "unknown-target".to_string()
+            } else {
+                plan.review_target.clone()
+            },
+            plan.proposals.len(),
+            plan.approvals.len(),
+            plan.deferrals.len(),
+            if context.active_goals.is_empty() {
+                "<none>".to_string()
+            } else {
+                context
+                    .active_goals
+                    .iter()
+                    .map(GoalRecord::concise_label)
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            },
+        )))
     }
 
     fn reflection_summary(

@@ -11,6 +11,7 @@ use crate::base_type_turn::{format_turn_input, parse_turn_output, prepare_turn_c
 use crate::base_types::{
     BaseTypeCapability, BaseTypeDescriptor, BaseTypeFactory, BaseTypeId, BaseTypeOutcome,
     BaseTypeSession, BaseTypeSessionRequest, BaseTypeTurnInput, capability_set,
+    ensure_session_not_already_open, ensure_session_not_closed, ensure_session_open,
 };
 use crate::error::{SimardError, SimardResult};
 use crate::knowledge_bridge::KnowledgeBridge;
@@ -144,17 +145,6 @@ impl std::fmt::Debug for CopilotSdkSession {
 }
 
 impl CopilotSdkSession {
-    fn ensure_can(&self, action: &str) -> SimardResult<()> {
-        if self.is_closed {
-            return Err(SimardError::InvalidBaseTypeSessionState {
-                base_type: self.descriptor.id.to_string(),
-                action: action.to_string(),
-                reason: "session is already closed".to_string(),
-            });
-        }
-        Ok(())
-    }
-
     /// Build an enriched terminal objective from the turn input.
     ///
     /// The enriched objective includes a shell/command preamble that the
@@ -177,35 +167,21 @@ impl BaseTypeSession for CopilotSdkSession {
     }
 
     fn open(&mut self) -> SimardResult<()> {
-        self.ensure_can("open")?;
-        if self.is_open {
-            return Err(SimardError::InvalidBaseTypeSessionState {
-                base_type: self.descriptor.id.to_string(),
-                action: "open".to_string(),
-                reason: "session is already open".to_string(),
-            });
-        }
+        ensure_session_not_closed(&self.descriptor, self.is_closed, "open")?;
+        ensure_session_not_already_open(&self.descriptor, self.is_open)?;
         self.is_open = true;
         Ok(())
     }
 
     fn run_turn(&mut self, input: BaseTypeTurnInput) -> SimardResult<BaseTypeOutcome> {
-        self.ensure_can("run_turn")?;
-        if !self.is_open {
-            return Err(SimardError::InvalidBaseTypeSessionState {
-                base_type: self.descriptor.id.to_string(),
-                action: "run_turn".to_string(),
-                reason: "session must be opened before turns can run".to_string(),
-            });
-        }
+        ensure_session_not_closed(&self.descriptor, self.is_closed, "run_turn")?;
+        ensure_session_open(&self.descriptor, self.is_open, "run_turn")?;
 
         self.turn_count += 1;
 
         // Build enriched objective and dispatch via terminal infrastructure.
         let enriched_objective = self.build_enriched_objective(&input);
-        let enriched_input = BaseTypeTurnInput {
-            objective: enriched_objective,
-        };
+        let enriched_input = BaseTypeTurnInput::objective_only(enriched_objective);
 
         // Delegate to the terminal session infrastructure. If the terminal
         // turn fails, wrap the error with copilot-specific context.
@@ -238,14 +214,8 @@ impl BaseTypeSession for CopilotSdkSession {
     }
 
     fn close(&mut self) -> SimardResult<()> {
-        self.ensure_can("close")?;
-        if !self.is_open {
-            return Err(SimardError::InvalidBaseTypeSessionState {
-                base_type: self.descriptor.id.to_string(),
-                action: "close".to_string(),
-                reason: "session was never opened".to_string(),
-            });
-        }
+        ensure_session_not_closed(&self.descriptor, self.is_closed, "close")?;
+        ensure_session_open(&self.descriptor, self.is_open, "close")?;
         self.is_closed = true;
         Ok(())
     }
@@ -359,9 +329,7 @@ mod tests {
         let request = test_request();
         let mut session = adapter.open_session(request).unwrap();
 
-        let result = session.run_turn(BaseTypeTurnInput {
-            objective: "test".to_string(),
-        });
+        let result = session.run_turn(BaseTypeTurnInput::objective_only("test"));
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("must be opened"));

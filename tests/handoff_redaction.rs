@@ -4,10 +4,10 @@ use simard::{
     BaseTypeCapability, BaseTypeId, BaseTypeRegistry, Freshness, IdentityManifest,
     InMemoryEvidenceStore, InMemoryGoalStore, InMemoryHandoffStore, InMemoryMailboxTransport,
     InMemoryMemoryStore, InMemoryPromptAssetStore, InProcessSupervisor, InProcessTopologyDriver,
-    LocalProcessHarnessAdapter, LocalRuntime, ManifestContract, MemoryPolicy,
-    ObjectiveRelayProgram, OperatingMode, PromptAsset, PromptAssetRef, Provenance,
-    RuntimeHandoffStore, RuntimePorts, RuntimeRequest, RuntimeTopology, SessionPhase,
-    UuidSessionIdGenerator, bootstrap_entrypoint, capability_set,
+    LocalRuntime, ManifestContract, MemoryPolicy, ObjectiveRelayProgram, OperatingMode,
+    PromptAsset, PromptAssetRef, Provenance, RuntimeHandoffStore, RuntimePorts, RuntimeRequest,
+    RuntimeTopology, SessionPhase, TestAdapter, UuidSessionIdGenerator, bootstrap_entrypoint,
+    capability_set,
 };
 
 fn manifest() -> IdentityManifest {
@@ -63,10 +63,8 @@ fn compose_runtime(handoff: Arc<InMemoryHandoffStore>) -> LocalRuntime {
     let evidence =
         Arc::new(InMemoryEvidenceStore::try_default().expect("evidence store should initialize"));
     let mut base_types = BaseTypeRegistry::default();
-    base_types.register(
-        LocalProcessHarnessAdapter::single_process("local-harness")
-            .expect("adapter should initialize"),
-    );
+    base_types
+        .register(TestAdapter::single_process("local-harness").expect("adapter should initialize"));
 
     LocalRuntime::compose(
         RuntimePorts::with_runtime_services_and_program(
@@ -148,7 +146,7 @@ fn restored_handoff_keeps_only_redacted_session_objective() {
             {
                 let mut base_types = BaseTypeRegistry::default();
                 base_types.register(
-                    LocalProcessHarnessAdapter::single_process("local-harness")
+                    TestAdapter::single_process("local-harness")
                         .expect("adapter should initialize"),
                 );
                 base_types

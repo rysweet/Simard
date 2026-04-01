@@ -936,7 +936,7 @@ command: printf \"terminal-cli-ok\\n\"";
     );
     for expected in [
         "Selected base type: terminal-shell",
-        "Adapter implementation: terminal-shell::local-pty",
+        "Adapter implementation: local-harness::pty-session",
         "Adapter capabilities: prompt-assets, session-lifecycle, memory, evidence, reflection, terminal-session",
         "Terminal command count: 2",
         "Terminal wait count: 1",
@@ -2100,7 +2100,7 @@ input: printf \"terminal-read-ok\\n\"";
         "Topology: single-process",
         &format!("State root: {}", state_root.path().display()),
         "Session phase: complete",
-        "Adapter implementation: terminal-shell::local-pty",
+        "Adapter implementation: local-harness::pty-session",
         "Terminal command count: 2",
         "Terminal wait count: 1",
         "Terminal steps count: 3",

@@ -684,8 +684,10 @@ impl RuntimeKernel {
         self.persist_session_scratch(&mut session)?;
         let outcome = self.run_selected_base_type_session(&mut session)?;
         self.record_execution_evidence(&mut session, &outcome)?;
-        let reflection = self.build_reflection(&mut session, &outcome)?;
-        self.persist_session_summary(&mut session, &outcome)?;
+        // Build context once and reuse for reflection + persistence phases.
+        let context = self.agent_program_context(&session);
+        let reflection = self.build_reflection(&mut session, &outcome, &context)?;
+        self.persist_session_summary(&mut session, &outcome, &context)?;
         self.complete_session(session, outcome, reflection)
     }
 
@@ -730,7 +732,6 @@ impl RuntimeKernel {
 
     fn persist_session_scratch(&mut self, session: &mut SessionRecord) -> SimardResult<()> {
         session.advance(SessionPhase::Preparation)?;
-        self.remember_session(session);
 
         let scratch_key = format!("{}-scratch", session.id);
         self.ports.memory_store.put(MemoryRecord {
@@ -751,7 +752,6 @@ impl RuntimeKernel {
         session: &mut SessionRecord,
     ) -> SimardResult<BaseTypeOutcome> {
         session.advance(SessionPhase::Planning)?;
-        self.remember_session(session);
 
         let context = self.agent_program_context(session);
         let turn_input = self.ports.agent_program.plan_turn(&context)?;
@@ -787,8 +787,8 @@ impl RuntimeKernel {
         outcome: &BaseTypeOutcome,
     ) -> SimardResult<()> {
         session.advance(SessionPhase::Execution)?;
-        self.remember_session(session);
 
+        let evidence_source = EvidenceSource::BaseType(self.request.selected_base_type.clone());
         for (index, detail) in outcome.evidence.iter().enumerate() {
             let evidence_id = format!("{}-evidence-{}", session.id, index + 1);
             self.ports.evidence_store.record(EvidenceRecord {
@@ -796,7 +796,7 @@ impl RuntimeKernel {
                 session_id: session.id.clone(),
                 phase: SessionPhase::Execution,
                 detail: detail.clone(),
-                source: EvidenceSource::BaseType(self.request.selected_base_type.clone()),
+                source: evidence_source.clone(),
             })?;
             session.attach_evidence(evidence_id);
         }
@@ -809,16 +809,16 @@ impl RuntimeKernel {
         &mut self,
         session: &mut SessionRecord,
         outcome: &BaseTypeOutcome,
+        context: &AgentProgramContext,
     ) -> SimardResult<ReflectionReport> {
         self.transition(RuntimeState::Reflecting)?;
         session.advance(SessionPhase::Reflection)?;
-        self.remember_session(session);
 
         Ok(ReflectionReport {
             summary: self
                 .ports
                 .agent_program
-                .reflection_summary(&self.agent_program_context(session), outcome)?,
+                .reflection_summary(context, outcome)?,
             snapshot: self.snapshot_for(Some(session))?,
         })
     }
@@ -827,10 +827,10 @@ impl RuntimeKernel {
         &mut self,
         session: &mut SessionRecord,
         outcome: &BaseTypeOutcome,
+        context: &AgentProgramContext,
     ) -> SimardResult<()> {
         self.transition(RuntimeState::Persisting)?;
         session.advance(SessionPhase::Persistence)?;
-        self.remember_session(session);
 
         let summary_key = format!("{}-summary", session.id);
         self.ports.memory_store.put(MemoryRecord {
@@ -839,7 +839,7 @@ impl RuntimeKernel {
             value: self
                 .ports
                 .agent_program
-                .persistence_summary(&self.agent_program_context(session), outcome)?,
+                .persistence_summary(context, outcome)?,
             session_id: session.id.clone(),
             recorded_in: SessionPhase::Persistence,
         })?;
@@ -848,7 +848,7 @@ impl RuntimeKernel {
         for record in self
             .ports
             .agent_program
-            .additional_memory_records(&self.agent_program_context(session), outcome)?
+            .additional_memory_records(context, outcome)?
         {
             let key = format!("{}-{}", session.id, record.key_suffix);
             self.ports.memory_store.put(MemoryRecord {
@@ -860,11 +860,7 @@ impl RuntimeKernel {
             })?;
             session.attach_memory(key);
         }
-        for update in self
-            .ports
-            .agent_program
-            .goal_updates(&self.agent_program_context(session), outcome)?
-        {
+        for update in self.ports.agent_program.goal_updates(context, outcome)? {
             self.ports.goal_store.put(GoalRecord::from_update(
                 update,
                 self.request.manifest.name.clone(),
@@ -922,6 +918,7 @@ impl RuntimeKernel {
     }
 
     fn snapshot_for(&self, session: Option<&SessionRecord>) -> SimardResult<ReflectionSnapshot> {
+        let adapter_desc = self.factory.descriptor();
         let evidence_records = match session {
             Some(active_session) => self
                 .ports
@@ -978,17 +975,13 @@ impl RuntimeKernel {
                 .collect(),
             agent_program_backend: self.ports.agent_program.descriptor(),
             handoff_backend: self.ports.handoff_store.descriptor(),
-            adapter_backend: self.factory.descriptor().backend.clone(),
-            adapter_capabilities: self
-                .factory
-                .descriptor()
+            adapter_backend: adapter_desc.backend.clone(),
+            adapter_capabilities: adapter_desc
                 .capabilities
                 .iter()
                 .map(ToString::to_string)
                 .collect(),
-            adapter_supported_topologies: self
-                .factory
-                .descriptor()
+            adapter_supported_topologies: adapter_desc
                 .supported_topologies
                 .iter()
                 .map(ToString::to_string)
@@ -1012,13 +1005,13 @@ impl ReflectiveRuntime for RuntimeKernel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::base_types::LocalProcessHarnessAdapter;
     use crate::evidence::InMemoryEvidenceStore;
     use crate::identity::{ManifestContract, MemoryPolicy, OperatingMode};
     use crate::memory::InMemoryMemoryStore;
     use crate::metadata::Provenance;
     use crate::prompt_assets::{InMemoryPromptAssetStore, PromptAsset};
     use crate::session::{SessionId, SessionIdGenerator};
+    use crate::test_support::TestAdapter;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     struct TestSessionIds(AtomicU64);
@@ -1079,7 +1072,7 @@ mod tests {
         let memory_store = Arc::new(InMemoryMemoryStore::try_default().unwrap());
         let evidence_store = Arc::new(InMemoryEvidenceStore::try_default().unwrap());
         let mut registry = BaseTypeRegistry::default();
-        registry.register(LocalProcessHarnessAdapter::single_process("local-harness").unwrap());
+        registry.register(TestAdapter::single_process("local-harness").unwrap());
         RuntimePorts::new(
             prompt_store,
             memory_store,

@@ -8,9 +8,10 @@ use crate::agent_program::{
     AgentProgram, GoalCuratorProgram, ImprovementCuratorProgram, MeetingFacilitatorProgram,
     ObjectiveRelayProgram,
 };
-use crate::base_types::{
-    BaseTypeId, LocalProcessHarnessAdapter, RustyClawdAdapter, TerminalShellAdapter,
-};
+use crate::base_type_claude_agent_sdk::claude_agent_sdk_adapter;
+use crate::base_type_ms_agent::ms_agent_framework_adapter;
+use crate::base_type_rustyclawd::RustyClawdAdapter;
+use crate::base_types::BaseTypeId;
 use crate::bridge_launcher::{find_python_dir, launch_memory_bridge};
 use crate::error::{SimardError, SimardResult};
 use crate::evidence::{EvidenceStore, FileBackedEvidenceStore};
@@ -30,6 +31,7 @@ use crate::runtime::{
     LoopbackMeshTopologyDriver, RuntimePorts, RuntimeRequest, RuntimeTopology, SessionOutcome,
 };
 use crate::session::UuidSessionIdGenerator;
+use crate::test_support::TestAdapter;
 
 const DEFAULT_IDENTITY: &str = "simard-engineer";
 const DEFAULT_OBJECTIVE: &str = "bootstrap the Simard engineer loop";
@@ -38,6 +40,8 @@ const LOCAL_BASE_TYPE: &str = "local-harness";
 const TERMINAL_SHELL_BASE_TYPE: &str = "terminal-shell";
 const RUSTY_CLAWD_BASE_TYPE: &str = "rusty-clawd";
 const COPILOT_SDK_BASE_TYPE: &str = "copilot-sdk";
+const CLAUDE_AGENT_SDK_BASE_TYPE: &str = "claude-agent-sdk";
+const MS_AGENT_FRAMEWORK_BASE_TYPE: &str = "ms-agent-framework";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BootstrapMode {
@@ -618,14 +622,16 @@ fn register_builtin_base_type(
 ) -> SimardResult<()> {
     match base_type.as_str() {
         LOCAL_BASE_TYPE => {
-            base_types.register(LocalProcessHarnessAdapter::single_process_alias(
+            base_types.register(TestAdapter::single_process_alias(
                 base_type.as_str(),
                 LOCAL_BASE_TYPE,
             )?);
             Ok(())
         }
         TERMINAL_SHELL_BASE_TYPE => {
-            base_types.register(TerminalShellAdapter::registered(base_type.as_str())?);
+            base_types.register(
+                crate::base_type_harness::RealLocalHarnessAdapter::registered(base_type.as_str())?,
+            );
             Ok(())
         }
         RUSTY_CLAWD_BASE_TYPE => {
@@ -633,10 +639,17 @@ fn register_builtin_base_type(
             Ok(())
         }
         COPILOT_SDK_BASE_TYPE => {
-            base_types.register(LocalProcessHarnessAdapter::single_process_alias(
+            base_types.register(crate::base_type_copilot::CopilotSdkAdapter::registered(
                 base_type.as_str(),
-                LOCAL_BASE_TYPE,
             )?);
+            Ok(())
+        }
+        CLAUDE_AGENT_SDK_BASE_TYPE => {
+            base_types.register(claude_agent_sdk_adapter(base_type.as_str())?);
+            Ok(())
+        }
+        MS_AGENT_FRAMEWORK_BASE_TYPE => {
+            base_types.register(ms_agent_framework_adapter(base_type.as_str())?);
             Ok(())
         }
         _ => Ok(()),
@@ -657,7 +670,8 @@ mod tests {
         LOCAL_BASE_TYPE, builtin_base_type_registry_for_manifest, decode_utf8_env_value,
         validate_state_root,
     };
-    use crate::base_types::{BaseTypeFactory, BaseTypeId, RustyClawdAdapter};
+    use crate::base_type_rustyclawd::RustyClawdAdapter;
+    use crate::base_types::{BaseTypeFactory, BaseTypeId};
     use crate::error::SimardError;
     use crate::identity::{
         BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader, ManifestContract,
@@ -732,9 +746,18 @@ mod tests {
         let copilot = registry
             .get(&BaseTypeId::new("copilot-sdk"))
             .expect("copilot-sdk should be registered");
+        let claude_sdk = registry
+            .get(&BaseTypeId::new("claude-agent-sdk"))
+            .expect("claude-agent-sdk should be registered");
+        let ms_agent = registry
+            .get(&BaseTypeId::new("ms-agent-framework"))
+            .expect("ms-agent-framework should be registered");
 
         assert_eq!(local.descriptor().backend.identity, LOCAL_BASE_TYPE);
-        assert_eq!(copilot.descriptor().backend.identity, LOCAL_BASE_TYPE);
+        assert_eq!(
+            copilot.descriptor().backend.identity,
+            "copilot-sdk::pty-session"
+        );
         assert_eq!(
             rusty.descriptor().backend.identity,
             RustyClawdAdapter::registered("rusty-clawd")
@@ -742,6 +765,14 @@ mod tests {
                 .descriptor()
                 .backend
                 .identity
+        );
+        assert_eq!(
+            claude_sdk.descriptor().backend.identity,
+            "claude-agent-sdk::session-backend"
+        );
+        assert_eq!(
+            ms_agent.descriptor().backend.identity,
+            "ms-agent-framework::session-backend"
         );
     }
 
