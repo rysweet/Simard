@@ -1,0 +1,76 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check if tag exists
+        id: tag_check
+        run: |
+          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build release binary
+        if: steps.tag_check.outputs.exists == 'false'
+        run: cargo build --release
+
+      - name: Package binary
+        if: steps.tag_check.outputs.exists == 'false'
+        run: |
+          cd target/release
+          tar czf simard-linux-x86_64.tar.gz simard
+          sha256sum simard-linux-x86_64.tar.gz > simard-linux-x86_64.tar.gz.sha256
+
+      - name: Create release
+        if: steps.tag_check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --title "Simard ${{ steps.version.outputs.tag }}" \
+            --notes "## Install
+
+          \`\`\`bash
+          curl -L https://github.com/rysweet/Simard/releases/download/${{ steps.version.outputs.tag }}/simard-linux-x86_64.tar.gz | tar xz
+          \`\`\`
+
+          Or with cargo:
+          \`\`\`bash
+          cargo install --git https://github.com/rysweet/Simard.git --tag ${{ steps.version.outputs.tag }}
+          \`\`\`" \
+            target/release/simard-linux-x86_64.tar.gz \
+            target/release/simard-linux-x86_64.tar.gz.sha256
