@@ -268,9 +268,7 @@ fn copilot_session_lifecycle_enforcement() {
     // Cannot run turn or close before open.
     assert!(
         session
-            .run_turn(BaseTypeTurnInput {
-                objective: "t".into()
-            })
+            .run_turn(BaseTypeTurnInput::objective_only("t"))
             .is_err()
     );
     assert!(session.close().is_err());
@@ -283,9 +281,7 @@ fn copilot_session_lifecycle_enforcement() {
     assert!(session.open().is_err());
     assert!(
         session
-            .run_turn(BaseTypeTurnInput {
-                objective: "t".into()
-            })
+            .run_turn(BaseTypeTurnInput::objective_only("t"))
             .is_err()
     );
 }
@@ -301,8 +297,8 @@ fn harness_adapter_descriptor() {
             .contains(&BaseTypeCapability::TerminalSession)
     );
     assert!(desc.capabilities.contains(&BaseTypeCapability::Evidence));
-    assert!(!desc.capabilities.contains(&BaseTypeCapability::Memory));
-    assert!(!desc.capabilities.contains(&BaseTypeCapability::Reflection));
+    assert!(desc.capabilities.contains(&BaseTypeCapability::Memory));
+    assert!(desc.capabilities.contains(&BaseTypeCapability::Reflection));
 }
 
 #[test]
@@ -324,9 +320,7 @@ fn harness_session_lifecycle_enforcement() {
 
     assert!(
         session
-            .run_turn(BaseTypeTurnInput {
-                objective: "echo hi".into()
-            })
+            .run_turn(BaseTypeTurnInput::objective_only("echo hi"))
             .is_err()
     );
     session.open().unwrap();

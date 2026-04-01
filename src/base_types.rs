@@ -1,16 +1,27 @@
+//! Base type trait contracts and shared types.
+//!
+//! A "base type" is an agent execution substrate — the runtime that Simard
+//! delegates work to. This module defines the trait pair (`BaseTypeFactory` +
+//! `BaseTypeSession`), shared data structures, and helper functions. Concrete
+//! adapter implementations live in their own modules:
+//!
+//! - `base_type_rustyclawd` — production adapter using rustyclawd-core SDK
+//! - `base_type_copilot` — GitHub Copilot SDK adapter via PTY
+//! - `base_type_claude_agent_sdk` — Claude Agent SDK (structural)
+//! - `base_type_ms_agent` — Microsoft Agent Framework (structural)
+//! - `test_support` — lightweight test adapter returning canned results
+
 use std::collections::BTreeSet;
-use std::fmt::{self, Display, Formatter};
+use std::fmt::{self, Display, Formatter, Write};
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{SimardError, SimardResult};
 use crate::identity::OperatingMode;
-use crate::metadata::{BackendDescriptor, Freshness};
+use crate::metadata::BackendDescriptor;
 use crate::prompt_assets::PromptAssetRef;
 use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeTopology};
-use crate::sanitization::objective_metadata;
 use crate::session::SessionId;
-use crate::terminal_session::execute_terminal_turn;
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub struct BaseTypeId(String);
@@ -67,7 +78,7 @@ pub fn capability_set(
     capabilities.into_iter().collect()
 }
 
-fn standard_session_capabilities() -> BTreeSet<BaseTypeCapability> {
+pub fn standard_session_capabilities() -> BTreeSet<BaseTypeCapability> {
     capability_set([
         BaseTypeCapability::PromptAssets,
         BaseTypeCapability::SessionLifecycle,
@@ -75,6 +86,17 @@ fn standard_session_capabilities() -> BTreeSet<BaseTypeCapability> {
         BaseTypeCapability::Evidence,
         BaseTypeCapability::Reflection,
     ])
+}
+
+pub fn joined_prompt_ids(prompt_assets: &[PromptAssetRef]) -> String {
+    let mut joined = String::with_capacity(prompt_assets.len() * 24);
+    for (index, asset) in prompt_assets.iter().enumerate() {
+        if index > 0 {
+            joined.push_str(", ");
+        }
+        let _ = write!(&mut joined, "{}", asset.id);
+    }
+    joined
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -104,6 +126,23 @@ pub struct BaseTypeSessionRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BaseTypeTurnInput {
     pub objective: String,
+    /// System-level identity context loaded from the manifest's prompt assets.
+    /// Used by LLM-calling adapters to construct system prompts.
+    pub identity_context: String,
+    /// Additional prompt preamble for the turn (e.g., from enrichment bridges).
+    pub prompt_preamble: String,
+}
+
+impl BaseTypeTurnInput {
+    /// Create a turn input with just an objective and empty context fields.
+    /// Useful in tests and for adapters that don't need LLM system prompts.
+    pub fn objective_only(objective: impl Into<String>) -> Self {
+        Self {
+            objective: objective.into(),
+            identity_context: String::new(),
+            prompt_preamble: String::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -132,457 +171,76 @@ pub trait BaseTypeFactory: Send + Sync {
     ) -> SimardResult<Box<dyn BaseTypeSession>>;
 }
 
-#[derive(Debug)]
-pub struct LocalProcessHarnessAdapter {
-    descriptor: BaseTypeDescriptor,
-}
-
-impl LocalProcessHarnessAdapter {
-    pub fn new(
-        id: impl Into<String>,
-        implementation_identity: impl Into<String>,
-        capabilities: impl IntoIterator<Item = BaseTypeCapability>,
-        supported_topologies: impl IntoIterator<Item = RuntimeTopology>,
-    ) -> SimardResult<Self> {
-        let id = BaseTypeId::new(id);
-        let implementation_identity = implementation_identity.into();
-        let backend = BackendDescriptor::for_runtime_type::<Self>(
-            implementation_identity.clone(),
-            format!("registered-base-type:{id}::implementation:{implementation_identity}"),
-            Freshness::now()?,
-        );
-        Ok(Self {
-            descriptor: BaseTypeDescriptor {
-                id,
-                backend,
-                capabilities: capability_set(capabilities),
-                supported_topologies: supported_topologies.into_iter().collect(),
-            },
-        })
-    }
-
-    pub fn single_process(id: impl Into<String>) -> SimardResult<Self> {
-        let id = id.into();
-        Self::single_process_alias(id.clone(), id)
-    }
-
-    pub fn single_process_alias(
-        id: impl Into<String>,
-        implementation_identity: impl Into<String>,
-    ) -> SimardResult<Self> {
-        Self::new(
-            id,
-            implementation_identity,
-            standard_session_capabilities(),
-            [RuntimeTopology::SingleProcess],
-        )
-    }
-}
-
-impl BaseTypeFactory for LocalProcessHarnessAdapter {
-    fn descriptor(&self) -> &BaseTypeDescriptor {
-        &self.descriptor
-    }
-
-    fn open_session(
-        &self,
-        request: BaseTypeSessionRequest,
-    ) -> SimardResult<Box<dyn BaseTypeSession>> {
-        if !self.descriptor.supports_topology(request.topology) {
-            return Err(SimardError::UnsupportedTopology {
-                base_type: self.descriptor.id.to_string(),
-                topology: request.topology,
-            });
-        }
-
-        Ok(Box::new(LocalProcessHarnessSession {
-            descriptor: self.descriptor.clone(),
-            request,
-            is_open: false,
-            is_closed: false,
-        }))
-    }
-}
-
-#[derive(Debug)]
-pub struct RustyClawdAdapter {
-    descriptor: BaseTypeDescriptor,
-}
-
-impl RustyClawdAdapter {
-    pub fn registered(id: impl Into<String>) -> SimardResult<Self> {
-        let id = BaseTypeId::new(id);
-        Ok(Self {
-            descriptor: BaseTypeDescriptor {
-                id,
-                backend: BackendDescriptor::for_runtime_type::<Self>(
-                    "rusty-clawd::session-backend",
-                    "registered-base-type:rusty-clawd",
-                    Freshness::now()?,
-                ),
-                capabilities: standard_session_capabilities(),
-                supported_topologies: [
-                    RuntimeTopology::SingleProcess,
-                    RuntimeTopology::MultiProcess,
-                ]
-                .into_iter()
-                .collect(),
-            },
-        })
-    }
-}
-
-impl BaseTypeFactory for RustyClawdAdapter {
-    fn descriptor(&self) -> &BaseTypeDescriptor {
-        &self.descriptor
-    }
-
-    fn open_session(
-        &self,
-        request: BaseTypeSessionRequest,
-    ) -> SimardResult<Box<dyn BaseTypeSession>> {
-        if !self.descriptor.supports_topology(request.topology) {
-            return Err(SimardError::UnsupportedTopology {
-                base_type: self.descriptor.id.to_string(),
-                topology: request.topology,
-            });
-        }
-
-        Ok(Box::new(RustyClawdSession {
-            descriptor: self.descriptor.clone(),
-            request,
-            is_open: false,
-            is_closed: false,
-        }))
-    }
-}
-
-#[derive(Debug)]
-struct RustyClawdSession {
-    descriptor: BaseTypeDescriptor,
-    request: BaseTypeSessionRequest,
-    is_open: bool,
+pub fn ensure_session_not_closed(
+    descriptor: &BaseTypeDescriptor,
     is_closed: bool,
+    action: &str,
+) -> SimardResult<()> {
+    if is_closed {
+        return Err(SimardError::InvalidBaseTypeSessionState {
+            base_type: descriptor.id.to_string(),
+            action: action.to_string(),
+            reason: "session is already closed".to_string(),
+        });
+    }
+
+    Ok(())
 }
 
-impl RustyClawdSession {
-    fn ensure_can(&self, action: &str) -> SimardResult<()> {
-        if self.is_closed {
-            return Err(SimardError::InvalidBaseTypeSessionState {
-                base_type: self.descriptor.id.to_string(),
-                action: action.to_string(),
-                reason: "session is already closed".to_string(),
-            });
-        }
-
-        Ok(())
-    }
-}
-
-impl BaseTypeSession for RustyClawdSession {
-    fn descriptor(&self) -> &BaseTypeDescriptor {
-        &self.descriptor
-    }
-
-    fn open(&mut self) -> SimardResult<()> {
-        self.ensure_can("open")?;
-        if self.is_open {
-            return Err(SimardError::InvalidBaseTypeSessionState {
-                base_type: self.descriptor.id.to_string(),
-                action: "open".to_string(),
-                reason: "session is already open".to_string(),
-            });
-        }
-        self.is_open = true;
-        Ok(())
-    }
-
-    fn run_turn(&mut self, input: BaseTypeTurnInput) -> SimardResult<BaseTypeOutcome> {
-        self.ensure_can("run_turn")?;
-        if !self.is_open {
-            return Err(SimardError::InvalidBaseTypeSessionState {
-                base_type: self.descriptor.id.to_string(),
-                action: "run_turn".to_string(),
-                reason: "session must be opened before turns can run".to_string(),
-            });
-        }
-
-        let prompt_ids = self
-            .request
-            .prompt_assets
-            .iter()
-            .map(|asset| asset.id.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let objective_summary = objective_metadata(&input.objective);
-
-        Ok(BaseTypeOutcome {
-            plan: format!(
-                "Launch RustyClawd backend '{}' for '{}' on '{}' and bind prompt assets [{}] with {}.",
-                self.descriptor.backend.identity,
-                self.request.mode,
-                self.request.topology,
-                prompt_ids,
-                objective_summary
-            ),
-            execution_summary: format!(
-                "RustyClawd session backend executed {} via selected base type '{}' on implementation '{}' from node '{}' at '{}'.",
-                objective_summary,
-                self.descriptor.id,
-                self.descriptor.backend.identity,
-                self.request.runtime_node,
-                self.request.mailbox_address,
-            ),
-            evidence: vec![
-                format!("selected-base-type={}", self.descriptor.id),
-                format!(
-                    "backend-implementation={}",
-                    self.descriptor.backend.identity
-                ),
-                format!("prompt-assets=[{}]", prompt_ids),
-                format!("runtime-node={}", self.request.runtime_node),
-                format!("mailbox-address={}", self.request.mailbox_address),
-            ],
-        })
-    }
-
-    fn close(&mut self) -> SimardResult<()> {
-        self.ensure_can("close")?;
-        if !self.is_open {
-            return Err(SimardError::InvalidBaseTypeSessionState {
-                base_type: self.descriptor.id.to_string(),
-                action: "close".to_string(),
-                reason: "session was never opened".to_string(),
-            });
-        }
-        self.is_closed = true;
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-pub struct TerminalShellAdapter {
-    descriptor: BaseTypeDescriptor,
-}
-
-impl TerminalShellAdapter {
-    pub fn registered(id: impl Into<String>) -> SimardResult<Self> {
-        let id = BaseTypeId::new(id);
-        Ok(Self {
-            descriptor: BaseTypeDescriptor {
-                id,
-                backend: BackendDescriptor::for_runtime_type::<Self>(
-                    "terminal-shell::local-pty",
-                    "registered-base-type:terminal-shell",
-                    Freshness::now()?,
-                ),
-                capabilities: capability_set([
-                    BaseTypeCapability::PromptAssets,
-                    BaseTypeCapability::SessionLifecycle,
-                    BaseTypeCapability::Memory,
-                    BaseTypeCapability::Evidence,
-                    BaseTypeCapability::Reflection,
-                    BaseTypeCapability::TerminalSession,
-                ]),
-                supported_topologies: [RuntimeTopology::SingleProcess].into_iter().collect(),
-            },
-        })
-    }
-}
-
-impl BaseTypeFactory for TerminalShellAdapter {
-    fn descriptor(&self) -> &BaseTypeDescriptor {
-        &self.descriptor
-    }
-
-    fn open_session(
-        &self,
-        request: BaseTypeSessionRequest,
-    ) -> SimardResult<Box<dyn BaseTypeSession>> {
-        if !self.descriptor.supports_topology(request.topology) {
-            return Err(SimardError::UnsupportedTopology {
-                base_type: self.descriptor.id.to_string(),
-                topology: request.topology,
-            });
-        }
-
-        Ok(Box::new(TerminalShellSession {
-            descriptor: self.descriptor.clone(),
-            request,
-            is_open: false,
-            is_closed: false,
-        }))
-    }
-}
-
-#[derive(Debug)]
-struct TerminalShellSession {
-    descriptor: BaseTypeDescriptor,
-    request: BaseTypeSessionRequest,
+pub fn ensure_session_open(
+    descriptor: &BaseTypeDescriptor,
     is_open: bool,
-    is_closed: bool,
+    action: &str,
+) -> SimardResult<()> {
+    if !is_open {
+        return Err(SimardError::InvalidBaseTypeSessionState {
+            base_type: descriptor.id.to_string(),
+            action: action.to_string(),
+            reason: "session must be opened before turns can run".to_string(),
+        });
+    }
+
+    Ok(())
 }
 
-impl TerminalShellSession {
-    fn ensure_can(&self, action: &str) -> SimardResult<()> {
-        if self.is_closed {
-            return Err(SimardError::InvalidBaseTypeSessionState {
-                base_type: self.descriptor.id.to_string(),
-                action: action.to_string(),
-                reason: "session is already closed".to_string(),
-            });
-        }
-
-        Ok(())
-    }
-}
-
-impl BaseTypeSession for TerminalShellSession {
-    fn descriptor(&self) -> &BaseTypeDescriptor {
-        &self.descriptor
-    }
-
-    fn open(&mut self) -> SimardResult<()> {
-        self.ensure_can("open")?;
-        if self.is_open {
-            return Err(SimardError::InvalidBaseTypeSessionState {
-                base_type: self.descriptor.id.to_string(),
-                action: "open".to_string(),
-                reason: "session is already open".to_string(),
-            });
-        }
-        self.is_open = true;
-        Ok(())
-    }
-
-    fn run_turn(&mut self, input: BaseTypeTurnInput) -> SimardResult<BaseTypeOutcome> {
-        self.ensure_can("run_turn")?;
-        if !self.is_open {
-            return Err(SimardError::InvalidBaseTypeSessionState {
-                base_type: self.descriptor.id.to_string(),
-                action: "run_turn".to_string(),
-                reason: "session must be opened before turns can run".to_string(),
-            });
-        }
-
-        execute_terminal_turn(&self.descriptor, &self.request, &input)
-    }
-
-    fn close(&mut self) -> SimardResult<()> {
-        self.ensure_can("close")?;
-        if !self.is_open {
-            return Err(SimardError::InvalidBaseTypeSessionState {
-                base_type: self.descriptor.id.to_string(),
-                action: "close".to_string(),
-                reason: "session was never opened".to_string(),
-            });
-        }
-        self.is_closed = true;
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-struct LocalProcessHarnessSession {
-    descriptor: BaseTypeDescriptor,
-    request: BaseTypeSessionRequest,
+pub fn ensure_session_not_already_open(
+    descriptor: &BaseTypeDescriptor,
     is_open: bool,
-    is_closed: bool,
+) -> SimardResult<()> {
+    if is_open {
+        return Err(SimardError::InvalidBaseTypeSessionState {
+            base_type: descriptor.id.to_string(),
+            action: "open".to_string(),
+            reason: "session is already open".to_string(),
+        });
+    }
+
+    Ok(())
 }
 
-impl LocalProcessHarnessSession {
-    fn ensure_can(&self, action: &str) -> SimardResult<()> {
-        if self.is_closed {
-            return Err(SimardError::InvalidBaseTypeSessionState {
-                base_type: self.descriptor.id.to_string(),
-                action: action.to_string(),
-                reason: "session is already closed".to_string(),
-            });
-        }
+/// Collect evidence from a completed child process output. Shared by adapters
+/// that fall back to process-based execution.
+pub fn process_output_evidence(prefix: &str, output: &std::process::Output) -> Vec<String> {
+    let exit_code = output.status.code().unwrap_or(-1);
 
-        Ok(())
+    let mut evidence = Vec::with_capacity(5);
+    evidence.push(format!("{prefix}-exit-code={exit_code}"));
+    evidence.push(format!("{prefix}-stdout-bytes={}", output.stdout.len()));
+    evidence.push(format!("{prefix}-stderr-bytes={}", output.stderr.len()));
+    if !output.stdout.is_empty() {
+        let stdout = String::from_utf8_lossy(&output.stdout[..output.stdout.len().min(1024)]);
+        evidence.push(format!("{prefix}-stdout-head={stdout}"));
     }
-}
-
-impl BaseTypeSession for LocalProcessHarnessSession {
-    fn descriptor(&self) -> &BaseTypeDescriptor {
-        &self.descriptor
+    if !output.stderr.is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr[..output.stderr.len().min(512)]);
+        evidence.push(format!("{prefix}-stderr-head={stderr}"));
     }
-
-    fn open(&mut self) -> SimardResult<()> {
-        self.ensure_can("open")?;
-        if self.is_open {
-            return Err(SimardError::InvalidBaseTypeSessionState {
-                base_type: self.descriptor.id.to_string(),
-                action: "open".to_string(),
-                reason: "session is already open".to_string(),
-            });
-        }
-        self.is_open = true;
-        Ok(())
-    }
-
-    fn run_turn(&mut self, input: BaseTypeTurnInput) -> SimardResult<BaseTypeOutcome> {
-        self.ensure_can("run_turn")?;
-        if !self.is_open {
-            return Err(SimardError::InvalidBaseTypeSessionState {
-                base_type: self.descriptor.id.to_string(),
-                action: "run_turn".to_string(),
-                reason: "session must be opened before turns can run".to_string(),
-            });
-        }
-
-        let prompt_ids = self
-            .request
-            .prompt_assets
-            .iter()
-            .map(|asset| asset.id.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let objective_summary = objective_metadata(&input.objective);
-        let implementation_identity = &self.descriptor.backend.identity;
-
-        Ok(BaseTypeOutcome {
-            plan: format!(
-                "Open '{}' session on '{}' via {} and run prompt assets [{}].",
-                self.request.mode, self.request.topology, objective_summary, prompt_ids
-            ),
-            execution_summary: format!(
-                "Local single-process harness session executed {} via selected base type '{}' on implementation '{}' from node '{}' at '{}'.",
-                objective_summary,
-                self.descriptor.id,
-                implementation_identity,
-                self.request.runtime_node,
-                self.request.mailbox_address,
-            ),
-            evidence: vec![
-                format!("selected-base-type={}", self.descriptor.id),
-                format!("prompt-assets=[{}]", prompt_ids),
-                format!("runtime-node={}", self.request.runtime_node),
-                format!("mailbox-address={}", self.request.mailbox_address),
-            ],
-        })
-    }
-
-    fn close(&mut self) -> SimardResult<()> {
-        self.ensure_can("close")?;
-        if !self.is_open {
-            return Err(SimardError::InvalidBaseTypeSessionState {
-                base_type: self.descriptor.id.to_string(),
-                action: "close".to_string(),
-                reason: "session was never opened".to_string(),
-            });
-        }
-        self.is_closed = true;
-        Ok(())
-    }
+    evidence
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::prompt_assets::PromptAssetRef;
-    use crate::session::SessionId;
 
     #[test]
     fn capability_set_collects_unique_capabilities() {
@@ -606,110 +264,10 @@ mod tests {
     }
 
     #[test]
-    fn local_harness_adapter_supports_single_process_only() {
-        let adapter = LocalProcessHarnessAdapter::single_process("test-local").unwrap();
-        let desc = adapter.descriptor();
-        assert!(desc.supports_topology(RuntimeTopology::SingleProcess));
-        assert!(!desc.supports_topology(RuntimeTopology::MultiProcess));
-    }
-
-    #[test]
-    fn rusty_clawd_adapter_supports_single_and_multi_process() {
-        let adapter = RustyClawdAdapter::registered("rusty-clawd").unwrap();
-        let desc = adapter.descriptor();
-        assert!(desc.supports_topology(RuntimeTopology::SingleProcess));
-        assert!(desc.supports_topology(RuntimeTopology::MultiProcess));
-        assert!(!desc.supports_topology(RuntimeTopology::Distributed));
-    }
-
-    #[test]
-    fn open_session_rejects_unsupported_topology() {
-        let adapter = LocalProcessHarnessAdapter::single_process("test-local").unwrap();
-        let session_id = SessionId::parse("session-00000000-0000-0000-0000-000000000001").unwrap();
-        let result = adapter.open_session(BaseTypeSessionRequest {
-            session_id,
-            mode: OperatingMode::Engineer,
-            topology: RuntimeTopology::MultiProcess,
-            prompt_assets: vec![],
-            runtime_node: RuntimeNodeId::local(),
-            mailbox_address: RuntimeAddress::local(&RuntimeNodeId::local()),
-        });
-        assert!(matches!(
-            result,
-            Err(SimardError::UnsupportedTopology { .. })
-        ));
-    }
-
-    #[test]
-    fn session_lifecycle_open_run_close() {
-        let adapter = LocalProcessHarnessAdapter::single_process("test-local").unwrap();
-        let session_id = SessionId::parse("session-00000000-0000-0000-0000-000000000001").unwrap();
-        let mut session = adapter
-            .open_session(BaseTypeSessionRequest {
-                session_id,
-                mode: OperatingMode::Engineer,
-                topology: RuntimeTopology::SingleProcess,
-                prompt_assets: vec![PromptAssetRef::new("sys", "sys.md")],
-                runtime_node: RuntimeNodeId::local(),
-                mailbox_address: RuntimeAddress::local(&RuntimeNodeId::local()),
-            })
-            .unwrap();
-
-        session.open().unwrap();
-        let outcome = session
-            .run_turn(BaseTypeTurnInput {
-                objective: "test objective".to_string(),
-            })
-            .unwrap();
-        assert!(!outcome.execution_summary.is_empty());
-        assert!(!outcome.evidence.is_empty());
-        session.close().unwrap();
-    }
-
-    #[test]
-    fn session_rejects_run_before_open() {
-        let adapter = LocalProcessHarnessAdapter::single_process("test-local").unwrap();
-        let session_id = SessionId::parse("session-00000000-0000-0000-0000-000000000001").unwrap();
-        let mut session = adapter
-            .open_session(BaseTypeSessionRequest {
-                session_id,
-                mode: OperatingMode::Engineer,
-                topology: RuntimeTopology::SingleProcess,
-                prompt_assets: vec![],
-                runtime_node: RuntimeNodeId::local(),
-                mailbox_address: RuntimeAddress::local(&RuntimeNodeId::local()),
-            })
-            .unwrap();
-        let err = session
-            .run_turn(BaseTypeTurnInput {
-                objective: "test".to_string(),
-            })
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            SimardError::InvalidBaseTypeSessionState { .. }
-        ));
-    }
-
-    #[test]
-    fn session_rejects_double_open() {
-        let adapter = RustyClawdAdapter::registered("rusty-clawd").unwrap();
-        let session_id = SessionId::parse("session-00000000-0000-0000-0000-000000000001").unwrap();
-        let mut session = adapter
-            .open_session(BaseTypeSessionRequest {
-                session_id,
-                mode: OperatingMode::Engineer,
-                topology: RuntimeTopology::SingleProcess,
-                prompt_assets: vec![],
-                runtime_node: RuntimeNodeId::local(),
-                mailbox_address: RuntimeAddress::local(&RuntimeNodeId::local()),
-            })
-            .unwrap();
-        session.open().unwrap();
-        let err = session.open().unwrap_err();
-        assert!(matches!(
-            err,
-            SimardError::InvalidBaseTypeSessionState { .. }
-        ));
+    fn turn_input_objective_only_sets_empty_context() {
+        let input = BaseTypeTurnInput::objective_only("test objective");
+        assert_eq!(input.objective, "test objective");
+        assert!(input.identity_context.is_empty());
+        assert!(input.prompt_preamble.is_empty());
     }
 }

@@ -19,43 +19,46 @@ gantt
     axisFormat %b %d
 
     section Foundation
-    Phase 0 - Bridge Infrastructure       :done, p0, 2026-03-31, 1d
+    Phase 0 - Bridge Infrastructure       :done, p0, 2026-03-20, 3d
 
     section Memory & Knowledge
-    Phase 1 - Cognitive Memory            :active, p1, after p0, 3d
-    Phase 2 - Knowledge Packs             :active, p2, after p0, 3d
+    Phase 1 - Cognitive Memory            :done, p1, after p0, 3d
+    Phase 2 - Knowledge Packs             :done, p2, after p0, 3d
 
     section Adapters
-    Phase 3 - Real Base Type Adapter      :p3, after p1, 3d
+    Phase 3 - Real Base Type Adapters     :done, p3, after p1, 3d
 
     section Eval & Composition
-    Phase 4 - Gym & Benchmarks            :p4, after p3, 3d
-    Phase 5 - Agent Composition           :p5, after p3, 3d
+    Phase 4 - Gym & Benchmarks            :done, p4, after p3, 3d
+    Phase 5 - Agent Composition           :done, p5, after p3, 3d
 
     section Autonomy
-    Phase 6 - Self-Improvement            :p6, after p4, 3d
-    Phase 7 - Remote Orchestration        :p7, after p5, 3d
-    Phase 8 - Meeting/Goals/Identity      :p8, after p5, 3d
+    Phase 6 - Self-Improvement            :done, p6, after p4, 3d
+    Phase 7 - Remote Orchestration        :done, p7, after p5, 3d
+    Phase 8 - Meeting/Goals/Identity      :done, p8, after p5, 3d
 
     section Continuous
-    Phase 9 - OODA Loop                   :p9, after p6, 3d
+    Phase 9 - OODA Loop                   :done, p9, after p6, 3d
+
+    section Hardening
+    Phase 10 - Stub Removal               :active, p10, 2026-03-31, 2d
 ```
 
 ## Phase Summary
 
-| Phase | Deliverable | Modules | LOC Budget | Status |
-|-------|------------|---------|-----------|--------|
-| 0 | Bridge infrastructure | 5 | ~1,400 | Merged (PR #89) |
-| 1 | Cognitive memory via amplihack-memory-lib | 6 | ~2,150 | In progress |
-| 2 | Knowledge packs via agent-kgpacks | 4 | ~1,300 | In progress |
-| 3 | Real Copilot/harness adapter | 4 | ~1,450 | Planned (#92) |
-| 4 | Gym/eval via amplihack-agent-eval | 5 | ~1,850 | Planned (#93) |
-| 5 | Agent composition & subordinates | 5 | ~1,800 | Planned (#94) |
-| 6 | Self-improvement & relaunch | 4 | ~1,400 | Planned (#95) |
-| 7 | Remote orchestration via azlin | 4 | ~1,400 | Planned (#96) |
-| 8 | Meeting mode, goals, dual identity | 5 | ~1,650 | Planned (#97) |
-| 9 | OODA loop & autonomous operation | 4 | ~1,450 | Planned (#98) |
-| **Total** | | **46** | **~15,850** | |
+| Phase | Deliverable | Key Modules | Status |
+|-------|------------|-------------|--------|
+| 0 | Bridge infrastructure | `bridge`, `bridge_circuit`, `bridge_subprocess`, `bridge_launcher` | Merged |
+| 1 | Cognitive memory via amplihack-memory-lib | `memory_bridge`, `memory_bridge_adapter`, `memory_cognitive`, `memory_consolidation`, `memory_hive` | Merged |
+| 2 | Knowledge packs via agent-kgpacks | `knowledge_bridge`, `knowledge_context` | Merged |
+| 3 | Real base type adapters (PTY-backed) | `base_type_copilot`, `base_type_harness`, `base_type_turn`, `terminal_session` | Merged |
+| 4 | Gym/eval via amplihack-agent-eval | `gym`, `gym_bridge`, `gym_scoring` | Merged |
+| 5 | Agent composition & subordinates | `identity_composition`, `agent_supervisor`, `agent_goal_assignment`, `agent_roles`, `agent_program` | Merged |
+| 6 | Self-improvement & relaunch | `self_improve`, `self_relaunch`, `review`, `improvements` | Merged |
+| 7 | Remote orchestration via azlin | `remote_azlin`, `remote_session`, `remote_transfer` | Merged |
+| 8 | Meeting mode, goals, dual identity | `meeting_facilitator`, `meetings`, `goal_curation`, `goals`, `identity_auth` | Merged |
+| 9 | OODA loop & autonomous operation | `ooda_loop`, `ooda_actions`, `ooda_scheduler` | Merged |
+| 10 | Stub removal & hardening | All modules — real process execution, CLI, meeting REPL, OODA daemon | In Progress |
 
 ## Quality Gates (Every Phase)
 
@@ -70,13 +73,19 @@ gantt
 
 ## Self-Building Unlock
 
-Minimum viable self-building requires Phases 0-6. At that point, Simard can:
+All prerequisite phases (0-6) are now merged. Simard can:
 
-1. **Remember** what she learned (Phase 1)
-2. **Understand** her ecosystem (Phase 2)
-3. **Act** on real coding tasks (Phase 3)
-4. **Measure** her capability (Phase 4)
-5. **Delegate** subtasks (Phase 5)
-6. **Improve** herself (Phase 6)
+1. **Remember** what she learned (Phase 1 — cognitive memory with six types, hive mind sharing)
+2. **Understand** her ecosystem (Phase 2 — knowledge graph packs, domain context enrichment)
+3. **Act** on real coding tasks (Phase 3 — PTY-backed adapters driving real tools)
+4. **Measure** her capability (Phase 4 — benchmark gym with regression detection)
+5. **Delegate** subtasks (Phase 5 — subordinate spawning, heartbeat monitoring, goal assignment)
+6. **Improve** herself (Phase 6 — controlled improvement cycles with canary verification)
 
-Phases 7-9 add operational maturity: remote execution, meeting facilitation, and continuous autonomous operation.
+Phases 7-9 add operational maturity and are also merged:
+
+7. **Distribute** work across Azure VMs (Phase 7 — azlin integration)
+8. **Facilitate** meetings and curate goals (Phase 8 — meeting records, durable top-5 goals)
+9. **Operate** continuously (Phase 9 — OODA loop with scheduler and action dispatch)
+
+Phase 10 (stub removal) is the current hardening pass: replacing all remaining placeholder implementations with real process execution, real CLI dispatch, real meeting REPL, and real OODA daemon behavior.
