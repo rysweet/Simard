@@ -52,6 +52,7 @@ dependencies = [
 [[package]]
 name = "amplihack-memory"
 version = "0.4.0"
+source = "git+https://github.com/rysweet/amplihack-memory-lib.git#b6e7c2eb73fd6d9cdee656c1d3ef712c3b3b4c7d"
 dependencies = [
  "chrono",
  "dirs",
@@ -2618,6 +2619,7 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 [[package]]
 name = "rustyclawd-core"
 version = "0.1.0"
+source = "git+https://github.com/rysweet/RustyClawd.git#856bdf81d2404fb57b16ef6a9836c6da9655651b"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2639,6 +2641,7 @@ dependencies = [
 [[package]]
 name = "rustyclawd-tools"
 version = "0.1.0"
+source = "git+https://github.com/rysweet/RustyClawd.git#856bdf81d2404fb57b16ef6a9836c6da9655651b"
 dependencies = [
  "anyhow",
  "async-stream",
