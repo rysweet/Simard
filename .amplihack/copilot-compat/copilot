@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec /home/azureuser/.cache/uv/archive-v0/l2ntLriHP-jsYAqZQtYWq/bin/python3 /home/azureuser/src/Simard/.amplihack/copilot-compat/copilot.py "$@"

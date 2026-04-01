@@ -250,36 +250,40 @@ pub fn poll_slots(scheduler: &mut Scheduler) -> Vec<CompletedSlot> {
 
 /// Remove all completed and failed slots from the scheduler.
 pub fn drain_finished(scheduler: &mut Scheduler) -> Vec<CompletedSlot> {
-    let finished = poll_slots(scheduler);
-    let finished_ids: Vec<usize> = finished.iter().map(|s| s.slot_id).collect();
-    scheduler
-        .slots
-        .retain(|s| !finished_ids.contains(&s.slot_id));
+    let mut finished = Vec::new();
+    scheduler.slots.retain(|slot| match &slot.status {
+        SlotStatus::Completed(outcome) => {
+            finished.push(CompletedSlot {
+                slot_id: slot.slot_id,
+                goal_id: slot.goal_id.clone(),
+                outcome: Ok(outcome.clone()),
+            });
+            false
+        }
+        SlotStatus::Failed(reason) => {
+            finished.push(CompletedSlot {
+                slot_id: slot.slot_id,
+                goal_id: slot.goal_id.clone(),
+                outcome: Err(reason.clone()),
+            });
+            false
+        }
+        _ => true,
+    });
     finished
 }
 
 /// Summary of the scheduler state for logging.
 pub fn scheduler_summary(scheduler: &Scheduler) -> String {
-    let pending = scheduler
-        .slots
-        .iter()
-        .filter(|s| matches!(s.status, SlotStatus::Pending))
-        .count();
-    let running = scheduler
-        .slots
-        .iter()
-        .filter(|s| matches!(s.status, SlotStatus::Running { .. }))
-        .count();
-    let completed = scheduler
-        .slots
-        .iter()
-        .filter(|s| matches!(s.status, SlotStatus::Completed(_)))
-        .count();
-    let failed = scheduler
-        .slots
-        .iter()
-        .filter(|s| matches!(s.status, SlotStatus::Failed(_)))
-        .count();
+    let (mut pending, mut running, mut completed, mut failed) = (0usize, 0usize, 0usize, 0usize);
+    for slot in &scheduler.slots {
+        match &slot.status {
+            SlotStatus::Pending => pending += 1,
+            SlotStatus::Running { .. } => running += 1,
+            SlotStatus::Completed(_) => completed += 1,
+            SlotStatus::Failed(_) => failed += 1,
+        }
+    }
     format!(
         "Scheduler: {pending} pending, {running} running, {completed} completed, {failed} failed (max={})",
         scheduler.max_concurrent

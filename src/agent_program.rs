@@ -105,7 +105,7 @@ impl AgentProgram for ObjectiveRelayProgram {
     ) -> SimardResult<String> {
         let objective_summary = objective_metadata(&context.objective);
         Ok(format!(
-            "Agent program '{}' completed '{}' through '{}' on '{}' from '{}' with {} and {} active top goals in scope.",
+            "Agent program '{}' completed '{}' through '{}' on '{}' from '{}' with {} and {} active top goals in scope. Outcome summary: {}.",
             self.descriptor.identity,
             context.mode,
             context.selected_base_type,
@@ -113,7 +113,8 @@ impl AgentProgram for ObjectiveRelayProgram {
             context.runtime_node,
             objective_summary,
             context.active_goals.len(),
-        ) + &format!(" Outcome summary: {}.", outcome.execution_summary))
+            outcome.execution_summary,
+        ))
     }
 
     fn persistence_summary(
@@ -563,10 +564,12 @@ impl StructuredGoalPlan {
             }
         }
         if plan.goals.is_empty() {
-            return Err(SimardError::InvalidGoalRecord {
-                field: "goal".to_string(),
-                reason: "at least one structured 'goal:' line is required".to_string(),
-            });
+            plan.goals.push(GoalUpdate::new(
+                raw.trim(),
+                "natural-language objective accepted as a durable Simard priority",
+                GoalStatus::Active,
+                1,
+            )?);
         }
         Ok(plan)
     }
@@ -583,16 +586,18 @@ impl StructuredGoalPlan {
     }
 
     fn concise_top_five(&self) -> String {
-        let mut goals = self.goals.clone();
-        goals.sort_by(|left, right| {
-            left.status
-                .cmp(&right.status)
-                .then(left.priority.cmp(&right.priority))
+        let mut active: Vec<_> = self
+            .goals
+            .iter()
+            .filter(|goal| goal.status == GoalStatus::Active)
+            .collect();
+        active.sort_by(|left, right| {
+            left.priority
+                .cmp(&right.priority)
                 .then(left.title.cmp(&right.title))
         });
-        goals
+        active
             .into_iter()
-            .filter(|goal| goal.status == GoalStatus::Active)
             .take(5)
             .map(|goal| format!("p{}:{} ({})", goal.priority, goal.title, goal.rationale))
             .collect::<Vec<_>>()
@@ -808,9 +813,12 @@ mod tests {
     }
 
     #[test]
-    fn goal_curator_rejects_empty_input() {
-        let err = StructuredGoalPlan::parse("no goal lines here").unwrap_err();
-        assert!(matches!(err, SimardError::InvalidGoalRecord { .. }));
+    fn goal_curator_accepts_natural_language_input() {
+        let plan = StructuredGoalPlan::parse("review top 5 goals").unwrap();
+        assert_eq!(plan.goals.len(), 1);
+        assert_eq!(plan.goals[0].title, "review top 5 goals");
+        assert_eq!(plan.goals[0].status, GoalStatus::Active);
+        assert_eq!(plan.goals[0].priority, 1);
     }
 
     #[test]
@@ -822,5 +830,42 @@ mod tests {
         assert_eq!(plan.goals.len(), 1);
         assert_eq!(plan.goals[0].priority, 1);
         assert_eq!(plan.goals[0].status, GoalStatus::Active);
+    }
+
+    #[test]
+    fn goal_curator_natural_language_generates_slug() {
+        let plan = StructuredGoalPlan::parse("review top 5 goals").unwrap();
+        assert_eq!(plan.goals[0].slug, "review-top-5-goals");
+    }
+
+    #[test]
+    fn goal_curator_natural_language_sets_rationale() {
+        let plan = StructuredGoalPlan::parse("review top 5 goals").unwrap();
+        assert!(plan.goals[0].rationale.contains("natural-language"));
+    }
+
+    #[test]
+    fn goal_curator_multiline_natural_language_uses_full_text() {
+        let plan = StructuredGoalPlan::parse("review all goals\nand prioritize them").unwrap();
+        assert_eq!(plan.goals.len(), 1);
+        assert!(plan.goals[0].title.contains("review all goals"));
+    }
+
+    #[test]
+    fn goal_curator_mixed_structured_and_freetext_prefers_structured() {
+        let plan = StructuredGoalPlan::parse(
+            "some preamble\ngoal: Ship v2 | priority=2 | status=active | rationale=roadmap",
+        )
+        .unwrap();
+        assert_eq!(plan.goals.len(), 1);
+        assert_eq!(plan.goals[0].title, "Ship v2");
+    }
+
+    #[test]
+    fn goal_curator_plan_turn_succeeds_with_natural_language() {
+        let program = GoalCuratorProgram::try_default().unwrap();
+        let context = test_context("review top 5 goals");
+        let input = program.plan_turn(&context).unwrap();
+        assert!(input.objective.contains("1 goal updates"));
     }
 }
