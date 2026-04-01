@@ -28,29 +28,49 @@ function binaryPath() {
   return join(installDir(), name);
 }
 
-function latestReleaseUrl() {
+function findLatestAssetUrl() {
   const suffix = platformSuffix();
   if (!suffix) {
     console.error(`Unsupported platform: ${platform()}-${arch()}`);
     process.exit(1);
   }
-  // Use GitHub's redirect to latest release asset
-  return `https://github.com/${GITHUB_REPO}/releases/latest/download/simard-${suffix}.tar.gz`;
+  const asset = `simard-${suffix}.tar.gz`;
+
+  // Use gh CLI for authenticated access (works with private repos)
+  try {
+    const json = execFileSync("gh", [
+      "api", `repos/${GITHUB_REPO}/releases/latest`,
+      "--jq", `.assets[] | select(.name == "${asset}") | .url`
+    ], { encoding: "utf8" }).trim();
+    if (json) return json;
+  } catch (_) {}
+
+  // Fallback: try the public redirect URL
+  return `https://github.com/${GITHUB_REPO}/releases/latest/download/${asset}`;
 }
 
 function download(binPath) {
-  const url = latestReleaseUrl();
   const dir = installDir();
   mkdirSync(dir, { recursive: true });
   const tmp = join(dir, "simard-download.tar.gz");
 
+  const url = findLatestAssetUrl();
+  console.error(`Downloading simard from ${GITHUB_REPO}...`);
+
   try {
-    console.error(`Downloading simard from ${GITHUB_REPO}...`);
-    execFileSync(
-      "curl",
-      ["-sS", "-L", "--connect-timeout", "15", "--max-time", "120", "-o", tmp, url],
-      { stdio: "inherit" }
-    );
+    if (url.startsWith("https://api.github.com/")) {
+      // GitHub API URL — need Accept header for binary download
+      execFileSync("gh", [
+        "api", url,
+        "-H", "Accept: application/octet-stream",
+        "--output", tmp
+      ], { stdio: "inherit" });
+    } else {
+      execFileSync("curl", [
+        "-sS", "-L", "--connect-timeout", "15", "--max-time", "120",
+        "-o", tmp, url
+      ], { stdio: "inherit" });
+    }
     execFileSync("tar", ["xzf", tmp, "-C", dir], { stdio: "inherit" });
     if (platform() !== "win32") chmodSync(binPath, 0o755);
   } finally {
