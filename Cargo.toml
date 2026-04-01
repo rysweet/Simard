@@ -25,3 +25,4 @@ libc = "0.2"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+panic = "abort"

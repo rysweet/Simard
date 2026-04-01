@@ -157,7 +157,7 @@ fn download_and_replace(url: &str, version: &str) -> Result<(), Box<dyn std::err
 
     let new_bin = find_binary_in_dir(&tmp_dir)?;
 
-    // Replace current binary
+    // Replace current binary — try atomic rename first, fall back to copy
     println!("Replacing binary...");
     let backup = current_exe.with_extension("old");
     if backup.exists() {
@@ -166,8 +166,11 @@ fn download_and_replace(url: &str, version: &str) -> Result<(), Box<dyn std::err
     fs::rename(&current_exe, &backup)
         .map_err(|e| format!("Failed to backup current binary (try running with sudo): {e}"))?;
 
-    fs::copy(&new_bin, &current_exe)
-        .map_err(|e| format!("Failed to install new binary: {e}"))?;
+    // rename is O(1) on same filesystem; copy is fallback for cross-device
+    if fs::rename(&new_bin, &current_exe).is_err() {
+        fs::copy(&new_bin, &current_exe)
+            .map_err(|e| format!("Failed to install new binary: {e}"))?;
+    }
 
     #[cfg(unix)]
     {
@@ -185,15 +188,16 @@ fn download_and_replace(url: &str, version: &str) -> Result<(), Box<dyn std::err
 
 /// Find the simard binary in an extracted directory tree (max depth 3).
 fn find_binary_in_dir(dir: &std::path::Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    use std::ffi::OsStr;
     fn search(dir: &std::path::Path, depth: u32) -> Option<PathBuf> {
         if depth > 3 {
             return None;
         }
         let entries = fs::read_dir(dir).ok()?;
+        let target = OsStr::new("simard");
         for entry in entries.flatten() {
             let path = entry.path();
-            let name = entry.file_name().to_string_lossy().to_string();
-            if path.is_file() && name == "simard" {
+            if path.is_file() && entry.file_name() == target {
                 return Some(path);
             }
             if path.is_dir() {

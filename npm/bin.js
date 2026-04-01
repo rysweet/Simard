@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 "use strict";
 
-const { existsSync, mkdirSync, chmodSync, createWriteStream } = require("fs");
+const { existsSync, mkdirSync, chmodSync } = require("fs");
 const { execFileSync, execSync } = require("child_process");
 const { join } = require("path");
 const { homedir, platform, arch } = require("os");
@@ -53,7 +53,8 @@ function download(binPath) {
         if (attempt > 0) {
           const delay = Math.pow(2, attempt) * 1000;
           console.error(`Retrying download (attempt ${attempt + 1}/3)...`);
-          execSync(`sleep ${delay / 1000}`);
+          // Native sleep — avoids spawning a shell process
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
         }
         execFileSync(
           "curl",
@@ -77,7 +78,8 @@ function download(binPath) {
   } finally {
     // Clean up archive
     try {
-      require("fs").unlinkSync(tmp);
+      const { unlinkSync } = require("fs");
+      unlinkSync(tmp);
     } catch (_) {
       // ignore
     }
@@ -100,7 +102,7 @@ function main() {
   // Pass through all arguments to the native binary
   const args = process.argv.slice(2);
   try {
-    const result = execFileSync(bin, args, { stdio: "inherit" });
+    execFileSync(bin, args, { stdio: "inherit" });
     process.exit(0);
   } catch (err) {
     process.exit(err.status || 1);
