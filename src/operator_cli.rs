@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::agent_roles::AgentRole;
+use crate::agent_supervisor::{SubordinateConfig, spawn_subordinate};
 use crate::operator_commands::{
     run_bootstrap_probe, run_copilot_submit_probe, run_engineer_loop_probe,
     run_engineer_read_probe, run_goal_curation_probe, run_goal_curation_read_probe,
@@ -8,6 +10,11 @@ use crate::operator_commands::{
     run_review_probe, run_review_read_probe, run_terminal_probe, run_terminal_probe_from_file,
     run_terminal_read_probe, run_terminal_recipe_list_probe, run_terminal_recipe_probe,
     run_terminal_recipe_show_probe,
+};
+use crate::operator_commands_meeting::run_meeting_repl_command;
+use crate::operator_commands_ooda::run_ooda_daemon;
+use crate::self_relaunch::{
+    RelaunchConfig, all_gates_passed, build_canary, default_gates, handover, verify_canary,
 };
 
 const OPERATOR_CLI_HELP: &str = "\
@@ -25,6 +32,7 @@ Product modes:
   engineer read <topology> [state-root]
   meeting run <base-type> <topology> <objective> [state-root]
   meeting read <base-type> <topology> [state-root]
+  meeting repl <topic>
   goal-curation run <base-type> <topology> <objective> [state-root]
   goal-curation read <base-type> <topology> [state-root]
   improvement-curation run <base-type> <topology> <objective> [state-root]
@@ -33,6 +41,9 @@ Product modes:
   gym run <scenario-id>
   gym compare <scenario-id>
   gym run-suite <suite-id>
+  ooda run [--cycles=N] [state-root]
+  spawn <agent-name> <goal> <worktree-path> [--depth=N]
+  handover [--canary-dir=PATH] [--manifest-dir=PATH]
 
 Operator utilities:
   review run <base-type> <topology> <objective> [state-root]
@@ -64,13 +75,16 @@ where
         "improvement-curation" => dispatch_improvement_curation_command(args),
         "review" => dispatch_review_command(args),
         "gym" => dispatch_gym_command(args),
+        "ooda" => dispatch_ooda_command(args),
+        "spawn" => dispatch_spawn_command(args),
+        "handover" => dispatch_handover_command(args),
         "bootstrap" => dispatch_bootstrap_command(args),
         other => Err(format!("unsupported command '{other}'").into()),
     }
 }
 
 pub fn operator_cli_usage() -> &'static str {
-    "usage: simard <engineer|meeting|goal-curation|improvement-curation|gym|review|bootstrap> ..."
+    "usage: simard <engineer|meeting|goal-curation|improvement-curation|gym|ooda|spawn|handover|review|bootstrap> ..."
 }
 
 pub fn operator_cli_help() -> &'static str {
@@ -166,6 +180,11 @@ fn dispatch_meeting_command(
             let state_root = next_optional_path(&mut args);
             reject_extra_args(args)?;
             run_meeting_read_probe(&base_type, &topology, state_root)
+        }
+        "repl" => {
+            let topic = next_required(&mut args, "meeting topic")?;
+            reject_extra_args(args)?;
+            run_meeting_repl_command(&topic)
         }
         other => Err(format!("unsupported command 'meeting {other}'").into()),
     }
@@ -271,6 +290,33 @@ fn dispatch_gym_command(
     }
 }
 
+fn dispatch_ooda_command(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let subcommand = next_required(&mut args, "ooda command")?;
+    match subcommand.as_str() {
+        "run" => {
+            let mut max_cycles: u32 = 0; // 0 = infinite
+            let mut state_root: Option<PathBuf> = None;
+
+            for arg in args {
+                if let Some(n) = arg.strip_prefix("--cycles=") {
+                    max_cycles = n
+                        .parse()
+                        .map_err(|_| format!("invalid --cycles value: {n}"))?;
+                } else if state_root.is_none() {
+                    state_root = Some(PathBuf::from(arg));
+                } else {
+                    return Err(format!("unexpected argument: {arg}").into());
+                }
+            }
+
+            run_ooda_daemon(max_cycles, state_root)
+        }
+        other => Err(format!("unsupported command 'ooda {other}'").into()),
+    }
+}
+
 fn dispatch_bootstrap_command(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -287,6 +333,86 @@ fn dispatch_bootstrap_command(
         }
         other => Err(format!("unsupported command 'bootstrap {other}'").into()),
     }
+}
+
+fn dispatch_spawn_command(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let agent_name = next_required(&mut args, "agent name")?;
+    let goal = next_required(&mut args, "goal")?;
+    let worktree_path = next_required(&mut args, "worktree path")?;
+
+    let mut depth: u32 = 0;
+    for arg in args {
+        if let Some(n) = arg.strip_prefix("--depth=") {
+            depth = n
+                .parse()
+                .map_err(|_| format!("invalid --depth value: {n}"))?;
+        } else {
+            return Err(format!("unexpected argument: {arg}").into());
+        }
+    }
+
+    let config = SubordinateConfig {
+        agent_name: agent_name.clone(),
+        goal: goal.clone(),
+        role: AgentRole::Engineer,
+        worktree_path: PathBuf::from(&worktree_path),
+        current_depth: depth,
+    };
+
+    let handle = spawn_subordinate(&config)?;
+    println!(
+        "spawned subordinate '{}' with pid {} in {}",
+        handle.agent_name, handle.pid, worktree_path
+    );
+    Ok(())
+}
+
+fn dispatch_handover_command(
+    args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut canary_dir: Option<PathBuf> = None;
+    let mut manifest_dir: Option<PathBuf> = None;
+
+    for arg in args {
+        if let Some(v) = arg.strip_prefix("--canary-dir=") {
+            canary_dir = Some(PathBuf::from(v));
+        } else if let Some(v) = arg.strip_prefix("--manifest-dir=") {
+            manifest_dir = Some(PathBuf::from(v));
+        } else {
+            return Err(format!("unexpected argument: {arg}").into());
+        }
+    }
+
+    let mut config = RelaunchConfig::default();
+    if let Some(dir) = canary_dir {
+        config.canary_target_dir = dir;
+    }
+    if let Some(dir) = manifest_dir {
+        config.manifest_dir = dir;
+    }
+
+    eprintln!("building canary binary...");
+    let canary = build_canary(&config)?;
+    eprintln!("canary built at {}", canary.display());
+
+    eprintln!("running gate checks...");
+    let gates = default_gates();
+    let results = verify_canary(&canary, &gates, &config)?;
+    for r in &results {
+        eprintln!("  {r}");
+    }
+
+    if !all_gates_passed(&results) {
+        return Err("canary verification failed — aborting handover".into());
+    }
+
+    eprintln!("all gates passed — handing over to canary");
+    let pid = std::process::id();
+    handover(pid, &canary)?;
+    // handover does not return on success (exec replaces process)
+    Ok(())
 }
 
 fn next_required(

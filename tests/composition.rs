@@ -7,9 +7,9 @@ use serde_json::{Value, json};
 
 use simard::{
     AgentRole, BridgeErrorPayload, CognitiveMemoryBridge, HeartbeatStatus, InMemoryBridgeTransport,
-    SubordinateConfig, SubordinateIdentity, SubordinateProgress, assign_goal, check_heartbeat,
-    compose_identity, identity_for_role, kill_subordinate, max_subordinate_depth, poll_progress,
-    read_assigned_goal, report_progress, role_for_objective, spawn_subordinate,
+    SubordinateConfig, SubordinateHandle, SubordinateIdentity, SubordinateProgress, assign_goal,
+    check_heartbeat, compose_identity, identity_for_role, kill_subordinate, max_subordinate_depth,
+    poll_progress, read_assigned_goal, report_progress, role_for_objective, spawn_subordinate,
 };
 
 struct StoredFact {
@@ -72,6 +72,7 @@ fn mock_hive_bridge() -> CognitiveMemoryBridge {
     CognitiveMemoryBridge::new(Box::new(transport))
 }
 
+#[allow(dead_code)]
 fn test_config(name: &str, goal: &str) -> SubordinateConfig {
     SubordinateConfig {
         agent_name: name.to_string(),
@@ -87,6 +88,19 @@ fn now_epoch() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs()
+}
+
+/// Create a test handle without spawning a real process.
+fn test_handle(name: &str, goal: &str) -> SubordinateHandle {
+    SubordinateHandle {
+        pid: 0,
+        agent_name: name.to_string(),
+        goal: goal.to_string(),
+        worktree_path: PathBuf::from("/tmp/test-worktree"),
+        spawn_time: now_epoch(),
+        retry_count: 0,
+        killed: false,
+    }
 }
 
 fn progress(sub_id: &str, epoch: u64, outcome: Option<&str>) -> SubordinateProgress {
@@ -105,7 +119,7 @@ fn progress(sub_id: &str, epoch: u64, outcome: Option<&str>) -> SubordinateProgr
 
 #[test]
 fn spawn_mock_subordinate_and_verify_handle() {
-    let handle = spawn_subordinate(&test_config("sub-1", "build it")).expect("spawn");
+    let handle = test_handle("sub-1", "build it");
     assert_eq!(handle.agent_name, "sub-1");
     assert!(!handle.killed);
     assert!(handle.spawn_time > 0);
@@ -113,14 +127,14 @@ fn spawn_mock_subordinate_and_verify_handle() {
 
 #[test]
 fn heartbeat_dead_when_no_progress_reported() {
-    let handle = spawn_subordinate(&test_config("sub-hb-1", "goal")).expect("spawn");
+    let handle = test_handle("sub-hb-1", "goal");
     let status = check_heartbeat(&handle, &mock_hive_bridge()).expect("check");
     assert_eq!(status, HeartbeatStatus::Dead);
 }
 
 #[test]
 fn heartbeat_alive_after_progress_reported() {
-    let handle = spawn_subordinate(&test_config("sub-hb-2", "goal")).expect("spawn");
+    let handle = test_handle("sub-hb-2", "goal");
     let bridge = mock_hive_bridge();
     report_progress(
         "sub-hb-2",
@@ -136,7 +150,7 @@ fn heartbeat_alive_after_progress_reported() {
 
 #[test]
 fn heartbeat_stale_with_old_epoch() {
-    let handle = spawn_subordinate(&test_config("sub-hb-3", "goal")).expect("spawn");
+    let handle = test_handle("sub-hb-3", "goal");
     let bridge = mock_hive_bridge();
     report_progress("sub-hb-3", &progress("sub-hb-3", 1000, None), &bridge).expect("rpt");
     match check_heartbeat(&handle, &bridge).expect("check") {
@@ -147,7 +161,7 @@ fn heartbeat_stale_with_old_epoch() {
 
 #[test]
 fn heartbeat_dead_after_kill() {
-    let mut handle = spawn_subordinate(&test_config("sub-hb-4", "goal")).expect("spawn");
+    let mut handle = test_handle("sub-hb-4", "goal");
     let bridge = mock_hive_bridge();
     report_progress(
         "sub-hb-4",
@@ -320,7 +334,7 @@ fn spawn_rejects_depth_at_limit() {
 
 #[test]
 fn retry_policy_enforced() {
-    let mut handle = spawn_subordinate(&test_config("sub-retry", "flaky")).expect("spawn");
+    let mut handle = test_handle("sub-retry", "flaky");
     assert!(handle.can_retry());
     handle.record_retry();
     assert!(handle.can_retry());
@@ -330,7 +344,7 @@ fn retry_policy_enforced() {
 
 #[test]
 fn kill_idempotency_check() {
-    let mut handle = spawn_subordinate(&test_config("sub-kill", "doomed")).expect("spawn");
+    let mut handle = test_handle("sub-kill", "doomed");
     kill_subordinate(&mut handle).expect("first kill");
     let err = kill_subordinate(&mut handle).expect_err("second kill");
     assert!(err.to_string().contains("already killed"));

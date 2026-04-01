@@ -134,7 +134,10 @@ pub fn all_gates_passed(results: &[GateResult]) -> bool {
     results.iter().all(|r| r.passed)
 }
 
-/// Validate preconditions and approve handover from current process to canary.
+/// Validate preconditions and hand over execution to the canary binary.
+///
+/// On Unix, this uses `CommandExt::exec()` to replace the current process
+/// image with the canary binary. This function does not return on success.
 /// Returns error if pid is 0 or binary does not exist.
 pub fn handover(current_pid: u32, canary_binary: &Path) -> SimardResult<()> {
     if current_pid == 0 {
@@ -164,8 +167,32 @@ pub fn handover(current_pid: u32, canary_binary: &Path) -> SimardResult<()> {
         });
     }
 
-    // Phase 6: preconditions validated. Actual exec deferred to CLI integration.
-    Ok(())
+    // Replace the current process with the canary binary.
+    // On Unix, exec() replaces the process image — this does not return on success.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = Command::new(canary_binary).exec();
+        // exec() only returns on error.
+        Err(SimardError::BridgeCallFailed {
+            bridge: "self-relaunch".to_string(),
+            method: "handover".to_string(),
+            reason: format!("exec failed for '{}': {err}", canary_binary.display()),
+        })
+    }
+
+    // On non-Unix platforms, spawn the canary and exit the current process.
+    #[cfg(not(unix))]
+    {
+        Command::new(canary_binary)
+            .spawn()
+            .map_err(|e| SimardError::BridgeCallFailed {
+                bridge: "self-relaunch".to_string(),
+                method: "handover".to_string(),
+                reason: format!("failed to spawn canary '{}': {e}", canary_binary.display()),
+            })?;
+        std::process::exit(0);
+    }
 }
 
 fn run_gate(binary: &Path, gate: RelaunchGate, config: &RelaunchConfig) -> GateResult {

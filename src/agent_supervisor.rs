@@ -10,6 +10,7 @@
 
 use std::fmt::{self, Display, Formatter};
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::agent_goal_assignment::{SubordinateProgress, poll_progress};
@@ -151,27 +152,50 @@ impl Display for HeartbeatStatus {
     }
 }
 
-/// Spawn a subordinate agent.
+/// Spawn a subordinate agent as a real child process.
 ///
-/// In production, this would fork a new Simard process in the given
-/// worktree. For now, this creates the handle and records the spawn.
-/// The actual subprocess spawning will be wired in Phase 6 when we
-/// integrate with the CLI entrypoint.
+/// Forks a new Simard process via `Command::new(current_exe())` in the
+/// given worktree, passing `--agent-name`, `--goal`, and `--depth` as
+/// arguments. The child process inherits the parent's environment.
 ///
 /// The function validates the configuration (depth limits, non-empty
-/// fields) before creating the handle.
+/// fields) before spawning.
 pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<SubordinateHandle> {
     config.validate()?;
 
     let now = current_epoch_seconds()?;
 
-    // In a real implementation, this would use std::process::Command to
-    // fork a new simard process. For Phase 5, we create the handle with
-    // pid=0 to indicate a logical (not yet physically spawned) subordinate.
-    // The handle is fully functional for heartbeat tracking and goal
-    // assignment via the hive.
+    let exe = std::env::current_exe().map_err(|e| SimardError::BridgeSpawnFailed {
+        bridge: "subordinate".to_string(),
+        reason: format!("cannot resolve current executable: {e}"),
+    })?;
+
+    let child = Command::new(&exe)
+        .arg("engineer")
+        .arg("run")
+        .arg("local")
+        .arg(&config.worktree_path)
+        .arg(&config.goal)
+        .env("SIMARD_AGENT_NAME", &config.agent_name)
+        .env(
+            "SIMARD_SUBORDINATE_DEPTH",
+            (config.current_depth + 1).to_string(),
+        )
+        .current_dir(&config.worktree_path)
+        .spawn()
+        .map_err(|e| SimardError::BridgeSpawnFailed {
+            bridge: "subordinate".to_string(),
+            reason: format!(
+                "failed to spawn subordinate '{}' at '{}': {e}",
+                config.agent_name,
+                exe.display()
+            ),
+        })?;
+
+    let pid = child.id();
+
     Ok(SubordinateHandle {
-        pid: 0,
+        pid,
         agent_name: config.agent_name.clone(),
         goal: config.goal.clone(),
         worktree_path: config.worktree_path.clone(),
@@ -216,11 +240,12 @@ pub fn check_heartbeat(
     }
 }
 
-/// Kill a subordinate.
+/// Kill a subordinate by sending SIGTERM (Unix) or terminating the process.
 ///
-/// Marks the handle as killed. In production, this would also send
-/// SIGTERM to the process. The handle is mutated in place so the
-/// supervisor can track that it was explicitly terminated.
+/// Marks the handle as killed and sends a termination signal to the real
+/// child process. On Unix, this sends SIGTERM via `kill(2)`. The handle
+/// is mutated in place so the supervisor can track that it was explicitly
+/// terminated.
 pub fn kill_subordinate(handle: &mut SubordinateHandle) -> SimardResult<()> {
     if handle.killed {
         return Err(SimardError::InvalidIdentityComposition {
@@ -228,6 +253,26 @@ pub fn kill_subordinate(handle: &mut SubordinateHandle) -> SimardResult<()> {
             reason: "subordinate is already killed".to_string(),
         });
     }
+
+    // Send SIGTERM to the real child process (pid > 0).
+    if handle.pid > 0 {
+        #[cfg(unix)]
+        {
+            // SAFETY: kill(2) is safe to call with a valid PID and signal.
+            let ret = unsafe { libc::kill(handle.pid as libc::pid_t, libc::SIGTERM) };
+            if ret != 0 {
+                let err = std::io::Error::last_os_error();
+                // ESRCH means the process already exited — that's fine.
+                if err.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(SimardError::ActionExecutionFailed {
+                        action: format!("kill subordinate '{}'", handle.agent_name),
+                        reason: format!("SIGTERM to pid {} failed: {err}", handle.pid),
+                    });
+                }
+            }
+        }
+    }
+
     handle.killed = true;
     Ok(())
 }
@@ -271,14 +316,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn spawn_subordinate_succeeds_with_valid_config() {
-        let config = test_config();
-        let handle = spawn_subordinate(&config).expect("spawn should succeed");
-        assert_eq!(handle.agent_name, "sub-engineer-1");
-        assert_eq!(handle.goal, "implement the parser");
-        assert_eq!(handle.retry_count, 0);
-        assert!(!handle.killed);
+    /// Create a test handle without spawning a real process.
+    fn test_handle() -> SubordinateHandle {
+        SubordinateHandle {
+            pid: 0,
+            agent_name: "sub-engineer-1".to_string(),
+            goal: "implement the parser".to_string(),
+            worktree_path: PathBuf::from("/tmp/test-worktree"),
+            spawn_time: 1_700_000_000,
+            retry_count: 0,
+            killed: false,
+        }
     }
 
     #[test]
@@ -315,9 +363,17 @@ mod tests {
     }
 
     #[test]
+    fn handle_fields_are_correct() {
+        let handle = test_handle();
+        assert_eq!(handle.agent_name, "sub-engineer-1");
+        assert_eq!(handle.goal, "implement the parser");
+        assert_eq!(handle.retry_count, 0);
+        assert!(!handle.killed);
+    }
+
+    #[test]
     fn kill_subordinate_marks_killed() {
-        let config = test_config();
-        let mut handle = spawn_subordinate(&config).expect("spawn should succeed");
+        let mut handle = test_handle();
         assert!(!handle.killed);
         kill_subordinate(&mut handle).expect("kill should succeed");
         assert!(handle.killed);
@@ -325,8 +381,7 @@ mod tests {
 
     #[test]
     fn kill_already_killed_subordinate_fails() {
-        let config = test_config();
-        let mut handle = spawn_subordinate(&config).expect("spawn should succeed");
+        let mut handle = test_handle();
         kill_subordinate(&mut handle).expect("first kill should succeed");
         let err = kill_subordinate(&mut handle).expect_err("second kill should fail");
         assert!(matches!(
@@ -337,8 +392,7 @@ mod tests {
 
     #[test]
     fn retry_tracking_works() {
-        let config = test_config();
-        let mut handle = spawn_subordinate(&config).expect("spawn should succeed");
+        let mut handle = test_handle();
         assert!(handle.can_retry());
         assert_eq!(handle.record_retry(), 1);
         assert!(handle.can_retry());
@@ -348,8 +402,7 @@ mod tests {
 
     #[test]
     fn handle_display_is_readable() {
-        let config = test_config();
-        let handle = spawn_subordinate(&config).expect("spawn should succeed");
+        let handle = test_handle();
         let display = handle.to_string();
         assert!(display.contains("sub-engineer-1"));
         assert!(display.contains("retries=0"));

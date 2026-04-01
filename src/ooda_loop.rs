@@ -179,9 +179,18 @@ pub fn observe(state: &OodaState, bridges: &OodaBridges) -> SimardResult<Observa
             use crate::gym_scoring::suite_score_from_result;
             Some(suite_score_from_result(&result))
         }
-        Err(_) => None,
+        Err(e) => {
+            eprintln!("[simard] OODA observe: gym bridge unavailable: {e}");
+            None
+        }
     };
-    let memory_stats = bridges.memory.get_statistics().unwrap_or_default();
+    let memory_stats = match bridges.memory.get_statistics() {
+        Ok(stats) => stats,
+        Err(e) => {
+            eprintln!("[simard] OODA observe: memory bridge unavailable: {e}");
+            CognitiveStatistics::default()
+        }
+    };
     Ok(Observation {
         goal_statuses,
         gym_health,
@@ -304,7 +313,6 @@ pub fn run_ooda_cycle(
     state.current_phase = OodaPhase::Act;
     let outcomes = act(&planned_actions, bridges, state)?;
     state.cycle_count += 1;
-    state.last_observation = Some(observation.clone());
     Ok(CycleReport {
         cycle_number: state.cycle_count,
         observation,

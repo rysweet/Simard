@@ -94,13 +94,9 @@ impl MemoryStore for CognitiveBridgeMemoryStore {
         // Always persist to file fallback for handoff/recovery.
         self.fallback.put(record.clone())?;
 
-        // Also store in cognitive bridge for rich queries.
-        if let Err(e) = self.store_as_fact(&record) {
-            eprintln!(
-                "[simard] cognitive bridge write failed for key '{}': {e}",
-                record.key
-            );
-        }
+        // Store in cognitive bridge — propagate errors instead of silently
+        // falling back (Pillar 11: no silent memory fallbacks).
+        self.store_as_fact(&record)?;
 
         // Maintain local index for list/count — O(1) insert/overwrite via HashMap.
         let mut records = self

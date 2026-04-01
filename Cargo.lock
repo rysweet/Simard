@@ -2882,9 +2882,11 @@ dependencies = [
 
 [[package]]
 name = "simard"
-version = "0.6.0"
+version = "0.6.2"
 dependencies = [
  "amplihack-memory",
+ "libc",
+ "rusqlite",
  "rustyclawd-core",
  "rustyclawd-tools",
  "serde",

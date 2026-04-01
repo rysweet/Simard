@@ -10,7 +10,7 @@ Replace the sections below with information about your project.
 
 ---
 
-## Project: issue-127-fix-all-3-critical-gaps-in-the-simard-stub-removal
+## Project: Simard
 
 ## Overview
 

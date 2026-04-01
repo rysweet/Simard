@@ -1,8 +1,12 @@
+use std::io::{self, BufReader};
 use std::path::PathBuf;
 
+use crate::bridge_subprocess::InMemoryBridgeTransport;
 use crate::goals::{FileBackedGoalStore, GoalStatus, GoalStore};
 use crate::improvements::PersistedImprovementRecord;
+use crate::meeting_repl::run_meeting_repl;
 use crate::meetings::PersistedMeetingRecord;
+use crate::memory_bridge::CognitiveMemoryBridge;
 use crate::operator_commands::{
     GoalRegisterView, print_display, print_goal_section, print_meeting_goal_section,
     print_string_section, print_text, prompt_root, resolved_goal_curation_state_root,
@@ -332,5 +336,35 @@ pub fn run_improvement_curation_read_probe(
     print_goal_section(&goal_records, GoalStatus::Active, "Active");
     print_goal_section(&goal_records, GoalStatus::Proposed, "Proposed");
     print_text("Latest improvement record", parsed_record.concise_record());
+    Ok(())
+}
+
+pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // Use an in-memory bridge transport for the REPL since the Python bridge
+    // may not be running. The REPL's primary purpose is interactive capture;
+    // durable persistence happens via the session handoff store.
+    let transport = InMemoryBridgeTransport::new("meeting-repl", |method, _params| match method {
+        "memory.record_sensory" => Ok(serde_json::json!({"id": "sen_repl"})),
+        "memory.store_episode" => Ok(serde_json::json!({"id": "epi_repl"})),
+        "memory.store_fact" => Ok(serde_json::json!({"id": "sem_repl"})),
+        "memory.store_prospective" => Ok(serde_json::json!({"id": "pro_repl"})),
+        _ => Err(crate::bridge::BridgeErrorPayload {
+            code: -32601,
+            message: format!("unknown method: {method}"),
+        }),
+    });
+    let bridge = CognitiveMemoryBridge::new(Box::new(transport));
+
+    let stdin = io::stdin();
+    let mut reader = BufReader::new(stdin.lock());
+    let stdout = io::stdout();
+    let mut writer = stdout.lock();
+
+    let session = run_meeting_repl(topic, &bridge, &mut reader, &mut writer)?;
+
+    println!("Meeting closed.");
+    println!("Decisions: {}", session.decisions.len());
+    println!("Action items: {}", session.action_items.len());
+    println!("Notes: {}", session.notes.len());
     Ok(())
 }

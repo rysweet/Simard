@@ -108,13 +108,12 @@ where
         })?;
     }
 
-    let payload =
-        serde_json::to_vec_pretty(value).map_err(|error| SimardError::PersistentStoreIo {
-            store: store.to_string(),
-            action: "serialize".to_string(),
-            path: path.to_path_buf(),
-            reason: error.to_string(),
-        })?;
+    let payload = serde_json::to_vec(value).map_err(|error| SimardError::PersistentStoreIo {
+        store: store.to_string(),
+        action: "serialize".to_string(),
+        path: path.to_path_buf(),
+        reason: error.to_string(),
+    })?;
     let mut temp_file = TempFileGuard::new(store, path)?;
     temp_file
         .file_mut()?

@@ -33,6 +33,7 @@ pub mod improvements;
 pub mod knowledge_bridge;
 pub mod knowledge_context;
 pub mod meeting_facilitator;
+pub mod meeting_repl;
 pub mod meetings;
 pub mod memory;
 pub mod memory_bridge;
@@ -49,6 +50,7 @@ pub mod operator_commands;
 mod operator_commands_engineer;
 mod operator_commands_gym;
 mod operator_commands_meeting;
+mod operator_commands_ooda;
 mod operator_commands_review;
 mod operator_commands_terminal;
 mod persistence;
@@ -166,11 +168,13 @@ pub use meeting_facilitator::{
     ActionItem, MeetingDecision, MeetingSession, MeetingSessionStatus, add_note, close_meeting,
     record_action_item, record_decision, start_meeting,
 };
+pub use meeting_repl::{MeetingCommand, parse_meeting_command, run_meeting_repl};
 pub use meetings::{
     PersistedMeetingGoalUpdate, PersistedMeetingRecord, looks_like_persisted_meeting_record,
 };
 pub use memory::{
     FileBackedMemoryStore, InMemoryMemoryStore, MemoryRecord, MemoryScope, MemoryStore,
+    SqliteMemoryStore,
 };
 pub use memory_bridge::CognitiveMemoryBridge;
 pub use memory_bridge_adapter::CognitiveBridgeMemoryStore;
