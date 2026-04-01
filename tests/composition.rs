@@ -72,6 +72,7 @@ fn mock_hive_bridge() -> CognitiveMemoryBridge {
     CognitiveMemoryBridge::new(Box::new(transport))
 }
 
+#[allow(dead_code)]
 fn test_config(name: &str, goal: &str) -> SubordinateConfig {
     SubordinateConfig {
         agent_name: name.to_string(),
