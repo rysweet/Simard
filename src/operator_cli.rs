@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use crate::agent_roles::AgentRole;
 use crate::agent_supervisor::{SubordinateConfig, spawn_subordinate};
+use crate::cmd_install::handle_install;
+use crate::cmd_self_update::handle_self_update;
 use crate::operator_commands::{
     run_bootstrap_probe, run_copilot_submit_probe, run_engineer_loop_probe,
     run_engineer_read_probe, run_goal_curation_probe, run_goal_curation_read_probe,
@@ -13,8 +15,6 @@ use crate::operator_commands::{
 };
 use crate::operator_commands_meeting::run_meeting_repl_command;
 use crate::operator_commands_ooda::run_ooda_daemon;
-use crate::cmd_install::handle_install;
-use crate::cmd_self_update::handle_self_update;
 use crate::self_relaunch::{
     RelaunchConfig, all_gates_passed, build_canary, default_gates, handover, verify_canary,
 };
@@ -469,7 +469,10 @@ mod tests {
     #[test]
     fn test_help_text_contains_update_command() {
         let help = operator_cli_help();
-        assert!(help.contains("update"), "help should mention 'update' command");
+        assert!(
+            help.contains("update"),
+            "help should mention 'update' command"
+        );
     }
 
     #[test]
@@ -490,41 +493,43 @@ mod tests {
 
     #[test]
     fn test_unknown_command_returns_error() {
-        let result = dispatch_operator_cli(vec!["nonexistent-cmd".to_string()].into_iter());
+        let result = dispatch_operator_cli(vec!["nonexistent-cmd".to_string()]);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported command"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported command")
+        );
     }
 
     #[test]
     fn test_update_rejects_extra_args() {
-        let result = dispatch_operator_cli(
-            vec!["update".to_string(), "extra".to_string()].into_iter(),
-        );
+        let result = dispatch_operator_cli(vec!["update".to_string(), "extra".to_string()]);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("unexpected trailing arguments"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected trailing arguments")
+        );
     }
 
     #[test]
     fn test_install_rejects_extra_args() {
-        let result = dispatch_operator_cli(
-            vec!["install".to_string(), "extra".to_string()].into_iter(),
-        );
+        let result = dispatch_operator_cli(vec!["install".to_string(), "extra".to_string()]);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("unexpected trailing arguments"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected trailing arguments")
+        );
     }
 
     #[test]
     fn test_help_flag_does_not_error() {
-        let result = dispatch_operator_cli(vec!["--help".to_string()].into_iter());
+        let result = dispatch_operator_cli(vec!["--help".to_string()]);
         assert!(result.is_ok());
     }
 

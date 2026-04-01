@@ -26,11 +26,11 @@ pub fn handle_install() -> Result<(), Box<dyn std::error::Error>> {
     let dest = dest_dir.join("simard");
 
     // If source and dest are the same file, nothing to do
-    if let (Ok(src_canon), Ok(dst_canon)) = (current_exe.canonicalize(), dest.canonicalize()) {
-        if src_canon == dst_canon {
-            println!("simard is already installed at {}", dest.display());
-            return Ok(());
-        }
+    if let (Ok(src_canon), Ok(dst_canon)) = (current_exe.canonicalize(), dest.canonicalize())
+        && src_canon == dst_canon
+    {
+        println!("simard is already installed at {}", dest.display());
+        return Ok(());
     }
 
     fs::copy(&current_exe, &dest)
@@ -89,7 +89,10 @@ mod tests {
         let dir = install_dir();
         let components: Vec<_> = dir.components().collect();
         let len = components.len();
-        assert!(len >= 3, "install dir should have at least 3 path components");
+        assert!(
+            len >= 3,
+            "install dir should have at least 3 path components"
+        );
         let last = components[len - 1]
             .as_os_str()
             .to_string_lossy()
@@ -118,7 +121,10 @@ mod tests {
         fs::copy(&current_exe, &dest).unwrap();
 
         assert!(dest.exists(), "binary should exist after copy");
-        assert!(dest.metadata().unwrap().len() > 0, "binary should not be empty");
+        assert!(
+            dest.metadata().unwrap().len() > 0,
+            "binary should not be empty"
+        );
 
         fs::remove_dir_all(&tmp).unwrap();
     }

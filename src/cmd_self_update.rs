@@ -88,7 +88,8 @@ fn find_latest_release() -> Result<(String, String), Box<dyn std::error::Error>>
 
 /// Download and extract the binary, replacing the current executable.
 fn download_and_replace(url: &str, version: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let current_exe = std::env::current_exe().map_err(|e| format!("Cannot determine current executable: {e}"))?;
+    let current_exe =
+        std::env::current_exe().map_err(|e| format!("Cannot determine current executable: {e}"))?;
     let tmp_dir = std::env::temp_dir().join(format!("simard-update-{}", std::process::id()));
     fs::create_dir_all(&tmp_dir)?;
     let archive_path = tmp_dir.join("simard.tar.gz");
@@ -101,7 +102,10 @@ fn download_and_replace(url: &str, version: &str) -> Result<(), Box<dyn std::err
     for attempt in 0..3u32 {
         if attempt > 0 {
             let delay = 1u64 << attempt; // 2s, 4s
-            println!("Retrying download (attempt {}/3, waiting {delay}s)...", attempt + 1);
+            println!(
+                "Retrying download (attempt {}/3, waiting {delay}s)...",
+                attempt + 1
+            );
             std::thread::sleep(std::time::Duration::from_secs(delay));
         }
         match std::process::Command::new("curl")
@@ -200,10 +204,10 @@ fn find_binary_in_dir(dir: &std::path::Path) -> Result<PathBuf, Box<dyn std::err
             if path.is_file() && entry.file_name() == target {
                 return Some(path);
             }
-            if path.is_dir() {
-                if let Some(found) = search(&path, depth + 1) {
-                    return Some(found);
-                }
+            if path.is_dir()
+                && let Some(found) = search(&path, depth + 1)
+            {
+                return Some(found);
             }
         }
         None
@@ -340,8 +344,7 @@ mod tests {
 
     #[test]
     fn test_find_binary_ignores_directories_named_simard() {
-        let tmp =
-            std::env::temp_dir().join(format!("simard-test-dirname-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("simard-test-dirname-{}", std::process::id()));
         fs::create_dir_all(&tmp).unwrap();
         // Create a directory named "simard" (not a file)
         fs::create_dir_all(tmp.join("simard")).unwrap();
