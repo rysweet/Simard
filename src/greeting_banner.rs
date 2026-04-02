@@ -140,7 +140,6 @@ fn fetch_gh_count(args: &[&str]) -> String {
         .spawn()
     {
         Ok(child) => {
-            // Wait with timeout
             let output = child.wait_with_output();
             match output {
                 Ok(o) if o.status.success() => {
