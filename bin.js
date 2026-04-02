@@ -52,7 +52,7 @@ function download(binPath) {
     try { unlinkSync(tarball); } catch (_) {}
   }
 
-  if (!existsSync(binPath)) { console.error(`Binary not found at ${binPath}`); process.exit(1); }
+  if (!existsSync(binPath)) { console.error(`binary not found at ${binPath}`); process.exit(1); }
 }
 
 if (process.argv[2] === "install") {
