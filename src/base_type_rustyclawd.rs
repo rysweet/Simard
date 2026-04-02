@@ -79,9 +79,13 @@ impl BaseTypeFactory for RustyClawdAdapter {
             is_closed: false,
             client: None,
             rt: None,
+            conversation_history: Vec::new(),
         }))
     }
 }
+
+/// Maximum conversation turns to retain in history (prevents unbounded growth).
+const MAX_HISTORY_MESSAGES: usize = 100;
 
 struct RustyClawdSession {
     descriptor: BaseTypeDescriptor,
@@ -93,6 +97,8 @@ struct RustyClawdSession {
     /// Tokio runtime for bridging async rustyclawd client calls into sync
     /// BaseTypeSession methods.
     rt: Option<tokio::runtime::Runtime>,
+    /// Accumulated conversation history for multi-turn sessions (meetings, etc.).
+    conversation_history: Vec<RcMessage>,
 }
 
 impl fmt::Debug for RustyClawdSession {
@@ -163,7 +169,14 @@ impl BaseTypeSession for RustyClawdSession {
 
         let (execution_summary, process_evidence) =
             if let (Some(client), Some(rt)) = (self.client.as_ref(), self.rt.as_ref()) {
-                execute_rustyclawd_client(client, rt, &input, &self.descriptor, &self.request)?
+                execute_rustyclawd_client(
+                    client,
+                    rt,
+                    &input,
+                    &self.descriptor,
+                    &self.request,
+                    &mut self.conversation_history,
+                )?
             } else {
                 // Fallback: no API key available, run via process spawn.
                 execute_rustyclawd_process_fallback(&input, &self.descriptor, &self.request)?
@@ -267,19 +280,28 @@ fn execute_rustyclawd_client(
     input: &BaseTypeTurnInput,
     descriptor: &BaseTypeDescriptor,
     request: &BaseTypeSessionRequest,
+    conversation_history: &mut Vec<RcMessage>,
 ) -> SimardResult<(String, Vec<String>)> {
     let system_prompt = if input.identity_context.is_empty() && input.prompt_preamble.is_empty() {
-        "You are a software engineering agent. Execute the given objective using your available tools.".to_string()
+        "You are Simard, an autonomous engineer. Execute the given objective using your available tools.".to_string()
     } else {
-        format!("{}\n---\n{}", input.prompt_preamble, input.identity_context,)
+        format!("{}\n---\n{}", input.prompt_preamble, input.identity_context)
     };
 
-    let messages = vec![RcMessage::user(&input.objective)];
+    // Append user message to conversation history
+    conversation_history.push(RcMessage::user(&input.objective));
+
+    // Truncate if history exceeds max
+    if conversation_history.len() > MAX_HISTORY_MESSAGES {
+        let drain_count = conversation_history.len() - MAX_HISTORY_MESSAGES;
+        conversation_history.drain(..drain_count);
+    }
 
     let tools = rustyclawd_tool_definitions();
-    let api_request = CreateMessageRequest::new("claude-sonnet-4-6", messages, 8192)
-        .with_system(system_prompt)
-        .with_tools(tools);
+    let api_request =
+        CreateMessageRequest::new("claude-sonnet-4-6", conversation_history.clone(), 8192)
+            .with_system(system_prompt)
+            .with_tools(tools);
 
     let response = rt.block_on(async {
         client
@@ -315,8 +337,12 @@ fn execute_rustyclawd_client(
                 ),
             ];
 
+            // Append assistant response to conversation history for multi-turn.
+            if !text_output.is_empty() {
+                conversation_history.push(RcMessage::assistant(&text_output));
+            }
+
             // Return the LLM's actual text response as the execution summary.
-            // Callers (meeting mode, engineer mode, etc.) display this directly.
             Ok((text_output, evidence))
         }
         Err(e) => Err(SimardError::AdapterInvocationFailed {
@@ -344,6 +370,9 @@ async fn execute_tool_locally(
 
             let mut cmd = tokio::process::Command::new("sh");
             cmd.args(["-c", command]);
+            // Pipe stdout/stderr so tool output doesn't leak to the terminal.
+            cmd.stdout(std::process::Stdio::piped());
+            cmd.stderr(std::process::Stdio::piped());
             let config = rustyclawd_tools::ProcessSpawnConfig::default();
             let child = rustyclawd_tools::spawn_with_isolation(cmd, &config)
                 .await

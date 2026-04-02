@@ -81,10 +81,17 @@ pub fn print_greeting_banner(bridge: Option<&CognitiveMemoryBridge>) {
     }
 }
 
-/// Count .rs source files under src/.
+/// Count .rs source files under src/. Uses compile-time repo root so this
+/// works regardless of the CWD at runtime.
 fn count_source_files() -> String {
+    let compile_time_src = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    let src_dir = if std::path::Path::new(compile_time_src).is_dir() {
+        compile_time_src
+    } else {
+        "src"
+    };
     match Command::new("find")
-        .args(["src", "-name", "*.rs", "-type", "f"])
+        .args([src_dir, "-name", "*.rs", "-type", "f"])
         .output()
     {
         Ok(output) => {
