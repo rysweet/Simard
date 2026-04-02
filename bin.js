@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 "use strict";
 
-const { existsSync, mkdirSync, chmodSync, unlinkSync } = require("fs");
+const { existsSync, mkdirSync, chmodSync, unlinkSync, readFileSync, writeFileSync } = require("fs");
 const { execFileSync } = require("child_process");
 const { join } = require("path");
 const { homedir, platform, arch } = require("os");
@@ -25,20 +25,38 @@ function binaryPath() {
   return join(installDir(), platform() === "win32" ? "simard.exe" : "simard");
 }
 
+function versionFile() { return join(installDir(), ".version"); }
+
 function assetName() {
   const suffix = platformSuffix();
   if (!suffix) { console.error(`Unsupported platform: ${platform()}-${arch()}`); process.exit(1); }
   return `simard-${suffix}.tar.gz`;
 }
 
-function download(binPath) {
+function latestTag() {
+  try {
+    return execFileSync("gh", [
+      "api", `repos/${GITHUB_REPO}/releases/latest`, "--jq", ".tag_name"
+    ], { encoding: "utf8", timeout: 10000 }).trim();
+  } catch (_) {
+    return null;
+  }
+}
+
+function installedVersion() {
+  try { return readFileSync(versionFile(), "utf8").trim(); } catch (_) { return null; }
+}
+
+function download(binPath, tag) {
   const dir = installDir();
   mkdirSync(dir, { recursive: true });
   const asset = assetName();
-  console.error(`Downloading simard from ${GITHUB_REPO}...`);
+  console.error(`Downloading simard ${tag || "latest"} from ${GITHUB_REPO}...`);
 
   try {
-    execFileSync("gh", ["release", "download", "--repo", GITHUB_REPO, "--pattern", asset, "--dir", dir, "--clobber"], { stdio: "inherit" });
+    const args = ["release", "download", "--repo", GITHUB_REPO, "--pattern", asset, "--dir", dir, "--clobber"];
+    if (tag) args.push("--tag", tag);
+    execFileSync("gh", args, { stdio: "inherit" });
   } catch (_) {
     const url = `https://github.com/${GITHUB_REPO}/releases/latest/download/${asset}`;
     execFileSync("curl", ["-sS", "-L", "--fail", "-o", join(dir, asset), url], { stdio: "inherit" });
@@ -52,18 +70,36 @@ function download(binPath) {
     try { unlinkSync(tarball); } catch (_) {}
   }
 
-  if (!existsSync(binPath)) { console.error(`binary not found at ${binPath}`); process.exit(1); }
+  if (!existsSync(binPath)) { console.error(`Binary not found at ${binPath}`); process.exit(1); }
+  if (tag) writeFileSync(versionFile(), tag);
 }
 
+// "install" subcommand
 if (process.argv[2] === "install") {
   const bin = binaryPath();
+  const tag = latestTag();
   console.error(`Installing simard to ${bin}...`);
-  download(bin);
-  console.error(`Installed: ${bin}`);
+  download(bin, tag);
+  console.error(`Installed: ${bin} (${tag || "latest"})`);
   process.exit(0);
 }
 
+// Auto-update check: if binary exists, compare installed vs latest
 const bin = binaryPath();
-if (!existsSync(bin)) download(bin);
+if (existsSync(bin)) {
+  const latest = latestTag();
+  const installed = installedVersion();
+  if (latest && installed && latest !== installed) {
+    console.error(`Updating simard: ${installed} → ${latest}`);
+    download(bin, latest);
+  } else if (!installed && latest) {
+    // No version file — write it so next run can compare
+    writeFileSync(versionFile(), latest);
+  }
+} else {
+  const tag = latestTag();
+  download(bin, tag);
+}
+
 try { execFileSync(bin, process.argv.slice(2), { stdio: "inherit" }); }
 catch (err) { process.exit(err.status || 1); }
