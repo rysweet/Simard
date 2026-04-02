@@ -1,10 +1,15 @@
-//! Interactive meeting REPL — reads operator input from stdin and builds a
-//! `MeetingSession` with decisions, action items, and notes.
+//! Interactive meeting REPL — a **conversation** with Simard that also captures
+//! decisions, action items, and notes.
+//!
+//! Natural-language lines are sent to `claude -p` (the Claude Code CLI) for a
+//! conversational response. Structured slash-commands (`/decision`, `/action`,
+//! `/note`, `/close`) bypass the agent and record directly.
 //!
 //! The REPL produces a durable `MeetingSession` (with `MeetingRecord` summary)
 //! when the operator types `/close` or stdin reaches EOF.
 
 use std::io::{BufRead, Write};
+use std::process::Command;
 
 use crate::error::{SimardError, SimardResult};
 use crate::meeting_facilitator::{
@@ -29,8 +34,10 @@ pub enum MeetingCommand {
         owner: String,
         priority: u32,
     },
-    /// `/note <text>`
+    /// `/note <text>` — explicit note (not sent to agent)
     Note(String),
+    /// Natural language — sent to the agent for a conversational response
+    Conversation(String),
     /// `/close` — end the meeting
     Close,
     /// `/help` — show available commands
@@ -100,13 +107,13 @@ pub fn parse_meeting_command(line: &str) -> MeetingCommand {
         return MeetingCommand::Help;
     }
 
-    // Any non-command input is natural language — treat as a note.
-    // Simard is an agentic system; she accepts free-form conversation.
-    MeetingCommand::Note(trimmed.to_string())
+    // Any non-command input is natural language — route to the agent for
+    // a conversational response. The response is also captured as a note.
+    MeetingCommand::Conversation(trimmed.to_string())
 }
 
 const HELP_TEXT: &str = "\
-Simard meeting — natural language conversation is always accepted.
+Simard meeting — speak naturally and Simard will respond.
 
 Commands (optional):
   /decision <description> | <rationale>   Record a formal decision
@@ -115,20 +122,66 @@ Commands (optional):
   /close                                  Close the meeting and persist summary
   /help                                   Show this help
 
-Anything else you type is captured as meeting notes.
+Anything else you type is a conversation with Simard.
 ";
+
+/// Send a message to the `claude` CLI and return the response text.
+/// Maintains conversation history via `--resume` session flag.
+fn converse_with_claude(
+    message: &str,
+    topic: &str,
+    system_prompt: &str,
+    history: &mut Vec<(String, String)>,
+) -> String {
+    // Build context from conversation history
+    let mut context = format!(
+        "{}\n\nMeeting topic: {}\n\nConversation so far:\n",
+        system_prompt, topic
+    );
+    for (user, assistant) in history.iter() {
+        context.push_str(&format!("Operator: {}\nSimard: {}\n", user, assistant));
+    }
+    context.push_str(&format!("Operator: {}\nSimard:", message));
+
+    let result = Command::new("claude")
+        .args([
+            "-p",
+            &context,
+            "--output-format",
+            "text",
+            "--dangerously-skip-permissions",
+        ])
+        .output();
+
+    match result {
+        Ok(output) if output.status.success() => {
+            let response = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            history.push((message.to_string(), response.clone()));
+            response
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            format!("[claude error: {}]", stderr.trim())
+        }
+        Err(e) => format!("[could not reach claude: {e}]"),
+    }
+}
 
 /// Run the interactive meeting REPL, reading from `input` and writing to `output`.
 ///
-/// Returns the closed `MeetingSession` with its durable summary, or an error
-/// if the meeting could not be started or closed.
+/// Natural-language lines are sent to the `claude` CLI for conversational
+/// responses. Structured slash-commands bypass the agent.
+///
+/// Returns the closed `MeetingSession` with its durable summary.
 pub fn run_meeting_repl<R: BufRead, W: Write>(
     topic: &str,
     bridge: &CognitiveMemoryBridge,
+    meeting_system_prompt: &str,
     input: &mut R,
     output: &mut W,
 ) -> SimardResult<MeetingSession> {
     let mut session = start_meeting(topic, bridge)?;
+    let mut conversation_history: Vec<(String, String)> = Vec::new();
 
     writeln!(
         output,
@@ -139,7 +192,7 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
     writeln!(output, "Topic: {topic}").ok();
     writeln!(
         output,
-        "Type naturally — everything you say is captured. /help for commands, /close to end."
+        "Simard is listening. Speak naturally — /help for commands, /close to end."
     )
     .ok();
     writeln!(output).ok();
@@ -212,6 +265,17 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                     writeln!(output, "Error: {e}").ok();
                 }
             },
+            MeetingCommand::Conversation(text) => {
+                add_note(&mut session, &format!("operator: {text}")).ok();
+                let response = converse_with_claude(
+                    &text,
+                    topic,
+                    meeting_system_prompt,
+                    &mut conversation_history,
+                );
+                writeln!(output, "\n{response}\n").ok();
+                add_note(&mut session, &format!("simard: {response}")).ok();
+            }
             MeetingCommand::Close => {
                 writeln!(output, "Closing meeting.").ok();
                 break;
@@ -258,6 +322,8 @@ mod tests {
             });
         CognitiveMemoryBridge::new(Box::new(transport))
     }
+
+    // --- Parser tests ---
 
     #[test]
     fn parse_decision_command() {
@@ -319,13 +385,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_natural_language_as_note() {
-        // Natural language is accepted as a note, not rejected as unknown
+    fn parse_natural_language_as_conversation() {
         assert_eq!(
             parse_meeting_command("hello world"),
-            MeetingCommand::Note("hello world".to_string())
+            MeetingCommand::Conversation("hello world".to_string())
         );
     }
+
+    // --- REPL tests (no agent — legacy note-taking mode) ---
 
     #[test]
     fn repl_records_decision_and_closes() {
@@ -335,7 +402,7 @@ mod tests {
         let mut output = Vec::new();
 
         let session =
-            run_meeting_repl("Sprint planning", &bridge, &mut reader, &mut output).unwrap();
+            run_meeting_repl("Sprint planning", &bridge, "", &mut reader, &mut output).unwrap();
 
         assert_eq!(session.status, MeetingSessionStatus::Closed);
         assert_eq!(session.decisions.len(), 1);
@@ -350,7 +417,7 @@ mod tests {
         let mut reader = &input[..];
         let mut output = Vec::new();
 
-        let session = run_meeting_repl("Retro", &bridge, &mut reader, &mut output).unwrap();
+        let session = run_meeting_repl("Retro", &bridge, "", &mut reader, &mut output).unwrap();
 
         assert_eq!(session.status, MeetingSessionStatus::Closed);
         assert_eq!(session.action_items.len(), 1);
@@ -366,7 +433,7 @@ mod tests {
         let mut reader = &input[..];
         let mut output = Vec::new();
 
-        let session = run_meeting_repl("Standup", &bridge, &mut reader, &mut output).unwrap();
+        let session = run_meeting_repl("Standup", &bridge, "", &mut reader, &mut output).unwrap();
 
         assert_eq!(session.status, MeetingSessionStatus::Closed);
         assert_eq!(session.notes, vec!["Check CI before merge"]);
@@ -379,7 +446,7 @@ mod tests {
         let mut reader = &input[..];
         let mut output = Vec::new();
 
-        run_meeting_repl("Architecture", &bridge, &mut reader, &mut output).unwrap();
+        run_meeting_repl("Architecture", &bridge, "", &mut reader, &mut output).unwrap();
 
         let output_str = String::from_utf8(output).unwrap();
         assert!(output_str.contains("Meeting record:"));
@@ -396,7 +463,8 @@ mod tests {
         let mut reader = &input[..];
         let mut output = Vec::new();
 
-        let session = run_meeting_repl("Sprint review", &bridge, &mut reader, &mut output).unwrap();
+        let session =
+            run_meeting_repl("Sprint review", &bridge, "", &mut reader, &mut output).unwrap();
 
         assert_eq!(session.status, MeetingSessionStatus::Closed);
         assert_eq!(session.decisions.len(), 1);
@@ -411,7 +479,7 @@ mod tests {
         let mut reader = &input[..];
         let mut output = Vec::new();
 
-        run_meeting_repl("Help test", &bridge, &mut reader, &mut output).unwrap();
+        run_meeting_repl("Help test", &bridge, "", &mut reader, &mut output).unwrap();
 
         let output_str = String::from_utf8(output).unwrap();
         assert!(output_str.contains("/decision"));
@@ -420,25 +488,32 @@ mod tests {
         assert!(output_str.contains("/close"));
     }
 
+    // --- REPL integration tests (conversation calls claude CLI, so these test
+    // the note-taking and structured command paths only) ---
+
     #[test]
-    fn repl_accepts_natural_language_as_notes() {
+    fn repl_slash_note_records_note() {
         let bridge = mock_bridge();
-        let input = b"Hello tell me about projects\n/close\n";
+        let input = b"/note This is an explicit note\n/close\n";
         let mut reader = &input[..];
         let mut output = Vec::new();
 
-        let session = run_meeting_repl("Test", &bridge, &mut reader, &mut output).unwrap();
+        let session = run_meeting_repl("Test", &bridge, "", &mut reader, &mut output).unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(output_str.contains("Note added"));
+        assert_eq!(session.notes, vec!["This is an explicit note"]);
+    }
+
+    #[test]
+    fn repl_close_command_ends_meeting() {
+        let bridge = mock_bridge();
+        let input = b"/close\n";
+        let mut reader = &input[..];
+        let mut output = Vec::new();
+
+        let session = run_meeting_repl("Test", &bridge, "", &mut reader, &mut output).unwrap();
 
         assert_eq!(session.status, MeetingSessionStatus::Closed);
-        let output_str = String::from_utf8(output).unwrap();
-        // Natural language is accepted as a note, NOT rejected as unknown
-        assert!(
-            output_str.contains("Note added"),
-            "natural language should be accepted: {output_str}"
-        );
-        assert!(
-            !output_str.contains("Unknown command"),
-            "should not show Unknown command for natural language"
-        );
     }
 }

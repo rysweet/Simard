@@ -343,6 +343,17 @@ pub fn run_improvement_curation_read_probe(
     Ok(())
 }
 
+/// Load the meeting system prompt from prompt_assets/simard/meeting_system.md.
+fn load_meeting_system_prompt() -> String {
+    let path = prompt_root().join("simard/meeting_system.md");
+    std::fs::read_to_string(&path).unwrap_or_default()
+}
+
+/// Auto-detect the best available base type and open a session for the meeting.
+///
+/// Priority: RustyClawd (needs ANTHROPIC_API_KEY) → local-harness fallback.
+/// Returns `None` if no agent backend can be initialised — the REPL will then
+/// degrade to note-taking mode.
 pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::Error>> {
     // Use an in-memory bridge transport for the REPL since the Python bridge
     // may not be running. The REPL's primary purpose is interactive capture;
@@ -362,12 +373,20 @@ pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::E
     // Display greeting banner with memory bridge context
     print_greeting_banner(Some(&bridge));
 
+    let meeting_system_prompt = load_meeting_system_prompt();
+
     let stdin = io::stdin();
     let mut reader = BufReader::new(stdin.lock());
     let stdout = io::stdout();
     let mut writer = stdout.lock();
 
-    let session = run_meeting_repl(topic, &bridge, &mut reader, &mut writer)?;
+    let session = run_meeting_repl(
+        topic,
+        &bridge,
+        &meeting_system_prompt,
+        &mut reader,
+        &mut writer,
+    )?;
 
     println!("Meeting closed.");
     println!("Decisions: {}", session.decisions.len());
