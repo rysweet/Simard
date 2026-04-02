@@ -2886,6 +2886,7 @@ name = "simard"
 version = "0.7.1"
 dependencies = [
  "amplihack-memory",
+ "chrono",
  "libc",
  "rusqlite",
  "rustyclawd-core",
