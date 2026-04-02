@@ -144,26 +144,35 @@ fn converse_with_claude(
     context.push_str(&format!("Operator: {}\nSimard:", message));
 
     let result = Command::new("claude")
-        .args([
-            "-p",
-            &context,
-            "--output-format",
-            "text",
-            "--dangerously-skip-permissions",
-        ])
+        .args(["-p", &context, "--output-format", "text"])
         .output();
 
     match result {
         Ok(output) if output.status.success() => {
             let response = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            history.push((message.to_string(), response.clone()));
-            response
+            if response.is_empty() {
+                "[simard received empty response from claude]".to_string()
+            } else {
+                history.push((message.to_string(), response.clone()));
+                response
+            }
         }
         Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            format!("[claude error: {}]", stderr.trim())
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let detail = if !stderr.is_empty() {
+                stderr
+            } else if !stdout.is_empty() {
+                stdout
+            } else {
+                format!("exit code {}", output.status.code().unwrap_or(-1))
+            };
+            format!("[claude error: {detail}]")
         }
-        Err(e) => format!("[could not reach claude: {e}]"),
+        Err(e) => format!(
+            "[claude not found — install Claude Code CLI: https://docs.anthropic.com/en/docs/claude-code]\n\
+             [error: {e}]"
+        ),
     }
 }
 

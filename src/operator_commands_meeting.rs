@@ -373,6 +373,22 @@ pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::E
     // Display greeting banner with memory bridge context
     print_greeting_banner(Some(&bridge));
 
+    // Check prerequisites for conversational mode
+    match std::process::Command::new("claude")
+        .arg("--version")
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            let ver = String::from_utf8_lossy(&out.stdout);
+            eprintln!("  Claude CLI: {}", ver.trim());
+        }
+        _ => {
+            eprintln!("  ⚠ Claude Code CLI not found — meeting will be note-taking only.");
+            eprintln!("    Install: https://docs.anthropic.com/en/docs/claude-code");
+            eprintln!("    Or: npm install -g @anthropic-ai/claude-code");
+        }
+    }
+
     let meeting_system_prompt = load_meeting_system_prompt();
 
     let stdin = io::stdin();
