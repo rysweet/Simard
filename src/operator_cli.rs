@@ -178,7 +178,7 @@ fn dispatch_engineer_command(
 fn dispatch_meeting_command(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let subcommand = next_required(&mut args, "meeting command")?;
+    let subcommand = args.next().unwrap_or_else(|| "repl".to_string());
     match subcommand.as_str() {
         "run" => {
             let base_type = next_required(&mut args, "base type")?;
@@ -195,14 +195,23 @@ fn dispatch_meeting_command(
             reject_extra_args(args)?;
             run_meeting_read_probe(&base_type, &topology, state_root)
         }
-        "repl" => {
+        "repl" | "begin" | "start" => {
             let topic = args
                 .next()
                 .unwrap_or_else(|| Local::now().format("%Y-%m-%d:%H:%M").to_string());
             reject_extra_args(args)?;
             run_meeting_repl_command(&topic)
         }
-        other => Err(format!("unsupported command 'meeting {other}'").into()),
+        // Any other word is treated as a topic for a meeting repl
+        topic => {
+            let rest: Vec<String> = args.collect();
+            let full_topic = if rest.is_empty() {
+                topic.to_string()
+            } else {
+                format!("{topic} {}", rest.join(" "))
+            };
+            run_meeting_repl_command(&full_topic)
+        }
     }
 }
 
