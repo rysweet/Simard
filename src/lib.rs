@@ -24,6 +24,7 @@ pub mod error;
 pub mod evidence;
 pub mod goal_curation;
 pub mod goals;
+pub mod greeting_banner;
 pub mod gym;
 pub mod gym_bridge;
 pub mod gym_scoring;

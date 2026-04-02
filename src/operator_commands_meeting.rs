@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use crate::bridge_subprocess::InMemoryBridgeTransport;
 use crate::goals::{FileBackedGoalStore, GoalStatus, GoalStore};
+use crate::greeting_banner::print_greeting_banner;
 use crate::improvements::PersistedImprovementRecord;
 use crate::meeting_repl::run_meeting_repl;
 use crate::meetings::PersistedMeetingRecord;
@@ -42,6 +43,9 @@ pub fn run_meeting_probe(
         topology: Some(topology.to_string()),
         ..BootstrapInputs::default()
     })?;
+
+    // Display greeting banner before starting the meeting session (no bridge available here)
+    print_greeting_banner(None);
 
     let execution = run_local_session(&config)?;
     let exported = latest_local_handoff(&config)?.ok_or("expected durable meeting handoff")?;
@@ -354,6 +358,9 @@ pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::E
         }),
     });
     let bridge = CognitiveMemoryBridge::new(Box::new(transport));
+
+    // Display greeting banner with memory bridge context
+    print_greeting_banner(Some(&bridge));
 
     let stdin = io::stdin();
     let mut reader = BufReader::new(stdin.lock());
