@@ -2883,7 +2883,7 @@ dependencies = [
 
 [[package]]
 name = "simard"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "amplihack-memory",
  "chrono",

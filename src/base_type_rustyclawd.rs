@@ -12,8 +12,6 @@
 use std::fmt::{self, Formatter};
 use std::process::{Command, Stdio};
 
-use crate::identity::OperatingMode;
-
 use rustyclawd_core::client::{
     Client as RcClient, ClientError, Config as RcConfig, ContentBlock as RcContentBlock,
     CreateMessageRequest, Message as RcMessage, ToolDefinition,
@@ -278,18 +276,10 @@ fn execute_rustyclawd_client(
 
     let messages = vec![RcMessage::user(&input.objective)];
 
-    // In meeting mode, don't provide tools — just conversation.
-    // In other modes, provide the full tool set for engineering tasks.
-    let use_tools = request.mode != OperatingMode::Meeting;
-
-    let api_request = if use_tools {
-        let tools = rustyclawd_tool_definitions();
-        CreateMessageRequest::new("claude-sonnet-4-6", messages, 8192)
-            .with_system(system_prompt)
-            .with_tools(tools)
-    } else {
-        CreateMessageRequest::new("claude-sonnet-4-6", messages, 8192).with_system(system_prompt)
-    };
+    let tools = rustyclawd_tool_definitions();
+    let api_request = CreateMessageRequest::new("claude-sonnet-4-6", messages, 8192)
+        .with_system(system_prompt)
+        .with_tools(tools);
 
     let response = rt.block_on(async {
         client
