@@ -12,6 +12,8 @@
 use std::fmt::{self, Formatter};
 use std::process::{Command, Stdio};
 
+use crate::identity::OperatingMode;
+
 use rustyclawd_core::client::{
     Client as RcClient, ClientError, Config as RcConfig, ContentBlock as RcContentBlock,
     CreateMessageRequest, Message as RcMessage, ToolDefinition,
@@ -275,11 +277,19 @@ fn execute_rustyclawd_client(
     };
 
     let messages = vec![RcMessage::user(&input.objective)];
-    let tools = rustyclawd_tool_definitions();
 
-    let api_request = CreateMessageRequest::new("claude-sonnet-4-6", messages, 8192)
-        .with_system(system_prompt)
-        .with_tools(tools);
+    // In meeting mode, don't provide tools — just conversation.
+    // In other modes, provide the full tool set for engineering tasks.
+    let use_tools = request.mode != OperatingMode::Meeting;
+
+    let api_request = if use_tools {
+        let tools = rustyclawd_tool_definitions();
+        CreateMessageRequest::new("claude-sonnet-4-6", messages, 8192)
+            .with_system(system_prompt)
+            .with_tools(tools)
+    } else {
+        CreateMessageRequest::new("claude-sonnet-4-6", messages, 8192).with_system(system_prompt)
+    };
 
     let response = rt.block_on(async {
         client
@@ -301,16 +311,6 @@ fn execute_rustyclawd_client(
                 .collect::<Vec<_>>()
                 .join("\n");
 
-            let summary = format!(
-                "RustyClawd client session on node '{}' at '{}' completed. Model: {}. \
-                 Input tokens: {}, output tokens: {}.",
-                request.runtime_node,
-                request.mailbox_address,
-                resp.model,
-                resp.usage.input_tokens,
-                resp.usage.output_tokens,
-            );
-
             let evidence = vec![
                 format!("rustyclawd-model={}", resp.model),
                 format!("rustyclawd-input-tokens={}", resp.usage.input_tokens),
@@ -320,12 +320,14 @@ fn execute_rustyclawd_client(
                     resp.stop_reason.as_deref().unwrap_or("none")
                 ),
                 format!(
-                    "rustyclawd-output-head={}",
-                    &text_output[..text_output.len().min(1024)]
+                    "rustyclawd-session=node={} addr={} model={}",
+                    request.runtime_node, request.mailbox_address, resp.model,
                 ),
             ];
 
-            Ok((summary, evidence))
+            // Return the LLM's actual text response as the execution summary.
+            // Callers (meeting mode, engineer mode, etc.) display this directly.
+            Ok((text_output, evidence))
         }
         Err(e) => Err(SimardError::AdapterInvocationFailed {
             base_type: descriptor.id.to_string(),

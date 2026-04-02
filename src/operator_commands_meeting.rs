@@ -1,9 +1,12 @@
 use std::io::{self, BufReader};
 use std::path::PathBuf;
 
+use crate::base_type_rustyclawd::RustyClawdAdapter;
+use crate::base_types::{BaseTypeFactory, BaseTypeSessionRequest};
 use crate::bridge_subprocess::InMemoryBridgeTransport;
 use crate::goals::{FileBackedGoalStore, GoalStatus, GoalStore};
 use crate::greeting_banner::print_greeting_banner;
+use crate::identity::OperatingMode;
 use crate::improvements::PersistedImprovementRecord;
 use crate::meeting_repl::run_meeting_repl;
 use crate::meetings::PersistedMeetingRecord;
@@ -14,7 +17,9 @@ use crate::operator_commands::{
     resolved_improvement_curation_read_state_root, resolved_meeting_read_state_root,
     resolved_state_root,
 };
+use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeTopology};
 use crate::sanitization::sanitize_terminal_text;
+use crate::session::SessionId;
 use crate::{
     BootstrapConfig, BootstrapInputs, FileBackedMemoryStore, MemoryScope, MemoryStore,
     latest_local_handoff, latest_review_artifact, render_review_context_directives,
@@ -373,40 +378,71 @@ pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::E
     // Display greeting banner with memory bridge context
     print_greeting_banner(Some(&bridge));
 
-    // Check prerequisites for conversational mode
-    match std::process::Command::new("claude")
-        .arg("--version")
-        .output()
-    {
-        Ok(out) if out.status.success() => {
-            let ver = String::from_utf8_lossy(&out.stdout);
-            eprintln!("  Claude CLI: {}", ver.trim());
-        }
-        _ => {
-            eprintln!("  ⚠ Claude Code CLI not found — meeting will be note-taking only.");
-            eprintln!("    Install: https://docs.anthropic.com/en/docs/claude-code");
-            eprintln!("    Or: npm install -g @anthropic-ai/claude-code");
-        }
-    }
-
+    // Open an agent session for conversational meeting mode.
+    // Uses the same base type infrastructure as engineer mode.
+    let mut agent_session = open_meeting_agent_session();
     let meeting_system_prompt = load_meeting_system_prompt();
+
+    if agent_session.is_some() {
+        eprintln!("  Agent: ready");
+    } else {
+        eprintln!("  ⚠ No agent backend available — meeting will be note-taking only.");
+        eprintln!("    Set ANTHROPIC_API_KEY for RustyClawd conversation.");
+    }
 
     let stdin = io::stdin();
     let mut reader = BufReader::new(stdin.lock());
     let stdout = io::stdout();
     let mut writer = stdout.lock();
 
-    let session = run_meeting_repl(
-        topic,
-        &bridge,
-        &meeting_system_prompt,
-        &mut reader,
-        &mut writer,
-    )?;
+    let session = match agent_session {
+        Some(ref mut boxed_agent) => run_meeting_repl(
+            topic,
+            &bridge,
+            Some(&mut **boxed_agent),
+            &meeting_system_prompt,
+            &mut reader,
+            &mut writer,
+        )?,
+        None => run_meeting_repl(
+            topic,
+            &bridge,
+            None,
+            &meeting_system_prompt,
+            &mut reader,
+            &mut writer,
+        )?,
+    };
 
     println!("Meeting closed.");
     println!("Decisions: {}", session.decisions.len());
     println!("Action items: {}", session.action_items.len());
     println!("Notes: {}", session.notes.len());
     Ok(())
+}
+
+/// Open an agent session for the meeting REPL using the standard base type
+/// infrastructure. Same agent identity, same platform — just meeting mode.
+fn open_meeting_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeSession>> {
+    let request = BaseTypeSessionRequest {
+        session_id: SessionId::from_uuid(uuid::Uuid::now_v7()),
+        mode: OperatingMode::Meeting,
+        topology: RuntimeTopology::SingleProcess,
+        prompt_assets: Vec::new(),
+        runtime_node: RuntimeNodeId::new("meeting-repl"),
+        mailbox_address: RuntimeAddress::new("meeting-repl://local"),
+    };
+
+    // Try RustyClawd first — it's the primary agent backend.
+    if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+        if let Ok(factory) = RustyClawdAdapter::registered("meeting-rustyclawd") {
+            if let Ok(mut session) = factory.open_session(request.clone()) {
+                if session.open().is_ok() {
+                    return Some(session);
+                }
+            }
+        }
+    }
+
+    None
 }
