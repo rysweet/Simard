@@ -13,7 +13,7 @@ use crate::meeting_facilitator::{
 };
 use crate::memory_bridge::CognitiveMemoryBridge;
 
-const PROMPT: &str = "meeting> ";
+const PROMPT: &str = "simard:meeting> ";
 
 /// Parsed REPL command from a single input line.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -100,16 +100,22 @@ pub fn parse_meeting_command(line: &str) -> MeetingCommand {
         return MeetingCommand::Help;
     }
 
-    MeetingCommand::Unknown(trimmed.to_string())
+    // Any non-command input is natural language — treat as a note.
+    // Simard is an agentic system; she accepts free-form conversation.
+    MeetingCommand::Note(trimmed.to_string())
 }
 
 const HELP_TEXT: &str = "\
-Commands:
-  /decision <description> | <rationale>   Record a decision
+Simard meeting — natural language conversation is always accepted.
+
+Commands (optional):
+  /decision <description> | <rationale>   Record a formal decision
   /action <description> | <owner> [| <priority>]  Record an action item
-  /note <text>                            Add a free-form note
+  /note <text>                            Add an explicit note
   /close                                  Close the meeting and persist summary
   /help                                   Show this help
+
+Anything else you type is captured as meeting notes.
 ";
 
 /// Run the interactive meeting REPL, reading from `input` and writing to `output`.
@@ -124,8 +130,19 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
 ) -> SimardResult<MeetingSession> {
     let mut session = start_meeting(topic, bridge)?;
 
-    writeln!(output, "Meeting started: {topic}").ok();
-    writeln!(output, "Type /help for available commands.").ok();
+    writeln!(
+        output,
+        "Simard v{} — meeting mode",
+        env!("CARGO_PKG_VERSION")
+    )
+    .ok();
+    writeln!(output, "Topic: {topic}").ok();
+    writeln!(
+        output,
+        "Type naturally — everything you say is captured. /help for commands, /close to end."
+    )
+    .ok();
+    writeln!(output).ok();
 
     let mut line = String::new();
     loop {
@@ -204,8 +221,12 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
             }
             MeetingCommand::Empty => {}
             MeetingCommand::Unknown(input) => {
-                writeln!(output, "Unknown command: {input}").ok();
-                writeln!(output, "Type /help for available commands.").ok();
+                writeln!(output, "Could not parse command: {input}").ok();
+                writeln!(
+                    output,
+                    "Try /help for command syntax, or just type naturally."
+                )
+                .ok();
             }
         }
     }
@@ -298,10 +319,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_unknown_command() {
+    fn parse_natural_language_as_note() {
+        // Natural language is accepted as a note, not rejected as unknown
         assert_eq!(
             parse_meeting_command("hello world"),
-            MeetingCommand::Unknown("hello world".to_string())
+            MeetingCommand::Note("hello world".to_string())
         );
     }
 
@@ -399,9 +421,9 @@ mod tests {
     }
 
     #[test]
-    fn repl_handles_unknown_command_gracefully() {
+    fn repl_accepts_natural_language_as_notes() {
         let bridge = mock_bridge();
-        let input = b"gibberish\n/close\n";
+        let input = b"Hello tell me about projects\n/close\n";
         let mut reader = &input[..];
         let mut output = Vec::new();
 
@@ -409,6 +431,14 @@ mod tests {
 
         assert_eq!(session.status, MeetingSessionStatus::Closed);
         let output_str = String::from_utf8(output).unwrap();
-        assert!(output_str.contains("Unknown command"));
+        // Natural language is accepted as a note, NOT rejected as unknown
+        assert!(
+            output_str.contains("Note added"),
+            "natural language should be accepted: {output_str}"
+        );
+        assert!(
+            !output_str.contains("Unknown command"),
+            "should not show Unknown command for natural language"
+        );
     }
 }
