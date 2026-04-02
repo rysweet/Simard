@@ -57,10 +57,22 @@ simard
 |  |- run <base-type> <topology> <objective> [state-root]
 |  `- read <base-type> <topology> [state-root]
 `- bootstrap
-   `- run <identity> <base-type> <topology> <objective> [state-root]
+|  `- run <identity> <base-type> <topology> <objective> [state-root]
+|- update
+`- install
 ```
 
 Bare `simard` prints this operator surface directly.
+
+## Self-management commands
+
+### `simard update`
+
+Self-update the binary to the latest GitHub release. Downloads the release asset matching the current platform and replaces the running binary.
+
+### `simard install`
+
+Install the Simard binary to `~/.simard/bin`. Used by the npx wrapper (`npx github:rysweet/Simard install`) to persist the binary for direct CLI use.
 
 ## Compatibility mapping
 

@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use chrono::Local;
+
 use crate::agent_roles::AgentRole;
 use crate::agent_supervisor::{SubordinateConfig, spawn_subordinate};
 use crate::cmd_install::handle_install;
@@ -34,7 +36,7 @@ Product modes:
   engineer read <topology> [state-root]
   meeting run <base-type> <topology> <objective> [state-root]
   meeting read <base-type> <topology> [state-root]
-  meeting repl <topic>
+  meeting repl [topic]
   goal-curation run <base-type> <topology> <objective> [state-root]
   goal-curation read <base-type> <topology> [state-root]
   improvement-curation run <base-type> <topology> <objective> [state-root]
@@ -194,7 +196,9 @@ fn dispatch_meeting_command(
             run_meeting_read_probe(&base_type, &topology, state_root)
         }
         "repl" => {
-            let topic = next_required(&mut args, "meeting topic")?;
+            let topic = args
+                .next()
+                .unwrap_or_else(|| Local::now().format("%Y-%m-%d:%H:%M").to_string());
             reject_extra_args(args)?;
             run_meeting_repl_command(&topic)
         }

@@ -12,6 +12,18 @@ Simard is part of the [amplihack](https://github.com/rysweet/amplihack) ecosyste
 
 ## Install
 
+### With npx (easiest)
+
+Requires [GitHub CLI](https://cli.github.com/) authenticated with repo access.
+
+```bash
+# Run Simard directly
+npx github:rysweet/Simard meeting repl
+
+# Install the binary locally (~/.simard/bin)
+npx github:rysweet/Simard install
+```
+
 ### From GitHub Releases
 
 ```bash
@@ -81,6 +93,12 @@ simard gym list                        # list all scenarios
 simard gym run <scenario-id>           # run a scenario
 simard gym compare <scenario-id>       # compare results
 simard gym run-suite <suite-id>        # run a suite
+```
+
+### Self-Management
+```bash
+simard update                          # self-update to the latest release
+simard install                         # install binary to ~/.simard/bin
 ```
 
 ### Other Commands
