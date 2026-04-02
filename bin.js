@@ -19,71 +19,42 @@ function platformSuffix() {
   return null;
 }
 
-function installDir() {
-  return join(homedir(), ".simard", "bin");
-}
+function installDir() { return join(homedir(), ".simard", "bin"); }
 
 function binaryPath() {
-  const name = platform() === "win32" ? "simard.exe" : "simard";
-  return join(installDir(), name);
+  return join(installDir(), platform() === "win32" ? "simard.exe" : "simard");
 }
 
-function findLatestAssetUrl() {
+function assetName() {
   const suffix = platformSuffix();
-  if (!suffix) {
-    console.error(`Unsupported platform: ${platform()}-${arch()}`);
-    process.exit(1);
-  }
-  const asset = `simard-${suffix}.tar.gz`;
-
-  // Use gh CLI for authenticated access (works with private repos)
-  try {
-    const json = execFileSync("gh", [
-      "api", `repos/${GITHUB_REPO}/releases/latest`,
-      "--jq", `.assets[] | select(.name == "${asset}") | .url`
-    ], { encoding: "utf8" }).trim();
-    if (json) return json;
-  } catch (_) {}
-
-  // Fallback: try the public redirect URL
-  return `https://github.com/${GITHUB_REPO}/releases/latest/download/${asset}`;
+  if (!suffix) { console.error(`Unsupported platform: ${platform()}-${arch()}`); process.exit(1); }
+  return `simard-${suffix}.tar.gz`;
 }
 
 function download(binPath) {
   const dir = installDir();
   mkdirSync(dir, { recursive: true });
-  const tmp = join(dir, "simard-download.tar.gz");
-
-  const url = findLatestAssetUrl();
+  const asset = assetName();
   console.error(`Downloading simard from ${GITHUB_REPO}...`);
 
   try {
-    if (url.startsWith("https://api.github.com/")) {
-      // GitHub API URL — need Accept header for binary download
-      execFileSync("gh", [
-        "api", url,
-        "-H", "Accept: application/octet-stream",
-        "--output", tmp
-      ], { stdio: "inherit" });
-    } else {
-      execFileSync("curl", [
-        "-sS", "-L", "--connect-timeout", "15", "--max-time", "120",
-        "-o", tmp, url
-      ], { stdio: "inherit" });
-    }
-    execFileSync("tar", ["xzf", tmp, "-C", dir], { stdio: "inherit" });
+    execFileSync("gh", ["release", "download", "--repo", GITHUB_REPO, "--pattern", asset, "--dir", dir, "--clobber"], { stdio: "inherit" });
+  } catch (_) {
+    const url = `https://github.com/${GITHUB_REPO}/releases/latest/download/${asset}`;
+    execFileSync("curl", ["-sS", "-L", "--fail", "-o", join(dir, asset), url], { stdio: "inherit" });
+  }
+
+  const tarball = join(dir, asset);
+  try {
+    execFileSync("tar", ["xzf", tarball, "-C", dir], { stdio: "inherit" });
     if (platform() !== "win32") chmodSync(binPath, 0o755);
   } finally {
-    try { unlinkSync(tmp); } catch (_) {}
+    try { unlinkSync(tarball); } catch (_) {}
   }
 
-  if (!existsSync(binPath)) {
-    console.error(`Download succeeded but binary not found at ${binPath}`);
-    process.exit(1);
-  }
+  if (!existsSync(binPath)) { console.error(`Binary not found at ${binPath}`); process.exit(1); }
 }
 
-// If first arg is "install", just download and exit
 if (process.argv[2] === "install") {
   const bin = binaryPath();
   console.error(`Installing simard to ${bin}...`);
@@ -92,12 +63,7 @@ if (process.argv[2] === "install") {
   process.exit(0);
 }
 
-// Normal mode: ensure binary exists, then passthrough
 const bin = binaryPath();
 if (!existsSync(bin)) download(bin);
-
-try {
-  execFileSync(bin, process.argv.slice(2), { stdio: "inherit" });
-} catch (err) {
-  process.exit(err.status || 1);
-}
+try { execFileSync(bin, process.argv.slice(2), { stdio: "inherit" }); }
+catch (err) { process.exit(err.status || 1); }
