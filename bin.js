@@ -55,7 +55,7 @@ function download(binPath, tag) {
 
   try {
     const args = ["release", "download", "--repo", GITHUB_REPO, "--pattern", asset, "--dir", dir, "--clobber"];
-    if (tag) args.push("--tag", tag);
+    if (tag) args.splice(2, 0, tag);  // positional: gh release download <tag> --flags
     execFileSync("gh", args, { stdio: "inherit" });
   } catch (_) {
     const url = `https://github.com/${GITHUB_REPO}/releases/latest/download/${asset}`;
