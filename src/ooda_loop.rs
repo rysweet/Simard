@@ -112,6 +112,7 @@ pub enum ActionKind {
     ResearchQuery,
     RunGymEval,
     BuildSkill,
+    LaunchSession,
 }
 
 impl Display for ActionKind {
@@ -123,6 +124,7 @@ impl Display for ActionKind {
             Self::ResearchQuery => f.write_str("research-query"),
             Self::RunGymEval => f.write_str("run-gym-eval"),
             Self::BuildSkill => f.write_str("build-skill"),
+            Self::LaunchSession => f.write_str("launch-session"),
         }
     }
 }
