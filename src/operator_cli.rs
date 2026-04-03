@@ -49,6 +49,7 @@ Product modes:
   spawn <agent-name> <goal> <worktree-path> [--depth=N]
   handover [--canary-dir=PATH] [--manifest-dir=PATH]
   update
+  act-on-decisions
   install
 
 Operator utilities:
@@ -85,6 +86,10 @@ where
         "spawn" => dispatch_spawn_command(args),
         "handover" => dispatch_handover_command(args),
         "bootstrap" => dispatch_bootstrap_command(args),
+        "act-on-decisions" => {
+            reject_extra_args(args)?;
+            dispatch_act_on_decisions()
+        }
         "update" => {
             reject_extra_args(args)?;
             handle_self_update()
@@ -473,6 +478,124 @@ fn parse_state_root_and_json(
         [state_root, flag] if flag == "--json" => Ok((Some(PathBuf::from(state_root)), true)),
         _ => Err(format!("unexpected trailing arguments: {}", trailing.join(" ")).into()),
     }
+}
+
+/// Default directory for meeting handoff artifacts.
+fn meeting_handoff_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/meeting_handoffs")
+}
+
+/// Read the latest meeting handoff and create GitHub issues for each
+/// decision and action item via `gh issue create`.
+fn dispatch_act_on_decisions() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::meeting_facilitator::{load_meeting_handoff, mark_meeting_handoff_processed};
+
+    let dir = meeting_handoff_dir();
+    let handoff = load_meeting_handoff(&dir)?;
+
+    let Some(handoff) = handoff else {
+        println!("No meeting handoff found in {}", dir.display());
+        return Ok(());
+    };
+
+    if handoff.processed {
+        println!(
+            "Meeting handoff already processed (topic: {})",
+            handoff.topic
+        );
+        return Ok(());
+    }
+
+    println!(
+        "Processing meeting handoff: {} (closed {})",
+        handoff.topic, handoff.closed_at
+    );
+
+    let mut created = 0u32;
+
+    for decision in &handoff.decisions {
+        let title = format!("Decision: {}", decision.description);
+        let body = format!(
+            "**Rationale:** {}\n**Participants:** {}\n\n_From meeting: {}_",
+            decision.rationale,
+            if decision.participants.is_empty() {
+                "(none)".to_string()
+            } else {
+                decision.participants.join(", ")
+            },
+            handoff.topic,
+        );
+        match std::process::Command::new("gh")
+            .args(["issue", "create", "--title", &title, "--body", &body])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                let url = String::from_utf8_lossy(&output.stdout);
+                println!(
+                    "  Created issue for decision: {} → {}",
+                    decision.description,
+                    url.trim()
+                );
+                created += 1;
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                eprintln!(
+                    "  [warn] gh issue create failed for '{}': {}",
+                    decision.description,
+                    stderr.trim()
+                );
+            }
+            Err(e) => {
+                eprintln!("  [warn] Failed to run gh: {e}");
+            }
+        }
+    }
+
+    for item in &handoff.action_items {
+        let title = format!("Action: {}", item.description);
+        let due = item.due_description.as_deref().unwrap_or("(unspecified)");
+        let body = format!(
+            "**Owner:** {}\n**Priority:** {}\n**Due:** {}\n\n_From meeting: {}_",
+            item.owner, item.priority, due, handoff.topic,
+        );
+        match std::process::Command::new("gh")
+            .args(["issue", "create", "--title", &title, "--body", &body])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                let url = String::from_utf8_lossy(&output.stdout);
+                println!(
+                    "  Created issue for action: {} → {}",
+                    item.description,
+                    url.trim()
+                );
+                created += 1;
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                eprintln!(
+                    "  [warn] gh issue create failed for '{}': {}",
+                    item.description,
+                    stderr.trim()
+                );
+            }
+            Err(e) => {
+                eprintln!("  [warn] Failed to run gh: {e}");
+            }
+        }
+    }
+
+    if !handoff.open_questions.is_empty() {
+        println!("\nOpen questions (not filed as issues):");
+        for q in &handoff.open_questions {
+            println!("  - {q}");
+        }
+    }
+
+    mark_meeting_handoff_processed(&dir)?;
+    println!("\nDone. Created {created} issue(s). Handoff marked as processed.");
+    Ok(())
 }
 
 #[cfg(test)]

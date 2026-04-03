@@ -5,7 +5,10 @@
 //! cognitive memory when the meeting closes.
 
 use std::fmt::{self, Display, Formatter};
+use std::fs;
+use std::path::Path;
 
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -232,6 +235,114 @@ pub fn close_meeting(
     }
 
     Ok(session)
+}
+
+// ---------------------------------------------------------------------------
+// Meeting Handoff — artifact written when a meeting closes, consumed by
+// the engineer loop and the `act-on-decisions` CLI subcommand.
+// ---------------------------------------------------------------------------
+
+/// Well-known filename for meeting handoff artifacts.
+pub const MEETING_HANDOFF_FILENAME: &str = "meeting_handoff.json";
+
+/// A handoff artifact produced when a meeting closes. Contains decisions,
+/// action items, and open questions extracted from the meeting session.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MeetingHandoff {
+    pub topic: String,
+    pub closed_at: String,
+    pub decisions: Vec<MeetingDecision>,
+    pub action_items: Vec<ActionItem>,
+    pub open_questions: Vec<String>,
+    #[serde(default)]
+    pub processed: bool,
+}
+
+impl MeetingHandoff {
+    /// Create a handoff from a closed meeting session.
+    /// Notes containing `?` are extracted as open questions.
+    pub fn from_session(session: &MeetingSession) -> Self {
+        let open_questions: Vec<String> = session
+            .notes
+            .iter()
+            .filter(|n| n.contains('?'))
+            .cloned()
+            .collect();
+
+        Self {
+            topic: session.topic.clone(),
+            closed_at: Utc::now().to_rfc3339(),
+            decisions: session.decisions.clone(),
+            action_items: session.action_items.clone(),
+            open_questions,
+            processed: false,
+        }
+    }
+}
+
+/// Write a meeting handoff artifact to a directory.
+pub fn write_meeting_handoff(dir: &Path, handoff: &MeetingHandoff) -> SimardResult<()> {
+    fs::create_dir_all(dir).map_err(|e| SimardError::ArtifactIo {
+        path: dir.to_path_buf(),
+        reason: format!("creating handoff dir: {e}"),
+    })?;
+    let path = dir.join(MEETING_HANDOFF_FILENAME);
+    let json = serde_json::to_string_pretty(handoff).map_err(|e| SimardError::ArtifactIo {
+        path: path.clone(),
+        reason: format!("serializing handoff: {e}"),
+    })?;
+    fs::write(&path, json).map_err(|e| SimardError::ArtifactIo {
+        path: path.clone(),
+        reason: format!("writing handoff: {e}"),
+    })?;
+    Ok(())
+}
+
+/// Load a meeting handoff artifact from a directory. Returns `None` if the
+/// file does not exist.
+pub fn load_meeting_handoff(dir: &Path) -> SimardResult<Option<MeetingHandoff>> {
+    let path = dir.join(MEETING_HANDOFF_FILENAME);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&path).map_err(|e| SimardError::ArtifactIo {
+        path: path.clone(),
+        reason: format!("reading handoff: {e}"),
+    })?;
+    let handoff: MeetingHandoff =
+        serde_json::from_str(&raw).map_err(|e| SimardError::ArtifactIo {
+            path: path.clone(),
+            reason: format!("failed to parse handoff JSON: {e}"),
+        })?;
+    Ok(Some(handoff))
+}
+
+/// Mark the meeting handoff in a directory as processed. No-op if no handoff
+/// file exists.
+pub fn mark_meeting_handoff_processed(dir: &Path) -> SimardResult<()> {
+    let path = dir.join(MEETING_HANDOFF_FILENAME);
+    if !path.is_file() {
+        return Ok(());
+    }
+    let raw = fs::read_to_string(&path).map_err(|e| SimardError::ArtifactIo {
+        path: path.clone(),
+        reason: format!("reading handoff: {e}"),
+    })?;
+    let mut handoff: MeetingHandoff =
+        serde_json::from_str(&raw).map_err(|e| SimardError::ArtifactIo {
+            path: path.clone(),
+            reason: format!("failed to parse handoff JSON: {e}"),
+        })?;
+    handoff.processed = true;
+    let json = serde_json::to_string_pretty(&handoff).map_err(|e| SimardError::ArtifactIo {
+        path: path.clone(),
+        reason: format!("serializing handoff: {e}"),
+    })?;
+    fs::write(&path, json).map_err(|e| SimardError::ArtifactIo {
+        path: path.clone(),
+        reason: format!("writing handoff: {e}"),
+    })?;
+    Ok(())
 }
 
 #[cfg(test)]

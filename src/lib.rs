@@ -168,8 +168,10 @@ pub use knowledge_bridge::{
 };
 pub use knowledge_context::{PlanningContext, enrich_planning_context};
 pub use meeting_facilitator::{
-    ActionItem, MeetingDecision, MeetingSession, MeetingSessionStatus, add_note, close_meeting,
-    record_action_item, record_decision, start_meeting,
+    ActionItem, MEETING_HANDOFF_FILENAME, MeetingDecision, MeetingHandoff, MeetingSession,
+    MeetingSessionStatus, add_note, close_meeting, load_meeting_handoff,
+    mark_meeting_handoff_processed, record_action_item, record_decision, start_meeting,
+    write_meeting_handoff,
 };
 pub use meeting_repl::{MeetingCommand, parse_meeting_command, run_meeting_repl};
 pub use meetings::{
