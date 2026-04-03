@@ -1,7 +1,7 @@
 //! Self-update command: downloads the latest simard binary from GitHub Releases.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const GITHUB_REPO: &str = "rysweet/Simard";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -190,6 +190,57 @@ fn download_and_replace(url: &str, version: &str) -> Result<(), Box<dyn std::err
     Ok(())
 }
 
+/// Run `<binary> self-test` to verify a binary is healthy.
+/// Returns Ok(()) if the self-test passes, Err otherwise.
+fn run_self_test_on_binary(binary: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Running self-test on new binary...");
+    let output = std::process::Command::new(binary)
+        .args(["self-test"])
+        .output()
+        .map_err(|e| format!("Failed to run self-test on new binary: {e}"))?;
+
+    if output.status.success() {
+        println!("Self-test passed.");
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Err(format!(
+            "Self-test failed (exit {}):\n{}\n{}",
+            output.status,
+            stdout.trim(),
+            stderr.trim()
+        )
+        .into())
+    }
+}
+
+/// Run `simard self-test` against the current binary. This executes
+/// `simard gym run-suite starter` and reports pass/fail.
+pub fn handle_self_test() -> Result<(), Box<dyn std::error::Error>> {
+    println!("simard self-test (v{CURRENT_VERSION})");
+    let current_exe =
+        std::env::current_exe().map_err(|e| format!("Cannot determine current executable: {e}"))?;
+
+    let output = std::process::Command::new(&current_exe)
+        .args(["gym", "run-suite", "starter"])
+        .output()
+        .map_err(|e| format!("Failed to run gym suite: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if output.status.success() {
+        println!("{}", stdout.trim());
+        println!("SELF-TEST PASSED");
+        Ok(())
+    } else {
+        eprintln!("{}", stdout.trim());
+        eprintln!("{}", stderr.trim());
+        Err("SELF-TEST FAILED: gym run-suite starter did not pass".into())
+    }
+}
+
 /// Find the simard binary in an extracted directory tree (max depth 3).
 fn find_binary_in_dir(dir: &std::path::Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
     use std::ffi::OsStr;
@@ -215,7 +266,7 @@ fn find_binary_in_dir(dir: &std::path::Path) -> Result<PathBuf, Box<dyn std::err
     search(dir, 0).ok_or_else(|| "Binary 'simard' not found in downloaded archive".into())
 }
 
-/// Run the self-update flow.
+/// Run the self-update flow: download -> self-test -> relaunch.
 pub fn handle_self_update() -> Result<(), Box<dyn std::error::Error>> {
     println!("simard self-update (current: v{CURRENT_VERSION})");
 
@@ -228,6 +279,25 @@ pub fn handle_self_update() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("New version available: v{CURRENT_VERSION} → v{version}");
     download_and_replace(&url, &version)?;
+
+    // The new binary is now at current_exe(). Run self-test before relaunching.
+    let current_exe =
+        std::env::current_exe().map_err(|e| format!("Cannot determine current executable: {e}"))?;
+
+    if let Err(e) = run_self_test_on_binary(&current_exe) {
+        eprintln!("WARNING: Self-test failed on new binary: {e}");
+        eprintln!("The new binary has been installed but may not be healthy.");
+        eprintln!("Skipping automatic relaunch. Run 'simard self-test' to diagnose.");
+        return Err(e);
+    }
+
+    // Self-test passed — exec() into the new binary.
+    println!("Relaunching into v{version}...");
+    let pid = std::process::id();
+    crate::self_relaunch::handover(pid, &current_exe)
+        .map_err(|e| format!("Relaunch failed: {e}"))?;
+
+    // handover does not return on success (exec replaces process)
     Ok(())
 }
 

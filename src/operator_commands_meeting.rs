@@ -1,6 +1,7 @@
 use std::io::{self, BufReader};
 use std::path::PathBuf;
 
+use crate::bridge_launcher::{find_python_dir, launch_memory_bridge};
 use crate::bridge_subprocess::InMemoryBridgeTransport;
 use crate::goals::{FileBackedGoalStore, GoalStatus, GoalStore};
 use crate::greeting_banner::print_greeting_banner;
@@ -350,31 +351,57 @@ fn load_meeting_system_prompt() -> String {
     std::fs::read_to_string(&path).unwrap_or_default()
 }
 
+/// Attempt to launch the real Python memory bridge for meeting mode.
+///
+/// Uses the same `BridgeLauncher` infrastructure as engineer mode: locates the
+/// `python/` directory, starts `simard_memory_bridge.py`, and connects to Kuzu.
+/// Returns `None` if any step fails so the caller can fall back gracefully.
+fn launch_real_meeting_bridge() -> Option<CognitiveMemoryBridge> {
+    let python_dir = find_python_dir().ok()?;
+    let state_root = PathBuf::from("target/simard-state");
+    let db_path = state_root.join("cognitive_memory");
+    // Ensure the db directory exists so the bridge can write to it.
+    let _ = std::fs::create_dir_all(&db_path);
+    launch_memory_bridge("simard-meeting", &db_path, &python_dir).ok()
+}
+
 /// Auto-detect the best available base type and open a session for the meeting.
 ///
 /// Priority: RustyClawd (needs ANTHROPIC_API_KEY) → local-harness fallback.
 /// Returns `None` if no agent backend can be initialised — the REPL will then
 /// degrade to note-taking mode.
 pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::Error>> {
-    // Use an in-memory bridge transport for the REPL since the Python bridge
-    // may not be running. The REPL's primary purpose is interactive capture;
-    // durable persistence happens via the session handoff store.
-    let transport = InMemoryBridgeTransport::new("meeting-repl", |method, _params| match method {
-        "memory.record_sensory" => Ok(serde_json::json!({"id": "sen_repl"})),
-        "memory.store_episode" => Ok(serde_json::json!({"id": "epi_repl"})),
-        "memory.store_fact" => Ok(serde_json::json!({"id": "sem_repl"})),
-        "memory.store_prospective" => Ok(serde_json::json!({"id": "pro_repl"})),
-        "memory.search_facts" => Ok(serde_json::json!({"facts": []})),
-        "memory.get_statistics" => Ok(serde_json::json!({
-            "sensory_count": 0, "working_count": 0, "episodic_count": 0,
-            "semantic_count": 0, "procedural_count": 0, "prospective_count": 0
-        })),
-        _ => Err(crate::bridge::BridgeErrorPayload {
-            code: -32601,
-            message: format!("unknown method: {method}"),
-        }),
-    });
-    let bridge = CognitiveMemoryBridge::new(Box::new(transport));
+    // Try to launch the real Python memory bridge backed by Kuzu graph database.
+    // Falls back to an in-memory stub if the bridge is unavailable (no Python,
+    // missing bridge_server.py, etc.).
+    let bridge = match launch_real_meeting_bridge() {
+        Some(b) => {
+            eprintln!("  Memory: cognitive bridge active (Kuzu backend)");
+            b
+        }
+        None => {
+            eprintln!(
+                "  \u{26a0} Memory bridge unavailable \u{2014} using in-memory stub (memories will not persist to Kuzu)"
+            );
+            let transport =
+                InMemoryBridgeTransport::new("meeting-repl", |method, _params| match method {
+                    "memory.record_sensory" => Ok(serde_json::json!({"id": "sen_repl"})),
+                    "memory.store_episode" => Ok(serde_json::json!({"id": "epi_repl"})),
+                    "memory.store_fact" => Ok(serde_json::json!({"id": "sem_repl"})),
+                    "memory.store_prospective" => Ok(serde_json::json!({"id": "pro_repl"})),
+                    "memory.search_facts" => Ok(serde_json::json!({"facts": []})),
+                    "memory.get_statistics" => Ok(serde_json::json!({
+                        "sensory_count": 0, "working_count": 0, "episodic_count": 0,
+                        "semantic_count": 0, "procedural_count": 0, "prospective_count": 0
+                    })),
+                    _ => Err(crate::bridge::BridgeErrorPayload {
+                        code: -32601,
+                        message: format!("unknown method: {method}"),
+                    }),
+                });
+            CognitiveMemoryBridge::new(Box::new(transport))
+        }
+    };
 
     // Display greeting banner with memory bridge context
     print_greeting_banner(Some(&bridge));

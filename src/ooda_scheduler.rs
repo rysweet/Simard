@@ -229,28 +229,28 @@ pub fn fail_slot(scheduler: &mut Scheduler, slot_id: usize, reason: String) -> S
 /// state can be inspected later. Callers should use the `CompletedSlot`
 /// to decide whether to retry failed actions.
 pub fn poll_slots(scheduler: &mut Scheduler) -> Vec<CompletedSlot> {
-    scheduler
-        .slots
-        .iter()
-        .filter_map(|slot| match &slot.status {
-            SlotStatus::Completed(outcome) => Some(CompletedSlot {
+    let mut results = Vec::with_capacity(scheduler.slots.len());
+    for slot in &scheduler.slots {
+        match &slot.status {
+            SlotStatus::Completed(outcome) => results.push(CompletedSlot {
                 slot_id: slot.slot_id,
                 goal_id: slot.goal_id.clone(),
                 outcome: Ok(outcome.clone()),
             }),
-            SlotStatus::Failed(reason) => Some(CompletedSlot {
+            SlotStatus::Failed(reason) => results.push(CompletedSlot {
                 slot_id: slot.slot_id,
                 goal_id: slot.goal_id.clone(),
                 outcome: Err(reason.clone()),
             }),
-            _ => None,
-        })
-        .collect()
+            _ => {}
+        }
+    }
+    results
 }
 
 /// Remove all completed and failed slots from the scheduler.
 pub fn drain_finished(scheduler: &mut Scheduler) -> Vec<CompletedSlot> {
-    let mut finished = Vec::new();
+    let mut finished = Vec::with_capacity(scheduler.slots.len());
     scheduler.slots.retain(|slot| match &slot.status {
         SlotStatus::Completed(outcome) => {
             finished.push(CompletedSlot {

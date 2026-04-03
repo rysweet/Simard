@@ -1,7 +1,7 @@
 ---
 title: Simard documentation
 description: Start here for the shipped `simard` operator CLI, the shared-state-root bridge from bounded terminal sessions into the repo-grounded engineer loop, the `engineer read` audit companion, compatibility binaries, runtime contracts, and benchmark flow.
-last_updated: 2026-03-31
+last_updated: 2026-04-03
 review_schedule: as-needed
 owner: simard
 ---
@@ -25,6 +25,7 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [How to inspect meeting records](./howto/inspect-meeting-records.md) - Read back the latest durable meeting record without mutating stored state.
 - [How to inspect improvement-curation state](./howto/inspect-improvement-curation-state.md) - Read back the latest approved, deferred, and promoted improvement state without mutation.
 - [How to inspect the durable goal register](./howto/inspect-durable-goal-register.md) - Read back the active top-5 goals and backlog without mutation.
+- [How to run the OODA daemon](./howto/run-ooda-daemon.md) - Start the continuous OODA loop for autonomous goal-driven operation and act on meeting decisions.
 - [Simard CLI reference](./reference/simard-cli.md) - Look up the shipped command tree, `engineer read` audit surface, and compatibility mappings.
 - [Runtime contracts reference](./reference/runtime-contracts.md) - Look up executable contracts, state-root guarantees, and the shipped engineer audit readback semantics.
 - [Base type adapters reference](./reference/base-type-adapters.md) - Look up the pluggable agent execution substrates, their capabilities, and topology support.
@@ -42,6 +43,10 @@ Simard guarantees these operator-visible namespaces on the primary binary:
 - `simard gym ...`
 - `simard review ...`
 - `simard bootstrap ...`
+- `simard ooda ...`
+- `simard act-on-decisions`
+- `simard spawn ...`
+- `simard handover ...`
 
 Bare `simard` prints the unified help text instead of attempting a hidden environment-only bootstrap fallback.
 

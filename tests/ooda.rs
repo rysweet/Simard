@@ -69,6 +69,7 @@ fn test_bridges() -> OodaBridges {
         memory: CognitiveMemoryBridge::new(Box::new(mock_memory_transport())),
         knowledge: KnowledgeBridge::new(Box::new(mock_knowledge_transport())),
         gym: GymBridge::new(Box::new(mock_gym_transport())),
+        session: None,
     }
 }
 
@@ -142,13 +143,13 @@ fn decide_selects_actions_within_concurrent_limit() {
 
 #[test]
 fn act_dispatches_and_returns_outcomes() {
-    let bridges = test_bridges();
+    let mut bridges = test_bridges();
     let board = board_with_goals();
     let mut state = OodaState::new(board.clone());
     let obs = observe(&state, &bridges).unwrap();
     let priorities = orient(&obs, &board).unwrap();
     let actions = decide(&priorities, &OodaConfig::default()).unwrap();
-    let outcomes = act(&actions, &bridges, &mut state).unwrap();
+    let outcomes = act(&actions, &mut bridges, &mut state).unwrap();
     assert_eq!(outcomes.len(), actions.len());
     // AdvanceGoal for blocked goals will fail (can't advance blocked goals).
     // All other outcomes should succeed.
@@ -168,24 +169,24 @@ fn act_dispatches_and_returns_outcomes() {
 
 #[test]
 fn run_full_ooda_cycle_and_increments() {
-    let bridges = test_bridges();
+    let mut bridges = test_bridges();
     let mut state = OodaState::new(board_with_goals());
     let config = OodaConfig::default();
-    let r1 = run_ooda_cycle(&mut state, &bridges, &config).unwrap();
+    let r1 = run_ooda_cycle(&mut state, &mut bridges, &config).unwrap();
     assert_eq!(r1.cycle_number, 1);
     assert!(!r1.priorities.is_empty());
     assert!(!r1.outcomes.is_empty());
     assert!(summarize_cycle_report(&r1).contains("OODA cycle #1"));
-    let r2 = run_ooda_cycle(&mut state, &bridges, &config).unwrap();
+    let r2 = run_ooda_cycle(&mut state, &mut bridges, &config).unwrap();
     assert_eq!(r2.cycle_number, 2);
     assert_eq!(state.cycle_count, 2);
 }
 
 #[test]
 fn feral_empty_goals() {
-    let bridges = test_bridges();
+    let mut bridges = test_bridges();
     let mut state = OodaState::new(GoalBoard::new());
-    let report = run_ooda_cycle(&mut state, &bridges, &OodaConfig::default()).unwrap();
+    let report = run_ooda_cycle(&mut state, &mut bridges, &OodaConfig::default()).unwrap();
     assert!(report.observation.goal_statuses.is_empty());
     assert_eq!(report.cycle_number, 1);
 }
@@ -220,13 +221,14 @@ fn feral_gym_bridge_down() {
             message: "crashed".into(),
         })
     });
-    let bridges = OodaBridges {
+    let mut bridges = OodaBridges {
         memory: CognitiveMemoryBridge::new(Box::new(mock_memory_transport())),
         knowledge: KnowledgeBridge::new(Box::new(mock_knowledge_transport())),
         gym: GymBridge::new(Box::new(failing_gym)),
+        session: None,
     };
     let mut state = OodaState::new(board_with_goals());
-    let report = run_ooda_cycle(&mut state, &bridges, &OodaConfig::default()).unwrap();
+    let report = run_ooda_cycle(&mut state, &mut bridges, &OodaConfig::default()).unwrap();
     assert!(report.observation.gym_health.is_none());
     assert_eq!(report.cycle_number, 1);
 }

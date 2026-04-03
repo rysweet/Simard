@@ -1,7 +1,7 @@
 ---
 title: Simard CLI reference
 description: Reference for the shipped `simard` command tree, the shared-state-root bridge between terminal sessions and the repo-grounded engineer loop, the `engineer read` audit companion, the shipped bounded `engineer copilot-submit` contract, and the legacy compatibility binaries that still expose selected older runtime behaviors.
-last_updated: 2026-03-30
+last_updated: 2026-04-03
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -58,6 +58,11 @@ simard
 |  `- read <base-type> <topology> [state-root]
 `- bootstrap
 |  `- run <identity> <base-type> <topology> <objective> [state-root]
+|- ooda
+|  `- run [--cycles=N] [state-root]
+|- act-on-decisions
+|- spawn <agent-name> <goal> <worktree-path>
+|- handover [--canary-dir=PATH]
 |- update
 `- install
 ```
@@ -776,6 +781,88 @@ Example:
 
 ```bash
 simard bootstrap run simard-engineer local-harness single-process   "verify current reflection metadata"   "$PWD/target/simard-state"
+```
+
+## OODA daemon
+
+### `simard ooda run [--cycles=N] [state-root]`
+
+Runs the continuous OODA (Observe-Orient-Decide-Act) daemon loop for autonomous operation. Simard observes her goal board, orients by ranking priorities, decides which actions to take, and acts by dispatching bounded work — then sleeps and repeats.
+
+Key behavior:
+
+- launches memory, knowledge, and gym bridges
+- loads the goal board from cognitive memory
+- runs OODA cycles in a loop with 60-second sleep between cycles
+- `--cycles=N` limits the daemon to N cycles; `--cycles=0` or omitting the flag runs indefinitely
+- logs cycle summaries to stderr: observation counts, priorities, actions dispatched, outcomes
+- errors in individual actions do not abort the cycle; the daemon continues to the next phase
+- state root defaults to `$SIMARD_STATE_ROOT` or `/tmp/simard-ooda` when omitted
+
+Environment variables:
+
+- `SIMARD_STATE_ROOT` — override the state root directory
+- `SIMARD_AGENT_NAME` — override the agent name (default: `simard-ooda`)
+
+Example:
+
+```bash
+# Run 5 cycles then exit
+simard ooda run --cycles=5 "$PWD/target/simard-ooda"
+
+# Run indefinitely as a daemon
+SIMARD_STATE_ROOT="$PWD/target/simard-state" simard ooda run
+```
+
+Each cycle follows the four OODA phases:
+
+1. **Observe** — gather goal statuses, gym health, memory statistics; degrades honestly if a bridge is unavailable (Pillar 11)
+2. **Orient** — rank goals by urgency (blocked 1.0 > not-started 0.8 > in-progress scaled by remaining %). Also injects synthetic priorities: memory consolidation (urgency 0.5) when episodic count exceeds 100, and improvement cycles (urgency 0.7) when gym score drops below 70%
+3. **Decide** — select up to `max_concurrent_actions` (default 3) actions from the priority list; completed goals (urgency 0) are skipped
+4. **Act** — dispatch actions independently; each action produces its own outcome
+
+Action kinds: `AdvanceGoal`, `RunImprovement`, `ConsolidateMemory`, `ResearchQuery`, `RunGymEval`, `BuildSkill`.
+
+## Meeting handoff commands
+
+### `simard act-on-decisions`
+
+Reads the latest meeting handoff artifact and creates GitHub issues for each decision and action item.
+
+Key behavior:
+
+- loads the handoff from `target/meeting_handoffs/meeting_handoff.json`
+- if no handoff exists, prints a message and exits successfully
+- if the handoff is already marked as processed, prints a message and exits
+- for each `MeetingDecision`: creates a GitHub issue titled `Decision: <description>` with rationale and participants in the body
+- for each `ActionItem`: creates a GitHub issue titled `Action: <description>` with owner, priority, and due date in the body
+- prints open questions to stdout (not filed as issues)
+- marks the handoff as processed after creating all issues
+- individual `gh issue create` failures are warnings; the command continues
+
+Requires:
+
+- `gh` CLI installed and authenticated
+- a prior `simard meeting run` that produced a handoff artifact
+
+Example:
+
+```bash
+# After closing a meeting session
+simard act-on-decisions
+```
+
+Example output:
+
+```text
+Processing meeting handoff: align next workstream (closed 2026-04-02T14:30:00Z)
+  Created issue for decision: adopt session builder → https://github.com/rysweet/Simard/issues/155
+  Created issue for action: wire OODA to RustyClawd → https://github.com/rysweet/Simard/issues/156
+
+Open questions (not filed as issues):
+  - how aggressively should Simard reprioritize?
+
+Done. Created 2 issue(s). Handoff marked as processed.
 ```
 
 ## Running from source

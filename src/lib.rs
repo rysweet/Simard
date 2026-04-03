@@ -195,9 +195,9 @@ pub use memory_consolidation::{
 pub use memory_hive::{HiveConfig, hive_config_from_identity};
 pub use ooda_actions::dispatch_actions;
 pub use ooda_loop::{
-    ActionKind, ActionOutcome, CycleReport, GoalSnapshot, Observation, OodaBridges, OodaConfig,
-    OodaPhase, OodaState, PlannedAction, Priority, act, decide, observe, orient, run_ooda_cycle,
-    summarize_cycle_report,
+    ActionKind, ActionOutcome, CycleReport, EnvironmentSnapshot, GoalSnapshot, Observation,
+    OodaBridges, OodaConfig, OodaPhase, OodaState, PlannedAction, Priority, act, decide,
+    gather_environment, observe, orient, run_ooda_cycle, summarize_cycle_report,
 };
 pub use ooda_scheduler::{
     CompletedSlot, ScheduledAction, Scheduler, SchedulerSlot, SlotStatus, complete_slot,

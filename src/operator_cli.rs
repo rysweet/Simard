@@ -5,7 +5,7 @@ use chrono::Local;
 use crate::agent_roles::AgentRole;
 use crate::agent_supervisor::{SubordinateConfig, spawn_subordinate};
 use crate::cmd_install::handle_install;
-use crate::cmd_self_update::handle_self_update;
+use crate::cmd_self_update::{handle_self_test, handle_self_update};
 use crate::operator_commands::{
     run_bootstrap_probe, run_copilot_submit_probe, run_engineer_loop_probe,
     run_engineer_read_probe, run_goal_curation_probe, run_goal_curation_read_probe,
@@ -49,6 +49,7 @@ Product modes:
   spawn <agent-name> <goal> <worktree-path> [--depth=N]
   handover [--canary-dir=PATH] [--manifest-dir=PATH]
   update
+  self-test
   act-on-decisions
   install
 
@@ -93,6 +94,10 @@ where
         "update" => {
             reject_extra_args(args)?;
             handle_self_update()
+        }
+        "self-test" => {
+            reject_extra_args(args)?;
+            handle_self_test()
         }
         "install" => {
             reject_extra_args(args)?;
@@ -480,6 +485,32 @@ fn parse_state_root_and_json(
     }
 }
 
+/// Run `gh issue create` and print the result. Returns `true` on success.
+fn gh_create_issue(title: &str, body: &str, label: &str) -> bool {
+    match std::process::Command::new("gh")
+        .args(["issue", "create", "--title", title, "--body", body])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let url = String::from_utf8_lossy(&output.stdout);
+            println!("  Created issue: {label} → {}", url.trim());
+            true
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!(
+                "  [warn] gh issue create failed for '{label}': {}",
+                stderr.trim()
+            );
+            false
+        }
+        Err(e) => {
+            eprintln!("  [warn] Failed to run gh: {e}");
+            false
+        }
+    }
+}
+
 /// Read the latest meeting handoff and create GitHub issues for each
 /// decision and action item via `gh issue create`.
 fn dispatch_act_on_decisions() -> Result<(), Box<dyn std::error::Error>> {
@@ -522,30 +553,8 @@ fn dispatch_act_on_decisions() -> Result<(), Box<dyn std::error::Error>> {
             },
             handoff.topic,
         );
-        match std::process::Command::new("gh")
-            .args(["issue", "create", "--title", &title, "--body", &body])
-            .output()
-        {
-            Ok(output) if output.status.success() => {
-                let url = String::from_utf8_lossy(&output.stdout);
-                println!(
-                    "  Created issue for decision: {} → {}",
-                    decision.description,
-                    url.trim()
-                );
-                created += 1;
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                eprintln!(
-                    "  [warn] gh issue create failed for '{}': {}",
-                    decision.description,
-                    stderr.trim()
-                );
-            }
-            Err(e) => {
-                eprintln!("  [warn] Failed to run gh: {e}");
-            }
+        if gh_create_issue(&title, &body, &decision.description) {
+            created += 1;
         }
     }
 
@@ -556,30 +565,8 @@ fn dispatch_act_on_decisions() -> Result<(), Box<dyn std::error::Error>> {
             "**Owner:** {}\n**Priority:** {}\n**Due:** {}\n\n_From meeting: {}_",
             item.owner, item.priority, due, handoff.topic,
         );
-        match std::process::Command::new("gh")
-            .args(["issue", "create", "--title", &title, "--body", &body])
-            .output()
-        {
-            Ok(output) if output.status.success() => {
-                let url = String::from_utf8_lossy(&output.stdout);
-                println!(
-                    "  Created issue for action: {} → {}",
-                    item.description,
-                    url.trim()
-                );
-                created += 1;
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                eprintln!(
-                    "  [warn] gh issue create failed for '{}': {}",
-                    item.description,
-                    stderr.trim()
-                );
-            }
-            Err(e) => {
-                eprintln!("  [warn] Failed to run gh: {e}");
-            }
+        if gh_create_issue(&title, &body, &item.description) {
+            created += 1;
         }
     }
 

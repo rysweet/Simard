@@ -14,13 +14,43 @@ use crate::skill_builder::extract_skill_candidates;
 /// Minimum procedure usage count required for skill extraction.
 const SKILL_MIN_USAGE: u32 = 3;
 
+/// Advance a goal's progress by one step: `NotStarted → InProgress(10)`,
+/// `InProgress(N) → InProgress(N+10)` or `Completed` at 100.
+fn next_progress(current: &GoalProgress) -> GoalProgress {
+    match current {
+        GoalProgress::NotStarted => GoalProgress::InProgress { percent: 10 },
+        GoalProgress::InProgress { percent } => {
+            let next = (*percent + 10).min(100);
+            if next >= 100 {
+                GoalProgress::Completed
+            } else {
+                GoalProgress::InProgress { percent: next }
+            }
+        }
+        other => other.clone(),
+    }
+}
+
+/// Construct an [`ActionOutcome`] from the shared action reference.
+///
+/// Centralises the single unavoidable clone of the [`PlannedAction`] so
+/// dispatch helpers only need `(action, success, detail)`.
+#[inline]
+fn make_outcome(action: &PlannedAction, success: bool, detail: String) -> ActionOutcome {
+    ActionOutcome {
+        action: action.clone(),
+        success,
+        detail,
+    }
+}
+
 /// Dispatch a batch of planned actions against live bridges and state.
 ///
 /// Each action is dispatched independently; a failure in one does not
 /// abort the others. Returns one [`ActionOutcome`] per input action.
 pub fn dispatch_actions(
     actions: &[PlannedAction],
-    bridges: &OodaBridges,
+    bridges: &mut OodaBridges,
     state: &mut OodaState,
 ) -> SimardResult<Vec<ActionOutcome>> {
     let mut outcomes = Vec::with_capacity(actions.len());
@@ -34,7 +64,7 @@ pub fn dispatch_actions(
 /// Dispatch a single planned action and return its outcome.
 fn dispatch_one(
     action: &PlannedAction,
-    bridges: &OodaBridges,
+    bridges: &mut OodaBridges,
     state: &mut OodaState,
 ) -> ActionOutcome {
     match action.kind {
@@ -50,32 +80,20 @@ fn dispatch_one(
 /// ConsolidateMemory: batch-consolidate episodic memory entries.
 fn dispatch_consolidate_memory(action: &PlannedAction, bridges: &OodaBridges) -> ActionOutcome {
     match bridges.memory.consolidate_episodes(20) {
-        Ok(_) => ActionOutcome {
-            action: action.clone(),
-            success: true,
-            detail: "consolidated up to 20 episodes".to_string(),
-        },
-        Err(e) => ActionOutcome {
-            action: action.clone(),
-            success: false,
-            detail: format!("consolidation failed: {e}"),
-        },
+        Ok(_) => make_outcome(action, true, "consolidated up to 20 episodes".to_string()),
+        Err(e) => make_outcome(action, false, format!("consolidation failed: {e}")),
     }
 }
 
 /// ResearchQuery: list available knowledge packs.
 fn dispatch_research_query(action: &PlannedAction, bridges: &OodaBridges) -> ActionOutcome {
     match bridges.knowledge.list_packs() {
-        Ok(packs) => ActionOutcome {
-            action: action.clone(),
-            success: true,
-            detail: format!("found {} knowledge packs", packs.len()),
-        },
-        Err(e) => ActionOutcome {
-            action: action.clone(),
-            success: false,
-            detail: format!("knowledge query failed: {e}"),
-        },
+        Ok(packs) => make_outcome(
+            action,
+            true,
+            format!("found {} knowledge packs", packs.len()),
+        ),
+        Err(e) => make_outcome(action, false, format!("knowledge query failed: {e}")),
     }
 }
 
@@ -94,42 +112,32 @@ fn dispatch_run_improvement(action: &PlannedAction, bridges: &OodaBridges) -> Ac
                 cycle.decision,
                 Some(crate::self_improve::ImprovementDecision::Commit { .. })
             );
-            ActionOutcome {
-                action: action.clone(),
-                success: true,
-                detail: format!(
-                    "improvement cycle completed (committed={}): {}",
-                    committed, summary
-                ),
-            }
+            make_outcome(
+                action,
+                true,
+                format!("improvement cycle completed (committed={committed}): {summary}"),
+            )
         }
-        Err(e) => ActionOutcome {
-            action: action.clone(),
-            success: false,
-            detail: format!("improvement cycle failed: {e}"),
-        },
+        Err(e) => make_outcome(action, false, format!("improvement cycle failed: {e}")),
     }
 }
 
 /// AdvanceGoal: progress the target goal on the board.
 ///
 /// If the goal has a subordinate assigned, checks the subordinate's
-/// heartbeat via the supervisor. Updates goal progress based on the
-/// subordinate's status. If no subordinate is assigned, advances the
-/// goal from NotStarted to InProgress or bumps the percent.
+/// heartbeat via the supervisor. If a base-type session is available
+/// (e.g. RustyClawd), delegates the goal to the agent via `run_turn`
+/// for real autonomous work. Otherwise, falls back to bumping the
+/// progress percentage.
 fn dispatch_advance_goal(
     action: &PlannedAction,
-    bridges: &OodaBridges,
+    bridges: &mut OodaBridges,
     state: &mut OodaState,
 ) -> ActionOutcome {
     let goal_id = match &action.goal_id {
         Some(id) => id.clone(),
         None => {
-            return ActionOutcome {
-                action: action.clone(),
-                success: false,
-                detail: "advance-goal requires a goal_id".to_string(),
-            };
+            return make_outcome(action, false, "advance-goal requires a goal_id".to_string());
         }
     };
 
@@ -137,11 +145,11 @@ fn dispatch_advance_goal(
     let goal = match state.active_goals.active.iter().find(|g| g.id == goal_id) {
         Some(g) => g.clone(),
         None => {
-            return ActionOutcome {
-                action: action.clone(),
-                success: false,
-                detail: format!("goal '{goal_id}' not found on active board"),
-            };
+            return make_outcome(
+                action,
+                false,
+                format!("goal '{goal_id}' not found on active board"),
+            );
         }
     };
 
@@ -150,51 +158,126 @@ fn dispatch_advance_goal(
         return advance_goal_with_subordinate(action, bridges, state, &goal_id, sub_name);
     }
 
-    // No subordinate: advance progress directly.
-    let new_progress = match &goal.status {
-        GoalProgress::NotStarted => GoalProgress::InProgress { percent: 10 },
-        GoalProgress::InProgress { percent } => {
-            let next = (*percent + 10).min(100);
-            if next >= 100 {
-                GoalProgress::Completed
-            } else {
-                GoalProgress::InProgress { percent: next }
-            }
-        }
+    // Blocked and completed goals short-circuit before session dispatch.
+    match &goal.status {
         GoalProgress::Blocked(reason) => {
-            return ActionOutcome {
-                action: action.clone(),
-                success: false,
-                detail: format!("goal '{goal_id}' is blocked: {reason}"),
-            };
+            return make_outcome(
+                action,
+                false,
+                format!("goal '{goal_id}' is blocked: {reason}"),
+            );
         }
         GoalProgress::Completed => {
-            return ActionOutcome {
-                action: action.clone(),
-                success: true,
-                detail: format!("goal '{goal_id}' is already completed"),
-            };
+            return make_outcome(
+                action,
+                true,
+                format!("goal '{goal_id}' is already completed"),
+            );
         }
-    };
+        _ => {}
+    }
+
+    // If a base-type session is available, use run_turn for real agent work.
+    if let Some(ref mut session) = bridges.session {
+        return advance_goal_with_session(action, session.as_mut(), state, &goal);
+    }
+
+    // Fallback: no session available — advance progress by bumping percentage.
+    let new_progress = next_progress(&goal.status);
 
     match update_goal_progress(&mut state.active_goals, &goal_id, new_progress.clone()) {
-        Ok(()) => ActionOutcome {
-            action: action.clone(),
-            success: true,
-            detail: format!("goal '{goal_id}' advanced to {new_progress}"),
+        Ok(()) => make_outcome(
+            action,
+            true,
+            format!("goal '{goal_id}' advanced to {new_progress}"),
+        ),
+        Err(e) => make_outcome(
+            action,
+            false,
+            format!("failed to update goal '{goal_id}': {e}"),
+        ),
+    }
+}
+
+/// Advance a goal using a base-type session's `run_turn`.
+///
+/// Constructs an objective that includes environment context (git status,
+/// open issues, recent commits) so the agent can make informed decisions.
+/// Updates goal progress based on the turn outcome.
+fn advance_goal_with_session(
+    action: &PlannedAction,
+    session: &mut dyn crate::base_types::BaseTypeSession,
+    state: &mut OodaState,
+    goal: &crate::goal_curation::ActiveGoal,
+) -> ActionOutcome {
+    use crate::base_types::BaseTypeTurnInput;
+
+    let percent = match &goal.status {
+        GoalProgress::InProgress { percent } => *percent,
+        _ => 0,
+    };
+
+    // Gather fresh environment context so the agent sees current state.
+    let env = crate::ooda_loop::gather_environment();
+    let env_context = format!(
+        "\n\nEnvironment context:\n- Git status: {}\n- Open issues: {}\n- Recent commits: {}",
+        if env.git_status.is_empty() {
+            "clean".to_string()
+        } else {
+            format!("{} changed files", env.git_status.lines().count())
         },
-        Err(e) => ActionOutcome {
-            action: action.clone(),
-            success: false,
-            detail: format!("failed to update goal '{goal_id}': {e}"),
+        if env.open_issues.is_empty() {
+            "none".to_string()
+        } else {
+            env.open_issues.join("; ")
         },
+        if env.recent_commits.is_empty() {
+            "none".to_string()
+        } else {
+            env.recent_commits[..env.recent_commits.len().min(5)].join("; ")
+        },
+    );
+
+    let objective = format!(
+        "Goal '{}' ({}% complete): {}. Assess current progress and take one bounded action to advance this goal.{}",
+        goal.id, percent, goal.description, env_context,
+    );
+
+    let input = BaseTypeTurnInput::objective_only(&objective);
+
+    match session.run_turn(input) {
+        Ok(outcome) => {
+            let new_progress = next_progress(&goal.status);
+            let _ = update_goal_progress(&mut state.active_goals, &goal.id, new_progress.clone());
+
+            eprintln!(
+                "[simard] OODA session result: advance-goal '{}': {}",
+                goal.id, outcome.execution_summary
+            );
+
+            make_outcome(
+                action,
+                true,
+                format!(
+                    "goal '{}' advanced to {} via session (evidence={})",
+                    goal.id,
+                    new_progress,
+                    outcome.evidence.len(),
+                ),
+            )
+        }
+        Err(e) => make_outcome(
+            action,
+            false,
+            format!("session run_turn failed for goal '{}': {e}", goal.id),
+        ),
     }
 }
 
 /// Advance a goal that has a subordinate assigned by checking heartbeat.
 fn advance_goal_with_subordinate(
     action: &PlannedAction,
-    bridges: &OodaBridges,
+    bridges: &mut OodaBridges,
     state: &mut OodaState,
     goal_id: &str,
     sub_name: &str,
@@ -215,38 +298,38 @@ fn advance_goal_with_subordinate(
             // Subordinate is alive; update goal to in-progress if not already.
             let new_progress = GoalProgress::InProgress { percent: 50 };
             let _ = update_goal_progress(&mut state.active_goals, goal_id, new_progress);
-            ActionOutcome {
-                action: action.clone(),
-                success: true,
-                detail: format!(
+            make_outcome(
+                action,
+                true,
+                format!(
                     "subordinate '{sub_name}' alive (phase={phase}), goal '{goal_id}' in-progress"
                 ),
-            }
+            )
         }
-        Ok(HeartbeatStatus::Stale { seconds_since }) => ActionOutcome {
-            action: action.clone(),
-            success: false,
-            detail: format!(
+        Ok(HeartbeatStatus::Stale { seconds_since }) => make_outcome(
+            action,
+            false,
+            format!(
                 "subordinate '{sub_name}' stale ({seconds_since}s), goal '{goal_id}' may need reassignment"
             ),
-        },
+        ),
         Ok(HeartbeatStatus::Dead) => {
             let _ = update_goal_progress(
                 &mut state.active_goals,
                 goal_id,
                 GoalProgress::Blocked(format!("subordinate '{sub_name}' is dead")),
             );
-            ActionOutcome {
-                action: action.clone(),
-                success: false,
-                detail: format!("subordinate '{sub_name}' is dead, goal '{goal_id}' blocked"),
-            }
+            make_outcome(
+                action,
+                false,
+                format!("subordinate '{sub_name}' is dead, goal '{goal_id}' blocked"),
+            )
         }
-        Err(e) => ActionOutcome {
-            action: action.clone(),
-            success: false,
-            detail: format!("heartbeat check failed for subordinate '{sub_name}': {e}"),
-        },
+        Err(e) => make_outcome(
+            action,
+            false,
+            format!("heartbeat check failed for subordinate '{sub_name}': {e}"),
+        ),
     }
 }
 
@@ -256,22 +339,18 @@ fn dispatch_run_gym_eval(action: &PlannedAction, bridges: &OodaBridges) -> Actio
         Ok(result) => {
             use crate::gym_scoring::suite_score_from_result;
             let score = suite_score_from_result(&result);
-            ActionOutcome {
-                action: action.clone(),
-                success: true,
-                detail: format!(
+            make_outcome(
+                action,
+                true,
+                format!(
                     "gym eval: {:.1}% overall, {}/{} passed",
                     score.overall * 100.0,
                     score.scenarios_passed,
                     score.scenario_count,
                 ),
-            }
+            )
         }
-        Err(e) => ActionOutcome {
-            action: action.clone(),
-            success: false,
-            detail: format!("gym eval failed: {e}"),
-        },
+        Err(e) => make_outcome(action, false, format!("gym eval failed: {e}")),
     }
 }
 
@@ -280,21 +359,17 @@ fn dispatch_build_skill(action: &PlannedAction, bridges: &OodaBridges) -> Action
     match extract_skill_candidates(&bridges.memory, SKILL_MIN_USAGE) {
         Ok(candidates) => {
             let names: Vec<&str> = candidates.iter().map(|c| c.name.as_str()).collect();
-            ActionOutcome {
-                action: action.clone(),
-                success: true,
-                detail: format!(
+            make_outcome(
+                action,
+                true,
+                format!(
                     "extracted {} skill candidates: [{}]",
                     candidates.len(),
                     names.join(", ")
                 ),
-            }
+            )
         }
-        Err(e) => ActionOutcome {
-            action: action.clone(),
-            success: false,
-            detail: format!("skill extraction failed: {e}"),
-        },
+        Err(e) => make_outcome(action, false, format!("skill extraction failed: {e}")),
     }
 }
 
@@ -370,6 +445,7 @@ mod tests {
             memory: mock_memory(),
             knowledge: mock_knowledge(),
             gym: mock_gym(),
+            session: None,
         }
     }
 
@@ -391,14 +467,14 @@ mod tests {
 
     #[test]
     fn dispatch_run_improvement_calls_gym() {
-        let bridges = test_bridges();
+        let mut bridges = test_bridges();
         let action = PlannedAction {
             kind: ActionKind::RunImprovement,
             goal_id: None,
             description: "test".into(),
         };
         let mut state = OodaState::new(GoalBoard::new());
-        let outcomes = dispatch_actions(&[action], &bridges, &mut state).unwrap();
+        let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
         assert_eq!(outcomes.len(), 1);
         assert!(outcomes[0].success);
         assert!(outcomes[0].detail.contains("improvement cycle completed"));
@@ -406,7 +482,7 @@ mod tests {
 
     #[test]
     fn dispatch_advance_goal_not_started_becomes_in_progress() {
-        let bridges = test_bridges();
+        let mut bridges = test_bridges();
         let board = board_with_goal("g1", GoalProgress::NotStarted, None);
         let mut state = OodaState::new(board);
         let action = PlannedAction {
@@ -414,7 +490,7 @@ mod tests {
             goal_id: Some("g1".into()),
             description: "advance".into(),
         };
-        let outcomes = dispatch_actions(&[action], &bridges, &mut state).unwrap();
+        let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
         assert!(outcomes[0].success);
         assert!(outcomes[0].detail.contains("in-progress"));
         assert!(matches!(
@@ -425,7 +501,7 @@ mod tests {
 
     #[test]
     fn dispatch_advance_goal_blocked_fails() {
-        let bridges = test_bridges();
+        let mut bridges = test_bridges();
         let board = board_with_goal("g1", GoalProgress::Blocked("waiting".into()), None);
         let mut state = OodaState::new(board);
         let action = PlannedAction {
@@ -433,35 +509,35 @@ mod tests {
             goal_id: Some("g1".into()),
             description: "advance".into(),
         };
-        let outcomes = dispatch_actions(&[action], &bridges, &mut state).unwrap();
+        let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
         assert!(!outcomes[0].success);
         assert!(outcomes[0].detail.contains("blocked"));
     }
 
     #[test]
     fn dispatch_advance_goal_missing_id_fails() {
-        let bridges = test_bridges();
+        let mut bridges = test_bridges();
         let mut state = OodaState::new(GoalBoard::new());
         let action = PlannedAction {
             kind: ActionKind::AdvanceGoal,
             goal_id: None,
             description: "advance".into(),
         };
-        let outcomes = dispatch_actions(&[action], &bridges, &mut state).unwrap();
+        let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
         assert!(!outcomes[0].success);
         assert!(outcomes[0].detail.contains("requires a goal_id"));
     }
 
     #[test]
     fn dispatch_run_gym_eval_returns_score() {
-        let bridges = test_bridges();
+        let mut bridges = test_bridges();
         let mut state = OodaState::new(GoalBoard::new());
         let action = PlannedAction {
             kind: ActionKind::RunGymEval,
             goal_id: None,
             description: "eval".into(),
         };
-        let outcomes = dispatch_actions(&[action], &bridges, &mut state).unwrap();
+        let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
         assert!(outcomes[0].success);
         assert!(outcomes[0].detail.contains("gym eval"));
         assert!(outcomes[0].detail.contains("75.0%"));
@@ -469,21 +545,21 @@ mod tests {
 
     #[test]
     fn dispatch_build_skill_extracts_candidates() {
-        let bridges = test_bridges();
+        let mut bridges = test_bridges();
         let mut state = OodaState::new(GoalBoard::new());
         let action = PlannedAction {
             kind: ActionKind::BuildSkill,
             goal_id: None,
             description: "build".into(),
         };
-        let outcomes = dispatch_actions(&[action], &bridges, &mut state).unwrap();
+        let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
         assert!(outcomes[0].success);
         assert!(outcomes[0].detail.contains("cargo-build"));
     }
 
     #[test]
     fn dispatch_advance_goal_with_dead_subordinate_blocks() {
-        let bridges = test_bridges();
+        let mut bridges = test_bridges();
         let board = board_with_goal("g1", GoalProgress::NotStarted, Some("sub-1"));
         let mut state = OodaState::new(board);
         let action = PlannedAction {
@@ -491,7 +567,7 @@ mod tests {
             goal_id: Some("g1".into()),
             description: "advance".into(),
         };
-        let outcomes = dispatch_actions(&[action], &bridges, &mut state).unwrap();
+        let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
         // No progress facts in memory means Dead heartbeat.
         assert!(!outcomes[0].success);
         assert!(outcomes[0].detail.contains("dead"));

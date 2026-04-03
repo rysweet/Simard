@@ -73,6 +73,17 @@ impl From<&ActiveGoal> for GoalSnapshot {
     }
 }
 
+/// Snapshot of the local environment: git state, issues, recent commits.
+#[derive(Clone, Debug, Default)]
+pub struct EnvironmentSnapshot {
+    /// Output of `git status --porcelain` (empty string if unavailable).
+    pub git_status: String,
+    /// Open issue titles from `gh issue list` (empty if unavailable).
+    pub open_issues: Vec<String>,
+    /// Recent commit one-liners from `git log --oneline -10`.
+    pub recent_commits: Vec<String>,
+}
+
 /// Everything gathered during the Observe phase.
 #[derive(Clone, Debug)]
 pub struct Observation {
@@ -80,6 +91,8 @@ pub struct Observation {
     pub gym_health: Option<GymSuiteScore>,
     pub memory_stats: CognitiveStatistics,
     pub pending_improvements: Vec<ImprovementCycle>,
+    /// Local environment state for goal assessment.
+    pub environment: EnvironmentSnapshot,
 }
 
 /// A ranked priority produced during the Orient phase.
@@ -163,10 +176,73 @@ pub struct OodaBridges {
     pub memory: CognitiveMemoryBridge,
     pub knowledge: KnowledgeBridge,
     pub gym: GymBridge,
+    /// Optional base-type session for real autonomous work (e.g. RustyClawd).
+    /// When present, `AdvanceGoal` actions use `run_turn` to delegate work
+    /// to an LLM agent instead of just bumping a progress percentage.
+    pub session: Option<Box<dyn crate::base_types::BaseTypeSession>>,
 }
 
-/// Observe: gather goal statuses, gym health, memory stats.
-/// Gym failures produce `None` rather than aborting (Pillar 11).
+/// Gather a snapshot of the local environment (git status, issues, commits).
+///
+/// Each sub-command degrades honestly: if the tool is unavailable the
+/// corresponding field is empty rather than causing a cycle failure.
+pub fn gather_environment() -> EnvironmentSnapshot {
+    let git_status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    let open_issues = std::process::Command::new("gh")
+        .args([
+            "issue",
+            "list",
+            "--state",
+            "open",
+            "--limit",
+            "20",
+            "--json",
+            "title",
+            "--jq",
+            ".[].title",
+        ])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let recent_commits = std::process::Command::new("git")
+        .args(["log", "--oneline", "-10"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    EnvironmentSnapshot {
+        git_status,
+        open_issues,
+        recent_commits,
+    }
+}
+
+/// Observe: gather goal statuses, environment state, gym health, memory stats.
+/// Sub-system failures produce degraded fields rather than aborting (Pillar 11).
 pub fn observe(state: &OodaState, bridges: &OodaBridges) -> SimardResult<Observation> {
     let goal_statuses: Vec<GoalSnapshot> = state
         .active_goals
@@ -174,6 +250,9 @@ pub fn observe(state: &OodaState, bridges: &OodaBridges) -> SimardResult<Observa
         .iter()
         .map(GoalSnapshot::from)
         .collect();
+
+    let environment = gather_environment();
+
     let gym_health = match bridges.gym.run_suite("progressive") {
         Ok(result) => {
             use crate::gym_scoring::suite_score_from_result;
@@ -196,16 +275,24 @@ pub fn observe(state: &OodaState, bridges: &OodaBridges) -> SimardResult<Observa
         gym_health,
         memory_stats,
         pending_improvements: Vec::new(),
+        environment,
     })
 }
 
-/// Orient: rank goals by urgency. Blocked > not-started > in-progress.
+/// Orient: rank goals by urgency, informed by environment context.
+///
+/// Base urgency: Blocked > not-started > in-progress > completed.
+/// Environment signals (dirty working tree, open issues mentioning a goal)
+/// can boost a goal's urgency so the OODA loop prioritises actionable work.
 pub fn orient(observation: &Observation, goals: &GoalBoard) -> SimardResult<Vec<Priority>> {
+    let env = &observation.environment;
+    let has_dirty_tree = !env.git_status.is_empty();
+
     let mut priorities: Vec<Priority> = goals
         .active
         .iter()
         .map(|g| {
-            let (urgency, reason) = match &g.status {
+            let (mut urgency, mut reason) = match &g.status {
                 GoalProgress::Blocked(r) => (1.0, format!("blocked: {r}")),
                 GoalProgress::NotStarted => (0.8, "not yet started".to_string()),
                 GoalProgress::InProgress { percent } => (
@@ -214,6 +301,24 @@ pub fn orient(observation: &Observation, goals: &GoalBoard) -> SimardResult<Vec<
                 ),
                 GoalProgress::Completed => (0.0, "completed".to_string()),
             };
+
+            // Boost urgency if an open issue mentions this goal.
+            let mentioned_in_issues = env
+                .open_issues
+                .iter()
+                .any(|title| title.to_lowercase().contains(&g.id.to_lowercase()));
+            if mentioned_in_issues {
+                urgency = (urgency + 0.1).min(1.0);
+                reason = format!("{reason}; mentioned in open issue");
+            }
+
+            // Slight boost for in-progress goals when the tree is dirty
+            // (indicates active development that may relate to this goal).
+            if has_dirty_tree && matches!(g.status, GoalProgress::InProgress { .. }) {
+                urgency = (urgency + 0.05).min(1.0);
+                reason = format!("{reason}; dirty working tree");
+            }
+
             Priority {
                 goal_id: g.id.clone(),
                 urgency,
@@ -284,18 +389,27 @@ pub fn decide(priorities: &[Priority], config: &OodaConfig) -> SimardResult<Vec<
 ///
 /// Delegates to [`crate::ooda_actions::dispatch_actions`] which calls the
 /// real subsystems (gym bridge, supervisor, skill builder, etc.).
+/// Takes `&mut OodaBridges` so that the optional session can be used for
+/// `run_turn` calls during `AdvanceGoal` actions.
 pub fn act(
     actions: &[PlannedAction],
-    bridges: &OodaBridges,
+    bridges: &mut OodaBridges,
     state: &mut OodaState,
 ) -> SimardResult<Vec<ActionOutcome>> {
     crate::ooda_actions::dispatch_actions(actions, bridges, state)
 }
 
-/// Run one complete OODA cycle: Observe -> Orient -> Decide -> Act.
+/// Run one complete OODA cycle: Observe -> Orient -> Decide -> Act -> Curate.
+///
+/// After dispatching actions, the cycle archives completed goals and promotes
+/// the highest-scoring backlog items to fill any freed active slots. This
+/// implements the meta-goal of continually seeking the best goals to pursue.
+///
+/// Takes `&mut OodaBridges` so that the optional session can be used for
+/// `run_turn` calls during `AdvanceGoal` dispatch.
 pub fn run_ooda_cycle(
     state: &mut OodaState,
-    bridges: &OodaBridges,
+    bridges: &mut OodaBridges,
     config: &OodaConfig,
 ) -> SimardResult<CycleReport> {
     // Only replace board if loaded one is non-empty (cold memory = keep local).
@@ -304,14 +418,45 @@ pub fn run_ooda_cycle(
     {
         state.active_goals = board;
     }
+
+    // --- Observe ---
     state.current_phase = OodaPhase::Observe;
     let observation = observe(state, bridges)?;
+
+    // --- Orient ---
     state.current_phase = OodaPhase::Orient;
     let priorities = orient(&observation, &state.active_goals)?;
+
+    // --- Decide ---
     state.current_phase = OodaPhase::Decide;
     let planned_actions = decide(&priorities, config)?;
+
+    // --- Act ---
     state.current_phase = OodaPhase::Act;
     let outcomes = act(&planned_actions, bridges, state)?;
+
+    // --- Curate: archive completed goals, promote from backlog ---
+    let archived = crate::goal_curation::archive_completed(&mut state.active_goals);
+    if !archived.is_empty() {
+        eprintln!(
+            "[simard] OODA curate: archived {} completed goal(s): {}",
+            archived.len(),
+            archived
+                .iter()
+                .map(|g| g.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
+
+    // Promote highest-scoring backlog items to fill freed slots.
+    promote_from_backlog(&mut state.active_goals);
+
+    // Persist the updated board to cognitive memory (best-effort).
+    if let Err(e) = crate::goal_curation::persist_board(&state.active_goals, &bridges.memory) {
+        eprintln!("[simard] OODA curate: failed to persist goal board: {e}");
+    }
+
     state.cycle_count += 1;
     Ok(CycleReport {
         cycle_number: state.cycle_count,
@@ -322,17 +467,51 @@ pub fn run_ooda_cycle(
     })
 }
 
+/// Promote the highest-scoring backlog items into free active slots.
+///
+/// Backlog items are sorted by score descending and promoted until the
+/// active board is at capacity or the backlog is empty.
+fn promote_from_backlog(board: &mut GoalBoard) {
+    // Sort backlog by score descending so we promote the best first.
+    board.backlog.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    while board.active_slots_remaining() > 0 && !board.backlog.is_empty() {
+        let item_id = board.backlog[0].id.clone();
+        match crate::goal_curation::promote_to_active(board, &item_id, 3, None) {
+            Ok(()) => {
+                eprintln!("[simard] OODA curate: promoted backlog item '{item_id}' to active");
+            }
+            Err(e) => {
+                eprintln!("[simard] OODA curate: failed to promote '{item_id}': {e}");
+                break;
+            }
+        }
+    }
+}
+
 /// Summarize a cycle report for logging/persistence.
 pub fn summarize_cycle_report(report: &CycleReport) -> String {
     let succeeded = report.outcomes.iter().filter(|o| o.success).count();
     let total = report.outcomes.len();
+    let env = &report.observation.environment;
+    let dirty = if env.git_status.is_empty() {
+        "clean"
+    } else {
+        "dirty"
+    };
     format!(
-        "OODA cycle #{}: {} priorities, {} actions ({}/{} succeeded), goals={}",
+        "OODA cycle #{}: {} priorities, {} actions ({}/{} succeeded), goals={}, issues={}, tree={}",
         report.cycle_number,
         report.priorities.len(),
         total,
         succeeded,
         total,
         report.observation.goal_statuses.len(),
+        env.open_issues.len(),
+        dirty,
     )
 }
