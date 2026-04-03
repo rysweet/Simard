@@ -96,3 +96,4 @@ If you are changing architecture, start with the [architecture overview](./archi
 - [Bridge pattern](./architecture/bridge-pattern.md) - Rust-Python subprocess bridges with circuit breaker fault tolerance.
 - [Cognitive memory](./architecture/cognitive-memory.md) - Six-type memory model, session lifecycle mapping, and hive mind integration.
 - [Implementation plan](./architecture/implementation-plan.md) - Phased roadmap with current status and quality gates.
+- [OODA meeting handoff integration](./architecture/ooda-meeting-handoff-integration.md) - Wire meeting handoffs into the OODA daemon and seed default goals (Issues #157, #158).

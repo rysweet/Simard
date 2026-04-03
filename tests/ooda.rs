@@ -183,11 +183,12 @@ fn run_full_ooda_cycle_and_increments() {
 }
 
 #[test]
-fn feral_empty_goals() {
+fn feral_empty_goals_seeds_defaults() {
     let mut bridges = test_bridges();
     let mut state = OodaState::new(GoalBoard::new());
     let report = run_ooda_cycle(&mut state, &mut bridges, &OodaConfig::default()).unwrap();
-    assert!(report.observation.goal_statuses.is_empty());
+    // Empty boards now get seeded with 5 default goals before observation.
+    assert_eq!(report.observation.goal_statuses.len(), 5);
     assert_eq!(report.cycle_number, 1);
 }
 

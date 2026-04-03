@@ -339,15 +339,17 @@ pub fn mark_meeting_handoff_processed(dir: &Path) -> SimardResult<()> {
             reason: format!("failed to parse handoff JSON: {e}"),
         })?;
     handoff.processed = true;
-    let json = serde_json::to_string_pretty(&handoff).map_err(|e| SimardError::ArtifactIo {
-        path: path.clone(),
-        reason: format!("serializing handoff: {e}"),
-    })?;
-    fs::write(&path, json).map_err(|e| SimardError::ArtifactIo {
-        path: path.clone(),
-        reason: format!("writing handoff: {e}"),
-    })?;
-    Ok(())
+    write_meeting_handoff(dir, &handoff)
+}
+
+/// Mark an already-loaded handoff as processed and write it back, avoiding a
+/// redundant file read when the caller already holds the parsed struct.
+pub fn mark_handoff_processed_in_place(
+    dir: &Path,
+    handoff: &mut MeetingHandoff,
+) -> SimardResult<()> {
+    handoff.processed = true;
+    write_meeting_handoff(dir, handoff)
 }
 
 #[cfg(test)]

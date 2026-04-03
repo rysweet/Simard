@@ -288,6 +288,59 @@ pub fn archive_completed(board: &mut GoalBoard) -> Vec<ActiveGoal> {
     archived
 }
 
+/// The 5 default starter goals shared by both `seed_default_board` (GoalBoard)
+/// and `seed_default_goals` (GoalStore). Single source of truth.
+///
+/// Each tuple: (priority, title, description).
+pub const DEFAULT_SEED_GOALS: [(u32, &str, &str); 5] = [
+    (
+        1,
+        "Improve amplihack test coverage",
+        "Increase test coverage across the amplihack ecosystem to catch regressions early",
+    ),
+    (
+        2,
+        "Enhance Simard meeting experience",
+        "Improve the interactive meeting facilitator with better UX and richer handoffs",
+    ),
+    (
+        3,
+        "Improve cognitive memory persistence",
+        "Harden memory consolidation and ensure durable recall across sessions",
+    ),
+    (
+        4,
+        "Add more gym benchmark scenarios",
+        "Expand the gym evaluation suite with diverse scenarios for broader coverage",
+    ),
+    (
+        5,
+        "Explore developer ideas from tracked researchers",
+        "Monitor tracked researchers and incorporate promising ideas into the roadmap",
+    ),
+];
+
+/// Seed the board with 5 default starter goals if it has no active goals.
+/// Returns the number of goals added.
+pub fn seed_default_board(board: &mut GoalBoard) -> usize {
+    if !board.active.is_empty() {
+        return 0;
+    }
+
+    for (priority, id_source, description) in DEFAULT_SEED_GOALS {
+        let id = crate::goals::goal_slug(id_source);
+        board.active.push(ActiveGoal {
+            id,
+            description: description.to_string(),
+            priority,
+            status: GoalProgress::NotStarted,
+            assigned_to: None,
+        });
+    }
+
+    DEFAULT_SEED_GOALS.len()
+}
+
 /// Persist the board state and record an episode for recall.
 pub fn persist_board(board: &GoalBoard, bridge: &CognitiveMemoryBridge) -> SimardResult<()> {
     save_goal_board(board, bridge)?;
@@ -400,5 +453,34 @@ mod tests {
         let err = update_goal_progress(&mut board, "g1", GoalProgress::InProgress { percent: 200 })
             .unwrap_err();
         assert!(err.to_string().contains("100"));
+    }
+
+    #[test]
+    fn seed_default_board_adds_five_goals_to_empty_board() {
+        let mut board = GoalBoard::new();
+        let count = seed_default_board(&mut board);
+        assert_eq!(count, 5);
+        assert_eq!(board.active.len(), 5);
+        for goal in &board.active {
+            assert!(matches!(goal.status, GoalProgress::NotStarted));
+        }
+    }
+
+    #[test]
+    fn seed_default_board_noop_when_board_has_goals() {
+        let mut board = GoalBoard::new();
+        add_active_goal(&mut board, sample_goal("existing", 1)).unwrap();
+        let count = seed_default_board(&mut board);
+        assert_eq!(count, 0);
+        assert_eq!(board.active.len(), 1);
+    }
+
+    #[test]
+    fn seed_default_board_is_idempotent() {
+        let mut board = GoalBoard::new();
+        seed_default_board(&mut board);
+        let count = seed_default_board(&mut board);
+        assert_eq!(count, 0);
+        assert_eq!(board.active.len(), 5);
     }
 }

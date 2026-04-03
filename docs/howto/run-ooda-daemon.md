@@ -76,9 +76,32 @@ ls target/simard-ooda/
 # cognitive_memory/  (memory bridge database)
 ```
 
-## Act on meeting decisions
+## Meeting handoff → goals (Issues #157, #158)
 
-After a meeting session produces a handoff artifact, convert decisions to GitHub issues:
+When a meeting closes, `meeting_repl.rs` writes a handoff artifact to
+`target/meeting_handoffs/meeting_handoff.json`. The OODA daemon automatically
+picks up unprocessed handoffs at the start of each cycle and converts them
+to goals on the board:
+
+- **Decisions** become active goals (up to the board cap of 5).
+- **Action items** with priority >= 2 become scored backlog items.
+- The handoff is marked as processed so it is not re-ingested.
+
+This means meeting outcomes flow into autonomous work without manual
+intervention. See the [architecture doc](../architecture/ooda-meeting-handoff-integration.md)
+for the full design.
+
+## Goal seeding
+
+If the goal store is empty on daemon startup (first run or reset), Simard
+seeds 5 default goals that reflect her core purpose: keeping goals honest,
+improving gym scores, consolidating memory, advancing open issues, and
+curating the backlog. Seeding is idempotent — it only triggers on an empty
+store.
+
+## Act on meeting decisions (CLI)
+
+To manually convert meeting decisions to GitHub issues instead of OODA goals:
 
 ```bash
 simard act-on-decisions

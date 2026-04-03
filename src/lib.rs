@@ -125,12 +125,13 @@ pub use evidence::{
     EvidenceRecord, EvidenceSource, EvidenceStore, FileBackedEvidenceStore, InMemoryEvidenceStore,
 };
 pub use goal_curation::{
-    ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS, add_active_goal,
-    add_backlog_item, archive_completed, load_goal_board, persist_board, promote_to_active,
-    update_goal_progress,
+    ActiveGoal, BacklogItem, DEFAULT_SEED_GOALS, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS,
+    add_active_goal, add_backlog_item, archive_completed, load_goal_board, persist_board,
+    promote_to_active, seed_default_board, update_goal_progress,
 };
 pub use goals::{
     FileBackedGoalStore, GoalRecord, GoalStatus, GoalStore, GoalUpdate, InMemoryGoalStore,
+    seed_default_goals,
 };
 pub use gym::{
     BenchmarkArtifactPaths, BenchmarkCheckResult, BenchmarkComparisonArtifactPaths,
@@ -171,8 +172,8 @@ pub use knowledge_context::{PlanningContext, enrich_planning_context};
 pub use meeting_facilitator::{
     ActionItem, MEETING_HANDOFF_FILENAME, MeetingDecision, MeetingHandoff, MeetingSession,
     MeetingSessionStatus, add_note, close_meeting, default_handoff_dir, load_meeting_handoff,
-    mark_meeting_handoff_processed, record_action_item, record_decision, start_meeting,
-    write_meeting_handoff,
+    mark_handoff_processed_in_place, mark_meeting_handoff_processed, record_action_item,
+    record_decision, start_meeting, write_meeting_handoff,
 };
 pub use meeting_repl::{MeetingCommand, parse_meeting_command, run_meeting_repl};
 pub use meetings::{
@@ -196,8 +197,9 @@ pub use memory_hive::{HiveConfig, hive_config_from_identity};
 pub use ooda_actions::dispatch_actions;
 pub use ooda_loop::{
     ActionKind, ActionOutcome, CycleReport, EnvironmentSnapshot, GoalSnapshot, Observation,
-    OodaBridges, OodaConfig, OodaPhase, OodaState, PlannedAction, Priority, act, decide,
-    gather_environment, observe, orient, run_ooda_cycle, summarize_cycle_report,
+    OodaBridges, OodaConfig, OodaPhase, OodaState, PlannedAction, Priority, act,
+    check_meeting_handoffs, decide, gather_environment, observe, orient, run_ooda_cycle,
+    summarize_cycle_report,
 };
 pub use ooda_scheduler::{
     CompletedSlot, ScheduledAction, Scheduler, SchedulerSlot, SlotStatus, complete_slot,
