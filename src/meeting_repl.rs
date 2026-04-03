@@ -453,6 +453,26 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
     let summary = closed.durable_summary();
     writeln!(output, "Meeting record: {summary}").ok();
 
+    // --- Write meeting handoff artifact for engineer loop and act-on-decisions ---
+    {
+        use crate::meeting_facilitator::{
+            MeetingHandoff, default_handoff_dir, write_meeting_handoff,
+        };
+        let handoff = MeetingHandoff::from_session(&closed);
+        let handoff_dir = default_handoff_dir();
+        if let Err(e) = write_meeting_handoff(&handoff_dir, &handoff) {
+            writeln!(output, "[warn] Failed to write meeting handoff: {e}").ok();
+        } else {
+            writeln!(
+                output,
+                "Meeting handoff written ({} decisions, {} actions). Run `simard act-on-decisions` to create issues.",
+                handoff.decisions.len(),
+                handoff.action_items.len(),
+            )
+            .ok();
+        }
+    }
+
     // --- Persist full meeting content to cognitive memory ---
 
     // 1. Store the full transcript as an episodic memory so future meetings
