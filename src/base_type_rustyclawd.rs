@@ -84,8 +84,9 @@ impl BaseTypeFactory for RustyClawdAdapter {
     }
 }
 
-/// Maximum conversation turns to retain in history (prevents unbounded growth).
-const MAX_HISTORY_MESSAGES: usize = 100;
+/// Maximum conversation messages to retain in history. Keep low because
+/// each tool-use turn can be very large (tool inputs + outputs).
+const MAX_HISTORY_MESSAGES: usize = 20;
 
 struct RustyClawdSession {
     descriptor: BaseTypeDescriptor,

@@ -358,10 +358,9 @@ fn load_meeting_system_prompt() -> String {
 /// Returns `None` if any step fails so the caller can fall back gracefully.
 fn launch_real_meeting_bridge() -> Option<CognitiveMemoryBridge> {
     let python_dir = find_python_dir().ok()?;
-    let state_root = PathBuf::from("target/simard-state");
-    let db_path = state_root.join("cognitive_memory");
-    // Ensure the db directory exists so the bridge can write to it.
-    let _ = std::fs::create_dir_all(&db_path);
+    let state_root = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/target/simard-state"));
+    let _ = std::fs::create_dir_all(&state_root);
+    let db_path = state_root.join("cognitive_memory.kuzu");
     launch_memory_bridge("simard-meeting", &db_path, &python_dir).ok()
 }
 
