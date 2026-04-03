@@ -133,9 +133,12 @@ fn write_and_load_handoff_round_trips_all_fields() {
 
     write_meeting_handoff(&dir, &handoff).unwrap();
 
-    // File should exist at expected path
-    let expected_path = dir.join(MEETING_HANDOFF_FILENAME);
-    assert!(expected_path.is_file(), "handoff JSON should exist on disk");
+    // File should exist as a timestamped handoff-*.json file
+    let handoff_file = fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).any(|e| {
+        let name = e.file_name().to_string_lossy().to_string();
+        name.starts_with("handoff-") && name.ends_with(".json")
+    });
+    assert!(handoff_file, "handoff JSON should exist on disk");
 
     let loaded = load_meeting_handoff(&dir).unwrap().unwrap();
     assert_eq!(loaded.topic, handoff.topic);
@@ -219,7 +222,16 @@ fn handoff_json_contains_expected_fields() {
     let handoff = MeetingHandoff::from_session(&session);
     write_meeting_handoff(&dir, &handoff).unwrap();
 
-    let raw = fs::read_to_string(dir.join(MEETING_HANDOFF_FILENAME)).unwrap();
+    let handoff_path = fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .find(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.starts_with("handoff-") && name.ends_with(".json")
+        })
+        .expect("expected handoff-*.json file")
+        .path();
+    let raw = fs::read_to_string(&handoff_path).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
 
     assert!(parsed.get("topic").is_some(), "JSON must have 'topic'");

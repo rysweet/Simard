@@ -318,11 +318,19 @@ fn handoff_is_written_to_correct_path() {
     let handoff = sample_handoff();
     write_meeting_handoff(&dir, &handoff).unwrap();
 
-    let expected_path = dir.join("meeting_handoff.json");
-    assert!(expected_path.is_file());
+    // write_meeting_handoff uses timestamped filenames (handoff-*.json).
+    let handoff_file = fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .find(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.starts_with("handoff-") && name.ends_with(".json")
+        })
+        .expect("expected a handoff-*.json file");
+    assert!(handoff_file.path().is_file());
 
     // Verify it's valid JSON
-    let raw = fs::read_to_string(&expected_path).unwrap();
+    let raw = fs::read_to_string(handoff_file.path()).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(parsed["topic"], "Sprint planning");
 
