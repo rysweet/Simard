@@ -169,7 +169,7 @@ pub use knowledge_bridge::{
 pub use knowledge_context::{PlanningContext, enrich_planning_context};
 pub use meeting_facilitator::{
     ActionItem, MEETING_HANDOFF_FILENAME, MeetingDecision, MeetingHandoff, MeetingSession,
-    MeetingSessionStatus, add_note, close_meeting, load_meeting_handoff,
+    MeetingSessionStatus, add_note, close_meeting, default_handoff_dir, load_meeting_handoff,
     mark_meeting_handoff_processed, record_action_item, record_decision, start_meeting,
     write_meeting_handoff,
 };

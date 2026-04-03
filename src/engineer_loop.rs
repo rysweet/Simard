@@ -186,7 +186,7 @@ fn load_carried_meeting_decisions(state_root: &Path) -> SimardResult<Vec<String>
         .collect::<Vec<_>>();
 
     // Also check for unprocessed meeting handoff artifacts.
-    let handoff_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/meeting_handoffs");
+    let handoff_dir = crate::meeting_facilitator::default_handoff_dir();
     if let Ok(Some(handoff)) = crate::meeting_facilitator::load_meeting_handoff(&handoff_dir)
         && !handoff.processed
     {

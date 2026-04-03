@@ -480,17 +480,14 @@ fn parse_state_root_and_json(
     }
 }
 
-/// Default directory for meeting handoff artifacts.
-fn meeting_handoff_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/meeting_handoffs")
-}
-
 /// Read the latest meeting handoff and create GitHub issues for each
 /// decision and action item via `gh issue create`.
 fn dispatch_act_on_decisions() -> Result<(), Box<dyn std::error::Error>> {
-    use crate::meeting_facilitator::{load_meeting_handoff, mark_meeting_handoff_processed};
+    use crate::meeting_facilitator::{
+        default_handoff_dir, load_meeting_handoff, mark_meeting_handoff_processed,
+    };
 
-    let dir = meeting_handoff_dir();
+    let dir = default_handoff_dir();
     let handoff = load_meeting_handoff(&dir)?;
 
     let Some(handoff) = handoff else {

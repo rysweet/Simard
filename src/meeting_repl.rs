@@ -455,10 +455,11 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
 
     // --- Write meeting handoff artifact for engineer loop and act-on-decisions ---
     {
-        use crate::meeting_facilitator::{MeetingHandoff, write_meeting_handoff};
+        use crate::meeting_facilitator::{
+            MeetingHandoff, default_handoff_dir, write_meeting_handoff,
+        };
         let handoff = MeetingHandoff::from_session(&closed);
-        let handoff_dir =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/meeting_handoffs");
+        let handoff_dir = default_handoff_dir();
         if let Err(e) = write_meeting_handoff(&handoff_dir, &handoff) {
             writeln!(output, "[warn] Failed to write meeting handoff: {e}").ok();
         } else {
