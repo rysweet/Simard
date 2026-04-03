@@ -57,6 +57,8 @@ struct StructuredEditRequest {
 enum EngineerActionKind {
     ReadOnlyScan,
     StructuredTextReplace(StructuredEditRequest),
+    CargoTest,
+    CargoCheck,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -323,6 +325,66 @@ fn select_engineer_action(
     }
 
     if inspection.repo_root.join("Cargo.toml").is_file() {
+        // Only select cargo test/check when the objective explicitly asks for it.
+        // Generic words like "verify" are too broad and would misfire.
+        let obj_lower = objective.to_lowercase();
+        if obj_lower.contains("cargo test")
+            || obj_lower.contains("run tests")
+            || obj_lower.contains("test suite")
+            || obj_lower.contains("run the tests")
+        {
+            return Ok(SelectedEngineerAction {
+                label: "cargo-test".to_string(),
+                rationale: format!(
+                    "Objective explicitly requests running tests and a Cargo.toml is present, so the next bounded action is to run the test suite and report results.{carry_forward_note}"
+                ),
+                argv: vec![
+                    "cargo".to_string(),
+                    "test".to_string(),
+                    "--all-features".to_string(),
+                    "--locked".to_string(),
+                ],
+                plan_summary:
+                    "Run the full Rust test suite, capture results, and verify the build is healthy."
+                        .to_string(),
+                verification_steps: vec![
+                    "confirm cargo test exits with status 0".to_string(),
+                    "confirm test result line reports 0 failures".to_string(),
+                    "confirm repo root, branch, HEAD, and worktree state stayed stable".to_string(),
+                ],
+                expected_changed_files: Vec::new(),
+                kind: EngineerActionKind::CargoTest,
+            });
+        }
+
+        if obj_lower.contains("cargo check")
+            || obj_lower.contains("compilation check")
+            || obj_lower.contains("check compilation")
+            || obj_lower.contains("cargo build")
+        {
+            return Ok(SelectedEngineerAction {
+                label: "cargo-check".to_string(),
+                rationale: format!(
+                    "Objective mentions build/check and a Cargo.toml is present, so the next bounded action is to run cargo check and report compilation status.{carry_forward_note}"
+                ),
+                argv: vec![
+                    "cargo".to_string(),
+                    "check".to_string(),
+                    "--all-targets".to_string(),
+                    "--all-features".to_string(),
+                ],
+                plan_summary: "Run cargo check to verify the codebase compiles cleanly."
+                    .to_string(),
+                verification_steps: vec![
+                    "confirm cargo check exits with status 0".to_string(),
+                    "confirm no compilation errors in output".to_string(),
+                    "confirm repo root, branch, HEAD, and worktree state stayed stable".to_string(),
+                ],
+                expected_changed_files: Vec::new(),
+                kind: EngineerActionKind::CargoCheck,
+            });
+        }
+
         return Ok(SelectedEngineerAction {
             label: "cargo-metadata-scan".to_string(),
             rationale: format!(
@@ -437,6 +499,17 @@ fn execute_engineer_action(
                 changed_files: vec![edit_request.relative_path.clone()],
             })
         }
+        EngineerActionKind::CargoTest | EngineerActionKind::CargoCheck => {
+            let argv = selected.argv.iter().map(String::as_str).collect::<Vec<_>>();
+            let output = run_command(repo_root, &argv)?;
+            Ok(ExecutedEngineerAction {
+                selected,
+                exit_code: output.status.code().unwrap_or_default(),
+                stdout: sanitize_terminal_text(&output.stdout),
+                stderr: sanitize_terminal_text(&output.stderr),
+                changed_files: Vec::new(),
+            })
+        }
     }
 }
 
@@ -486,7 +559,9 @@ fn verify_engineer_action(
     checks.push(format!("repo-branch={}", post.branch));
 
     match &action.selected.kind {
-        EngineerActionKind::ReadOnlyScan => {
+        EngineerActionKind::ReadOnlyScan
+        | EngineerActionKind::CargoTest
+        | EngineerActionKind::CargoCheck => {
             if post.worktree_dirty != inspection.worktree_dirty
                 || post.changed_files != inspection.changed_files
             {
@@ -571,6 +646,40 @@ fn verify_engineer_action(
             &action.stdout,
             &mut checks,
         )?,
+        EngineerActionKind::CargoTest => {
+            // Verify test output contains a test result summary line
+            let combined = format!("{}\n{}", action.stdout, action.stderr);
+            if combined.contains("test result:") {
+                checks.push("cargo-test-result-present=true".to_string());
+                if combined.contains("FAILED") || action.exit_code != 0 {
+                    checks.push("cargo-test-passed=false".to_string());
+                } else {
+                    checks.push("cargo-test-passed=true".to_string());
+                }
+            } else if action.exit_code == 0 {
+                checks.push("cargo-test-result-present=false (no test output)".to_string());
+                checks.push("cargo-test-passed=true (exit 0)".to_string());
+            } else {
+                return Err(SimardError::VerificationFailed {
+                    reason: format!(
+                        "cargo test exited with code {} and produced no recognizable test result summary",
+                        action.exit_code
+                    ),
+                });
+            }
+        }
+        EngineerActionKind::CargoCheck => {
+            if action.exit_code == 0 {
+                checks.push("cargo-check-passed=true".to_string());
+            } else {
+                let error_count = action
+                    .stderr
+                    .lines()
+                    .filter(|l| l.starts_with("error"))
+                    .count();
+                checks.push(format!("cargo-check-passed=false (errors={})", error_count));
+            }
+        }
     }
 
     Ok(VerificationReport {
@@ -583,6 +692,25 @@ fn verify_engineer_action(
             EngineerActionKind::StructuredTextReplace(edit_request) => format!(
                 "Verified bounded local engineer edit '{}' by checking '{}' for the requested content, confirming the expected git-visible file change, and preserving stable repo grounding.",
                 action.selected.label, edit_request.relative_path
+            ),
+            EngineerActionKind::CargoTest => format!(
+                "Verified cargo test action '{}': exit_code={}, test suite {}.",
+                action.selected.label,
+                action.exit_code,
+                if action.exit_code == 0 {
+                    "passed"
+                } else {
+                    "failed"
+                }
+            ),
+            EngineerActionKind::CargoCheck => format!(
+                "Verified cargo check action '{}': compilation {}.",
+                action.selected.label,
+                if action.exit_code == 0 {
+                    "succeeded"
+                } else {
+                    "failed"
+                }
             ),
         },
         checks,
