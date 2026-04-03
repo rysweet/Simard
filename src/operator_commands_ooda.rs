@@ -96,8 +96,13 @@ pub fn run_ooda_daemon(
 
         cycles_run += 1;
 
+        // Skip the inter-cycle sleep if this was the last requested cycle.
+        if max_cycles > 0 && cycles_run >= max_cycles {
+            continue;
+        }
+
         // Sleep between cycles to avoid busy-looping. Configurable via
-        // SIMARD_OODA_INTERVAL_SECS; default is 60 seconds.
+        // SIMARD_OODA_INTERVAL_SECS; default is 300 seconds.
         std::thread::sleep(std::time::Duration::from_secs(interval_secs));
     }
 

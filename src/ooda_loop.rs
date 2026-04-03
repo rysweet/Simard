@@ -443,19 +443,36 @@ pub fn run_ooda_cycle(
 
     // --- Observe ---
     state.current_phase = OodaPhase::Observe;
+    eprintln!("[simard] OODA cycle: entering Observe phase");
     let observation = observe(state, bridges)?;
+    eprintln!("[simard] OODA cycle: Observe complete");
 
     // --- Orient ---
     state.current_phase = OodaPhase::Orient;
+    eprintln!("[simard] OODA cycle: entering Orient phase");
     let priorities = orient(&observation, &state.active_goals)?;
+    eprintln!(
+        "[simard] OODA cycle: Orient complete ({} priorities)",
+        priorities.len()
+    );
 
     // --- Decide ---
     state.current_phase = OodaPhase::Decide;
+    eprintln!("[simard] OODA cycle: entering Decide phase");
     let planned_actions = decide(&priorities, config)?;
+    eprintln!(
+        "[simard] OODA cycle: Decide complete ({} actions)",
+        planned_actions.len()
+    );
 
     // --- Act ---
     state.current_phase = OodaPhase::Act;
+    eprintln!("[simard] OODA cycle: entering Act phase");
     let outcomes = act(&planned_actions, bridges, state)?;
+    eprintln!(
+        "[simard] OODA cycle: Act complete ({} outcomes)",
+        outcomes.len()
+    );
 
     // --- Curate: archive completed goals, promote from backlog ---
     let archived = crate::goal_curation::archive_completed(&mut state.active_goals);
