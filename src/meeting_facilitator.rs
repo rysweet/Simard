@@ -306,13 +306,40 @@ pub fn write_meeting_handoff(dir: &Path, handoff: &MeetingHandoff) -> SimardResu
     Ok(())
 }
 
-/// Load a meeting handoff artifact from a directory. Returns `None` if the
-/// file does not exist.
-pub fn load_meeting_handoff(dir: &Path) -> SimardResult<Option<MeetingHandoff>> {
-    let path = dir.join(MEETING_HANDOFF_FILENAME);
-    if !path.is_file() {
-        return Ok(None);
+/// Find the newest handoff file in a directory (timestamped `handoff-*.json`
+/// or legacy `meeting_handoff.json`). Returns `None` if no file exists.
+fn find_newest_handoff(dir: &Path) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    // Legacy fixed filename.
+    let legacy = dir.join(MEETING_HANDOFF_FILENAME);
+    if legacy.is_file() {
+        candidates.push(legacy);
     }
+
+    // Timestamped files written by `write_meeting_handoff`.
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with("handoff-") && name_str.ends_with(".json") {
+                candidates.push(entry.path());
+            }
+        }
+    }
+
+    // Newest by filename (timestamps sort lexicographically).
+    candidates.sort();
+    candidates.pop()
+}
+
+/// Load a meeting handoff artifact from a directory. Returns `None` if no
+/// handoff file exists. Scans for both legacy and timestamped filenames.
+pub fn load_meeting_handoff(dir: &Path) -> SimardResult<Option<MeetingHandoff>> {
+    let path = match find_newest_handoff(dir) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
     let raw = fs::read_to_string(&path).map_err(|e| SimardError::ArtifactIo {
         path: path.clone(),
         reason: format!("reading handoff: {e}"),
@@ -326,12 +353,12 @@ pub fn load_meeting_handoff(dir: &Path) -> SimardResult<Option<MeetingHandoff>> 
 }
 
 /// Mark the meeting handoff in a directory as processed. No-op if no handoff
-/// file exists.
+/// file exists. Updates the file in-place (writes back to the same path).
 pub fn mark_meeting_handoff_processed(dir: &Path) -> SimardResult<()> {
-    let path = dir.join(MEETING_HANDOFF_FILENAME);
-    if !path.is_file() {
-        return Ok(());
-    }
+    let path = match find_newest_handoff(dir) {
+        Some(p) => p,
+        None => return Ok(()),
+    };
     let raw = fs::read_to_string(&path).map_err(|e| SimardError::ArtifactIo {
         path: path.clone(),
         reason: format!("reading handoff: {e}"),
@@ -342,17 +369,40 @@ pub fn mark_meeting_handoff_processed(dir: &Path) -> SimardResult<()> {
             reason: format!("failed to parse handoff JSON: {e}"),
         })?;
     handoff.processed = true;
-    write_meeting_handoff(dir, &handoff)
+    // Write back to the same file to avoid creating duplicates.
+    let json = serde_json::to_string_pretty(&handoff).map_err(|e| SimardError::ArtifactIo {
+        path: path.clone(),
+        reason: format!("serializing handoff: {e}"),
+    })?;
+    fs::write(&path, &json).map_err(|e| SimardError::ArtifactIo {
+        path: path.clone(),
+        reason: format!("writing handoff: {e}"),
+    })?;
+    Ok(())
 }
 
 /// Mark an already-loaded handoff as processed and write it back, avoiding a
 /// redundant file read when the caller already holds the parsed struct.
+/// Writes back to the existing file (if found) to avoid creating duplicates.
 pub fn mark_handoff_processed_in_place(
     dir: &Path,
     handoff: &mut MeetingHandoff,
 ) -> SimardResult<()> {
     handoff.processed = true;
-    write_meeting_handoff(dir, handoff)
+    // Write back to the existing file if found, otherwise create a new one.
+    let path = find_newest_handoff(dir).unwrap_or_else(|| {
+        let ts = handoff.closed_at.replace(':', "-").replace('+', "_");
+        dir.join(format!("handoff-{ts}.json"))
+    });
+    let json = serde_json::to_string_pretty(handoff).map_err(|e| SimardError::ArtifactIo {
+        path: path.clone(),
+        reason: format!("serializing handoff: {e}"),
+    })?;
+    fs::write(&path, &json).map_err(|e| SimardError::ArtifactIo {
+        path: path.clone(),
+        reason: format!("writing handoff: {e}"),
+    })?;
+    Ok(())
 }
 
 #[cfg(test)]
