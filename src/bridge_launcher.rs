@@ -18,6 +18,14 @@ use crate::memory_bridge::CognitiveMemoryBridge;
 
 const DEFAULT_BRIDGE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Canonical filename for the Kuzu cognitive-memory database.
+const COGNITIVE_MEMORY_DB: &str = "cognitive_memory.kuzu";
+
+/// Return the canonical path to the Kuzu cognitive-memory database.
+pub fn cognitive_memory_db_path(state_root: &Path) -> PathBuf {
+    state_root.join(COGNITIVE_MEMORY_DB)
+}
+
 fn default_circuit_breaker() -> CircuitBreakerConfig {
     CircuitBreakerConfig {
         failure_threshold: 3,
@@ -165,7 +173,7 @@ pub fn launch_all_bridges(
         }
     };
 
-    let db_path = state_root.join("cognitive_memory");
+    let db_path = cognitive_memory_db_path(state_root);
     let memory = launch_memory_bridge(agent_name, &db_path, &python_dir).ok();
     let knowledge = launch_knowledge_bridge(&python_dir).ok();
     let gym = launch_gym_bridge(&python_dir).ok();

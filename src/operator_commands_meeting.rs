@@ -1,7 +1,7 @@
 use std::io::{self, BufReader};
 use std::path::PathBuf;
 
-use crate::bridge_launcher::{find_python_dir, launch_memory_bridge};
+use crate::bridge_launcher::{cognitive_memory_db_path, find_python_dir, launch_memory_bridge};
 use crate::bridge_subprocess::InMemoryBridgeTransport;
 use crate::goals::{FileBackedGoalStore, GoalStatus, GoalStore};
 use crate::greeting_banner::print_greeting_banner;
@@ -360,7 +360,7 @@ fn launch_real_meeting_bridge() -> Option<CognitiveMemoryBridge> {
     let python_dir = find_python_dir().ok()?;
     let state_root = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/target/simard-state"));
     let _ = std::fs::create_dir_all(&state_root);
-    let db_path = state_root.join("cognitive_memory.kuzu");
+    let db_path = cognitive_memory_db_path(&state_root);
     launch_memory_bridge("simard-meeting", &db_path, &python_dir).ok()
 }
 
