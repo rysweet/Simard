@@ -547,14 +547,12 @@ fn open_meeting_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeSes
     };
 
     // Try RustyClawd first — it's the primary agent backend.
-    if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-        if let Ok(factory) = RustyClawdAdapter::registered("meeting-rustyclawd") {
-            if let Ok(mut session) = factory.open_session(request.clone()) {
-                if session.open().is_ok() {
-                    return Some(session);
-                }
-            }
-        }
+    if std::env::var("ANTHROPIC_API_KEY").is_ok()
+        && let Ok(factory) = RustyClawdAdapter::registered("meeting-rustyclawd")
+        && let Ok(mut session) = factory.open_session(request.clone())
+        && session.open().is_ok()
+    {
+        return Some(session);
     }
 
     None
