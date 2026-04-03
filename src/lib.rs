@@ -69,6 +69,7 @@ mod sanitization;
 pub mod self_improve;
 pub mod self_relaunch;
 pub mod session;
+pub mod session_builder;
 pub mod skill_builder;
 pub mod terminal_engineer_bridge;
 mod terminal_session;
