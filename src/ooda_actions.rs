@@ -233,7 +233,16 @@ fn advance_goal_with_session(
             `simard engineer` or `amplihack copilot` to handle it.\n\
          4. If the goal is already progressing or blocked, report the status without launching new work.\n\n\
          End your response with a PROGRESS line indicating your assessed completion percentage \
-         (0-100), e.g.: PROGRESS: 45\n\nEnvironment context:\n- Git status: ",
+         (0-100), e.g.: PROGRESS: 45\n\n\
+         Concrete commands you can use:\n\
+         - Create a GitHub issue: `gh issue create --repo rysweet/Simard --title \"<title>\" --body \"<body>\"`\n\
+         - Create a branch: `git checkout -b feat/<description>`\n\
+         - Launch an amplihack coding session: `amplihack copilot` then type your task\n\
+         - Run tests: `cargo test 2>&1 | tail -20`\n\
+         - Check build: `cargo check 2>&1`\n\
+         - Open a PR: `gh pr create --title \"<title>\" --body \"<body>\"`\n\
+         - Check CI status: `gh run list --limit 5`\n\n\
+         Environment context:\n- Git status: ",
         goal.id, percent, goal.description,
     );
     if env.git_status.is_empty() {

@@ -17,6 +17,7 @@ pub enum OperatingMode {
     Curator,
     Improvement,
     Gym,
+    Orchestrator,
 }
 
 impl Display for OperatingMode {
@@ -27,6 +28,7 @@ impl Display for OperatingMode {
             Self::Curator => "curator",
             Self::Improvement => "improvement",
             Self::Gym => "gym",
+            Self::Orchestrator => "orchestrator",
         };
         f.write_str(label)
     }
@@ -553,6 +555,7 @@ mod tests {
         assert_eq!(OperatingMode::Curator.to_string(), "curator");
         assert_eq!(OperatingMode::Improvement.to_string(), "improvement");
         assert_eq!(OperatingMode::Gym.to_string(), "gym");
+        assert_eq!(OperatingMode::Orchestrator.to_string(), "orchestrator");
     }
 
     #[test]

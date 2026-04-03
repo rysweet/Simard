@@ -588,7 +588,7 @@ fn agent_program_for_manifest(manifest: &IdentityManifest) -> SimardResult<Arc<d
         OperatingMode::Meeting => Ok(Arc::new(MeetingFacilitatorProgram::try_default()?)),
         OperatingMode::Curator => Ok(Arc::new(GoalCuratorProgram::try_default()?)),
         OperatingMode::Improvement => Ok(Arc::new(ImprovementCuratorProgram::try_default()?)),
-        OperatingMode::Engineer | OperatingMode::Gym => {
+        OperatingMode::Engineer | OperatingMode::Gym | OperatingMode::Orchestrator => {
             Ok(Arc::new(ObjectiveRelayProgram::try_default()?))
         }
     }
