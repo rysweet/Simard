@@ -1,8 +1,6 @@
 use std::io::{self, BufReader};
 use std::path::PathBuf;
 
-use crate::base_type_rustyclawd::RustyClawdAdapter;
-use crate::base_types::{BaseTypeFactory, BaseTypeSessionRequest};
 use crate::bridge_subprocess::InMemoryBridgeTransport;
 use crate::goals::{FileBackedGoalStore, GoalStatus, GoalStore};
 use crate::greeting_banner::print_greeting_banner;
@@ -17,9 +15,7 @@ use crate::operator_commands::{
     resolved_improvement_curation_read_state_root, resolved_meeting_read_state_root,
     resolved_state_root,
 };
-use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeTopology};
 use crate::sanitization::sanitize_terminal_text;
-use crate::session::SessionId;
 use crate::{
     BootstrapConfig, BootstrapInputs, FileBackedMemoryStore, MemoryScope, MemoryStore,
     latest_local_handoff, latest_review_artifact, render_review_context_directives,
@@ -537,25 +533,9 @@ fn build_live_meeting_context(bridge: &CognitiveMemoryBridge) -> String {
 /// Open an agent session for the meeting REPL using the standard base type
 /// infrastructure. Same agent identity, same platform — just meeting mode.
 fn open_meeting_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeSession>> {
-    let request = BaseTypeSessionRequest {
-        session_id: SessionId::from_uuid(uuid::Uuid::now_v7()),
-        mode: OperatingMode::Meeting,
-        topology: RuntimeTopology::SingleProcess,
-        prompt_assets: Vec::new(),
-        runtime_node: RuntimeNodeId::new("meeting-repl"),
-        mailbox_address: RuntimeAddress::new("meeting-repl://local"),
-    };
-
-    // Try RustyClawd first — it's the primary agent backend.
-    if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-        if let Ok(factory) = RustyClawdAdapter::registered("meeting-rustyclawd") {
-            if let Ok(mut session) = factory.open_session(request.clone()) {
-                if session.open().is_ok() {
-                    return Some(session);
-                }
-            }
-        }
-    }
-
-    None
+    crate::session_builder::SessionBuilder::new(OperatingMode::Meeting)
+        .node_id("meeting-repl")
+        .address("meeting-repl://local")
+        .adapter_tag("meeting-rustyclawd")
+        .open()
 }
