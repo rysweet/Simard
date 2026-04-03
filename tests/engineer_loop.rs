@@ -22,13 +22,25 @@ fn engineer_loop_objective() -> &'static str {
 }
 
 fn run_engineer_loop_probe(workspace_root: &Path, objective: &str) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
-        .arg("engineer-loop-run")
+    run_engineer_loop_probe_with_state_root(workspace_root, objective, None)
+}
+
+fn run_engineer_loop_probe_with_state_root(
+    workspace_root: &Path,
+    objective: &str,
+    state_root: Option<&Path>,
+) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"));
+    cmd.arg("engineer-loop-run")
         .arg("single-process")
         .arg(workspace_root)
-        .arg(objective)
-        .output()
-        .expect("engineer-loop probe should launch")
+        .arg(objective);
+    if let Some(root) = state_root {
+        cmd.arg(root);
+        // Also isolate meeting handoffs so stale artifacts don't leak in.
+        cmd.env("SIMARD_HANDOFF_DIR", root.join("handoffs"));
+    }
+    cmd.output().expect("engineer-loop probe should launch")
 }
 
 fn worktree_dirty(path: &Path) -> bool {
@@ -148,7 +160,12 @@ fn engineer_loop_probe_rejects_non_repo_workspaces_with_explicit_not_a_repo_sign
 #[test]
 fn engineer_loop_probe_reports_repo_state_runs_verified_action_and_persists_truthful_artifacts() {
     let expected_dirty = worktree_dirty(&repo_root());
-    let output = run_engineer_loop_probe(&repo_root(), engineer_loop_objective());
+    let isolated_state = TempDirGuard::new("simard-engineer-loop-isolated-state");
+    let output = run_engineer_loop_probe_with_state_root(
+        &repo_root(),
+        engineer_loop_objective(),
+        Some(isolated_state.path()),
+    );
     let rendered = rendered_output(&output);
 
     assert!(
