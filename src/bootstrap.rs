@@ -12,7 +12,7 @@ use crate::base_type_claude_agent_sdk::claude_agent_sdk_adapter;
 use crate::base_type_ms_agent::ms_agent_framework_adapter;
 use crate::base_type_rustyclawd::RustyClawdAdapter;
 use crate::base_types::BaseTypeId;
-use crate::bridge_launcher::{find_python_dir, launch_memory_bridge};
+use crate::bridge_launcher::{cognitive_memory_db_path, find_python_dir, launch_memory_bridge};
 use crate::error::{SimardError, SimardResult};
 use crate::evidence::{EvidenceStore, FileBackedEvidenceStore};
 use crate::goals::{FileBackedGoalStore, GoalStore};
@@ -386,7 +386,7 @@ impl BootstrapConfig {
 /// on-demand by subsystems that need them, avoiding unnecessary subprocess spawns.
 fn build_memory_store(config: &BootstrapConfig) -> SimardResult<Arc<dyn MemoryStore>> {
     let bridge = find_python_dir().ok().and_then(|python_dir| {
-        let db_path = config.state_root.value.join("cognitive_memory");
+        let db_path = cognitive_memory_db_path(&config.state_root.value);
         launch_memory_bridge(&config.identity, &db_path, &python_dir).ok()
     });
 

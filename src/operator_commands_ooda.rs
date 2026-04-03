@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use crate::bridge_launcher::{
-    find_python_dir, launch_gym_bridge, launch_knowledge_bridge, launch_memory_bridge,
+    cognitive_memory_db_path, find_python_dir, launch_gym_bridge, launch_knowledge_bridge,
+    launch_memory_bridge,
 };
 use crate::goal_curation::load_goal_board;
 use crate::identity::OperatingMode;
@@ -34,7 +35,7 @@ pub fn run_ooda_daemon(
         std::env::var("SIMARD_AGENT_NAME").unwrap_or_else(|_| "simard-ooda".to_string());
 
     let python_dir = find_python_dir()?;
-    let db_path = state_root.join("cognitive_memory");
+    let db_path = cognitive_memory_db_path(&state_root);
 
     let memory = launch_memory_bridge(&agent_name, &db_path, &python_dir)?;
     let knowledge = launch_knowledge_bridge(&python_dir)?;
