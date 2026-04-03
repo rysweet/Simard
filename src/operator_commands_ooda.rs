@@ -42,7 +42,7 @@ pub fn run_ooda_daemon(
     let gym = launch_gym_bridge(&python_dir)?;
 
     // Try to open a RustyClawd session for real autonomous work.
-    let session = SessionBuilder::new(OperatingMode::Engineer)
+    let session = SessionBuilder::new(OperatingMode::Orchestrator)
         .node_id("ooda-daemon")
         .address("ooda-daemon://local")
         .adapter_tag("ooda-rustyclawd")

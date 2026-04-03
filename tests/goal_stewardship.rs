@@ -89,12 +89,14 @@ open-question: how aggressively should Simard reprioritize?\n\
 goal: Preserve meeting handoff | priority=1 | status=active | rationale=meeting decisions must shape later work\n\
 goal: Keep outside-in verification strong | priority=2 | status=active | rationale=operator confidence depends on real product exercise";
 
+    let handoff_dir = state_root.path().join("handoffs");
     let meeting_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
         .arg("meeting-run")
         .arg("local-harness")
         .arg("single-process")
         .arg(meeting_objective)
         .arg(state_root.path())
+        .env("SIMARD_HANDOFF_DIR", &handoff_dir)
         .output()
         .expect("meeting probe should launch");
     let meeting_rendered = rendered_output(&meeting_output);
@@ -110,6 +112,7 @@ goal: Keep outside-in verification strong | priority=2 | status=active | rationa
         .arg(repo_root())
         .arg("inspect the repo and preserve explicit goal context")
         .arg(state_root.path())
+        .env("SIMARD_HANDOFF_DIR", &handoff_dir)
         .output()
         .expect("engineer loop probe should launch");
     let engineer_rendered = rendered_output(&engineer_output);
@@ -140,6 +143,7 @@ goal: Keep outside-in verification strong | priority=2 | status=active | rationa
 #[test]
 fn engineer_loop_only_carries_the_three_most_recent_meeting_records() {
     let state_root = TempDirGuard::new("simard-meeting-carry-limit");
+    let handoff_dir = state_root.path().join("handoffs");
 
     for meeting_number in 1..=4 {
         let meeting_objective = format!(
@@ -157,6 +161,7 @@ open-question: what changes after meeting {meeting_number}?"
             .arg("single-process")
             .arg(&meeting_objective)
             .arg(state_root.path())
+            .env("SIMARD_HANDOFF_DIR", &handoff_dir)
             .output()
             .expect("meeting probe should launch");
         let rendered = rendered_output(&output);
@@ -174,6 +179,7 @@ open-question: what changes after meeting {meeting_number}?"
         .arg(repo_root())
         .arg("inspect the repo and preserve bounded meeting memory")
         .arg(state_root.path())
+        .env("SIMARD_HANDOFF_DIR", &handoff_dir)
         .output()
         .expect("engineer loop probe should launch");
     let engineer_rendered = rendered_output(&engineer_output);

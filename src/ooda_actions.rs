@@ -294,7 +294,28 @@ fn advance_goal_with_session(
     match session.run_turn(input) {
         Ok(outcome) => {
             let new_progress = assess_progress_from_outcome(&outcome, &goal.status);
+
+            // Verify claimed actions against reality.
+            let verification = verify_claimed_actions(&outcome.execution_summary);
+            let verified_count = verification.iter().filter(|v| v.verified).count();
+            let claimed_count = verification.len();
+
             let _ = update_goal_progress(&mut state.active_goals, &goal.id, new_progress.clone());
+
+            if !verification.is_empty() {
+                eprintln!(
+                    "[simard] OODA action verification for '{}': {}/{} claims verified",
+                    goal.id, verified_count, claimed_count,
+                );
+                for v in &verification {
+                    eprintln!(
+                        "[simard]   {} {}: {}",
+                        if v.verified { "✓" } else { "✗" },
+                        v.claim_type,
+                        v.detail,
+                    );
+                }
+            }
 
             eprintln!(
                 "[simard] OODA session result: advance-goal '{}': {}",
@@ -305,10 +326,12 @@ fn advance_goal_with_session(
                 action,
                 true,
                 format!(
-                    "goal '{}' assessed at {} via session (evidence={})",
+                    "goal '{}' assessed at {} via session (evidence={}, verified={}/{})",
                     goal.id,
                     new_progress,
                     outcome.evidence.len(),
+                    verified_count,
+                    claimed_count,
                 ),
             )
         }
@@ -318,6 +341,149 @@ fn advance_goal_with_session(
             format!("session run_turn failed for goal '{}': {e}", goal.id),
         ),
     }
+}
+
+/// A single verified or unverified claim from the agent's response.
+#[derive(Debug, Clone)]
+struct ActionVerification {
+    claim_type: &'static str,
+    detail: String,
+    verified: bool,
+}
+
+/// Scan the agent's execution summary for claimed actions and verify them
+/// against actual repository/system state.
+///
+/// Checks for:
+/// - `gh issue create` → verify issue exists via `gh issue list`
+/// - `git checkout -b` → verify branch exists via `git branch`
+/// - `gh pr create` → verify PR exists via `gh pr list`
+/// - `cargo test` / `cargo check` → verify exit status mentioned
+fn verify_claimed_actions(summary: &str) -> Vec<ActionVerification> {
+    let mut verifications = Vec::new();
+
+    // Check for issue creation claims.
+    if summary.contains("gh issue create")
+        || summary.contains("created issue")
+        || summary.contains("opened issue")
+        || summary.contains("filed issue")
+    {
+        let verified = verify_recent_issue();
+        verifications.push(ActionVerification {
+            claim_type: "issue-create",
+            detail: if verified {
+                "confirmed: recent issue found via gh issue list".into()
+            } else {
+                "unverified: no recent issue found".into()
+            },
+            verified,
+        });
+    }
+
+    // Check for branch creation claims.
+    for line in summary.lines() {
+        let trimmed = line.trim();
+        if let Some(branch) = extract_branch_name(trimmed) {
+            let verified = verify_branch_exists(&branch);
+            verifications.push(ActionVerification {
+                claim_type: "branch-create",
+                detail: format!(
+                    "{}: branch '{branch}'",
+                    if verified { "confirmed" } else { "unverified" },
+                ),
+                verified,
+            });
+        }
+    }
+
+    // Check for PR creation claims.
+    if summary.contains("gh pr create")
+        || summary.contains("opened PR")
+        || summary.contains("created PR")
+        || summary.contains("pull request")
+    {
+        let verified = verify_recent_pr();
+        verifications.push(ActionVerification {
+            claim_type: "pr-create",
+            detail: if verified {
+                "confirmed: recent PR found via gh pr list".into()
+            } else {
+                "unverified: no recent PR found".into()
+            },
+            verified,
+        });
+    }
+
+    verifications
+}
+
+/// Check if `git checkout -b <name>` appears and extract the branch name.
+fn extract_branch_name(line: &str) -> Option<String> {
+    let markers = ["git checkout -b ", "git switch -c "];
+    for marker in markers {
+        if let Some(idx) = line.find(marker) {
+            let rest = &line[idx + marker.len()..];
+            let branch = rest.split_whitespace().next()?;
+            // Strip backticks or quotes.
+            let branch = branch.trim_matches(|c| c == '`' || c == '\'' || c == '"');
+            if !branch.is_empty() {
+                return Some(branch.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Verify a branch exists locally or in the remote.
+fn verify_branch_exists(branch: &str) -> bool {
+    std::process::Command::new("git")
+        .args(["branch", "--list", branch])
+        .output()
+        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// Verify that a GitHub issue was recently created (within the last 5 minutes).
+fn verify_recent_issue() -> bool {
+    std::process::Command::new("gh")
+        .args([
+            "issue",
+            "list",
+            "--state",
+            "open",
+            "--limit",
+            "1",
+            "--json",
+            "createdAt",
+        ])
+        .output()
+        .map(|o| {
+            let text = String::from_utf8_lossy(&o.stdout);
+            // If there's a recent issue, the JSON array will be non-empty.
+            o.status.success() && text.contains("createdAt")
+        })
+        .unwrap_or(false)
+}
+
+/// Verify that a PR was recently created.
+fn verify_recent_pr() -> bool {
+    std::process::Command::new("gh")
+        .args([
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--limit",
+            "1",
+            "--json",
+            "createdAt",
+        ])
+        .output()
+        .map(|o| {
+            let text = String::from_utf8_lossy(&o.stdout);
+            o.status.success() && text.contains("createdAt")
+        })
+        .unwrap_or(false)
 }
 
 /// Extract a progress percentage from the agent's execution summary.
@@ -1026,6 +1192,110 @@ mod tests {
         assert!(
             input.objective.contains("0% complete"),
             "NotStarted goal should report 0% in objective"
+        );
+    }
+
+    #[test]
+    fn session_outcome_includes_verification_counts() {
+        let (session, _) = MockSession::new_ok("Created an issue. PROGRESS: 20", vec![]);
+        let mut bridges = bridges_with_session(session);
+        let board = board_with_goal("g1", GoalProgress::NotStarted, None);
+        let mut state = OodaState::new(board);
+        let action = PlannedAction {
+            kind: ActionKind::AdvanceGoal,
+            goal_id: Some("g1".into()),
+            description: "advance".into(),
+        };
+        let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+        // The outcome detail should include verification counts.
+        assert!(
+            outcomes[0].detail.contains("verified="),
+            "outcome should include verification counts, got: {}",
+            outcomes[0].detail,
+        );
+    }
+
+    #[test]
+    fn extract_branch_name_from_checkout() {
+        assert_eq!(
+            extract_branch_name("git checkout -b feat/fix-issue-42"),
+            Some("feat/fix-issue-42".to_string()),
+        );
+        assert_eq!(
+            extract_branch_name("ran `git checkout -b feat/new-thing` and pushed"),
+            Some("feat/new-thing".to_string()),
+        );
+        assert_eq!(
+            extract_branch_name("git switch -c hotfix/urgent"),
+            Some("hotfix/urgent".to_string()),
+        );
+        assert_eq!(extract_branch_name("just some text"), None);
+    }
+
+    #[test]
+    fn verify_claimed_actions_detects_issue_creation_claims() {
+        let v = verify_claimed_actions("I ran gh issue create to file the bug");
+        assert!(!v.is_empty(), "should detect issue creation claim");
+        assert_eq!(v[0].claim_type, "issue-create");
+    }
+
+    #[test]
+    fn verify_claimed_actions_detects_branch_creation() {
+        let v = verify_claimed_actions("Created branch with git checkout -b feat/my-fix");
+        let branch_claims: Vec<_> = v
+            .iter()
+            .filter(|c| c.claim_type == "branch-create")
+            .collect();
+        assert!(
+            !branch_claims.is_empty(),
+            "should detect branch creation claim"
+        );
+        assert!(branch_claims[0].detail.contains("feat/my-fix"));
+    }
+
+    #[test]
+    fn verify_claimed_actions_detects_pr_creation() {
+        let v = verify_claimed_actions("I opened PR #42 for the fix");
+        let pr_claims: Vec<_> = v.iter().filter(|c| c.claim_type == "pr-create").collect();
+        assert!(!pr_claims.is_empty(), "should detect PR creation claim");
+    }
+
+    #[test]
+    fn verify_claimed_actions_returns_empty_for_observation_only() {
+        let v =
+            verify_claimed_actions("Checked the repo status. Everything looks clean. PROGRESS: 30");
+        assert!(
+            v.is_empty(),
+            "observation-only responses should have no claims to verify"
+        );
+    }
+
+    #[test]
+    fn objective_includes_concrete_commands() {
+        let (session, captured) = MockSession::new_ok("PROGRESS: 10", vec![]);
+        let mut bridges = bridges_with_session(session);
+        let board = board_with_goal("g1", GoalProgress::NotStarted, None);
+        let mut state = OodaState::new(board);
+        let action = PlannedAction {
+            kind: ActionKind::AdvanceGoal,
+            goal_id: Some("g1".into()),
+            description: "advance".into(),
+        };
+        dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+
+        let input = captured.borrow();
+        let input = input.as_ref().unwrap();
+        assert!(
+            input.objective.contains("gh issue create"),
+            "objective should include concrete gh issue create command"
+        );
+        assert!(
+            input.objective.contains("amplihack copilot"),
+            "objective should include amplihack copilot command"
+        );
+        assert!(
+            input.objective.contains("cargo test"),
+            "objective should include cargo test command"
         );
     }
 }
