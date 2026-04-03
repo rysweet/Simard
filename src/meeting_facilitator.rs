@@ -6,7 +6,7 @@
 
 use std::fmt::{self, Display, Formatter};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -244,6 +244,11 @@ pub fn close_meeting(
 
 /// Well-known filename for meeting handoff artifacts.
 pub const MEETING_HANDOFF_FILENAME: &str = "meeting_handoff.json";
+
+/// Default directory for meeting handoff artifacts.
+pub fn default_handoff_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/meeting_handoffs")
+}
 
 /// A handoff artifact produced when a meeting closes. Contains decisions,
 /// action items, and open questions extracted from the meeting session.
