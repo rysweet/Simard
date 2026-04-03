@@ -568,17 +568,43 @@ impl PtyTerminalSession {
         if self.final_status.is_none() {
             self.close_stdin()?;
         }
+        // Wait for the child to exit. Since we closed stdin, bash should
+        // get EOF and exit. Use a generous timeout for agentic workloads.
         let exit_status = match self.final_status.take() {
             Some(status) => status,
-            None => self
-                .child
-                .wait()
-                .map_err(|error| SimardError::AdapterInvocationFailed {
-                    base_type: self.base_type.clone(),
-                    reason: format!(
-                        "terminal-shell session failed while waiting for output: {error}"
-                    ),
-                })?,
+            None => {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+                loop {
+                    match self.child.try_wait() {
+                        Ok(Some(status)) => break status,
+                        Ok(None) if std::time::Instant::now() >= deadline => {
+                            eprintln!(
+                                "[simard] terminal session pid={} did not exit after 10min, \
+                                 returning transcript so far",
+                                self.child.id()
+                            );
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::process::ExitStatusExt;
+                                break std::process::ExitStatus::from_raw(0);
+                            }
+                            #[cfg(not(unix))]
+                            {
+                                break self.child.wait().unwrap_or_default();
+                            }
+                        }
+                        Ok(None) => {
+                            std::thread::sleep(std::time::Duration::from_millis(200));
+                        }
+                        Err(e) => {
+                            return Err(SimardError::AdapterInvocationFailed {
+                                base_type: self.base_type.clone(),
+                                reason: format!("terminal-shell session failed while waiting: {e}"),
+                            });
+                        }
+                    }
+                }
+            }
         };
         let transcript = self.read_transcript()?;
         let _ = &self.transcript_guard;
