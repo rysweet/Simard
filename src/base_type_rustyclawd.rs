@@ -491,16 +491,16 @@ fn execute_rustyclawd_process_fallback(
                 reason: format!("failed to collect RustyClawd output: {error}"),
             })?;
 
-    let execution_summary = format!(
-        "RustyClawd session executed via process '{}' on node '{}' at '{}' with exit code {}.",
-        descriptor.backend.identity,
+    // Return the process stdout as the execution summary (the LLM's text response).
+    let text_output = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    let mut evidence = process_output_evidence("rustyclawd", &output);
+    evidence.push(format!(
+        "rustyclawd-process-session=node={} addr={} exit={}",
         request.runtime_node,
         request.mailbox_address,
         output.status.code().unwrap_or(-1),
-    );
+    ));
 
-    Ok((
-        execution_summary,
-        process_output_evidence("rustyclawd", &output),
-    ))
+    Ok((text_output, evidence))
 }

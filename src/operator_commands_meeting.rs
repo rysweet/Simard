@@ -368,6 +368,11 @@ pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::E
         "memory.store_episode" => Ok(serde_json::json!({"id": "epi_repl"})),
         "memory.store_fact" => Ok(serde_json::json!({"id": "sem_repl"})),
         "memory.store_prospective" => Ok(serde_json::json!({"id": "pro_repl"})),
+        "memory.search_facts" => Ok(serde_json::json!({"facts": []})),
+        "memory.get_statistics" => Ok(serde_json::json!({
+            "sensory_count": 0, "working_count": 0, "episodic_count": 0,
+            "semantic_count": 0, "procedural_count": 0, "prospective_count": 0
+        })),
         _ => Err(crate::bridge::BridgeErrorPayload {
             code: -32601,
             message: format!("unknown method: {method}"),
@@ -427,6 +432,28 @@ pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::E
 /// enrich the meeting system prompt so Simard knows her own state.
 fn build_live_meeting_context(bridge: &CognitiveMemoryBridge) -> String {
     let mut sections = Vec::new();
+
+    // Recent meeting summaries (decisions from past meetings)
+    let past_meetings = bridge.search_facts("meeting:", 10, 0.0).unwrap_or_default();
+    if !past_meetings.is_empty() {
+        let mut meeting_text = String::from("## Previous Meeting Summaries\n");
+        for (i, m) in past_meetings.iter().enumerate().take(5) {
+            meeting_text.push_str(&format!("{}. [{}] {}\n", i + 1, m.concept, m.content));
+        }
+        sections.push(meeting_text);
+    }
+
+    // Recent decisions from meetings (individually stored by REPL)
+    let past_decisions = bridge
+        .search_facts("decision:", 10, 0.0)
+        .unwrap_or_default();
+    if !past_decisions.is_empty() {
+        let mut dec_text = String::from("## Past Decisions\n");
+        for (i, d) in past_decisions.iter().enumerate().take(10) {
+            dec_text.push_str(&format!("{}. {}\n", i + 1, d.content));
+        }
+        sections.push(dec_text);
+    }
 
     // Active goals
     let goals = bridge.search_facts("goal:", 10, 0.0).unwrap_or_default();

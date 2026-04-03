@@ -21,12 +21,11 @@ pub fn build_greeting_banner(bridge: Option<&CognitiveMemoryBridge>) -> Vec<Stri
     lines.push(format!("🌲 Simard v{version}"));
     lines.push("─".repeat(40));
 
-    // Section 2: Build stats
-    let src_count = count_source_files();
-    lines.push(format!("  Source files: {src_count}"));
-
-    // Section 3: GitHub repo info (fetched concurrently)
+    // Section 2+3: Build stats and GitHub info (all concurrent)
+    let src_handle = std::thread::spawn(count_source_files);
     let (issues, prs) = fetch_github_counts();
+    let src_count = src_handle.join().unwrap_or_else(|_| "?".to_string());
+    lines.push(format!("  Source files: {src_count}"));
     lines.push(format!("  GitHub: {issues} open issues, {prs} open PRs"));
 
     // Section 4: Known projects from cognitive memory

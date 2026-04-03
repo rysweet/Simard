@@ -22,6 +22,185 @@ use crate::memory_bridge::CognitiveMemoryBridge;
 
 const PROMPT: &str = "simard:meeting> ";
 
+/// A structured item auto-detected from natural conversation.
+#[derive(Clone, Debug)]
+enum AutoCaptured {
+    Decision(String),
+    Action(String),
+}
+
+/// Scan user and agent text for implicit decisions and action items.
+///
+/// Returns a list of `AutoCaptured` items found via simple keyword heuristics.
+/// This does NOT replace explicit `/decision` or `/action` commands — it
+/// supplements them by catching things that happen in natural conversation.
+fn auto_detect_structured_items(user_text: &str, agent_text: &str) -> Vec<AutoCaptured> {
+    let mut items = Vec::new();
+
+    // Decision patterns — things the agent completed or confirmed.
+    let decision_indicators: &[&str] = &[
+        "\u{2705}", // ✅
+        "Closed", "closed", "Created", "created", "Merged", "merged", "Done", "Shipped", "shipped",
+        "Approved", "approved", "Resolved", "resolved",
+    ];
+
+    // Action patterns — things the agent committed to doing.
+    let action_indicators: &[&str] = &[
+        "I'll ",
+        "I will ",
+        "Let me ",
+        "I'll ", // curly apostrophe
+        "Next step",
+        "next step",
+        "TODO:",
+        "Will do",
+        "will do",
+    ];
+
+    // Skip lines that are clearly table rows, headings, or formatting.
+    let is_structural = |line: &str| -> bool {
+        let t = line.trim();
+        t.starts_with('|')
+            || t.starts_with('#')
+            || t.starts_with("---")
+            || t.starts_with("===")
+            || t.starts_with("```")
+            || t.starts_with("**")
+            || t.chars().filter(|&c| c == '|').count() >= 2
+    };
+
+    // Scan agent text for decisions — only prose lines, not tables/formatting.
+    for line in agent_text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.len() < 15 || is_structural(trimmed) {
+            continue;
+        }
+        for indicator in decision_indicators {
+            if trimmed.contains(indicator) {
+                let desc = truncate_for_capture(trimmed, 120);
+                items.push(AutoCaptured::Decision(desc));
+                break;
+            }
+        }
+    }
+
+    // Scan agent text for action commitments — only prose lines.
+    for line in agent_text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.len() < 15 || is_structural(trimmed) {
+            continue;
+        }
+        let dominated = decision_indicators.iter().any(|ind| trimmed.contains(ind));
+        if dominated {
+            continue;
+        }
+        for indicator in action_indicators {
+            if trimmed.contains(indicator) {
+                let desc = truncate_for_capture(trimmed, 120);
+                items.push(AutoCaptured::Action(desc));
+                break;
+            }
+        }
+    }
+
+    // Also scan user text for explicit priorities stated conversationally.
+    // e.g. "Let's prioritize X" or "We decided to Y"
+    let user_decision_phrases: &[&str] = &[
+        "we decided",
+        "let's go with",
+        "decision:",
+        "agreed:",
+        "final answer:",
+    ];
+    for line in user_text.lines() {
+        let lower = line.to_lowercase();
+        let trimmed = line.trim();
+        if trimmed.len() < 5 {
+            continue;
+        }
+        for phrase in user_decision_phrases {
+            if lower.contains(phrase) {
+                let desc = truncate_for_capture(trimmed, 120);
+                items.push(AutoCaptured::Decision(desc));
+                break;
+            }
+        }
+    }
+
+    items
+}
+
+/// Record auto-captured items into the meeting session and print notifications.
+fn auto_capture_structured_items<W: Write>(
+    session: &mut MeetingSession,
+    user_text: &str,
+    agent_text: &str,
+    output: &mut W,
+) {
+    let items = auto_detect_structured_items(user_text, agent_text);
+    for item in items {
+        match item {
+            AutoCaptured::Decision(ref desc) => {
+                let decision = MeetingDecision {
+                    description: desc.clone(),
+                    rationale: "auto-detected from conversation".to_string(),
+                    participants: Vec::new(),
+                };
+                if record_decision(session, decision).is_ok() {
+                    writeln!(
+                        output,
+                        "  [captured: decision \u{2014} {}]",
+                        short_label(desc, 60)
+                    )
+                    .ok();
+                }
+            }
+            AutoCaptured::Action(ref desc) => {
+                let action = ActionItem {
+                    description: desc.clone(),
+                    owner: "simard".to_string(),
+                    priority: 1,
+                    due_description: None,
+                };
+                if record_action_item(session, action).is_ok() {
+                    writeln!(
+                        output,
+                        "  [captured: action \u{2014} {}]",
+                        short_label(desc, 60)
+                    )
+                    .ok();
+                }
+            }
+        }
+    }
+}
+
+/// Truncate a string to `max_len` characters, appending "..." if truncated.
+fn truncate_for_capture(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        let mut end = max_len;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
+    }
+}
+
+/// Short label for notification output.
+fn short_label(s: &str, max_len: usize) -> &str {
+    if s.len() <= max_len {
+        s
+    } else {
+        let mut end = max_len;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        &s[..end]
+    }
+}
+
 /// Parsed REPL command from a single input line.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MeetingCommand {
@@ -238,6 +417,7 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                             writeln!(output, "\n{response}\n").ok();
                             add_note(&mut session, &format!("operator: {text}")).ok();
                             add_note(&mut session, &format!("simard: {response}")).ok();
+                            auto_capture_structured_items(&mut session, &text, response, output);
                         }
                         Err(e) => {
                             writeln!(output, "[agent error: {e}]").ok();
@@ -272,6 +452,79 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
     let closed = close_meeting(session, bridge)?;
     let summary = closed.durable_summary();
     writeln!(output, "Meeting record: {summary}").ok();
+
+    // --- Persist full meeting content to cognitive memory ---
+
+    // 1. Store the full transcript as an episodic memory so future meetings
+    //    can recall what was discussed (close_meeting only stores the summary).
+    if !closed.notes.is_empty() {
+        let transcript_text = closed.notes.join("\n");
+        let episode_content = format!(
+            "Meeting transcript — topic: {}\n\n{}",
+            closed.topic, transcript_text
+        );
+        if let Err(e) = bridge.store_episode(
+            &episode_content,
+            "meeting-repl-transcript",
+            Some(&serde_json::json!({
+                "topic": closed.topic,
+                "type": "transcript",
+                "decisions": closed.decisions.len(),
+                "action_items": closed.action_items.len(),
+            })),
+        ) {
+            writeln!(output, "[warn] Failed to persist transcript: {e}").ok();
+        }
+    }
+
+    // 2. Store each decision as an individual semantic fact so they are
+    //    independently searchable by concept.
+    for decision in &closed.decisions {
+        let tags = vec![
+            "meeting".to_string(),
+            "decision".to_string(),
+            closed.topic.clone(),
+        ];
+        if let Err(e) = bridge.store_fact(
+            &format!("decision:{}", decision.description),
+            &format!(
+                "Decision: {} — Rationale: {}",
+                decision.description, decision.rationale
+            ),
+            0.9,
+            &tags,
+            "meeting-repl",
+        ) {
+            writeln!(
+                output,
+                "[warn] Failed to persist decision '{}': {e}",
+                decision.description
+            )
+            .ok();
+        }
+    }
+
+    // 3. Store each action item as a prospective memory so Simard can
+    //    remind the owner when the trigger condition is met.
+    for item in &closed.action_items {
+        if let Err(e) = bridge.store_prospective(
+            &format!("Meeting action: {}", item.description),
+            &format!("owner={} begins related work", item.owner),
+            &format!(
+                "Remind {} to complete: {} (priority {})",
+                item.owner, item.description, item.priority
+            ),
+            i64::from(item.priority),
+        ) {
+            writeln!(
+                output,
+                "[warn] Failed to persist action '{}': {e}",
+                item.description
+            )
+            .ok();
+        }
+    }
+
     Ok(closed)
 }
 
