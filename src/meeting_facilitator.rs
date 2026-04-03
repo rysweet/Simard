@@ -291,12 +291,15 @@ pub fn write_meeting_handoff(dir: &Path, handoff: &MeetingHandoff) -> SimardResu
         path: dir.to_path_buf(),
         reason: format!("creating handoff dir: {e}"),
     })?;
-    let path = dir.join(MEETING_HANDOFF_FILENAME);
+    // Use timestamped filename to avoid overwriting/appending corruption.
+    let ts = handoff.closed_at.replace(':', "-").replace('+', "_");
+    let filename = format!("handoff-{ts}.json");
+    let path = dir.join(&filename);
     let json = serde_json::to_string_pretty(handoff).map_err(|e| SimardError::ArtifactIo {
         path: path.clone(),
         reason: format!("serializing handoff: {e}"),
     })?;
-    fs::write(&path, json).map_err(|e| SimardError::ArtifactIo {
+    fs::write(&path, &json).map_err(|e| SimardError::ArtifactIo {
         path: path.clone(),
         reason: format!("writing handoff: {e}"),
     })?;
