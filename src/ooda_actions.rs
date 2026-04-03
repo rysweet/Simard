@@ -201,9 +201,9 @@ fn dispatch_advance_goal(
 
 /// Advance a goal using a base-type session's `run_turn`.
 ///
-/// Constructs an objective that includes environment context (git status,
-/// open issues, recent commits) so the agent can make informed decisions.
-/// Updates goal progress based on the turn outcome.
+/// Simard acts as a PM architect: she assesses the goal, decides whether to
+/// delegate to an amplihack coding session, and tracks progress based on
+/// evidence from the agent's response — never by auto-incrementing.
 fn advance_goal_with_session(
     action: &PlannedAction,
     session: &mut dyn crate::base_types::BaseTypeSession,
@@ -211,6 +211,7 @@ fn advance_goal_with_session(
     goal: &crate::goal_curation::ActiveGoal,
 ) -> ActionOutcome {
     use crate::base_types::BaseTypeTurnInput;
+    use std::fmt::Write;
 
     let percent = match &goal.status {
         GoalProgress::InProgress { percent } => *percent,
@@ -219,35 +220,71 @@ fn advance_goal_with_session(
 
     // Gather fresh environment context so the agent sees current state.
     let env = crate::ooda_loop::gather_environment();
-    let env_context = format!(
-        "\n\nEnvironment context:\n- Git status: {}\n- Open issues: {}\n- Recent commits: {}",
-        if env.git_status.is_empty() {
-            "clean".to_string()
-        } else {
-            format!("{} changed files", env.git_status.lines().count())
-        },
-        if env.open_issues.is_empty() {
-            "none".to_string()
-        } else {
-            env.open_issues.join("; ")
-        },
-        if env.recent_commits.is_empty() {
-            "none".to_string()
-        } else {
-            env.recent_commits[..env.recent_commits.len().min(5)].join("; ")
-        },
-    );
 
-    let objective = format!(
-        "Goal '{}' ({}% complete): {}. Assess current progress and take one bounded action to advance this goal.{}",
-        goal.id, percent, goal.description, env_context,
+    // Build the objective in a single pre-sized buffer to avoid intermediate allocations.
+    let mut objective = String::with_capacity(1024);
+    let _ = write!(
+        objective,
+        "Goal '{}' ({}% complete): {}\n\n\
+         Assess this goal's current status by:\n\
+         1. Check the repository state, open issues, and recent commits to understand where things stand.\n\
+         2. Decide whether this goal needs an amplihack coding session to make progress.\n\
+         3. If work is needed: create a GitHub issue describing the specific task, then launch \
+            `simard engineer` or `amplihack copilot` to handle it.\n\
+         4. If the goal is already progressing or blocked, report the status without launching new work.\n\n\
+         End your response with a PROGRESS line indicating your assessed completion percentage \
+         (0-100), e.g.: PROGRESS: 45\n\nEnvironment context:\n- Git status: ",
+        goal.id, percent, goal.description,
     );
+    if env.git_status.is_empty() {
+        objective.push_str("clean");
+    } else {
+        let _ = write!(
+            objective,
+            "{} changed files",
+            env.git_status.lines().count()
+        );
+    }
+    objective.push_str("\n- Open issues: ");
+    if env.open_issues.is_empty() {
+        objective.push_str("none");
+    } else {
+        for (i, issue) in env.open_issues.iter().enumerate() {
+            if i > 0 {
+                objective.push_str("; ");
+            }
+            objective.push_str(issue);
+        }
+    }
+    objective.push_str("\n- Recent commits: ");
+    if env.recent_commits.is_empty() {
+        objective.push_str("none");
+    } else {
+        for (i, commit) in env.recent_commits.iter().take(5).enumerate() {
+            if i > 0 {
+                objective.push_str("; ");
+            }
+            objective.push_str(commit);
+        }
+    }
 
-    let input = BaseTypeTurnInput::objective_only(&objective);
+    let identity_context = "You are Simard, a PM architect who manages fleets of amplihack \
+        coding sessions. You do NOT write code yourself. You assess goals, create GitHub \
+        issues for specific work items, and delegate implementation to amplihack coding \
+        agents (via `simard engineer` or `amplihack copilot`). Your job is to evaluate \
+        what needs to happen, break it into actionable work, and orchestrate the right \
+        agent to do it."
+        .to_string();
+
+    let input = BaseTypeTurnInput {
+        objective,
+        identity_context,
+        prompt_preamble: String::new(),
+    };
 
     match session.run_turn(input) {
         Ok(outcome) => {
-            let new_progress = next_progress(&goal.status);
+            let new_progress = assess_progress_from_outcome(&outcome, &goal.status);
             let _ = update_goal_progress(&mut state.active_goals, &goal.id, new_progress.clone());
 
             eprintln!(
@@ -259,7 +296,7 @@ fn advance_goal_with_session(
                 action,
                 true,
                 format!(
-                    "goal '{}' advanced to {} via session (evidence={})",
+                    "goal '{}' assessed at {} via session (evidence={})",
                     goal.id,
                     new_progress,
                     outcome.evidence.len(),
@@ -272,6 +309,50 @@ fn advance_goal_with_session(
             format!("session run_turn failed for goal '{}': {e}", goal.id),
         ),
     }
+}
+
+/// Extract a progress percentage from the agent's execution summary.
+///
+/// Looks for a `PROGRESS: <number>` line in the summary or evidence.
+/// Falls back to the current progress if no explicit assessment is found —
+/// never auto-increments.
+fn assess_progress_from_outcome(
+    outcome: &crate::base_types::BaseTypeOutcome,
+    current: &GoalProgress,
+) -> GoalProgress {
+    // Search execution_summary and evidence for "PROGRESS: <N>"
+    let sources = std::iter::once(outcome.execution_summary.as_str())
+        .chain(outcome.evidence.iter().map(String::as_str));
+
+    for text in sources {
+        if let Some(p) = parse_progress_line(text) {
+            return if p >= 100 {
+                GoalProgress::Completed
+            } else if p == 0 {
+                GoalProgress::NotStarted
+            } else {
+                GoalProgress::InProgress { percent: p }
+            };
+        }
+    }
+
+    // No explicit progress found — preserve current state unchanged.
+    current.clone()
+}
+
+/// Parse a "PROGRESS: <number>" line from text, returning the percentage.
+fn parse_progress_line(text: &str) -> Option<u32> {
+    const PREFIX: &str = "PROGRESS:";
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.len() >= PREFIX.len()
+            && trimmed[..PREFIX.len()].eq_ignore_ascii_case(PREFIX)
+            && let Ok(value) = trimmed[PREFIX.len()..].trim().parse::<u32>()
+        {
+            return Some(value.min(100));
+        }
+    }
+    None
 }
 
 /// Advance a goal that has a subordinate assigned by checking heartbeat.
@@ -376,13 +457,83 @@ fn dispatch_build_skill(action: &PlannedAction, bridges: &OodaBridges) -> Action
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::base_types::{
+        BaseTypeDescriptor, BaseTypeOutcome, BaseTypeSession, BaseTypeTurnInput,
+    };
     use crate::bridge::BridgeErrorPayload;
     use crate::bridge_subprocess::InMemoryBridgeTransport;
+    use crate::error::SimardError;
     use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, add_active_goal};
     use crate::gym_bridge::GymBridge;
     use crate::knowledge_bridge::KnowledgeBridge;
     use crate::memory_bridge::CognitiveMemoryBridge;
     use serde_json::json;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// A mock session that captures the input sent to `run_turn` and returns
+    /// a configurable response. Used to test `advance_goal_with_session`.
+    struct MockSession {
+        captured_input: Rc<RefCell<Option<BaseTypeTurnInput>>>,
+        response: Result<BaseTypeOutcome, String>,
+    }
+
+    impl MockSession {
+        fn new_ok(
+            summary: &str,
+            evidence: Vec<String>,
+        ) -> (Self, Rc<RefCell<Option<BaseTypeTurnInput>>>) {
+            let captured = Rc::new(RefCell::new(None));
+            let session = Self {
+                captured_input: Rc::clone(&captured),
+                response: Ok(BaseTypeOutcome {
+                    plan: String::new(),
+                    execution_summary: summary.to_string(),
+                    evidence,
+                }),
+            };
+            (session, captured)
+        }
+
+        fn new_err(msg: &str) -> Self {
+            Self {
+                captured_input: Rc::new(RefCell::new(None)),
+                response: Err(msg.to_string()),
+            }
+        }
+    }
+
+    // MockSession is !Send because of Rc<RefCell<...>>, but tests are single-threaded.
+    // We need Send for BaseTypeSession trait bound, so use an unsafe impl.
+    unsafe impl Send for MockSession {}
+
+    impl BaseTypeSession for MockSession {
+        fn descriptor(&self) -> &BaseTypeDescriptor {
+            unimplemented!("not needed for advance_goal_with_session tests")
+        }
+
+        fn open(&mut self) -> crate::error::SimardResult<()> {
+            Ok(())
+        }
+
+        fn run_turn(
+            &mut self,
+            input: BaseTypeTurnInput,
+        ) -> crate::error::SimardResult<BaseTypeOutcome> {
+            *self.captured_input.borrow_mut() = Some(input);
+            match &self.response {
+                Ok(outcome) => Ok(outcome.clone()),
+                Err(msg) => Err(SimardError::BridgeTransportError {
+                    bridge: "mock-session".to_string(),
+                    reason: msg.clone(),
+                }),
+            }
+        }
+
+        fn close(&mut self) -> crate::error::SimardResult<()> {
+            Ok(())
+        }
+    }
 
     fn mock_memory() -> CognitiveMemoryBridge {
         CognitiveMemoryBridge::new(Box::new(InMemoryBridgeTransport::new(
@@ -571,5 +722,301 @@ mod tests {
         // No progress facts in memory means Dead heartbeat.
         assert!(!outcomes[0].success);
         assert!(outcomes[0].detail.contains("dead"));
+    }
+
+    #[test]
+    fn parse_progress_line_extracts_percentage() {
+        assert_eq!(parse_progress_line("PROGRESS: 45"), Some(45));
+        assert_eq!(parse_progress_line("progress: 80"), Some(80));
+        assert_eq!(
+            parse_progress_line("Some text\nPROGRESS: 60\nMore text"),
+            Some(60)
+        );
+        assert_eq!(parse_progress_line("no progress here"), None);
+        assert_eq!(parse_progress_line("PROGRESS: 150"), Some(100)); // clamped
+        assert_eq!(parse_progress_line("PROGRESS: 0"), Some(0));
+    }
+
+    #[test]
+    fn assess_progress_keeps_current_when_no_marker() {
+        use crate::base_types::BaseTypeOutcome;
+        let outcome = BaseTypeOutcome {
+            plan: String::new(),
+            execution_summary: "did some work".to_string(),
+            evidence: vec![],
+        };
+        let current = GoalProgress::InProgress { percent: 30 };
+        assert_eq!(assess_progress_from_outcome(&outcome, &current), current);
+    }
+
+    #[test]
+    fn assess_progress_extracts_from_summary() {
+        use crate::base_types::BaseTypeOutcome;
+        let outcome = BaseTypeOutcome {
+            plan: String::new(),
+            execution_summary: "Assessed goal.\nPROGRESS: 55".to_string(),
+            evidence: vec![],
+        };
+        let current = GoalProgress::InProgress { percent: 30 };
+        assert_eq!(
+            assess_progress_from_outcome(&outcome, &current),
+            GoalProgress::InProgress { percent: 55 }
+        );
+    }
+
+    #[test]
+    fn assess_progress_extracts_from_evidence() {
+        use crate::base_types::BaseTypeOutcome;
+        let outcome = BaseTypeOutcome {
+            plan: String::new(),
+            execution_summary: "no marker here".to_string(),
+            evidence: vec!["PROGRESS: 100".to_string()],
+        };
+        let current = GoalProgress::InProgress { percent: 80 };
+        assert_eq!(
+            assess_progress_from_outcome(&outcome, &current),
+            GoalProgress::Completed
+        );
+    }
+
+    #[test]
+    fn assess_progress_zero_means_not_started() {
+        use crate::base_types::BaseTypeOutcome;
+        let outcome = BaseTypeOutcome {
+            plan: String::new(),
+            execution_summary: "PROGRESS: 0".to_string(),
+            evidence: vec![],
+        };
+        let current = GoalProgress::InProgress { percent: 10 };
+        assert_eq!(
+            assess_progress_from_outcome(&outcome, &current),
+            GoalProgress::NotStarted
+        );
+    }
+
+    // ── advance_goal_with_session tests ──────────────────────────────
+
+    fn bridges_with_session(session: MockSession) -> OodaBridges {
+        OodaBridges {
+            memory: mock_memory(),
+            knowledge: mock_knowledge(),
+            gym: mock_gym(),
+            session: Some(Box::new(session)),
+        }
+    }
+
+    #[test]
+    fn session_identity_describes_pm_architect_not_coder() {
+        let (session, captured) = MockSession::new_ok("PROGRESS: 25", vec![]);
+        let mut bridges = bridges_with_session(session);
+        let board = board_with_goal("g1", GoalProgress::InProgress { percent: 20 }, None);
+        let mut state = OodaState::new(board);
+        let action = PlannedAction {
+            kind: ActionKind::AdvanceGoal,
+            goal_id: Some("g1".into()),
+            description: "advance".into(),
+        };
+        dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+
+        let input = captured.borrow();
+        let input = input.as_ref().expect("session should have received input");
+        let id = &input.identity_context;
+
+        // Must describe PM architect role, not a coder.
+        assert!(
+            id.contains("PM architect"),
+            "identity should mention PM architect, got: {id}"
+        );
+        assert!(
+            id.contains("amplihack") || id.contains("coding sessions"),
+            "identity should mention managing coding sessions, got: {id}"
+        );
+        assert!(
+            !id.to_lowercase().contains("you write code")
+                && !id.to_lowercase().contains("you are a coder"),
+            "identity must NOT describe Simard as a coder, got: {id}"
+        );
+    }
+
+    #[test]
+    fn session_objective_includes_assessment_steps() {
+        let (session, captured) = MockSession::new_ok("PROGRESS: 30", vec![]);
+        let mut bridges = bridges_with_session(session);
+        let board = board_with_goal("g1", GoalProgress::InProgress { percent: 10 }, None);
+        let mut state = OodaState::new(board);
+        let action = PlannedAction {
+            kind: ActionKind::AdvanceGoal,
+            goal_id: Some("g1".into()),
+            description: "advance".into(),
+        };
+        dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+
+        let input = captured.borrow();
+        let input = input.as_ref().expect("session should have received input");
+        let obj = &input.objective;
+
+        // Objective must include the goal ID and description.
+        assert!(obj.contains("g1"), "objective should contain goal ID");
+
+        // Must instruct assessment of goal status.
+        assert!(
+            obj.to_lowercase().contains("assess") || obj.to_lowercase().contains("check"),
+            "objective should instruct assessment, got: {obj}"
+        );
+
+        // Must mention creating GitHub issues for work.
+        assert!(
+            obj.to_lowercase().contains("github issue") || obj.to_lowercase().contains("issue"),
+            "objective should mention creating issues, got: {obj}"
+        );
+
+        // Must mention launching amplihack sessions.
+        assert!(
+            obj.contains("simard engineer") || obj.contains("amplihack copilot"),
+            "objective should mention delegation commands, got: {obj}"
+        );
+
+        // Must request a PROGRESS line in the response.
+        assert!(
+            obj.contains("PROGRESS"),
+            "objective should request PROGRESS assessment, got: {obj}"
+        );
+    }
+
+    #[test]
+    fn session_progress_comes_from_agent_response_not_auto_bump() {
+        // Agent reports PROGRESS: 55 — goal should become 55%, not current+10.
+        let (session, _captured) = MockSession::new_ok(
+            "Assessed the goal. Created issue #42.\nPROGRESS: 55",
+            vec![],
+        );
+        let mut bridges = bridges_with_session(session);
+        let board = board_with_goal("g1", GoalProgress::InProgress { percent: 20 }, None);
+        let mut state = OodaState::new(board);
+        let action = PlannedAction {
+            kind: ActionKind::AdvanceGoal,
+            goal_id: Some("g1".into()),
+            description: "advance".into(),
+        };
+        let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+
+        assert!(outcomes[0].success);
+        // Progress must be 55 (from agent response), NOT 30 (20+10 auto-bump).
+        assert_eq!(
+            state.active_goals.active[0].status,
+            GoalProgress::InProgress { percent: 55 },
+            "progress should come from agent's PROGRESS line, not auto-bump"
+        );
+    }
+
+    #[test]
+    fn session_no_progress_marker_preserves_current() {
+        // Agent does NOT include a PROGRESS line — current progress must be preserved.
+        let (session, _captured) = MockSession::new_ok(
+            "Checked the repo. Everything looks fine.",
+            vec!["no markers here".to_string()],
+        );
+        let mut bridges = bridges_with_session(session);
+        let board = board_with_goal("g1", GoalProgress::InProgress { percent: 40 }, None);
+        let mut state = OodaState::new(board);
+        let action = PlannedAction {
+            kind: ActionKind::AdvanceGoal,
+            goal_id: Some("g1".into()),
+            description: "advance".into(),
+        };
+        let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+
+        assert!(outcomes[0].success);
+        // Must stay at 40%, NOT bumped to 50%.
+        assert_eq!(
+            state.active_goals.active[0].status,
+            GoalProgress::InProgress { percent: 40 },
+            "without PROGRESS marker, progress must be preserved (not auto-bumped)"
+        );
+    }
+
+    #[test]
+    fn session_progress_100_completes_goal() {
+        let (session, _captured) = MockSession::new_ok("PROGRESS: 100", vec![]);
+        let mut bridges = bridges_with_session(session);
+        let board = board_with_goal("g1", GoalProgress::InProgress { percent: 80 }, None);
+        let mut state = OodaState::new(board);
+        let action = PlannedAction {
+            kind: ActionKind::AdvanceGoal,
+            goal_id: Some("g1".into()),
+            description: "advance".into(),
+        };
+        let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+
+        assert!(outcomes[0].success);
+        assert_eq!(state.active_goals.active[0].status, GoalProgress::Completed,);
+    }
+
+    #[test]
+    fn session_run_turn_failure_returns_error_outcome() {
+        let session = MockSession::new_err("connection lost");
+        let mut bridges = bridges_with_session(session);
+        let board = board_with_goal("g1", GoalProgress::InProgress { percent: 10 }, None);
+        let mut state = OodaState::new(board);
+        let action = PlannedAction {
+            kind: ActionKind::AdvanceGoal,
+            goal_id: Some("g1".into()),
+            description: "advance".into(),
+        };
+        let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+
+        assert!(!outcomes[0].success);
+        assert!(outcomes[0].detail.contains("session run_turn failed"));
+        // Progress must NOT change on error.
+        assert_eq!(
+            state.active_goals.active[0].status,
+            GoalProgress::InProgress { percent: 10 },
+        );
+    }
+
+    #[test]
+    fn session_objective_includes_environment_context() {
+        let (session, captured) = MockSession::new_ok("PROGRESS: 20", vec![]);
+        let mut bridges = bridges_with_session(session);
+        let board = board_with_goal("g1", GoalProgress::NotStarted, None);
+        let mut state = OodaState::new(board);
+        let action = PlannedAction {
+            kind: ActionKind::AdvanceGoal,
+            goal_id: Some("g1".into()),
+            description: "advance".into(),
+        };
+        dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+
+        let input = captured.borrow();
+        let input = input.as_ref().expect("session should have received input");
+        let obj = &input.objective;
+
+        // Objective should include environment context (git status, issues, commits).
+        assert!(
+            obj.contains("Git status") || obj.contains("git status"),
+            "objective should include environment context"
+        );
+    }
+
+    #[test]
+    fn session_not_started_goal_reports_0_percent_in_objective() {
+        let (session, captured) = MockSession::new_ok("PROGRESS: 5", vec![]);
+        let mut bridges = bridges_with_session(session);
+        let board = board_with_goal("g1", GoalProgress::NotStarted, None);
+        let mut state = OodaState::new(board);
+        let action = PlannedAction {
+            kind: ActionKind::AdvanceGoal,
+            goal_id: Some("g1".into()),
+            description: "advance".into(),
+        };
+        dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+
+        let input = captured.borrow();
+        let input = input.as_ref().unwrap();
+        // NotStarted should show 0% in the objective.
+        assert!(
+            input.objective.contains("0% complete"),
+            "NotStarted goal should report 0% in objective"
+        );
     }
 }
