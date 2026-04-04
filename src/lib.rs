@@ -277,8 +277,8 @@ pub use self_improve_executor::{
     ApplyResult, ImprovementPatch, apply_and_review, generate_patch, run_autonomous_improvement,
 };
 pub use self_relaunch::{
-    GateResult, RelaunchConfig, RelaunchGate, all_gates_passed, build_canary, default_gates,
-    handover, verify_canary,
+    GateResult, RelaunchConfig, RelaunchGate, all_gates_passed, build_canary, coordinated_relaunch,
+    default_gates, handover, verify_canary,
 };
 pub use self_relaunch_semaphore::{
     HandoffConfig, HandoffResult, LeaderSemaphore, LeaderState, coordinated_handoff, signal_ready,
