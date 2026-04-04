@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -145,6 +146,10 @@ impl BaseTypeRegistry {
 
     pub fn get(&self, id: &BaseTypeId) -> Option<Arc<dyn BaseTypeFactory>> {
         self.factories.get(id).map(Arc::clone)
+    }
+
+    pub fn registered_ids(&self) -> Vec<BaseTypeId> {
+        self.factories.keys().cloned().collect()
     }
 }
 
@@ -500,6 +505,7 @@ pub struct RuntimeKernel {
     last_session: Option<SessionRecord>,
     runtime_node: RuntimeNodeId,
     mailbox_address: RuntimeAddress,
+    start_time: Instant,
 }
 
 pub type LocalRuntime = RuntimeKernel;
@@ -561,11 +567,35 @@ impl RuntimeKernel {
             last_session: None,
             runtime_node,
             mailbox_address,
+            start_time: Instant::now(),
         })
     }
 
     pub fn state(&self) -> RuntimeState {
         self.state
+    }
+
+    pub fn reflector(&self) -> crate::runtime_reflection::LocalReflector {
+        let base_types = self
+            .ports
+            .base_types
+            .registered_ids()
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect();
+        let memory_backends = vec![self.ports.memory_store.descriptor().identity.clone()];
+        let identities = self.request.manifest.components.clone();
+        let mut r = crate::runtime_reflection::LocalReflector::new(
+            self.request.topology,
+            self.start_time,
+            base_types,
+            memory_backends,
+            identities,
+        );
+        if let Some(session) = &self.last_session {
+            r.set_session_phase(session.phase);
+        }
+        r
     }
 
     pub fn compose_from_handoff(
