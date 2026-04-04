@@ -2,6 +2,9 @@
 //!
 //! Gate sequence: Smoke -> UnitTest -> GymBaseline -> BridgeHealth.
 //! All gates must pass before handover. Failures reject the canary (Pillar 11).
+//!
+//! For coordinated multi-process handoff with leader election, see
+//! [`coordinated_relaunch`] which uses [`self_relaunch_semaphore`].
 
 use std::fmt::{self, Display, Formatter};
 use std::path::{Path, PathBuf};
@@ -9,6 +12,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::error::{SimardError, SimardResult};
+use crate::self_relaunch_semaphore::{HandoffConfig, HandoffResult, LeaderSemaphore};
 
 #[derive(Clone, Debug)]
 pub struct RelaunchConfig {
@@ -315,6 +319,30 @@ fn run_bridge_health_gate(binary: &Path, config: &RelaunchConfig) -> GateResult 
     }
 }
 
+/// Perform a coordinated self-relaunch using the leader semaphore.
+///
+/// This is the recommended relaunch path for production use. It:
+/// 1. Acquires the leader semaphore (or confirms we already hold it)
+/// 2. Delegates to [`coordinated_handoff`] which builds, gates, spawns, and transfers
+/// 3. Returns the handoff result so the caller can shut down gracefully
+///
+/// Unlike [`handover`] which replaces the process image immediately,
+/// this function keeps the old process alive until the new one is verified healthy.
+pub fn coordinated_relaunch(
+    semaphore_dir: &Path,
+    config: &RelaunchConfig,
+) -> SimardResult<HandoffResult> {
+    let my_pid = std::process::id();
+    let lock_path = semaphore_dir.join("simard-leader.lock");
+    let semaphore = LeaderSemaphore::new(lock_path);
+
+    // Ensure we are the leader before attempting handoff.
+    semaphore.try_acquire(my_pid)?;
+
+    let handoff_config = HandoffConfig::new(semaphore, config.clone());
+    crate::self_relaunch_semaphore::coordinated_handoff(my_pid, &handoff_config)
+}
+
 fn truncate_output(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.trim().to_string()
@@ -364,5 +392,28 @@ mod tests {
     fn smoke_gate_handles_missing_binary() {
         let result = run_smoke_gate(Path::new("/tmp/no-such-binary-48291"));
         assert!(!result.passed);
+    }
+
+    #[test]
+    fn coordinated_relaunch_acquires_semaphore() {
+        let dir = std::env::temp_dir().join(format!("simard-relaunch-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = RelaunchConfig {
+            canary_target_dir: PathBuf::from("/tmp/no-such-canary-dir"),
+            manifest_dir: PathBuf::from("/tmp/no-such-manifest"),
+            ..Default::default()
+        };
+        // coordinated_relaunch will acquire the semaphore, then fail at build_canary
+        // because manifest_dir doesn't exist — that's fine, we're testing the wiring.
+        let err = coordinated_relaunch(&dir, &config).unwrap_err();
+        // The error should come from build_canary (not from semaphore acquisition).
+        let msg = err.to_string();
+        assert!(
+            msg.contains("canary") || msg.contains("cargo") || msg.contains("build"),
+            "expected build error, got: {msg}"
+        );
+        // Semaphore should have been acquired — verify the lock file exists.
+        assert!(dir.join("simard-leader.lock").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
