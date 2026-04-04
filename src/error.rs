@@ -131,6 +131,10 @@ pub enum SimardError {
         action: String,
         reason: String,
     },
+    CommandTimeout {
+        action: String,
+        timeout_secs: u64,
+    },
     VerificationFailed {
         reason: String,
     },
@@ -329,6 +333,15 @@ impl Display for SimardError {
             }
             Self::ActionExecutionFailed { action, reason } => {
                 write!(f, "engineer action '{action}' failed: {reason}")
+            }
+            Self::CommandTimeout {
+                action,
+                timeout_secs,
+            } => {
+                write!(
+                    f,
+                    "engineer action '{action}' timed out after {timeout_secs}s"
+                )
             }
             Self::VerificationFailed { reason } => {
                 write!(f, "engineer loop verification failed: {reason}")

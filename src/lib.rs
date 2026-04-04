@@ -117,8 +117,8 @@ pub use bridge::{
 pub use bridge_circuit::{CircuitBreakerConfig, CircuitBreakerTransport, CircuitState};
 pub use bridge_subprocess::{InMemoryBridgeTransport, SubprocessBridgeTransport};
 pub use engineer_loop::{
-    EngineerLoopRun, ExecutedEngineerAction, RepoInspection, SelectedEngineerAction,
-    VerificationReport, run_local_engineer_loop,
+    EngineerLoopRun, ExecutedEngineerAction, PhaseOutcome, PhaseTrace, RepoInspection,
+    SelectedEngineerAction, VerificationReport, run_local_engineer_loop,
 };
 pub use error::{SimardError, SimardResult};
 pub use evidence::{

@@ -406,3 +406,109 @@ verify-contains: Current status: DONE";
         "failed bounded edit should not mutate the file:\n{readme_payload}"
     );
 }
+
+#[test]
+fn engineer_loop_timeout_kills_hung_child_and_returns_command_timeout() {
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    let start = Instant::now();
+    let mut child = Command::new("sleep")
+        .arg("3600")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("sleep should spawn");
+
+    let deadline = Duration::from_secs(1);
+    let timed_out;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                timed_out = false;
+                break;
+            }
+            Ok(None) => {
+                if start.elapsed() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    timed_out = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => {
+                timed_out = false;
+                break;
+            }
+        }
+    }
+
+    assert!(
+        timed_out,
+        "watchdog should have killed the hung child before it completed naturally"
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "watchdog should not wait anywhere near 3600s"
+    );
+
+    // Verify CommandTimeout display format.
+    let error = simard::SimardError::CommandTimeout {
+        action: "sleep 3600".to_string(),
+        timeout_secs: 1,
+    };
+    let display = format!("{error}");
+    assert!(
+        display.contains("timed out after 1s"),
+        "CommandTimeout should display timeout duration: {display}"
+    );
+    assert!(
+        display.contains("sleep 3600"),
+        "CommandTimeout should display the action: {display}"
+    );
+}
+
+#[test]
+fn engineer_loop_run_includes_non_zero_elapsed_duration() {
+    let isolated_state = TempDirGuard::new("simard-engineer-loop-elapsed-state");
+    let output = run_engineer_loop_probe_with_state_root(
+        &repo_root(),
+        engineer_loop_objective(),
+        Some(isolated_state.path()),
+    );
+    let rendered = rendered_output(&output);
+
+    assert!(
+        output.status.success(),
+        "engineer loop should succeed:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Elapsed duration:"),
+        "output should include elapsed duration:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Phase traces:"),
+        "output should include phase traces count:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Phase: inspect"),
+        "output should include inspect phase:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Phase: select"),
+        "output should include select phase:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Phase: execute"),
+        "output should include execute phase:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Phase: verify"),
+        "output should include verify phase:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Phase: persist"),
+        "output should include persist phase:\n{rendered}"
+    );
+}

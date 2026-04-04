@@ -86,6 +86,14 @@ pub fn run_engineer_loop_probe(
     );
     println!("Verification status: {}", run.verification.status);
     print_text("Verification summary", &run.verification.summary);
+    println!("Elapsed duration: {:?}", run.elapsed_duration);
+    println!("Phase traces: {}", run.phase_traces.len());
+    for trace in &run.phase_traces {
+        println!(
+            "  Phase: {} | duration={:?} | outcome={:?}",
+            trace.name, trace.duration, trace.outcome
+        );
+    }
     print_display("State root", run.state_root.display());
     Ok(())
 }
