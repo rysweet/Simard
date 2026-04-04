@@ -505,3 +505,376 @@ fn execute_rustyclawd_process_fallback(
 
     Ok((text_output, evidence))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::base_types::BaseTypeFactory;
+    use crate::runtime::RuntimeTopology;
+
+    // ── RustyClawdAdapter construction ──
+
+    #[test]
+    fn registered_adapter_has_correct_backend_identity() {
+        let adapter = RustyClawdAdapter::registered("rusty-clawd").unwrap();
+        assert_eq!(
+            adapter.descriptor().backend.identity,
+            "rusty-clawd::session-backend"
+        );
+    }
+
+    #[test]
+    fn registered_adapter_has_expected_id() {
+        let adapter = RustyClawdAdapter::registered("my-id").unwrap();
+        assert_eq!(adapter.descriptor().id.as_str(), "my-id");
+    }
+
+    #[test]
+    fn registered_adapter_supports_single_and_multi_process() {
+        let adapter = RustyClawdAdapter::registered("rc").unwrap();
+        let desc = adapter.descriptor();
+        assert!(desc.supports_topology(RuntimeTopology::SingleProcess));
+        assert!(desc.supports_topology(RuntimeTopology::MultiProcess));
+        assert!(!desc.supports_topology(RuntimeTopology::Distributed));
+    }
+
+    #[test]
+    fn registered_adapter_has_standard_capabilities() {
+        let adapter = RustyClawdAdapter::registered("rc").unwrap();
+        let caps = &adapter.descriptor().capabilities;
+        assert!(
+            !caps.is_empty(),
+            "should have standard session capabilities"
+        );
+    }
+
+    #[test]
+    fn descriptor_returns_reference_to_stored_descriptor() {
+        let adapter = RustyClawdAdapter::registered("rc").unwrap();
+        let d1 = adapter.descriptor();
+        let d2 = adapter.descriptor();
+        assert_eq!(d1.id, d2.id);
+    }
+
+    // ── open_session ──
+
+    #[test]
+    fn open_session_rejects_unsupported_topology() {
+        use crate::base_types::BaseTypeSessionRequest;
+        use crate::identity::OperatingMode;
+        use crate::runtime::{RuntimeAddress, RuntimeNodeId};
+        use crate::session::SessionId;
+
+        let adapter = RustyClawdAdapter::registered("rc-test").unwrap();
+        let request = BaseTypeSessionRequest {
+            session_id: SessionId::try_from("session-00000000-0000-0000-0000-000000000001")
+                .unwrap(),
+            mode: OperatingMode::Engineer,
+            topology: RuntimeTopology::Distributed, // not supported
+            prompt_assets: vec![],
+            runtime_node: RuntimeNodeId::local(),
+            mailbox_address: RuntimeAddress::new("test-addr"),
+        };
+        let result = adapter.open_session(request);
+        assert!(result.is_err());
+        match result {
+            Err(SimardError::UnsupportedTopology {
+                base_type,
+                topology,
+            }) => {
+                assert_eq!(base_type, "rc-test");
+                assert_eq!(topology, RuntimeTopology::Distributed);
+            }
+            Err(other) => panic!("expected UnsupportedTopology, got {other:?}"),
+            Ok(_) => panic!("expected error"),
+        }
+    }
+
+    #[test]
+    fn open_session_succeeds_for_supported_topology() {
+        use crate::base_types::BaseTypeSessionRequest;
+        use crate::identity::OperatingMode;
+        use crate::runtime::{RuntimeAddress, RuntimeNodeId};
+        use crate::session::SessionId;
+
+        let adapter = RustyClawdAdapter::registered("rc-test").unwrap();
+        let request = BaseTypeSessionRequest {
+            session_id: SessionId::try_from("session-00000000-0000-0000-0000-000000000002")
+                .unwrap(),
+            mode: OperatingMode::Engineer,
+            topology: RuntimeTopology::SingleProcess,
+            prompt_assets: vec![],
+            runtime_node: RuntimeNodeId::local(),
+            mailbox_address: RuntimeAddress::new("test-addr"),
+        };
+        let result = adapter.open_session(request);
+        assert!(result.is_ok());
+    }
+
+    // ── Session lifecycle guards ──
+    // Note: BaseTypeSession is a trait object (Box<dyn BaseTypeSession>)
+    // which does not implement Debug, so we use is_err() assertions.
+
+    #[test]
+    fn session_run_turn_before_open_fails() {
+        use crate::base_types::{BaseTypeSessionRequest, BaseTypeTurnInput};
+        use crate::identity::OperatingMode;
+        use crate::runtime::{RuntimeAddress, RuntimeNodeId};
+        use crate::session::SessionId;
+
+        let adapter = RustyClawdAdapter::registered("rc-test").unwrap();
+        let request = BaseTypeSessionRequest {
+            session_id: SessionId::try_from("session-00000000-0000-0000-0000-000000000003")
+                .unwrap(),
+            mode: OperatingMode::Engineer,
+            topology: RuntimeTopology::SingleProcess,
+            prompt_assets: vec![],
+            runtime_node: RuntimeNodeId::local(),
+            mailbox_address: RuntimeAddress::new("test-addr"),
+        };
+        let mut session = adapter.open_session(request).unwrap();
+
+        let input = BaseTypeTurnInput {
+            objective: "test".to_string(),
+            identity_context: "".to_string(),
+            prompt_preamble: "".to_string(),
+        };
+        let result = session.run_turn(input);
+        assert!(result.is_err(), "run_turn before open should fail");
+    }
+
+    #[test]
+    fn session_close_before_open_fails() {
+        use crate::base_types::BaseTypeSessionRequest;
+        use crate::identity::OperatingMode;
+        use crate::runtime::{RuntimeAddress, RuntimeNodeId};
+        use crate::session::SessionId;
+
+        let adapter = RustyClawdAdapter::registered("rc-test").unwrap();
+        let request = BaseTypeSessionRequest {
+            session_id: SessionId::try_from("session-00000000-0000-0000-0000-000000000004")
+                .unwrap(),
+            mode: OperatingMode::Engineer,
+            topology: RuntimeTopology::SingleProcess,
+            prompt_assets: vec![],
+            runtime_node: RuntimeNodeId::local(),
+            mailbox_address: RuntimeAddress::new("test-addr"),
+        };
+        let mut session = adapter.open_session(request).unwrap();
+        let result = session.close();
+        assert!(result.is_err(), "close before open should fail");
+    }
+
+    // ── RustyClawdSession debug format (via direct construction) ──
+
+    #[test]
+    fn session_struct_debug_format_is_readable() {
+        use crate::base_types::BaseTypeSessionRequest;
+        use crate::identity::OperatingMode;
+        use crate::runtime::{RuntimeAddress, RuntimeNodeId};
+        use crate::session::SessionId;
+
+        let descriptor = RustyClawdAdapter::registered("rc-dbg")
+            .unwrap()
+            .descriptor
+            .clone();
+        let request = BaseTypeSessionRequest {
+            session_id: SessionId::try_from("session-00000000-0000-0000-0000-000000000005")
+                .unwrap(),
+            mode: OperatingMode::Engineer,
+            topology: RuntimeTopology::SingleProcess,
+            prompt_assets: vec![],
+            runtime_node: RuntimeNodeId::local(),
+            mailbox_address: RuntimeAddress::new("test-addr"),
+        };
+        let session = RustyClawdSession {
+            descriptor,
+            request,
+            is_open: false,
+            is_closed: false,
+            client: None,
+            rt: None,
+            conversation_history: Vec::new(),
+        };
+        let debug_str = format!("{session:?}");
+        assert!(debug_str.contains("RustyClawdSession"));
+        assert!(debug_str.contains("is_open"));
+        assert!(debug_str.contains("is_closed"));
+    }
+
+    // ── Tool definitions ──
+
+    #[test]
+    fn tool_definitions_contains_expected_tools() {
+        let tools = rustyclawd_tool_definitions();
+        assert_eq!(tools.len(), 4);
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"Bash"));
+        assert!(names.contains(&"Read"));
+        assert!(names.contains(&"Write"));
+        assert!(names.contains(&"Edit"));
+    }
+
+    #[test]
+    fn tool_definitions_all_have_descriptions() {
+        let tools = rustyclawd_tool_definitions();
+        for tool in &tools {
+            assert!(
+                !tool.description.is_empty(),
+                "tool {} has empty description",
+                tool.name
+            );
+        }
+    }
+
+    // ── MAX_HISTORY_MESSAGES constant ──
+
+    #[test]
+    fn max_history_messages_is_reasonable() {
+        let m = MAX_HISTORY_MESSAGES;
+        assert!(m > 0, "must be positive, got {m}");
+        assert!(m <= 100, "must be <= 100, got {m}");
+    }
+
+    // ── execute_tool_locally tests ──
+
+    #[tokio::test]
+    async fn execute_tool_locally_unknown_tool_returns_error_json() {
+        let input = serde_json::json!({});
+        let result = execute_tool_locally("UnknownTool", &input).await.unwrap();
+        let error = result.get("error").and_then(|v| v.as_str()).unwrap();
+        assert!(error.contains("unknown tool"));
+        assert!(error.contains("UnknownTool"));
+    }
+
+    #[tokio::test]
+    async fn execute_tool_locally_read_nonexistent_file_returns_error() {
+        let input = serde_json::json!({ "file_path": "/nonexistent/path/to/file.txt" });
+        let result = execute_tool_locally("Read", &input).await.unwrap();
+        assert!(
+            result.get("error").is_some(),
+            "should return error for missing file"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_tool_locally_write_to_invalid_path_returns_error() {
+        let input =
+            serde_json::json!({ "file_path": "/nonexistent/dir/file.txt", "content": "hello" });
+        let result = execute_tool_locally("Write", &input).await.unwrap();
+        assert!(
+            result.get("error").is_some(),
+            "should return error for invalid path"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_tool_locally_edit_nonexistent_file_returns_error() {
+        let input = serde_json::json!({
+            "file_path": "/nonexistent/dir/file.txt",
+            "old_string": "old",
+            "new_string": "new"
+        });
+        let result = execute_tool_locally("Edit", &input).await.unwrap();
+        assert!(
+            result.get("error").is_some(),
+            "should return error for missing file"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_tool_locally_read_with_empty_path_returns_error() {
+        let input = serde_json::json!({});
+        let result = execute_tool_locally("Read", &input).await.unwrap();
+        assert!(
+            result.get("error").is_some(),
+            "empty path should yield error"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_tool_locally_bash_missing_command_runs_empty_string() {
+        let input = serde_json::json!({});
+        let result = execute_tool_locally("Bash", &input).await.unwrap();
+        // Running empty command succeeds (sh -c "")
+        assert!(result.get("exit_code").is_some());
+    }
+
+    #[tokio::test]
+    async fn execute_tool_locally_bash_echo_captures_stdout() {
+        let input = serde_json::json!({ "command": "echo hello_test_42" });
+        let result = execute_tool_locally("Bash", &input).await.unwrap();
+        let stdout = result.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(stdout.contains("hello_test_42"));
+        let exit_code = result.get("exit_code").and_then(|v| v.as_i64()).unwrap();
+        assert_eq!(exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn execute_tool_locally_bash_failing_command_has_nonzero_exit() {
+        let input = serde_json::json!({ "command": "false" });
+        let result = execute_tool_locally("Bash", &input).await.unwrap();
+        let exit_code = result.get("exit_code").and_then(|v| v.as_i64()).unwrap();
+        assert_ne!(exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn execute_tool_locally_write_and_read_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("simard-test-rw-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("test_roundtrip.txt");
+        let path_str = file_path.to_str().unwrap();
+
+        let write_input =
+            serde_json::json!({ "file_path": path_str, "content": "roundtrip_content" });
+        let write_result = execute_tool_locally("Write", &write_input).await.unwrap();
+        assert_eq!(
+            write_result.get("status").and_then(|v| v.as_str()),
+            Some("ok")
+        );
+
+        let read_input = serde_json::json!({ "file_path": path_str });
+        let read_result = execute_tool_locally("Read", &read_input).await.unwrap();
+        let content = read_result.get("content").and_then(|v| v.as_str()).unwrap();
+        assert_eq!(content, "roundtrip_content");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn execute_tool_locally_edit_replaces_content() {
+        let dir = std::env::temp_dir().join(format!("simard-test-edit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("test_edit.txt");
+        let path_str = file_path.to_str().unwrap();
+
+        std::fs::write(&file_path, "hello world").unwrap();
+
+        let edit_input = serde_json::json!({
+            "file_path": path_str,
+            "old_string": "hello",
+            "new_string": "goodbye"
+        });
+        let edit_result = execute_tool_locally("Edit", &edit_input).await.unwrap();
+        assert_eq!(
+            edit_result.get("status").and_then(|v| v.as_str()),
+            Some("ok")
+        );
+
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "goodbye world");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── System prompt construction (in execute_rustyclawd_client) ──
+    // Tested indirectly through adapter — the system prompt logic is:
+    // empty identity + preamble → default prompt, otherwise concatenated.
+
+    #[test]
+    fn adapter_debug_format_contains_type_name() {
+        let adapter = RustyClawdAdapter::registered("debug-test").unwrap();
+        let debug = format!("{adapter:?}");
+        assert!(debug.contains("RustyClawdAdapter"));
+    }
+}

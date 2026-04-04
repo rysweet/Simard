@@ -378,3 +378,181 @@ fn parse_carried_meeting_decisions(raw: &str) -> crate::SimardResult<Vec<String>
     }
     Ok(decisions)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::evidence::EvidenceSource;
+    use crate::session::{SessionId, SessionPhase};
+
+    fn make_evidence(detail: &str) -> EvidenceRecord {
+        EvidenceRecord {
+            id: "ev-test".to_string(),
+            session_id: SessionId::parse("00000000-0000-0000-0000-000000000001").unwrap(),
+            phase: SessionPhase::Execution,
+            detail: detail.to_string(),
+            source: EvidenceSource::Runtime,
+        }
+    }
+
+    // --- parse_engineer_summary_list ---
+
+    #[test]
+    fn summary_list_returns_empty_for_none_marker() {
+        assert!(parse_engineer_summary_list("<none>", ", ").is_empty());
+    }
+
+    #[test]
+    fn summary_list_parses_comma_separated() {
+        let result = parse_engineer_summary_list("goal-a, goal-b, goal-c", ", ");
+        assert_eq!(result, vec!["goal-a", "goal-b", "goal-c"]);
+    }
+
+    #[test]
+    fn summary_list_trims_whitespace() {
+        let result = parse_engineer_summary_list("  alpha ,  beta  ", ",");
+        assert_eq!(result, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn summary_list_filters_empty_entries() {
+        let result = parse_engineer_summary_list("a, , b", ", ");
+        assert_eq!(result, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn summary_list_single_item() {
+        let result = parse_engineer_summary_list("only-one", ", ");
+        assert_eq!(result, vec!["only-one"]);
+    }
+
+    #[test]
+    fn summary_list_with_pipe_separator() {
+        let result = parse_engineer_summary_list("x | y | z", " | ");
+        assert_eq!(result, vec!["x", "y", "z"]);
+    }
+
+    #[test]
+    fn summary_list_all_empty_after_split() {
+        let result = parse_engineer_summary_list(", , ", ", ");
+        assert!(result.is_empty());
+    }
+
+    // --- parse_carried_meeting_decisions ---
+
+    #[test]
+    fn carried_decisions_returns_empty_for_none_marker() {
+        let result = parse_carried_meeting_decisions("<none>").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn carried_decisions_errors_on_invalid_record_format() {
+        let result = parse_carried_meeting_decisions("not-a-valid-record");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn carried_decisions_parses_valid_record_with_decisions() {
+        let record = "agenda=Sprint review; updates=[Updated A]; decisions=[Use strategy X | Defer Y]; risks=[Risk 1]; next_steps=[Step 1]; open_questions=[Question 1]; goals=[p1:active:Goal title:Goal rationale]";
+        let result = parse_carried_meeting_decisions(record).unwrap();
+        assert_eq!(result, vec!["Use strategy X", "Defer Y"]);
+    }
+
+    #[test]
+    fn carried_decisions_multiple_records_merged() {
+        let record_a = "agenda=Review A; updates=[U1]; decisions=[D1]; risks=[R1]; next_steps=[N1]; open_questions=[Q1]; goals=[p1:active:G1:Rationale]";
+        let record_b = "agenda=Review B; updates=[U2]; decisions=[D2 | D3]; risks=[R2]; next_steps=[N2]; open_questions=[Q2]; goals=[p2:active:G2:Rationale]";
+        let combined = format!("{record_a} || {record_b}");
+        let result = parse_carried_meeting_decisions(&combined).unwrap();
+        assert_eq!(result, vec!["D1", "D2", "D3"]);
+    }
+
+    // --- required_engineer_evidence_value ---
+
+    #[test]
+    fn required_evidence_returns_value_for_matching_prefix() {
+        let records = vec![make_evidence("repo-root=/home/user/project")];
+        let result =
+            required_engineer_evidence_value(&records, "repo-root=", "test-handoff").unwrap();
+        assert_eq!(result, "/home/user/project");
+    }
+
+    #[test]
+    fn required_evidence_errors_when_no_match() {
+        let records = vec![make_evidence("repo-root=/home/user/project")];
+        let result =
+            required_engineer_evidence_value(&records, "nonexistent-prefix=", "test-handoff");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn required_evidence_returns_last_matching_value_via_rev() {
+        let records = vec![
+            make_evidence("repo-branch=main"),
+            make_evidence("repo-branch=feature/new"),
+        ];
+        let result =
+            required_engineer_evidence_value(&records, "repo-branch=", "test-handoff").unwrap();
+        assert_eq!(result, "feature/new");
+    }
+
+    #[test]
+    fn required_evidence_ignores_non_matching_records() {
+        let records = vec![
+            make_evidence("other-key=value1"),
+            make_evidence("repo-head=abc123"),
+            make_evidence("another-key=value2"),
+        ];
+        let result =
+            required_engineer_evidence_value(&records, "repo-head=", "test-handoff").unwrap();
+        assert_eq!(result, "abc123");
+    }
+
+    #[test]
+    fn required_evidence_empty_records_errors() {
+        let records: Vec<EvidenceRecord> = vec![];
+        let result = required_engineer_evidence_value(&records, "repo-root=", "test-handoff");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn required_evidence_error_message_contains_field() {
+        let records: Vec<EvidenceRecord> = vec![];
+        let err =
+            required_engineer_evidence_value(&records, "repo-root=", "test-handoff").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("repo-root"),
+            "error should mention field name: {msg}"
+        );
+    }
+
+    #[test]
+    fn required_evidence_error_message_contains_handoff_source() {
+        let records: Vec<EvidenceRecord> = vec![];
+        let err = required_engineer_evidence_value(&records, "repo-root=", "my-handoff.json")
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("my-handoff.json"),
+            "error should mention handoff source: {msg}"
+        );
+    }
+
+    #[test]
+    fn required_evidence_strips_prefix_correctly() {
+        let records = vec![make_evidence("worktree-dirty=false")];
+        let result =
+            required_engineer_evidence_value(&records, "worktree-dirty=", "test-handoff").unwrap();
+        assert_eq!(result, "false");
+    }
+
+    #[test]
+    fn required_evidence_handles_empty_value_after_prefix() {
+        let records = vec![make_evidence("changed-files=")];
+        let result =
+            required_engineer_evidence_value(&records, "changed-files=", "test-handoff").unwrap();
+        assert_eq!(result, "");
+    }
+}

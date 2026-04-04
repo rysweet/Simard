@@ -862,4 +862,447 @@ mod tests {
             }
         );
     }
+
+    // ── BootstrapMode::parse ──
+
+    #[test]
+    fn bootstrap_mode_parse_none_defaults_to_explicit_config() {
+        use super::BootstrapMode;
+        let mode = BootstrapMode::parse(None).unwrap();
+        assert_eq!(mode, BootstrapMode::ExplicitConfig);
+    }
+
+    #[test]
+    fn bootstrap_mode_parse_explicit_config() {
+        use super::BootstrapMode;
+        let mode = BootstrapMode::parse(Some("explicit-config".to_string())).unwrap();
+        assert_eq!(mode, BootstrapMode::ExplicitConfig);
+    }
+
+    #[test]
+    fn bootstrap_mode_parse_builtin_defaults() {
+        use super::BootstrapMode;
+        let mode = BootstrapMode::parse(Some("builtin-defaults".to_string())).unwrap();
+        assert_eq!(mode, BootstrapMode::BuiltinDefaults);
+    }
+
+    #[test]
+    fn bootstrap_mode_parse_invalid_value() {
+        use super::BootstrapMode;
+        let err = BootstrapMode::parse(Some("invalid".to_string())).unwrap_err();
+        match err {
+            SimardError::InvalidConfigValue { key, value, .. } => {
+                assert_eq!(key, "SIMARD_BOOTSTRAP_MODE");
+                assert_eq!(value, "invalid");
+            }
+            other => panic!("expected InvalidConfigValue, got {other:?}"),
+        }
+    }
+
+    // ── BootstrapMode Display ──
+
+    #[test]
+    fn bootstrap_mode_display_explicit_config() {
+        use super::BootstrapMode;
+        assert_eq!(BootstrapMode::ExplicitConfig.to_string(), "explicit-config");
+    }
+
+    #[test]
+    fn bootstrap_mode_display_builtin_defaults() {
+        use super::BootstrapMode;
+        assert_eq!(
+            BootstrapMode::BuiltinDefaults.to_string(),
+            "builtin-defaults"
+        );
+    }
+
+    // ── ConfigValueSource Display ──
+
+    #[test]
+    fn config_value_source_display_environment() {
+        use super::ConfigValueSource;
+        let source = ConfigValueSource::Environment("MY_VAR");
+        assert_eq!(source.to_string(), "env:MY_VAR");
+    }
+
+    #[test]
+    fn config_value_source_display_explicit_opt_in() {
+        use super::ConfigValueSource;
+        let source = ConfigValueSource::ExplicitOptIn("OPT_KEY");
+        assert_eq!(source.to_string(), "opt-in:OPT_KEY");
+    }
+
+    // ── parse_runtime_topology ──
+
+    #[test]
+    fn parse_runtime_topology_single_process() {
+        use super::parse_runtime_topology;
+        use crate::runtime::RuntimeTopology;
+        let topo = parse_runtime_topology("single-process".to_string()).unwrap();
+        assert_eq!(topo, RuntimeTopology::SingleProcess);
+    }
+
+    #[test]
+    fn parse_runtime_topology_multi_process() {
+        use super::parse_runtime_topology;
+        use crate::runtime::RuntimeTopology;
+        let topo = parse_runtime_topology("multi-process".to_string()).unwrap();
+        assert_eq!(topo, RuntimeTopology::MultiProcess);
+    }
+
+    #[test]
+    fn parse_runtime_topology_distributed() {
+        use super::parse_runtime_topology;
+        use crate::runtime::RuntimeTopology;
+        let topo = parse_runtime_topology("distributed".to_string()).unwrap();
+        assert_eq!(topo, RuntimeTopology::Distributed);
+    }
+
+    #[test]
+    fn parse_runtime_topology_invalid() {
+        use super::parse_runtime_topology;
+        let err = parse_runtime_topology("mesh".to_string()).unwrap_err();
+        match err {
+            SimardError::InvalidConfigValue { key, value, .. } => {
+                assert_eq!(key, "SIMARD_RUNTIME_TOPOLOGY");
+                assert_eq!(value, "mesh");
+            }
+            other => panic!("expected InvalidConfigValue, got {other:?}"),
+        }
+    }
+
+    // ── BootstrapInputs default ──
+
+    #[test]
+    fn bootstrap_inputs_default_all_none() {
+        use super::BootstrapInputs;
+        let inputs = BootstrapInputs::default();
+        assert!(inputs.prompt_root.is_none());
+        assert!(inputs.objective.is_none());
+        assert!(inputs.state_root.is_none());
+        assert!(inputs.mode.is_none());
+        assert!(inputs.identity.is_none());
+        assert!(inputs.base_type.is_none());
+        assert!(inputs.topology.is_none());
+    }
+
+    // ── BootstrapConfig::resolve ──
+
+    #[test]
+    fn resolve_builtin_defaults_produces_valid_config() {
+        use super::{BootstrapConfig, BootstrapInputs, BootstrapMode};
+        let inputs = BootstrapInputs {
+            mode: Some("builtin-defaults".to_string()),
+            ..Default::default()
+        };
+        let config = BootstrapConfig::resolve(inputs).unwrap();
+        assert_eq!(config.mode, BootstrapMode::BuiltinDefaults);
+        assert_eq!(config.identity, "simard-engineer");
+        assert_eq!(config.selected_base_type.value.as_str(), "local-harness");
+    }
+
+    #[test]
+    fn resolve_explicit_config_without_prompt_root_fails() {
+        use super::{BootstrapConfig, BootstrapInputs};
+        let inputs = BootstrapInputs {
+            mode: Some("explicit-config".to_string()),
+            ..Default::default()
+        };
+        let err = BootstrapConfig::resolve(inputs).unwrap_err();
+        match err {
+            SimardError::MissingRequiredConfig { key, .. } => {
+                assert_eq!(key, "SIMARD_PROMPT_ROOT");
+            }
+            other => panic!("expected MissingRequiredConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_explicit_config_without_objective_fails() {
+        use super::{BootstrapConfig, BootstrapInputs};
+        let inputs = BootstrapInputs {
+            mode: Some("explicit-config".to_string()),
+            prompt_root: Some(PathBuf::from("/some/path")),
+            ..Default::default()
+        };
+        let err = BootstrapConfig::resolve(inputs).unwrap_err();
+        match err {
+            SimardError::MissingRequiredConfig { key, .. } => {
+                assert_eq!(key, "SIMARD_OBJECTIVE");
+            }
+            other => panic!("expected MissingRequiredConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_explicit_config_without_base_type_fails() {
+        use super::{BootstrapConfig, BootstrapInputs};
+        let inputs = BootstrapInputs {
+            mode: Some("explicit-config".to_string()),
+            prompt_root: Some(PathBuf::from("/some/path")),
+            objective: Some("test".to_string()),
+            ..Default::default()
+        };
+        let err = BootstrapConfig::resolve(inputs).unwrap_err();
+        match err {
+            SimardError::MissingRequiredConfig { key, .. } => {
+                assert_eq!(key, "SIMARD_BASE_TYPE");
+            }
+            other => panic!("expected MissingRequiredConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_explicit_config_without_topology_fails() {
+        use super::{BootstrapConfig, BootstrapInputs};
+        let inputs = BootstrapInputs {
+            mode: Some("explicit-config".to_string()),
+            prompt_root: Some(PathBuf::from("/some/path")),
+            objective: Some("test".to_string()),
+            base_type: Some("local-harness".to_string()),
+            ..Default::default()
+        };
+        let err = BootstrapConfig::resolve(inputs).unwrap_err();
+        match err {
+            SimardError::MissingRequiredConfig { key, .. } => {
+                assert_eq!(key, "SIMARD_RUNTIME_TOPOLOGY");
+            }
+            other => panic!("expected MissingRequiredConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_explicit_config_without_state_root_fails() {
+        use super::{BootstrapConfig, BootstrapInputs};
+        let inputs = BootstrapInputs {
+            mode: Some("explicit-config".to_string()),
+            prompt_root: Some(PathBuf::from("/some/path")),
+            objective: Some("test".to_string()),
+            base_type: Some("local-harness".to_string()),
+            topology: Some("single-process".to_string()),
+            ..Default::default()
+        };
+        let err = BootstrapConfig::resolve(inputs).unwrap_err();
+        match err {
+            SimardError::MissingRequiredConfig { key, .. } => {
+                assert_eq!(key, "SIMARD_STATE_ROOT");
+            }
+            other => panic!("expected MissingRequiredConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_explicit_config_without_identity_fails() {
+        use super::{BootstrapConfig, BootstrapInputs};
+        let temp_dir = TestDir::new("simard-resolve-test");
+        let inputs = BootstrapInputs {
+            mode: Some("explicit-config".to_string()),
+            prompt_root: Some(PathBuf::from("/some/path")),
+            objective: Some("test".to_string()),
+            base_type: Some("local-harness".to_string()),
+            topology: Some("single-process".to_string()),
+            state_root: Some(temp_dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let err = BootstrapConfig::resolve(inputs).unwrap_err();
+        match err {
+            SimardError::MissingRequiredConfig { key, .. } => {
+                assert_eq!(key, "SIMARD_IDENTITY");
+            }
+            other => panic!("expected MissingRequiredConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_full_explicit_config_succeeds() {
+        use super::{BootstrapConfig, BootstrapInputs, BootstrapMode, ConfigValueSource};
+        use crate::runtime::RuntimeTopology;
+        let temp_dir = TestDir::new("simard-resolve-full");
+        let inputs = BootstrapInputs {
+            mode: Some("explicit-config".to_string()),
+            prompt_root: Some(PathBuf::from("/some/path")),
+            objective: Some("my-objective".to_string()),
+            base_type: Some("local-harness".to_string()),
+            topology: Some("single-process".to_string()),
+            state_root: Some(temp_dir.path().to_path_buf()),
+            identity: Some("my-identity".to_string()),
+        };
+        let config = BootstrapConfig::resolve(inputs).unwrap();
+        assert_eq!(config.mode, BootstrapMode::ExplicitConfig);
+        assert_eq!(config.identity, "my-identity");
+        assert_eq!(config.objective.value, "my-objective");
+        assert_eq!(config.selected_base_type.value.as_str(), "local-harness");
+        assert_eq!(config.topology.value, RuntimeTopology::SingleProcess);
+        assert_eq!(config.prompt_root.value, PathBuf::from("/some/path"));
+        assert!(matches!(
+            config.prompt_root.source,
+            ConfigValueSource::Environment(_)
+        ));
+        assert!(matches!(
+            config.objective.source,
+            ConfigValueSource::Environment(_)
+        ));
+    }
+
+    // ── BootstrapConfig path methods ──
+
+    #[test]
+    fn config_path_methods_use_state_root() {
+        use super::{BootstrapConfig, BootstrapInputs};
+        let temp_dir = TestDir::new("simard-paths-test");
+        let inputs = BootstrapInputs {
+            mode: Some("builtin-defaults".to_string()),
+            state_root: Some(temp_dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let config = BootstrapConfig::resolve(inputs).unwrap();
+        assert!(
+            config
+                .memory_store_path()
+                .to_string_lossy()
+                .contains("memory_records.json")
+        );
+        assert!(
+            config
+                .evidence_store_path()
+                .to_string_lossy()
+                .contains("evidence_records.json")
+        );
+        assert!(
+            config
+                .goal_store_path()
+                .to_string_lossy()
+                .contains("goal_records.json")
+        );
+        assert!(
+            config
+                .handoff_store_path()
+                .to_string_lossy()
+                .contains("latest_handoff.json")
+        );
+    }
+
+    #[test]
+    fn state_root_path_returns_state_root_ref() {
+        use super::{BootstrapConfig, BootstrapInputs};
+        let inputs = BootstrapInputs {
+            mode: Some("builtin-defaults".to_string()),
+            ..Default::default()
+        };
+        let config = BootstrapConfig::resolve(inputs).unwrap();
+        assert!(!config.state_root_path().as_os_str().is_empty());
+    }
+
+    // ── manifest_precedence ──
+
+    #[test]
+    fn manifest_precedence_returns_expected_entries() {
+        use super::{BootstrapConfig, BootstrapInputs};
+        let inputs = BootstrapInputs {
+            mode: Some("builtin-defaults".to_string()),
+            ..Default::default()
+        };
+        let config = BootstrapConfig::resolve(inputs).unwrap();
+        let prec = config.manifest_precedence();
+        assert!(prec.len() >= 7);
+        assert!(prec.iter().any(|s| s.starts_with("mode:")));
+        assert!(prec.iter().any(|s| s.starts_with("identity:")));
+        assert!(prec.iter().any(|s| s.starts_with("base-type:")));
+        assert!(prec.iter().any(|s| s.starts_with("topology:")));
+        assert!(prec.iter().any(|s| s.starts_with("prompt-root:")));
+        assert!(prec.iter().any(|s| s.starts_with("state-root:")));
+        assert!(prec.iter().any(|s| s.starts_with("objective:")));
+    }
+
+    // ── bootstrap_entrypoint ──
+
+    #[test]
+    fn bootstrap_entrypoint_contains_module_path() {
+        use super::bootstrap_entrypoint;
+        let entry = bootstrap_entrypoint();
+        assert!(entry.contains("bootstrap"));
+        assert!(entry.contains("assemble_local_runtime"));
+    }
+
+    // ── decode_utf8_env_value ──
+
+    #[test]
+    fn decode_utf8_env_value_valid_string() {
+        use std::ffi::OsString;
+        let result = decode_utf8_env_value("KEY", OsString::from("hello")).unwrap();
+        assert_eq!(result, Some("hello".to_string()));
+    }
+
+    // ── validate_state_root ──
+
+    #[test]
+    fn validate_state_root_rejects_empty_path() {
+        let err = validate_state_root("").unwrap_err();
+        assert_eq!(
+            err,
+            SimardError::InvalidStateRoot {
+                path: PathBuf::from(""),
+                reason: "state root must not be empty".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn validate_state_root_rejects_double_parent_traversal() {
+        let err = validate_state_root("a/../../outside").unwrap_err();
+        match err {
+            SimardError::InvalidStateRoot { reason, .. } => {
+                assert!(reason.contains(".."));
+            }
+            other => panic!("expected InvalidStateRoot, got {other:?}"),
+        }
+    }
+
+    // ── register_builtin_base_type ──
+
+    #[test]
+    fn register_unknown_base_type_does_not_error() {
+        use super::register_builtin_base_type;
+        use crate::base_types::BaseTypeId;
+        use crate::runtime::BaseTypeRegistry;
+        let mut registry = BaseTypeRegistry::default();
+        let result = register_builtin_base_type(&mut registry, &BaseTypeId::new("nonexistent"));
+        assert!(
+            result.is_ok(),
+            "unknown base type should be silently ignored"
+        );
+    }
+
+    #[test]
+    fn register_local_harness_base_type_succeeds() {
+        use super::register_builtin_base_type;
+        use crate::base_types::BaseTypeId;
+        use crate::runtime::BaseTypeRegistry;
+        let mut registry = BaseTypeRegistry::default();
+        let result = register_builtin_base_type(&mut registry, &BaseTypeId::new("local-harness"));
+        assert!(result.is_ok());
+        assert!(registry.get(&BaseTypeId::new("local-harness")).is_some());
+    }
+
+    #[test]
+    fn register_rusty_clawd_base_type_succeeds() {
+        use super::register_builtin_base_type;
+        use crate::base_types::BaseTypeId;
+        use crate::runtime::BaseTypeRegistry;
+        let mut registry = BaseTypeRegistry::default();
+        let result = register_builtin_base_type(&mut registry, &BaseTypeId::new("rusty-clawd"));
+        assert!(result.is_ok());
+        assert!(registry.get(&BaseTypeId::new("rusty-clawd")).is_some());
+    }
+
+    #[test]
+    fn register_terminal_shell_base_type_succeeds() {
+        use super::register_builtin_base_type;
+        use crate::base_types::BaseTypeId;
+        use crate::runtime::BaseTypeRegistry;
+        let mut registry = BaseTypeRegistry::default();
+        let result = register_builtin_base_type(&mut registry, &BaseTypeId::new("terminal-shell"));
+        assert!(result.is_ok());
+        assert!(registry.get(&BaseTypeId::new("terminal-shell")).is_some());
+    }
 }

@@ -156,3 +156,194 @@ fn persist_cycle_to_memory(
         eprintln!("[simard] OODA persist: failed to store episode: {e}");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ooda_loop::{
+        ActionKind, ActionOutcome, CycleReport, EnvironmentSnapshot, GoalSnapshot, Observation,
+        PlannedAction, Priority,
+    };
+    use crate::{CognitiveStatistics, GoalProgress};
+
+    fn make_minimal_observation() -> Observation {
+        Observation {
+            goal_statuses: vec![],
+            gym_health: None,
+            memory_stats: CognitiveStatistics::default(),
+            pending_improvements: vec![],
+            environment: EnvironmentSnapshot::default(),
+        }
+    }
+
+    fn make_test_report(cycle_number: u32) -> CycleReport {
+        CycleReport {
+            cycle_number,
+            observation: make_minimal_observation(),
+            priorities: vec![],
+            planned_actions: vec![],
+            outcomes: vec![],
+        }
+    }
+
+    fn make_report_with_goals_and_outcomes() -> CycleReport {
+        CycleReport {
+            cycle_number: 7,
+            observation: Observation {
+                goal_statuses: vec![
+                    GoalSnapshot {
+                        id: "goal-1".to_string(),
+                        description: "First goal".to_string(),
+                        progress: GoalProgress::InProgress { percent: 50 },
+                    },
+                    GoalSnapshot {
+                        id: "goal-2".to_string(),
+                        description: "Second goal".to_string(),
+                        progress: GoalProgress::NotStarted,
+                    },
+                ],
+                gym_health: None,
+                memory_stats: CognitiveStatistics::default(),
+                pending_improvements: vec![],
+                environment: EnvironmentSnapshot {
+                    git_status: "clean".to_string(),
+                    open_issues: vec!["issue-1".to_string()],
+                    recent_commits: vec![],
+                },
+            },
+            priorities: vec![Priority {
+                goal_id: "goal-1".to_string(),
+                urgency: 0.8,
+                reason: "High priority".to_string(),
+            }],
+            planned_actions: vec![PlannedAction {
+                kind: ActionKind::AdvanceGoal,
+                goal_id: Some("goal-1".to_string()),
+                description: "Work on goal 1".to_string(),
+            }],
+            outcomes: vec![
+                ActionOutcome {
+                    action: PlannedAction {
+                        kind: ActionKind::AdvanceGoal,
+                        goal_id: Some("goal-1".to_string()),
+                        description: "Work on goal 1".to_string(),
+                    },
+                    success: true,
+                    detail: "Completed".to_string(),
+                },
+                ActionOutcome {
+                    action: PlannedAction {
+                        kind: ActionKind::RunGymEval,
+                        goal_id: None,
+                        description: "Run gym eval".to_string(),
+                    },
+                    success: false,
+                    detail: "Failed".to_string(),
+                },
+            ],
+        }
+    }
+
+    // --- OodaConfig defaults ---
+
+    #[test]
+    fn ooda_config_default_values() {
+        let config = OodaConfig::default();
+        assert_eq!(config.max_concurrent_actions, 3);
+        assert!(
+            (config.improvement_threshold - 0.02).abs() < f64::EPSILON,
+            "improvement_threshold should be 0.02"
+        );
+        assert_eq!(config.gym_suite_id, "progressive");
+    }
+
+    // --- persist_cycle_report ---
+
+    #[test]
+    fn persist_cycle_report_creates_directory_and_file() {
+        let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-scratch")
+            .join(format!("ooda-persist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+
+        let report = make_test_report(42);
+        persist_cycle_report(&scratch, &report);
+
+        let path = scratch.join("cycle_reports").join("cycle_42.json");
+        assert!(path.exists(), "cycle report file should be created");
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("42"),
+            "content should reference cycle number"
+        );
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn persist_cycle_report_uses_cycle_number_in_filename() {
+        let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-scratch")
+            .join(format!("ooda-filename-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+
+        persist_cycle_report(&scratch, &make_test_report(99));
+        let path = scratch.join("cycle_reports").join("cycle_99.json");
+        assert!(path.exists());
+
+        persist_cycle_report(&scratch, &make_test_report(100));
+        let path2 = scratch.join("cycle_reports").join("cycle_100.json");
+        assert!(path2.exists());
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    // --- summarize_cycle_report ---
+
+    #[test]
+    fn summarize_empty_report() {
+        let report = make_test_report(1);
+        let summary = crate::ooda_loop::summarize_cycle_report(&report);
+        assert!(
+            summary.contains("#1"),
+            "summary should contain cycle number: {summary}"
+        );
+    }
+
+    #[test]
+    fn summarize_report_with_outcomes() {
+        let report = make_report_with_goals_and_outcomes();
+        let summary = crate::ooda_loop::summarize_cycle_report(&report);
+        assert!(
+            summary.contains("#7"),
+            "summary should contain cycle number: {summary}"
+        );
+        assert!(
+            summary.contains("1/2"),
+            "summary should contain success ratio: {summary}"
+        );
+    }
+
+    #[test]
+    fn summarize_report_mentions_goals() {
+        let report = make_report_with_goals_and_outcomes();
+        let summary = crate::ooda_loop::summarize_cycle_report(&report);
+        assert!(
+            summary.contains("goals=2"),
+            "summary should mention goal count: {summary}"
+        );
+    }
+
+    #[test]
+    fn summarize_report_mentions_issues() {
+        let report = make_report_with_goals_and_outcomes();
+        let summary = crate::ooda_loop::summarize_cycle_report(&report);
+        assert!(
+            summary.contains("issues=1"),
+            "summary should mention issue count: {summary}"
+        );
+    }
+}

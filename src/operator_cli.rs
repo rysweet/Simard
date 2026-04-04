@@ -681,4 +681,602 @@ mod tests {
         assert_eq!(root.unwrap(), PathBuf::from("/tmp/state"));
         assert!(json);
     }
+
+    // ── parse_state_root_and_json edge cases ──
+
+    #[test]
+    fn test_parse_state_root_and_json_path_only() {
+        let (root, json) = parse_state_root_and_json(vec!["/some/path".to_string()]).unwrap();
+        assert_eq!(root.unwrap(), PathBuf::from("/some/path"));
+        assert!(!json);
+    }
+
+    #[test]
+    fn test_parse_state_root_and_json_too_many_args() {
+        let result =
+            parse_state_root_and_json(vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected trailing")
+        );
+    }
+
+    // ── help text completeness ──
+
+    #[test]
+    fn test_help_text_contains_all_top_level_commands() {
+        let help = operator_cli_help();
+        for cmd in &[
+            "engineer",
+            "meeting",
+            "goal-curation",
+            "improvement-curation",
+            "gym",
+            "ooda",
+            "spawn",
+            "handover",
+            "update",
+            "self-test",
+            "act-on-decisions",
+            "install",
+            "review",
+            "bootstrap",
+        ] {
+            assert!(help.contains(cmd), "help should mention '{cmd}' command");
+        }
+    }
+
+    #[test]
+    fn test_help_flag_variants() {
+        for flag in &["-h", "--help", "help"] {
+            let result = dispatch_operator_cli(vec![flag.to_string()]);
+            assert!(result.is_ok(), "flag '{flag}' should not error");
+        }
+    }
+
+    // ── next_required / reject_extra_args helpers ──
+
+    #[test]
+    fn test_next_required_returns_value_when_present() {
+        let mut iter = vec!["value".to_string()].into_iter();
+        let result = next_required(&mut iter, "test");
+        assert_eq!(result.unwrap(), "value");
+    }
+
+    #[test]
+    fn test_next_required_errors_when_missing() {
+        let mut iter = Vec::<String>::new().into_iter();
+        let result = next_required(&mut iter, "my-label");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected my-label")
+        );
+    }
+
+    #[test]
+    fn test_next_optional_path_returns_some_when_present() {
+        let mut iter = vec!["/foo/bar".to_string()].into_iter();
+        let result = next_optional_path(&mut iter);
+        assert_eq!(result, Some(PathBuf::from("/foo/bar")));
+    }
+
+    #[test]
+    fn test_next_optional_path_returns_none_when_empty() {
+        let mut iter = Vec::<String>::new().into_iter();
+        let result = next_optional_path(&mut iter);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_reject_extra_args_ok_when_empty() {
+        let iter = Vec::<String>::new().into_iter();
+        assert!(reject_extra_args(iter).is_ok());
+    }
+
+    #[test]
+    fn test_reject_extra_args_errors_with_one_arg() {
+        let iter = vec!["extra1".to_string()].into_iter();
+        let result = reject_extra_args(iter);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("extra1"));
+    }
+
+    #[test]
+    fn test_reject_extra_args_collects_multiple() {
+        let iter = vec!["a".to_string(), "b".to_string(), "c".to_string()].into_iter();
+        let result = reject_extra_args(iter);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("a b c"));
+    }
+
+    // ── Dispatch error paths for missing subcommands ──
+
+    #[test]
+    fn test_engineer_missing_subcommand() {
+        let result = dispatch_operator_cli(vec!["engineer".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected engineer command")
+        );
+    }
+
+    #[test]
+    fn test_engineer_unknown_subcommand() {
+        let result = dispatch_operator_cli(vec!["engineer".to_string(), "nope".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported command 'engineer nope'")
+        );
+    }
+
+    #[test]
+    fn test_engineer_run_missing_topology() {
+        let result = dispatch_operator_cli(vec!["engineer".to_string(), "run".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected topology")
+        );
+    }
+
+    #[test]
+    fn test_engineer_run_missing_workspace_root() {
+        let result = dispatch_operator_cli(vec![
+            "engineer".to_string(),
+            "run".to_string(),
+            "single-process".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected workspace root")
+        );
+    }
+
+    #[test]
+    fn test_engineer_run_missing_objective() {
+        let result = dispatch_operator_cli(vec![
+            "engineer".to_string(),
+            "run".to_string(),
+            "single-process".to_string(),
+            "/workspace".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected objective")
+        );
+    }
+
+    #[test]
+    fn test_engineer_terminal_missing_args() {
+        let result = dispatch_operator_cli(vec!["engineer".to_string(), "terminal".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected topology")
+        );
+    }
+
+    #[test]
+    fn test_engineer_terminal_file_missing_args() {
+        let result =
+            dispatch_operator_cli(vec!["engineer".to_string(), "terminal-file".to_string()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_engineer_terminal_read_missing_topology() {
+        let result =
+            dispatch_operator_cli(vec!["engineer".to_string(), "terminal-read".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected topology")
+        );
+    }
+
+    #[test]
+    fn test_engineer_read_missing_topology() {
+        let result = dispatch_operator_cli(vec!["engineer".to_string(), "read".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected topology")
+        );
+    }
+
+    #[test]
+    fn test_engineer_terminal_recipe_show_missing_name() {
+        let result = dispatch_operator_cli(vec![
+            "engineer".to_string(),
+            "terminal-recipe-show".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected recipe name")
+        );
+    }
+
+    #[test]
+    fn test_engineer_terminal_recipe_missing_args() {
+        let result =
+            dispatch_operator_cli(vec!["engineer".to_string(), "terminal-recipe".to_string()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_engineer_copilot_submit_missing_topology() {
+        let result =
+            dispatch_operator_cli(vec!["engineer".to_string(), "copilot-submit".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected topology")
+        );
+    }
+
+    // ── goal-curation dispatch ──
+
+    #[test]
+    fn test_goal_curation_missing_subcommand() {
+        let result = dispatch_operator_cli(vec!["goal-curation".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected goal-curation command")
+        );
+    }
+
+    #[test]
+    fn test_goal_curation_unknown_subcommand() {
+        let result =
+            dispatch_operator_cli(vec!["goal-curation".to_string(), "unknown".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported command 'goal-curation unknown'")
+        );
+    }
+
+    #[test]
+    fn test_goal_curation_run_missing_base_type() {
+        let result = dispatch_operator_cli(vec!["goal-curation".to_string(), "run".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected base type")
+        );
+    }
+
+    #[test]
+    fn test_goal_curation_read_missing_base_type() {
+        let result = dispatch_operator_cli(vec!["goal-curation".to_string(), "read".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected base type")
+        );
+    }
+
+    // ── improvement-curation dispatch ──
+
+    #[test]
+    fn test_improvement_curation_missing_subcommand() {
+        let result = dispatch_operator_cli(vec!["improvement-curation".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected improvement-curation command")
+        );
+    }
+
+    #[test]
+    fn test_improvement_curation_unknown_subcommand() {
+        let result =
+            dispatch_operator_cli(vec!["improvement-curation".to_string(), "bad".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported command 'improvement-curation bad'")
+        );
+    }
+
+    // ── review dispatch ──
+
+    #[test]
+    fn test_review_missing_subcommand() {
+        let result = dispatch_operator_cli(vec!["review".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected review command")
+        );
+    }
+
+    #[test]
+    fn test_review_unknown_subcommand() {
+        let result = dispatch_operator_cli(vec!["review".to_string(), "bogus".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported command 'review bogus'")
+        );
+    }
+
+    // ── gym dispatch ──
+
+    #[test]
+    fn test_gym_missing_subcommand() {
+        let result = dispatch_operator_cli(vec!["gym".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected gym command")
+        );
+    }
+
+    #[test]
+    fn test_gym_unknown_subcommand() {
+        let result = dispatch_operator_cli(vec!["gym".to_string(), "nope".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported command 'gym nope'")
+        );
+    }
+
+    #[test]
+    fn test_gym_run_missing_scenario_id() {
+        let result = dispatch_operator_cli(vec!["gym".to_string(), "run".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected scenario id")
+        );
+    }
+
+    #[test]
+    fn test_gym_compare_missing_scenario_id() {
+        let result = dispatch_operator_cli(vec!["gym".to_string(), "compare".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected scenario id")
+        );
+    }
+
+    #[test]
+    fn test_gym_run_suite_missing_suite_id() {
+        let result = dispatch_operator_cli(vec!["gym".to_string(), "run-suite".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected suite id")
+        );
+    }
+
+    // ── ooda dispatch ──
+
+    #[test]
+    fn test_ooda_missing_subcommand() {
+        let result = dispatch_operator_cli(vec!["ooda".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected ooda command")
+        );
+    }
+
+    #[test]
+    fn test_ooda_unknown_subcommand() {
+        let result = dispatch_operator_cli(vec!["ooda".to_string(), "xyz".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported command 'ooda xyz'")
+        );
+    }
+
+    // ── spawn dispatch ──
+
+    #[test]
+    fn test_spawn_missing_agent_name() {
+        let result = dispatch_operator_cli(vec!["spawn".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected agent name")
+        );
+    }
+
+    #[test]
+    fn test_spawn_missing_goal() {
+        let result = dispatch_operator_cli(vec!["spawn".to_string(), "agent1".to_string()]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("expected goal"));
+    }
+
+    #[test]
+    fn test_spawn_missing_worktree_path() {
+        let result = dispatch_operator_cli(vec![
+            "spawn".to_string(),
+            "agent1".to_string(),
+            "do stuff".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected worktree path")
+        );
+    }
+
+    // ── bootstrap dispatch ──
+
+    #[test]
+    fn test_bootstrap_missing_subcommand() {
+        let result = dispatch_operator_cli(vec!["bootstrap".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected bootstrap command")
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_unknown_subcommand() {
+        let result = dispatch_operator_cli(vec!["bootstrap".to_string(), "unknown".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported command 'bootstrap unknown'")
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_run_missing_identity() {
+        let result = dispatch_operator_cli(vec!["bootstrap".to_string(), "run".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected identity")
+        );
+    }
+
+    // ── handover dispatch ──
+
+    #[test]
+    fn test_handover_rejects_unexpected_arg() {
+        let result =
+            dispatch_operator_cli(vec!["handover".to_string(), "--bad-flag=x".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected argument")
+        );
+    }
+
+    // ── self-test rejects extra args ──
+
+    #[test]
+    fn test_self_test_rejects_extra_args() {
+        let result = dispatch_operator_cli(vec!["self-test".to_string(), "extra".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected trailing arguments")
+        );
+    }
+
+    // ── OPERATOR_CLI_HELP constant ──
+
+    #[test]
+    fn test_operator_cli_help_starts_with_simard() {
+        assert!(OPERATOR_CLI_HELP.starts_with("Simard"));
+    }
+
+    #[test]
+    fn test_operator_cli_usage_is_not_empty() {
+        assert!(!operator_cli_usage().is_empty());
+    }
+
+    // ── meeting dispatch edge cases ──
+
+    #[test]
+    fn test_meeting_run_missing_base_type() {
+        let result = dispatch_operator_cli(vec!["meeting".to_string(), "run".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected base type")
+        );
+    }
+
+    #[test]
+    fn test_meeting_read_missing_base_type() {
+        let result = dispatch_operator_cli(vec!["meeting".to_string(), "read".to_string()]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected base type")
+        );
+    }
 }

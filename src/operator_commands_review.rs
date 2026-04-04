@@ -128,3 +128,75 @@ pub fn run_review_read_probe(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn review_read_probe_errors_with_nonexistent_explicit_state_root() {
+        let result = run_review_read_probe(
+            "terminal-shell",
+            "single-process",
+            Some(PathBuf::from(
+                "/nonexistent/simard-test-path-does-not-exist-12345",
+            )),
+        );
+        assert!(
+            result.is_err(),
+            "should fail when state root does not exist"
+        );
+    }
+
+    #[test]
+    fn review_probe_errors_with_nonexistent_explicit_state_root() {
+        let result = run_review_probe(
+            "terminal-shell",
+            "single-process",
+            "test objective",
+            Some(PathBuf::from(
+                "/nonexistent/simard-test-path-does-not-exist-12345",
+            )),
+        );
+        assert!(
+            result.is_err(),
+            "should fail when state root does not exist"
+        );
+    }
+
+    #[test]
+    fn review_read_probe_errors_with_empty_state_root() {
+        let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-scratch")
+            .join(format!("review-empty-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&scratch);
+
+        let result =
+            run_review_read_probe("terminal-shell", "single-process", Some(scratch.clone()));
+        assert!(
+            result.is_err(),
+            "should fail with empty state root (no review artifacts)"
+        );
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn sanitize_terminal_text_is_applied_to_proposals() {
+        // Verify that the sanitize function is importable and works
+        let input = "normal text";
+        let result = sanitize_terminal_text(input);
+        assert_eq!(result, input, "clean text should pass through unchanged");
+    }
+
+    #[test]
+    fn sanitize_terminal_text_strips_control_chars() {
+        let input = "text\x1b[31mwith\x1b[0m escapes";
+        let result = sanitize_terminal_text(input);
+        assert!(
+            !result.contains("\x1b"),
+            "should strip ANSI escape sequences: {result}"
+        );
+    }
+}

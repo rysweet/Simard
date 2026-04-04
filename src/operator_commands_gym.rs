@@ -130,3 +130,112 @@ pub fn run_gym_suite(suite_id: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("Suite artifact report: {}", report.artifact_path);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gym_list_succeeds() {
+        let result = run_gym_list();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn benchmark_scenarios_not_empty() {
+        let scenarios = benchmark_scenarios();
+        assert!(
+            !scenarios.is_empty(),
+            "benchmark_scenarios should return at least one scenario"
+        );
+    }
+
+    #[test]
+    fn benchmark_scenarios_have_required_fields() {
+        for scenario in benchmark_scenarios() {
+            assert!(!scenario.id.is_empty(), "scenario id must not be empty");
+            assert!(
+                !scenario.title.is_empty(),
+                "scenario title must not be empty"
+            );
+            assert!(
+                !scenario.identity.is_empty(),
+                "scenario identity must not be empty"
+            );
+            assert!(
+                !scenario.base_type.is_empty(),
+                "scenario base_type must not be empty"
+            );
+        }
+    }
+
+    #[test]
+    fn benchmark_scenarios_have_unique_ids() {
+        let scenarios = benchmark_scenarios();
+        let mut ids: Vec<&str> = scenarios.iter().map(|s| s.id).collect();
+        let original_count = ids.len();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            original_count,
+            "benchmark scenario ids must be unique"
+        );
+    }
+
+    #[test]
+    fn render_benchmark_count_some() {
+        assert_eq!(crate::gym::render_benchmark_count(Some(5)), "5");
+    }
+
+    #[test]
+    fn render_benchmark_count_zero() {
+        assert_eq!(crate::gym::render_benchmark_count(Some(0)), "0");
+    }
+
+    #[test]
+    fn render_benchmark_count_none() {
+        assert_eq!(crate::gym::render_benchmark_count(None), "unmeasured");
+    }
+
+    #[test]
+    fn render_benchmark_delta_positive() {
+        let result = crate::gym::render_benchmark_delta(Some(3));
+        assert_eq!(result, "+3");
+    }
+
+    #[test]
+    fn render_benchmark_delta_negative() {
+        let result = crate::gym::render_benchmark_delta(Some(-2));
+        assert_eq!(result, "-2");
+    }
+
+    #[test]
+    fn render_benchmark_delta_zero() {
+        let result = crate::gym::render_benchmark_delta(Some(0));
+        assert_eq!(result, "+0");
+    }
+
+    #[test]
+    fn render_benchmark_delta_none() {
+        assert_eq!(crate::gym::render_benchmark_delta(None), "unmeasured");
+    }
+
+    #[test]
+    fn gym_scenario_errors_with_invalid_id() {
+        let result = run_gym_scenario("nonexistent-scenario-id-12345");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn gym_compare_errors_with_invalid_id() {
+        let result = run_gym_compare("nonexistent-scenario-id-12345");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn gym_suite_errors_with_invalid_id() {
+        let result = run_gym_suite("nonexistent-suite-id-12345");
+        assert!(result.is_err());
+    }
+}

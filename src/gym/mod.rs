@@ -214,3 +214,95 @@ fn runtime_ports_for_topology(
 pub fn default_output_root() -> PathBuf {
     PathBuf::from(DEFAULT_OUTPUT_ROOT)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::SimardError;
+
+    #[test]
+    fn default_output_root_returns_expected_path() {
+        let path = default_output_root();
+        assert_eq!(path, PathBuf::from("target/simard-gym"));
+    }
+
+    #[test]
+    fn default_output_root_is_relative() {
+        let path = default_output_root();
+        assert!(path.is_relative());
+    }
+
+    #[test]
+    fn starter_suite_id_constant() {
+        assert_eq!(STARTER_SUITE_ID, "starter");
+    }
+
+    #[test]
+    fn run_benchmark_suite_rejects_unknown_suite_id() {
+        let result = run_benchmark_suite("nonexistent-suite", default_output_root());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SimardError::BenchmarkSuiteNotFound { suite_id } => {
+                assert_eq!(suite_id, "nonexistent-suite");
+            }
+            other => panic!("expected BenchmarkSuiteNotFound, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_benchmark_scenario_rejects_unknown_scenario_id() {
+        let result = run_benchmark_scenario("nonexistent-scenario", default_output_root());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn runtime_ports_single_process() {
+        let prompt_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets");
+        let prompt_store = Arc::new(FilePromptAssetStore::new(prompt_root));
+        let memory_store = Arc::new(InMemoryMemoryStore::try_default().unwrap());
+        let evidence_store = Arc::new(InMemoryEvidenceStore::try_default().unwrap());
+        let base_types = BaseTypeRegistry::default();
+        let result = runtime_ports_for_topology(
+            prompt_store,
+            memory_store,
+            evidence_store,
+            base_types,
+            RuntimeTopology::SingleProcess,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn runtime_ports_multi_process() {
+        let prompt_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets");
+        let prompt_store = Arc::new(FilePromptAssetStore::new(prompt_root));
+        let memory_store = Arc::new(InMemoryMemoryStore::try_default().unwrap());
+        let evidence_store = Arc::new(InMemoryEvidenceStore::try_default().unwrap());
+        let base_types = BaseTypeRegistry::default();
+        let result = runtime_ports_for_topology(
+            prompt_store,
+            memory_store,
+            evidence_store,
+            base_types,
+            RuntimeTopology::MultiProcess,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn runtime_ports_distributed() {
+        let prompt_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets");
+        let prompt_store = Arc::new(FilePromptAssetStore::new(prompt_root));
+        let memory_store = Arc::new(InMemoryMemoryStore::try_default().unwrap());
+        let evidence_store = Arc::new(InMemoryEvidenceStore::try_default().unwrap());
+        let base_types = BaseTypeRegistry::default();
+        let result = runtime_ports_for_topology(
+            prompt_store,
+            memory_store,
+            evidence_store,
+            base_types,
+            RuntimeTopology::Distributed,
+        );
+        assert!(result.is_ok());
+    }
+}

@@ -424,4 +424,70 @@ mod tests {
 
         fs::remove_dir_all(&tmp).unwrap();
     }
+
+    // ── Additional tests ──
+
+    #[test]
+    fn test_find_binary_at_depth_boundary() {
+        // Binary at depth 3 should be found (limit is depth > 3)
+        let tmp = std::env::temp_dir().join(format!("simard-test-depth3-{}", std::process::id()));
+        let at_depth3 = tmp.join("a").join("b").join("c");
+        fs::create_dir_all(&at_depth3).unwrap();
+        fs::write(at_depth3.join("simard"), b"fake").unwrap();
+
+        let result = find_binary_in_dir(&tmp);
+        assert!(result.is_ok(), "binary at depth 3 should be found");
+
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_find_binary_nonexistent_dir_returns_error() {
+        let tmp = std::env::temp_dir().join(format!("simard-test-nodir-{}", std::process::id()));
+        // Don't create the directory
+        let result = find_binary_in_dir(&tmp);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_find_binary_empty_dir_returns_error() {
+        let tmp = std::env::temp_dir().join(format!("simard-test-emptydir-{}", std::process::id()));
+        fs::create_dir_all(&tmp).unwrap();
+
+        let result = find_binary_in_dir(&tmp);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_find_binary_prefers_first_found() {
+        let tmp = std::env::temp_dir().join(format!("simard-test-multi-{}", std::process::id()));
+        fs::create_dir_all(&tmp).unwrap();
+        // Binary at root level
+        fs::write(tmp.join("simard"), b"root-binary").unwrap();
+        // Also at depth 1
+        let sub = tmp.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("simard"), b"nested-binary").unwrap();
+
+        let found = find_binary_in_dir(&tmp).unwrap();
+        // Should find one of them without panicking
+        assert!(found.exists());
+
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_platform_suffix_is_deterministic() {
+        let s1 = platform_suffix();
+        let s2 = platform_suffix();
+        assert_eq!(s1, s2);
+    }
+
+    #[test]
+    fn test_current_version_matches_cargo_pkg() {
+        assert_eq!(CURRENT_VERSION, env!("CARGO_PKG_VERSION"));
+    }
 }

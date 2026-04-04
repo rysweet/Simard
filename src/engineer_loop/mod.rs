@@ -741,4 +741,148 @@ mod tests {
             "error should explain: {error}"
         );
     }
+
+    // ---- is_meeting_decision_record tests ----
+
+    #[test]
+    fn is_meeting_decision_record_positive() {
+        let value = "agenda=stuff updates=things decisions=yes risks=low next_steps=go open_questions=none goals=win";
+        assert!(super::is_meeting_decision_record(value));
+    }
+
+    #[test]
+    fn is_meeting_decision_record_missing_field() {
+        // Missing "goals="
+        let value =
+            "agenda=stuff updates=things decisions=yes risks=low next_steps=go open_questions=none";
+        assert!(!super::is_meeting_decision_record(value));
+    }
+
+    #[test]
+    fn is_meeting_decision_record_empty_string() {
+        assert!(!super::is_meeting_decision_record(""));
+    }
+
+    #[test]
+    fn is_meeting_decision_record_partial_match() {
+        let value = "agenda=stuff decisions=yes";
+        assert!(!super::is_meeting_decision_record(value));
+    }
+
+    // ---- Additional types tests ----
+
+    #[test]
+    fn validate_repo_relative_path_absolute_rejected() {
+        let err = validate_repo_relative_path("/etc/passwd")
+            .expect_err("absolute paths should be rejected");
+        assert!(err.to_string().contains("must stay relative"));
+    }
+
+    #[test]
+    fn validate_repo_relative_path_empty_rejected() {
+        let err = validate_repo_relative_path("").expect_err("empty paths should be rejected");
+        assert!(err.to_string().contains("must identify a file"));
+    }
+
+    #[test]
+    fn validate_repo_relative_path_dot_only_rejected() {
+        let err = validate_repo_relative_path(".").expect_err("dot-only paths should be rejected");
+        assert!(err.to_string().contains("must identify a file"));
+    }
+
+    #[test]
+    fn validate_repo_relative_path_normalizes_dot_segments() {
+        let result = validate_repo_relative_path("./src/./lib.rs").unwrap();
+        assert_eq!(result, "src/lib.rs");
+    }
+
+    #[test]
+    fn validate_repo_relative_path_simple_valid() {
+        let result = validate_repo_relative_path("src/main.rs").unwrap();
+        assert_eq!(result, "src/main.rs");
+    }
+
+    // ---- parse_structured_edit_request tests ----
+
+    #[test]
+    fn structured_edit_complete_request_parses() {
+        let obj =
+            "edit-file: src/lib.rs\nreplace: old_text\nwith: new_text\nverify-contains: new_text";
+        let result = parse_structured_edit_request(obj).unwrap().unwrap();
+        assert_eq!(result.relative_path, "src/lib.rs");
+        assert_eq!(result.search, "old_text");
+        assert_eq!(result.replacement, "new_text");
+        assert_eq!(result.verify_contains, "new_text");
+    }
+
+    #[test]
+    fn structured_edit_no_directives_returns_none() {
+        let obj = "just a regular objective with no edit directives";
+        assert!(parse_structured_edit_request(obj).unwrap().is_none());
+    }
+
+    #[test]
+    fn structured_edit_empty_field_value_rejected() {
+        let obj = "edit-file:   \nreplace: old\nwith: new\nverify-contains: new";
+        let err = parse_structured_edit_request(obj).unwrap_err();
+        assert!(err.to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn structured_edit_unescape_newlines_and_tabs() {
+        let obj = "edit-file: f.rs\nreplace: a\\nb\nwith: c\\td\nverify-contains: c\\td";
+        let result = parse_structured_edit_request(obj).unwrap().unwrap();
+        assert_eq!(result.search, "a\nb");
+        assert_eq!(result.replacement, "c\td");
+    }
+
+    // ---- extract_command_from_objective tests ----
+
+    #[test]
+    fn extract_command_run_keyword() {
+        let cmd = super::types::extract_command_from_objective("run cargo fmt").unwrap();
+        assert_eq!(cmd, vec!["cargo", "fmt"]);
+    }
+
+    #[test]
+    fn extract_command_execute_keyword() {
+        let cmd = super::types::extract_command_from_objective("execute git status").unwrap();
+        assert_eq!(cmd, vec!["git", "status"]);
+    }
+
+    #[test]
+    fn extract_command_no_keyword_returns_none() {
+        assert!(super::types::extract_command_from_objective("please do something").is_none());
+    }
+
+    #[test]
+    fn extract_command_empty_after_keyword_returns_none() {
+        assert!(super::types::extract_command_from_objective("run   ").is_none());
+    }
+
+    // ---- extract_file_path_from_objective tests ----
+
+    #[test]
+    fn extract_file_path_with_slash() {
+        let path = super::types::extract_file_path_from_objective("create src/lib.rs now").unwrap();
+        assert_eq!(path, "src/lib.rs");
+    }
+
+    #[test]
+    fn extract_file_path_with_dot_extension() {
+        let path =
+            super::types::extract_file_path_from_objective("modify config.toml please").unwrap();
+        assert_eq!(path, "config.toml");
+    }
+
+    #[test]
+    fn extract_file_path_no_path_returns_none() {
+        assert!(super::types::extract_file_path_from_objective("do something").is_none());
+    }
+
+    #[test]
+    fn extract_file_path_short_dot_word_skipped() {
+        // Words like "a." are too short (len <= 2) to be considered paths
+        assert!(super::types::extract_file_path_from_objective("fix a bug").is_none());
+    }
 }

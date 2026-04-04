@@ -330,3 +330,543 @@ impl TerminalReadView {
         println!("Evidence records: {}", self.evidence_record_count);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::evidence::EvidenceSource;
+    use crate::session::{SessionId, SessionPhase};
+    use crate::{
+        BaseTypeId, EvidenceRecord, MemoryRecord, OperatingMode, RuntimeAddress, RuntimeNodeId,
+        RuntimeState, RuntimeTopology,
+    };
+
+    fn make_evidence(detail: &str) -> EvidenceRecord {
+        EvidenceRecord {
+            id: "ev-test".to_string(),
+            session_id: SessionId::parse("00000000-0000-0000-0000-000000000001").unwrap(),
+            phase: SessionPhase::Execution,
+            detail: detail.to_string(),
+            source: EvidenceSource::Runtime,
+        }
+    }
+
+    fn make_session_record() -> crate::session::SessionRecord {
+        crate::session::SessionRecord {
+            id: SessionId::parse("00000000-0000-0000-0000-000000000001").unwrap(),
+            mode: OperatingMode::Engineer,
+            objective: "objective-metadata(chars=42, words=8, lines=2)".to_string(),
+            phase: SessionPhase::Complete,
+            selected_base_type: BaseTypeId::from("terminal-shell"),
+            evidence_ids: vec![],
+            memory_keys: vec![],
+        }
+    }
+
+    fn required_evidence_records() -> Vec<EvidenceRecord> {
+        vec![
+            make_evidence("backend-implementation=test-adapter"),
+            make_evidence("shell=/bin/bash"),
+            make_evidence("terminal-working-directory=/home/user/project"),
+            make_evidence("terminal-command-count=5"),
+            make_evidence("terminal-transcript-preview=$ echo hello"),
+        ]
+    }
+
+    fn make_handoff(
+        session: Option<crate::session::SessionRecord>,
+        evidence: Vec<EvidenceRecord>,
+    ) -> RuntimeHandoffSnapshot {
+        RuntimeHandoffSnapshot {
+            exported_state: RuntimeState::Ready,
+            identity_name: "simard-engineer".to_string(),
+            selected_base_type: BaseTypeId::from("terminal-shell"),
+            topology: RuntimeTopology::SingleProcess,
+            source_runtime_node: RuntimeNodeId::new("test-node"),
+            source_mailbox_address: RuntimeAddress::new("test-addr"),
+            session,
+            memory_records: vec![],
+            evidence_records: evidence,
+            copilot_submit_audit: None,
+        }
+    }
+
+    // --- TerminalReadView::from_handoff success ---
+
+    #[test]
+    fn from_handoff_succeeds_with_valid_data() {
+        let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state-root"),
+            handoff,
+            "latest_terminal_handoff.json".to_string(),
+            Some("shared default state-root".to_string()),
+        );
+        assert!(
+            view.is_ok(),
+            "from_handoff should succeed: {:?}",
+            view.err()
+        );
+    }
+
+    #[test]
+    fn from_handoff_extracts_identity() {
+        let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state-root"),
+            handoff,
+            "latest_terminal_handoff.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(view.identity, "simard-engineer");
+    }
+
+    #[test]
+    fn from_handoff_extracts_topology() {
+        let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state-root"),
+            handoff,
+            "latest_terminal_handoff.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(view.topology, "single-process");
+    }
+
+    #[test]
+    fn from_handoff_extracts_session_phase() {
+        let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state-root"),
+            handoff,
+            "latest_terminal_handoff.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(view.session_phase, "complete");
+    }
+
+    #[test]
+    fn from_handoff_extracts_evidence_values() {
+        let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state-root"),
+            handoff,
+            "latest_terminal_handoff.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(view.adapter_implementation, "test-adapter");
+        assert_eq!(view.shell, "/bin/bash");
+        assert_eq!(view.working_directory, "/home/user/project");
+        assert_eq!(view.command_count, "5");
+        assert_eq!(view.transcript_preview, "$ echo hello");
+    }
+
+    #[test]
+    fn from_handoff_defaults_optional_values() {
+        let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state-root"),
+            handoff,
+            "latest_terminal_handoff.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(view.wait_count, "0");
+        assert_eq!(view.wait_timeout_seconds, "5");
+        assert!(view.last_output_line.is_none());
+    }
+
+    #[test]
+    fn from_handoff_extracts_optional_values_when_present() {
+        let mut evidence = required_evidence_records();
+        evidence.push(make_evidence("terminal-wait-count=3"));
+        evidence.push(make_evidence("terminal-wait-timeout-seconds=15"));
+        evidence.push(make_evidence("terminal-last-output-line=done"));
+
+        let handoff = make_handoff(Some(make_session_record()), evidence);
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state-root"),
+            handoff,
+            "latest_terminal_handoff.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(view.wait_count, "3");
+        assert_eq!(view.wait_timeout_seconds, "15");
+        assert_eq!(view.last_output_line.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn from_handoff_collects_steps() {
+        let mut evidence = required_evidence_records();
+        evidence.push(make_evidence("terminal-step-1=run tests"));
+        evidence.push(make_evidence("terminal-step-2=check results"));
+
+        let handoff = make_handoff(Some(make_session_record()), evidence);
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state-root"),
+            handoff,
+            "latest_terminal_handoff.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(view.step_count, 2);
+        assert_eq!(view.steps.len(), 2);
+    }
+
+    #[test]
+    fn from_handoff_collects_checkpoints() {
+        let mut evidence = required_evidence_records();
+        evidence.push(make_evidence("terminal-checkpoint-1=build passed"));
+
+        let handoff = make_handoff(Some(make_session_record()), evidence);
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state-root"),
+            handoff,
+            "latest_terminal_handoff.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(view.checkpoints.len(), 1);
+    }
+
+    #[test]
+    fn from_handoff_empty_steps_and_checkpoints() {
+        let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state-root"),
+            handoff,
+            "latest_terminal_handoff.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(view.step_count, 0);
+        assert!(view.steps.is_empty());
+        assert!(view.checkpoints.is_empty());
+    }
+
+    #[test]
+    fn from_handoff_preserves_continuity_source() {
+        let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state-root"),
+            handoff,
+            "latest_terminal_handoff.json".to_string(),
+            Some("shared explicit state-root".to_string()),
+        )
+        .unwrap();
+        assert_eq!(
+            view.continuity_source.as_deref(),
+            Some("shared explicit state-root")
+        );
+    }
+
+    #[test]
+    fn from_handoff_preserves_state_root() {
+        let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/my/state/root"),
+            handoff,
+            "latest_terminal_handoff.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(view.state_root, PathBuf::from("/my/state/root"));
+    }
+
+    #[test]
+    fn from_handoff_preserves_handoff_source() {
+        let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state-root"),
+            handoff,
+            "custom_handoff.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(view.handoff_source, "custom_handoff.json");
+    }
+
+    #[test]
+    fn from_handoff_tracks_record_counts() {
+        let mut handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        handoff.memory_records.push(MemoryRecord {
+            key: "test-key".to_string(),
+            scope: crate::MemoryScope::SessionScratch,
+            value: "test-value".to_string(),
+            session_id: SessionId::parse("00000000-0000-0000-0000-000000000001").unwrap(),
+            recorded_in: SessionPhase::Execution,
+        });
+
+        let evidence_count = handoff.evidence_records.len();
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state-root"),
+            handoff,
+            "latest_terminal_handoff.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(view.memory_record_count, 1);
+        assert_eq!(view.evidence_record_count, evidence_count);
+    }
+
+    #[test]
+    fn from_handoff_preserves_copilot_audit() {
+        let mut handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        handoff.copilot_submit_audit = Some(CopilotSubmitAudit {
+            flow_asset: "test-flow".to_string(),
+            payload_id: "payload-123".to_string(),
+            outcome: "success".to_string(),
+            reason_code: Some("OK".to_string()),
+            ..CopilotSubmitAudit::default()
+        });
+
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state-root"),
+            handoff,
+            "latest_terminal_handoff.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert!(view.copilot_submit_audit.is_some());
+        let audit = view.copilot_submit_audit.unwrap();
+        assert_eq!(audit.flow_asset, "test-flow");
+        assert_eq!(audit.payload_id, "payload-123");
+        assert_eq!(audit.outcome, "success");
+        assert_eq!(audit.reason_code.as_deref(), Some("OK"));
+    }
+
+    // --- TerminalReadView::from_handoff error cases ---
+
+    #[test]
+    fn from_handoff_errors_when_session_is_none() {
+        let handoff = make_handoff(None, required_evidence_records());
+        let result = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state-root"),
+            handoff,
+            "latest_terminal_handoff.json".to_string(),
+            None,
+        );
+        assert!(result.is_err(), "should fail when session is None");
+    }
+
+    #[test]
+    fn from_handoff_errors_when_backend_implementation_missing() {
+        let evidence = vec![
+            // Missing backend-implementation=
+            make_evidence("shell=/bin/bash"),
+            make_evidence("terminal-working-directory=/home/user"),
+            make_evidence("terminal-command-count=1"),
+            make_evidence("terminal-transcript-preview=preview"),
+        ];
+        let handoff = make_handoff(Some(make_session_record()), evidence);
+        let result = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state-root"),
+            handoff,
+            "latest_terminal_handoff.json".to_string(),
+            None,
+        );
+        assert!(
+            result.is_err(),
+            "should fail when backend-implementation evidence is missing"
+        );
+    }
+
+    #[test]
+    fn from_handoff_errors_when_shell_missing() {
+        let evidence = vec![
+            make_evidence("backend-implementation=test-adapter"),
+            // Missing shell=
+            make_evidence("terminal-working-directory=/home/user"),
+            make_evidence("terminal-command-count=1"),
+            make_evidence("terminal-transcript-preview=preview"),
+        ];
+        let handoff = make_handoff(Some(make_session_record()), evidence);
+        let result = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state-root"),
+            handoff,
+            "latest_terminal_handoff.json".to_string(),
+            None,
+        );
+        assert!(
+            result.is_err(),
+            "should fail when shell evidence is missing"
+        );
+    }
+
+    #[test]
+    fn from_handoff_errors_when_working_directory_missing() {
+        let evidence = vec![
+            make_evidence("backend-implementation=test-adapter"),
+            make_evidence("shell=/bin/bash"),
+            // Missing terminal-working-directory=
+            make_evidence("terminal-command-count=1"),
+            make_evidence("terminal-transcript-preview=preview"),
+        ];
+        let handoff = make_handoff(Some(make_session_record()), evidence);
+        let result = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state-root"),
+            handoff,
+            "latest_terminal_handoff.json".to_string(),
+            None,
+        );
+        assert!(
+            result.is_err(),
+            "should fail when working-directory evidence is missing"
+        );
+    }
+
+    #[test]
+    fn from_handoff_errors_when_command_count_missing() {
+        let evidence = vec![
+            make_evidence("backend-implementation=test-adapter"),
+            make_evidence("shell=/bin/bash"),
+            make_evidence("terminal-working-directory=/home/user"),
+            // Missing terminal-command-count=
+            make_evidence("terminal-transcript-preview=preview"),
+        ];
+        let handoff = make_handoff(Some(make_session_record()), evidence);
+        let result = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state-root"),
+            handoff,
+            "latest_terminal_handoff.json".to_string(),
+            None,
+        );
+        assert!(
+            result.is_err(),
+            "should fail when command-count evidence is missing"
+        );
+    }
+
+    #[test]
+    fn from_handoff_errors_when_transcript_preview_missing() {
+        let evidence = vec![
+            make_evidence("backend-implementation=test-adapter"),
+            make_evidence("shell=/bin/bash"),
+            make_evidence("terminal-working-directory=/home/user"),
+            make_evidence("terminal-command-count=1"),
+            // Missing terminal-transcript-preview=
+        ];
+        let handoff = make_handoff(Some(make_session_record()), evidence);
+        let result = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state-root"),
+            handoff,
+            "latest_terminal_handoff.json".to_string(),
+            None,
+        );
+        assert!(
+            result.is_err(),
+            "should fail when transcript-preview evidence is missing"
+        );
+    }
+
+    #[test]
+    fn from_handoff_errors_with_empty_evidence() {
+        let handoff = make_handoff(Some(make_session_record()), vec![]);
+        let result = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state-root"),
+            handoff,
+            "latest_terminal_handoff.json".to_string(),
+            None,
+        );
+        assert!(result.is_err(), "should fail with no evidence records");
+    }
+
+    // --- print methods (smoke tests that don't panic) ---
+
+    #[test]
+    fn print_does_not_panic() {
+        let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state-root"),
+            handoff,
+            "latest_terminal_handoff.json".to_string(),
+            Some("shared default state-root".to_string()),
+        )
+        .unwrap();
+        // Just verify it doesn't panic
+        view.print();
+    }
+
+    #[test]
+    fn print_terminal_run_does_not_panic() {
+        let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state-root"),
+            handoff,
+            "latest_terminal_handoff.json".to_string(),
+            None,
+        )
+        .unwrap();
+        view.print_terminal_run(
+            &["capability-a".to_string(), "capability-b".to_string()],
+            "execution completed",
+            "reflection completed",
+        );
+    }
+
+    #[test]
+    fn print_with_steps_and_checkpoints_does_not_panic() {
+        let mut evidence = required_evidence_records();
+        evidence.push(make_evidence("terminal-step-1=run cargo test"));
+        evidence.push(make_evidence("terminal-step-2=verify output"));
+        evidence.push(make_evidence("terminal-checkpoint-1=tests pass"));
+        evidence.push(make_evidence("terminal-last-output-line=All tests passed"));
+
+        let handoff = make_handoff(Some(make_session_record()), evidence);
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state-root"),
+            handoff,
+            "latest_terminal_handoff.json".to_string(),
+            Some("shared explicit state-root".to_string()),
+        )
+        .unwrap();
+        view.print();
+    }
+
+    #[test]
+    fn print_with_copilot_audit_does_not_panic() {
+        let mut handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        handoff.copilot_submit_audit = Some(CopilotSubmitAudit {
+            flow_asset: "test-flow".to_string(),
+            payload_id: "payload-123".to_string(),
+            outcome: "success".to_string(),
+            reason_code: Some("OK".to_string()),
+            ..CopilotSubmitAudit::default()
+        });
+
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state-root"),
+            handoff,
+            "latest_terminal_handoff.json".to_string(),
+            None,
+        )
+        .unwrap();
+        view.print();
+    }
+
+    #[test]
+    fn print_with_copilot_audit_no_reason_code_does_not_panic() {
+        let mut handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        handoff.copilot_submit_audit = Some(CopilotSubmitAudit {
+            flow_asset: "test-flow".to_string(),
+            payload_id: "payload-456".to_string(),
+            outcome: "skipped".to_string(),
+            reason_code: None,
+            ..CopilotSubmitAudit::default()
+        });
+
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state-root"),
+            handoff,
+            "latest_terminal_handoff.json".to_string(),
+            None,
+        )
+        .unwrap();
+        view.print();
+    }
+}
