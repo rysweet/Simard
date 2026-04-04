@@ -56,7 +56,7 @@ impl CognitiveBridgeMemoryStore {
         fallback_path: impl Into<PathBuf>,
     ) -> SimardResult<Self> {
         let fallback = FileBackedMemoryStore::try_new(fallback_path)?;
-        Ok(Self {
+        let mut store = Self {
             bridge,
             records: Mutex::new(HashMap::new()),
             descriptor: BackendDescriptor::for_runtime_type::<Self>(
@@ -65,7 +65,50 @@ impl CognitiveBridgeMemoryStore {
                 Freshness::now()?,
             ),
             fallback,
-        })
+        };
+        store.hydrate_from_fallback();
+        Ok(store)
+    }
+
+    /// Populate the in-memory index from the file-backed fallback store so that
+    /// records persisted in prior sessions are visible after restart. Each scope
+    /// is loaded independently — failures in one scope do not prevent others
+    /// from hydrating (Pillar 11).
+    fn hydrate_from_fallback(&mut self) {
+        use crate::memory::MemoryScope;
+
+        const ALL_SCOPES: [MemoryScope; 5] = [
+            MemoryScope::SessionScratch,
+            MemoryScope::SessionSummary,
+            MemoryScope::Decision,
+            MemoryScope::Project,
+            MemoryScope::Benchmark,
+        ];
+
+        let mut hydrated = 0usize;
+        for scope in ALL_SCOPES {
+            match self.fallback.list(scope) {
+                Ok(records) => {
+                    // Lock is safe here — called only during construction, no
+                    // contention possible.
+                    if let Ok(mut map) = self.records.lock() {
+                        for record in records {
+                            map.insert(record.key.clone(), record);
+                            hydrated += 1;
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[simard] cognitive-bridge hydration: \
+                         failed to load scope {scope:?}: {e}"
+                    );
+                }
+            }
+        }
+        if hydrated > 0 {
+            eprintln!("[simard] cognitive-bridge: hydrated {hydrated} records from fallback");
+        }
     }
 
     /// Store a record in cognitive memory as a semantic fact.
@@ -247,5 +290,165 @@ mod tests {
         let store = test_store();
         let desc = store.descriptor();
         assert!(desc.identity.contains("cognitive-bridge"));
+    }
+
+    #[test]
+    fn hydration_loads_records_from_fallback() {
+        // Step 1: create a fallback file with pre-existing records.
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("hydrate-test-{unique}.json"));
+
+        // Seed the fallback with records via a standalone FileBackedMemoryStore.
+        {
+            let seed = FileBackedMemoryStore::try_new(&path).unwrap();
+            seed.put(make_record("prior-a", MemoryScope::Decision))
+                .unwrap();
+            seed.put(make_record("prior-b", MemoryScope::Project))
+                .unwrap();
+        }
+
+        // Step 2: create a CognitiveBridgeMemoryStore that reads the same path.
+        let transport =
+            InMemoryBridgeTransport::new("test-hydrate", |method, _params| match method {
+                "memory.store_fact" => Ok(json!({"id": "sem_hydrate"})),
+                "memory.search_facts" => Ok(json!({"facts": []})),
+                _ => Err(crate::bridge::BridgeErrorPayload {
+                    code: -32601,
+                    message: format!("unknown method: {method}"),
+                }),
+            });
+        let bridge = CognitiveMemoryBridge::new(Box::new(transport));
+        let store = CognitiveBridgeMemoryStore::new(bridge, &path).unwrap();
+
+        // Step 3: verify hydration — records visible without any put().
+        let decisions = store.list(MemoryScope::Decision).unwrap();
+        assert_eq!(decisions.len(), 1, "decision record should be hydrated");
+        assert_eq!(decisions[0].key, "prior-a");
+
+        let projects = store.list(MemoryScope::Project).unwrap();
+        assert_eq!(projects.len(), 1, "project record should be hydrated");
+        assert_eq!(projects[0].key, "prior-b");
+
+        // Clean up.
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn hydration_with_empty_fallback_starts_empty() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("hydrate-empty-{unique}.json"));
+
+        let transport =
+            InMemoryBridgeTransport::new("test-hydrate-empty", |method, _params| match method {
+                "memory.store_fact" => Ok(json!({"id": "sem_empty"})),
+                "memory.search_facts" => Ok(json!({"facts": []})),
+                _ => Err(crate::bridge::BridgeErrorPayload {
+                    code: -32601,
+                    message: format!("unknown method: {method}"),
+                }),
+            });
+        let bridge = CognitiveMemoryBridge::new(Box::new(transport));
+        let store = CognitiveBridgeMemoryStore::new(bridge, &path).unwrap();
+
+        // No records should exist — hydration from empty fallback is a no-op.
+        for scope in [
+            MemoryScope::SessionScratch,
+            MemoryScope::SessionSummary,
+            MemoryScope::Decision,
+            MemoryScope::Project,
+            MemoryScope::Benchmark,
+        ] {
+            assert!(
+                store.list(scope).unwrap().is_empty(),
+                "scope {scope:?} should be empty after hydrating empty fallback"
+            );
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn hydration_plus_new_put_merge_correctly() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("hydrate-merge-{unique}.json"));
+
+        // Seed with one record.
+        {
+            let seed = FileBackedMemoryStore::try_new(&path).unwrap();
+            seed.put(make_record("old-key", MemoryScope::Decision))
+                .unwrap();
+        }
+
+        let transport =
+            InMemoryBridgeTransport::new("test-merge", |method, _params| match method {
+                "memory.store_fact" => Ok(json!({"id": "sem_merge"})),
+                "memory.search_facts" => Ok(json!({"facts": []})),
+                _ => Err(crate::bridge::BridgeErrorPayload {
+                    code: -32601,
+                    message: format!("unknown method: {method}"),
+                }),
+            });
+        let bridge = CognitiveMemoryBridge::new(Box::new(transport));
+        let store = CognitiveBridgeMemoryStore::new(bridge, &path).unwrap();
+
+        // Add a new record via put.
+        store
+            .put(make_record("new-key", MemoryScope::Decision))
+            .unwrap();
+
+        // Both old (hydrated) and new should be visible.
+        let decisions = store.list(MemoryScope::Decision).unwrap();
+        assert_eq!(decisions.len(), 2);
+        let keys: Vec<&str> = decisions.iter().map(|r| r.key.as_str()).collect();
+        assert!(keys.contains(&"old-key"));
+        assert!(keys.contains(&"new-key"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn list_for_session_includes_hydrated_records() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("hydrate-session-{unique}.json"));
+
+        {
+            let seed = FileBackedMemoryStore::try_new(&path).unwrap();
+            seed.put(make_record("sess-rec", MemoryScope::SessionScratch))
+                .unwrap();
+        }
+
+        let transport =
+            InMemoryBridgeTransport::new("test-session", |method, _params| match method {
+                "memory.store_fact" => Ok(json!({"id": "sem_sess"})),
+                "memory.search_facts" => Ok(json!({"facts": []})),
+                _ => Err(crate::bridge::BridgeErrorPayload {
+                    code: -32601,
+                    message: format!("unknown method: {method}"),
+                }),
+            });
+        let bridge = CognitiveMemoryBridge::new(Box::new(transport));
+        let store = CognitiveBridgeMemoryStore::new(bridge, &path).unwrap();
+
+        let session = SessionId::from_uuid(Uuid::nil());
+        let records = store.list_for_session(&session).unwrap();
+        assert_eq!(
+            records.len(),
+            1,
+            "hydrated records should be visible via list_for_session"
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 }
