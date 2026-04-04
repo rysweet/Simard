@@ -338,6 +338,28 @@ pub fn run_local_engineer_loop(
     }
     let verification = verification?;
 
+    // Optional LLM-driven review gate: only runs for mutating actions
+    // when an LLM session is available (requires ANTHROPIC_API_KEY).
+    let phase_start = Instant::now();
+    let review_result = run_optional_review(&inspection, &action);
+    match &review_result {
+        Ok(()) => {
+            phase_traces.push(PhaseTrace {
+                name: "review".to_string(),
+                duration: phase_start.elapsed(),
+                outcome: PhaseOutcome::Success,
+            });
+        }
+        Err(e) => {
+            phase_traces.push(PhaseTrace {
+                name: "review".to_string(),
+                duration: phase_start.elapsed(),
+                outcome: PhaseOutcome::Failed(e.to_string()),
+            });
+        }
+    }
+    review_result?;
+
     let phase_start = Instant::now();
     let persist_result = persist_engineer_loop_artifacts(
         &state_root,
@@ -1460,6 +1482,73 @@ fn verify_cargo_metadata(
     }
     checks.push(format!("metadata-packages={}", packages.len()));
     Ok(())
+}
+
+/// Run the optional LLM-driven review on mutating actions.
+///
+/// Skips (returns `Ok`) for read-only actions, test/check actions, and when
+/// no LLM session is available. Blocks with [`SimardError::ReviewBlocked`]
+/// if the review finds high-severity bugs or security issues.
+fn run_optional_review(
+    inspection: &RepoInspection,
+    action: &ExecutedEngineerAction,
+) -> SimardResult<()> {
+    let is_mutating = matches!(
+        action.selected.kind,
+        EngineerActionKind::StructuredTextReplace(_)
+            | EngineerActionKind::CreateFile(_)
+            | EngineerActionKind::AppendToFile(_)
+            | EngineerActionKind::GitCommit(_)
+    );
+    if !is_mutating {
+        return Ok(());
+    }
+
+    let mut review_session = match crate::review_pipeline::ReviewSession::open() {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
+    let diff_text = compute_diff_for_review(&inspection.repo_root, &action.selected.kind);
+    if diff_text.is_empty() {
+        let _ = review_session.close();
+        return Ok(());
+    }
+
+    let findings =
+        crate::review_pipeline::review_diff(&mut review_session, &diff_text, PHILOSOPHY_REVIEW);
+    let _ = review_session.close();
+
+    let findings = match findings {
+        Ok(f) => f,
+        Err(_) => return Ok(()),
+    };
+
+    if !crate::review_pipeline::should_commit(&findings) {
+        let summary = crate::review_pipeline::summarize_review(&findings);
+        return Err(SimardError::ReviewBlocked { summary });
+    }
+
+    Ok(())
+}
+
+const PHILOSOPHY_REVIEW: &str = "Ruthless simplicity. No unnecessary abstractions. \
+    Modules under 400 lines. Every public function tested. \
+    Clippy clean. No panics in library code.";
+
+fn compute_diff_for_review(repo_root: &Path, kind: &EngineerActionKind) -> String {
+    let args: &[&str] = match kind {
+        EngineerActionKind::GitCommit(_) => &["git", "diff", "HEAD~1", "HEAD"],
+        _ => &["git", "diff"],
+    };
+    match Command::new(args[0])
+        .args(&args[1..])
+        .current_dir(repo_root)
+        .output()
+    {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).into_owned(),
+        _ => String::new(),
+    }
 }
 
 fn persist_engineer_loop_artifacts(

@@ -191,6 +191,12 @@ pub enum SimardError {
     PlanningUnavailable {
         reason: String,
     },
+    ReviewUnavailable {
+        reason: String,
+    },
+    ReviewBlocked {
+        summary: String,
+    },
 }
 
 pub type SimardResult<T> = Result<T, SimardError>;
@@ -407,6 +413,12 @@ impl Display for SimardError {
             }
             Self::PlanningUnavailable { reason } => {
                 write!(f, "LLM-based planning is unavailable: {reason}")
+            }
+            Self::ReviewUnavailable { reason } => {
+                write!(f, "LLM-based review is unavailable: {reason}")
+            }
+            Self::ReviewBlocked { summary } => {
+                write!(f, "review blocked commit: {summary}")
             }
         }
     }
