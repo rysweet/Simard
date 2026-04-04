@@ -240,4 +240,107 @@ mod tests {
     fn copilot_submit_base_type_constant() {
         assert_eq!(COPILOT_SUBMIT_BASE_TYPE, "terminal-shell");
     }
+
+    // --- CopilotSubmitOutcome ---
+
+    #[test]
+    fn copilot_submit_outcome_debug_format() {
+        let debug = format!("{:?}", CopilotSubmitOutcome::Success);
+        assert!(debug.contains("Success"));
+        let debug2 = format!("{:?}", CopilotSubmitOutcome::Unsupported);
+        assert!(debug2.contains("Unsupported"));
+    }
+
+    // --- CopilotSubmitReport ---
+
+    #[test]
+    fn copilot_submit_report_debug_format() {
+        let report = test_report(CopilotSubmitOutcome::Success);
+        let debug = format!("{:?}", report);
+        assert!(debug.contains("terminal-shell"));
+        assert!(debug.contains("p1"));
+    }
+
+    #[test]
+    fn copilot_submit_report_empty_steps_and_checkpoints() {
+        let report = test_report(CopilotSubmitOutcome::Success);
+        assert!(report.ordered_steps.is_empty());
+        assert!(report.observed_checkpoints.is_empty());
+    }
+
+    #[test]
+    fn copilot_submit_report_with_reason_code() {
+        let mut report = test_report(CopilotSubmitOutcome::Unsupported);
+        report.reason_code = Some("no-copilot-binary".to_string());
+        assert_eq!(report.reason_code.as_deref(), Some("no-copilot-binary"));
+    }
+
+    #[test]
+    fn copilot_submit_report_transcript_preview() {
+        let report = test_report(CopilotSubmitOutcome::Success);
+        assert_eq!(report.transcript_preview, "preview");
+    }
+
+    // --- CopilotSubmitRun ---
+
+    #[test]
+    fn copilot_submit_run_clone() {
+        let run = CopilotSubmitRun::Success(test_report(CopilotSubmitOutcome::Success));
+        let cloned = run.clone();
+        assert_eq!(run, cloned);
+    }
+
+    #[test]
+    fn copilot_submit_run_debug_format() {
+        let run = CopilotSubmitRun::Success(test_report(CopilotSubmitOutcome::Success));
+        let debug = format!("{:?}", run);
+        assert!(debug.contains("Success"));
+    }
+
+    #[test]
+    fn copilot_submit_run_unsupported_debug() {
+        let run = CopilotSubmitRun::Unsupported(test_report(CopilotSubmitOutcome::Unsupported));
+        let debug = format!("{:?}", run);
+        assert!(debug.contains("Unsupported"));
+    }
+
+    // --- constants ---
+
+    #[test]
+    fn copilot_submit_action_is_kebab_case() {
+        assert!(
+            COPILOT_SUBMIT_ACTION
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c == '-'),
+            "action should be kebab-case"
+        );
+    }
+
+    #[test]
+    fn copilot_submit_base_type_is_kebab_case() {
+        assert!(
+            COPILOT_SUBMIT_BASE_TYPE
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c == '-'),
+            "base type should be kebab-case"
+        );
+    }
+
+    // --- CopilotSubmitReport with last_meaningful_output_line ---
+
+    #[test]
+    fn copilot_submit_report_none_output_line_default() {
+        let report = test_report(CopilotSubmitOutcome::Success);
+        assert!(report.last_meaningful_output_line.is_none());
+    }
+
+    #[test]
+    fn copilot_submit_report_with_output_line() {
+        let mut report = test_report(CopilotSubmitOutcome::Success);
+        report.last_meaningful_output_line = Some("Build succeeded".to_string());
+        assert_eq!(
+            report.last_meaningful_output_line.as_deref(),
+            Some("Build succeeded")
+        );
+    }
 }

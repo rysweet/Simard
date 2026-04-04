@@ -317,4 +317,99 @@ mod tests {
     fn render_benchmark_delta_large_negative() {
         assert_eq!(crate::gym::render_benchmark_delta(Some(-100)), "-100");
     }
+
+    // --- benchmark scenario field validations ---
+
+    #[test]
+    fn benchmark_scenarios_description_not_empty() {
+        for scenario in benchmark_scenarios() {
+            assert!(
+                !scenario.description.is_empty(),
+                "scenario description must not be empty for {}",
+                scenario.id
+            );
+        }
+    }
+
+    #[test]
+    fn benchmark_scenarios_objective_not_empty() {
+        for scenario in benchmark_scenarios() {
+            assert!(
+                !scenario.objective.is_empty(),
+                "scenario objective must not be empty for {}",
+                scenario.id
+            );
+        }
+    }
+
+    #[test]
+    fn benchmark_scenarios_topology_is_known_variant() {
+        for scenario in benchmark_scenarios() {
+            match scenario.topology {
+                crate::runtime::RuntimeTopology::SingleProcess
+                | crate::runtime::RuntimeTopology::MultiProcess
+                | crate::runtime::RuntimeTopology::Distributed => {}
+            }
+        }
+    }
+
+    #[test]
+    fn benchmark_scenarios_min_evidence_is_reasonable() {
+        for scenario in benchmark_scenarios() {
+            assert!(
+                scenario.expected_min_runtime_evidence <= 100,
+                "min evidence for {} seems too high: {}",
+                scenario.id,
+                scenario.expected_min_runtime_evidence
+            );
+        }
+    }
+
+    // --- render_benchmark edge cases ---
+
+    #[test]
+    fn render_benchmark_count_one() {
+        assert_eq!(crate::gym::render_benchmark_count(Some(1)), "1");
+    }
+
+    #[test]
+    fn render_benchmark_delta_one() {
+        assert_eq!(crate::gym::render_benchmark_delta(Some(1)), "+1");
+    }
+
+    #[test]
+    fn render_benchmark_delta_minus_one() {
+        assert_eq!(crate::gym::render_benchmark_delta(Some(-1)), "-1");
+    }
+
+    #[test]
+    fn render_benchmark_count_u32_max() {
+        assert_eq!(
+            crate::gym::render_benchmark_count(Some(u32::MAX)),
+            format!("{}", u32::MAX)
+        );
+    }
+
+    // --- gym_list output shape ---
+
+    #[test]
+    fn gym_list_returns_ok() {
+        assert!(run_gym_list().is_ok());
+    }
+
+    #[test]
+    fn gym_scenario_distinct_error_for_each_bad_id() {
+        let r1 = run_gym_scenario("bad-id-alpha");
+        let r2 = run_gym_scenario("bad-id-beta");
+        assert!(r1.is_err());
+        assert!(r2.is_err());
+        let m1 = r1.unwrap_err().to_string();
+        let m2 = r2.unwrap_err().to_string();
+        assert_ne!(m1, m2, "different IDs should produce different errors");
+    }
+
+    #[test]
+    fn default_output_root_is_relative() {
+        assert!(default_output_root().is_relative());
+    }
 }

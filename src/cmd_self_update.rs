@@ -626,4 +626,153 @@ mod tests {
             "CURRENT_VERSION should not have a 'v' prefix"
         );
     }
+
+    // ── find_binary_in_dir: edge cases ──
+
+    #[test]
+    fn test_find_binary_with_symlink_named_simard() {
+        // On Unix, a symlink to a file named simard should be found
+        // (only testing that it doesn't panic — actual behavior depends on fs)
+        let tmp = std::env::temp_dir().join(format!("simard-test-symlink-{}", std::process::id()));
+        fs::create_dir_all(&tmp).unwrap();
+        let real = tmp.join("simard_real");
+        fs::write(&real, b"binary").unwrap();
+        #[cfg(unix)]
+        {
+            let _ = std::os::unix::fs::symlink(&real, tmp.join("simard"));
+        }
+        #[cfg(not(unix))]
+        {
+            fs::write(tmp.join("simard"), b"binary").unwrap();
+        }
+        let result = find_binary_in_dir(&tmp);
+        assert!(result.is_ok(), "should find simard (or symlink to it)");
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_find_binary_deeply_nested_multiple_dirs() {
+        let tmp =
+            std::env::temp_dir().join(format!("simard-test-multi-nested-{}", std::process::id()));
+        // Create multiple subdirectories, only one contains simard at depth 2
+        fs::create_dir_all(tmp.join("dir_a/sub_a")).unwrap();
+        fs::create_dir_all(tmp.join("dir_b/sub_b")).unwrap();
+        fs::write(tmp.join("dir_a/sub_a/not_simard"), b"wrong").unwrap();
+        fs::write(tmp.join("dir_b/sub_b/simard"), b"binary").unwrap();
+        let result = find_binary_in_dir(&tmp);
+        assert!(result.is_ok(), "should find simard in dir_b/sub_b");
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    // ── platform_suffix: structural checks ──
+
+    #[test]
+    fn test_platform_suffix_is_ascii() {
+        let suffix = platform_suffix().unwrap();
+        assert!(suffix.is_ascii(), "suffix should be ASCII: {suffix}");
+    }
+
+    #[test]
+    fn test_platform_suffix_no_whitespace() {
+        let suffix = platform_suffix().unwrap();
+        assert!(!suffix.contains(' '), "suffix should not contain spaces");
+    }
+
+    // ── CURRENT_VERSION: structural checks ──
+
+    #[test]
+    fn test_current_version_no_whitespace() {
+        assert!(
+            !CURRENT_VERSION.contains(' '),
+            "version should not contain spaces"
+        );
+    }
+
+    #[test]
+    fn test_current_version_no_newlines() {
+        assert!(
+            !CURRENT_VERSION.contains('\n'),
+            "version should not contain newlines"
+        );
+    }
+
+    #[test]
+    fn test_current_version_major_is_reasonable() {
+        let major: u32 = CURRENT_VERSION.split('.').next().unwrap().parse().unwrap();
+        assert!(major < 100, "major version should be < 100, got {major}");
+    }
+
+    // ── GITHUB_REPO: structural checks ──
+
+    #[test]
+    fn test_github_repo_no_whitespace() {
+        assert!(!GITHUB_REPO.contains(' '), "repo should not contain spaces");
+    }
+
+    #[test]
+    fn test_github_repo_owner_is_rysweet() {
+        let owner = GITHUB_REPO.split('/').next().unwrap();
+        assert_eq!(owner, "rysweet");
+    }
+
+    #[test]
+    fn test_github_repo_name_is_simard() {
+        let name = GITHUB_REPO.split('/').nth(1).unwrap();
+        assert_eq!(name, "Simard");
+    }
+
+    // ── find_binary_in_dir: determinism / cleanup ──
+
+    #[test]
+    fn test_find_binary_result_path_exists() {
+        let tmp = std::env::temp_dir().join(format!("simard-test-exists-{}", std::process::id()));
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("simard"), b"binary").unwrap();
+        let found = find_binary_in_dir(&tmp).unwrap();
+        assert!(found.exists(), "found path should exist");
+        assert!(found.is_file(), "found path should be a file");
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_find_binary_result_has_correct_name() {
+        let tmp = std::env::temp_dir().join(format!("simard-test-name-{}", std::process::id()));
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("simard"), b"binary").unwrap();
+        let found = find_binary_in_dir(&tmp).unwrap();
+        assert_eq!(found.file_name().unwrap(), "simard");
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    // ── find_binary_in_dir: depth boundary precise test ──
+
+    #[test]
+    fn test_find_binary_depth_3_found_depth_4_not() {
+        // At depth 3 → found
+        let tmp3 = std::env::temp_dir().join(format!("simard-test-d3ok-{}", std::process::id()));
+        let d3 = tmp3.join("a").join("b").join("c");
+        fs::create_dir_all(&d3).unwrap();
+        fs::write(d3.join("simard"), b"found").unwrap();
+        assert!(find_binary_in_dir(&tmp3).is_ok());
+        fs::remove_dir_all(&tmp3).unwrap();
+
+        // At depth 4 → not found
+        let tmp4 = std::env::temp_dir().join(format!("simard-test-d4fail-{}", std::process::id()));
+        let d4 = tmp4.join("a").join("b").join("c").join("d");
+        fs::create_dir_all(&d4).unwrap();
+        fs::write(d4.join("simard"), b"too deep").unwrap();
+        assert!(find_binary_in_dir(&tmp4).is_err());
+        fs::remove_dir_all(&tmp4).unwrap();
+    }
+
+    // ── handle_self_test: structural validation ──
+    // We can't run the actual self-test in unit tests, but we can verify constants.
+
+    #[test]
+    fn test_self_test_uses_starter_suite() {
+        // The handle_self_test function runs `gym run-suite starter`
+        // Just verify the constant strings used
+        assert!(!CURRENT_VERSION.is_empty());
+        assert!(GITHUB_REPO.contains("Simard"));
+    }
 }

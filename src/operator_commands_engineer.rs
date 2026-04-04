@@ -630,4 +630,160 @@ mod tests {
         let result = required_engineer_evidence_value(&records, "repo-root=", "test-handoff");
         assert!(result.is_err(), "partial prefix match should not succeed");
     }
+
+    // --- parse_engineer_summary_list: more edge cases ---
+
+    #[test]
+    fn summary_list_empty_string() {
+        let result = parse_engineer_summary_list("", ", ");
+        assert_eq!(result, Vec::<String>::new());
+    }
+
+    #[test]
+    fn summary_list_separator_at_start() {
+        let result = parse_engineer_summary_list(", alpha, beta", ", ");
+        assert_eq!(result, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn summary_list_separator_at_end() {
+        let result = parse_engineer_summary_list("alpha, beta, ", ", ");
+        assert_eq!(result, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn summary_list_multiple_separators_in_row() {
+        let result = parse_engineer_summary_list("a, , , b", ", ");
+        assert_eq!(result, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn summary_list_none_marker_case_sensitive() {
+        // "<None>" is not the same as "<none>"
+        let result = parse_engineer_summary_list("<None>", ", ");
+        assert_eq!(result, vec!["<None>"]);
+    }
+
+    // --- parse_carried_meeting_decisions: more patterns ---
+
+    #[test]
+    fn carried_decisions_none_marker_case_sensitive() {
+        let result = parse_carried_meeting_decisions("<None>");
+        assert!(
+            result.is_err(),
+            "<None> is not <none>, should be treated as invalid"
+        );
+    }
+
+    #[test]
+    fn carried_decisions_empty_input_errors() {
+        let result = parse_carried_meeting_decisions("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn carried_decisions_valid_record_many_decisions() {
+        let record = "agenda=Sprint; updates=[U]; decisions=[D1 | D2 | D3 | D4]; risks=[R]; next_steps=[N]; open_questions=[Q]; goals=[p1:active:G:Rationale]";
+        let result = parse_carried_meeting_decisions(record).unwrap();
+        assert_eq!(result.len(), 4);
+    }
+
+    // --- required_engineer_evidence_value: more patterns ---
+
+    #[test]
+    fn required_evidence_multiple_different_prefixes() {
+        let records = vec![
+            make_evidence("repo-root=/home/user"),
+            make_evidence("repo-branch=main"),
+            make_evidence("repo-head=abc123"),
+            make_evidence("worktree-dirty=true"),
+        ];
+        assert_eq!(
+            required_engineer_evidence_value(&records, "repo-root=", "h").unwrap(),
+            "/home/user"
+        );
+        assert_eq!(
+            required_engineer_evidence_value(&records, "repo-branch=", "h").unwrap(),
+            "main"
+        );
+        assert_eq!(
+            required_engineer_evidence_value(&records, "repo-head=", "h").unwrap(),
+            "abc123"
+        );
+        assert_eq!(
+            required_engineer_evidence_value(&records, "worktree-dirty=", "h").unwrap(),
+            "true"
+        );
+    }
+
+    #[test]
+    fn required_evidence_error_mentions_engineer_read() {
+        let records: Vec<EvidenceRecord> = vec![];
+        let err =
+            required_engineer_evidence_value(&records, "selected-action=", "engineer-handoff.json")
+                .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("selected-action"),
+            "error should mention field: {msg}"
+        );
+        assert!(
+            msg.contains("engineer-handoff.json"),
+            "error should mention source: {msg}"
+        );
+        assert!(
+            msg.contains("engineer read"),
+            "error should mention context: {msg}"
+        );
+    }
+
+    // --- run_engineer_read_probe: error paths ---
+
+    #[test]
+    fn engineer_read_probe_rejects_nonexistent_state_root() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        let result = run_engineer_read_probe("single-process", Some(missing));
+        assert!(result.is_err(), "should fail for nonexistent state root");
+    }
+
+    #[test]
+    fn engineer_read_probe_rejects_empty_state_root() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let result = run_engineer_read_probe("single-process", Some(dir.path().to_path_buf()));
+        assert!(
+            result.is_err(),
+            "should fail when handoff artifacts missing"
+        );
+    }
+
+    #[test]
+    fn engineer_read_probe_invalid_topology() {
+        let result = run_engineer_read_probe("invalid-topology", None);
+        assert!(result.is_err(), "should fail for invalid topology");
+    }
+
+    // --- run_engineer_loop_probe: error paths ---
+
+    #[test]
+    fn engineer_loop_probe_invalid_topology() {
+        let result = run_engineer_loop_probe(
+            "invalid-topology",
+            std::path::Path::new("/nonexistent"),
+            "test objective",
+            None,
+        );
+        assert!(result.is_err(), "should fail for invalid topology");
+    }
+
+    #[test]
+    fn engineer_loop_probe_nonexistent_workspace() {
+        let result = run_engineer_loop_probe(
+            "single-process",
+            std::path::Path::new("/nonexistent/workspace/path"),
+            "test objective",
+            None,
+        );
+        assert!(result.is_err(), "should fail for nonexistent workspace");
+    }
 }

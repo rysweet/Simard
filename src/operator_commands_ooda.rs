@@ -452,4 +452,165 @@ mod tests {
         assert!(env.open_issues.is_empty());
         assert!(env.recent_commits.is_empty());
     }
+
+    // --- persist_cycle_report: edge cases ---
+
+    #[test]
+    fn persist_cycle_report_with_high_cycle_number() {
+        let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-scratch")
+            .join(format!("ooda-high-cycle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+
+        let report = make_test_report(999999);
+        persist_cycle_report(&scratch, &report);
+        let path = scratch.join("cycle_reports").join("cycle_999999.json");
+        assert!(path.exists());
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn persist_cycle_report_cycle_zero() {
+        let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-scratch")
+            .join(format!("ooda-zero-cycle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+
+        let report = make_test_report(0);
+        persist_cycle_report(&scratch, &report);
+        let path = scratch.join("cycle_reports").join("cycle_0.json");
+        assert!(path.exists());
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn persist_cycle_report_with_rich_report() {
+        let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-scratch")
+            .join(format!("ooda-rich-report-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+
+        let report = make_report_with_goals_and_outcomes();
+        persist_cycle_report(&scratch, &report);
+        let path = scratch.join("cycle_reports").join("cycle_7.json");
+        assert!(path.exists());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("7"), "should contain cycle number");
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn persist_cycle_report_multiple_cycles_coexist() {
+        let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-scratch")
+            .join(format!("ooda-multi-cycle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+
+        for i in 0..5 {
+            persist_cycle_report(&scratch, &make_test_report(i));
+        }
+        for i in 0..5 {
+            let path = scratch
+                .join("cycle_reports")
+                .join(format!("cycle_{i}.json"));
+            assert!(path.exists(), "cycle {i} file should exist");
+        }
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    // --- OodaState ---
+
+    #[test]
+    fn ooda_state_has_empty_active_goals() {
+        let board = crate::goal_curation::GoalBoard::default();
+        let state = OodaState::new(board);
+        assert_eq!(state.cycle_count, 0);
+        assert!(state.active_goals.active.is_empty());
+    }
+
+    // --- OodaConfig ---
+
+    #[test]
+    fn ooda_config_gym_suite_id_is_progressive() {
+        let config = OodaConfig::default();
+        assert_eq!(config.gym_suite_id, "progressive");
+    }
+
+    #[test]
+    fn ooda_config_max_concurrent_is_three() {
+        let config = OodaConfig::default();
+        assert_eq!(config.max_concurrent_actions, 3);
+    }
+
+    // --- report field accessors ---
+
+    #[test]
+    fn report_with_goals_outcome_detail_strings() {
+        let report = make_report_with_goals_and_outcomes();
+        assert_eq!(report.outcomes[0].detail, "Completed");
+        assert_eq!(report.outcomes[1].detail, "Failed");
+    }
+
+    #[test]
+    fn report_with_goals_action_kinds() {
+        let report = make_report_with_goals_and_outcomes();
+        assert!(matches!(
+            report.outcomes[0].action.kind,
+            ActionKind::AdvanceGoal
+        ));
+        assert!(matches!(
+            report.outcomes[1].action.kind,
+            ActionKind::RunGymEval
+        ));
+    }
+
+    #[test]
+    fn report_with_goals_environment_has_git_status() {
+        let report = make_report_with_goals_and_outcomes();
+        assert_eq!(report.observation.environment.git_status, "clean");
+    }
+
+    #[test]
+    fn report_with_goals_priority_reason() {
+        let report = make_report_with_goals_and_outcomes();
+        assert_eq!(report.priorities[0].reason, "High priority");
+        assert_eq!(report.priorities[0].goal_id, "goal-1");
+    }
+
+    #[test]
+    fn report_goal_progress_variants() {
+        let report = make_report_with_goals_and_outcomes();
+        assert!(matches!(
+            report.observation.goal_statuses[0].progress,
+            GoalProgress::InProgress { percent: 50 }
+        ));
+        assert!(matches!(
+            report.observation.goal_statuses[1].progress,
+            GoalProgress::NotStarted
+        ));
+    }
+
+    // --- CognitiveStatistics default ---
+
+    #[test]
+    fn cognitive_statistics_default_all_zero() {
+        let stats = CognitiveStatistics::default();
+        assert_eq!(stats.total(), 0);
+    }
+
+    // --- summarize edge cases ---
+
+    #[test]
+    fn summarize_large_cycle_number() {
+        let report = make_test_report(1_000_000);
+        let summary = crate::ooda_loop::summarize_cycle_report(&report);
+        assert!(
+            summary.contains("1000000"),
+            "should contain large number: {summary}"
+        );
+    }
 }

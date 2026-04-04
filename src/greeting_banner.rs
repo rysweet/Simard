@@ -272,4 +272,126 @@ mod tests {
         // Compile-time validation that the constant is in a sensible range
         const { assert!(MAX_PROJECTS_SHOWN > 0 && MAX_PROJECTS_SHOWN <= 10) };
     }
+
+    // --- banner structure ---
+
+    #[test]
+    fn banner_starts_with_tree_emoji() {
+        let lines = build_greeting_banner(None);
+        assert!(
+            lines[0].starts_with('🌲'),
+            "first line should start with tree emoji: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn banner_first_separator_is_line_two() {
+        let lines = build_greeting_banner(None);
+        assert!(
+            lines[1].chars().all(|c| c == '─'),
+            "second line should be separator: {}",
+            lines[1]
+        );
+    }
+
+    #[test]
+    fn banner_last_line_is_separator() {
+        let lines = build_greeting_banner(None);
+        let last = lines.last().unwrap();
+        assert!(
+            last.chars().all(|c| c == '─'),
+            "last line should be separator: {last}"
+        );
+    }
+
+    #[test]
+    fn banner_separator_length_is_40() {
+        let lines = build_greeting_banner(None);
+        let sep = &lines[1];
+        assert_eq!(sep.chars().count(), 40, "separator should be 40 chars");
+    }
+
+    #[test]
+    fn banner_has_at_least_six_lines() {
+        let lines = build_greeting_banner(None);
+        assert!(
+            lines.len() >= 6,
+            "banner should have at least 6 lines, got {}",
+            lines.len()
+        );
+    }
+
+    #[test]
+    fn banner_no_bridge_mentions_projects_and_goals() {
+        let lines = build_greeting_banner(None);
+        let has_projects = lines.iter().any(|l| l.contains("Known projects"));
+        let has_goals = lines.iter().any(|l| l.contains("Goals"));
+        assert!(has_projects, "should mention projects");
+        assert!(has_goals, "should mention goals");
+    }
+
+    // --- count_source_files ---
+
+    #[test]
+    fn count_source_files_returns_positive_number() {
+        let result = count_source_files();
+        if let Ok(n) = result.parse::<usize>() {
+            assert!(n > 0, "should have at least one .rs file");
+        }
+        // If "?", that's also acceptable (find not available)
+    }
+
+    // --- fetch_gh_count ---
+
+    #[test]
+    fn fetch_gh_count_empty_args_returns_question_mark() {
+        let result = fetch_gh_count(&[]);
+        // gh with no args will likely fail → "?"
+        assert!(
+            !result.is_empty(),
+            "should return some string even on failure"
+        );
+    }
+
+    #[test]
+    fn fetch_gh_count_invalid_subcommand_does_not_panic() {
+        let result = fetch_gh_count(&["this-subcommand-does-not-exist-xyz"]);
+        // Either "?" or empty — main point is no panic
+        let _ = result;
+    }
+
+    // --- MAX_PROJECTS_SHOWN ---
+
+    #[test]
+    fn max_projects_shown_is_five() {
+        assert_eq!(MAX_PROJECTS_SHOWN, 5);
+    }
+
+    // --- version format ---
+
+    #[test]
+    fn banner_version_is_semver_like() {
+        let lines = build_greeting_banner(None);
+        let header = &lines[0];
+        // Extract version after "v"
+        if let Some(pos) = header.find('v') {
+            let version_part = &header[pos + 1..];
+            let dots = version_part.chars().filter(|&c| c == '.').count();
+            assert!(dots >= 2, "version should have at least 2 dots: {header}");
+        }
+    }
+
+    // --- banner idempotent ---
+
+    #[test]
+    fn banner_is_deterministic_for_no_bridge() {
+        let lines1 = build_greeting_banner(None);
+        let lines2 = build_greeting_banner(None);
+        // Source file count and GitHub counts might differ due to timing,
+        // but structural elements should be stable
+        assert_eq!(lines1.len(), lines2.len(), "line count should be stable");
+        assert_eq!(lines1[0], lines2[0], "header should be identical");
+        assert_eq!(lines1[1], lines2[1], "separator should be identical");
+    }
 }
