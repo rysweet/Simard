@@ -1,7 +1,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::bridge::{
@@ -34,7 +34,7 @@ struct TransportState {
 struct ManagedChild {
     process: Child,
     stdin: std::io::BufWriter<std::process::ChildStdin>,
-    stdout: BufReader<std::process::ChildStdout>,
+    stdout: Arc<Mutex<BufReader<std::process::ChildStdout>>>,
 }
 
 impl SubprocessBridgeTransport {
@@ -93,7 +93,7 @@ impl SubprocessBridgeTransport {
         Ok(ManagedChild {
             process: child,
             stdin: std::io::BufWriter::new(stdin),
-            stdout: BufReader::new(stdout),
+            stdout: Arc::new(Mutex::new(BufReader::new(stdout))),
         })
     }
 
@@ -141,9 +141,10 @@ impl SubprocessBridgeTransport {
         bridge_name: &str,
     ) -> SimardResult<BridgeResponse> {
         let deadline = Instant::now() + timeout;
-        let mut line_buf = String::new();
+
         loop {
-            if Instant::now() > deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
                 return Ok(BridgeResponse {
                     id: expected_id.to_string(),
                     result: None,
@@ -153,32 +154,89 @@ impl SubprocessBridgeTransport {
                     }),
                 });
             }
-            line_buf.clear();
-            let bytes_read = child.stdout.read_line(&mut line_buf).map_err(|error| {
-                SimardError::BridgeTransportError {
-                    bridge: bridge_name.to_string(),
-                    reason: format!("failed to read from child stdout: {error}"),
+
+            let mut line_buf = String::new();
+            let read_result = Self::read_line_with_timeout(child, &mut line_buf, remaining);
+
+            match read_result {
+                Ok(0) => {
+                    return Err(SimardError::BridgeTransportError {
+                        bridge: bridge_name.to_string(),
+                        reason: "child process closed stdout (process exited?)".to_string(),
+                    });
                 }
-            })?;
-            if bytes_read == 0 {
-                return Err(SimardError::BridgeTransportError {
-                    bridge: bridge_name.to_string(),
-                    reason: "child process closed stdout (process exited?)".to_string(),
-                });
-            }
-            let trimmed = line_buf.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let response: BridgeResponse = serde_json::from_str(trimmed).map_err(|error| {
-                SimardError::BridgeProtocolError {
-                    bridge: bridge_name.to_string(),
-                    reason: format!("malformed response line: {error}"),
+                Ok(_) => {
+                    let trimmed = line_buf.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let response: BridgeResponse =
+                        serde_json::from_str(trimmed).map_err(|error| {
+                            SimardError::BridgeProtocolError {
+                                bridge: bridge_name.to_string(),
+                                reason: format!("malformed response line: {error}"),
+                            }
+                        })?;
+                    if response.id == expected_id {
+                        return Ok(response);
+                    }
                 }
-            })?;
-            if response.id == expected_id {
-                return Ok(response);
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::TimedOut
+                        || e.kind() == std::io::ErrorKind::WouldBlock =>
+                {
+                    continue; // loop will check deadline
+                }
+                Err(error) => {
+                    return Err(SimardError::BridgeTransportError {
+                        bridge: bridge_name.to_string(),
+                        reason: format!("failed to read from child stdout: {error}"),
+                    });
+                }
             }
+        }
+    }
+
+    /// Read a line from child stdout with a timeout, using a background thread
+    /// to avoid blocking the caller indefinitely.
+    fn read_line_with_timeout(
+        child: &mut ManagedChild,
+        buf: &mut String,
+        timeout: Duration,
+    ) -> std::io::Result<usize> {
+        use std::sync::mpsc;
+
+        let (tx, rx) = mpsc::channel();
+        let stdout = Arc::clone(&child.stdout);
+
+        std::thread::spawn(move || {
+            let result = match stdout.lock() {
+                Ok(mut reader) => {
+                    let mut local_buf = String::new();
+                    let result = reader.read_line(&mut local_buf);
+                    (result, local_buf)
+                }
+                Err(_) => (
+                    Err(std::io::Error::other("stdout mutex poisoned")),
+                    String::new(),
+                ),
+            };
+            let _ = tx.send(result);
+        });
+
+        match rx.recv_timeout(timeout) {
+            Ok((result, line)) => {
+                buf.push_str(&line);
+                result
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "read_line timed out waiting for subprocess output",
+            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "reader thread disconnected unexpectedly",
+            )),
         }
     }
 }
@@ -348,5 +406,59 @@ mod tests {
         );
         let desc = transport.descriptor();
         assert!(desc.identity.contains("test_bridge.py"));
+    }
+
+    #[test]
+    fn read_response_returns_timeout_error_when_subprocess_is_silent() {
+        // Spawn a subprocess that reads stdin but never writes to stdout.
+        // read_response should return a BridgeResponse with BRIDGE_ERROR_TIMEOUT.
+        let mut child_process = std::process::Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("cat should spawn");
+
+        let stdin = child_process.stdin.take().unwrap();
+        let stdout = child_process.stdout.take().unwrap();
+
+        let mut managed = ManagedChild {
+            process: child_process,
+            stdin: std::io::BufWriter::new(stdin),
+            stdout: Arc::new(Mutex::new(BufReader::new(stdout))),
+        };
+
+        let start = std::time::Instant::now();
+        let result = SubprocessBridgeTransport::read_response(
+            &mut managed,
+            "test-id-1",
+            Duration::from_millis(200),
+            "silent-bridge",
+        );
+        let elapsed = start.elapsed();
+
+        // Should not hang — should return within a reasonable margin of the timeout
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "read_response should not hang; elapsed: {elapsed:?}"
+        );
+
+        let response = result.expect("timeout should return Ok with error payload, not Err");
+        let error = response
+            .error
+            .expect("timeout response should contain an error payload");
+        assert_eq!(
+            error.code, BRIDGE_ERROR_TIMEOUT,
+            "error code should be BRIDGE_ERROR_TIMEOUT"
+        );
+        assert!(
+            error.message.contains("timed out"),
+            "error message should mention timeout: {}",
+            error.message
+        );
+
+        // Clean up the child process
+        let _ = managed.process.kill();
+        let _ = managed.process.wait();
     }
 }

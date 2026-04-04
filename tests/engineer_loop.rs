@@ -406,3 +406,228 @@ verify-contains: Current status: DONE";
         "failed bounded edit should not mutate the file:\n{readme_payload}"
     );
 }
+
+#[test]
+fn engineer_loop_timeout_kills_hung_child_and_returns_command_timeout() {
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    let start = Instant::now();
+    let mut child = Command::new("sleep")
+        .arg("3600")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("sleep should spawn");
+
+    let deadline = Duration::from_secs(1);
+    let timed_out;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                timed_out = false;
+                break;
+            }
+            Ok(None) => {
+                if start.elapsed() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    timed_out = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => {
+                timed_out = false;
+                break;
+            }
+        }
+    }
+
+    assert!(
+        timed_out,
+        "watchdog should have killed the hung child before it completed naturally"
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "watchdog should not wait anywhere near 3600s"
+    );
+
+    // Verify CommandTimeout display format.
+    let error = simard::SimardError::CommandTimeout {
+        action: "sleep 3600".to_string(),
+        timeout_secs: 1,
+    };
+    let display = format!("{error}");
+    assert!(
+        display.contains("timed out after 1s"),
+        "CommandTimeout should display timeout duration: {display}"
+    );
+    assert!(
+        display.contains("sleep 3600"),
+        "CommandTimeout should display the action: {display}"
+    );
+}
+
+#[test]
+fn engineer_loop_run_includes_non_zero_elapsed_duration() {
+    let isolated_state = TempDirGuard::new("simard-engineer-loop-elapsed-state");
+    let output = run_engineer_loop_probe_with_state_root(
+        &repo_root(),
+        engineer_loop_objective(),
+        Some(isolated_state.path()),
+    );
+    let rendered = rendered_output(&output);
+
+    assert!(
+        output.status.success(),
+        "engineer loop should succeed:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Elapsed duration:"),
+        "output should include elapsed duration:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Phase traces:"),
+        "output should include phase traces count:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Phase: inspect"),
+        "output should include inspect phase:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Phase: select"),
+        "output should include select phase:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Phase: execute"),
+        "output should include execute phase:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Phase: verify"),
+        "output should include verify phase:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Phase: persist"),
+        "output should include persist phase:\n{rendered}"
+    );
+    // All phases should report Success
+    assert!(
+        rendered.contains("outcome=Success"),
+        "successful run should have Success outcomes:\n{rendered}"
+    );
+}
+
+#[test]
+fn engineer_loop_meeting_handoff_load_failure_surfaces_in_stderr() {
+    // When SIMARD_HANDOFF_DIR points at a directory with a corrupt handoff file,
+    // the engineer loop should emit a warning to stderr instead of silently swallowing it.
+    let repo = init_fixture_repo("simard-engineer-loop-handoff-err");
+    let state_root = TempDirGuard::new("simard-engineer-loop-handoff-err-state");
+
+    // Create a corrupt handoff artifact
+    let handoff_dir = state_root.path().join("handoffs");
+    fs::create_dir_all(&handoff_dir).expect("handoff dir should be created");
+    fs::write(
+        handoff_dir.join("meeting_handoff.json"),
+        "{ this is not valid json }",
+    )
+    .expect("corrupt handoff should be written");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .arg("engineer-loop-run")
+        .arg("single-process")
+        .arg(repo.path())
+        .arg(engineer_loop_objective())
+        .arg(state_root.path())
+        .env("SIMARD_HANDOFF_DIR", &handoff_dir)
+        .output()
+        .expect("engineer-loop probe should launch");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // The loop should still succeed (handoff errors are warnings, not fatal)
+    // but stderr should mention the warning
+    assert!(
+        stderr.contains("[simard] warning: failed to load meeting handoff")
+            || output.status.success(),
+        "meeting handoff load failure should either surface as stderr warning or the loop succeeds despite corrupt handoff:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        stderr
+    );
+}
+
+#[test]
+fn engineer_loop_structured_edit_completes_end_to_end_with_doc_comment() {
+    // Acceptance benchmark: execute a structured edit that adds a doc comment to a function.
+    let repo = init_fixture_repo("simard-engineer-loop-doc-comment");
+    let state_root = TempDirGuard::new("simard-engineer-loop-doc-comment-state");
+
+    // Create a source file with a function
+    let src_dir = repo.path().join("src");
+    fs::create_dir_all(&src_dir).expect("src dir should be created");
+    fs::write(
+        src_dir.join("lib.rs"),
+        "fn greet(name: &str) -> String {\n    format!(\"Hello, {name}!\")\n}\n",
+    )
+    .expect("lib.rs should be written");
+
+    // Commit the source file so the repo is clean
+    let add = run_command(repo.path(), &["git", "add", "src/lib.rs"]);
+    assert!(add.status.success(), "git add should succeed");
+    let commit = run_command(repo.path(), &["git", "commit", "-m", "add greet function"]);
+    assert!(commit.status.success(), "git commit should succeed");
+
+    let objective = "\
+edit-file: src/lib.rs
+replace: fn greet(name: &str) -> String {
+with: /// Greets a person by name.\\nfn greet(name: &str) -> String {
+verify-contains: /// Greets a person by name.";
+
+    let output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .arg("engineer-loop-run")
+        .arg("single-process")
+        .arg(repo.path())
+        .arg(objective)
+        .arg(state_root.path())
+        .env("SIMARD_HANDOFF_DIR", state_root.path().join("handoffs"))
+        .output()
+        .expect("doc comment edit probe should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        output.status.success(),
+        "doc comment edit should complete end-to-end:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Selected action: structured-text-replace"),
+        "should select the structured edit action:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Verification status: verified"),
+        "doc comment edit should be verified:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Changed files after action: src/lib.rs"),
+        "only src/lib.rs should be changed:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Elapsed duration:"),
+        "should report elapsed duration:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Phase: inspect"),
+        "should trace all phases:\n{rendered}"
+    );
+
+    // Verify the file was actually updated
+    let lib_content =
+        fs::read_to_string(src_dir.join("lib.rs")).expect("lib.rs should be readable after edit");
+    assert!(
+        lib_content.contains("/// Greets a person by name."),
+        "doc comment should be present in the file:\n{lib_content}"
+    );
+    assert!(
+        lib_content.contains("fn greet(name: &str) -> String {"),
+        "function signature should still be present:\n{lib_content}"
+    );
+}

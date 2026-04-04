@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -22,6 +23,8 @@ const ENGINEER_IDENTITY: &str = "simard-engineer";
 const ENGINEER_BASE_TYPE: &str = "terminal-shell";
 const EXECUTION_SCOPE: &str = "local-only";
 const MAX_CARRIED_MEETING_DECISIONS: usize = 3;
+const GIT_COMMAND_TIMEOUT_SECS: u64 = 60;
+const CARGO_COMMAND_TIMEOUT_SECS: u64 = 120;
 const CLEARED_GIT_ENV_VARS: &[&str] = &[
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -89,6 +92,20 @@ pub struct VerificationReport {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PhaseOutcome {
+    Success,
+    Failed(String),
+    Skipped(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PhaseTrace {
+    pub name: String,
+    pub duration: Duration,
+    pub outcome: PhaseOutcome,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EngineerLoopRun {
     pub state_root: PathBuf,
     pub execution_scope: String,
@@ -96,6 +113,8 @@ pub struct EngineerLoopRun {
     pub action: ExecutedEngineerAction,
     pub verification: VerificationReport,
     pub terminal_bridge_context: Option<TerminalBridgeContext>,
+    pub elapsed_duration: Duration,
+    pub phase_traces: Vec<PhaseTrace>,
 }
 
 pub fn run_local_engineer_loop(
@@ -104,16 +123,114 @@ pub fn run_local_engineer_loop(
     topology: RuntimeTopology,
     state_root: impl Into<PathBuf>,
 ) -> SimardResult<EngineerLoopRun> {
+    let loop_start = Instant::now();
     let state_root = state_root.into();
-    let inspection = inspect_workspace(workspace_root.as_ref(), &state_root)?;
-    let terminal_bridge_context = TerminalBridgeContext::load_from_state_root(
-        &state_root,
-        SHARED_EXPLICIT_STATE_ROOT_SOURCE,
-    )?;
-    let selected_action = select_engineer_action(&inspection, objective)?;
-    let action = execute_engineer_action(&inspection.repo_root, selected_action)?;
-    let verification = verify_engineer_action(&inspection, &action, &state_root)?;
-    persist_engineer_loop_artifacts(
+    let mut phase_traces = Vec::new();
+
+    let phase_start = Instant::now();
+    let inspection = inspect_workspace(workspace_root.as_ref(), &state_root);
+    let inspection = match &inspection {
+        Ok(_) => {
+            phase_traces.push(PhaseTrace {
+                name: "inspect".to_string(),
+                duration: phase_start.elapsed(),
+                outcome: PhaseOutcome::Success,
+            });
+            inspection?
+        }
+        Err(e) => {
+            phase_traces.push(PhaseTrace {
+                name: "inspect".to_string(),
+                duration: phase_start.elapsed(),
+                outcome: PhaseOutcome::Failed(e.to_string()),
+            });
+            return Err(inspection.unwrap_err());
+        }
+    };
+
+    let phase_start = Instant::now();
+    let terminal_bridge_context =
+        TerminalBridgeContext::load_from_state_root(&state_root, SHARED_EXPLICIT_STATE_ROOT_SOURCE);
+    match &terminal_bridge_context {
+        Ok(_) => {
+            phase_traces.push(PhaseTrace {
+                name: "load-bridge-context".to_string(),
+                duration: phase_start.elapsed(),
+                outcome: PhaseOutcome::Success,
+            });
+        }
+        Err(e) => {
+            phase_traces.push(PhaseTrace {
+                name: "load-bridge-context".to_string(),
+                duration: phase_start.elapsed(),
+                outcome: PhaseOutcome::Failed(e.to_string()),
+            });
+        }
+    }
+    let terminal_bridge_context = terminal_bridge_context?;
+
+    let phase_start = Instant::now();
+    let selected_action = select_engineer_action(&inspection, objective);
+    match &selected_action {
+        Ok(_) => {
+            phase_traces.push(PhaseTrace {
+                name: "select".to_string(),
+                duration: phase_start.elapsed(),
+                outcome: PhaseOutcome::Success,
+            });
+        }
+        Err(e) => {
+            phase_traces.push(PhaseTrace {
+                name: "select".to_string(),
+                duration: phase_start.elapsed(),
+                outcome: PhaseOutcome::Failed(e.to_string()),
+            });
+        }
+    }
+    let selected_action = selected_action?;
+
+    let phase_start = Instant::now();
+    let action = execute_engineer_action(&inspection.repo_root, selected_action);
+    match &action {
+        Ok(_) => {
+            phase_traces.push(PhaseTrace {
+                name: "execute".to_string(),
+                duration: phase_start.elapsed(),
+                outcome: PhaseOutcome::Success,
+            });
+        }
+        Err(e) => {
+            phase_traces.push(PhaseTrace {
+                name: "execute".to_string(),
+                duration: phase_start.elapsed(),
+                outcome: PhaseOutcome::Failed(e.to_string()),
+            });
+        }
+    }
+    let action = action?;
+
+    let phase_start = Instant::now();
+    let verification = verify_engineer_action(&inspection, &action, &state_root);
+    match &verification {
+        Ok(_) => {
+            phase_traces.push(PhaseTrace {
+                name: "verify".to_string(),
+                duration: phase_start.elapsed(),
+                outcome: PhaseOutcome::Success,
+            });
+        }
+        Err(e) => {
+            phase_traces.push(PhaseTrace {
+                name: "verify".to_string(),
+                duration: phase_start.elapsed(),
+                outcome: PhaseOutcome::Failed(e.to_string()),
+            });
+        }
+    }
+    let verification = verification?;
+
+    let phase_start = Instant::now();
+    let persist_result = persist_engineer_loop_artifacts(
         &state_root,
         topology,
         objective,
@@ -121,7 +238,24 @@ pub fn run_local_engineer_loop(
         &action,
         &verification,
         terminal_bridge_context.as_ref(),
-    )?;
+    );
+    match &persist_result {
+        Ok(()) => {
+            phase_traces.push(PhaseTrace {
+                name: "persist".to_string(),
+                duration: phase_start.elapsed(),
+                outcome: PhaseOutcome::Success,
+            });
+        }
+        Err(e) => {
+            phase_traces.push(PhaseTrace {
+                name: "persist".to_string(),
+                duration: phase_start.elapsed(),
+                outcome: PhaseOutcome::Failed(e.to_string()),
+            });
+        }
+    }
+    persist_result?;
 
     Ok(EngineerLoopRun {
         state_root,
@@ -130,6 +264,8 @@ pub fn run_local_engineer_loop(
         action,
         verification,
         terminal_bridge_context,
+        elapsed_duration: loop_start.elapsed(),
+        phase_traces,
     })
 }
 
@@ -189,20 +325,27 @@ fn load_carried_meeting_decisions(state_root: &Path) -> SimardResult<Vec<String>
 
     // Also check for unprocessed meeting handoff artifacts.
     let handoff_dir = crate::meeting_facilitator::default_handoff_dir();
-    if let Ok(Some(handoff)) = crate::meeting_facilitator::load_meeting_handoff(&handoff_dir)
-        && !handoff.processed
-    {
-        for d in &handoff.decisions {
-            carried.push(format!(
-                "meeting handoff — {}: {} (rationale: {})",
-                handoff.topic, d.description, d.rationale,
-            ));
+    match crate::meeting_facilitator::load_meeting_handoff(&handoff_dir) {
+        Ok(Some(handoff)) if !handoff.processed => {
+            for d in &handoff.decisions {
+                carried.push(format!(
+                    "meeting handoff — {}: {} (rationale: {})",
+                    handoff.topic, d.description, d.rationale,
+                ));
+            }
+            for a in &handoff.action_items {
+                carried.push(format!(
+                    "meeting handoff — {} action: {} (owner: {}, priority: {})",
+                    handoff.topic, a.description, a.owner, a.priority,
+                ));
+            }
         }
-        for a in &handoff.action_items {
-            carried.push(format!(
-                "meeting handoff — {} action: {} (owner: {}, priority: {})",
-                handoff.topic, a.description, a.owner, a.priority,
-            ));
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!(
+                "[simard] warning: failed to load meeting handoff from '{}': {e}",
+                handoff_dir.display()
+            );
         }
     }
 
@@ -1011,13 +1154,20 @@ fn parse_structured_edit_request(objective: &str) -> SimardResult<Option<Structu
             relative_path = Some(non_empty_objective_value("edit-file", value)?);
         } else if let Some(value) = trimmed.strip_prefix("replace:") {
             saw_edit_directive = true;
-            search = Some(non_empty_objective_value("replace", value)?);
+            search = Some(unescape_edit_value(&non_empty_objective_value(
+                "replace", value,
+            )?));
         } else if let Some(value) = trimmed.strip_prefix("with:") {
             saw_edit_directive = true;
-            replacement = Some(non_empty_objective_value("with", value)?);
+            replacement = Some(unescape_edit_value(&non_empty_objective_value(
+                "with", value,
+            )?));
         } else if let Some(value) = trimmed.strip_prefix("verify-contains:") {
             saw_edit_directive = true;
-            verify_contains = Some(non_empty_objective_value("verify-contains", value)?);
+            verify_contains = Some(unescape_edit_value(&non_empty_objective_value(
+                "verify-contains",
+                value,
+            )?));
         }
     }
 
@@ -1048,6 +1198,10 @@ fn non_empty_objective_value(field: &str, value: &str) -> SimardResult<String> {
         });
     }
     Ok(trimmed.to_string())
+}
+
+fn unescape_edit_value(value: &str) -> String {
+    value.replace("\\n", "\n").replace("\\t", "\t")
 }
 
 fn validate_repo_relative_path(relative_path: &str) -> SimardResult<String> {
@@ -1089,6 +1243,14 @@ struct CommandOutput {
     stderr: String,
 }
 
+fn timeout_for_command(argv: &[&str]) -> Duration {
+    if argv.first().is_some_and(|cmd| *cmd == "cargo") {
+        Duration::from_secs(CARGO_COMMAND_TIMEOUT_SECS)
+    } else {
+        Duration::from_secs(GIT_COMMAND_TIMEOUT_SECS)
+    }
+}
+
 fn run_command(cwd: &Path, argv: &[&str]) -> SimardResult<CommandOutput> {
     let (program, args) = argv
         .split_first()
@@ -1107,16 +1269,52 @@ fn run_command(cwd: &Path, argv: &[&str]) -> SimardResult<CommandOutput> {
     }
 
     let mut command = Command::new(program);
-    command.args(args).current_dir(cwd);
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     for key in CLEARED_GIT_ENV_VARS {
         command.env_remove(key);
     }
-    let output = command
-        .output()
+    let mut child = command
+        .spawn()
         .map_err(|error| SimardError::ActionExecutionFailed {
             action: argv.join(" "),
             reason: error.to_string(),
         })?;
+
+    let deadline = Instant::now() + timeout_for_command(argv);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => break,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(SimardError::CommandTimeout {
+                        action: argv.join(" "),
+                        timeout_secs: timeout_for_command(argv).as_secs(),
+                    });
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => {
+                return Err(SimardError::ActionExecutionFailed {
+                    action: argv.join(" "),
+                    reason: format!("failed to poll child process: {error}"),
+                });
+            }
+        }
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| SimardError::ActionExecutionFailed {
+            action: argv.join(" "),
+            reason: format!("failed to collect child output: {error}"),
+        })?;
+
     if !output.status.success() {
         let stderr = sanitize_terminal_text(&String::from_utf8_lossy(&output.stderr));
         let stdout = sanitize_terminal_text(&String::from_utf8_lossy(&output.stdout));
