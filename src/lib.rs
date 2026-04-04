@@ -34,6 +34,7 @@ pub mod handoff;
 pub mod identity;
 pub mod identity_auth;
 pub mod identity_composition;
+pub mod identity_precedence;
 pub mod improvements;
 pub mod knowledge_bridge;
 pub mod knowledge_context;
@@ -173,6 +174,7 @@ pub use identity_auth::{
 pub use identity_composition::{
     CompositeIdentity, SubordinateIdentity, compose_identity, max_subordinate_depth,
 };
+pub use identity_precedence::{ConflictEntry, ConflictLog, PrecedenceResolver, ResolvedIdentity};
 pub use improvements::{
     ImprovementPromotionPlan, PersistedImprovementApproval, PersistedImprovementRecord,
     render_review_context_directives,
