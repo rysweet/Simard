@@ -75,6 +75,7 @@ mod sanitization;
 pub mod self_improve;
 pub mod self_improve_executor;
 pub mod self_relaunch;
+pub mod self_relaunch_semaphore;
 pub mod session;
 pub mod session_builder;
 pub mod skill_builder;
@@ -278,6 +279,9 @@ pub use self_improve_executor::{
 pub use self_relaunch::{
     GateResult, RelaunchConfig, RelaunchGate, all_gates_passed, build_canary, default_gates,
     handover, verify_canary,
+};
+pub use self_relaunch_semaphore::{
+    HandoffConfig, HandoffResult, LeaderSemaphore, LeaderState, coordinated_handoff, signal_ready,
 };
 pub use session::{
     SessionId, SessionIdGenerator, SessionPhase, SessionRecord, UuidSessionIdGenerator,
