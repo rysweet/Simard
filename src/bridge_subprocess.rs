@@ -407,4 +407,58 @@ mod tests {
         let desc = transport.descriptor();
         assert!(desc.identity.contains("test_bridge.py"));
     }
+
+    #[test]
+    fn read_response_returns_timeout_error_when_subprocess_is_silent() {
+        // Spawn a subprocess that reads stdin but never writes to stdout.
+        // read_response should return a BridgeResponse with BRIDGE_ERROR_TIMEOUT.
+        let mut child_process = std::process::Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("cat should spawn");
+
+        let stdin = child_process.stdin.take().unwrap();
+        let stdout = child_process.stdout.take().unwrap();
+
+        let mut managed = ManagedChild {
+            process: child_process,
+            stdin: std::io::BufWriter::new(stdin),
+            stdout: Arc::new(Mutex::new(BufReader::new(stdout))),
+        };
+
+        let start = std::time::Instant::now();
+        let result = SubprocessBridgeTransport::read_response(
+            &mut managed,
+            "test-id-1",
+            Duration::from_millis(200),
+            "silent-bridge",
+        );
+        let elapsed = start.elapsed();
+
+        // Should not hang — should return within a reasonable margin of the timeout
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "read_response should not hang; elapsed: {elapsed:?}"
+        );
+
+        let response = result.expect("timeout should return Ok with error payload, not Err");
+        let error = response
+            .error
+            .expect("timeout response should contain an error payload");
+        assert_eq!(
+            error.code, BRIDGE_ERROR_TIMEOUT,
+            "error code should be BRIDGE_ERROR_TIMEOUT"
+        );
+        assert!(
+            error.message.contains("timed out"),
+            "error message should mention timeout: {}",
+            error.message
+        );
+
+        // Clean up the child process
+        let _ = managed.process.kill();
+        let _ = managed.process.wait();
+    }
 }
