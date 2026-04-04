@@ -9,12 +9,13 @@ use std::fmt::{self, Display, Formatter};
 
 use crate::error::SimardResult;
 use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, load_goal_board};
-use crate::gym_bridge::GymBridge;
-use crate::gym_scoring::GymSuiteScore;
+use crate::gym_bridge::{GymBridge, ScoreDimensions};
+use crate::gym_scoring::{GymSuiteScore, detect_regression};
 use crate::knowledge_bridge::KnowledgeBridge;
+use crate::meeting_facilitator::load_meeting_handoff;
 use crate::memory_bridge::CognitiveMemoryBridge;
 use crate::memory_cognitive::CognitiveStatistics;
-use crate::self_improve::ImprovementCycle;
+use crate::self_improve::{ImprovementCycle, ImprovementPhase};
 
 /// The four phases of a single OODA cycle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -243,7 +244,8 @@ pub fn gather_environment() -> EnvironmentSnapshot {
     }
 }
 
-/// Observe: gather goal statuses, environment state, gym health, memory stats.
+/// Observe: gather goal statuses, environment state, gym health, memory stats,
+/// and pending improvement signals from gym regressions and unprocessed handoffs.
 /// Sub-system failures produce degraded fields rather than aborting (Pillar 11).
 pub fn observe(state: &OodaState, bridges: &OodaBridges) -> SimardResult<Observation> {
     let goal_statuses: Vec<GoalSnapshot> = state
@@ -272,13 +274,87 @@ pub fn observe(state: &OodaState, bridges: &OodaBridges) -> SimardResult<Observa
             CognitiveStatistics::default()
         }
     };
+
+    let pending_improvements = collect_pending_improvements(state, &gym_health);
+
     Ok(Observation {
         goal_statuses,
         gym_health,
         memory_stats,
-        pending_improvements: Vec::new(),
+        pending_improvements,
         environment,
     })
+}
+
+/// Collect pending improvement signals from gym regressions and unprocessed
+/// meeting handoffs. Each source degrades independently — a failure in one
+/// does not prevent others from contributing signals.
+fn collect_pending_improvements(
+    state: &OodaState,
+    current_gym: &Option<GymSuiteScore>,
+) -> Vec<ImprovementCycle> {
+    let mut improvements = Vec::new();
+
+    // Signal 1: gym regressions vs last observation.
+    if let (Some(current), Some(prev_obs)) = (current_gym, &state.last_observation)
+        && let Some(baseline) = &prev_obs.gym_health
+    {
+        let regressions = detect_regression(current, baseline);
+        if !regressions.is_empty() {
+            improvements.push(ImprovementCycle {
+                baseline: baseline.clone(),
+                proposed_changes: Vec::new(),
+                post_score: Some(current.clone()),
+                regressions,
+                decision: None,
+                final_phase: ImprovementPhase::Eval,
+            });
+        }
+    }
+
+    // Signal 2: unprocessed meeting handoffs.
+    match scan_unprocessed_handoffs() {
+        Ok(true) => {
+            let baseline = current_gym.clone().unwrap_or_else(|| GymSuiteScore {
+                suite_id: "handoff-signal".to_string(),
+                overall: 0.0,
+                dimensions: ScoreDimensions::default(),
+                scenario_count: 0,
+                scenarios_passed: 0,
+                pass_rate: 0.0,
+                recorded_at_unix_ms: None,
+            });
+            improvements.push(ImprovementCycle {
+                baseline,
+                proposed_changes: Vec::new(),
+                post_score: None,
+                regressions: Vec::new(),
+                decision: None,
+                final_phase: ImprovementPhase::Eval,
+            });
+        }
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("[simard] OODA observe: handoff scan failed: {e}");
+        }
+    }
+
+    improvements
+}
+
+/// Check whether there is an unprocessed meeting handoff in the default
+/// handoff directory. Returns `true` when one exists.
+fn scan_unprocessed_handoffs() -> SimardResult<bool> {
+    let dir = crate::meeting_facilitator::default_handoff_dir();
+    scan_unprocessed_handoffs_in(&dir)
+}
+
+fn scan_unprocessed_handoffs_in(dir: &std::path::Path) -> SimardResult<bool> {
+    match load_meeting_handoff(dir) {
+        Ok(Some(h)) if !h.processed => Ok(true),
+        Ok(_) => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 /// Orient: rank goals by urgency, informed by environment context.
@@ -827,5 +903,163 @@ mod tests {
                 .contains("[action] Add metrics (owner: carol)")
         );
         assert_eq!(board.backlog[0].source, "meeting:Sprint planning");
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests for collect_pending_improvements
+    // -----------------------------------------------------------------------
+
+    fn make_gym_score(overall: f64, factual_accuracy: f64) -> GymSuiteScore {
+        use crate::gym_bridge::ScoreDimensions;
+        GymSuiteScore {
+            suite_id: "progressive".to_string(),
+            overall,
+            dimensions: ScoreDimensions {
+                factual_accuracy,
+                specificity: 0.8,
+                temporal_awareness: 0.7,
+                source_attribution: 0.6,
+                confidence_calibration: 0.5,
+            },
+            scenario_count: 5,
+            scenarios_passed: 4,
+            pass_rate: 0.8,
+            recorded_at_unix_ms: None,
+        }
+    }
+
+    #[test]
+    fn collect_pending_improvements_empty_when_no_signals() {
+        let dir = TempDir::new().unwrap();
+        // Isolate from any leftover handoff files in the default directory.
+        unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", dir.path()) };
+
+        let state = OodaState::new(GoalBoard::new());
+        let current = Some(make_gym_score(0.8, 0.9));
+        let result = collect_pending_improvements(&state, &current);
+        assert!(result.is_empty(), "no signals should yield empty vec");
+
+        unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR") };
+    }
+
+    #[test]
+    fn collect_pending_improvements_detects_gym_regression() {
+        let dir = TempDir::new().unwrap();
+        unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", dir.path()) };
+
+        let baseline = make_gym_score(0.9, 0.95);
+        let current_score = make_gym_score(0.7, 0.70); // factual_accuracy dropped 0.25
+
+        let mut state = OodaState::new(GoalBoard::new());
+        state.last_observation = Some(Observation {
+            goal_statuses: Vec::new(),
+            gym_health: Some(baseline.clone()),
+            memory_stats: CognitiveStatistics::default(),
+            pending_improvements: Vec::new(),
+            environment: EnvironmentSnapshot::default(),
+        });
+
+        let result = collect_pending_improvements(&state, &Some(current_score.clone()));
+
+        assert_eq!(
+            result.len(),
+            1,
+            "regression should produce exactly one improvement signal"
+        );
+        let cycle = &result[0];
+        assert_eq!(cycle.baseline.overall, 0.9);
+        assert!(cycle.post_score.is_some());
+        assert!(!cycle.regressions.is_empty());
+        assert!(cycle.decision.is_none());
+        assert_eq!(cycle.final_phase, ImprovementPhase::Eval);
+
+        unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR") };
+    }
+
+    #[test]
+    fn collect_pending_improvements_no_regression_when_scores_stable() {
+        let dir = TempDir::new().unwrap();
+        unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", dir.path()) };
+
+        let baseline = make_gym_score(0.8, 0.85);
+        let current_score = make_gym_score(0.8, 0.85);
+
+        let mut state = OodaState::new(GoalBoard::new());
+        state.last_observation = Some(Observation {
+            goal_statuses: Vec::new(),
+            gym_health: Some(baseline),
+            memory_stats: CognitiveStatistics::default(),
+            pending_improvements: Vec::new(),
+            environment: EnvironmentSnapshot::default(),
+        });
+
+        let result = collect_pending_improvements(&state, &Some(current_score));
+        assert!(
+            result.is_empty(),
+            "stable scores with no handoffs should produce no signals"
+        );
+
+        unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR") };
+    }
+
+    #[test]
+    fn collect_pending_improvements_no_crash_when_no_gym_health() {
+        let dir = TempDir::new().unwrap();
+        unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", dir.path()) };
+
+        let state = OodaState::new(GoalBoard::new());
+        let result = collect_pending_improvements(&state, &None);
+        // Should not panic — graceful degradation.
+        assert!(result.is_empty());
+
+        unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR") };
+    }
+
+    #[test]
+    fn collect_pending_improvements_no_crash_when_no_last_observation() {
+        let dir = TempDir::new().unwrap();
+        unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", dir.path()) };
+
+        let state = OodaState::new(GoalBoard::new());
+        let current = Some(make_gym_score(0.8, 0.9));
+        // No last_observation means no baseline for regression comparison.
+        let result = collect_pending_improvements(&state, &current);
+        assert!(
+            result.is_empty(),
+            "no last observation and no handoffs means no signals"
+        );
+
+        unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR") };
+    }
+
+    #[test]
+    fn scan_unprocessed_handoffs_returns_true_for_unprocessed() {
+        let dir = TempDir::new().unwrap();
+
+        let handoff = sample_handoff(vec![sample_decision("Ship v3")]);
+        write_meeting_handoff(dir.path(), &handoff).unwrap();
+
+        let result = scan_unprocessed_handoffs_in(dir.path()).unwrap();
+        assert!(result, "unprocessed handoff should return true");
+    }
+
+    #[test]
+    fn scan_unprocessed_handoffs_returns_false_when_processed() {
+        let dir = TempDir::new().unwrap();
+
+        let mut handoff = sample_handoff(vec![sample_decision("Done")]);
+        handoff.processed = true;
+        write_meeting_handoff(dir.path(), &handoff).unwrap();
+
+        let result = scan_unprocessed_handoffs_in(dir.path()).unwrap();
+        assert!(!result, "processed handoff should return false");
+    }
+
+    #[test]
+    fn scan_unprocessed_handoffs_returns_false_when_no_file() {
+        let dir = TempDir::new().unwrap();
+
+        let result = scan_unprocessed_handoffs_in(dir.path()).unwrap();
+        assert!(!result, "no handoff file should return false");
     }
 }
