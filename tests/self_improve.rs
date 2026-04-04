@@ -95,6 +95,7 @@ fn cfg(changes: Vec<ProposedChange>) -> ImprovementConfig {
         min_net_improvement: 0.02,
         max_single_regression: 0.05,
         proposed_changes: changes,
+        auto_apply: false,
     }
 }
 
@@ -171,6 +172,7 @@ fn cycle_records_baseline_accurately() {
         min_net_improvement: 0.02,
         max_single_regression: 0.05,
         proposed_changes: vec![],
+        auto_apply: false,
     };
 
     let cycle = run_improvement_cycle(&gym, &config).expect("cycle should succeed");

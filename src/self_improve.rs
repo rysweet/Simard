@@ -8,11 +8,15 @@
 //! committed when the net improvement meets the threshold and no single
 //! dimension regresses beyond the allowed maximum (Pillar 11).
 
+use std::path::Path;
+
+use crate::engineer_loop::RepoInspection;
 use crate::error::SimardResult;
 use crate::gym_bridge::GymBridge;
 use crate::gym_scoring::{
     GymSuiteScore, Regression, RegressionSeverity, detect_regression, suite_score_from_result,
 };
+use crate::self_improve_executor::ApplyResult;
 
 /// Phases of a single self-improvement cycle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -82,6 +86,8 @@ pub struct ImprovementConfig {
     pub max_single_regression: f64,
     /// Proposed changes to evaluate.
     pub proposed_changes: Vec<ProposedChange>,
+    /// Whether to auto-apply improvements via the plan+review pipeline.
+    pub auto_apply: bool,
 }
 
 impl Default for ImprovementConfig {
@@ -91,6 +97,7 @@ impl Default for ImprovementConfig {
             min_net_improvement: 0.02,
             max_single_regression: 0.05,
             proposed_changes: Vec::new(),
+            auto_apply: false,
         }
     }
 }
@@ -294,6 +301,18 @@ pub fn summarize_cycle(cycle: &ImprovementCycle) -> String {
     }
 
     lines.join("\n")
+}
+
+/// Apply improvement proposals autonomously via the plan+review pipeline.
+///
+/// Delegates to [`crate::self_improve_executor::run_autonomous_improvement`].
+/// Each proposal is planned, executed, reviewed, and committed or rolled back.
+pub fn apply_improvements(
+    proposals: &[String],
+    workspace: &Path,
+    inspection: &RepoInspection,
+) -> Vec<ApplyResult> {
+    crate::self_improve_executor::run_autonomous_improvement(proposals, workspace, inspection)
 }
 
 #[cfg(test)]
