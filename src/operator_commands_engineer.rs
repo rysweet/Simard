@@ -555,4 +555,79 @@ mod tests {
             required_engineer_evidence_value(&records, "changed-files=", "test-handoff").unwrap();
         assert_eq!(result, "");
     }
+
+    // --- parse_engineer_summary_list extended ---
+
+    #[test]
+    fn summary_list_preserves_internal_whitespace() {
+        let result = parse_engineer_summary_list("goal with spaces, another goal", ", ");
+        assert_eq!(result, vec!["goal with spaces", "another goal"]);
+    }
+
+    #[test]
+    fn summary_list_exact_none_marker() {
+        // Only exactly "<none>" should return empty
+        let result = parse_engineer_summary_list("<NONE>", ", ");
+        assert_eq!(result, vec!["<NONE>"]);
+    }
+
+    #[test]
+    fn summary_list_single_separator_only() {
+        let result = parse_engineer_summary_list(", ", ", ");
+        assert!(result.is_empty());
+    }
+
+    // --- parse_carried_meeting_decisions extended ---
+
+    #[test]
+    fn carried_decisions_rejects_empty_after_split() {
+        // A string that splits into only empty pieces after trim
+        let result = parse_carried_meeting_decisions(" || ");
+        assert!(result.is_err(), "should reject empty records after split");
+    }
+
+    #[test]
+    fn carried_decisions_single_valid_record_no_decisions() {
+        let record = "agenda=Review; updates=[U]; decisions=[]; risks=[R]; next_steps=[N]; open_questions=[Q]; goals=[p1:active:G:Rationale]";
+        let result = parse_carried_meeting_decisions(record).unwrap();
+        assert!(
+            result.is_empty(),
+            "empty decisions list should yield empty vec"
+        );
+    }
+
+    #[test]
+    fn carried_decisions_error_mentions_field() {
+        let err = parse_carried_meeting_decisions("garbage input").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("carried-meeting-decisions"),
+            "error should mention field: {msg}"
+        );
+    }
+
+    // --- required_engineer_evidence_value with special characters ---
+
+    #[test]
+    fn required_evidence_value_with_equals_in_value() {
+        let records = vec![make_evidence("repo-root=/home/user=special")];
+        let result =
+            required_engineer_evidence_value(&records, "repo-root=", "test-handoff").unwrap();
+        assert_eq!(result, "/home/user=special");
+    }
+
+    #[test]
+    fn required_evidence_value_with_spaces_in_value() {
+        let records = vec![make_evidence("repo-branch=feature/my branch")];
+        let result =
+            required_engineer_evidence_value(&records, "repo-branch=", "test-handoff").unwrap();
+        assert_eq!(result, "feature/my branch");
+    }
+
+    #[test]
+    fn required_evidence_prefix_partial_match_does_not_match() {
+        let records = vec![make_evidence("repo-root-extra=/value")];
+        let result = required_engineer_evidence_value(&records, "repo-root=", "test-handoff");
+        assert!(result.is_err(), "partial prefix match should not succeed");
+    }
 }

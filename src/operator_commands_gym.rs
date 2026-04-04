@@ -238,4 +238,83 @@ mod tests {
         let result = run_gym_suite("nonexistent-suite-id-12345");
         assert!(result.is_err());
     }
+
+    #[test]
+    fn benchmark_scenarios_class_is_valid() {
+        for scenario in benchmark_scenarios() {
+            // BenchmarkClass is an enum — just verify Display works
+            let class_str = format!("{}", scenario.class);
+            assert!(
+                !class_str.is_empty(),
+                "scenario class display must not be empty for {}",
+                scenario.id
+            );
+        }
+    }
+
+    #[test]
+    fn benchmark_scenarios_topology_is_valid() {
+        for scenario in benchmark_scenarios() {
+            let topology_str = format!("{}", scenario.topology);
+            assert!(
+                !topology_str.is_empty(),
+                "scenario topology display must not be empty for {}",
+                scenario.id
+            );
+        }
+    }
+
+    #[test]
+    fn gym_scenario_error_message_is_descriptive() {
+        let result = run_gym_scenario("totally-fake-scenario");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("totally-fake-scenario")
+                || msg.contains("not registered")
+                || msg.contains("not found"),
+            "error should be descriptive: {msg}"
+        );
+    }
+
+    #[test]
+    fn gym_compare_error_message_is_descriptive() {
+        let result = run_gym_compare("totally-fake-scenario");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(!msg.is_empty(), "error message should not be empty");
+    }
+
+    #[test]
+    fn gym_suite_error_message_is_descriptive() {
+        let result = run_gym_suite("totally-fake-suite");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(!msg.is_empty(), "error message should not be empty");
+    }
+
+    #[test]
+    fn default_output_root_returns_path() {
+        let root = default_output_root();
+        // Should return a valid PathBuf (may or may not exist)
+        assert!(
+            !root.as_os_str().is_empty(),
+            "output root should not be empty"
+        );
+    }
+
+    #[test]
+    fn render_benchmark_count_large_value() {
+        assert_eq!(crate::gym::render_benchmark_count(Some(999999)), "999999");
+    }
+
+    #[test]
+    fn render_benchmark_delta_large_positive() {
+        assert_eq!(crate::gym::render_benchmark_delta(Some(100)), "+100");
+    }
+
+    #[test]
+    fn render_benchmark_delta_large_negative() {
+        assert_eq!(crate::gym::render_benchmark_delta(Some(-100)), "-100");
+    }
 }

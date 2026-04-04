@@ -416,4 +416,239 @@ mod tests {
         assert!(dir.join("simard-leader.lock").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // --- truncate_output ---
+
+    #[test]
+    fn truncate_output_short_string_unchanged() {
+        let result = truncate_output("hello world", 100);
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn truncate_output_exact_length() {
+        let input = "abcde";
+        let result = truncate_output(input, 5);
+        assert_eq!(result, "abcde");
+    }
+
+    #[test]
+    fn truncate_output_over_limit_appends_ellipsis() {
+        let input = "abcdefghij";
+        let result = truncate_output(input, 5);
+        assert!(
+            result.ends_with("..."),
+            "should end with ellipsis: {result}"
+        );
+        assert!(result.len() <= 8, "should be truncated: {result}");
+    }
+
+    #[test]
+    fn truncate_output_trims_whitespace() {
+        let result = truncate_output("  hello  ", 100);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn truncate_output_empty_string() {
+        let result = truncate_output("", 100);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn truncate_output_multibyte_utf8_safe() {
+        let input = "héllo wörld café";
+        let result = truncate_output(input, 8);
+        assert!(
+            result.ends_with("..."),
+            "should end with ellipsis: {result}"
+        );
+        // Must not panic on multi-byte boundary
+    }
+
+    #[test]
+    fn truncate_output_zero_max_len() {
+        let result = truncate_output("hello", 0);
+        assert_eq!(result, "...");
+    }
+
+    // --- RelaunchConfig defaults ---
+
+    #[test]
+    fn relaunch_config_default_health_timeout() {
+        let config = RelaunchConfig::default();
+        assert_eq!(config.health_timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn relaunch_config_default_manifest_dir() {
+        let config = RelaunchConfig::default();
+        assert_eq!(config.manifest_dir, PathBuf::from("."));
+    }
+
+    // --- RelaunchGate Display ---
+
+    #[test]
+    fn relaunch_gate_display_all_variants() {
+        assert_eq!(RelaunchGate::Smoke.to_string(), "smoke");
+        assert_eq!(RelaunchGate::UnitTest.to_string(), "unit-test");
+        assert_eq!(RelaunchGate::GymBaseline.to_string(), "gym-baseline");
+        assert_eq!(RelaunchGate::BridgeHealth.to_string(), "bridge-health");
+    }
+
+    // --- GateResult Display ---
+
+    #[test]
+    fn gate_result_display_pass() {
+        let result = GateResult {
+            gate: RelaunchGate::Smoke,
+            passed: true,
+            detail: "version: 1.0.0".to_string(),
+        };
+        let display = result.to_string();
+        assert!(display.contains("[PASS]"), "{display}");
+        assert!(display.contains("smoke"), "{display}");
+        assert!(display.contains("version: 1.0.0"), "{display}");
+    }
+
+    #[test]
+    fn gate_result_display_fail() {
+        let result = GateResult {
+            gate: RelaunchGate::UnitTest,
+            passed: false,
+            detail: "3 tests failed".to_string(),
+        };
+        let display = result.to_string();
+        assert!(display.contains("[FAIL]"), "{display}");
+        assert!(display.contains("unit-test"), "{display}");
+        assert!(display.contains("3 tests failed"), "{display}");
+    }
+
+    // --- all_gates_passed ---
+
+    #[test]
+    fn all_gates_passed_empty_is_true() {
+        assert!(all_gates_passed(&[]));
+    }
+
+    #[test]
+    fn all_gates_passed_all_true() {
+        let results = vec![
+            GateResult {
+                gate: RelaunchGate::Smoke,
+                passed: true,
+                detail: "ok".to_string(),
+            },
+            GateResult {
+                gate: RelaunchGate::UnitTest,
+                passed: true,
+                detail: "ok".to_string(),
+            },
+        ];
+        assert!(all_gates_passed(&results));
+    }
+
+    #[test]
+    fn all_gates_passed_one_false() {
+        let results = vec![
+            GateResult {
+                gate: RelaunchGate::Smoke,
+                passed: true,
+                detail: "ok".to_string(),
+            },
+            GateResult {
+                gate: RelaunchGate::UnitTest,
+                passed: false,
+                detail: "fail".to_string(),
+            },
+            GateResult {
+                gate: RelaunchGate::GymBaseline,
+                passed: true,
+                detail: "ok".to_string(),
+            },
+        ];
+        assert!(!all_gates_passed(&results));
+    }
+
+    // --- RelaunchGate equality ---
+
+    #[test]
+    fn relaunch_gate_eq() {
+        assert_eq!(RelaunchGate::Smoke, RelaunchGate::Smoke);
+        assert_ne!(RelaunchGate::Smoke, RelaunchGate::UnitTest);
+    }
+
+    // --- handover: directory instead of file ---
+
+    #[test]
+    fn handover_rejects_directory_as_binary() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target");
+        if dir.exists() {
+            let err = handover(12345, &dir).unwrap_err();
+            assert!(err.to_string().contains("not a regular file"), "{}", err);
+        }
+    }
+
+    // --- verify_canary with nonexistent binary ---
+
+    #[test]
+    fn verify_canary_with_missing_binary() {
+        let config = RelaunchConfig::default();
+        let results = verify_canary(
+            Path::new("/no-such-binary-99999"),
+            &[RelaunchGate::Smoke],
+            &config,
+        )
+        .unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(
+            !results[0].passed,
+            "smoke gate should fail for missing binary"
+        );
+    }
+
+    #[test]
+    fn verify_canary_runs_all_gates_without_short_circuit() {
+        let config = RelaunchConfig::default();
+        let gates = default_gates();
+        let results = verify_canary(Path::new("/no-such-binary-99999"), &gates, &config).unwrap();
+        assert_eq!(
+            results.len(),
+            4,
+            "should run all 4 gates even if first fails"
+        );
+    }
+
+    #[test]
+    fn verify_canary_empty_gates() {
+        let config = RelaunchConfig::default();
+        let results = verify_canary(Path::new("/no-such-binary"), &[], &config).unwrap();
+        assert!(results.is_empty());
+    }
+
+    // --- GateResult clone and debug ---
+
+    #[test]
+    fn gate_result_clone() {
+        let result = GateResult {
+            gate: RelaunchGate::Smoke,
+            passed: true,
+            detail: "ok".to_string(),
+        };
+        let cloned = result.clone();
+        assert_eq!(cloned.gate, result.gate);
+        assert_eq!(cloned.passed, result.passed);
+        assert_eq!(cloned.detail, result.detail);
+    }
+
+    #[test]
+    fn gate_result_debug() {
+        let result = GateResult {
+            gate: RelaunchGate::BridgeHealth,
+            passed: false,
+            detail: "err".to_string(),
+        };
+        let debug = format!("{result:?}");
+        assert!(debug.contains("BridgeHealth"), "{debug}");
+    }
 }

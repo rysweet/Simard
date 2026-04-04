@@ -1232,4 +1232,838 @@ mod tests {
         let result = scan_unprocessed_handoffs_in(dir.path()).unwrap();
         assert!(!result, "no handoff file should return false");
     }
+
+    // --- OodaPhase Display ---
+
+    #[test]
+    fn ooda_phase_display_all_variants() {
+        assert_eq!(OodaPhase::Observe.to_string(), "observe");
+        assert_eq!(OodaPhase::Orient.to_string(), "orient");
+        assert_eq!(OodaPhase::Decide.to_string(), "decide");
+        assert_eq!(OodaPhase::Act.to_string(), "act");
+    }
+
+    #[test]
+    fn ooda_phase_equality() {
+        assert_eq!(OodaPhase::Observe, OodaPhase::Observe);
+        assert_ne!(OodaPhase::Observe, OodaPhase::Orient);
+    }
+
+    #[test]
+    fn ooda_phase_clone() {
+        let phase = OodaPhase::Decide;
+        let cloned = phase;
+        assert_eq!(phase, cloned);
+    }
+
+    // --- OodaState ---
+
+    #[test]
+    fn ooda_state_new_defaults() {
+        let state = OodaState::new(GoalBoard::new());
+        assert_eq!(state.current_phase, OodaPhase::Observe);
+        assert_eq!(state.cycle_count, 0);
+        assert!(state.last_observation.is_none());
+        assert!(state.review_improvements.is_empty());
+        assert!(state.active_goals.active.is_empty());
+    }
+
+    #[test]
+    fn ooda_state_new_with_goals() {
+        let mut board = GoalBoard::new();
+        board.active.push(ActiveGoal {
+            id: "goal-1".to_string(),
+            description: "Test goal".to_string(),
+            priority: 1,
+            status: GoalProgress::NotStarted,
+            assigned_to: None,
+        });
+        let state = OodaState::new(board);
+        assert_eq!(state.active_goals.active.len(), 1);
+    }
+
+    // --- GoalSnapshot ---
+
+    #[test]
+    fn goal_snapshot_from_active_goal() {
+        let goal = ActiveGoal {
+            id: "g-1".to_string(),
+            description: "Build widget".to_string(),
+            priority: 2,
+            status: GoalProgress::InProgress { percent: 50 },
+            assigned_to: Some("engineer".to_string()),
+        };
+        let snapshot = GoalSnapshot::from(&goal);
+        assert_eq!(snapshot.id, "g-1");
+        assert_eq!(snapshot.description, "Build widget");
+        assert!(matches!(
+            snapshot.progress,
+            GoalProgress::InProgress { percent: 50 }
+        ));
+    }
+
+    #[test]
+    fn goal_snapshot_from_blocked_goal() {
+        let goal = ActiveGoal {
+            id: "g-blocked".to_string(),
+            description: "Blocked task".to_string(),
+            priority: 1,
+            status: GoalProgress::Blocked("dependency missing".to_string()),
+            assigned_to: None,
+        };
+        let snapshot = GoalSnapshot::from(&goal);
+        assert!(matches!(snapshot.progress, GoalProgress::Blocked(_)));
+    }
+
+    // --- EnvironmentSnapshot ---
+
+    #[test]
+    fn environment_snapshot_default() {
+        let env = EnvironmentSnapshot::default();
+        assert!(env.git_status.is_empty());
+        assert!(env.open_issues.is_empty());
+        assert!(env.recent_commits.is_empty());
+    }
+
+    // --- ActionKind Display ---
+
+    #[test]
+    fn action_kind_display_all_variants() {
+        assert_eq!(ActionKind::AdvanceGoal.to_string(), "advance-goal");
+        assert_eq!(ActionKind::RunImprovement.to_string(), "run-improvement");
+        assert_eq!(
+            ActionKind::ConsolidateMemory.to_string(),
+            "consolidate-memory"
+        );
+        assert_eq!(ActionKind::ResearchQuery.to_string(), "research-query");
+        assert_eq!(ActionKind::RunGymEval.to_string(), "run-gym-eval");
+        assert_eq!(ActionKind::BuildSkill.to_string(), "build-skill");
+        assert_eq!(ActionKind::LaunchSession.to_string(), "launch-session");
+    }
+
+    #[test]
+    fn action_kind_equality() {
+        assert_eq!(ActionKind::AdvanceGoal, ActionKind::AdvanceGoal);
+        assert_ne!(ActionKind::AdvanceGoal, ActionKind::RunImprovement);
+    }
+
+    // --- OodaConfig ---
+
+    #[test]
+    fn ooda_config_default_values() {
+        let config = OodaConfig::default();
+        assert_eq!(config.max_concurrent_actions, 3);
+        assert!((config.improvement_threshold - 0.02).abs() < f64::EPSILON);
+        assert_eq!(config.gym_suite_id, "progressive");
+    }
+
+    // --- orient ---
+
+    fn make_board_with_goals(goals: Vec<ActiveGoal>) -> GoalBoard {
+        let mut board = GoalBoard::new();
+        board.active = goals;
+        board
+    }
+
+    fn make_observation(env: EnvironmentSnapshot) -> Observation {
+        Observation {
+            goal_statuses: Vec::new(),
+            gym_health: None,
+            memory_stats: CognitiveStatistics::default(),
+            pending_improvements: Vec::new(),
+            environment: env,
+        }
+    }
+
+    #[test]
+    fn orient_blocked_goals_have_highest_urgency() {
+        let goals = vec![
+            ActiveGoal {
+                id: "blocked".to_string(),
+                description: "Blocked".to_string(),
+                priority: 1,
+                status: GoalProgress::Blocked("dependency".to_string()),
+                assigned_to: None,
+            },
+            ActiveGoal {
+                id: "not-started".to_string(),
+                description: "Not started".to_string(),
+                priority: 1,
+                status: GoalProgress::NotStarted,
+                assigned_to: None,
+            },
+        ];
+        let board = make_board_with_goals(goals);
+        let obs = make_observation(EnvironmentSnapshot::default());
+        let priorities = orient(&obs, &board).unwrap();
+        assert_eq!(priorities[0].goal_id, "blocked");
+        assert!(priorities[0].urgency > priorities[1].urgency);
+    }
+
+    #[test]
+    fn orient_completed_goals_have_zero_urgency() {
+        let goals = vec![ActiveGoal {
+            id: "done".to_string(),
+            description: "Done".to_string(),
+            priority: 1,
+            status: GoalProgress::Completed,
+            assigned_to: None,
+        }];
+        let board = make_board_with_goals(goals);
+        let obs = make_observation(EnvironmentSnapshot::default());
+        let priorities = orient(&obs, &board).unwrap();
+        assert!(
+            priorities[0].urgency < f64::EPSILON,
+            "completed goals should have zero urgency"
+        );
+    }
+
+    #[test]
+    fn orient_not_started_higher_urgency_than_in_progress() {
+        let goals = vec![
+            ActiveGoal {
+                id: "new".to_string(),
+                description: "New".to_string(),
+                priority: 1,
+                status: GoalProgress::NotStarted,
+                assigned_to: None,
+            },
+            ActiveGoal {
+                id: "wip".to_string(),
+                description: "WIP".to_string(),
+                priority: 1,
+                status: GoalProgress::InProgress { percent: 50 },
+                assigned_to: None,
+            },
+        ];
+        let board = make_board_with_goals(goals);
+        let obs = make_observation(EnvironmentSnapshot::default());
+        let priorities = orient(&obs, &board).unwrap();
+        let new_prio = priorities.iter().find(|p| p.goal_id == "new").unwrap();
+        let wip_prio = priorities.iter().find(|p| p.goal_id == "wip").unwrap();
+        assert!(new_prio.urgency > wip_prio.urgency);
+    }
+
+    #[test]
+    fn orient_in_progress_urgency_decreases_with_percent() {
+        let goals = vec![
+            ActiveGoal {
+                id: "early".to_string(),
+                description: "Early".to_string(),
+                priority: 1,
+                status: GoalProgress::InProgress { percent: 10 },
+                assigned_to: None,
+            },
+            ActiveGoal {
+                id: "late".to_string(),
+                description: "Late".to_string(),
+                priority: 1,
+                status: GoalProgress::InProgress { percent: 90 },
+                assigned_to: None,
+            },
+        ];
+        let board = make_board_with_goals(goals);
+        let obs = make_observation(EnvironmentSnapshot::default());
+        let priorities = orient(&obs, &board).unwrap();
+        let early = priorities.iter().find(|p| p.goal_id == "early").unwrap();
+        let late = priorities.iter().find(|p| p.goal_id == "late").unwrap();
+        assert!(early.urgency > late.urgency);
+    }
+
+    #[test]
+    fn orient_boosts_urgency_when_goal_mentioned_in_issues() {
+        let goals = vec![ActiveGoal {
+            id: "auth".to_string(),
+            description: "Auth system".to_string(),
+            priority: 1,
+            status: GoalProgress::InProgress { percent: 50 },
+            assigned_to: None,
+        }];
+        let board = make_board_with_goals(goals.clone());
+        let env_with_issue = EnvironmentSnapshot {
+            git_status: String::new(),
+            open_issues: vec!["Fix auth bug".to_string()],
+            recent_commits: Vec::new(),
+        };
+        let env_without = EnvironmentSnapshot::default();
+
+        let prio_with = orient(&make_observation(env_with_issue), &board).unwrap();
+        let prio_without = orient(&make_observation(env_without), &board).unwrap();
+        assert!(prio_with[0].urgency > prio_without[0].urgency);
+        assert!(prio_with[0].reason.contains("open issue"));
+    }
+
+    #[test]
+    fn orient_boosts_in_progress_when_dirty_tree() {
+        let goals = vec![ActiveGoal {
+            id: "wip".to_string(),
+            description: "WIP".to_string(),
+            priority: 1,
+            status: GoalProgress::InProgress { percent: 50 },
+            assigned_to: None,
+        }];
+        let board = make_board_with_goals(goals);
+        let env_dirty = EnvironmentSnapshot {
+            git_status: "M src/main.rs".to_string(),
+            open_issues: Vec::new(),
+            recent_commits: Vec::new(),
+        };
+        let env_clean = EnvironmentSnapshot::default();
+        let prio_dirty = orient(&make_observation(env_dirty), &board).unwrap();
+        let prio_clean = orient(&make_observation(env_clean), &board).unwrap();
+        assert!(prio_dirty[0].urgency > prio_clean[0].urgency);
+        assert!(prio_dirty[0].reason.contains("dirty"));
+    }
+
+    #[test]
+    fn orient_adds_memory_consolidation_when_episodic_exceeds_100() {
+        let goals = vec![ActiveGoal {
+            id: "g1".to_string(),
+            description: "Goal".to_string(),
+            priority: 1,
+            status: GoalProgress::NotStarted,
+            assigned_to: None,
+        }];
+        let board = make_board_with_goals(goals);
+        let obs = Observation {
+            goal_statuses: Vec::new(),
+            gym_health: None,
+            memory_stats: CognitiveStatistics {
+                episodic_count: 101,
+                ..Default::default()
+            },
+            pending_improvements: Vec::new(),
+            environment: EnvironmentSnapshot::default(),
+        };
+        let priorities = orient(&obs, &board).unwrap();
+        assert!(
+            priorities.iter().any(|p| p.goal_id == "__memory__"),
+            "should add memory consolidation priority"
+        );
+    }
+
+    #[test]
+    fn orient_no_memory_consolidation_when_episodic_at_100() {
+        let board = make_board_with_goals(vec![]);
+        let obs = Observation {
+            goal_statuses: Vec::new(),
+            gym_health: None,
+            memory_stats: CognitiveStatistics {
+                episodic_count: 100,
+                ..Default::default()
+            },
+            pending_improvements: Vec::new(),
+            environment: EnvironmentSnapshot::default(),
+        };
+        let priorities = orient(&obs, &board).unwrap();
+        assert!(
+            !priorities.iter().any(|p| p.goal_id == "__memory__"),
+            "should not add memory priority at exactly 100"
+        );
+    }
+
+    #[test]
+    fn orient_adds_improvement_priority_when_gym_below_70() {
+        let board = make_board_with_goals(vec![]);
+        let obs = Observation {
+            goal_statuses: Vec::new(),
+            gym_health: Some(make_gym_score(0.5, 0.6)),
+            memory_stats: CognitiveStatistics::default(),
+            pending_improvements: Vec::new(),
+            environment: EnvironmentSnapshot::default(),
+        };
+        let priorities = orient(&obs, &board).unwrap();
+        assert!(
+            priorities.iter().any(|p| p.goal_id == "__improvement__"),
+            "should add improvement priority when gym < 70%"
+        );
+    }
+
+    #[test]
+    fn orient_no_improvement_priority_when_gym_above_70() {
+        let board = make_board_with_goals(vec![]);
+        let obs = Observation {
+            goal_statuses: Vec::new(),
+            gym_health: Some(make_gym_score(0.8, 0.9)),
+            memory_stats: CognitiveStatistics::default(),
+            pending_improvements: Vec::new(),
+            environment: EnvironmentSnapshot::default(),
+        };
+        let priorities = orient(&obs, &board).unwrap();
+        assert!(
+            !priorities.iter().any(|p| p.goal_id == "__improvement__"),
+            "should not add improvement priority when gym >= 70%"
+        );
+    }
+
+    #[test]
+    fn orient_priorities_sorted_by_urgency_descending() {
+        let goals = vec![
+            ActiveGoal {
+                id: "low".to_string(),
+                description: "Low".to_string(),
+                priority: 1,
+                status: GoalProgress::Completed,
+                assigned_to: None,
+            },
+            ActiveGoal {
+                id: "high".to_string(),
+                description: "High".to_string(),
+                priority: 1,
+                status: GoalProgress::Blocked("x".to_string()),
+                assigned_to: None,
+            },
+            ActiveGoal {
+                id: "mid".to_string(),
+                description: "Mid".to_string(),
+                priority: 1,
+                status: GoalProgress::NotStarted,
+                assigned_to: None,
+            },
+        ];
+        let board = make_board_with_goals(goals);
+        let obs = make_observation(EnvironmentSnapshot::default());
+        let priorities = orient(&obs, &board).unwrap();
+        for i in 0..priorities.len() - 1 {
+            assert!(priorities[i].urgency >= priorities[i + 1].urgency);
+        }
+    }
+
+    // --- decide ---
+
+    #[test]
+    fn decide_respects_max_concurrent_actions() {
+        let priorities = vec![
+            Priority {
+                goal_id: "g1".to_string(),
+                urgency: 0.9,
+                reason: "a".to_string(),
+            },
+            Priority {
+                goal_id: "g2".to_string(),
+                urgency: 0.8,
+                reason: "b".to_string(),
+            },
+            Priority {
+                goal_id: "g3".to_string(),
+                urgency: 0.7,
+                reason: "c".to_string(),
+            },
+            Priority {
+                goal_id: "g4".to_string(),
+                urgency: 0.6,
+                reason: "d".to_string(),
+            },
+        ];
+        let config = OodaConfig {
+            max_concurrent_actions: 2,
+            ..Default::default()
+        };
+        let actions = decide(&priorities, &config).unwrap();
+        assert_eq!(actions.len(), 2);
+    }
+
+    #[test]
+    fn decide_skips_zero_urgency_priorities() {
+        let priorities = vec![
+            Priority {
+                goal_id: "g1".to_string(),
+                urgency: 0.5,
+                reason: "a".to_string(),
+            },
+            Priority {
+                goal_id: "g2".to_string(),
+                urgency: 0.0,
+                reason: "done".to_string(),
+            },
+        ];
+        let config = OodaConfig::default();
+        let actions = decide(&priorities, &config).unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].goal_id, Some("g1".to_string()));
+    }
+
+    #[test]
+    fn decide_maps_memory_priority_to_consolidate_action() {
+        let priorities = vec![Priority {
+            goal_id: "__memory__".to_string(),
+            urgency: 0.5,
+            reason: "too many memories".to_string(),
+        }];
+        let config = OodaConfig::default();
+        let actions = decide(&priorities, &config).unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, ActionKind::ConsolidateMemory);
+        assert!(actions[0].goal_id.is_none());
+    }
+
+    #[test]
+    fn decide_maps_improvement_priority_to_run_improvement() {
+        let priorities = vec![Priority {
+            goal_id: "__improvement__".to_string(),
+            urgency: 0.7,
+            reason: "gym below target".to_string(),
+        }];
+        let config = OodaConfig::default();
+        let actions = decide(&priorities, &config).unwrap();
+        assert_eq!(actions[0].kind, ActionKind::RunImprovement);
+        assert!(actions[0].goal_id.is_none());
+    }
+
+    #[test]
+    fn decide_maps_regular_goal_to_advance_goal() {
+        let priorities = vec![Priority {
+            goal_id: "ship-v1".to_string(),
+            urgency: 0.9,
+            reason: "high priority".to_string(),
+        }];
+        let config = OodaConfig::default();
+        let actions = decide(&priorities, &config).unwrap();
+        assert_eq!(actions[0].kind, ActionKind::AdvanceGoal);
+        assert_eq!(actions[0].goal_id, Some("ship-v1".to_string()));
+    }
+
+    #[test]
+    fn decide_empty_priorities_returns_empty() {
+        let config = OodaConfig::default();
+        let actions = decide(&[], &config).unwrap();
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn decide_preserves_reason_as_description() {
+        let priorities = vec![Priority {
+            goal_id: "g1".to_string(),
+            urgency: 0.5,
+            reason: "important task".to_string(),
+        }];
+        let config = OodaConfig::default();
+        let actions = decide(&priorities, &config).unwrap();
+        assert_eq!(actions[0].description, "important task");
+    }
+
+    // --- review_outcomes ---
+
+    #[test]
+    fn review_outcomes_generates_fix_for_failed_action() {
+        let outcomes = vec![ActionOutcome {
+            action: PlannedAction {
+                kind: ActionKind::AdvanceGoal,
+                goal_id: Some("g1".to_string()),
+                description: "advance g1".to_string(),
+            },
+            success: false,
+            detail: "timeout during execution".to_string(),
+        }];
+        let proposals = review_outcomes(&outcomes, std::time::Duration::from_secs(5));
+        assert_eq!(proposals.len(), 1);
+        assert!(proposals[0].title.contains("Fix failed"));
+        assert_eq!(proposals[0].priority, 2);
+        assert_eq!(proposals[0].status, GoalStatus::Proposed);
+    }
+
+    #[test]
+    fn review_outcomes_generates_quality_for_warning() {
+        let outcomes = vec![ActionOutcome {
+            action: PlannedAction {
+                kind: ActionKind::RunImprovement,
+                goal_id: None,
+                description: "run improvement".to_string(),
+            },
+            success: true,
+            detail: "completed with warning: unstable test".to_string(),
+        }];
+        let proposals = review_outcomes(&outcomes, std::time::Duration::from_secs(5));
+        assert_eq!(proposals.len(), 1);
+        assert!(proposals[0].title.contains("Improve quality"));
+        assert_eq!(proposals[0].priority, 3);
+    }
+
+    #[test]
+    fn review_outcomes_generates_quality_for_partial() {
+        let outcomes = vec![ActionOutcome {
+            action: PlannedAction {
+                kind: ActionKind::AdvanceGoal,
+                goal_id: Some("g1".to_string()),
+                description: "partial work".to_string(),
+            },
+            success: true,
+            detail: "partial success: only 2 of 5 steps completed".to_string(),
+        }];
+        let proposals = review_outcomes(&outcomes, std::time::Duration::from_secs(5));
+        assert_eq!(proposals.len(), 1);
+        assert!(proposals[0].title.contains("quality"));
+    }
+
+    #[test]
+    fn review_outcomes_generates_quality_for_degraded() {
+        let outcomes = vec![ActionOutcome {
+            action: PlannedAction {
+                kind: ActionKind::ConsolidateMemory,
+                goal_id: None,
+                description: "memory work".to_string(),
+            },
+            success: true,
+            detail: "degraded performance observed".to_string(),
+        }];
+        let proposals = review_outcomes(&outcomes, std::time::Duration::from_secs(5));
+        assert_eq!(proposals.len(), 1);
+    }
+
+    #[test]
+    fn review_outcomes_generates_optimization_for_slow_phase() {
+        let outcomes = vec![ActionOutcome {
+            action: PlannedAction {
+                kind: ActionKind::AdvanceGoal,
+                goal_id: Some("g1".to_string()),
+                description: "normal".to_string(),
+            },
+            success: true,
+            detail: "done".to_string(),
+        }];
+        let proposals = review_outcomes(&outcomes, std::time::Duration::from_secs(120));
+        assert_eq!(proposals.len(), 1);
+        assert!(proposals[0].title.contains("Optimize slow"));
+    }
+
+    #[test]
+    fn review_outcomes_no_proposals_for_clean_fast_success() {
+        let outcomes = vec![ActionOutcome {
+            action: PlannedAction {
+                kind: ActionKind::AdvanceGoal,
+                goal_id: Some("g1".to_string()),
+                description: "advance".to_string(),
+            },
+            success: true,
+            detail: "completed successfully".to_string(),
+        }];
+        let proposals = review_outcomes(&outcomes, std::time::Duration::from_secs(10));
+        assert!(proposals.is_empty());
+    }
+
+    #[test]
+    fn review_outcomes_empty_outcomes() {
+        let proposals = review_outcomes(&[], std::time::Duration::from_secs(5));
+        assert!(proposals.is_empty());
+    }
+
+    // --- summarize_cycle_report ---
+
+    #[test]
+    fn summarize_cycle_report_format() {
+        let report = CycleReport {
+            cycle_number: 1,
+            observation: Observation {
+                goal_statuses: vec![GoalSnapshot {
+                    id: "g1".to_string(),
+                    description: "Goal 1".to_string(),
+                    progress: GoalProgress::NotStarted,
+                }],
+                gym_health: None,
+                memory_stats: CognitiveStatistics::default(),
+                pending_improvements: Vec::new(),
+                environment: EnvironmentSnapshot::default(),
+            },
+            priorities: vec![Priority {
+                goal_id: "g1".to_string(),
+                urgency: 0.8,
+                reason: "not started".to_string(),
+            }],
+            planned_actions: vec![PlannedAction {
+                kind: ActionKind::AdvanceGoal,
+                goal_id: Some("g1".to_string()),
+                description: "advance g1".to_string(),
+            }],
+            outcomes: vec![ActionOutcome {
+                action: PlannedAction {
+                    kind: ActionKind::AdvanceGoal,
+                    goal_id: Some("g1".to_string()),
+                    description: "advance g1".to_string(),
+                },
+                success: true,
+                detail: "done".to_string(),
+            }],
+        };
+        let summary = summarize_cycle_report(&report);
+        assert!(summary.contains("cycle #1"));
+        assert!(summary.contains("1 priorities"));
+        assert!(summary.contains("1/1 succeeded"));
+        assert!(summary.contains("goals=1"));
+        assert!(summary.contains("tree=clean"));
+    }
+
+    #[test]
+    fn summarize_cycle_report_dirty_tree() {
+        let report = CycleReport {
+            cycle_number: 2,
+            observation: Observation {
+                goal_statuses: Vec::new(),
+                gym_health: None,
+                memory_stats: CognitiveStatistics::default(),
+                pending_improvements: Vec::new(),
+                environment: EnvironmentSnapshot {
+                    git_status: "M file.rs".to_string(),
+                    open_issues: vec!["issue 1".to_string()],
+                    recent_commits: Vec::new(),
+                },
+            },
+            priorities: Vec::new(),
+            planned_actions: Vec::new(),
+            outcomes: Vec::new(),
+        };
+        let summary = summarize_cycle_report(&report);
+        assert!(summary.contains("tree=dirty"));
+        assert!(summary.contains("issues=1"));
+    }
+
+    #[test]
+    fn summarize_cycle_report_mixed_outcomes() {
+        let report = CycleReport {
+            cycle_number: 3,
+            observation: Observation {
+                goal_statuses: Vec::new(),
+                gym_health: None,
+                memory_stats: CognitiveStatistics::default(),
+                pending_improvements: Vec::new(),
+                environment: EnvironmentSnapshot::default(),
+            },
+            priorities: Vec::new(),
+            planned_actions: Vec::new(),
+            outcomes: vec![
+                ActionOutcome {
+                    action: PlannedAction {
+                        kind: ActionKind::AdvanceGoal,
+                        goal_id: None,
+                        description: "a".to_string(),
+                    },
+                    success: true,
+                    detail: "ok".to_string(),
+                },
+                ActionOutcome {
+                    action: PlannedAction {
+                        kind: ActionKind::RunImprovement,
+                        goal_id: None,
+                        description: "b".to_string(),
+                    },
+                    success: false,
+                    detail: "fail".to_string(),
+                },
+            ],
+        };
+        let summary = summarize_cycle_report(&report);
+        assert!(summary.contains("1/2 succeeded"));
+    }
+
+    // --- promote_from_backlog ---
+
+    #[test]
+    fn promote_from_backlog_fills_slots() {
+        use crate::goal_curation::BacklogItem;
+        let mut board = GoalBoard::new();
+        board.backlog.push(BacklogItem {
+            id: "item-1".to_string(),
+            description: "First".to_string(),
+            source: "test".to_string(),
+            score: 0.9,
+        });
+        board.backlog.push(BacklogItem {
+            id: "item-2".to_string(),
+            description: "Second".to_string(),
+            source: "test".to_string(),
+            score: 0.5,
+        });
+        promote_from_backlog(&mut board);
+        assert!(board.active.len() <= crate::goal_curation::MAX_ACTIVE_GOALS);
+        assert!(!board.active.is_empty());
+    }
+
+    #[test]
+    fn promote_from_backlog_does_nothing_when_at_capacity() {
+        use crate::goal_curation::BacklogItem;
+        let mut board = GoalBoard::new();
+        for i in 0..crate::goal_curation::MAX_ACTIVE_GOALS {
+            board.active.push(ActiveGoal {
+                id: format!("g-{i}"),
+                description: format!("Goal {i}"),
+                priority: 1,
+                status: GoalProgress::NotStarted,
+                assigned_to: None,
+            });
+        }
+        board.backlog.push(BacklogItem {
+            id: "overflow".to_string(),
+            description: "Overflow".to_string(),
+            source: "test".to_string(),
+            score: 0.9,
+        });
+        promote_from_backlog(&mut board);
+        assert_eq!(board.active.len(), crate::goal_curation::MAX_ACTIVE_GOALS);
+        assert_eq!(board.backlog.len(), 1, "backlog item should remain");
+    }
+
+    #[test]
+    fn promote_from_backlog_empty_backlog() {
+        let mut board = GoalBoard::new();
+        promote_from_backlog(&mut board);
+        assert!(board.active.is_empty());
+    }
+
+    // --- collect_pending_improvements drains review_improvements ---
+
+    #[test]
+    fn collect_pending_improvements_drains_review_improvements() {
+        let dir = TempDir::new().unwrap();
+        unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", dir.path()) };
+
+        let mut state = OodaState::new(GoalBoard::new());
+        state.review_improvements.push(ImprovementCycle {
+            baseline: make_gym_score(0.8, 0.9),
+            proposed_changes: Vec::new(),
+            post_score: None,
+            regressions: Vec::new(),
+            decision: None,
+            final_phase: ImprovementPhase::Eval,
+        });
+        let result = collect_pending_improvements(&mut state, &None);
+        assert!(
+            result
+                .iter()
+                .any(|c| c.final_phase == ImprovementPhase::Eval),
+            "should include drained review improvement"
+        );
+        assert!(
+            state.review_improvements.is_empty(),
+            "review improvements should be drained"
+        );
+
+        unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR") };
+    }
+
+    // --- Observation / PlannedAction / CycleReport: struct construction ---
+
+    #[test]
+    fn planned_action_construction() {
+        let action = PlannedAction {
+            kind: ActionKind::BuildSkill,
+            goal_id: Some("skill-1".to_string()),
+            description: "Build skill".to_string(),
+        };
+        assert_eq!(action.kind, ActionKind::BuildSkill);
+        assert_eq!(action.goal_id.unwrap(), "skill-1");
+    }
+
+    #[test]
+    fn action_outcome_construction() {
+        let outcome = ActionOutcome {
+            action: PlannedAction {
+                kind: ActionKind::LaunchSession,
+                goal_id: None,
+                description: "launch".to_string(),
+            },
+            success: true,
+            detail: "session launched".to_string(),
+        };
+        assert!(outcome.success);
+        assert_eq!(outcome.detail, "session launched");
+    }
 }

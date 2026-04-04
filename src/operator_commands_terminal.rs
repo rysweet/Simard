@@ -869,4 +869,155 @@ mod tests {
         .unwrap();
         view.print();
     }
+
+    // --- TerminalReadView::from_handoff additional edge cases ---
+
+    #[test]
+    fn from_handoff_multiple_steps_are_ordered() {
+        let mut evidence = required_evidence_records();
+        evidence.push(make_evidence("terminal-step-1=first"));
+        evidence.push(make_evidence("terminal-step-2=second"));
+        evidence.push(make_evidence("terminal-step-3=third"));
+
+        let handoff = make_handoff(Some(make_session_record()), evidence);
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test"),
+            handoff,
+            "h.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(view.step_count, 3);
+        assert_eq!(view.steps.len(), 3);
+    }
+
+    #[test]
+    fn from_handoff_multiple_checkpoints() {
+        let mut evidence = required_evidence_records();
+        evidence.push(make_evidence("terminal-checkpoint-1=cp1"));
+        evidence.push(make_evidence("terminal-checkpoint-2=cp2"));
+
+        let handoff = make_handoff(Some(make_session_record()), evidence);
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test"),
+            handoff,
+            "h.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(view.checkpoints.len(), 2);
+    }
+
+    #[test]
+    fn from_handoff_no_continuity_source() {
+        let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test"),
+            handoff,
+            "h.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert!(view.continuity_source.is_none());
+    }
+
+    #[test]
+    fn from_handoff_selected_base_type_string() {
+        let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test"),
+            handoff,
+            "h.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(view.selected_base_type, "terminal-shell");
+    }
+
+    #[test]
+    fn from_handoff_topology_string() {
+        let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test"),
+            handoff,
+            "h.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(view.topology, "single-process");
+    }
+
+    #[test]
+    fn from_handoff_no_copilot_audit_by_default() {
+        let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test"),
+            handoff,
+            "h.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert!(view.copilot_submit_audit.is_none());
+    }
+
+    // --- print_terminal_run with empty capabilities ---
+
+    #[test]
+    fn print_terminal_run_empty_capabilities_does_not_panic() {
+        let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test"),
+            handoff,
+            "h.json".to_string(),
+            None,
+        )
+        .unwrap();
+        view.print_terminal_run(&[], "summary", "reflection");
+    }
+
+    // --- print_terminal_run with many capabilities ---
+
+    #[test]
+    fn print_terminal_run_multiple_capabilities() {
+        let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test"),
+            handoff,
+            "h.json".to_string(),
+            Some("explicit".to_string()),
+        )
+        .unwrap();
+        view.print_terminal_run(
+            &["cap-a".into(), "cap-b".into(), "cap-c".into()],
+            "exec done",
+            "reflect done",
+        );
+    }
+
+    // --- run_terminal_read_probe error paths ---
+
+    #[test]
+    fn terminal_read_probe_errors_with_nonexistent_state_root() {
+        let result = run_terminal_read_probe(
+            "single-process",
+            Some(PathBuf::from("/nonexistent/path/12345")),
+        );
+        assert!(result.is_err(), "should fail for missing state root");
+    }
+
+    // --- run_terminal_recipe_list_probe ---
+
+    #[test]
+    fn terminal_recipe_list_does_not_panic() {
+        // May succeed or fail depending on prompt asset availability, but should not panic
+        let _ = run_terminal_recipe_list_probe();
+    }
+
+    // --- run_terminal_recipe_show_probe ---
+
+    #[test]
+    fn terminal_recipe_show_errors_for_nonexistent() {
+        let result = run_terminal_recipe_show_probe("nonexistent-recipe-xyz-99999");
+        assert!(result.is_err(), "should fail for unknown recipe");
+    }
 }

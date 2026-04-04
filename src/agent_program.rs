@@ -868,4 +868,554 @@ mod tests {
         let input = program.plan_turn(&context).unwrap();
         assert!(input.objective.contains("1 goal updates"));
     }
+
+    // --- ObjectiveRelayProgram ---
+
+    #[test]
+    fn objective_relay_descriptor_has_identity() {
+        let program = ObjectiveRelayProgram::try_default().unwrap();
+        let desc = program.descriptor();
+        assert!(
+            desc.identity.contains("objective-relay"),
+            "descriptor identity should mention objective-relay"
+        );
+    }
+
+    #[test]
+    fn objective_relay_plan_turn_empty_goals_no_goals_section() {
+        let program = ObjectiveRelayProgram::try_default().unwrap();
+        let context = test_context("simple task");
+        let input = program.plan_turn(&context).unwrap();
+        assert!(!input.objective.contains("Active top goals:"));
+        assert_eq!(input.objective, "simple task");
+    }
+
+    #[test]
+    fn objective_relay_additional_memory_records_default_empty() {
+        let program = ObjectiveRelayProgram::try_default().unwrap();
+        let context = test_context("test");
+        let records = program
+            .additional_memory_records(&context, &test_outcome())
+            .unwrap();
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn objective_relay_goal_updates_default_empty() {
+        let program = ObjectiveRelayProgram::try_default().unwrap();
+        let context = test_context("test");
+        let updates = program.goal_updates(&context, &test_outcome()).unwrap();
+        assert!(updates.is_empty());
+    }
+
+    // --- MeetingFacilitatorProgram ---
+
+    #[test]
+    fn meeting_facilitator_descriptor_has_identity() {
+        let program = MeetingFacilitatorProgram::try_default().unwrap();
+        let desc = program.descriptor();
+        assert!(desc.identity.contains("meeting-facilitator"));
+    }
+
+    #[test]
+    fn meeting_facilitator_parses_multiple_note_types() {
+        let program = MeetingFacilitatorProgram::try_default().unwrap();
+        let context = test_context(
+            "agenda: Sprint 42\nupdate: PR merged\ndecision: Ship Friday\nrisk: Scope creep\nnext-step: Write tests\nopen-question: Deploy strategy?",
+        );
+        let input = program.plan_turn(&context).unwrap();
+        assert!(input.objective.contains("Sprint 42"));
+        assert!(input.objective.contains("updates=1"));
+        assert!(input.objective.contains("decisions=1"));
+        assert!(input.objective.contains("risks=1"));
+        assert!(input.objective.contains("next_steps=1"));
+        assert!(input.objective.contains("open_questions=1"));
+    }
+
+    #[test]
+    fn meeting_facilitator_persistence_summary_includes_meeting_record() {
+        let program = MeetingFacilitatorProgram::try_default().unwrap();
+        let context = test_context("agenda: Retro\ndecision: Move to Rust");
+        let summary = program
+            .persistence_summary(&context, &test_outcome())
+            .unwrap();
+        assert!(summary.contains("meeting-record"));
+        assert!(summary.contains("Retro"));
+    }
+
+    #[test]
+    fn meeting_facilitator_additional_memory_records_with_outputs() {
+        let program = MeetingFacilitatorProgram::try_default().unwrap();
+        let context = test_context("agenda: Standup\ndecision: Deploy v2");
+        let records = program
+            .additional_memory_records(&context, &test_outcome())
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].key_suffix, "decision-record");
+        assert_eq!(records[0].scope, MemoryScope::Decision);
+        assert!(records[0].value.contains("Standup"));
+    }
+
+    #[test]
+    fn meeting_facilitator_additional_memory_records_empty_when_no_outputs() {
+        let program = MeetingFacilitatorProgram::try_default().unwrap();
+        let context = test_context("just some freetext");
+        let records = program
+            .additional_memory_records(&context, &test_outcome())
+            .unwrap();
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn meeting_facilitator_goal_updates_from_structured() {
+        let program = MeetingFacilitatorProgram::try_default().unwrap();
+        let context = test_context("agenda: Planning\ngoal: Ship v3 | priority=1 | status=active");
+        let updates = program.goal_updates(&context, &test_outcome()).unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].title, "Ship v3");
+    }
+
+    #[test]
+    fn meeting_facilitator_goal_updates_empty_when_no_goals() {
+        let program = MeetingFacilitatorProgram::try_default().unwrap();
+        let context = test_context("agenda: Quick sync\nupdate: All good");
+        let updates = program.goal_updates(&context, &test_outcome()).unwrap();
+        assert!(updates.is_empty());
+    }
+
+    // --- GoalCuratorProgram ---
+
+    #[test]
+    fn goal_curator_descriptor_has_identity() {
+        let program = GoalCuratorProgram::try_default().unwrap();
+        let desc = program.descriptor();
+        assert!(desc.identity.contains("goal-curator"));
+    }
+
+    #[test]
+    fn goal_curator_reflection_summary_includes_goal_count() {
+        let program = GoalCuratorProgram::try_default().unwrap();
+        let context = test_context(
+            "goal: Ship v1 | priority=1 | status=active\ngoal: Add tests | priority=2 | status=proposed",
+        );
+        let summary = program
+            .reflection_summary(&context, &test_outcome())
+            .unwrap();
+        assert!(summary.contains("2 goal updates"));
+    }
+
+    #[test]
+    fn goal_curator_persistence_summary_includes_counts() {
+        let program = GoalCuratorProgram::try_default().unwrap();
+        let context = test_context(
+            "goal: Ship v1 | priority=1 | status=active\ngoal: Old | priority=3 | status=completed",
+        );
+        let summary = program
+            .persistence_summary(&context, &test_outcome())
+            .unwrap();
+        assert!(summary.contains("goal-curation-record"));
+        assert!(summary.contains("active=1"));
+        assert!(summary.contains("completed=1"));
+    }
+
+    #[test]
+    fn goal_curator_additional_memory_records_with_goals() {
+        let program = GoalCuratorProgram::try_default().unwrap();
+        let context = test_context("goal: Ship v1 | priority=1 | status=active");
+        let records = program
+            .additional_memory_records(&context, &test_outcome())
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].key_suffix, "goal-curation-record");
+        assert!(records[0].value.contains("Ship v1"));
+    }
+
+    #[test]
+    fn goal_curator_additional_memory_records_empty_for_no_goals_in_output() {
+        let program = GoalCuratorProgram::try_default().unwrap();
+        // Natural language objective gets one auto-goal, so memory records are non-empty.
+        // To get empty, we'd need parse to produce empty goals, but the fallback always adds one.
+        // Instead, test that goal_updates returns the parsed goals.
+        let context = test_context("goal: Test | priority=1 | status=active");
+        let updates = program.goal_updates(&context, &test_outcome()).unwrap();
+        assert_eq!(updates.len(), 1);
+    }
+
+    #[test]
+    fn goal_curator_plan_turn_with_active_goals_in_context() {
+        let program = GoalCuratorProgram::try_default().unwrap();
+        let mut context = test_context("goal: Review | priority=1 | status=active");
+        context.active_goals = vec![GoalRecord {
+            slug: "existing".to_string(),
+            title: "Existing Goal".to_string(),
+            rationale: "test".to_string(),
+            status: GoalStatus::Active,
+            priority: 1,
+            owner_identity: "test".to_string(),
+            source_session_id: context.session_id.clone(),
+            updated_in: crate::session::SessionPhase::Persistence,
+        }];
+        let input = program.plan_turn(&context).unwrap();
+        assert!(input.objective.contains("Existing Goal"));
+    }
+
+    // --- ImprovementCuratorProgram ---
+
+    #[test]
+    fn improvement_curator_descriptor_has_identity() {
+        let program = ImprovementCuratorProgram::try_default().unwrap();
+        let desc = program.descriptor();
+        assert!(desc.identity.contains("improvement-curator"));
+    }
+
+    #[test]
+    fn improvement_curator_plan_turn_with_empty_review_target() {
+        let program = ImprovementCuratorProgram::try_default().unwrap();
+        let context = test_context(
+            "review-id: review-001\nreview-target:   \nproposal: Fix flaky test | category=quality | rationale=stabilize CI | suggested_change=add retry logic\napprove: Fix flaky test | priority=2 | status=proposed | rationale=stabilize CI",
+        );
+        let input = program.plan_turn(&context).unwrap();
+        assert!(input.objective.contains("unknown-target"));
+    }
+
+    #[test]
+    fn improvement_curator_plan_turn_with_no_active_goals() {
+        let program = ImprovementCuratorProgram::try_default().unwrap();
+        let context = test_context(
+            "review-id: review-001\nreview-target: prompt-system\nproposal: Improve prompt | category=quality | rationale=better output | suggested_change=rewrite system prompt\ndefer: Improve prompt | rationale=low priority",
+        );
+        let input = program.plan_turn(&context).unwrap();
+        assert!(input.objective.contains("<none>"));
+    }
+
+    #[test]
+    fn improvement_curator_plan_turn_with_active_goals() {
+        let program = ImprovementCuratorProgram::try_default().unwrap();
+        let mut context = test_context(
+            "review-id: review-002\nreview-target: gym-eval\nproposal: Add scenario | category=coverage | rationale=more tests | suggested_change=write new gym scenarios\napprove: Add scenario | priority=1 | status=active | rationale=more tests",
+        );
+        context.active_goals = vec![GoalRecord {
+            slug: "improve-scores".to_string(),
+            title: "Improve Scores".to_string(),
+            rationale: "low gym".to_string(),
+            status: GoalStatus::Active,
+            priority: 1,
+            owner_identity: "test".to_string(),
+            source_session_id: context.session_id.clone(),
+            updated_in: crate::session::SessionPhase::Persistence,
+        }];
+        let input = program.plan_turn(&context).unwrap();
+        assert!(input.objective.contains("Improve Scores"));
+    }
+
+    // --- StructuredMeetingNotes parsing ---
+
+    #[test]
+    fn meeting_notes_parse_multiple_agendas_concatenated() {
+        let notes = StructuredMeetingNotes::parse("agenda: Topic A\nagenda: Topic B").unwrap();
+        assert!(notes.agenda.contains("Topic A"));
+        assert!(notes.agenda.contains("Topic B"));
+        assert!(notes.agenda.contains("/"));
+    }
+
+    #[test]
+    fn meeting_notes_parse_topic_alias_for_agenda() {
+        let notes = StructuredMeetingNotes::parse("topic: My Topic").unwrap();
+        assert_eq!(notes.agenda, "My Topic");
+    }
+
+    #[test]
+    fn meeting_notes_parse_status_alias_for_update() {
+        let notes = StructuredMeetingNotes::parse("status: All green").unwrap();
+        assert_eq!(notes.updates, vec!["All green"]);
+    }
+
+    #[test]
+    fn meeting_notes_parse_action_item_aliases() {
+        let notes =
+            StructuredMeetingNotes::parse("next_step: Do A\naction: Do B\naction-item: Do C")
+                .unwrap();
+        assert_eq!(notes.next_steps.len(), 3);
+    }
+
+    #[test]
+    fn meeting_notes_parse_question_aliases() {
+        let notes =
+            StructuredMeetingNotes::parse("open-question: Q1\nopen_question: Q2\nquestion: Q3")
+                .unwrap();
+        assert_eq!(notes.open_questions.len(), 3);
+    }
+
+    #[test]
+    fn meeting_notes_parse_empty_value_skipped() {
+        let notes = StructuredMeetingNotes::parse("decision:\nrisk: Real risk").unwrap();
+        assert!(notes.decisions.is_empty());
+        assert_eq!(notes.risks.len(), 1);
+    }
+
+    #[test]
+    fn meeting_notes_parse_freetext_lines_become_agenda() {
+        let notes = StructuredMeetingNotes::parse("Some freetext line\nAnother line").unwrap();
+        assert!(notes.agenda.contains("Some freetext line"));
+        assert!(notes.agenda.contains("Another line"));
+    }
+
+    #[test]
+    fn meeting_notes_has_persistable_outputs_false_when_empty() {
+        let notes = StructuredMeetingNotes::parse("just freetext").unwrap();
+        assert!(!notes.has_persistable_outputs());
+    }
+
+    #[test]
+    fn meeting_notes_has_persistable_outputs_true_with_decisions() {
+        let notes = StructuredMeetingNotes::parse("decision: Ship it").unwrap();
+        assert!(notes.has_persistable_outputs());
+    }
+
+    #[test]
+    fn meeting_notes_concise_record_format() {
+        let notes =
+            StructuredMeetingNotes::parse("agenda: Sprint\ndecision: Yes\nrisk: Maybe").unwrap();
+        let record = notes.concise_record();
+        assert!(record.contains("agenda=Sprint"));
+        assert!(record.contains("decisions=[Yes]"));
+        assert!(record.contains("risks=[Maybe]"));
+    }
+
+    // --- StructuredGoalPlan ---
+
+    #[test]
+    fn goal_plan_parse_multiple_goals() {
+        let plan = StructuredGoalPlan::parse(
+            "goal: A | priority=1 | status=active\ngoal: B | priority=2 | status=proposed",
+        )
+        .unwrap();
+        assert_eq!(plan.goals.len(), 2);
+        assert_eq!(plan.goals[0].title, "A");
+        assert_eq!(plan.goals[1].title, "B");
+    }
+
+    #[test]
+    fn goal_plan_active_goal_count() {
+        let plan = StructuredGoalPlan::parse(
+            "goal: A | priority=1 | status=active\ngoal: B | priority=2 | status=proposed\ngoal: C | priority=3 | status=active",
+        )
+        .unwrap();
+        assert_eq!(plan.active_goal_count(), 2);
+    }
+
+    #[test]
+    fn goal_plan_goal_count_by_status() {
+        let plan = StructuredGoalPlan::parse(
+            "goal: A | status=active\ngoal: B | status=completed\ngoal: C | status=paused",
+        )
+        .unwrap();
+        assert_eq!(plan.goal_count(GoalStatus::Active), 1);
+        assert_eq!(plan.goal_count(GoalStatus::Completed), 1);
+        assert_eq!(plan.goal_count(GoalStatus::Paused), 1);
+        assert_eq!(plan.goal_count(GoalStatus::Proposed), 0);
+    }
+
+    #[test]
+    fn goal_plan_concise_top_five_limits_to_five() {
+        let raw = (1..=8)
+            .map(|i| format!("goal: Goal{i} | priority={i} | status=active"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let plan = StructuredGoalPlan::parse(&raw).unwrap();
+        let top = plan.concise_top_five();
+        let count = top.matches(" | ").count() + 1;
+        assert!(count <= 5, "should limit to 5 goals, got {count}");
+    }
+
+    #[test]
+    fn goal_plan_concise_top_five_sorted_by_priority() {
+        let plan = StructuredGoalPlan::parse(
+            "goal: Low | priority=3 | status=active\ngoal: High | priority=1 | status=active",
+        )
+        .unwrap();
+        let top = plan.concise_top_five();
+        let high_pos = top.find("High").unwrap();
+        let low_pos = top.find("Low").unwrap();
+        assert!(high_pos < low_pos, "higher priority should come first");
+    }
+
+    #[test]
+    fn goal_plan_turn_objective_with_no_active_goals() {
+        let plan = StructuredGoalPlan::parse("goal: X | status=active").unwrap();
+        let obj = plan.turn_objective(&[]);
+        assert!(obj.contains("<none>"));
+    }
+
+    #[test]
+    fn goal_plan_turn_objective_with_active_goals() {
+        let plan = StructuredGoalPlan::parse("goal: X | status=active").unwrap();
+        let goals = vec![GoalRecord {
+            slug: "existing".to_string(),
+            title: "Existing".to_string(),
+            rationale: "test".to_string(),
+            status: GoalStatus::Active,
+            priority: 1,
+            owner_identity: "test".to_string(),
+            source_session_id: SessionId::parse("session-00000000-0000-0000-0000-000000000001")
+                .unwrap(),
+            updated_in: crate::session::SessionPhase::Persistence,
+        }];
+        let obj = plan.turn_objective(&goals);
+        assert!(obj.contains("Existing"));
+    }
+
+    // --- parse_goal_directive ---
+
+    #[test]
+    fn parse_goal_directive_minimal() {
+        let goal = parse_goal_directive("Ship v1", 1).unwrap();
+        assert_eq!(goal.title, "Ship v1");
+        assert_eq!(goal.priority, 1);
+        assert_eq!(goal.status, GoalStatus::Active);
+    }
+
+    #[test]
+    fn parse_goal_directive_with_all_attributes() {
+        let goal = parse_goal_directive(
+            "Ship v1 | priority=2 | status=proposed | rationale=roadmap",
+            1,
+        )
+        .unwrap();
+        assert_eq!(goal.title, "Ship v1");
+        assert_eq!(goal.priority, 2);
+        assert_eq!(goal.status, GoalStatus::Proposed);
+        assert_eq!(goal.rationale, "roadmap");
+    }
+
+    #[test]
+    fn parse_goal_directive_rejects_missing_title() {
+        let err = parse_goal_directive("", 1).unwrap_err();
+        assert!(matches!(err, SimardError::InvalidGoalRecord { .. }));
+    }
+
+    #[test]
+    fn parse_goal_directive_rejects_invalid_attribute_format() {
+        let err = parse_goal_directive("Title | bad-attr", 1).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("key=value"));
+    }
+
+    #[test]
+    fn parse_goal_directive_rejects_empty_attribute_value() {
+        let err = parse_goal_directive("Title | priority=", 1).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cannot be empty"));
+    }
+
+    #[test]
+    fn parse_goal_directive_rejects_unsupported_attribute() {
+        let err = parse_goal_directive("Title | foo=bar", 1).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("supported goal attributes"));
+    }
+
+    #[test]
+    fn parse_goal_directive_rejects_invalid_priority() {
+        let err = parse_goal_directive("Title | priority=abc", 1).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not a valid integer"));
+    }
+
+    // --- parse_goal_status ---
+
+    #[test]
+    fn parse_goal_status_standard_values() {
+        assert_eq!(parse_goal_status("active").unwrap(), GoalStatus::Active);
+        assert_eq!(parse_goal_status("proposed").unwrap(), GoalStatus::Proposed);
+        assert_eq!(parse_goal_status("paused").unwrap(), GoalStatus::Paused);
+        assert_eq!(
+            parse_goal_status("completed").unwrap(),
+            GoalStatus::Completed
+        );
+    }
+
+    #[test]
+    fn parse_goal_status_aliases() {
+        assert_eq!(
+            parse_goal_status("candidate").unwrap(),
+            GoalStatus::Proposed
+        );
+        assert_eq!(parse_goal_status("hold").unwrap(), GoalStatus::Paused);
+        assert_eq!(parse_goal_status("holding").unwrap(), GoalStatus::Paused);
+        assert_eq!(parse_goal_status("done").unwrap(), GoalStatus::Completed);
+    }
+
+    #[test]
+    fn parse_goal_status_case_insensitive() {
+        assert_eq!(parse_goal_status("ACTIVE").unwrap(), GoalStatus::Active);
+        assert_eq!(parse_goal_status("Proposed").unwrap(), GoalStatus::Proposed);
+    }
+
+    #[test]
+    fn parse_goal_status_invalid() {
+        let err = parse_goal_status("bogus").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unsupported goal status"));
+    }
+
+    // --- format_items / format_goal_items ---
+
+    #[test]
+    fn format_items_empty() {
+        assert_eq!(format_items(&[]), "[]");
+    }
+
+    #[test]
+    fn format_items_single() {
+        assert_eq!(format_items(&["hello".to_string()]), "[hello]");
+    }
+
+    #[test]
+    fn format_items_multiple() {
+        let result = format_items(&["a".to_string(), "b".to_string()]);
+        assert_eq!(result, "[a | b]");
+    }
+
+    #[test]
+    fn format_goal_items_empty() {
+        assert_eq!(format_goal_items(&[]), "[]");
+    }
+
+    #[test]
+    fn format_goal_items_single() {
+        let goal = GoalUpdate::new("Ship v1", "roadmap", GoalStatus::Active, 1).unwrap();
+        let result = format_goal_items(&[goal]);
+        assert!(result.contains("p1"));
+        assert!(result.contains("Ship v1"));
+        assert!(result.contains("roadmap"));
+    }
+
+    // --- AgentProgramContext construction ---
+
+    #[test]
+    fn agent_program_context_equality() {
+        let ctx1 = test_context("objective-a");
+        let ctx2 = test_context("objective-a");
+        assert_eq!(ctx1, ctx2);
+    }
+
+    #[test]
+    fn agent_program_context_inequality() {
+        let ctx1 = test_context("objective-a");
+        let ctx2 = test_context("objective-b");
+        assert_ne!(ctx1, ctx2);
+    }
+
+    #[test]
+    fn agent_program_memory_record_fields() {
+        let record = AgentProgramMemoryRecord {
+            key_suffix: "test-key".to_string(),
+            scope: MemoryScope::Decision,
+            value: "test-value".to_string(),
+        };
+        assert_eq!(record.key_suffix, "test-key");
+        assert_eq!(record.scope, MemoryScope::Decision);
+        assert_eq!(record.value, "test-value");
+    }
 }

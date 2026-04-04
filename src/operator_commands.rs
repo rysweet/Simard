@@ -1543,4 +1543,404 @@ mod tests {
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("objective"));
     }
+
+    // --- dispatch_operator_probe: more arg validation ---
+
+    #[test]
+    fn dispatch_operator_probe_bootstrap_missing_topology() {
+        let err = dispatch_operator_probe(args(&["bootstrap-run", "id", "type"])).unwrap_err();
+        assert!(err.to_string().contains("expected topology"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_bootstrap_missing_objective() {
+        let err =
+            dispatch_operator_probe(args(&["bootstrap-run", "id", "type", "topo"])).unwrap_err();
+        assert!(err.to_string().contains("expected objective"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_handoff_missing_args() {
+        let err = dispatch_operator_probe(args(&["handoff-roundtrip"])).unwrap_err();
+        assert!(err.to_string().contains("expected identity"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_meeting_run_missing_args() {
+        let err = dispatch_operator_probe(args(&["meeting-run"])).unwrap_err();
+        assert!(err.to_string().contains("expected base type"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_meeting_read_missing_args() {
+        let err = dispatch_operator_probe(args(&["meeting-read"])).unwrap_err();
+        assert!(err.to_string().contains("expected base type"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_terminal_run_missing_args() {
+        let err = dispatch_operator_probe(args(&["terminal-run"])).unwrap_err();
+        assert!(err.to_string().contains("expected topology"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_terminal_run_file_missing_args() {
+        let err = dispatch_operator_probe(args(&["terminal-run-file"])).unwrap_err();
+        assert!(err.to_string().contains("expected topology"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_terminal_read_missing_args() {
+        let err = dispatch_operator_probe(args(&["terminal-read"])).unwrap_err();
+        assert!(err.to_string().contains("expected topology"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_terminal_recipe_show_missing_args() {
+        let err = dispatch_operator_probe(args(&["terminal-recipe-show"])).unwrap_err();
+        assert!(err.to_string().contains("expected recipe name"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_terminal_recipe_run_missing_args() {
+        let err = dispatch_operator_probe(args(&["terminal-recipe-run"])).unwrap_err();
+        assert!(err.to_string().contains("expected topology"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_engineer_loop_missing_args() {
+        let err = dispatch_operator_probe(args(&["engineer-loop-run"])).unwrap_err();
+        assert!(err.to_string().contains("expected topology"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_engineer_read_missing_args() {
+        let err = dispatch_operator_probe(args(&["engineer-read"])).unwrap_err();
+        assert!(err.to_string().contains("expected topology"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_review_run_missing_args() {
+        let err = dispatch_operator_probe(args(&["review-run"])).unwrap_err();
+        assert!(err.to_string().contains("expected base type"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_review_read_missing_args() {
+        let err = dispatch_operator_probe(args(&["review-read"])).unwrap_err();
+        assert!(err.to_string().contains("expected base type"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_improvement_curation_run_missing_args() {
+        let err = dispatch_operator_probe(args(&["improvement-curation-run"])).unwrap_err();
+        assert!(err.to_string().contains("expected base type"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_improvement_curation_read_missing_args() {
+        let err = dispatch_operator_probe(args(&["improvement-curation-read"])).unwrap_err();
+        assert!(err.to_string().contains("expected base type"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_goal_curation_missing_args() {
+        let err = dispatch_operator_probe(args(&["goal-curation-run"])).unwrap_err();
+        assert!(err.to_string().contains("expected base type"));
+    }
+
+    // --- dispatch_legacy_gym_cli: more arg validation ---
+
+    #[test]
+    fn dispatch_legacy_gym_cli_compare_missing_scenario_id() {
+        let err = dispatch_legacy_gym_cli(args(&["compare"])).unwrap_err();
+        assert!(err.to_string().contains("expected scenario id"));
+    }
+
+    #[test]
+    fn dispatch_legacy_gym_cli_run_suite_missing_suite_id() {
+        let err = dispatch_legacy_gym_cli(args(&["run-suite"])).unwrap_err();
+        assert!(err.to_string().contains("expected suite id"));
+    }
+
+    #[test]
+    fn dispatch_legacy_gym_cli_list_rejects_extra_args() {
+        let err = dispatch_legacy_gym_cli(args(&["list", "extra"])).unwrap_err();
+        assert!(err.to_string().contains("trailing arguments"));
+    }
+
+    #[test]
+    fn dispatch_legacy_gym_cli_run_rejects_extra_args() {
+        let err = dispatch_legacy_gym_cli(args(&["run", "scenario-1", "extra"])).unwrap_err();
+        assert!(err.to_string().contains("trailing arguments"));
+    }
+
+    // --- terminal_recipe_reference: edge cases ---
+
+    #[test]
+    fn terminal_recipe_reference_rejects_underscores() {
+        assert!(terminal_recipe_reference("my_recipe").is_err());
+    }
+
+    #[test]
+    fn terminal_recipe_reference_rejects_dots() {
+        assert!(terminal_recipe_reference("my.recipe").is_err());
+    }
+
+    #[test]
+    fn terminal_recipe_reference_accepts_digits() {
+        let reference = terminal_recipe_reference("recipe-123").unwrap();
+        assert!(reference.id.as_str().contains("recipe-123"));
+    }
+
+    #[test]
+    fn terminal_recipe_reference_rejects_slashes() {
+        assert!(terminal_recipe_reference("path/recipe").is_err());
+    }
+
+    // --- GoalRegisterView: more tests ---
+
+    #[test]
+    fn goal_register_view_sorts_within_sections_by_priority_then_title() {
+        let records = vec![
+            make_goal("Zeta", GoalStatus::Active, 2),
+            make_goal("Alpha", GoalStatus::Active, 2),
+            make_goal("Beta", GoalStatus::Active, 1),
+        ];
+        let view = GoalRegisterView::from_records(records);
+        assert_eq!(view.sections[0].goals[0].title, "Beta");
+        assert_eq!(view.sections[0].goals[1].title, "Alpha");
+        assert_eq!(view.sections[0].goals[2].title, "Zeta");
+    }
+
+    #[test]
+    fn goal_register_view_all_same_status() {
+        let records = vec![
+            make_goal("A", GoalStatus::Proposed, 1),
+            make_goal("B", GoalStatus::Proposed, 2),
+        ];
+        let view = GoalRegisterView::from_records(records);
+        assert_eq!(view.sections[0].goals.len(), 0, "Active");
+        assert_eq!(view.sections[1].goals.len(), 2, "Proposed");
+    }
+
+    // --- state_root path construction: more variants ---
+
+    #[test]
+    fn state_root_multi_process_topology() {
+        let base_type = BaseTypeId::new("local-harness");
+        let path = state_root(
+            "simard-engineer",
+            &base_type,
+            RuntimeTopology::MultiProcess,
+            "handoff-roundtrip",
+        );
+        let path_str = path.to_string_lossy();
+        assert!(path_str.contains("multi-process"));
+        assert!(path_str.contains("handoff-roundtrip"));
+    }
+
+    #[test]
+    fn state_root_distributed_topology() {
+        let base_type = BaseTypeId::new("rusty-clawd");
+        let path = state_root(
+            "simard-meeting",
+            &base_type,
+            RuntimeTopology::Distributed,
+            "meeting-run",
+        );
+        let path_str = path.to_string_lossy();
+        assert!(path_str.contains("distributed"));
+        assert!(path_str.contains("meeting-run"));
+        assert!(path_str.contains("rusty-clawd"));
+    }
+
+    // --- validate_existing_read_state_root_root ---
+
+    #[test]
+    fn validate_existing_read_state_root_root_nonexistent() {
+        let result = validate_existing_read_state_root_root(
+            "test mode",
+            Path::new("/nonexistent/path/xyz_123"),
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("test mode"));
+    }
+
+    #[test]
+    fn validate_existing_read_state_root_root_with_dir() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let result = validate_existing_read_state_root_root("test mode", dir.path());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_existing_read_state_root_root_with_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file_path = dir.path().join("not_a_dir.txt");
+        std::fs::write(&file_path, "content").unwrap();
+        let result = validate_existing_read_state_root_root("test mode", &file_path);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("directory"));
+    }
+
+    // --- require_existing_read_file_for_mode ---
+
+    #[test]
+    fn require_existing_read_file_succeeds_for_regular_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file_path = dir.path().join("test.json");
+        std::fs::write(&file_path, "{}").unwrap();
+        let result = require_existing_read_file_for_mode("test mode", dir.path(), &file_path);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn require_existing_read_file_fails_for_nonexistent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file_path = dir.path().join("missing.json");
+        let result = require_existing_read_file_for_mode("test mode", dir.path(), &file_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn require_existing_read_file_fails_for_directory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let subdir = dir.path().join("subdir");
+        std::fs::create_dir(&subdir).unwrap();
+        let result = require_existing_read_file_for_mode("test mode", dir.path(), &subdir);
+        assert!(result.is_err());
+    }
+
+    // --- require_existing_read_directory_for_mode ---
+
+    #[test]
+    fn require_existing_read_directory_succeeds() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let subdir = dir.path().join("artifacts");
+        std::fs::create_dir(&subdir).unwrap();
+        let result = require_existing_read_directory_for_mode(
+            "test mode",
+            dir.path(),
+            &subdir,
+            "artifacts/",
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn require_existing_read_directory_fails_for_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("not_a_dir");
+        std::fs::write(&file, "data").unwrap();
+        let result =
+            require_existing_read_directory_for_mode("test mode", dir.path(), &file, "not_a_dir/");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn require_existing_read_directory_fails_for_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let missing = dir.path().join("nope");
+        let result =
+            require_existing_read_directory_for_mode("test mode", dir.path(), &missing, "nope/");
+        assert!(result.is_err());
+    }
+
+    // --- load_terminal_objective_file ---
+
+    #[test]
+    fn load_terminal_objective_file_reads_valid_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("objective.txt");
+        std::fs::write(&file, "Build the widget").unwrap();
+        let content = load_terminal_objective_file(&file).unwrap();
+        assert_eq!(content, "Build the widget");
+    }
+
+    #[test]
+    fn load_terminal_objective_file_fails_for_nonexistent() {
+        let result = load_terminal_objective_file(Path::new("/nonexistent/file.txt"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_terminal_objective_file_fails_for_directory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let result = load_terminal_objective_file(dir.path());
+        assert!(result.is_err());
+    }
+
+    // --- list_terminal_recipe_descriptors ---
+
+    #[test]
+    fn list_terminal_recipe_descriptors_returns_sorted() {
+        let recipes = list_terminal_recipe_descriptors().unwrap();
+        for i in 0..recipes.len().saturating_sub(1) {
+            assert!(
+                recipes[i].name <= recipes[i + 1].name,
+                "recipes should be sorted by name"
+            );
+        }
+    }
+
+    // --- GoalRegisterSection ---
+
+    #[test]
+    fn goal_register_section_labels() {
+        let section = GoalRegisterSection::new(GoalStatus::Active, vec![]);
+        assert_eq!(section.heading, "Active");
+        assert_eq!(section.label, "Active goals");
+
+        let section = GoalRegisterSection::new(GoalStatus::Proposed, vec![]);
+        assert_eq!(section.heading, "Proposed");
+
+        let section = GoalRegisterSection::new(GoalStatus::Paused, vec![]);
+        assert_eq!(section.heading, "Paused");
+
+        let section = GoalRegisterSection::new(GoalStatus::Completed, vec![]);
+        assert_eq!(section.heading, "Completed");
+    }
+
+    // --- evidence helpers: more edge cases ---
+
+    #[test]
+    fn required_terminal_evidence_value_multiple_records_various_prefixes() {
+        let records = vec![
+            make_evidence("terminal-cwd=/home"),
+            make_evidence("terminal-shell=bash"),
+            make_evidence("terminal-exit-code=0"),
+        ];
+        assert_eq!(
+            required_terminal_evidence_value(&records, "terminal-shell=", "test").unwrap(),
+            "bash"
+        );
+        assert_eq!(
+            required_terminal_evidence_value(&records, "terminal-cwd=", "test").unwrap(),
+            "/home"
+        );
+    }
+
+    #[test]
+    fn terminal_evidence_values_ignores_non_prefix_matches() {
+        let records = vec![
+            make_evidence("step1=do A"),
+            make_evidence("step2=do B"),
+            make_evidence("other_step1=ignore"),
+        ];
+        let values = terminal_evidence_values(&records, "step");
+        assert_eq!(values, vec!["do A", "do B"]);
+    }
+
+    #[test]
+    fn terminal_evidence_values_requires_digit_after_prefix() {
+        let records = vec![
+            make_evidence("stepa=not a match"),
+            make_evidence("step1=a match"),
+        ];
+        let values = terminal_evidence_values(&records, "step");
+        assert_eq!(values, vec!["a match"]);
+    }
 }

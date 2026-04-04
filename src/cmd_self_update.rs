@@ -490,4 +490,140 @@ mod tests {
     fn test_current_version_matches_cargo_pkg() {
         assert_eq!(CURRENT_VERSION, env!("CARGO_PKG_VERSION"));
     }
+
+    // ── find_binary_in_dir additional coverage ──
+
+    #[test]
+    fn test_find_binary_with_multiple_non_matching_files() {
+        let tmp =
+            std::env::temp_dir().join(format!("simard-test-multi-nomatch-{}", std::process::id()));
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("not-simard"), b"wrong").unwrap();
+        fs::write(tmp.join("simard.bak"), b"wrong").unwrap();
+        fs::write(tmp.join("simard.exe"), b"wrong").unwrap();
+        let result = find_binary_in_dir(&tmp);
+        assert!(result.is_err());
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_find_binary_at_depth_1() {
+        let tmp = std::env::temp_dir().join(format!("simard-test-depth1-{}", std::process::id()));
+        let sub = tmp.join("subdir");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("simard"), b"fake").unwrap();
+        let result = find_binary_in_dir(&tmp);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), sub.join("simard"));
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_find_binary_at_depth_2() {
+        let tmp = std::env::temp_dir().join(format!("simard-test-depth2-{}", std::process::id()));
+        let sub = tmp.join("a").join("b");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("simard"), b"fake").unwrap();
+        let result = find_binary_in_dir(&tmp);
+        assert!(result.is_ok());
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_find_binary_at_depth_4_not_found() {
+        let tmp = std::env::temp_dir().join(format!("simard-test-depth4-{}", std::process::id()));
+        let sub = tmp.join("a").join("b").join("c").join("d");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("simard"), b"fake").unwrap();
+        let result = find_binary_in_dir(&tmp);
+        assert!(result.is_err());
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_find_binary_with_mixed_files_and_dirs() {
+        let tmp = std::env::temp_dir().join(format!("simard-test-mixed-{}", std::process::id()));
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("README.md"), b"readme").unwrap();
+        fs::write(tmp.join("LICENSE"), b"license").unwrap();
+        fs::create_dir_all(tmp.join("bin")).unwrap();
+        fs::write(tmp.join("bin").join("simard"), b"binary").unwrap();
+        let result = find_binary_in_dir(&tmp);
+        assert!(result.is_ok());
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_find_binary_error_message_content() {
+        let tmp = std::env::temp_dir().join(format!("simard-test-errmsg-{}", std::process::id()));
+        fs::create_dir_all(&tmp).unwrap();
+        let result = find_binary_in_dir(&tmp);
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("simard"));
+        assert!(msg.contains("not found"));
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    // ── platform_suffix additional tests ──
+
+    #[test]
+    fn test_platform_suffix_no_hyphens_in_parts() {
+        let suffix = platform_suffix().unwrap();
+        let parts: Vec<&str> = suffix.split('-').collect();
+        assert_eq!(
+            parts.len(),
+            2,
+            "suffix should have exactly one hyphen: {suffix}"
+        );
+    }
+
+    #[test]
+    fn test_platform_suffix_known_combinations() {
+        let suffix = platform_suffix().unwrap();
+        let valid = [
+            "linux-x86_64",
+            "linux-aarch64",
+            "macos-x86_64",
+            "macos-aarch64",
+            "windows-x86_64",
+        ];
+        assert!(
+            valid.contains(&suffix),
+            "unexpected platform suffix: {suffix}"
+        );
+    }
+
+    // ── GITHUB_REPO constant ──
+
+    #[test]
+    fn test_github_repo_format() {
+        assert!(GITHUB_REPO.contains('/'));
+        let parts: Vec<&str> = GITHUB_REPO.split('/').collect();
+        assert_eq!(parts.len(), 2);
+        assert!(!parts[0].is_empty());
+        assert!(!parts[1].is_empty());
+    }
+
+    // ── CURRENT_VERSION deeper validation ──
+
+    #[test]
+    fn test_current_version_is_semver() {
+        let parts: Vec<&str> = CURRENT_VERSION.split('.').collect();
+        assert_eq!(parts.len(), 3, "version should be major.minor.patch");
+        for (i, part) in parts.iter().enumerate() {
+            assert!(
+                part.parse::<u32>().is_ok(),
+                "version part {i} '{part}' should be numeric"
+            );
+        }
+    }
+
+    #[test]
+    fn test_current_version_no_leading_v() {
+        assert!(
+            !CURRENT_VERSION.starts_with('v'),
+            "CURRENT_VERSION should not have a 'v' prefix"
+        );
+    }
 }

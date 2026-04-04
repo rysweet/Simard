@@ -716,4 +716,636 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, SimardError::UnknownIdentity { .. }));
     }
+
+    // --- OperatingMode serde ---
+
+    #[test]
+    fn operating_mode_serializes_to_kebab_case() {
+        let json = serde_json::to_string(&OperatingMode::Orchestrator).unwrap();
+        assert_eq!(json, "\"orchestrator\"");
+        let json = serde_json::to_string(&OperatingMode::Improvement).unwrap();
+        assert_eq!(json, "\"improvement\"");
+    }
+
+    #[test]
+    fn operating_mode_deserializes_from_kebab_case() {
+        let mode: OperatingMode = serde_json::from_str("\"engineer\"").unwrap();
+        assert_eq!(mode, OperatingMode::Engineer);
+        let mode: OperatingMode = serde_json::from_str("\"gym\"").unwrap();
+        assert_eq!(mode, OperatingMode::Gym);
+    }
+
+    #[test]
+    fn operating_mode_roundtrips_through_serde() {
+        let modes = [
+            OperatingMode::Engineer,
+            OperatingMode::Meeting,
+            OperatingMode::Curator,
+            OperatingMode::Improvement,
+            OperatingMode::Gym,
+            OperatingMode::Orchestrator,
+        ];
+        for mode in modes {
+            let json = serde_json::to_string(&mode).unwrap();
+            let back: OperatingMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(mode, back);
+        }
+    }
+
+    #[test]
+    fn operating_mode_ord_is_consistent() {
+        assert!(OperatingMode::Engineer < OperatingMode::Meeting);
+        assert!(OperatingMode::Gym < OperatingMode::Orchestrator);
+    }
+
+    // --- MemoryPolicy ---
+
+    #[test]
+    fn memory_policy_default_values() {
+        let policy = MemoryPolicy::default();
+        assert!(!policy.allow_project_writes);
+        assert_eq!(policy.summary_scope, MemoryScope::SessionSummary);
+    }
+
+    #[test]
+    fn memory_policy_project_writes_error_message() {
+        let policy = MemoryPolicy {
+            allow_project_writes: true,
+            summary_scope: MemoryScope::SessionSummary,
+        };
+        let err = policy.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("read-only project boundaries"));
+    }
+
+    // --- ManifestContract ---
+
+    #[test]
+    fn manifest_contract_valid_construction() {
+        let contract = ManifestContract::new(
+            "module::function",
+            "a -> b",
+            vec!["identity:simard".to_string(), "base-type:local".to_string()],
+            Provenance::new("test-source", "test-locator"),
+            Freshness::now().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(contract.entrypoint, "module::function");
+        assert_eq!(contract.composition, "a -> b");
+        assert_eq!(contract.precedence.len(), 2);
+    }
+
+    #[test]
+    fn manifest_contract_rejects_empty_entrypoint() {
+        let err = ManifestContract::new(
+            "",
+            "a -> b",
+            vec!["key:value".to_string()],
+            Provenance::new("s", "l"),
+            Freshness::now().unwrap(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            SimardError::InvalidManifestContract { field, .. } if field == "entrypoint"
+        ));
+    }
+
+    #[test]
+    fn manifest_contract_rejects_empty_composition() {
+        let err = ManifestContract::new(
+            "test::entry",
+            "",
+            vec!["key:value".to_string()],
+            Provenance::new("s", "l"),
+            Freshness::now().unwrap(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            SimardError::InvalidManifestContract { field, .. } if field == "composition"
+        ));
+    }
+
+    #[test]
+    fn manifest_contract_rejects_precedence_without_colon() {
+        let err = ManifestContract::new(
+            "test::entry",
+            "a -> b",
+            vec!["no-colon-here".to_string()],
+            Provenance::new("s", "l"),
+            Freshness::now().unwrap(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            SimardError::InvalidManifestContract { field, .. } if field == "precedence"
+        ));
+    }
+
+    #[test]
+    fn manifest_contract_rejects_empty_precedence_value() {
+        let err = ManifestContract::new(
+            "test::entry",
+            "a -> b",
+            vec!["  ".to_string()],
+            Provenance::new("s", "l"),
+            Freshness::now().unwrap(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, SimardError::InvalidManifestContract { .. }));
+    }
+
+    #[test]
+    fn manifest_contract_rejects_empty_provenance_source() {
+        let err = ManifestContract::new(
+            "test::entry",
+            "a -> b",
+            vec!["key:value".to_string()],
+            Provenance::new("", "l"),
+            Freshness::now().unwrap(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, SimardError::InvalidManifestContract { .. }));
+    }
+
+    #[test]
+    fn manifest_contract_rejects_empty_provenance_locator() {
+        let err = ManifestContract::new(
+            "test::entry",
+            "a -> b",
+            vec!["key:value".to_string()],
+            Provenance::new("src", ""),
+            Freshness::now().unwrap(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, SimardError::InvalidManifestContract { .. }));
+    }
+
+    #[test]
+    fn manifest_contract_with_freshness_preserves_other_fields() {
+        let contract = test_contract();
+        let new_freshness = Freshness::now().unwrap();
+        let updated = contract.with_freshness(new_freshness);
+        assert_eq!(updated.entrypoint, contract.entrypoint);
+        assert_eq!(updated.composition, contract.composition);
+        assert_eq!(updated.precedence, contract.precedence);
+        assert_eq!(updated.freshness, new_freshness);
+    }
+
+    // --- IdentityManifest ---
+
+    #[test]
+    fn identity_manifest_new_rejects_project_writes_policy() {
+        let policy = MemoryPolicy {
+            allow_project_writes: true,
+            summary_scope: MemoryScope::SessionSummary,
+        };
+        let err = IdentityManifest::new(
+            "test",
+            "1.0",
+            vec![],
+            vec![BaseTypeId::new("local-harness")],
+            capability_set([]),
+            OperatingMode::Engineer,
+            policy,
+            test_contract(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, SimardError::UnsupportedMemoryPolicy { .. }));
+    }
+
+    #[test]
+    fn identity_manifest_with_components_success() {
+        let manifest = IdentityManifest::new(
+            "parent",
+            "1.0",
+            vec![],
+            vec![BaseTypeId::new("local-harness")],
+            capability_set([]),
+            OperatingMode::Engineer,
+            MemoryPolicy::default(),
+            test_contract(),
+        )
+        .unwrap()
+        .with_components(["child-a", "child-b"])
+        .unwrap();
+        assert_eq!(manifest.components, vec!["child-a", "child-b"]);
+    }
+
+    #[test]
+    fn identity_manifest_with_components_rejects_empty() {
+        let manifest = IdentityManifest::new(
+            "parent",
+            "1.0",
+            vec![],
+            vec![BaseTypeId::new("local-harness")],
+            capability_set([]),
+            OperatingMode::Engineer,
+            MemoryPolicy::default(),
+            test_contract(),
+        )
+        .unwrap();
+        let err = manifest.with_components(["  "]).unwrap_err();
+        assert!(matches!(
+            err,
+            SimardError::InvalidIdentityComposition { .. }
+        ));
+    }
+
+    #[test]
+    fn identity_manifest_with_components_rejects_self_reference() {
+        let manifest = IdentityManifest::new(
+            "parent",
+            "1.0",
+            vec![],
+            vec![BaseTypeId::new("local-harness")],
+            capability_set([]),
+            OperatingMode::Engineer,
+            MemoryPolicy::default(),
+            test_contract(),
+        )
+        .unwrap();
+        let err = manifest.with_components(["parent"]).unwrap_err();
+        assert!(matches!(
+            err,
+            SimardError::InvalidIdentityComposition { .. }
+        ));
+    }
+
+    #[test]
+    fn identity_manifest_with_components_rejects_duplicates() {
+        let manifest = IdentityManifest::new(
+            "parent",
+            "1.0",
+            vec![],
+            vec![BaseTypeId::new("local-harness")],
+            capability_set([]),
+            OperatingMode::Engineer,
+            MemoryPolicy::default(),
+            test_contract(),
+        )
+        .unwrap();
+        let err = manifest
+            .with_components(["child-a", "child-a"])
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SimardError::InvalidIdentityComposition { .. }
+        ));
+    }
+
+    #[test]
+    fn identity_manifest_compose_requires_at_least_one_component() {
+        let err = IdentityManifest::compose(
+            "composite",
+            "1.0",
+            vec![],
+            OperatingMode::Engineer,
+            test_contract(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            SimardError::InvalidIdentityComposition { .. }
+        ));
+    }
+
+    #[test]
+    fn identity_manifest_compose_rejects_incompatible_base_types() {
+        let m1 = IdentityManifest::new(
+            "comp-a",
+            "1.0",
+            vec![],
+            vec![BaseTypeId::new("type-a")],
+            capability_set([]),
+            OperatingMode::Engineer,
+            MemoryPolicy::default(),
+            test_contract(),
+        )
+        .unwrap();
+        let m2 = IdentityManifest::new(
+            "comp-b",
+            "1.0",
+            vec![],
+            vec![BaseTypeId::new("type-b")],
+            capability_set([]),
+            OperatingMode::Meeting,
+            MemoryPolicy::default(),
+            test_contract(),
+        )
+        .unwrap();
+        let err = IdentityManifest::compose(
+            "composite",
+            "1.0",
+            vec![m1, m2],
+            OperatingMode::Engineer,
+            test_contract(),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("common supported base type"));
+    }
+
+    #[test]
+    fn identity_manifest_compose_rejects_mismatched_memory_policies() {
+        let m1 = IdentityManifest::new(
+            "comp-a",
+            "1.0",
+            vec![],
+            vec![BaseTypeId::new("local-harness")],
+            capability_set([]),
+            OperatingMode::Engineer,
+            MemoryPolicy::default(),
+            test_contract(),
+        )
+        .unwrap();
+        let mut m2 = IdentityManifest::new(
+            "comp-b",
+            "1.0",
+            vec![],
+            vec![BaseTypeId::new("local-harness")],
+            capability_set([]),
+            OperatingMode::Meeting,
+            MemoryPolicy::default(),
+            test_contract(),
+        )
+        .unwrap();
+        m2.memory_policy.summary_scope = MemoryScope::Decision;
+        let err = IdentityManifest::compose(
+            "composite",
+            "1.0",
+            vec![m1, m2],
+            OperatingMode::Engineer,
+            test_contract(),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("memory policy"));
+    }
+
+    #[test]
+    fn identity_manifest_compose_merges_capabilities() {
+        let m1 = IdentityManifest::new(
+            "comp-a",
+            "1.0",
+            vec![],
+            vec![BaseTypeId::new("local-harness")],
+            capability_set([BaseTypeCapability::PromptAssets]),
+            OperatingMode::Engineer,
+            MemoryPolicy::default(),
+            test_contract(),
+        )
+        .unwrap();
+        let m2 = IdentityManifest::new(
+            "comp-b",
+            "1.0",
+            vec![],
+            vec![BaseTypeId::new("local-harness")],
+            capability_set([BaseTypeCapability::Memory]),
+            OperatingMode::Meeting,
+            MemoryPolicy::default(),
+            test_contract(),
+        )
+        .unwrap();
+        let composed = IdentityManifest::compose(
+            "composite",
+            "1.0",
+            vec![m1, m2],
+            OperatingMode::Engineer,
+            test_contract(),
+        )
+        .unwrap();
+        assert!(
+            composed
+                .required_capabilities
+                .contains(&BaseTypeCapability::PromptAssets)
+        );
+        assert!(
+            composed
+                .required_capabilities
+                .contains(&BaseTypeCapability::Memory)
+        );
+    }
+
+    #[test]
+    fn identity_manifest_compose_intersects_base_types() {
+        let m1 = IdentityManifest::new(
+            "comp-a",
+            "1.0",
+            vec![],
+            vec![
+                BaseTypeId::new("local-harness"),
+                BaseTypeId::new("rusty-clawd"),
+            ],
+            capability_set([]),
+            OperatingMode::Engineer,
+            MemoryPolicy::default(),
+            test_contract(),
+        )
+        .unwrap();
+        let m2 = IdentityManifest::new(
+            "comp-b",
+            "1.0",
+            vec![],
+            vec![BaseTypeId::new("local-harness")],
+            capability_set([]),
+            OperatingMode::Meeting,
+            MemoryPolicy::default(),
+            test_contract(),
+        )
+        .unwrap();
+        let composed = IdentityManifest::compose(
+            "composite",
+            "1.0",
+            vec![m1, m2],
+            OperatingMode::Engineer,
+            test_contract(),
+        )
+        .unwrap();
+        assert_eq!(composed.supported_base_types.len(), 1);
+        assert!(composed.supports_base_type(&BaseTypeId::new("local-harness")));
+        assert!(!composed.supports_base_type(&BaseTypeId::new("rusty-clawd")));
+    }
+
+    #[test]
+    fn identity_manifest_compose_deduplicates_prompt_assets() {
+        let asset = PromptAssetRef::new("shared-asset", "path/to/asset.md");
+        let m1 = IdentityManifest::new(
+            "comp-a",
+            "1.0",
+            vec![asset.clone()],
+            vec![BaseTypeId::new("local-harness")],
+            capability_set([]),
+            OperatingMode::Engineer,
+            MemoryPolicy::default(),
+            test_contract(),
+        )
+        .unwrap();
+        let m2 = IdentityManifest::new(
+            "comp-b",
+            "1.0",
+            vec![asset],
+            vec![BaseTypeId::new("local-harness")],
+            capability_set([]),
+            OperatingMode::Meeting,
+            MemoryPolicy::default(),
+            test_contract(),
+        )
+        .unwrap();
+        let composed = IdentityManifest::compose(
+            "composite",
+            "1.0",
+            vec![m1, m2],
+            OperatingMode::Engineer,
+            test_contract(),
+        )
+        .unwrap();
+        assert_eq!(
+            composed.prompt_assets.len(),
+            1,
+            "duplicate prompt assets should be deduplicated"
+        );
+    }
+
+    // --- IdentityLoadRequest ---
+
+    #[test]
+    fn identity_load_request_construction() {
+        let req = IdentityLoadRequest::new("test-id", "1.0.0", test_contract());
+        assert_eq!(req.identity, "test-id");
+        assert_eq!(req.package_version, "1.0.0");
+    }
+
+    // --- BuiltinIdentityLoader: all identities ---
+
+    #[test]
+    fn builtin_loader_loads_meeting_identity() {
+        let loader = BuiltinIdentityLoader;
+        let manifest = loader
+            .load(&IdentityLoadRequest::new(
+                "simard-meeting",
+                "0.1.0",
+                test_contract(),
+            ))
+            .unwrap();
+        assert_eq!(manifest.name, "simard-meeting");
+        assert_eq!(manifest.default_mode, OperatingMode::Meeting);
+    }
+
+    #[test]
+    fn builtin_loader_loads_gym_identity() {
+        let loader = BuiltinIdentityLoader;
+        let manifest = loader
+            .load(&IdentityLoadRequest::new(
+                "simard-gym",
+                "0.1.0",
+                test_contract(),
+            ))
+            .unwrap();
+        assert_eq!(manifest.name, "simard-gym");
+        assert_eq!(manifest.default_mode, OperatingMode::Gym);
+    }
+
+    #[test]
+    fn builtin_loader_loads_goal_curator_identity() {
+        let loader = BuiltinIdentityLoader;
+        let manifest = loader
+            .load(&IdentityLoadRequest::new(
+                "simard-goal-curator",
+                "0.1.0",
+                test_contract(),
+            ))
+            .unwrap();
+        assert_eq!(manifest.name, "simard-goal-curator");
+        assert_eq!(manifest.default_mode, OperatingMode::Curator);
+    }
+
+    #[test]
+    fn builtin_loader_loads_improvement_curator_identity() {
+        let loader = BuiltinIdentityLoader;
+        let manifest = loader
+            .load(&IdentityLoadRequest::new(
+                "simard-improvement-curator",
+                "0.1.0",
+                test_contract(),
+            ))
+            .unwrap();
+        assert_eq!(manifest.name, "simard-improvement-curator");
+        assert_eq!(manifest.default_mode, OperatingMode::Improvement);
+    }
+
+    #[test]
+    fn builtin_loader_loads_composite_engineer_identity() {
+        let loader = BuiltinIdentityLoader;
+        let manifest = loader
+            .load(&IdentityLoadRequest::new(
+                "simard-composite-engineer",
+                "0.1.0",
+                test_contract(),
+            ))
+            .unwrap();
+        assert_eq!(manifest.name, "simard-composite-engineer");
+        assert_eq!(manifest.default_mode, OperatingMode::Engineer);
+        assert!(
+            !manifest.components.is_empty(),
+            "composite should have components"
+        );
+    }
+
+    #[test]
+    fn builtin_loader_all_identities_share_local_harness() {
+        let loader = BuiltinIdentityLoader;
+        let names = [
+            "simard-engineer",
+            "simard-meeting",
+            "simard-gym",
+            "simard-goal-curator",
+            "simard-improvement-curator",
+        ];
+        for name in names {
+            let manifest = loader
+                .load(&IdentityLoadRequest::new(name, "0.1.0", test_contract()))
+                .unwrap();
+            assert!(
+                manifest.supports_base_type(&BaseTypeId::new("local-harness")),
+                "{name} should support local-harness"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_loader_engineer_has_prompt_assets() {
+        let loader = BuiltinIdentityLoader;
+        let manifest = loader
+            .load(&IdentityLoadRequest::new(
+                "simard-engineer",
+                "0.1.0",
+                test_contract(),
+            ))
+            .unwrap();
+        assert!(!manifest.prompt_assets.is_empty());
+        assert_eq!(manifest.prompt_assets[0].id.as_str(), "engineer-system");
+    }
+
+    #[test]
+    fn supports_base_type_returns_false_for_nonexistent() {
+        let manifest = IdentityManifest::new(
+            "test",
+            "1.0",
+            vec![],
+            vec![
+                BaseTypeId::new("local-harness"),
+                BaseTypeId::new("rusty-clawd"),
+            ],
+            capability_set([]),
+            OperatingMode::Engineer,
+            MemoryPolicy::default(),
+            test_contract(),
+        )
+        .unwrap();
+        assert!(manifest.supports_base_type(&BaseTypeId::new("local-harness")));
+        assert!(manifest.supports_base_type(&BaseTypeId::new("rusty-clawd")));
+        assert!(!manifest.supports_base_type(&BaseTypeId::new("nonexistent")));
+    }
 }

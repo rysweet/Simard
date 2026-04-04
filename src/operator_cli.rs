@@ -1279,4 +1279,538 @@ mod tests {
                 .contains("expected base type")
         );
     }
+
+    // ── ooda run argument parsing ──
+
+    #[test]
+    fn test_ooda_run_invalid_cycles() {
+        let result = dispatch_operator_cli(vec![
+            "ooda".to_string(),
+            "run".to_string(),
+            "--cycles=abc".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid --cycles"));
+    }
+
+    #[test]
+    fn test_ooda_run_extra_positional_after_state_root() {
+        let result = dispatch_operator_cli(vec![
+            "ooda".to_string(),
+            "run".to_string(),
+            "/state".to_string(),
+            "extra".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected argument")
+        );
+    }
+
+    // ── spawn --depth parsing ──
+
+    #[test]
+    fn test_spawn_invalid_depth() {
+        let result = dispatch_operator_cli(vec![
+            "spawn".to_string(),
+            "agent1".to_string(),
+            "goal".to_string(),
+            "/worktree".to_string(),
+            "--depth=abc".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid --depth"));
+    }
+
+    #[test]
+    fn test_spawn_unexpected_flag() {
+        let result = dispatch_operator_cli(vec![
+            "spawn".to_string(),
+            "agent1".to_string(),
+            "goal".to_string(),
+            "/worktree".to_string(),
+            "--unknown=x".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected argument")
+        );
+    }
+
+    // ── gym trailing args rejection ──
+
+    #[test]
+    fn test_gym_run_rejects_extra_args() {
+        let result = dispatch_operator_cli(vec![
+            "gym".to_string(),
+            "run".to_string(),
+            "scenario1".to_string(),
+            "extra".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected trailing")
+        );
+    }
+
+    #[test]
+    fn test_gym_compare_rejects_extra_args() {
+        let result = dispatch_operator_cli(vec![
+            "gym".to_string(),
+            "compare".to_string(),
+            "scenario1".to_string(),
+            "extra".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected trailing")
+        );
+    }
+
+    #[test]
+    fn test_gym_run_suite_rejects_extra_args() {
+        let result = dispatch_operator_cli(vec![
+            "gym".to_string(),
+            "run-suite".to_string(),
+            "suite1".to_string(),
+            "extra".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected trailing")
+        );
+    }
+
+    #[test]
+    fn test_gym_list_rejects_extra_args() {
+        let result = dispatch_operator_cli(vec![
+            "gym".to_string(),
+            "list".to_string(),
+            "extra".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected trailing")
+        );
+    }
+
+    // ── engineer subcommand trailing args ──
+
+    #[test]
+    fn test_engineer_terminal_recipe_list_rejects_extra() {
+        let result = dispatch_operator_cli(vec![
+            "engineer".to_string(),
+            "terminal-recipe-list".to_string(),
+            "extra".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected trailing")
+        );
+    }
+
+    #[test]
+    fn test_engineer_terminal_recipe_show_rejects_extra() {
+        let result = dispatch_operator_cli(vec![
+            "engineer".to_string(),
+            "terminal-recipe-show".to_string(),
+            "name".to_string(),
+            "extra".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected trailing")
+        );
+    }
+
+    #[test]
+    fn test_engineer_run_rejects_trailing_after_state_root() {
+        let result = dispatch_operator_cli(vec![
+            "engineer".to_string(),
+            "run".to_string(),
+            "topology".to_string(),
+            "/workspace".to_string(),
+            "objective".to_string(),
+            "/state".to_string(),
+            "extra".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected trailing")
+        );
+    }
+
+    // ── review deeper missing args ──
+
+    #[test]
+    fn test_review_run_missing_topology() {
+        let result = dispatch_operator_cli(vec![
+            "review".to_string(),
+            "run".to_string(),
+            "base-type".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected topology")
+        );
+    }
+
+    #[test]
+    fn test_review_run_missing_objective() {
+        let result = dispatch_operator_cli(vec![
+            "review".to_string(),
+            "run".to_string(),
+            "base-type".to_string(),
+            "topology".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected objective")
+        );
+    }
+
+    #[test]
+    fn test_review_read_missing_topology() {
+        let result = dispatch_operator_cli(vec![
+            "review".to_string(),
+            "read".to_string(),
+            "base-type".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected topology")
+        );
+    }
+
+    // ── improvement-curation deeper missing args ──
+
+    #[test]
+    fn test_improvement_curation_run_missing_topology() {
+        let result = dispatch_operator_cli(vec![
+            "improvement-curation".to_string(),
+            "run".to_string(),
+            "base-type".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected topology")
+        );
+    }
+
+    #[test]
+    fn test_improvement_curation_run_missing_objective() {
+        let result = dispatch_operator_cli(vec![
+            "improvement-curation".to_string(),
+            "run".to_string(),
+            "base-type".to_string(),
+            "topology".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected objective")
+        );
+    }
+
+    #[test]
+    fn test_improvement_curation_read_missing_topology() {
+        let result = dispatch_operator_cli(vec![
+            "improvement-curation".to_string(),
+            "read".to_string(),
+            "base-type".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected topology")
+        );
+    }
+
+    // ── goal-curation deeper missing args ──
+
+    #[test]
+    fn test_goal_curation_run_missing_topology() {
+        let result = dispatch_operator_cli(vec![
+            "goal-curation".to_string(),
+            "run".to_string(),
+            "base-type".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected topology")
+        );
+    }
+
+    #[test]
+    fn test_goal_curation_run_missing_objective() {
+        let result = dispatch_operator_cli(vec![
+            "goal-curation".to_string(),
+            "run".to_string(),
+            "base-type".to_string(),
+            "topology".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected objective")
+        );
+    }
+
+    #[test]
+    fn test_goal_curation_read_missing_topology() {
+        let result = dispatch_operator_cli(vec![
+            "goal-curation".to_string(),
+            "read".to_string(),
+            "base-type".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected topology")
+        );
+    }
+
+    // ── bootstrap deeper missing args ──
+
+    #[test]
+    fn test_bootstrap_run_missing_base_type() {
+        let result = dispatch_operator_cli(vec![
+            "bootstrap".to_string(),
+            "run".to_string(),
+            "identity".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected base type")
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_run_missing_topology() {
+        let result = dispatch_operator_cli(vec![
+            "bootstrap".to_string(),
+            "run".to_string(),
+            "identity".to_string(),
+            "base-type".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected topology")
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_run_missing_objective() {
+        let result = dispatch_operator_cli(vec![
+            "bootstrap".to_string(),
+            "run".to_string(),
+            "identity".to_string(),
+            "base-type".to_string(),
+            "topology".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected objective")
+        );
+    }
+
+    // ── meeting deeper missing args ──
+
+    #[test]
+    fn test_meeting_run_missing_topology() {
+        let result = dispatch_operator_cli(vec![
+            "meeting".to_string(),
+            "run".to_string(),
+            "base-type".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected topology")
+        );
+    }
+
+    #[test]
+    fn test_meeting_run_missing_objective() {
+        let result = dispatch_operator_cli(vec![
+            "meeting".to_string(),
+            "run".to_string(),
+            "base-type".to_string(),
+            "topology".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected objective")
+        );
+    }
+
+    #[test]
+    fn test_meeting_read_missing_topology() {
+        let result = dispatch_operator_cli(vec![
+            "meeting".to_string(),
+            "read".to_string(),
+            "base-type".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected topology")
+        );
+    }
+
+    // ── parse_state_root_and_json edge cases ──
+
+    #[test]
+    fn test_parse_state_root_and_json_reversed_order_is_error() {
+        let result = parse_state_root_and_json(vec!["--json".to_string(), "/state".to_string()]);
+        assert!(result.is_err());
+    }
+
+    // ── help text structure ──
+
+    #[test]
+    fn test_help_text_contains_newlines() {
+        let help = operator_cli_help();
+        assert!(help.contains('\n'));
+    }
+
+    #[test]
+    fn test_usage_starts_with_usage() {
+        let usage = operator_cli_usage();
+        assert!(usage.starts_with("usage:"));
+    }
+
+    #[test]
+    fn test_help_mentions_product_modes() {
+        let help = operator_cli_help();
+        assert!(help.contains("Product modes:"));
+    }
+
+    #[test]
+    fn test_help_mentions_operator_utilities() {
+        let help = operator_cli_help();
+        assert!(help.contains("Operator utilities:"));
+    }
+
+    #[test]
+    fn test_help_mentions_compatibility() {
+        let help = operator_cli_help();
+        assert!(help.contains("Compatibility"));
+    }
+
+    // ── engineer terminal missing deeper args ──
+
+    #[test]
+    fn test_engineer_terminal_missing_objective() {
+        let result = dispatch_operator_cli(vec![
+            "engineer".to_string(),
+            "terminal".to_string(),
+            "topology".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected objective")
+        );
+    }
+
+    #[test]
+    fn test_engineer_terminal_file_missing_objective_file() {
+        let result = dispatch_operator_cli(vec![
+            "engineer".to_string(),
+            "terminal-file".to_string(),
+            "topology".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected objective file")
+        );
+    }
+
+    #[test]
+    fn test_engineer_terminal_recipe_missing_recipe_name() {
+        let result = dispatch_operator_cli(vec![
+            "engineer".to_string(),
+            "terminal-recipe".to_string(),
+            "topology".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected recipe name")
+        );
+    }
 }
