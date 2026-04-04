@@ -1178,3 +1178,369 @@ pub(crate) fn print_terminal_recipe(recipe_name: &str, recipe: &PromptAsset) {
         println!("{line}");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::goals::{GoalRecord, GoalStatus};
+    use crate::session::{SessionId, SessionPhase};
+
+    fn s(value: &str) -> String {
+        value.to_string()
+    }
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| s(v)).collect()
+    }
+
+    fn make_evidence(detail: &str) -> crate::EvidenceRecord {
+        crate::EvidenceRecord {
+            id: s("ev-1"),
+            session_id: SessionId::parse("00000000-0000-0000-0000-000000000001").unwrap(),
+            phase: SessionPhase::Execution,
+            detail: s(detail),
+            source: crate::evidence::EvidenceSource::Runtime,
+        }
+    }
+
+    fn make_goal(title: &str, status: GoalStatus, priority: u8) -> GoalRecord {
+        GoalRecord {
+            slug: title.to_lowercase().replace(' ', "-"),
+            title: s(title),
+            rationale: s("test rationale"),
+            status,
+            priority,
+            owner_identity: s("test-identity"),
+            source_session_id: SessionId::parse("00000000-0000-0000-0000-000000000001").unwrap(),
+            updated_in: SessionPhase::Execution,
+        }
+    }
+
+    // --- gym_usage ---
+
+    #[test]
+    fn gym_usage_contains_expected_subcommands() {
+        let usage = gym_usage();
+        assert!(usage.contains("list"), "should mention 'list'");
+        assert!(usage.contains("run"), "should mention 'run'");
+        assert!(usage.contains("compare"), "should mention 'compare'");
+        assert!(usage.contains("run-suite"), "should mention 'run-suite'");
+        assert!(usage.contains("simard-gym"), "should mention binary name");
+    }
+
+    // --- parse_runtime_topology ---
+
+    #[test]
+    fn parse_runtime_topology_single_process() {
+        assert_eq!(
+            parse_runtime_topology("single-process").unwrap(),
+            RuntimeTopology::SingleProcess
+        );
+    }
+
+    #[test]
+    fn parse_runtime_topology_multi_process() {
+        assert_eq!(
+            parse_runtime_topology("multi-process").unwrap(),
+            RuntimeTopology::MultiProcess
+        );
+    }
+
+    #[test]
+    fn parse_runtime_topology_distributed() {
+        assert_eq!(
+            parse_runtime_topology("distributed").unwrap(),
+            RuntimeTopology::Distributed
+        );
+    }
+
+    #[test]
+    fn parse_runtime_topology_invalid_value() {
+        let err = parse_runtime_topology("bogus").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SIMARD_RUNTIME_TOPOLOGY"),
+            "error should reference the config key"
+        );
+        assert!(
+            msg.contains("single-process"),
+            "error should list valid values"
+        );
+    }
+
+    // --- next_required / next_optional_path / reject_extra_args ---
+
+    #[test]
+    fn next_required_returns_value_when_present() {
+        let mut iter = args(&["hello"]).into_iter();
+        assert_eq!(next_required(&mut iter, "greeting").unwrap(), "hello");
+    }
+
+    #[test]
+    fn next_required_errors_when_empty() {
+        let mut iter = std::iter::empty::<String>();
+        let err = next_required(&mut iter, "widget").unwrap_err();
+        assert!(err.to_string().contains("expected widget"));
+    }
+
+    #[test]
+    fn next_optional_path_returns_some() {
+        let mut iter = args(&["/a/b"]).into_iter();
+        assert_eq!(next_optional_path(&mut iter), Some(PathBuf::from("/a/b")));
+    }
+
+    #[test]
+    fn next_optional_path_returns_none_when_empty() {
+        let mut iter = std::iter::empty::<String>();
+        assert_eq!(next_optional_path(&mut iter), None);
+    }
+
+    #[test]
+    fn reject_extra_args_ok_when_empty() {
+        reject_extra_args(std::iter::empty::<String>()).unwrap();
+    }
+
+    #[test]
+    fn reject_extra_args_errors_on_trailing() {
+        let err = reject_extra_args(args(&["extra1", "extra2"]).into_iter()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("extra1"));
+        assert!(msg.contains("extra2"));
+    }
+
+    // --- artifact_name ---
+
+    #[test]
+    fn artifact_name_extracts_file_name() {
+        assert_eq!(artifact_name(Path::new("/foo/bar/baz.json")), "baz.json");
+    }
+
+    #[test]
+    fn artifact_name_returns_fallback_for_root() {
+        assert_eq!(artifact_name(Path::new("/")), "file");
+    }
+
+    // --- terminal_recipe_reference ---
+
+    #[test]
+    fn terminal_recipe_reference_valid_name() {
+        let reference = terminal_recipe_reference("my-recipe-1").unwrap();
+        assert_eq!(
+            reference.id,
+            crate::prompt_assets::PromptAssetId::new("terminal-recipe:my-recipe-1")
+        );
+        assert_eq!(
+            reference.relative_path,
+            PathBuf::from("simard/terminal_recipes/my-recipe-1.simard-terminal")
+        );
+    }
+
+    #[test]
+    fn terminal_recipe_reference_rejects_empty() {
+        assert!(terminal_recipe_reference("").is_err());
+    }
+
+    #[test]
+    fn terminal_recipe_reference_rejects_uppercase() {
+        assert!(terminal_recipe_reference("MyRecipe").is_err());
+    }
+
+    #[test]
+    fn terminal_recipe_reference_rejects_spaces() {
+        assert!(terminal_recipe_reference("my recipe").is_err());
+    }
+
+    // --- dispatch_operator_probe: argument validation ---
+
+    #[test]
+    fn dispatch_operator_probe_no_command() {
+        let err = dispatch_operator_probe(std::iter::empty::<String>()).unwrap_err();
+        assert!(err.to_string().contains("expected a probe command"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_unknown_command() {
+        let err = dispatch_operator_probe(args(&["nonexistent"])).unwrap_err();
+        assert!(err.to_string().contains("unsupported probe command"));
+        assert!(err.to_string().contains("nonexistent"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_missing_required_args() {
+        // bootstrap-run needs identity, base type, topology, objective
+        let err = dispatch_operator_probe(args(&["bootstrap-run"])).unwrap_err();
+        assert!(err.to_string().contains("expected identity"));
+    }
+
+    // --- dispatch_legacy_gym_cli: argument validation ---
+
+    #[test]
+    fn dispatch_legacy_gym_cli_no_command() {
+        let err = dispatch_legacy_gym_cli(std::iter::empty::<String>()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("simard-gym"), "should show usage on no args");
+    }
+
+    #[test]
+    fn dispatch_legacy_gym_cli_unknown_command() {
+        let err = dispatch_legacy_gym_cli(args(&["bogus"])).unwrap_err();
+        assert!(err.to_string().contains("simard-gym"));
+    }
+
+    #[test]
+    fn dispatch_legacy_gym_cli_run_missing_scenario_id() {
+        let err = dispatch_legacy_gym_cli(args(&["run"])).unwrap_err();
+        assert!(err.to_string().contains("expected scenario id"));
+    }
+
+    // --- terminal evidence helpers ---
+
+    #[test]
+    fn required_terminal_evidence_value_found() {
+        let records = vec![
+            make_evidence("terminal-cwd=/home/user"),
+            make_evidence("terminal-exit-code=0"),
+        ];
+        let val = required_terminal_evidence_value(&records, "terminal-exit-code=", "test-handoff")
+            .unwrap();
+        assert_eq!(val, "0");
+    }
+
+    #[test]
+    fn required_terminal_evidence_value_not_found() {
+        let records = vec![make_evidence("terminal-cwd=/home/user")];
+        let err = required_terminal_evidence_value(&records, "terminal-exit-code=", "test-handoff")
+            .unwrap_err();
+        assert!(err.to_string().contains("terminal-exit-code"));
+    }
+
+    #[test]
+    fn required_terminal_evidence_value_returns_last_match() {
+        let records = vec![
+            make_evidence("terminal-exit-code=1"),
+            make_evidence("terminal-exit-code=0"),
+        ];
+        let val = required_terminal_evidence_value(&records, "terminal-exit-code=", "test-handoff")
+            .unwrap();
+        assert_eq!(val, "0", "should return last (most recent) match");
+    }
+
+    #[test]
+    fn optional_terminal_evidence_value_found() {
+        let records = vec![make_evidence("terminal-cwd=/workspace")];
+        assert_eq!(
+            optional_terminal_evidence_value(&records, "terminal-cwd="),
+            Some("/workspace")
+        );
+    }
+
+    #[test]
+    fn optional_terminal_evidence_value_missing() {
+        let records = vec![make_evidence("other-key=value")];
+        assert_eq!(
+            optional_terminal_evidence_value(&records, "terminal-cwd="),
+            None
+        );
+    }
+
+    #[test]
+    fn terminal_evidence_values_collects_indexed_entries() {
+        let records = vec![
+            make_evidence("checkpoint1=first"),
+            make_evidence("checkpoint2=second"),
+            make_evidence("unrelated=skip"),
+        ];
+        let values = terminal_evidence_values(&records, "checkpoint");
+        assert_eq!(values, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn terminal_evidence_values_empty_when_no_match() {
+        let records = vec![make_evidence("other=value")];
+        let values = terminal_evidence_values(&records, "checkpoint");
+        assert!(values.is_empty());
+    }
+
+    // --- GoalRegisterView::from_records ---
+
+    #[test]
+    fn goal_register_view_partitions_by_status() {
+        let records = vec![
+            make_goal("Alpha", GoalStatus::Active, 1),
+            make_goal("Beta", GoalStatus::Proposed, 2),
+            make_goal("Gamma", GoalStatus::Paused, 3),
+            make_goal("Delta", GoalStatus::Completed, 1),
+            make_goal("Epsilon", GoalStatus::Active, 2),
+        ];
+        let view = GoalRegisterView::from_records(records);
+
+        assert_eq!(view.sections[0].goals.len(), 2, "Active");
+        assert_eq!(view.sections[1].goals.len(), 1, "Proposed");
+        assert_eq!(view.sections[2].goals.len(), 1, "Paused");
+        assert_eq!(view.sections[3].goals.len(), 1, "Completed");
+
+        // Active section should be sorted by priority
+        assert_eq!(view.sections[0].goals[0].title, "Alpha");
+        assert_eq!(view.sections[0].goals[1].title, "Epsilon");
+    }
+
+    #[test]
+    fn goal_register_view_empty_input() {
+        let view = GoalRegisterView::from_records(vec![]);
+        for section in &view.sections {
+            assert!(section.goals.is_empty());
+        }
+    }
+
+    // --- prompt_root ---
+
+    #[test]
+    fn prompt_root_ends_with_prompt_assets() {
+        let root = prompt_root();
+        assert!(
+            root.ends_with("prompt_assets"),
+            "prompt_root should end with 'prompt_assets', got: {}",
+            root.display()
+        );
+    }
+
+    // --- state_root path construction ---
+
+    #[test]
+    fn state_root_builds_expected_path() {
+        let base_type = BaseTypeId::new("my-type");
+        let path = state_root(
+            "my-id",
+            &base_type,
+            RuntimeTopology::SingleProcess,
+            "probe-x",
+        );
+        let path_str = path.to_string_lossy();
+        assert!(path_str.contains("target/operator-probe-state"));
+        assert!(path_str.contains("probe-x"));
+        assert!(path_str.contains("my-id"));
+        assert!(path_str.contains("my-type"));
+        assert!(path_str.contains("single-process"));
+    }
+
+    // --- render_redacted_objective_metadata ---
+
+    #[test]
+    fn render_redacted_objective_metadata_valid() {
+        let result =
+            render_redacted_objective_metadata("objective-metadata(chars=10, words=2, lines=1)");
+        assert!(result.is_ok());
+        let rendered = result.unwrap();
+        assert!(rendered.contains("chars=10"));
+        assert!(rendered.contains("words=2"));
+        assert!(rendered.contains("lines=1"));
+    }
+
+    #[test]
+    fn render_redacted_objective_metadata_invalid() {
+        let result = render_redacted_objective_metadata("not a valid metadata string");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("objective"));
+    }
+}
