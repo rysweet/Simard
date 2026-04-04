@@ -506,6 +506,7 @@ pub struct RuntimeKernel {
     runtime_node: RuntimeNodeId,
     mailbox_address: RuntimeAddress,
     start_time: Instant,
+    subordinates: Vec<crate::runtime_ipc::IpcSubprocessHandle>,
 }
 
 pub type LocalRuntime = RuntimeKernel;
@@ -568,6 +569,7 @@ impl RuntimeKernel {
             runtime_node,
             mailbox_address,
             start_time: Instant::now(),
+            subordinates: Vec::new(),
         })
     }
 
@@ -661,6 +663,47 @@ impl RuntimeKernel {
 
         self.transition(RuntimeState::Stopping)?;
         self.transition(RuntimeState::Stopped)
+    }
+
+    /// Spawn a subordinate subprocess with IPC transport.
+    ///
+    /// Only available when the runtime topology is `MultiProcess`.
+    #[cfg(unix)]
+    pub fn spawn_subordinate(
+        &mut self,
+        binary_path: &std::path::Path,
+        identity_name: &str,
+        socket_path: &std::path::Path,
+    ) -> SimardResult<u32> {
+        if self.request.topology != RuntimeTopology::MultiProcess {
+            return Err(SimardError::UnsupportedRuntimeTopology {
+                topology: self.request.topology,
+                driver: "spawn_subordinate requires MultiProcess".to_string(),
+            });
+        }
+        let handle = crate::runtime_ipc::spawn_subprocess(binary_path, identity_name, socket_path)?;
+        let pid = handle.pid();
+        self.subordinates.push(handle);
+        Ok(pid)
+    }
+
+    /// Gracefully shut down all tracked subordinate subprocesses.
+    pub fn shutdown_all(&mut self) -> SimardResult<()> {
+        let mut last_err = None;
+        for handle in self.subordinates.drain(..) {
+            if let Err(e) = crate::runtime_ipc::shutdown_subprocess(handle) {
+                last_err = Some(e);
+            }
+        }
+        match last_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// Number of active subordinate subprocesses.
+    pub fn subordinate_count(&self) -> usize {
+        self.subordinates.len()
     }
 
     pub fn run(&mut self, objective: impl Into<String>) -> SimardResult<SessionOutcome> {
