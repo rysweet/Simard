@@ -20,6 +20,7 @@ pub mod cmd_self_update;
 mod copilot_status_probe;
 mod copilot_task_submit;
 pub mod engineer_loop;
+pub mod engineer_plan;
 pub mod error;
 pub mod evidence;
 pub mod goal_curation;
@@ -120,6 +121,9 @@ pub use engineer_loop::{
     AnalyzedAction, EngineerLoopRun, ExecutedEngineerAction, PhaseOutcome, PhaseTrace,
     RepoInspection, SelectedEngineerAction, VerificationReport, analyze_objective,
     run_local_engineer_loop,
+};
+pub use engineer_plan::{
+    Plan, PlanExecutionResult, PlanStep, PlanStepResult, execute_plan, plan_objective,
 };
 pub use error::{SimardError, SimardResult};
 pub use evidence::{
