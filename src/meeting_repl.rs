@@ -322,26 +322,7 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
     let mut session = start_meeting(topic, bridge)?;
     let mut agent = agent;
 
-    writeln!(
-        output,
-        "Simard v{} — meeting mode",
-        env!("CARGO_PKG_VERSION")
-    )
-    .ok();
-    writeln!(output, "Topic: {topic}").ok();
-    if agent.is_some() {
-        writeln!(
-            output,
-            "Simard is listening. Speak naturally — /help for commands, /close to end."
-        )
-    } else {
-        writeln!(
-            output,
-            "Note-taking mode (no agent backend). /help for commands, /close to end."
-        )
-    }
-    .ok();
-    writeln!(output).ok();
+    print_banner(topic, agent.is_some(), output);
 
     let mut line = String::new();
     loop {
@@ -363,120 +344,163 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
             }
         }
 
-        match parse_meeting_command(&line) {
-            MeetingCommand::Decision {
-                description,
-                rationale,
-            } => {
-                let decision = MeetingDecision {
-                    description: description.clone(),
-                    rationale,
-                    participants: Vec::new(),
-                };
-                match record_decision(&mut session, decision) {
-                    Ok(()) => writeln!(output, "Recorded decision: {description}").ok(),
-                    Err(e) => writeln!(output, "Error: {e}").ok(),
-                };
-            }
-            MeetingCommand::Action {
-                description,
-                owner,
-                priority,
-            } => {
-                let item = ActionItem {
-                    description: description.clone(),
-                    owner: owner.clone(),
-                    priority,
-                    due_description: None,
-                };
-                match record_action_item(&mut session, item) {
-                    Ok(()) => {
-                        writeln!(output, "Recorded action: {description} (owner={owner})").ok()
-                    }
-                    Err(e) => writeln!(output, "Error: {e}").ok(),
-                };
-            }
-            MeetingCommand::Note(text) => match add_note(&mut session, &text) {
-                Ok(()) => {
-                    writeln!(output, "Note added.").ok();
-                }
-                Err(e) => {
-                    writeln!(output, "Error: {e}").ok();
-                }
-            },
-            MeetingCommand::Conversation(text) => {
-                if let Some(ref mut agent_session) = agent {
-                    let turn_input = BaseTypeTurnInput {
-                        objective: text.clone(),
-                        identity_context: meeting_system_prompt.to_string(),
-                        prompt_preamble: format!("Meeting topic: {topic}"),
-                    };
-                    match agent_session.run_turn(turn_input) {
-                        Ok(outcome) => {
-                            let response = outcome.execution_summary.trim();
-                            writeln!(output, "\n{response}\n").ok();
-                            add_note(&mut session, &format!("operator: {text}")).ok();
-                            add_note(&mut session, &format!("simard: {response}")).ok();
-                            auto_capture_structured_items(&mut session, &text, response, output);
-                        }
-                        Err(e) => {
-                            writeln!(output, "[agent error: {e}]").ok();
-                            add_note(&mut session, &text).ok();
-                        }
-                    }
-                } else {
-                    // No agent — fall back to note-taking
-                    add_note(&mut session, &text).ok();
-                    writeln!(output, "Note added.").ok();
-                }
-            }
-            MeetingCommand::Close => {
-                writeln!(output, "Closing meeting.").ok();
-                break;
-            }
-            MeetingCommand::Help => {
-                write!(output, "{HELP_TEXT}").ok();
-            }
-            MeetingCommand::Empty => {}
-            MeetingCommand::Unknown(input) => {
-                writeln!(output, "Could not parse command: {input}").ok();
-                writeln!(
-                    output,
-                    "Try /help for command syntax, or just type naturally."
-                )
-                .ok();
-            }
+        let cmd = parse_meeting_command(&line);
+        if matches!(cmd, MeetingCommand::Close) {
+            writeln!(output, "Closing meeting.").ok();
+            break;
         }
+        dispatch_command(
+            cmd,
+            &mut session,
+            &mut agent,
+            topic,
+            meeting_system_prompt,
+            output,
+        );
     }
 
     let closed = close_meeting(session, bridge)?;
     let summary = closed.durable_summary();
     writeln!(output, "Meeting record: {summary}").ok();
 
-    // --- Write meeting handoff artifact for engineer loop and act-on-decisions ---
-    {
-        use crate::meeting_facilitator::{
-            MeetingHandoff, default_handoff_dir, write_meeting_handoff,
-        };
-        let handoff = MeetingHandoff::from_session(&closed);
-        let handoff_dir = default_handoff_dir();
-        if let Err(e) = write_meeting_handoff(&handoff_dir, &handoff) {
-            writeln!(output, "[warn] Failed to write meeting handoff: {e}").ok();
-        } else {
+    write_meeting_handoff_artifact(&closed, output);
+    persist_meeting_to_memory(&closed, bridge, output);
+
+    Ok(closed)
+}
+
+fn print_banner<W: Write>(topic: &str, has_agent: bool, output: &mut W) {
+    writeln!(
+        output,
+        "Simard v{} — meeting mode",
+        env!("CARGO_PKG_VERSION")
+    )
+    .ok();
+    writeln!(output, "Topic: {topic}").ok();
+    if has_agent {
+        writeln!(
+            output,
+            "Simard is listening. Speak naturally — /help for commands, /close to end."
+        )
+    } else {
+        writeln!(
+            output,
+            "Note-taking mode (no agent backend). /help for commands, /close to end."
+        )
+    }
+    .ok();
+    writeln!(output).ok();
+}
+
+fn dispatch_command<W: Write>(
+    cmd: MeetingCommand,
+    session: &mut MeetingSession,
+    agent: &mut Option<&mut dyn BaseTypeSession>,
+    topic: &str,
+    meeting_system_prompt: &str,
+    output: &mut W,
+) {
+    match cmd {
+        MeetingCommand::Decision {
+            description,
+            rationale,
+        } => {
+            let decision = MeetingDecision {
+                description: description.clone(),
+                rationale,
+                participants: Vec::new(),
+            };
+            match record_decision(session, decision) {
+                Ok(()) => writeln!(output, "Recorded decision: {description}").ok(),
+                Err(e) => writeln!(output, "Error: {e}").ok(),
+            };
+        }
+        MeetingCommand::Action {
+            description,
+            owner,
+            priority,
+        } => {
+            let item = ActionItem {
+                description: description.clone(),
+                owner: owner.clone(),
+                priority,
+                due_description: None,
+            };
+            match record_action_item(session, item) {
+                Ok(()) => writeln!(output, "Recorded action: {description} (owner={owner})").ok(),
+                Err(e) => writeln!(output, "Error: {e}").ok(),
+            };
+        }
+        MeetingCommand::Note(text) => match add_note(session, &text) {
+            Ok(()) => {
+                writeln!(output, "Note added.").ok();
+            }
+            Err(e) => {
+                writeln!(output, "Error: {e}").ok();
+            }
+        },
+        MeetingCommand::Conversation(text) => {
+            if let Some(agent_session) = agent {
+                let turn_input = BaseTypeTurnInput {
+                    objective: text.clone(),
+                    identity_context: meeting_system_prompt.to_string(),
+                    prompt_preamble: format!("Meeting topic: {topic}"),
+                };
+                match agent_session.run_turn(turn_input) {
+                    Ok(outcome) => {
+                        let response = outcome.execution_summary.trim();
+                        writeln!(output, "\n{response}\n").ok();
+                        add_note(session, &format!("operator: {text}")).ok();
+                        add_note(session, &format!("simard: {response}")).ok();
+                        auto_capture_structured_items(session, &text, response, output);
+                    }
+                    Err(e) => {
+                        writeln!(output, "[agent error: {e}]").ok();
+                        add_note(session, &text).ok();
+                    }
+                }
+            } else {
+                add_note(session, &text).ok();
+                writeln!(output, "Note added.").ok();
+            }
+        }
+        MeetingCommand::Close => unreachable!(),
+        MeetingCommand::Help => {
+            write!(output, "{HELP_TEXT}").ok();
+        }
+        MeetingCommand::Empty => {}
+        MeetingCommand::Unknown(input) => {
+            writeln!(output, "Could not parse command: {input}").ok();
             writeln!(
                 output,
-                "Meeting handoff written ({} decisions, {} actions). Run `simard act-on-decisions` to create issues.",
-                handoff.decisions.len(),
-                handoff.action_items.len(),
+                "Try /help for command syntax, or just type naturally."
             )
             .ok();
         }
     }
+}
 
-    // --- Persist full meeting content to cognitive memory ---
+fn write_meeting_handoff_artifact<W: Write>(closed: &MeetingSession, output: &mut W) {
+    use crate::meeting_facilitator::{MeetingHandoff, default_handoff_dir, write_meeting_handoff};
+    let handoff = MeetingHandoff::from_session(closed);
+    let handoff_dir = default_handoff_dir();
+    if let Err(e) = write_meeting_handoff(&handoff_dir, &handoff) {
+        writeln!(output, "[warn] Failed to write meeting handoff: {e}").ok();
+    } else {
+        writeln!(
+            output,
+            "Meeting handoff written ({} decisions, {} actions). Run `simard act-on-decisions` to create issues.",
+            handoff.decisions.len(),
+            handoff.action_items.len(),
+        ).ok();
+    }
+}
 
-    // 1. Store the full transcript as an episodic memory so future meetings
-    //    can recall what was discussed (close_meeting only stores the summary).
+fn persist_meeting_to_memory<W: Write>(
+    closed: &MeetingSession,
+    bridge: &CognitiveMemoryBridge,
+    output: &mut W,
+) {
     if !closed.notes.is_empty() {
         let transcript_text = closed.notes.join("\n");
         let episode_content = format!(
@@ -497,8 +521,6 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
         }
     }
 
-    // 2. Store each decision as an individual semantic fact so they are
-    //    independently searchable by concept.
     for decision in &closed.decisions {
         let tags = vec![
             "meeting".to_string(),
@@ -524,8 +546,6 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
         }
     }
 
-    // 3. Store each action item as a prospective memory so Simard can
-    //    remind the owner when the trigger condition is met.
     for item in &closed.action_items {
         if let Err(e) = bridge.store_prospective(
             &format!("Meeting action: {}", item.description),
@@ -544,8 +564,6 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
             .ok();
         }
     }
-
-    Ok(closed)
 }
 
 #[cfg(test)]

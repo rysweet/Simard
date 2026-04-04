@@ -122,6 +122,35 @@ pub(super) fn execute_scenario(
     output_root: &Path,
 ) -> SimardResult<BenchmarkRunReport> {
     let started_at_unix_ms = reporting::now_unix_ms()?;
+    let (runtime_artifacts, metric_facts) = run_scenario_runtime(&scenario, suite_id)?;
+    let checks = build_scenario_checks(&scenario, &runtime_artifacts);
+    let passed = checks.iter().all(|check| check.passed);
+    build_and_write_report(
+        &scenario,
+        suite_id,
+        output_root,
+        started_at_unix_ms,
+        runtime_artifacts,
+        metric_facts,
+        checks,
+        passed,
+    )
+}
+
+struct RuntimeArtifacts {
+    outcome: crate::runtime::SessionOutcome,
+    ready_snapshot: crate::reflection::ReflectionSnapshot,
+    stopped_snapshot: crate::reflection::ReflectionSnapshot,
+    exported: crate::handoff::RuntimeHandoffSnapshot,
+    restored_snapshot: crate::reflection::ReflectionSnapshot,
+    benchmark_memory_key: String,
+    benchmark_evidence_id: String,
+}
+
+fn run_scenario_runtime(
+    scenario: &BenchmarkScenario,
+    suite_id: &str,
+) -> SimardResult<(RuntimeArtifacts, BenchmarkMetricFacts)> {
     let prompt_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets");
     let prompt_store = Arc::new(FilePromptAssetStore::new(prompt_root));
     let memory_store = Arc::new(InMemoryMemoryStore::try_default()?);
@@ -208,59 +237,78 @@ pub(super) fn execute_scenario(
     let stopped_snapshot = runtime.snapshot()?;
     metric_facts.record_required_action();
 
-    let checks = vec![
+    Ok((
+        RuntimeArtifacts {
+            outcome,
+            ready_snapshot,
+            stopped_snapshot,
+            exported,
+            restored_snapshot,
+            benchmark_memory_key,
+            benchmark_evidence_id,
+        },
+        metric_facts,
+    ))
+}
+
+fn build_scenario_checks(
+    scenario: &BenchmarkScenario,
+    arts: &RuntimeArtifacts,
+) -> Vec<BenchmarkCheckResult> {
+    let core_checks = vec![
         BenchmarkCheckResult {
             id: "session-complete".to_string(),
-            passed: outcome.session.phase == SessionPhase::Complete,
+            passed: arts.outcome.session.phase == SessionPhase::Complete,
             detail: format!(
                 "session phase after execution was '{}'",
-                outcome.session.phase
+                arts.outcome.session.phase
             ),
         },
         BenchmarkCheckResult {
             id: "runtime-ready-before-stop".to_string(),
-            passed: ready_snapshot.runtime_state == RuntimeState::Ready,
+            passed: arts.ready_snapshot.runtime_state == RuntimeState::Ready,
             detail: format!(
                 "runtime state before stop was '{}'",
-                ready_snapshot.runtime_state
+                arts.ready_snapshot.runtime_state
             ),
         },
         BenchmarkCheckResult {
             id: "runtime-stopped-after-stop".to_string(),
-            passed: stopped_snapshot.runtime_state == RuntimeState::Stopped,
+            passed: arts.stopped_snapshot.runtime_state == RuntimeState::Stopped,
             detail: format!(
                 "runtime state after stop was '{}'",
-                stopped_snapshot.runtime_state
+                arts.stopped_snapshot.runtime_state
             ),
         },
         BenchmarkCheckResult {
             id: "reflection-summary-present".to_string(),
-            passed: !outcome.reflection.summary.trim().is_empty(),
+            passed: !arts.outcome.reflection.summary.trim().is_empty(),
             detail: "reflection summary was non-empty".to_string(),
         },
         BenchmarkCheckResult {
             id: "runtime-evidence-produced".to_string(),
-            passed: ready_snapshot.evidence_records >= scenario.expected_min_runtime_evidence,
+            passed: arts.ready_snapshot.evidence_records >= scenario.expected_min_runtime_evidence,
             detail: format!(
                 "runtime recorded {} evidence records before benchmark capture; expected at least {}",
-                ready_snapshot.evidence_records, scenario.expected_min_runtime_evidence
+                arts.ready_snapshot.evidence_records, scenario.expected_min_runtime_evidence
             ),
         },
         BenchmarkCheckResult {
             id: "exported-benchmark-artifacts".to_string(),
-            passed: exported.memory_records.len() >= 3 && exported.evidence_records.len() >= 4,
+            passed: arts.exported.memory_records.len() >= 3
+                && arts.exported.evidence_records.len() >= 4,
             detail: format!(
                 "exported {} memory records and {} evidence records",
-                exported.memory_records.len(),
-                exported.evidence_records.len()
+                arts.exported.memory_records.len(),
+                arts.exported.evidence_records.len()
             ),
         },
         BenchmarkCheckResult {
             id: "handoff-restores-session-boundary".to_string(),
-            passed: restored_snapshot.session_phase == Some(SessionPhase::Complete),
+            passed: arts.restored_snapshot.session_phase == Some(SessionPhase::Complete),
             detail: format!(
                 "restored session phase was '{}'",
-                restored_snapshot
+                arts.restored_snapshot
                     .session_phase
                     .map(|phase| phase.to_string())
                     .unwrap_or_else(|| "<none>".to_string())
@@ -268,7 +316,8 @@ pub(super) fn execute_scenario(
         },
         BenchmarkCheckResult {
             id: "handoff-objective-redacted".to_string(),
-            passed: exported
+            passed: arts
+                .exported
                 .session
                 .as_ref()
                 .map(|session| {
@@ -276,7 +325,8 @@ pub(super) fn execute_scenario(
                         && session.objective.ends_with(')')
                 })
                 .unwrap_or(false),
-            detail: exported
+            detail: arts
+                .exported
                 .session
                 .as_ref()
                 .map(|session| format!("exported session objective was '{}'", session.objective))
@@ -285,13 +335,24 @@ pub(super) fn execute_scenario(
                 }),
         },
     ];
-    // Class-specific scoring checks.
-    let class_checks = scenarios::class_specific_checks(&scenario, &outcome, &exported);
-    let checks = [checks, class_checks].concat();
-    let passed = checks.iter().all(|check| check.passed);
+    let class_checks = scenarios::class_specific_checks(scenario, &arts.outcome, &arts.exported);
+    [core_checks, class_checks].concat()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_and_write_report(
+    scenario: &BenchmarkScenario,
+    suite_id: &str,
+    output_root: &Path,
+    started_at_unix_ms: u128,
+    arts: RuntimeArtifacts,
+    metric_facts: BenchmarkMetricFacts,
+    checks: Vec<BenchmarkCheckResult>,
+    passed: bool,
+) -> SimardResult<BenchmarkRunReport> {
     let run_dir = output_root
         .join(scenario.id)
-        .join(outcome.session.id.as_str());
+        .join(arts.outcome.session.id.as_str());
     reporting::create_dir_all(&run_dir)?;
     let report_json = run_dir.join("report.json");
     let report_txt = run_dir.join("report.txt");
@@ -305,8 +366,8 @@ pub(super) fn execute_scenario(
         ReviewRequest {
             target_kind: ReviewTargetKind::Benchmark,
             target_label: format!("{suite_id}:{}", scenario.id),
-            execution_summary: outcome.execution_summary.clone(),
-            reflection_summary: outcome.reflection.summary.clone(),
+            execution_summary: arts.outcome.execution_summary.clone(),
+            reflection_summary: arts.outcome.reflection.summary.clone(),
             measurement_notes: measurement_notes.clone(),
             signals: checks
                 .iter()
@@ -317,17 +378,17 @@ pub(super) fn execute_scenario(
                 })
                 .collect(),
         },
-        &exported,
+        &arts.exported,
     )?;
     let report = BenchmarkRunReport {
         suite_id: suite_id.to_string(),
-        scenario,
-        session_id: outcome.session.id.to_string(),
+        scenario: *scenario,
+        session_id: arts.outcome.session.id.to_string(),
         run_started_at_unix_ms: started_at_unix_ms,
         passed,
         scorecard: BenchmarkScorecard {
             task_completed: passed,
-            evidence_quality: if exported.evidence_records.len() >= 4 {
+            evidence_quality: if arts.exported.evidence_records.len() >= 4 {
                 "sufficient".to_string()
             } else {
                 "thin".to_string()
@@ -344,33 +405,35 @@ pub(super) fn execute_scenario(
             measurement_notes,
         },
         checks,
-        plan: outcome.plan,
-        execution_summary: outcome.execution_summary,
-        reflection_summary: outcome.reflection.summary,
-        benchmark_memory_key,
-        benchmark_evidence_id,
+        plan: arts.outcome.plan,
+        execution_summary: arts.outcome.execution_summary,
+        reflection_summary: arts.outcome.reflection.summary,
+        benchmark_memory_key: arts.benchmark_memory_key,
+        benchmark_evidence_id: arts.benchmark_evidence_id,
         runtime: BenchmarkRuntimeReport {
-            identity: ready_snapshot.identity_name,
-            selected_base_type: ready_snapshot.selected_base_type.to_string(),
-            topology: ready_snapshot.topology.to_string(),
-            adapter_implementation: ready_snapshot.adapter_backend.identity,
-            topology_backend: ready_snapshot.topology_backend.identity,
-            transport_backend: ready_snapshot.transport_backend.identity,
-            supervisor_backend: ready_snapshot.supervisor_backend.identity,
-            runtime_node: ready_snapshot.runtime_node.to_string(),
-            mailbox_address: ready_snapshot.mailbox_address.to_string(),
-            snapshot_state_before_stop: ready_snapshot.runtime_state.to_string(),
-            snapshot_state_after_stop: stopped_snapshot.runtime_state.to_string(),
+            identity: arts.ready_snapshot.identity_name,
+            selected_base_type: arts.ready_snapshot.selected_base_type.to_string(),
+            topology: arts.ready_snapshot.topology.to_string(),
+            adapter_implementation: arts.ready_snapshot.adapter_backend.identity,
+            topology_backend: arts.ready_snapshot.topology_backend.identity,
+            transport_backend: arts.ready_snapshot.transport_backend.identity,
+            supervisor_backend: arts.ready_snapshot.supervisor_backend.identity,
+            runtime_node: arts.ready_snapshot.runtime_node.to_string(),
+            mailbox_address: arts.ready_snapshot.mailbox_address.to_string(),
+            snapshot_state_before_stop: arts.ready_snapshot.runtime_state.to_string(),
+            snapshot_state_after_stop: arts.stopped_snapshot.runtime_state.to_string(),
         },
         handoff: BenchmarkHandoffReport {
-            exported_state: exported.exported_state.to_string(),
-            exported_memory_records: exported.memory_records.len(),
-            exported_evidence_records: exported.evidence_records.len(),
-            restored_runtime_state: restored_snapshot.runtime_state.to_string(),
-            restored_session_phase: restored_snapshot
+            exported_state: arts.exported.exported_state.to_string(),
+            exported_memory_records: arts.exported.memory_records.len(),
+            exported_evidence_records: arts.exported.evidence_records.len(),
+            restored_runtime_state: arts.restored_snapshot.runtime_state.to_string(),
+            restored_session_phase: arts
+                .restored_snapshot
                 .session_phase
                 .map(|phase| phase.to_string()),
-            restored_session_objective: exported
+            restored_session_objective: arts
+                .exported
                 .session
                 .as_ref()
                 .map(|session| session.objective.clone()),
