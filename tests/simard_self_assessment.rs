@@ -134,12 +134,14 @@ fn assess_features() -> Vec<Feature> {
             id: "H",
             requirement: "Gym mode for self-improvement benchmarks",
             evidence: vec![
-                "src/gym.rs — 9 benchmark scenarios, class-specific scoring",
+                "src/gym/ — 9 benchmark scenarios, class-specific scoring",
                 "src/gym_scoring.rs — GymSuiteScore, regression detection",
                 "src/gym_bridge.rs — GymBridge for external gym engines",
                 "CLI: gym list/run/compare/run-suite",
             ],
-            status: if src.join("gym.rs").exists() && src.join("gym_scoring.rs").exists() {
+            status: if (src.join("gym.rs").exists() || src.join("gym").is_dir())
+                && src.join("gym_scoring.rs").exists()
+            {
                 Status::Implemented
             } else {
                 Status::Missing
@@ -237,7 +239,7 @@ fn assess_features() -> Vec<Feature> {
             requirement: "Agent identity / Agent runtime / Agent base type separation",
             evidence: vec![
                 "src/identity.rs + src/identity_composition.rs — Agent Identity layer",
-                "src/runtime.rs — Agent Runtime (session lifecycle, handoff)",
+                "src/runtime/ — Agent Runtime (session lifecycle, handoff)",
                 "src/base_types.rs — BaseTypeSession trait",
                 "src/base_type_rustyclawd.rs — RustyClawd base type",
                 "src/base_type_copilot.rs — Copilot SDK base type",
@@ -246,7 +248,7 @@ fn assess_features() -> Vec<Feature> {
                 "src/base_type_harness.rs — Local harness base type",
             ],
             status: if src.join("identity.rs").exists()
-                && src.join("runtime.rs").exists()
+                && (src.join("runtime.rs").exists() || src.join("runtime").is_dir())
                 && src.join("base_types.rs").exists()
                 && src.join("identity_composition.rs").exists()
             {
