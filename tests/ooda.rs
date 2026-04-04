@@ -106,8 +106,8 @@ fn board_with_goals() -> GoalBoard {
 #[test]
 fn observe_gathers_goal_statuses_and_gym_health() {
     let bridges = test_bridges();
-    let state = OodaState::new(board_with_goals());
-    let obs = observe(&state, &bridges).unwrap();
+    let mut state = OodaState::new(board_with_goals());
+    let obs = observe(&mut state, &bridges).unwrap();
     assert_eq!(obs.goal_statuses.len(), 3);
     assert!(obs.gym_health.is_some());
     assert!(obs.memory_stats.total() > 0);
@@ -117,8 +117,8 @@ fn observe_gathers_goal_statuses_and_gym_health() {
 fn orient_produces_ranked_priorities() {
     let bridges = test_bridges();
     let board = board_with_goals();
-    let state = OodaState::new(board.clone());
-    let obs = observe(&state, &bridges).unwrap();
+    let mut state = OodaState::new(board.clone());
+    let obs = observe(&mut state, &bridges).unwrap();
     let priorities = orient(&obs, &board).unwrap();
     assert!(!priorities.is_empty());
     assert_eq!(priorities[0].goal_id, "g3"); // blocked = highest urgency
@@ -129,8 +129,8 @@ fn orient_produces_ranked_priorities() {
 fn decide_selects_actions_within_concurrent_limit() {
     let bridges = test_bridges();
     let board = board_with_goals();
-    let state = OodaState::new(board.clone());
-    let obs = observe(&state, &bridges).unwrap();
+    let mut state = OodaState::new(board.clone());
+    let obs = observe(&mut state, &bridges).unwrap();
     let priorities = orient(&obs, &board).unwrap();
     let config = OodaConfig {
         max_concurrent_actions: 2,
@@ -146,7 +146,7 @@ fn act_dispatches_and_returns_outcomes() {
     let mut bridges = test_bridges();
     let board = board_with_goals();
     let mut state = OodaState::new(board.clone());
-    let obs = observe(&state, &bridges).unwrap();
+    let obs = observe(&mut state, &bridges).unwrap();
     let priorities = orient(&obs, &board).unwrap();
     let actions = decide(&priorities, &OodaConfig::default()).unwrap();
     let outcomes = act(&actions, &mut bridges, &mut state).unwrap();
@@ -206,8 +206,8 @@ fn feral_all_goals_blocked() {
         sample_goal("b2", 2, GoalProgress::Blocked("rev".into())),
     )
     .unwrap();
-    let state = OodaState::new(board.clone());
-    let obs = observe(&state, &bridges).unwrap();
+    let mut state = OodaState::new(board.clone());
+    let obs = observe(&mut state, &bridges).unwrap();
     let priorities = orient(&obs, &board).unwrap();
     for p in priorities.iter().filter(|p| !p.goal_id.starts_with("__")) {
         assert!((p.urgency - 1.0).abs() < f64::EPSILON);
