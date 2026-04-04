@@ -69,6 +69,7 @@ pub mod research_tracker;
 pub mod review;
 pub mod review_pipeline;
 pub mod runtime;
+pub mod runtime_ipc;
 pub mod runtime_reflection;
 mod sanitization;
 pub mod self_improve;
@@ -259,6 +260,11 @@ pub use runtime::{
     RuntimeRequest, RuntimeState, RuntimeSupervisor, RuntimeTopology, RuntimeTopologyDriver,
     SessionOutcome,
 };
+pub use runtime_ipc::{
+    IpcMessage, IpcSubprocessHandle, IpcTransport, StdioTransport, shutdown_subprocess,
+};
+#[cfg(unix)]
+pub use runtime_ipc::{UnixSocketTransport, spawn_subprocess};
 pub use runtime_reflection::{
     LocalReflector, ResourceSnapshot, RuntimeReflection, RuntimeSnapshot, snapshot,
 };
