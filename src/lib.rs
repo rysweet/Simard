@@ -69,6 +69,7 @@ pub mod review_pipeline;
 pub mod runtime;
 mod sanitization;
 pub mod self_improve;
+pub mod self_improve_executor;
 pub mod self_relaunch;
 pub mod session;
 pub mod session_builder;
@@ -253,7 +254,10 @@ pub use runtime::{
 };
 pub use self_improve::{
     ImprovementConfig, ImprovementCycle, ImprovementDecision, ImprovementPhase, ProposedChange,
-    run_improvement_cycle, summarize_cycle,
+    apply_improvements, run_improvement_cycle, summarize_cycle,
+};
+pub use self_improve_executor::{
+    ApplyResult, ImprovementPatch, apply_and_review, generate_patch, run_autonomous_improvement,
 };
 pub use self_relaunch::{
     GateResult, RelaunchConfig, RelaunchGate, all_gates_passed, build_canary, default_gates,
