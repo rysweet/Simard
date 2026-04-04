@@ -102,6 +102,35 @@ fn validate_email(email: &str) -> SimardResult<()> {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// The default dual-identity configuration for Simard production use.
+///
+/// - **Copilot auth**: `rysweet_microsoft` (EMU identity with unlimited Copilot entitlement)
+/// - **Commit auth**: `rysweet` (public GitHub identity for repository commits)
+pub fn default_identity_config() -> DualIdentityConfig {
+    // Safety: these are hardcoded valid values, unwrap is safe.
+    DualIdentityConfig::new(
+        "rysweet_microsoft",
+        "rysweet",
+        "rysweet@users.noreply.github.com",
+    )
+    .expect("default identity config has valid fields")
+}
+
+/// Build a `DualIdentityConfig` from environment variables, falling back to
+/// the hardcoded defaults.
+///
+/// Environment variables:
+/// - `SIMARD_COPILOT_USER` overrides the Copilot auth identity
+/// - `SIMARD_COMMIT_USER` overrides the commit auth identity
+/// - `SIMARD_COMMIT_EMAIL` overrides the commit email
+pub fn identity_config_from_env() -> DualIdentityConfig {
+    let defaults = default_identity_config();
+    let copilot = std::env::var("SIMARD_COPILOT_USER").unwrap_or(defaults.copilot_user);
+    let commit = std::env::var("SIMARD_COMMIT_USER").unwrap_or(defaults.commit_user);
+    let email = std::env::var("SIMARD_COMMIT_EMAIL").unwrap_or(defaults.commit_email);
+    DualIdentityConfig::new(copilot, commit, email).unwrap_or_else(|_| default_identity_config())
+}
+
 /// Operations that require Copilot authentication.
 const COPILOT_OPERATIONS: &[&str] = &[
     "copilot-chat",
@@ -277,5 +306,28 @@ mod tests {
             config.summary(),
             "copilot=simard-copilot, commit=simard-bot <simard@example.com>"
         );
+    }
+
+    #[test]
+    fn default_identity_uses_rysweet_identities() {
+        let config = default_identity_config();
+        assert_eq!(config.copilot_user, "rysweet_microsoft");
+        assert_eq!(config.commit_user, "rysweet");
+        assert!(config.commit_email.contains("rysweet"));
+    }
+
+    #[test]
+    fn default_identity_copilot_env_is_rysweet_microsoft() {
+        let config = default_identity_config();
+        let env = env_for_identity(AuthIdentity::CopilotAuth, &config);
+        assert_eq!(env[0].1, "rysweet_microsoft");
+    }
+
+    #[test]
+    fn default_identity_commit_env_is_rysweet() {
+        let config = default_identity_config();
+        let env = env_for_identity(AuthIdentity::CommitAuth, &config);
+        let author = env.iter().find(|(k, _)| k == "GIT_AUTHOR_NAME").unwrap();
+        assert_eq!(author.1, "rysweet");
     }
 }
