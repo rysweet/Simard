@@ -68,6 +68,7 @@ pub mod research_tracker;
 pub mod review;
 pub mod review_pipeline;
 pub mod runtime;
+pub mod runtime_reflection;
 mod sanitization;
 pub mod self_improve;
 pub mod self_improve_executor;
@@ -255,6 +256,9 @@ pub use runtime::{
     RuntimeAddress, RuntimeKernel, RuntimeMailboxTransport, RuntimeNodeId, RuntimePorts,
     RuntimeRequest, RuntimeState, RuntimeSupervisor, RuntimeTopology, RuntimeTopologyDriver,
     SessionOutcome,
+};
+pub use runtime_reflection::{
+    LocalReflector, ResourceSnapshot, RuntimeReflection, RuntimeSnapshot, snapshot,
 };
 pub use self_improve::{
     ImprovementConfig, ImprovementCycle, ImprovementDecision, ImprovementPhase, ProposedChange,
