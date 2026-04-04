@@ -338,6 +338,16 @@ impl IdentityManifest {
     }
 }
 
+/// Compose multiple identity manifests using precedence-based conflict
+/// resolution. Index 0 in the input `Vec` is the highest-precedence manifest.
+///
+/// Delegates to [`crate::identity_precedence::PrecedenceResolver`].
+pub fn compose_with_precedence(
+    manifests: Vec<IdentityManifest>,
+) -> crate::identity_precedence::ResolvedIdentity {
+    crate::identity_precedence::PrecedenceResolver::new(manifests).resolve_all()
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IdentityLoadRequest {
     pub identity: String,
