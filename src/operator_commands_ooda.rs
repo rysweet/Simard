@@ -346,4 +346,110 @@ mod tests {
             "summary should mention issue count: {summary}"
         );
     }
+
+    // --- persist_cycle_report extended ---
+
+    #[test]
+    fn persist_cycle_report_overwrites_existing() {
+        let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-scratch")
+            .join(format!("ooda-overwrite-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+
+        persist_cycle_report(&scratch, &make_test_report(1));
+        let first = std::fs::read_to_string(scratch.join("cycle_reports/cycle_1.json")).unwrap();
+
+        let report2 = make_report_with_goals_and_outcomes();
+        let mut report2_cycle1 = report2;
+        report2_cycle1.cycle_number = 1;
+        persist_cycle_report(&scratch, &report2_cycle1);
+        let second = std::fs::read_to_string(scratch.join("cycle_reports/cycle_1.json")).unwrap();
+
+        assert_ne!(first, second, "second write should overwrite the first");
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    // --- OodaState / OodaConfig ---
+
+    #[test]
+    fn ooda_state_new_has_zero_cycle_count() {
+        let board = crate::goal_curation::GoalBoard::default();
+        let state = OodaState::new(board);
+        assert_eq!(state.cycle_count, 0);
+    }
+
+    // --- make_minimal_observation ---
+
+    #[test]
+    fn minimal_observation_has_empty_goals() {
+        let obs = make_minimal_observation();
+        assert!(obs.goal_statuses.is_empty());
+        assert!(obs.pending_improvements.is_empty());
+    }
+
+    // --- report_with_goals_and_outcomes ---
+
+    #[test]
+    fn report_with_goals_has_two_goals() {
+        let report = make_report_with_goals_and_outcomes();
+        assert_eq!(report.observation.goal_statuses.len(), 2);
+    }
+
+    #[test]
+    fn report_with_goals_has_two_outcomes() {
+        let report = make_report_with_goals_and_outcomes();
+        assert_eq!(report.outcomes.len(), 2);
+    }
+
+    #[test]
+    fn report_with_goals_has_one_priority() {
+        let report = make_report_with_goals_and_outcomes();
+        assert_eq!(report.priorities.len(), 1);
+        assert!((report.priorities[0].urgency - 0.8).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn report_with_goals_has_one_planned_action() {
+        let report = make_report_with_goals_and_outcomes();
+        assert_eq!(report.planned_actions.len(), 1);
+    }
+
+    // --- summarize_cycle_report edge cases ---
+
+    #[test]
+    fn summarize_cycle_report_cycle_0() {
+        let report = make_test_report(0);
+        let summary = crate::ooda_loop::summarize_cycle_report(&report);
+        assert!(summary.contains("#0"), "should handle cycle 0: {summary}");
+    }
+
+    #[test]
+    fn summarize_report_all_outcomes_succeed() {
+        let mut report = make_report_with_goals_and_outcomes();
+        for outcome in &mut report.outcomes {
+            outcome.success = true;
+        }
+        let summary = crate::ooda_loop::summarize_cycle_report(&report);
+        assert!(summary.contains("2/2"), "all should pass: {summary}");
+    }
+
+    #[test]
+    fn summarize_report_all_outcomes_fail() {
+        let mut report = make_report_with_goals_and_outcomes();
+        for outcome in &mut report.outcomes {
+            outcome.success = false;
+        }
+        let summary = crate::ooda_loop::summarize_cycle_report(&report);
+        assert!(summary.contains("0/2"), "none should pass: {summary}");
+    }
+
+    // --- EnvironmentSnapshot::default ---
+
+    #[test]
+    fn environment_snapshot_default_is_empty() {
+        let env = EnvironmentSnapshot::default();
+        assert!(env.open_issues.is_empty());
+        assert!(env.recent_commits.is_empty());
+    }
 }

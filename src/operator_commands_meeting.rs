@@ -1019,4 +1019,113 @@ mod tests {
             "expected error when state root has no review artifacts"
         );
     }
+
+    // ── build_live_meeting_context — fallback/edge cases ───────────────
+
+    #[test]
+    fn build_live_meeting_context_no_defaults_when_operator_present() {
+        let bridge = bridge_with_specific_facts("operator:", "operator", "Custom operator");
+        let ctx = build_live_meeting_context(&bridge);
+        // When operator facts present, should NOT use default operator
+        assert!(
+            !ctx.contains("Ryan Sweet"),
+            "should not have default operator"
+        );
+        assert!(ctx.contains("Custom operator"));
+    }
+
+    #[test]
+    fn build_live_meeting_context_no_defaults_when_project_present() {
+        let bridge = bridge_with_specific_facts("project:", "proj", "My Custom Project");
+        let ctx = build_live_meeting_context(&bridge);
+        // When project facts present, should use bridge data not defaults
+        assert!(ctx.contains("My Custom Project"));
+    }
+
+    #[test]
+    fn build_live_meeting_context_contains_numbered_items() {
+        let bridge = bridge_with_meeting_facts();
+        let ctx = build_live_meeting_context(&bridge);
+        assert!(ctx.contains("1."), "meeting summaries should be numbered");
+    }
+
+    #[test]
+    fn build_live_meeting_context_has_markdown_headers() {
+        let bridge = bridge_with_all_fact_types();
+        let ctx = build_live_meeting_context(&bridge);
+        // All sections use ## headers
+        let header_count = ctx.matches("## ").count();
+        assert!(
+            header_count >= 7,
+            "expected at least 7 markdown headers, got {header_count}"
+        );
+    }
+
+    // ── empty_bridge helper validation ─────────────────────────────────
+
+    #[test]
+    fn empty_bridge_returns_empty_search_results() {
+        let bridge = empty_bridge();
+        let facts = bridge
+            .search_facts("anything:", 10, 0.0)
+            .unwrap_or_default();
+        assert!(facts.is_empty());
+    }
+
+    // ── meeting_read_probe with valid meeting record ───────────────────
+
+    #[test]
+    fn meeting_read_probe_with_valid_meeting_record() {
+        let dir = TempDir::new().unwrap();
+        let record = "agenda=Sprint Review; updates=[Updated backend]; decisions=[Deploy Monday]; risks=[None]; next_steps=[Run tests]; open_questions=[]; goals=[p1:active:Ship v2:High priority]";
+        let records = serde_json::json!([{
+            "key": "session-1-meeting",
+            "scope": "decision",
+            "value": record,
+            "session_id": "session-1",
+            "recorded_in": "complete"
+        }]);
+        std::fs::write(
+            dir.path().join("memory_records.json"),
+            serde_json::to_string(&records).unwrap(),
+        )
+        .unwrap();
+        let result = run_meeting_read_probe(
+            "local-harness",
+            "single-process",
+            Some(dir.path().to_path_buf()),
+        );
+        assert!(
+            result.is_ok(),
+            "should succeed with valid meeting record: {:?}",
+            result.err()
+        );
+    }
+
+    // ── goal_curation_read_probe extended ──────────────────────────────
+
+    #[test]
+    fn goal_curation_read_probe_with_valid_goal_file() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("goal_records.json"), "[]").unwrap();
+        let result = run_goal_curation_read_probe(
+            "local-harness",
+            "single-process",
+            Some(dir.path().to_path_buf()),
+        );
+        assert!(
+            result.is_ok(),
+            "should succeed with empty goal file: {:?}",
+            result.err()
+        );
+    }
+
+    // ── load_meeting_system_prompt ──────────────────────────────────────
+
+    #[test]
+    fn load_meeting_system_prompt_returns_string() {
+        let prompt = load_meeting_system_prompt();
+        // May be empty if the file doesn't exist, but must not panic
+        let _ = prompt.len();
+    }
 }

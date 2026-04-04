@@ -611,4 +611,230 @@ mod tests {
         );
         assert_eq!(facts.actions[2].classification, None);
     }
+
+    // ---- derive_benchmark_metrics additional coverage ----
+
+    #[test]
+    fn metric_derivation_all_retries_no_primary() {
+        let mut facts = BenchmarkMetricFacts::default();
+        facts.record_retry_attempt();
+        facts.record_retry_attempt();
+        let derived = derive_benchmark_metrics(&facts);
+        assert_eq!(derived.retry_count, Some(2));
+    }
+
+    #[test]
+    fn metric_derivation_all_unnecessary_actions() {
+        let mut facts = BenchmarkMetricFacts::default();
+        facts.record_unnecessary_action();
+        facts.record_unnecessary_action();
+        facts.record_unnecessary_action();
+        let derived = derive_benchmark_metrics(&facts);
+        assert_eq!(derived.unnecessary_action_count, Some(3));
+    }
+
+    #[test]
+    fn metric_derivation_single_unmeasured_attempt_returns_none() {
+        let mut facts = BenchmarkMetricFacts::default();
+        facts.record_unmeasured_attempt();
+        let derived = derive_benchmark_metrics(&facts);
+        assert_eq!(derived.retry_count, None);
+    }
+
+    #[test]
+    fn metric_derivation_single_unmeasured_action_returns_none() {
+        let mut facts = BenchmarkMetricFacts::default();
+        facts.record_unmeasured_action();
+        let derived = derive_benchmark_metrics(&facts);
+        assert_eq!(derived.unnecessary_action_count, None);
+    }
+
+    #[test]
+    fn metric_derivation_mixed_required_and_unnecessary() {
+        let mut facts = BenchmarkMetricFacts::default();
+        facts.record_required_action();
+        facts.record_unnecessary_action();
+        facts.record_required_action();
+        facts.record_unnecessary_action();
+        facts.record_required_action();
+        let derived = derive_benchmark_metrics(&facts);
+        assert_eq!(derived.unnecessary_action_count, Some(2));
+    }
+
+    #[test]
+    fn metric_derivation_alternating_primary_and_retry() {
+        let mut facts = BenchmarkMetricFacts::default();
+        facts.record_primary_attempt();
+        facts.record_retry_attempt();
+        facts.record_primary_attempt();
+        facts.record_retry_attempt();
+        let derived = derive_benchmark_metrics(&facts);
+        assert_eq!(derived.retry_count, Some(2));
+    }
+
+    #[test]
+    fn metric_derivation_unmeasured_in_middle_of_attempts() {
+        let mut facts = BenchmarkMetricFacts::default();
+        facts.record_primary_attempt();
+        facts.record_unmeasured_attempt();
+        facts.record_retry_attempt();
+        let derived = derive_benchmark_metrics(&facts);
+        assert_eq!(derived.retry_count, None);
+    }
+
+    #[test]
+    fn metric_derivation_unmeasured_in_middle_of_actions() {
+        let mut facts = BenchmarkMetricFacts::default();
+        facts.record_required_action();
+        facts.record_unmeasured_action();
+        facts.record_unnecessary_action();
+        let derived = derive_benchmark_metrics(&facts);
+        assert_eq!(derived.unnecessary_action_count, None);
+    }
+
+    // ---- struct construction and equality tests ----
+
+    #[test]
+    fn benchmark_metric_facts_clone_preserves_data() {
+        let mut facts = BenchmarkMetricFacts::default();
+        facts.record_primary_attempt();
+        facts.record_required_action();
+        let cloned = facts.clone();
+        assert_eq!(facts, cloned);
+    }
+
+    #[test]
+    fn benchmark_attempt_fact_debug_format() {
+        let fact = super::BenchmarkAttemptFact {
+            classification: Some(super::BenchmarkAttemptClassification::Primary),
+        };
+        let debug = format!("{:?}", fact);
+        assert!(debug.contains("Primary"));
+    }
+
+    #[test]
+    fn benchmark_action_fact_debug_format() {
+        let fact = super::BenchmarkActionFact {
+            classification: Some(super::BenchmarkActionClassification::Required),
+        };
+        let debug = format!("{:?}", fact);
+        assert!(debug.contains("Required"));
+    }
+
+    #[test]
+    fn derived_metrics_equality() {
+        let a = super::DerivedBenchmarkMetrics {
+            unnecessary_action_count: Some(1),
+            retry_count: Some(2),
+        };
+        let b = super::DerivedBenchmarkMetrics {
+            unnecessary_action_count: Some(1),
+            retry_count: Some(2),
+        };
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn derived_metrics_inequality() {
+        let a = super::DerivedBenchmarkMetrics {
+            unnecessary_action_count: Some(1),
+            retry_count: Some(2),
+        };
+        let b = super::DerivedBenchmarkMetrics {
+            unnecessary_action_count: Some(0),
+            retry_count: Some(2),
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn derived_metrics_none_vs_some() {
+        let a = super::DerivedBenchmarkMetrics {
+            unnecessary_action_count: None,
+            retry_count: None,
+        };
+        let b = super::DerivedBenchmarkMetrics {
+            unnecessary_action_count: Some(0),
+            retry_count: Some(0),
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn benchmark_attempt_classification_eq() {
+        assert_eq!(
+            super::BenchmarkAttemptClassification::Primary,
+            super::BenchmarkAttemptClassification::Primary
+        );
+        assert_ne!(
+            super::BenchmarkAttemptClassification::Primary,
+            super::BenchmarkAttemptClassification::Retry
+        );
+    }
+
+    #[test]
+    fn benchmark_action_classification_eq() {
+        assert_eq!(
+            super::BenchmarkActionClassification::Required,
+            super::BenchmarkActionClassification::Required
+        );
+        assert_ne!(
+            super::BenchmarkActionClassification::Required,
+            super::BenchmarkActionClassification::Unnecessary
+        );
+    }
+
+    #[test]
+    fn metric_facts_large_sequence() {
+        let mut facts = BenchmarkMetricFacts::default();
+        for _ in 0..100 {
+            facts.record_primary_attempt();
+            facts.record_required_action();
+        }
+        for _ in 0..50 {
+            facts.record_retry_attempt();
+            facts.record_unnecessary_action();
+        }
+        let derived = derive_benchmark_metrics(&facts);
+        assert_eq!(derived.retry_count, Some(50));
+        assert_eq!(derived.unnecessary_action_count, Some(50));
+        assert_eq!(facts.attempts.len(), 150);
+        assert_eq!(facts.actions.len(), 150);
+    }
+
+    #[test]
+    fn metric_derivation_only_retries_counts_correctly() {
+        let mut facts = BenchmarkMetricFacts::default();
+        facts.record_retry_attempt();
+        facts.record_retry_attempt();
+        facts.record_retry_attempt();
+        let derived = derive_benchmark_metrics(&facts);
+        assert_eq!(derived.retry_count, Some(3));
+    }
+
+    #[test]
+    fn metric_derivation_only_unnecessary_counts_correctly() {
+        let mut facts = BenchmarkMetricFacts::default();
+        facts.record_unnecessary_action();
+        let derived = derive_benchmark_metrics(&facts);
+        assert_eq!(derived.unnecessary_action_count, Some(1));
+    }
+
+    #[test]
+    fn benchmark_metric_facts_default_eq() {
+        let a = BenchmarkMetricFacts::default();
+        let b = BenchmarkMetricFacts::default();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn metric_derivation_independent_dimensions() {
+        let mut facts = BenchmarkMetricFacts::default();
+        facts.record_unmeasured_attempt();
+        facts.record_required_action();
+        facts.record_required_action();
+        let derived = derive_benchmark_metrics(&facts);
+        assert_eq!(derived.retry_count, None);
+        assert_eq!(derived.unnecessary_action_count, Some(0));
+    }
 }

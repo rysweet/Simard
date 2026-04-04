@@ -374,4 +374,225 @@ mod tests {
         assert!(!PHILOSOPHY_REVIEW.is_empty());
         assert!(PHILOSOPHY_REVIEW.contains("simplicity"));
     }
+
+    // --- run_optional_review: mutating actions (ReviewSession returns None in tests) ---
+
+    #[test]
+    fn optional_review_mutating_structured_text_replace_succeeds_without_session() {
+        let inspection = make_inspection();
+        let action = make_executed(EngineerActionKind::StructuredTextReplace(
+            super::super::types::StructuredEditRequest {
+                relative_path: "src/lib.rs".into(),
+                search: "old".into(),
+                replacement: "new".into(),
+                verify_contains: "new".into(),
+            },
+        ));
+        // No LLM session available → review is skipped, returns Ok
+        run_optional_review(&inspection, &action).unwrap();
+    }
+
+    #[test]
+    fn optional_review_mutating_create_file_succeeds_without_session() {
+        let inspection = make_inspection();
+        let action = make_executed(EngineerActionKind::CreateFile(
+            super::super::types::CreateFileRequest {
+                relative_path: "new.rs".into(),
+                content: "fn main() {}".into(),
+            },
+        ));
+        run_optional_review(&inspection, &action).unwrap();
+    }
+
+    #[test]
+    fn optional_review_mutating_append_to_file_succeeds_without_session() {
+        let inspection = make_inspection();
+        let action = make_executed(EngineerActionKind::AppendToFile(
+            super::super::types::AppendToFileRequest {
+                relative_path: "log.txt".into(),
+                content: "entry".into(),
+            },
+        ));
+        run_optional_review(&inspection, &action).unwrap();
+    }
+
+    #[test]
+    fn optional_review_mutating_git_commit_succeeds_without_session() {
+        let inspection = make_inspection();
+        let action = make_executed(EngineerActionKind::GitCommit(
+            super::super::types::GitCommitRequest {
+                message: "chore: test".into(),
+            },
+        ));
+        run_optional_review(&inspection, &action).unwrap();
+    }
+
+    // --- compute_diff_for_review: action kind variants ---
+
+    #[test]
+    fn diff_for_review_create_file_uses_git_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let kind = EngineerActionKind::CreateFile(super::super::types::CreateFileRequest {
+            relative_path: "new.rs".into(),
+            content: "content".into(),
+        });
+        let result = compute_diff_for_review(dir.path(), &kind);
+        assert!(result.is_empty()); // not a git repo
+    }
+
+    #[test]
+    fn diff_for_review_append_to_file_uses_git_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let kind = EngineerActionKind::AppendToFile(super::super::types::AppendToFileRequest {
+            relative_path: "log.txt".into(),
+            content: "entry".into(),
+        });
+        let result = compute_diff_for_review(dir.path(), &kind);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn diff_for_review_structured_text_replace_uses_git_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let kind =
+            EngineerActionKind::StructuredTextReplace(super::super::types::StructuredEditRequest {
+                relative_path: "src/lib.rs".into(),
+                search: "old".into(),
+                replacement: "new".into(),
+                verify_contains: "new".into(),
+            });
+        let result = compute_diff_for_review(dir.path(), &kind);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn diff_for_review_cargo_test_uses_git_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = compute_diff_for_review(dir.path(), &EngineerActionKind::CargoTest);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn diff_for_review_cargo_check_uses_git_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = compute_diff_for_review(dir.path(), &EngineerActionKind::CargoCheck);
+        assert!(result.is_empty());
+    }
+
+    // --- persist_engineer_loop_artifacts ---
+
+    #[test]
+    fn persist_artifacts_creates_files_in_state_root() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let inspection = make_inspection();
+        let action = make_executed(EngineerActionKind::ReadOnlyScan);
+        let verification = super::super::types::VerificationReport {
+            status: "passed".to_string(),
+            summary: "all checks ok".to_string(),
+            checks: vec!["check1".to_string()],
+        };
+        let result = persist_engineer_loop_artifacts(
+            state_dir.path(),
+            RuntimeTopology::SingleProcess,
+            "test objective",
+            &inspection,
+            &action,
+            &verification,
+            None,
+        );
+        assert!(result.is_ok());
+        // Memory and evidence files should be created
+        assert!(state_dir.path().join("memory_records.json").exists());
+        assert!(state_dir.path().join("evidence_records.json").exists());
+    }
+
+    #[test]
+    fn persist_artifacts_with_nonempty_inspection_fields() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let mut inspection = make_inspection();
+        inspection.worktree_dirty = true;
+        inspection.changed_files = vec!["src/main.rs".to_string(), "Cargo.toml".to_string()];
+        inspection.carried_meeting_decisions = vec!["decision-1".to_string()];
+        inspection.architecture_gap_summary = "some gap summary".to_string();
+        let mut action = make_executed(EngineerActionKind::ReadOnlyScan);
+        action.selected.verification_steps = vec!["step1".to_string(), "step2".to_string()];
+        action.changed_files = vec!["src/main.rs".to_string()];
+        let verification = super::super::types::VerificationReport {
+            status: "passed".to_string(),
+            summary: "verification complete".to_string(),
+            checks: vec![],
+        };
+        let result = persist_engineer_loop_artifacts(
+            state_dir.path(),
+            RuntimeTopology::SingleProcess,
+            "complex objective with details",
+            &inspection,
+            &action,
+            &verification,
+            None,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn persist_artifacts_with_different_topologies() {
+        for topology in [
+            RuntimeTopology::SingleProcess,
+            RuntimeTopology::MultiProcess,
+            RuntimeTopology::Distributed,
+        ] {
+            let state_dir = tempfile::tempdir().unwrap();
+            let inspection = make_inspection();
+            let action = make_executed(EngineerActionKind::ReadOnlyScan);
+            let verification = super::super::types::VerificationReport {
+                status: "ok".to_string(),
+                summary: "ok".to_string(),
+                checks: vec![],
+            };
+            let result = persist_engineer_loop_artifacts(
+                state_dir.path(),
+                topology,
+                "test",
+                &inspection,
+                &action,
+                &verification,
+                None,
+            );
+            assert!(result.is_ok(), "failed for topology {:?}", topology);
+        }
+    }
+
+    // --- make_inspection / make_executed helper validation ---
+
+    #[test]
+    fn make_inspection_has_expected_defaults() {
+        let insp = make_inspection();
+        assert_eq!(insp.branch, "main");
+        assert_eq!(insp.head, "abc123");
+        assert!(!insp.worktree_dirty);
+        assert!(insp.changed_files.is_empty());
+        assert!(insp.active_goals.is_empty());
+        assert!(insp.carried_meeting_decisions.is_empty());
+        assert!(insp.architecture_gap_summary.is_empty());
+    }
+
+    #[test]
+    fn make_executed_has_expected_defaults() {
+        let exec = make_executed(EngineerActionKind::ReadOnlyScan);
+        assert_eq!(exec.exit_code, 0);
+        assert!(exec.stdout.is_empty());
+        assert!(exec.stderr.is_empty());
+        assert!(exec.changed_files.is_empty());
+        assert_eq!(exec.selected.label, "test-action");
+    }
+
+    // --- PHILOSOPHY_REVIEW content checks ---
+
+    #[test]
+    fn philosophy_review_mentions_key_principles() {
+        assert!(PHILOSOPHY_REVIEW.contains("simplicity"));
+        assert!(PHILOSOPHY_REVIEW.contains("400 lines"));
+        assert!(PHILOSOPHY_REVIEW.contains("Clippy"));
+        assert!(PHILOSOPHY_REVIEW.contains("panics"));
+    }
 }

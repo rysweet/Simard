@@ -199,4 +199,76 @@ mod tests {
             "should strip ANSI escape sequences: {result}"
         );
     }
+
+    // --- run_review_read_probe additional edge cases ---
+
+    #[test]
+    fn review_read_probe_errors_with_empty_string_path() {
+        let result =
+            run_review_read_probe("terminal-shell", "single-process", Some(PathBuf::from("")));
+        assert!(result.is_err(), "empty path should fail");
+    }
+
+    #[test]
+    fn review_probe_errors_with_empty_objective() {
+        let result = run_review_probe(
+            "terminal-shell",
+            "single-process",
+            "",
+            Some(PathBuf::from("/nonexistent/path-12345")),
+        );
+        assert!(result.is_err(), "should fail with nonexistent state root");
+    }
+
+    #[test]
+    fn review_read_probe_with_valid_empty_state_root_has_descriptive_error() {
+        let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-scratch")
+            .join(format!("review-valid-empty-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&scratch);
+
+        let result =
+            run_review_read_probe("terminal-shell", "single-process", Some(scratch.clone()));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("review") || msg.contains("artifact"),
+            "error should mention review/artifact: {msg}"
+        );
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    // --- sanitize_terminal_text edge cases ---
+
+    #[test]
+    fn sanitize_terminal_text_empty_input() {
+        assert_eq!(sanitize_terminal_text(""), "");
+    }
+
+    #[test]
+    fn sanitize_terminal_text_only_ansi_escapes() {
+        let input = "\x1b[31m\x1b[0m";
+        let result = sanitize_terminal_text(input);
+        assert!(
+            !result.contains("\x1b"),
+            "should strip all escapes: {result}"
+        );
+    }
+
+    #[test]
+    fn sanitize_terminal_text_unicode_preserved() {
+        let input = "hello 🌍 world";
+        let result = sanitize_terminal_text(input);
+        assert_eq!(result, input, "unicode should be preserved");
+    }
+
+    #[test]
+    fn sanitize_terminal_text_newlines_preserved() {
+        let input = "line1\nline2";
+        let result = sanitize_terminal_text(input);
+        assert!(result.contains("line1"), "line content should be preserved");
+        assert!(result.contains("line2"), "line content should be preserved");
+    }
 }
