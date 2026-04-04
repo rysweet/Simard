@@ -12,6 +12,7 @@ use crate::error::SimardResult;
 use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, load_goal_board};
 use crate::goals::GoalStatus;
 use crate::gym_bridge::{GymBridge, ScoreDimensions};
+use crate::gym_history::{GymSignal, ScoreHistory, generate_signals};
 use crate::gym_scoring::{GymSuiteScore, detect_regression};
 use crate::improvements::ImprovementDirective;
 use crate::knowledge_bridge::KnowledgeBridge;
@@ -352,6 +353,38 @@ fn collect_pending_improvements(
             state.review_improvements.len()
         );
         improvements.append(&mut state.review_improvements);
+    }
+
+    // Signal 4: persistent gym score history (regression / promotion signals).
+    let history_path = std::path::Path::new("gym_history.db");
+    if history_path.exists() {
+        let history = ScoreHistory::open(history_path);
+        let signals = generate_signals(&history, "progressive");
+        for sig in &signals {
+            if matches!(sig.signal, GymSignal::Regression { .. }) {
+                let baseline = current_gym.clone().unwrap_or_else(|| GymSuiteScore {
+                    suite_id: "history-regression".to_string(),
+                    overall: 0.0,
+                    dimensions: ScoreDimensions::default(),
+                    scenario_count: 0,
+                    scenarios_passed: 0,
+                    pass_rate: 0.0,
+                    recorded_at_unix_ms: None,
+                });
+                eprintln!(
+                    "[simard] OODA observe: gym history regression on scenario {}",
+                    sig.scenario_id,
+                );
+                improvements.push(ImprovementCycle {
+                    baseline,
+                    proposed_changes: Vec::new(),
+                    post_score: None,
+                    regressions: Vec::new(),
+                    decision: None,
+                    final_phase: ImprovementPhase::Eval,
+                });
+            }
+        }
     }
 
     improvements

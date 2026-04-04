@@ -28,6 +28,7 @@ pub mod goals;
 pub mod greeting_banner;
 pub mod gym;
 pub mod gym_bridge;
+pub mod gym_history;
 pub mod gym_scoring;
 pub mod handoff;
 pub mod identity;
@@ -148,6 +149,9 @@ pub use gym::{
     default_output_root, run_benchmark_scenario, run_benchmark_suite,
 };
 pub use gym_bridge::{GymBridge, GymScenario, GymScenarioResult, GymSuiteResult, ScoreDimensions};
+pub use gym_history::{
+    GymSignal, ScenarioSignal, ScoreHistory, ScoreRecord, check_promotion, generate_signals,
+};
 pub use gym_scoring::{
     DimensionTrend, GymSuiteScore, ImprovementTrend, Regression, RegressionSeverity,
     TrendDirection, aggregate_suite_scores, detect_regression, suite_score_from_result,
