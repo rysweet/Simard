@@ -393,6 +393,9 @@ fn build_memory_store(config: &BootstrapConfig) -> SimardResult<Arc<dyn MemorySt
     if let Some(bridge) = bridge {
         eprintln!("[simard] cognitive memory bridge active — using Kuzu backend");
         let store = CognitiveBridgeMemoryStore::new(bridge, config.memory_store_path())?;
+        // Pull cross-session records from the cognitive bridge to supplement
+        // local fallback hydration — recovers data written by other processes.
+        store.hydrate_from_bridge();
         Ok(Arc::new(store))
     } else {
         eprintln!("[simard] cognitive memory bridge unavailable — using JSON file backend");
