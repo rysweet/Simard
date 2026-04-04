@@ -210,61 +210,62 @@ impl Display for SimardError {
             Self::NonUnicodeConfigValue { key } => {
                 write!(f, "configuration '{key}' must be valid UTF-8")
             }
-            Self::InvalidConfigValue {
-                key,
-                value: _,
-                help,
-            } => {
+            Self::InvalidConfigValue { key, help, .. } => {
                 write!(f, "invalid value for configuration '{key}': {help}")
             }
             Self::UnknownIdentity { requested } => {
                 write!(f, "identity '{requested}' is not registered")
             }
-            Self::InvalidIdentityComposition { identity, reason } => {
-                write!(f, "identity '{identity}' has invalid composition: {reason}")
+            Self::InvalidIdentityComposition { identity, reason }
+            | Self::InvalidManifestContract {
+                field: identity,
+                reason,
             }
-            Self::InvalidManifestContract { field, reason } => {
-                write!(f, "invalid manifest contract field '{field}': {reason}")
+            | Self::InvalidGoalRecord {
+                field: identity,
+                reason,
             }
-            Self::InvalidGoalRecord { field, reason } => {
-                write!(f, "invalid goal record field '{field}': {reason}")
+            | Self::InvalidResearchRecord {
+                field: identity,
+                reason,
             }
-            Self::InvalidResearchRecord { field, reason } => {
-                write!(f, "invalid research record field '{field}': {reason}")
+            | Self::InvalidMeetingRecord {
+                field: identity,
+                reason,
             }
-            Self::InvalidMeetingRecord { field, reason } => {
-                write!(f, "invalid meeting record field '{field}': {reason}")
-            }
-            Self::InvalidImprovementRecord { field, reason } => {
-                write!(f, "invalid improvement record field '{field}': {reason}")
-            }
+            | Self::InvalidImprovementRecord {
+                field: identity,
+                reason,
+            } => fmt_field_reason(f, self, identity, reason),
             Self::InvalidSessionId { value, reason } => {
                 write!(f, "invalid session id '{value}': {reason}")
             }
-            Self::PromptAssetMissing { asset_id, path: _ } => {
+            Self::PromptAssetMissing { asset_id, .. } => {
                 write!(
                     f,
                     "prompt asset '{asset_id}' was not found under the configured prompt root"
                 )
             }
-            Self::PromptAssetRead { path: _, reason } => {
+            Self::PromptAssetRead { reason, .. } => {
                 write!(f, "failed to read configured prompt asset: {reason}")
             }
             Self::InvalidPromptAssetPath {
-                asset_id,
-                path: _,
-                reason,
-            } => write!(f, "invalid prompt asset path for '{asset_id}': {reason}"),
+                asset_id, reason, ..
+            } => {
+                write!(f, "invalid prompt asset path for '{asset_id}': {reason}")
+            }
             Self::UnsupportedMemoryPolicy { field, reason } => {
                 write!(f, "unsupported memory policy '{field}': {reason}")
             }
             Self::UnsupportedBaseType {
                 identity,
                 base_type,
-            } => write!(
-                f,
-                "identity '{identity}' does not allow base type '{base_type}'"
-            ),
+            } => {
+                write!(
+                    f,
+                    "identity '{identity}' does not allow base type '{base_type}'"
+                )
+            }
             Self::AdapterNotRegistered { base_type } => {
                 write!(f, "no adapter is registered for base type '{base_type}'")
             }
@@ -279,36 +280,46 @@ impl Display for SimardError {
                 action,
                 reason,
                 cleanup_reason,
-            } => write!(
-                f,
-                "base type session '{base_type}' failed during '{action}': {reason}; cleanup failed: {cleanup_reason}"
-            ),
+            } => {
+                write!(
+                    f,
+                    "base type session '{base_type}' failed during '{action}': {reason}; cleanup failed: {cleanup_reason}"
+                )
+            }
             Self::InvalidBaseTypeSessionState {
                 base_type,
                 action,
                 reason,
-            } => write!(
-                f,
-                "base type session '{base_type}' cannot '{action}': {reason}"
-            ),
+            } => {
+                write!(
+                    f,
+                    "base type session '{base_type}' cannot '{action}': {reason}"
+                )
+            }
             Self::MissingCapability {
                 base_type,
                 capability,
-            } => write!(
-                f,
-                "base type '{base_type}' does not provide required capability '{capability}'"
-            ),
+            } => {
+                write!(
+                    f,
+                    "base type '{base_type}' does not provide required capability '{capability}'"
+                )
+            }
             Self::UnsupportedTopology {
                 base_type,
                 topology,
-            } => write!(
-                f,
-                "base type '{base_type}' does not support topology '{topology}'"
-            ),
-            Self::UnsupportedRuntimeTopology { topology, driver } => write!(
-                f,
-                "runtime topology driver '{driver}' does not support topology '{topology}'"
-            ),
+            } => {
+                write!(
+                    f,
+                    "base type '{base_type}' does not support topology '{topology}'"
+                )
+            }
+            Self::UnsupportedRuntimeTopology { topology, driver } => {
+                write!(
+                    f,
+                    "runtime topology driver '{driver}' does not support topology '{topology}'"
+                )
+            }
             Self::InvalidRuntimeTransition { from, to } => {
                 write!(f, "invalid runtime transition from '{from}' to '{to}'")
             }
@@ -361,12 +372,14 @@ impl Display for SimardError {
             Self::PersistentStoreIo {
                 store,
                 action,
-                path: _,
                 reason,
-            } => write!(
-                f,
-                "persistent store '{store}' failed during '{action}': {reason}"
-            ),
+                ..
+            } => {
+                write!(
+                    f,
+                    "persistent store '{store}' failed during '{action}': {reason}"
+                )
+            }
             Self::BenchmarkScenarioNotFound { scenario_id } => {
                 write!(f, "benchmark scenario '{scenario_id}' is not registered")
             }
@@ -376,11 +389,13 @@ impl Display for SimardError {
             Self::BenchmarkComparisonUnavailable {
                 scenario_id,
                 reason,
-            } => write!(
-                f,
-                "benchmark comparison for scenario '{scenario_id}' is unavailable: {reason}"
-            ),
-            Self::ArtifactIo { path: _, reason } => {
+            } => {
+                write!(
+                    f,
+                    "benchmark comparison for scenario '{scenario_id}' is unavailable: {reason}"
+                )
+            }
+            Self::ArtifactIo { reason, .. } => {
                 write!(f, "failed to read or write benchmark artifact: {reason}")
             }
             Self::StoragePoisoned { store } => {
@@ -421,6 +436,28 @@ impl Display for SimardError {
                 write!(f, "review blocked commit: {summary}")
             }
         }
+    }
+}
+
+fn fmt_field_reason(
+    f: &mut Formatter<'_>,
+    variant: &SimardError,
+    field: &str,
+    reason: &str,
+) -> fmt::Result {
+    let prefix = match variant {
+        SimardError::InvalidIdentityComposition { .. } => "identity",
+        SimardError::InvalidManifestContract { .. } => "invalid manifest contract field",
+        SimardError::InvalidGoalRecord { .. } => "invalid goal record field",
+        SimardError::InvalidResearchRecord { .. } => "invalid research record field",
+        SimardError::InvalidMeetingRecord { .. } => "invalid meeting record field",
+        SimardError::InvalidImprovementRecord { .. } => "invalid improvement record field",
+        _ => unreachable!(),
+    };
+    if matches!(variant, SimardError::InvalidIdentityComposition { .. }) {
+        write!(f, "{prefix} '{field}' has invalid composition: {reason}")
+    } else {
+        write!(f, "{prefix} '{field}': {reason}")
     }
 }
 

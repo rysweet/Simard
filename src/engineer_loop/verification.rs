@@ -8,26 +8,17 @@ use crate::error::{SimardError, SimardResult};
 use super::execution::run_command;
 use super::inspect_workspace;
 use super::types::{
-    EngineerActionKind, ExecutedEngineerAction, RepoInspection, StructuredEditRequest,
-    VerificationReport,
+    AppendToFileRequest, CreateFileRequest, EngineerActionKind, ExecutedEngineerAction,
+    RepoInspection, StructuredEditRequest, VerificationReport,
 };
 
-pub(crate) fn verify_engineer_action(
+fn verify_grounding_stable(
     inspection: &RepoInspection,
     action: &ExecutedEngineerAction,
     state_root: &Path,
-) -> SimardResult<VerificationReport> {
-    if action.exit_code != 0 {
-        return Err(SimardError::VerificationFailed {
-            reason: format!(
-                "selected action '{}' exited with code {}",
-                action.selected.label, action.exit_code
-            ),
-        });
-    }
-
+    checks: &mut Vec<String>,
+) -> SimardResult<RepoInspection> {
     let post = inspect_workspace(&inspection.repo_root, state_root)?;
-    let mut checks = Vec::new();
 
     if post.repo_root != inspection.repo_root {
         return Err(SimardError::VerificationFailed {
@@ -68,7 +59,15 @@ pub(crate) fn verify_engineer_action(
         });
     }
     checks.push(format!("repo-branch={}", post.branch));
+    Ok(post)
+}
 
+fn verify_worktree_state(
+    inspection: &RepoInspection,
+    action: &ExecutedEngineerAction,
+    post: &RepoInspection,
+    checks: &mut Vec<String>,
+) -> SimardResult<()> {
     match &action.selected.kind {
         EngineerActionKind::ReadOnlyScan
         | EngineerActionKind::CargoTest
@@ -124,6 +123,7 @@ pub(crate) fn verify_engineer_action(
             ));
         }
     }
+
     if post.active_goals != inspection.active_goals {
         return Err(SimardError::VerificationFailed {
             reason: "active goal set changed during a non-mutating local engineer action"
@@ -134,19 +134,25 @@ pub(crate) fn verify_engineer_action(
 
     if post.carried_meeting_decisions != inspection.carried_meeting_decisions {
         return Err(SimardError::VerificationFailed {
-            reason: "carried meeting decision memory changed during a non-mutating local engineer action"
-                .to_string(),
+            reason: "carried meeting decision memory changed during a non-mutating local engineer action".to_string(),
         });
     }
     checks.push(format!(
         "carried-meeting-decisions={}",
         post.carried_meeting_decisions.len()
     ));
+    Ok(())
+}
 
+fn verify_kind_specific(
+    inspection: &RepoInspection,
+    action: &ExecutedEngineerAction,
+    checks: &mut Vec<String>,
+) -> SimardResult<()> {
     match &action.selected.kind {
         EngineerActionKind::ReadOnlyScan => match action.selected.label.as_str() {
             "cargo-metadata-scan" => {
-                verify_cargo_metadata(&inspection.repo_root, &action.stdout, &mut checks)?
+                verify_cargo_metadata(&inspection.repo_root, &action.stdout, checks)?
             }
             "git-tracked-file-scan" => {
                 if action.stdout.lines().next().is_none() {
@@ -166,160 +172,209 @@ pub(crate) fn verify_engineer_action(
             &inspection.repo_root,
             edit_request,
             &action.stdout,
-            &mut checks,
+            checks,
         )?,
-        EngineerActionKind::CargoTest => {
-            // Verify test output contains a test result summary line
-            let combined = format!("{}\n{}", action.stdout, action.stderr);
-            if combined.contains("test result:") {
-                checks.push("cargo-test-result-present=true".to_string());
-                if combined.contains("FAILED") || action.exit_code != 0 {
-                    checks.push("cargo-test-passed=false".to_string());
-                } else {
-                    checks.push("cargo-test-passed=true".to_string());
-                }
-            } else if action.exit_code == 0 {
-                checks.push("cargo-test-result-present=false (no test output)".to_string());
-                checks.push("cargo-test-passed=true (exit 0)".to_string());
-            } else {
-                return Err(SimardError::VerificationFailed {
-                    reason: format!(
-                        "cargo test exited with code {} and produced no recognizable test result summary",
-                        action.exit_code
-                    ),
-                });
-            }
-        }
-        EngineerActionKind::CargoCheck => {
-            if action.exit_code == 0 {
-                checks.push("cargo-check-passed=true".to_string());
-            } else {
-                let error_count = action
-                    .stderr
-                    .lines()
-                    .filter(|l| l.starts_with("error"))
-                    .count();
-                checks.push(format!("cargo-check-passed=false (errors={})", error_count));
-            }
-        }
-        EngineerActionKind::CreateFile(req) => {
-            let target_path = inspection.repo_root.join(&req.relative_path);
-            if !target_path.exists() {
-                return Err(SimardError::VerificationFailed {
-                    reason: format!(
-                        "file '{}' does not exist after CreateFile",
-                        req.relative_path
-                    ),
-                });
-            }
-            let content = fs::read_to_string(&target_path).map_err(|error| {
-                SimardError::VerificationFailed {
-                    reason: format!(
-                        "could not read '{}' to verify content: {error}",
-                        req.relative_path
-                    ),
-                }
-            })?;
-            if content != req.content {
-                return Err(SimardError::VerificationFailed {
-                    reason: format!(
-                        "file '{}' content does not match expected content",
-                        req.relative_path
-                    ),
-                });
-            }
-            checks.push(format!("file-exists={}", req.relative_path));
-            checks.push("file-content-matches=true".to_string());
-        }
-        EngineerActionKind::AppendToFile(req) => {
-            let target_path = inspection.repo_root.join(&req.relative_path);
-            let content = fs::read_to_string(&target_path).map_err(|error| {
-                SimardError::VerificationFailed {
-                    reason: format!(
-                        "could not read '{}' to verify appended content: {error}",
-                        req.relative_path
-                    ),
-                }
-            })?;
-            if !content.contains(&req.content) {
-                return Err(SimardError::VerificationFailed {
-                    reason: format!(
-                        "file '{}' does not contain the appended content",
-                        req.relative_path
-                    ),
-                });
-            }
-            checks.push(format!("file-contains-appended={}", req.relative_path));
-        }
+        EngineerActionKind::CargoTest => verify_cargo_test(action, checks)?,
+        EngineerActionKind::CargoCheck => verify_cargo_check(action, checks),
+        EngineerActionKind::CreateFile(req) => verify_create_file(inspection, req, checks)?,
+        EngineerActionKind::AppendToFile(req) => verify_append_to_file(inspection, req, checks)?,
         EngineerActionKind::RunShellCommand(_) => {
             checks.push(format!("shell-command-exit-code={}", action.exit_code));
         }
         EngineerActionKind::GitCommit(_) => {
             checks.push("git-commit-created=true".to_string());
         }
-        EngineerActionKind::OpenIssue(_) => {
-            if action.stdout.contains("https://github.com/") || action.stdout.contains("github.com")
-            {
-                checks.push("issue-url-present=true".to_string());
-            } else {
-                return Err(SimardError::VerificationFailed {
-                    reason: "gh issue create did not return an issue URL in stdout".to_string(),
-                });
-            }
-        }
+        EngineerActionKind::OpenIssue(_) => verify_open_issue(action, checks)?,
     }
+    Ok(())
+}
+
+fn verify_cargo_test(
+    action: &ExecutedEngineerAction,
+    checks: &mut Vec<String>,
+) -> SimardResult<()> {
+    let combined = format!("{}\n{}", action.stdout, action.stderr);
+    if combined.contains("test result:") {
+        checks.push("cargo-test-result-present=true".to_string());
+        if combined.contains("FAILED") || action.exit_code != 0 {
+            checks.push("cargo-test-passed=false".to_string());
+        } else {
+            checks.push("cargo-test-passed=true".to_string());
+        }
+    } else if action.exit_code == 0 {
+        checks.push("cargo-test-result-present=false (no test output)".to_string());
+        checks.push("cargo-test-passed=true (exit 0)".to_string());
+    } else {
+        return Err(SimardError::VerificationFailed {
+            reason: format!(
+                "cargo test exited with code {} and produced no recognizable test result summary",
+                action.exit_code
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn verify_cargo_check(action: &ExecutedEngineerAction, checks: &mut Vec<String>) {
+    if action.exit_code == 0 {
+        checks.push("cargo-check-passed=true".to_string());
+    } else {
+        let error_count = action
+            .stderr
+            .lines()
+            .filter(|l| l.starts_with("error"))
+            .count();
+        checks.push(format!("cargo-check-passed=false (errors={})", error_count));
+    }
+}
+
+fn verify_create_file(
+    inspection: &RepoInspection,
+    req: &CreateFileRequest,
+    checks: &mut Vec<String>,
+) -> SimardResult<()> {
+    let target_path = inspection.repo_root.join(&req.relative_path);
+    if !target_path.exists() {
+        return Err(SimardError::VerificationFailed {
+            reason: format!(
+                "file '{}' does not exist after CreateFile",
+                req.relative_path
+            ),
+        });
+    }
+    let content =
+        fs::read_to_string(&target_path).map_err(|error| SimardError::VerificationFailed {
+            reason: format!(
+                "could not read '{}' to verify content: {error}",
+                req.relative_path
+            ),
+        })?;
+    if content != req.content {
+        return Err(SimardError::VerificationFailed {
+            reason: format!(
+                "file '{}' content does not match expected content",
+                req.relative_path
+            ),
+        });
+    }
+    checks.push(format!("file-exists={}", req.relative_path));
+    checks.push("file-content-matches=true".to_string());
+    Ok(())
+}
+
+fn verify_append_to_file(
+    inspection: &RepoInspection,
+    req: &AppendToFileRequest,
+    checks: &mut Vec<String>,
+) -> SimardResult<()> {
+    let target_path = inspection.repo_root.join(&req.relative_path);
+    let content =
+        fs::read_to_string(&target_path).map_err(|error| SimardError::VerificationFailed {
+            reason: format!(
+                "could not read '{}' to verify appended content: {error}",
+                req.relative_path
+            ),
+        })?;
+    if !content.contains(&req.content) {
+        return Err(SimardError::VerificationFailed {
+            reason: format!(
+                "file '{}' does not contain the appended content",
+                req.relative_path
+            ),
+        });
+    }
+    checks.push(format!("file-contains-appended={}", req.relative_path));
+    Ok(())
+}
+
+fn verify_open_issue(
+    action: &ExecutedEngineerAction,
+    checks: &mut Vec<String>,
+) -> SimardResult<()> {
+    if action.stdout.contains("https://github.com/") || action.stdout.contains("github.com") {
+        checks.push("issue-url-present=true".to_string());
+    } else {
+        return Err(SimardError::VerificationFailed {
+            reason: "gh issue create did not return an issue URL in stdout".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn build_verification_summary(action: &ExecutedEngineerAction) -> String {
+    match &action.selected.kind {
+        EngineerActionKind::ReadOnlyScan => format!(
+            "Verified local-only engineer action '{}' against stable repo grounding, unchanged worktree state, and explicit repo-native action checks.",
+            action.selected.label
+        ),
+        EngineerActionKind::StructuredTextReplace(edit_request) => format!(
+            "Verified bounded local engineer edit '{}' by checking '{}' for the requested content, confirming the expected git-visible file change, and preserving stable repo grounding.",
+            action.selected.label, edit_request.relative_path
+        ),
+        EngineerActionKind::CargoTest => format!(
+            "Verified cargo test action '{}': exit_code={}, test suite {}.",
+            action.selected.label,
+            action.exit_code,
+            if action.exit_code == 0 {
+                "passed"
+            } else {
+                "failed"
+            }
+        ),
+        EngineerActionKind::CargoCheck => format!(
+            "Verified cargo check action '{}': compilation {}.",
+            action.selected.label,
+            if action.exit_code == 0 {
+                "succeeded"
+            } else {
+                "failed"
+            }
+        ),
+        EngineerActionKind::CreateFile(req) => format!(
+            "Verified CreateFile action '{}': file '{}' exists with expected content.",
+            action.selected.label, req.relative_path
+        ),
+        EngineerActionKind::AppendToFile(req) => format!(
+            "Verified AppendToFile action '{}': file '{}' contains appended content.",
+            action.selected.label, req.relative_path
+        ),
+        EngineerActionKind::RunShellCommand(_) => format!(
+            "Verified RunShellCommand action '{}': exit_code={}.",
+            action.selected.label, action.exit_code
+        ),
+        EngineerActionKind::GitCommit(_) => format!(
+            "Verified GitCommit action '{}': HEAD advanced to new commit.",
+            action.selected.label
+        ),
+        EngineerActionKind::OpenIssue(_) => format!(
+            "Verified OpenIssue action '{}': issue URL present in output.",
+            action.selected.label
+        ),
+    }
+}
+
+pub(crate) fn verify_engineer_action(
+    inspection: &RepoInspection,
+    action: &ExecutedEngineerAction,
+    state_root: &Path,
+) -> SimardResult<VerificationReport> {
+    if action.exit_code != 0 {
+        return Err(SimardError::VerificationFailed {
+            reason: format!(
+                "selected action '{}' exited with code {}",
+                action.selected.label, action.exit_code
+            ),
+        });
+    }
+
+    let mut checks = Vec::new();
+    let post = verify_grounding_stable(inspection, action, state_root, &mut checks)?;
+    verify_worktree_state(inspection, action, &post, &mut checks)?;
+    verify_kind_specific(inspection, action, &mut checks)?;
 
     Ok(VerificationReport {
         status: "verified".to_string(),
-        summary: match &action.selected.kind {
-            EngineerActionKind::ReadOnlyScan => format!(
-                "Verified local-only engineer action '{}' against stable repo grounding, unchanged worktree state, and explicit repo-native action checks.",
-                action.selected.label
-            ),
-            EngineerActionKind::StructuredTextReplace(edit_request) => format!(
-                "Verified bounded local engineer edit '{}' by checking '{}' for the requested content, confirming the expected git-visible file change, and preserving stable repo grounding.",
-                action.selected.label, edit_request.relative_path
-            ),
-            EngineerActionKind::CargoTest => format!(
-                "Verified cargo test action '{}': exit_code={}, test suite {}.",
-                action.selected.label,
-                action.exit_code,
-                if action.exit_code == 0 {
-                    "passed"
-                } else {
-                    "failed"
-                }
-            ),
-            EngineerActionKind::CargoCheck => format!(
-                "Verified cargo check action '{}': compilation {}.",
-                action.selected.label,
-                if action.exit_code == 0 {
-                    "succeeded"
-                } else {
-                    "failed"
-                }
-            ),
-            EngineerActionKind::CreateFile(req) => format!(
-                "Verified CreateFile action '{}': file '{}' exists with expected content.",
-                action.selected.label, req.relative_path
-            ),
-            EngineerActionKind::AppendToFile(req) => format!(
-                "Verified AppendToFile action '{}': file '{}' contains appended content.",
-                action.selected.label, req.relative_path
-            ),
-            EngineerActionKind::RunShellCommand(_) => format!(
-                "Verified RunShellCommand action '{}': exit_code={}.",
-                action.selected.label, action.exit_code
-            ),
-            EngineerActionKind::GitCommit(_) => format!(
-                "Verified GitCommit action '{}': HEAD advanced to new commit.",
-                action.selected.label
-            ),
-            EngineerActionKind::OpenIssue(_) => format!(
-                "Verified OpenIssue action '{}': issue URL present in output.",
-                action.selected.label
-            ),
-        },
+        summary: build_verification_summary(action),
         checks,
     })
 }
