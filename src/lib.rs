@@ -65,6 +65,7 @@ pub mod remote_session;
 pub mod remote_transfer;
 pub mod research_tracker;
 pub mod review;
+pub mod review_pipeline;
 pub mod runtime;
 mod sanitization;
 pub mod self_improve;
@@ -238,6 +239,10 @@ pub use review::{
     ImprovementProposal, ReviewArtifact, ReviewRequest, ReviewSignal, ReviewTargetKind,
     build_review_artifact, latest_review_artifact, load_review_artifact, persist_review_artifact,
     render_review_text, review_artifacts_dir,
+};
+pub use review_pipeline::{
+    FindingCategory, ReviewFinding, ReviewSession, Severity, review_diff, should_commit,
+    summarize_review,
 };
 pub use runtime::{
     BaseTypeRegistry, CoordinatedSupervisor, InMemoryMailboxTransport, InProcessSupervisor,
