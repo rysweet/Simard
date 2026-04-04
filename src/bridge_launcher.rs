@@ -210,4 +210,95 @@ mod tests {
         // Just verify it doesn't panic — content depends on environment.
         let _ = path;
     }
+
+    // ── cognitive_memory_db_path ──
+
+    #[test]
+    fn cognitive_memory_db_path_joins_correctly() {
+        let path = cognitive_memory_db_path(Path::new("/state"));
+        assert_eq!(path, PathBuf::from("/state/cognitive_memory.kuzu"));
+    }
+
+    #[test]
+    fn cognitive_memory_db_path_with_nested_root() {
+        let path = cognitive_memory_db_path(Path::new("/a/b/c"));
+        assert_eq!(path, PathBuf::from("/a/b/c/cognitive_memory.kuzu"));
+    }
+
+    #[test]
+    fn cognitive_memory_db_path_relative() {
+        let path = cognitive_memory_db_path(Path::new("target/state"));
+        assert_eq!(path, PathBuf::from("target/state/cognitive_memory.kuzu"));
+    }
+
+    // ── Constants ──
+
+    #[test]
+    fn default_bridge_timeout_is_30_seconds() {
+        assert_eq!(DEFAULT_BRIDGE_TIMEOUT, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn cognitive_memory_db_constant() {
+        assert_eq!(COGNITIVE_MEMORY_DB, "cognitive_memory.kuzu");
+    }
+
+    // ── default_circuit_breaker ──
+
+    #[test]
+    fn default_circuit_breaker_has_expected_threshold() {
+        let config = default_circuit_breaker();
+        assert_eq!(config.failure_threshold, 3);
+    }
+
+    #[test]
+    fn default_circuit_breaker_has_30s_cooldown() {
+        let config = default_circuit_breaker();
+        assert_eq!(config.cooldown, Duration::from_secs(30));
+    }
+
+    // ── build_python_path ──
+
+    #[test]
+    fn build_python_path_is_colon_separated() {
+        let path = build_python_path();
+        // If non-empty, should use colon separators (unix path convention)
+        if !path.is_empty() {
+            // Each segment should not be empty
+            for segment in path.split(':') {
+                assert!(!segment.is_empty(), "path segment should not be empty");
+            }
+        }
+    }
+
+    #[test]
+    fn build_python_path_includes_existing_pythonpath() {
+        // Save and restore PYTHONPATH to avoid test interference
+        let original = std::env::var("PYTHONPATH").ok();
+        // SAFETY: test-only
+        unsafe {
+            std::env::set_var("PYTHONPATH", "/test/custom/path");
+        }
+        let path = build_python_path();
+        assert!(path.contains("/test/custom/path"));
+        // Restore
+        match original {
+            Some(val) => unsafe {
+                std::env::set_var("PYTHONPATH", val);
+            },
+            None => unsafe {
+                std::env::remove_var("PYTHONPATH");
+            },
+        }
+    }
+
+    // ── find_python_dir ──
+
+    #[test]
+    fn find_python_dir_returns_directory_containing_bridge_server() {
+        if let Ok(dir) = find_python_dir() {
+            assert!(dir.is_dir());
+            assert!(dir.join("bridge_server.py").exists());
+        }
+    }
 }

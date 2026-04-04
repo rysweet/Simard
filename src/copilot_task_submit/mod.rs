@@ -86,3 +86,158 @@ pub(crate) fn run_copilot_submit(
         CopilotSubmitOutcome::Unsupported => CopilotSubmitRun::Unsupported(report),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── run_copilot_submit error path ───────────────────────────────────
+
+    #[test]
+    fn run_copilot_submit_fails_without_copilot_binary() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let result = run_copilot_submit(RuntimeTopology::SingleProcess, dir.path());
+        // In test environments amplihack is typically not on PATH,
+        // so ensure_copilot_submit_is_launchable should fail.
+        match result {
+            Ok(_) => {} // amplihack is available in this environment
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("runtime-failure") || msg.contains("copilot-submit"),
+                    "error should reference the copilot-submit action: {msg}"
+                );
+            }
+        }
+    }
+
+    // ── CopilotSubmitOutcome ────────────────────────────────────────────
+
+    #[test]
+    fn copilot_submit_outcome_as_str_values() {
+        assert_eq!(CopilotSubmitOutcome::Success.as_str(), "success");
+        assert_eq!(CopilotSubmitOutcome::Unsupported.as_str(), "unsupported");
+    }
+
+    #[test]
+    fn copilot_submit_outcome_equality() {
+        assert_eq!(CopilotSubmitOutcome::Success, CopilotSubmitOutcome::Success);
+        assert_ne!(
+            CopilotSubmitOutcome::Success,
+            CopilotSubmitOutcome::Unsupported
+        );
+    }
+
+    #[test]
+    fn copilot_submit_outcome_clone() {
+        let original = CopilotSubmitOutcome::Success;
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    // ── CopilotSubmitReport ─────────────────────────────────────────────
+
+    fn test_report(outcome: CopilotSubmitOutcome) -> CopilotSubmitReport {
+        CopilotSubmitReport {
+            selected_base_type: "terminal-shell".to_string(),
+            flow_asset: "test.json".to_string(),
+            outcome,
+            reason_code: None,
+            payload_id: "p1".to_string(),
+            ordered_steps: vec![],
+            observed_checkpoints: vec![],
+            last_meaningful_output_line: None,
+            transcript_preview: "preview".to_string(),
+        }
+    }
+
+    #[test]
+    fn copilot_submit_report_construction() {
+        let report = test_report(CopilotSubmitOutcome::Success);
+        assert_eq!(report.selected_base_type, "terminal-shell");
+        assert_eq!(report.payload_id, "p1");
+        assert!(report.reason_code.is_none());
+        assert!(report.last_meaningful_output_line.is_none());
+    }
+
+    #[test]
+    fn copilot_submit_report_with_all_fields() {
+        let report = CopilotSubmitReport {
+            selected_base_type: "terminal-shell".to_string(),
+            flow_asset: "flow.json".to_string(),
+            outcome: CopilotSubmitOutcome::Unsupported,
+            reason_code: Some("startup-error".to_string()),
+            payload_id: "p2".to_string(),
+            ordered_steps: vec!["s1".to_string(), "s2".to_string()],
+            observed_checkpoints: vec!["c1".to_string()],
+            last_meaningful_output_line: Some("last line".to_string()),
+            transcript_preview: "transcript preview".to_string(),
+        };
+        assert_eq!(report.outcome.as_str(), "unsupported");
+        assert_eq!(report.reason_code.as_deref(), Some("startup-error"));
+        assert_eq!(report.ordered_steps.len(), 2);
+        assert_eq!(report.observed_checkpoints.len(), 1);
+        assert_eq!(
+            report.last_meaningful_output_line.as_deref(),
+            Some("last line")
+        );
+    }
+
+    #[test]
+    fn copilot_submit_report_clone() {
+        let report = test_report(CopilotSubmitOutcome::Success);
+        let cloned = report.clone();
+        assert_eq!(report, cloned);
+    }
+
+    // ── CopilotSubmitRun ────────────────────────────────────────────────
+
+    #[test]
+    fn copilot_submit_run_success_variant() {
+        let report = test_report(CopilotSubmitOutcome::Success);
+        let run = CopilotSubmitRun::Success(report);
+        match run {
+            CopilotSubmitRun::Success(r) => assert_eq!(r.outcome.as_str(), "success"),
+            _ => panic!("expected Success variant"),
+        }
+    }
+
+    #[test]
+    fn copilot_submit_run_unsupported_variant() {
+        let mut report = test_report(CopilotSubmitOutcome::Unsupported);
+        report.reason_code = Some("reason".to_string());
+        let run = CopilotSubmitRun::Unsupported(report);
+        match run {
+            CopilotSubmitRun::Unsupported(r) => {
+                assert_eq!(r.reason_code, Some("reason".to_string()));
+            }
+            _ => panic!("expected Unsupported variant"),
+        }
+    }
+
+    #[test]
+    fn copilot_submit_run_equality() {
+        let run1 = CopilotSubmitRun::Success(test_report(CopilotSubmitOutcome::Success));
+        let run2 = CopilotSubmitRun::Success(test_report(CopilotSubmitOutcome::Success));
+        assert_eq!(run1, run2);
+    }
+
+    #[test]
+    fn copilot_submit_run_inequality_across_variants() {
+        let run1 = CopilotSubmitRun::Success(test_report(CopilotSubmitOutcome::Success));
+        let run2 = CopilotSubmitRun::Unsupported(test_report(CopilotSubmitOutcome::Unsupported));
+        assert_ne!(run1, run2);
+    }
+
+    // ── constants ───────────────────────────────────────────────────────
+
+    #[test]
+    fn copilot_submit_action_constant() {
+        assert_eq!(COPILOT_SUBMIT_ACTION, "copilot-submit");
+    }
+
+    #[test]
+    fn copilot_submit_base_type_constant() {
+        assert_eq!(COPILOT_SUBMIT_BASE_TYPE, "terminal-shell");
+    }
+}

@@ -257,3 +257,121 @@ pub(crate) fn persist_engineer_loop_artifacts(
     persist_handoff_artifacts(state_root, ScopedHandoffMode::Engineer, &handoff)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    use super::super::types::{
+        EngineerActionKind, ExecutedEngineerAction, RepoInspection, SelectedEngineerAction,
+    };
+
+    fn make_inspection() -> RepoInspection {
+        RepoInspection {
+            workspace_root: PathBuf::from("/fake/workspace"),
+            repo_root: PathBuf::from("/fake/repo"),
+            branch: "main".to_string(),
+            head: "abc123".to_string(),
+            worktree_dirty: false,
+            changed_files: Vec::new(),
+            active_goals: Vec::new(),
+            carried_meeting_decisions: Vec::new(),
+            architecture_gap_summary: String::new(),
+        }
+    }
+
+    fn make_executed(kind: EngineerActionKind) -> ExecutedEngineerAction {
+        ExecutedEngineerAction {
+            selected: SelectedEngineerAction {
+                label: "test-action".into(),
+                rationale: "test".into(),
+                argv: vec!["test".into()],
+                plan_summary: "test".into(),
+                verification_steps: Vec::new(),
+                expected_changed_files: Vec::new(),
+                kind,
+            },
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            changed_files: Vec::new(),
+        }
+    }
+
+    // --- run_optional_review: non-mutating actions skip review ---
+
+    #[test]
+    fn optional_review_skips_read_only_scan() {
+        let inspection = make_inspection();
+        let action = make_executed(EngineerActionKind::ReadOnlyScan);
+        run_optional_review(&inspection, &action).unwrap();
+    }
+
+    #[test]
+    fn optional_review_skips_cargo_test() {
+        let inspection = make_inspection();
+        let action = make_executed(EngineerActionKind::CargoTest);
+        run_optional_review(&inspection, &action).unwrap();
+    }
+
+    #[test]
+    fn optional_review_skips_cargo_check() {
+        let inspection = make_inspection();
+        let action = make_executed(EngineerActionKind::CargoCheck);
+        run_optional_review(&inspection, &action).unwrap();
+    }
+
+    #[test]
+    fn optional_review_skips_run_shell_command() {
+        let inspection = make_inspection();
+        let action = make_executed(EngineerActionKind::RunShellCommand(
+            super::super::types::ShellCommandRequest {
+                argv: vec!["cargo".into(), "fmt".into()],
+            },
+        ));
+        run_optional_review(&inspection, &action).unwrap();
+    }
+
+    #[test]
+    fn optional_review_skips_open_issue() {
+        let inspection = make_inspection();
+        let action = make_executed(EngineerActionKind::OpenIssue(
+            super::super::types::OpenIssueRequest {
+                title: "t".into(),
+                body: String::new(),
+                labels: Vec::new(),
+            },
+        ));
+        run_optional_review(&inspection, &action).unwrap();
+    }
+
+    // --- compute_diff_for_review: argument selection ---
+
+    #[test]
+    fn diff_for_review_git_commit_uses_head_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let kind = EngineerActionKind::GitCommit(super::super::types::GitCommitRequest {
+            message: "test".into(),
+        });
+        // Won't succeed (not a git repo), but should return empty string gracefully
+        let result = compute_diff_for_review(dir.path(), &kind);
+        assert!(result.is_empty()); // no git repo → empty
+    }
+
+    #[test]
+    fn diff_for_review_non_commit_uses_git_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let kind = EngineerActionKind::ReadOnlyScan;
+        let result = compute_diff_for_review(dir.path(), &kind);
+        assert!(result.is_empty()); // no git repo → empty
+    }
+
+    // --- PHILOSOPHY_REVIEW constant ---
+
+    #[test]
+    fn philosophy_review_is_not_empty() {
+        assert!(!PHILOSOPHY_REVIEW.is_empty());
+        assert!(PHILOSOPHY_REVIEW.contains("simplicity"));
+    }
+}

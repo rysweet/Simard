@@ -749,4 +749,274 @@ mod tests {
             "expected error when review artifacts are missing"
         );
     }
+
+    // ── build_live_meeting_context — extended scenarios ─────────────────
+
+    /// Create a bridge that returns facts for a specific query prefix.
+    fn bridge_with_specific_facts(
+        prefix: &'static str,
+        concept: &'static str,
+        content: &'static str,
+    ) -> CognitiveMemoryBridge {
+        let transport =
+            InMemoryBridgeTransport::new("test-specific", move |method, params| match method {
+                "memory.search_facts" => {
+                    let query = params["query"].as_str().unwrap_or("");
+                    if query.starts_with(prefix) {
+                        Ok(serde_json::json!({
+                            "facts": [{
+                                "node_id": "n1",
+                                "concept": concept,
+                                "content": content,
+                                "confidence": 0.9,
+                                "source_id": "s1",
+                                "tags": []
+                            }]
+                        }))
+                    } else {
+                        Ok(serde_json::json!({"facts": []}))
+                    }
+                }
+                _ => Err(crate::bridge::BridgeErrorPayload {
+                    code: -32601,
+                    message: format!("unknown method: {method}"),
+                }),
+            });
+        CognitiveMemoryBridge::new(Box::new(transport))
+    }
+
+    /// Create a bridge that returns facts for all query prefixes used by
+    /// `build_live_meeting_context`.
+    fn bridge_with_all_fact_types() -> CognitiveMemoryBridge {
+        let transport = InMemoryBridgeTransport::new("test-all", |method, params| match method {
+            "memory.search_facts" => {
+                let query = params["query"].as_str().unwrap_or("");
+                let facts = if query.starts_with("meeting:") {
+                    serde_json::json!([{
+                        "node_id": "m1", "concept": "weekly-sync",
+                        "content": "Sprint review completed", "confidence": 0.9,
+                        "source_id": "s1", "tags": []
+                    }])
+                } else if query.starts_with("decision:") {
+                    serde_json::json!([{
+                        "node_id": "d1", "concept": "decision",
+                        "content": "Approved migration plan", "confidence": 0.9,
+                        "source_id": "s2", "tags": []
+                    }])
+                } else if query.starts_with("goal:") {
+                    serde_json::json!([{
+                        "node_id": "g1", "concept": "goal",
+                        "content": "Complete API refactor", "confidence": 0.9,
+                        "source_id": "s3", "tags": []
+                    }])
+                } else if query.starts_with("operator:") {
+                    serde_json::json!([{
+                        "node_id": "o1", "concept": "operator",
+                        "content": "Test Operator identity", "confidence": 0.9,
+                        "source_id": "s4", "tags": []
+                    }])
+                } else if query.starts_with("project:") {
+                    serde_json::json!([{
+                        "node_id": "p1", "concept": "project",
+                        "content": "TestProject — testing suite", "confidence": 0.9,
+                        "source_id": "s5", "tags": []
+                    }])
+                } else if query.starts_with("research:") {
+                    serde_json::json!([{
+                        "node_id": "r1", "concept": "research",
+                        "content": "Investigating new LLM patterns", "confidence": 0.9,
+                        "source_id": "s6", "tags": []
+                    }])
+                } else if query.starts_with("improvement:") {
+                    serde_json::json!([{
+                        "node_id": "i1", "concept": "improvement",
+                        "content": "Add better error handling", "confidence": 0.9,
+                        "source_id": "s7", "tags": []
+                    }])
+                } else {
+                    serde_json::json!([])
+                };
+                Ok(serde_json::json!({"facts": facts}))
+            }
+            _ => Err(crate::bridge::BridgeErrorPayload {
+                code: -32601,
+                message: format!("unknown method: {method}"),
+            }),
+        });
+        CognitiveMemoryBridge::new(Box::new(transport))
+    }
+
+    #[test]
+    fn build_live_meeting_context_includes_decision_facts() {
+        let bridge = bridge_with_specific_facts("decision:", "decision", "Use Rust for backend");
+        let ctx = build_live_meeting_context(&bridge);
+        assert!(
+            ctx.contains("Past Decisions"),
+            "expected past decisions section"
+        );
+        assert!(
+            ctx.contains("Use Rust for backend"),
+            "expected decision content"
+        );
+    }
+
+    #[test]
+    fn build_live_meeting_context_includes_goal_facts() {
+        let bridge = bridge_with_specific_facts("goal:", "goal", "Complete API refactor");
+        let ctx = build_live_meeting_context(&bridge);
+        assert!(
+            ctx.contains("Active Goals"),
+            "expected active goals section"
+        );
+        assert!(
+            ctx.contains("Complete API refactor"),
+            "expected goal content"
+        );
+    }
+
+    #[test]
+    fn build_live_meeting_context_includes_operator_facts() {
+        let bridge =
+            bridge_with_specific_facts("operator:", "operator", "Custom operator identity");
+        let ctx = build_live_meeting_context(&bridge);
+        assert!(
+            ctx.contains("Operator Context"),
+            "expected operator context section"
+        );
+        assert!(
+            ctx.contains("Custom operator identity"),
+            "expected operator content from bridge"
+        );
+        // Should NOT contain the default operator text when bridge provides facts
+        assert!(
+            !ctx.contains("Ryan Sweet"),
+            "should not contain default operator when bridge provides custom operator"
+        );
+    }
+
+    #[test]
+    fn build_live_meeting_context_includes_project_facts() {
+        let bridge =
+            bridge_with_specific_facts("project:", "project", "CustomProject — custom suite");
+        let ctx = build_live_meeting_context(&bridge);
+        assert!(
+            ctx.contains("Known Projects"),
+            "expected known projects section"
+        );
+        assert!(
+            ctx.contains("CustomProject"),
+            "expected project content from bridge"
+        );
+    }
+
+    #[test]
+    fn build_live_meeting_context_includes_research_facts() {
+        let bridge =
+            bridge_with_specific_facts("research:", "research", "Investigating LLM patterns");
+        let ctx = build_live_meeting_context(&bridge);
+        assert!(
+            ctx.contains("Research Topics"),
+            "expected research topics section"
+        );
+        assert!(
+            ctx.contains("Investigating LLM patterns"),
+            "expected research content"
+        );
+    }
+
+    #[test]
+    fn build_live_meeting_context_includes_improvement_facts() {
+        let bridge =
+            bridge_with_specific_facts("improvement:", "improvement", "Add better error handling");
+        let ctx = build_live_meeting_context(&bridge);
+        assert!(
+            ctx.contains("Improvement Backlog"),
+            "expected improvement backlog section"
+        );
+        assert!(
+            ctx.contains("Add better error handling"),
+            "expected improvement content"
+        );
+    }
+
+    #[test]
+    fn build_live_meeting_context_with_all_fact_types() {
+        let bridge = bridge_with_all_fact_types();
+        let ctx = build_live_meeting_context(&bridge);
+        assert!(ctx.contains("Previous Meeting Summaries"));
+        assert!(ctx.contains("Past Decisions"));
+        assert!(ctx.contains("Active Goals"));
+        assert!(ctx.contains("Operator Context"));
+        assert!(ctx.contains("Known Projects"));
+        assert!(ctx.contains("Research Topics"));
+        assert!(ctx.contains("Improvement Backlog"));
+        // Should NOT contain the "No cognitive memory" fallback
+        assert!(!ctx.contains("No cognitive memory available"));
+    }
+
+    #[test]
+    fn build_live_meeting_context_has_live_state_header() {
+        let bridge = empty_bridge();
+        let ctx = build_live_meeting_context(&bridge);
+        // Even with only defaults, the sections are present so it uses the live header
+        assert!(ctx.starts_with("## Live State"));
+    }
+
+    // ── goal_curation_read_probe edge cases ────────────────────────────
+
+    #[test]
+    fn goal_curation_read_probe_with_missing_directory() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("nonexistent");
+        let result = run_goal_curation_read_probe("local-harness", "single-process", Some(missing));
+        // FileBackedGoalStore::try_new handles missing files gracefully,
+        // but the missing parent directory for state root resolution may error.
+        // Either way, it should not panic.
+        let _ = result;
+    }
+
+    // ── meeting_read_probe with valid-shaped but non-meeting data ──────
+
+    #[test]
+    fn meeting_read_probe_rejects_non_meeting_record() {
+        let dir = TempDir::new().unwrap();
+        // Write a memory record that doesn't look like a meeting record
+        let records = serde_json::json!([{
+            "key": "session-1-decision",
+            "scope": "decision",
+            "value": "some non-meeting value",
+            "session_id": "session-1",
+            "recorded_in": "complete"
+        }]);
+        std::fs::write(
+            dir.path().join("memory_records.json"),
+            serde_json::to_string(&records).unwrap(),
+        )
+        .unwrap();
+        let result = run_meeting_read_probe(
+            "local-harness",
+            "single-process",
+            Some(dir.path().to_path_buf()),
+        );
+        assert!(
+            result.is_err(),
+            "expected error when no meeting-shaped records exist"
+        );
+    }
+
+    // ── improvement_curation_read_probe edge cases ─────────────────────
+
+    #[test]
+    fn improvement_curation_read_probe_rejects_empty_dir() {
+        let dir = TempDir::new().unwrap();
+        let result = run_improvement_curation_read_probe(
+            "local-harness",
+            "single-process",
+            Some(dir.path().to_path_buf()),
+        );
+        assert!(
+            result.is_err(),
+            "expected error when state root has no review artifacts"
+        );
+    }
 }
