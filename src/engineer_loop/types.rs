@@ -1,0 +1,295 @@
+use std::path::{Component, Path};
+use std::time::Duration;
+
+use crate::error::{SimardError, SimardResult};
+use crate::goals::GoalRecord;
+use crate::terminal_engineer_bridge::TerminalBridgeContext;
+
+use std::path::PathBuf;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepoInspection {
+    pub workspace_root: PathBuf,
+    pub repo_root: PathBuf,
+    pub branch: String,
+    pub head: String,
+    pub worktree_dirty: bool,
+    pub changed_files: Vec<String>,
+    pub active_goals: Vec<GoalRecord>,
+    pub carried_meeting_decisions: Vec<String>,
+    pub architecture_gap_summary: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct StructuredEditRequest {
+    pub(crate) relative_path: String,
+    pub(crate) search: String,
+    pub(crate) replacement: String,
+    pub(crate) verify_contains: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CreateFileRequest {
+    pub(crate) relative_path: String,
+    pub(crate) content: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AppendToFileRequest {
+    pub(crate) relative_path: String,
+    pub(crate) content: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ShellCommandRequest {
+    pub(crate) argv: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct GitCommitRequest {
+    pub(crate) message: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OpenIssueRequest {
+    pub(crate) title: String,
+    pub(crate) body: String,
+    pub(crate) labels: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum EngineerActionKind {
+    ReadOnlyScan,
+    StructuredTextReplace(StructuredEditRequest),
+    CargoTest,
+    CargoCheck,
+    CreateFile(CreateFileRequest),
+    AppendToFile(AppendToFileRequest),
+    RunShellCommand(ShellCommandRequest),
+    GitCommit(GitCommitRequest),
+    OpenIssue(OpenIssueRequest),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SelectedEngineerAction {
+    pub label: String,
+    pub rationale: String,
+    pub argv: Vec<String>,
+    pub plan_summary: String,
+    pub verification_steps: Vec<String>,
+    pub expected_changed_files: Vec<String>,
+    pub(crate) kind: EngineerActionKind,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutedEngineerAction {
+    pub selected: SelectedEngineerAction,
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub changed_files: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerificationReport {
+    pub status: String,
+    pub summary: String,
+    pub checks: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PhaseOutcome {
+    Success,
+    Failed(String),
+    Skipped(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PhaseTrace {
+    pub name: String,
+    pub duration: Duration,
+    pub outcome: PhaseOutcome,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EngineerLoopRun {
+    pub state_root: PathBuf,
+    pub execution_scope: String,
+    pub inspection: RepoInspection,
+    pub action: ExecutedEngineerAction,
+    pub verification: VerificationReport,
+    pub terminal_bridge_context: Option<TerminalBridgeContext>,
+    pub elapsed_duration: Duration,
+    pub phase_traces: Vec<PhaseTrace>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalyzedAction {
+    CreateFile,
+    AppendToFile,
+    RunShellCommand,
+    GitCommit,
+    OpenIssue,
+    StructuredTextReplace,
+    CargoTest,
+    ReadOnlyScan,
+}
+
+/// Classify an objective string into an action category using keyword matching.
+/// Case-insensitive. More specific compound patterns are checked before single
+/// keywords so that "run tests" maps to `CargoTest` rather than `RunShellCommand`.
+pub fn analyze_objective(objective: &str) -> AnalyzedAction {
+    let lower = objective.to_lowercase();
+
+    // Most specific compound patterns first
+    if lower.contains("new file") || lower.contains("create") || lower.contains("add file") {
+        AnalyzedAction::CreateFile
+    } else if lower.contains("append") || lower.contains("add to") {
+        AnalyzedAction::AppendToFile
+    } else if lower.contains("commit") || lower.contains("save changes") {
+        AnalyzedAction::GitCommit
+    } else if lower.contains("issue")
+        || lower.contains("bug report")
+        || lower.contains("feature request")
+    {
+        AnalyzedAction::OpenIssue
+    } else if lower.contains("cargo test")
+        || lower.contains("run tests")
+        || lower.contains("test suite")
+        || lower.contains("run the tests")
+    {
+        AnalyzedAction::CargoTest
+    } else if lower.contains("run") || lower.contains("execute") || lower.contains("check") {
+        AnalyzedAction::RunShellCommand
+    } else if lower.contains("fix")
+        || lower.contains("change")
+        || lower.contains("update")
+        || lower.contains("replace")
+    {
+        AnalyzedAction::StructuredTextReplace
+    } else if lower.contains("test") {
+        AnalyzedAction::CargoTest
+    } else {
+        AnalyzedAction::ReadOnlyScan
+    }
+}
+
+pub(crate) fn extract_command_from_objective(objective: &str) -> Option<Vec<String>> {
+    let lower = objective.to_lowercase();
+    let rest = if let Some(idx) = lower.find("run ") {
+        &objective[idx + 4..]
+    } else if let Some(idx) = lower.find("execute ") {
+        &objective[idx + 8..]
+    } else {
+        return None;
+    };
+    let argv: Vec<String> = rest.split_whitespace().map(String::from).collect();
+    if argv.is_empty() { None } else { Some(argv) }
+}
+
+pub(crate) fn extract_file_path_from_objective(objective: &str) -> Option<String> {
+    objective
+        .split_whitespace()
+        .find(|w| w.contains('/') || (w.contains('.') && w.len() > 2))
+        .map(|s| s.to_string())
+}
+
+pub(crate) fn parse_structured_edit_request(
+    objective: &str,
+) -> SimardResult<Option<StructuredEditRequest>> {
+    let mut relative_path = None;
+    let mut search = None;
+    let mut replacement = None;
+    let mut verify_contains = None;
+    let mut saw_edit_directive = false;
+
+    for line in objective.lines() {
+        let trimmed = line.trim();
+        if let Some(value) = trimmed.strip_prefix("edit-file:") {
+            saw_edit_directive = true;
+            relative_path = Some(non_empty_objective_value("edit-file", value)?);
+        } else if let Some(value) = trimmed.strip_prefix("replace:") {
+            saw_edit_directive = true;
+            search = Some(unescape_edit_value(&non_empty_objective_value(
+                "replace", value,
+            )?));
+        } else if let Some(value) = trimmed.strip_prefix("with:") {
+            saw_edit_directive = true;
+            replacement = Some(unescape_edit_value(&non_empty_objective_value(
+                "with", value,
+            )?));
+        } else if let Some(value) = trimmed.strip_prefix("verify-contains:") {
+            saw_edit_directive = true;
+            verify_contains = Some(unescape_edit_value(&non_empty_objective_value(
+                "verify-contains",
+                value,
+            )?));
+        }
+    }
+
+    if !saw_edit_directive {
+        return Ok(None);
+    }
+
+    match (relative_path, search, replacement, verify_contains) {
+        (Some(relative_path), Some(search), Some(replacement), Some(verify_contains)) => {
+            Ok(Some(StructuredEditRequest {
+                relative_path,
+                search,
+                replacement,
+                verify_contains,
+            }))
+        }
+        _ => Err(SimardError::UnsupportedEngineerAction {
+            reason: "structured edit objectives must include non-empty edit-file:, replace:, with:, and verify-contains: lines".to_string(),
+        }),
+    }
+}
+
+pub(crate) fn non_empty_objective_value(field: &str, value: &str) -> SimardResult<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(SimardError::UnsupportedEngineerAction {
+            reason: format!("structured edit objective field '{field}' cannot be empty"),
+        });
+    }
+    Ok(trimmed.to_string())
+}
+
+pub(crate) fn unescape_edit_value(value: &str) -> String {
+    value.replace("\\n", "\n").replace("\\t", "\t")
+}
+
+pub(crate) fn validate_repo_relative_path(relative_path: &str) -> SimardResult<String> {
+    let path = Path::new(relative_path);
+    if path.is_absolute() {
+        return Err(SimardError::UnsupportedEngineerAction {
+            reason: "structured edit target paths must stay relative to the selected repo"
+                .to_string(),
+        });
+    }
+
+    let mut normalized = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(segment) => normalized.push(segment.to_string_lossy().into_owned()),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(SimardError::UnsupportedEngineerAction {
+                    reason: "structured edit target paths must not escape the selected repo"
+                        .to_string(),
+                });
+            }
+        }
+    }
+
+    if normalized.is_empty() {
+        return Err(SimardError::UnsupportedEngineerAction {
+            reason: "structured edit target paths must identify a file under the selected repo"
+                .to_string(),
+        });
+    }
+
+    Ok(normalized.join("/"))
+}
