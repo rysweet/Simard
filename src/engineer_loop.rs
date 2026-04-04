@@ -154,7 +154,8 @@ pub struct EngineerLoopRun {
     pub phase_traces: Vec<PhaseTrace>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AnalyzedAction {
     CreateFile,
     AppendToFile,
@@ -577,7 +578,12 @@ fn select_engineer_action(
 
     // Route new action types via keyword analysis before falling through
     // to existing Cargo.toml / .git scan-based fallback.
-    let analyzed = analyze_objective(objective);
+    //
+    // Try LLM-based planning first; fall back to keyword analysis.
+    let analyzed = match crate::engineer_plan::plan_objective(objective, inspection) {
+        Ok(plan) if !plan.steps().is_empty() => plan.steps()[0].action.clone(),
+        _ => analyze_objective(objective),
+    };
     match analyzed {
         AnalyzedAction::CreateFile => {
             if let Some(path) = extract_file_path_from_objective(objective) {
