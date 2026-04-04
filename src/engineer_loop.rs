@@ -1,4 +1,5 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -25,6 +26,8 @@ const EXECUTION_SCOPE: &str = "local-only";
 const MAX_CARRIED_MEETING_DECISIONS: usize = 3;
 const GIT_COMMAND_TIMEOUT_SECS: u64 = 60;
 const CARGO_COMMAND_TIMEOUT_SECS: u64 = 120;
+const SHELL_COMMAND_ALLOWLIST: &[&str] = &["cargo", "git", "gh", "rustfmt", "clippy"];
+
 const CLEARED_GIT_ENV_VARS: &[&str] = &[
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -57,11 +60,45 @@ struct StructuredEditRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct CreateFileRequest {
+    relative_path: String,
+    content: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AppendToFileRequest {
+    relative_path: String,
+    content: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ShellCommandRequest {
+    argv: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GitCommitRequest {
+    message: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct OpenIssueRequest {
+    title: String,
+    body: String,
+    labels: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum EngineerActionKind {
     ReadOnlyScan,
     StructuredTextReplace(StructuredEditRequest),
     CargoTest,
     CargoCheck,
+    CreateFile(CreateFileRequest),
+    AppendToFile(AppendToFileRequest),
+    RunShellCommand(ShellCommandRequest),
+    GitCommit(GitCommitRequest),
+    OpenIssue(OpenIssueRequest),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -115,6 +152,77 @@ pub struct EngineerLoopRun {
     pub terminal_bridge_context: Option<TerminalBridgeContext>,
     pub elapsed_duration: Duration,
     pub phase_traces: Vec<PhaseTrace>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AnalyzedAction {
+    CreateFile,
+    AppendToFile,
+    RunShellCommand,
+    GitCommit,
+    OpenIssue,
+    StructuredTextReplace,
+    CargoTest,
+    ReadOnlyScan,
+}
+
+/// Classify an objective string into an action category using keyword matching.
+/// Case-insensitive. More specific compound patterns are checked before single
+/// keywords so that "run tests" maps to `CargoTest` rather than `RunShellCommand`.
+pub fn analyze_objective(objective: &str) -> AnalyzedAction {
+    let lower = objective.to_lowercase();
+
+    // Most specific compound patterns first
+    if lower.contains("new file") || lower.contains("create") || lower.contains("add file") {
+        AnalyzedAction::CreateFile
+    } else if lower.contains("append") || lower.contains("add to") {
+        AnalyzedAction::AppendToFile
+    } else if lower.contains("commit") || lower.contains("save changes") {
+        AnalyzedAction::GitCommit
+    } else if lower.contains("issue")
+        || lower.contains("bug report")
+        || lower.contains("feature request")
+    {
+        AnalyzedAction::OpenIssue
+    } else if lower.contains("cargo test")
+        || lower.contains("run tests")
+        || lower.contains("test suite")
+        || lower.contains("run the tests")
+    {
+        AnalyzedAction::CargoTest
+    } else if lower.contains("run") || lower.contains("execute") || lower.contains("check") {
+        AnalyzedAction::RunShellCommand
+    } else if lower.contains("fix")
+        || lower.contains("change")
+        || lower.contains("update")
+        || lower.contains("replace")
+    {
+        AnalyzedAction::StructuredTextReplace
+    } else if lower.contains("test") {
+        AnalyzedAction::CargoTest
+    } else {
+        AnalyzedAction::ReadOnlyScan
+    }
+}
+
+fn extract_command_from_objective(objective: &str) -> Option<Vec<String>> {
+    let lower = objective.to_lowercase();
+    let rest = if let Some(idx) = lower.find("run ") {
+        &objective[idx + 4..]
+    } else if let Some(idx) = lower.find("execute ") {
+        &objective[idx + 8..]
+    } else {
+        return None;
+    };
+    let argv: Vec<String> = rest.split_whitespace().map(String::from).collect();
+    if argv.is_empty() { None } else { Some(argv) }
+}
+
+fn extract_file_path_from_objective(objective: &str) -> Option<String> {
+    objective
+        .split_whitespace()
+        .find(|w| w.contains('/') || (w.contains('.') && w.len() > 2))
+        .map(|s| s.to_string())
 }
 
 pub fn run_local_engineer_loop(
@@ -467,6 +575,148 @@ fn select_engineer_action(
         });
     }
 
+    // Route new action types via keyword analysis before falling through
+    // to existing Cargo.toml / .git scan-based fallback.
+    let analyzed = analyze_objective(objective);
+    match analyzed {
+        AnalyzedAction::CreateFile => {
+            if let Some(path) = extract_file_path_from_objective(objective) {
+                let relative_path = validate_repo_relative_path(&path)?;
+                let content = objective
+                    .lines()
+                    .skip_while(|l| !l.to_lowercase().starts_with("content:"))
+                    .skip(1)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Ok(SelectedEngineerAction {
+                    label: "create-file".to_string(),
+                    rationale: format!(
+                        "Objective requests creating a new file at '{relative_path}'.{carry_forward_note}"
+                    ),
+                    argv: vec!["simard-create-file".to_string(), relative_path.clone()],
+                    plan_summary: format!(
+                        "Create file '{}' with the specified content, then verify the file exists.",
+                        relative_path
+                    ),
+                    verification_steps: vec![
+                        format!("confirm '{}' exists", relative_path),
+                        "confirm file content matches request".to_string(),
+                    ],
+                    expected_changed_files: vec![relative_path.clone()],
+                    kind: EngineerActionKind::CreateFile(CreateFileRequest {
+                        relative_path,
+                        content,
+                    }),
+                });
+            }
+        }
+        AnalyzedAction::AppendToFile => {
+            if let Some(path) = extract_file_path_from_objective(objective) {
+                let relative_path = validate_repo_relative_path(&path)?;
+                let content = objective
+                    .lines()
+                    .skip_while(|l| !l.to_lowercase().starts_with("content:"))
+                    .skip(1)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Ok(SelectedEngineerAction {
+                    label: "append-to-file".to_string(),
+                    rationale: format!(
+                        "Objective requests appending content to '{relative_path}'.{carry_forward_note}"
+                    ),
+                    argv: vec!["simard-append-file".to_string(), relative_path.clone()],
+                    plan_summary: format!(
+                        "Append content to '{}', then verify the file contains the appended text.",
+                        relative_path
+                    ),
+                    verification_steps: vec![format!(
+                        "confirm '{}' contains appended content",
+                        relative_path
+                    )],
+                    expected_changed_files: vec![relative_path.clone()],
+                    kind: EngineerActionKind::AppendToFile(AppendToFileRequest {
+                        relative_path,
+                        content,
+                    }),
+                });
+            }
+        }
+        AnalyzedAction::RunShellCommand => {
+            if let Some(argv) = extract_command_from_objective(objective) {
+                let first = argv.first().cloned().unwrap_or_default();
+                if SHELL_COMMAND_ALLOWLIST.contains(&first.as_str()) {
+                    return Ok(SelectedEngineerAction {
+                        label: "run-shell-command".to_string(),
+                        rationale: format!(
+                            "Objective requests running '{}', which is in the shell allowlist.{carry_forward_note}",
+                            argv.join(" ")
+                        ),
+                        argv: argv.clone(),
+                        plan_summary: format!("Execute '{}' and capture output.", argv.join(" ")),
+                        verification_steps: vec![format!(
+                            "confirm '{}' exits with status 0",
+                            argv.join(" ")
+                        )],
+                        expected_changed_files: Vec::new(),
+                        kind: EngineerActionKind::RunShellCommand(ShellCommandRequest { argv }),
+                    });
+                }
+            }
+        }
+        AnalyzedAction::GitCommit => {
+            let message = {
+                let lower = objective.to_lowercase();
+                if let Some(idx) = lower.find("commit ") {
+                    objective[idx + 7..].trim().to_string()
+                } else {
+                    objective.to_string()
+                }
+            };
+            return Ok(SelectedEngineerAction {
+                label: "git-commit".to_string(),
+                rationale: format!(
+                    "Objective requests committing changes with message: '{}'.{carry_forward_note}",
+                    message
+                ),
+                argv: vec![
+                    "git".to_string(),
+                    "commit".to_string(),
+                    "-m".to_string(),
+                    message.clone(),
+                ],
+                plan_summary: "Stage all changes and create a git commit.".to_string(),
+                verification_steps: vec!["confirm HEAD changed (new commit created)".to_string()],
+                expected_changed_files: Vec::new(),
+                kind: EngineerActionKind::GitCommit(GitCommitRequest { message }),
+            });
+        }
+        AnalyzedAction::OpenIssue => {
+            let title = objective.to_string();
+            return Ok(SelectedEngineerAction {
+                label: "open-issue".to_string(),
+                rationale: format!(
+                    "Objective requests opening a GitHub issue.{carry_forward_note}"
+                ),
+                argv: vec![
+                    "gh".to_string(),
+                    "issue".to_string(),
+                    "create".to_string(),
+                    "--title".to_string(),
+                    title.clone(),
+                ],
+                plan_summary: "Create a GitHub issue via gh CLI.".to_string(),
+                verification_steps: vec!["confirm issue URL is returned in stdout".to_string()],
+                expected_changed_files: Vec::new(),
+                kind: EngineerActionKind::OpenIssue(OpenIssueRequest {
+                    title,
+                    body: String::new(),
+                    labels: Vec::new(),
+                }),
+            });
+        }
+        _ => {} // CargoTest, StructuredTextReplace, ReadOnlyScan fall through to existing logic
+    }
+
     if inspection.repo_root.join("Cargo.toml").is_file() {
         // Only select cargo test/check when the objective explicitly asks for it.
         // Generic words like "verify" are too broad and would misfire.
@@ -653,6 +903,136 @@ fn execute_engineer_action(
                 changed_files: Vec::new(),
             })
         }
+        EngineerActionKind::CreateFile(ref req) => {
+            let relative_path = validate_repo_relative_path(&req.relative_path)?;
+            let target_path = repo_root.join(&relative_path);
+            if target_path.exists() {
+                return Err(SimardError::ActionExecutionFailed {
+                    action: selected.argv.join(" "),
+                    reason: format!(
+                        "file '{}' already exists; CreateFile refuses to overwrite",
+                        relative_path
+                    ),
+                });
+            }
+            if let Some(parent) = target_path.parent() {
+                fs::create_dir_all(parent).map_err(|error| SimardError::ActionExecutionFailed {
+                    action: selected.argv.join(" "),
+                    reason: format!(
+                        "could not create parent directories for '{}': {error}",
+                        relative_path
+                    ),
+                })?;
+            }
+            fs::write(&target_path, &req.content).map_err(|error| {
+                SimardError::ActionExecutionFailed {
+                    action: selected.argv.join(" "),
+                    reason: format!("could not write '{}': {error}", relative_path),
+                }
+            })?;
+            Ok(ExecutedEngineerAction {
+                selected,
+                exit_code: 0,
+                stdout: format!("created file '{}'", relative_path),
+                stderr: String::new(),
+                changed_files: vec![relative_path],
+            })
+        }
+        EngineerActionKind::AppendToFile(ref req) => {
+            let relative_path = validate_repo_relative_path(&req.relative_path)?;
+            let target_path = repo_root.join(&relative_path);
+            if !target_path.exists() {
+                return Err(SimardError::ActionExecutionFailed {
+                    action: selected.argv.join(" "),
+                    reason: format!(
+                        "file '{}' does not exist; AppendToFile requires an existing file",
+                        relative_path
+                    ),
+                });
+            }
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&target_path)
+                .map_err(|error| SimardError::ActionExecutionFailed {
+                    action: selected.argv.join(" "),
+                    reason: format!("could not open '{}' for appending: {error}", relative_path),
+                })?;
+            file.write_all(req.content.as_bytes()).map_err(|error| {
+                SimardError::ActionExecutionFailed {
+                    action: selected.argv.join(" "),
+                    reason: format!("could not append to '{}': {error}", relative_path),
+                }
+            })?;
+            Ok(ExecutedEngineerAction {
+                selected,
+                exit_code: 0,
+                stdout: format!("appended content to '{}'", relative_path),
+                stderr: String::new(),
+                changed_files: vec![relative_path],
+            })
+        }
+        EngineerActionKind::RunShellCommand(ref req) => {
+            let first = req
+                .argv
+                .first()
+                .ok_or_else(|| SimardError::ActionExecutionFailed {
+                    action: selected.argv.join(" "),
+                    reason: "shell command argv is empty".to_string(),
+                })?;
+            if !SHELL_COMMAND_ALLOWLIST.contains(&first.as_str()) {
+                return Err(SimardError::ActionExecutionFailed {
+                    action: selected.argv.join(" "),
+                    reason: format!(
+                        "command '{}' is not in the shell command allowlist {:?}",
+                        first, SHELL_COMMAND_ALLOWLIST
+                    ),
+                });
+            }
+            let argv_refs: Vec<&str> = req.argv.iter().map(String::as_str).collect();
+            let output = run_command(repo_root, &argv_refs)?;
+            Ok(ExecutedEngineerAction {
+                selected,
+                exit_code: output.status.code().unwrap_or_default(),
+                stdout: sanitize_terminal_text(&output.stdout),
+                stderr: sanitize_terminal_text(&output.stderr),
+                changed_files: Vec::new(),
+            })
+        }
+        EngineerActionKind::GitCommit(ref req) => {
+            run_command(repo_root, &["git", "add", "-A"])?;
+            let output = run_command(repo_root, &["git", "commit", "-m", &req.message])?;
+            Ok(ExecutedEngineerAction {
+                selected,
+                exit_code: output.status.code().unwrap_or_default(),
+                stdout: sanitize_terminal_text(&output.stdout),
+                stderr: sanitize_terminal_text(&output.stderr),
+                changed_files: Vec::new(),
+            })
+        }
+        EngineerActionKind::OpenIssue(ref req) => {
+            let mut argv_owned: Vec<String> = vec![
+                "gh".to_string(),
+                "issue".to_string(),
+                "create".to_string(),
+                "--title".to_string(),
+                req.title.clone(),
+                "--body".to_string(),
+                req.body.clone(),
+            ];
+            for label in &req.labels {
+                argv_owned.push("--label".to_string());
+                argv_owned.push(label.clone());
+            }
+            let argv_refs: Vec<&str> = argv_owned.iter().map(String::as_str).collect();
+            let output = run_command(repo_root, &argv_refs)?;
+            Ok(ExecutedEngineerAction {
+                selected,
+                exit_code: output.status.code().unwrap_or_default(),
+                stdout: sanitize_terminal_text(&output.stdout),
+                stderr: sanitize_terminal_text(&output.stderr),
+                changed_files: Vec::new(),
+            })
+        }
     }
 }
 
@@ -684,12 +1064,24 @@ fn verify_engineer_action(
     }
     checks.push(format!("repo-root={}", post.repo_root.display()));
 
-    if post.head != inspection.head {
-        return Err(SimardError::VerificationFailed {
-            reason: format!("HEAD changed from '{}' to '{}'", inspection.head, post.head),
-        });
+    match &action.selected.kind {
+        EngineerActionKind::GitCommit(_) => {
+            if post.head == inspection.head {
+                return Err(SimardError::VerificationFailed {
+                    reason: "HEAD did not change after git commit".to_string(),
+                });
+            }
+            checks.push(format!("repo-head-changed={}", post.head));
+        }
+        _ => {
+            if post.head != inspection.head {
+                return Err(SimardError::VerificationFailed {
+                    reason: format!("HEAD changed from '{}' to '{}'", inspection.head, post.head),
+                });
+            }
+            checks.push(format!("repo-head={}", post.head));
+        }
     }
-    checks.push(format!("repo-head={}", post.head));
 
     if post.branch != inspection.branch {
         return Err(SimardError::VerificationFailed {
@@ -704,7 +1096,9 @@ fn verify_engineer_action(
     match &action.selected.kind {
         EngineerActionKind::ReadOnlyScan
         | EngineerActionKind::CargoTest
-        | EngineerActionKind::CargoCheck => {
+        | EngineerActionKind::CargoCheck
+        | EngineerActionKind::RunShellCommand(_)
+        | EngineerActionKind::OpenIssue(_) => {
             if post.worktree_dirty != inspection.worktree_dirty
                 || post.changed_files != inspection.changed_files
             {
@@ -716,16 +1110,19 @@ fn verify_engineer_action(
             checks.push(format!("worktree-dirty={}", post.worktree_dirty));
             checks.push("changed-files-after-action=<none>".to_string());
         }
-        EngineerActionKind::StructuredTextReplace(_) => {
+        EngineerActionKind::StructuredTextReplace(_)
+        | EngineerActionKind::CreateFile(_)
+        | EngineerActionKind::AppendToFile(_) => {
             if !post.worktree_dirty {
                 return Err(SimardError::VerificationFailed {
-                    reason: "bounded edit succeeded but the repo still appears clean".to_string(),
+                    reason: "file-mutating action succeeded but the repo still appears clean"
+                        .to_string(),
                 });
             }
             if post.changed_files != action.selected.expected_changed_files {
                 return Err(SimardError::VerificationFailed {
                     reason: format!(
-                        "bounded edit changed unexpected files: expected {:?}, got {:?}",
+                        "file-mutating action changed unexpected files: expected {:?}, got {:?}",
                         action.selected.expected_changed_files, post.changed_files
                     ),
                 });
@@ -742,6 +1139,12 @@ fn verify_engineer_action(
             checks.push(format!(
                 "changed-files-after-action={}",
                 post.changed_files.join(", ")
+            ));
+        }
+        EngineerActionKind::GitCommit(_) => {
+            checks.push(format!(
+                "worktree-dirty-after-commit={}",
+                post.worktree_dirty
             ));
         }
     }
@@ -823,6 +1226,71 @@ fn verify_engineer_action(
                 checks.push(format!("cargo-check-passed=false (errors={})", error_count));
             }
         }
+        EngineerActionKind::CreateFile(req) => {
+            let target_path = inspection.repo_root.join(&req.relative_path);
+            if !target_path.exists() {
+                return Err(SimardError::VerificationFailed {
+                    reason: format!(
+                        "file '{}' does not exist after CreateFile",
+                        req.relative_path
+                    ),
+                });
+            }
+            let content = fs::read_to_string(&target_path).map_err(|error| {
+                SimardError::VerificationFailed {
+                    reason: format!(
+                        "could not read '{}' to verify content: {error}",
+                        req.relative_path
+                    ),
+                }
+            })?;
+            if content != req.content {
+                return Err(SimardError::VerificationFailed {
+                    reason: format!(
+                        "file '{}' content does not match expected content",
+                        req.relative_path
+                    ),
+                });
+            }
+            checks.push(format!("file-exists={}", req.relative_path));
+            checks.push("file-content-matches=true".to_string());
+        }
+        EngineerActionKind::AppendToFile(req) => {
+            let target_path = inspection.repo_root.join(&req.relative_path);
+            let content = fs::read_to_string(&target_path).map_err(|error| {
+                SimardError::VerificationFailed {
+                    reason: format!(
+                        "could not read '{}' to verify appended content: {error}",
+                        req.relative_path
+                    ),
+                }
+            })?;
+            if !content.contains(&req.content) {
+                return Err(SimardError::VerificationFailed {
+                    reason: format!(
+                        "file '{}' does not contain the appended content",
+                        req.relative_path
+                    ),
+                });
+            }
+            checks.push(format!("file-contains-appended={}", req.relative_path));
+        }
+        EngineerActionKind::RunShellCommand(_) => {
+            checks.push(format!("shell-command-exit-code={}", action.exit_code));
+        }
+        EngineerActionKind::GitCommit(_) => {
+            checks.push("git-commit-created=true".to_string());
+        }
+        EngineerActionKind::OpenIssue(_) => {
+            if action.stdout.contains("https://github.com/") || action.stdout.contains("github.com")
+            {
+                checks.push("issue-url-present=true".to_string());
+            } else {
+                return Err(SimardError::VerificationFailed {
+                    reason: "gh issue create did not return an issue URL in stdout".to_string(),
+                });
+            }
+        }
     }
 
     Ok(VerificationReport {
@@ -854,6 +1322,26 @@ fn verify_engineer_action(
                 } else {
                     "failed"
                 }
+            ),
+            EngineerActionKind::CreateFile(req) => format!(
+                "Verified CreateFile action '{}': file '{}' exists with expected content.",
+                action.selected.label, req.relative_path
+            ),
+            EngineerActionKind::AppendToFile(req) => format!(
+                "Verified AppendToFile action '{}': file '{}' contains appended content.",
+                action.selected.label, req.relative_path
+            ),
+            EngineerActionKind::RunShellCommand(_) => format!(
+                "Verified RunShellCommand action '{}': exit_code={}.",
+                action.selected.label, action.exit_code
+            ),
+            EngineerActionKind::GitCommit(_) => format!(
+                "Verified GitCommit action '{}': HEAD advanced to new commit.",
+                action.selected.label
+            ),
+            EngineerActionKind::OpenIssue(_) => format!(
+                "Verified OpenIssue action '{}': issue URL present in output.",
+                action.selected.label
             ),
         },
         checks,
@@ -1384,7 +1872,11 @@ fn parse_status_paths(stdout: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_status_paths, parse_structured_edit_request, validate_repo_relative_path};
+    use super::{
+        AnalyzedAction, AppendToFileRequest, CreateFileRequest, EngineerActionKind,
+        SelectedEngineerAction, ShellCommandRequest, analyze_objective, execute_engineer_action,
+        parse_status_paths, parse_structured_edit_request, validate_repo_relative_path,
+    };
 
     #[test]
     fn git_status_paths_strip_status_prefixes() {
@@ -1419,6 +1911,341 @@ mod tests {
         assert!(
             error.to_string().contains("must not escape"),
             "error should explain the rejected path: {error}"
+        );
+    }
+
+    // ---- analyze_objective keyword mapping tests ----
+
+    #[test]
+    fn analyze_objective_create_file() {
+        assert_eq!(
+            analyze_objective("create a new config file"),
+            AnalyzedAction::CreateFile
+        );
+    }
+
+    #[test]
+    fn analyze_objective_new_file() {
+        assert_eq!(
+            analyze_objective("new file for the project"),
+            AnalyzedAction::CreateFile
+        );
+    }
+
+    #[test]
+    fn analyze_objective_add_file() {
+        assert_eq!(
+            analyze_objective("add file to the project"),
+            AnalyzedAction::CreateFile
+        );
+    }
+
+    #[test]
+    fn analyze_objective_append() {
+        assert_eq!(
+            analyze_objective("append log entry"),
+            AnalyzedAction::AppendToFile
+        );
+    }
+
+    #[test]
+    fn analyze_objective_add_to() {
+        assert_eq!(
+            analyze_objective("add to the changelog"),
+            AnalyzedAction::AppendToFile
+        );
+    }
+
+    #[test]
+    fn analyze_objective_run_shell_command() {
+        assert_eq!(
+            analyze_objective("run cargo fmt"),
+            AnalyzedAction::RunShellCommand
+        );
+    }
+
+    #[test]
+    fn analyze_objective_execute_command() {
+        assert_eq!(
+            analyze_objective("execute rustfmt on main.rs"),
+            AnalyzedAction::RunShellCommand
+        );
+    }
+
+    #[test]
+    fn analyze_objective_git_commit() {
+        assert_eq!(
+            analyze_objective("commit the changes"),
+            AnalyzedAction::GitCommit
+        );
+    }
+
+    #[test]
+    fn analyze_objective_save_changes() {
+        assert_eq!(
+            analyze_objective("save changes to the repo"),
+            AnalyzedAction::GitCommit
+        );
+    }
+
+    #[test]
+    fn analyze_objective_open_issue() {
+        assert_eq!(
+            analyze_objective("open an issue for the bug"),
+            AnalyzedAction::OpenIssue
+        );
+    }
+
+    #[test]
+    fn analyze_objective_bug_report() {
+        assert_eq!(
+            analyze_objective("file a bug report"),
+            AnalyzedAction::OpenIssue
+        );
+    }
+
+    #[test]
+    fn analyze_objective_feature_request() {
+        assert_eq!(
+            analyze_objective("submit a feature request"),
+            AnalyzedAction::OpenIssue
+        );
+    }
+
+    #[test]
+    fn analyze_objective_fix_maps_to_structured_edit() {
+        assert_eq!(
+            analyze_objective("fix the typo in README"),
+            AnalyzedAction::StructuredTextReplace
+        );
+    }
+
+    #[test]
+    fn analyze_objective_update_maps_to_structured_edit() {
+        assert_eq!(
+            analyze_objective("update the version number"),
+            AnalyzedAction::StructuredTextReplace
+        );
+    }
+
+    #[test]
+    fn analyze_objective_cargo_test() {
+        assert_eq!(
+            analyze_objective("test the parser module"),
+            AnalyzedAction::CargoTest
+        );
+    }
+
+    #[test]
+    fn analyze_objective_run_tests_maps_to_cargo_test() {
+        assert_eq!(
+            analyze_objective("run tests for the project"),
+            AnalyzedAction::CargoTest
+        );
+    }
+
+    #[test]
+    fn analyze_objective_default_fallback() {
+        assert_eq!(
+            analyze_objective("unknown gibberish"),
+            AnalyzedAction::ReadOnlyScan
+        );
+    }
+
+    #[test]
+    fn analyze_objective_is_case_insensitive() {
+        assert_eq!(
+            analyze_objective("CREATE a New File"),
+            AnalyzedAction::CreateFile
+        );
+        assert_eq!(
+            analyze_objective("RUN cargo fmt"),
+            AnalyzedAction::RunShellCommand
+        );
+    }
+
+    // ---- CreateFile path validation tests ----
+
+    #[test]
+    fn create_file_rejects_path_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let selected = SelectedEngineerAction {
+            label: "create-file".to_string(),
+            rationale: "test".to_string(),
+            argv: vec!["simard-create-file".to_string()],
+            plan_summary: "test".to_string(),
+            verification_steps: Vec::new(),
+            expected_changed_files: Vec::new(),
+            kind: EngineerActionKind::CreateFile(CreateFileRequest {
+                relative_path: "../../../etc/passwd".to_string(),
+                content: "malicious".to_string(),
+            }),
+        };
+        let error = execute_engineer_action(dir.path(), selected)
+            .expect_err("path traversal should be rejected");
+        assert!(
+            error.to_string().contains("must not escape"),
+            "error should mention traversal: {error}"
+        );
+    }
+
+    #[test]
+    fn create_file_rejects_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("existing.txt"), "content").unwrap();
+        let selected = SelectedEngineerAction {
+            label: "create-file".to_string(),
+            rationale: "test".to_string(),
+            argv: vec!["simard-create-file".to_string()],
+            plan_summary: "test".to_string(),
+            verification_steps: Vec::new(),
+            expected_changed_files: Vec::new(),
+            kind: EngineerActionKind::CreateFile(CreateFileRequest {
+                relative_path: "existing.txt".to_string(),
+                content: "new".to_string(),
+            }),
+        };
+        let error = execute_engineer_action(dir.path(), selected)
+            .expect_err("overwriting existing file should be rejected");
+        assert!(
+            error.to_string().contains("already exists"),
+            "error should explain the rejection: {error}"
+        );
+    }
+
+    #[test]
+    fn create_file_succeeds_with_valid_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let selected = SelectedEngineerAction {
+            label: "create-file".to_string(),
+            rationale: "test".to_string(),
+            argv: vec!["simard-create-file".to_string()],
+            plan_summary: "test".to_string(),
+            verification_steps: Vec::new(),
+            expected_changed_files: vec!["src/new.rs".to_string()],
+            kind: EngineerActionKind::CreateFile(CreateFileRequest {
+                relative_path: "src/new.rs".to_string(),
+                content: "fn main() {}".to_string(),
+            }),
+        };
+        let result = execute_engineer_action(dir.path(), selected).unwrap();
+        assert_eq!(result.exit_code, 0);
+        let written = std::fs::read_to_string(dir.path().join("src/new.rs")).unwrap();
+        assert_eq!(written, "fn main() {}");
+    }
+
+    // ---- AppendToFile validation tests ----
+
+    #[test]
+    fn append_to_file_rejects_path_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let selected = SelectedEngineerAction {
+            label: "append-to-file".to_string(),
+            rationale: "test".to_string(),
+            argv: vec!["simard-append-file".to_string()],
+            plan_summary: "test".to_string(),
+            verification_steps: Vec::new(),
+            expected_changed_files: Vec::new(),
+            kind: EngineerActionKind::AppendToFile(AppendToFileRequest {
+                relative_path: "../../../etc/shadow".to_string(),
+                content: "malicious".to_string(),
+            }),
+        };
+        let error = execute_engineer_action(dir.path(), selected)
+            .expect_err("path traversal should be rejected");
+        assert!(
+            error.to_string().contains("must not escape"),
+            "error should mention traversal: {error}"
+        );
+    }
+
+    #[test]
+    fn append_to_file_rejects_nonexistent_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let selected = SelectedEngineerAction {
+            label: "append-to-file".to_string(),
+            rationale: "test".to_string(),
+            argv: vec!["simard-append-file".to_string()],
+            plan_summary: "test".to_string(),
+            verification_steps: Vec::new(),
+            expected_changed_files: Vec::new(),
+            kind: EngineerActionKind::AppendToFile(AppendToFileRequest {
+                relative_path: "missing.txt".to_string(),
+                content: "append this".to_string(),
+            }),
+        };
+        let error = execute_engineer_action(dir.path(), selected)
+            .expect_err("appending to nonexistent file should fail");
+        assert!(
+            error.to_string().contains("does not exist"),
+            "error should explain: {error}"
+        );
+    }
+
+    #[test]
+    fn append_to_file_succeeds_with_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("log.txt"), "line1\n").unwrap();
+        let selected = SelectedEngineerAction {
+            label: "append-to-file".to_string(),
+            rationale: "test".to_string(),
+            argv: vec!["simard-append-file".to_string()],
+            plan_summary: "test".to_string(),
+            verification_steps: Vec::new(),
+            expected_changed_files: vec!["log.txt".to_string()],
+            kind: EngineerActionKind::AppendToFile(AppendToFileRequest {
+                relative_path: "log.txt".to_string(),
+                content: "line2\n".to_string(),
+            }),
+        };
+        let result = execute_engineer_action(dir.path(), selected).unwrap();
+        assert_eq!(result.exit_code, 0);
+        let content = std::fs::read_to_string(dir.path().join("log.txt")).unwrap();
+        assert!(content.contains("line1\n"));
+        assert!(content.contains("line2\n"));
+    }
+
+    // ---- RunShellCommand allowlist tests ----
+
+    #[test]
+    fn run_shell_command_rejects_non_allowlisted_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let selected = SelectedEngineerAction {
+            label: "run-shell-command".to_string(),
+            rationale: "test".to_string(),
+            argv: vec!["rm".to_string(), "-rf".to_string(), "/".to_string()],
+            plan_summary: "test".to_string(),
+            verification_steps: Vec::new(),
+            expected_changed_files: Vec::new(),
+            kind: EngineerActionKind::RunShellCommand(ShellCommandRequest {
+                argv: vec!["rm".to_string(), "-rf".to_string(), "/".to_string()],
+            }),
+        };
+        let error = execute_engineer_action(dir.path(), selected)
+            .expect_err("non-allowlisted command should be rejected");
+        assert!(
+            error.to_string().contains("allowlist"),
+            "error should mention allowlist: {error}"
+        );
+    }
+
+    #[test]
+    fn run_shell_command_rejects_empty_argv() {
+        let dir = tempfile::tempdir().unwrap();
+        let selected = SelectedEngineerAction {
+            label: "run-shell-command".to_string(),
+            rationale: "test".to_string(),
+            argv: Vec::new(),
+            plan_summary: "test".to_string(),
+            verification_steps: Vec::new(),
+            expected_changed_files: Vec::new(),
+            kind: EngineerActionKind::RunShellCommand(ShellCommandRequest { argv: Vec::new() }),
+        };
+        let error = execute_engineer_action(dir.path(), selected)
+            .expect_err("empty argv should be rejected");
+        assert!(
+            error.to_string().contains("empty"),
+            "error should explain: {error}"
         );
     }
 }
