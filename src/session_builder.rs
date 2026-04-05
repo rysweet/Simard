@@ -1,8 +1,15 @@
 //! Unified session creation across all operating modes.
 //!
-//! Extracts the `BaseTypeSessionRequest` + `RustyClawdAdapter` factory pattern
-//! into a shared [`SessionBuilder`] so meeting, engineer, and future modes
-//! construct sessions the same way.
+//! Extracts the `BaseTypeSessionRequest` + adapter factory pattern into a
+//! shared [`SessionBuilder`] so meeting, engineer, and future modes construct
+//! sessions the same way.
+//!
+//! The LLM provider is selected by `SIMARD_LLM_PROVIDER` (env var or CLI flag):
+//!
+//! | Value         | Behaviour                                            |
+//! |---------------|------------------------------------------------------|
+//! | `copilot`     | Copilot SDK via `gh` auth **(default)**               |
+//! | `rustyclawd`  | RustyClawd / Anthropic (requires `ANTHROPIC_API_KEY`) |
 
 use crate::base_type_copilot::CopilotSdkAdapter;
 use crate::base_type_rustyclawd::RustyClawdAdapter;
@@ -12,12 +19,30 @@ use crate::prompt_assets::PromptAssetRef;
 use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeTopology};
 use crate::session::SessionId;
 
+/// Which LLM provider to use for agent sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmProvider {
+    /// GitHub Copilot SDK via `gh` auth (default).
+    Copilot,
+    /// RustyClawd / Anthropic (requires `ANTHROPIC_API_KEY`).
+    RustyClawd,
+}
+
+impl LlmProvider {
+    /// Read from `SIMARD_LLM_PROVIDER` env var.  Defaults to `Copilot`.
+    pub fn from_env() -> Self {
+        match std::env::var("SIMARD_LLM_PROVIDER").as_deref() {
+            Ok("rustyclawd") => Self::RustyClawd,
+            // "copilot" or anything else (including unset) → Copilot
+            _ => Self::Copilot,
+        }
+    }
+}
+
 /// Builds and opens a `BaseTypeSession` for any operating mode.
 ///
-/// Encapsulates the common pattern of:
-/// 1. Constructing a `BaseTypeSessionRequest` from mode-specific parameters.
-/// 2. Trying the RustyClawd adapter (requires `ANTHROPIC_API_KEY`).
-/// 3. Returning the opened session or `None`.
+/// The adapter tag is a logical name (e.g. `"meeting"`, `"engineer-planner"`).
+/// The provider suffix is appended automatically based on [`LlmProvider`].
 ///
 /// # Example
 ///
@@ -25,7 +50,7 @@ use crate::session::SessionId;
 /// let session = SessionBuilder::new(OperatingMode::Meeting)
 ///     .node_id("meeting-repl")
 ///     .address("meeting-repl://local")
-///     .adapter_tag("meeting-rustyclawd")
+///     .adapter_tag("meeting")
 ///     .open();
 /// ```
 pub struct SessionBuilder {
@@ -35,6 +60,7 @@ pub struct SessionBuilder {
     node_id: String,
     address: String,
     adapter_tag: String,
+    provider: LlmProvider,
 }
 
 impl SessionBuilder {
@@ -52,6 +78,7 @@ impl SessionBuilder {
             node_id: String::new(),
             address: String::new(),
             adapter_tag: String::new(),
+            provider: LlmProvider::from_env(),
         }
     }
 
@@ -79,9 +106,21 @@ impl SessionBuilder {
         self
     }
 
-    /// Set the adapter registration tag (e.g. `"meeting-rustyclawd"`).
+    /// Set the adapter registration tag (e.g. `"meeting"`).
+    ///
+    /// This is a logical name — the provider suffix is added automatically.
+    /// Legacy tags containing `"rustyclawd"` or `"copilot"` are stripped to
+    /// the base name for backward compatibility.
     pub fn adapter_tag(mut self, tag: &str) -> Self {
-        self.adapter_tag = tag.to_owned();
+        // Normalise legacy tags: "meeting-rustyclawd" → "meeting"
+        let base = tag.replace("-rustyclawd", "").replace("-copilot", "");
+        self.adapter_tag = base;
+        self
+    }
+
+    /// Explicitly select the LLM provider (overrides `SIMARD_LLM_PROVIDER`).
+    pub fn provider(mut self, provider: LlmProvider) -> Self {
+        self.provider = provider;
         self
     }
 
@@ -97,34 +136,28 @@ impl SessionBuilder {
         }
     }
 
-    /// Try to open a session, preferring RustyClawd then falling back to Copilot.
+    /// Open a session using the configured LLM provider.
     ///
-    /// Returns `Some(session)` if either backend opens successfully; `None` otherwise.
+    /// Returns `Some(session)` on success, `None` if the provider cannot open.
     pub fn open(self) -> Option<Box<dyn BaseTypeSession>> {
-        // Try RustyClawd first (needs ANTHROPIC_API_KEY).
-        if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-            let request = self.build_request();
-            let factory = RustyClawdAdapter::registered(&self.adapter_tag).ok()?;
-            let mut session = factory.open_session(request).ok()?;
-            if session.open().is_ok() {
-                return Some(session);
+        let request = self.build_request();
+        match self.provider {
+            LlmProvider::Copilot => {
+                let tag = format!("{}-copilot", self.adapter_tag);
+                let mut session = CopilotSdkAdapter::registered(&tag)
+                    .and_then(|f| f.open_session(request))
+                    .ok()?;
+                session.open().ok()?;
+                Some(session)
+            }
+            LlmProvider::RustyClawd => {
+                let tag = format!("{}-rustyclawd", self.adapter_tag);
+                let factory = RustyClawdAdapter::registered(&tag).ok()?;
+                let mut session = factory.open_session(request).ok()?;
+                session.open().ok()?;
+                Some(session)
             }
         }
-
-        // Fall back to Copilot SDK (needs `gh` auth — no env var check needed,
-        // the adapter validates at turn time).
-        // Allow disabling the Copilot fallback via env var (for tests that verify
-        // graceful degradation when no backend is available).
-        if std::env::var("_SIMARD_NO_COPILOT_FALLBACK").is_ok() {
-            return None;
-        }
-        let request = self.build_request();
-        let copilot_tag = self.adapter_tag.replace("rustyclawd", "copilot");
-        let mut session = CopilotSdkAdapter::registered(&copilot_tag)
-            .and_then(|f| f.open_session(request))
-            .ok()?;
-        session.open().ok()?;
-        Some(session)
     }
 }
 
@@ -149,20 +182,41 @@ mod tests {
     }
 
     #[test]
-    fn open_without_api_key_tries_copilot_fallback() {
-        // Ensure the key is unset so the RustyClawd path is skipped.
-        // SAFETY: test-only; single-threaded test runner for this module.
-        unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
+    fn adapter_tag_strips_legacy_provider_suffix() {
+        let builder = SessionBuilder::new(OperatingMode::Meeting).adapter_tag("meeting-rustyclawd");
+        assert_eq!(builder.adapter_tag, "meeting");
 
+        let builder =
+            SessionBuilder::new(OperatingMode::Meeting).adapter_tag("review-pipeline-copilot");
+        assert_eq!(builder.adapter_tag, "review-pipeline");
+
+        let builder = SessionBuilder::new(OperatingMode::Meeting).adapter_tag("plain-tag");
+        assert_eq!(builder.adapter_tag, "plain-tag");
+    }
+
+    #[test]
+    fn default_provider_is_copilot() {
+        // Unless SIMARD_LLM_PROVIDER=rustyclawd, default is Copilot.
+        unsafe { std::env::remove_var("SIMARD_LLM_PROVIDER") };
+        assert_eq!(LlmProvider::from_env(), LlmProvider::Copilot);
+    }
+
+    #[test]
+    fn provider_override_is_respected() {
+        let builder =
+            SessionBuilder::new(OperatingMode::Engineer).provider(LlmProvider::RustyClawd);
+        assert_eq!(builder.provider, LlmProvider::RustyClawd);
+    }
+
+    #[test]
+    fn open_does_not_panic() {
         let session = SessionBuilder::new(OperatingMode::Meeting)
             .node_id("test-node")
             .address("test://local")
             .adapter_tag("nonexistent-adapter")
             .open();
 
-        // With ANTHROPIC_API_KEY unset the RustyClawd path is skipped.
-        // The Copilot fallback may succeed (gh auth present) or fail.
-        // Both outcomes are valid — the invariant is no panic.
+        // The adapter may or may not open depending on auth — no panic is the invariant.
         drop(session);
     }
 

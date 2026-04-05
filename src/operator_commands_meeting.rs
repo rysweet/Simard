@@ -364,11 +364,10 @@ fn launch_real_meeting_bridge() -> Option<CognitiveMemoryBridge> {
     launch_memory_bridge("simard-meeting", &db_path, &python_dir).ok()
 }
 
-/// Auto-detect the best available base type and open a session for the meeting.
+/// Open an agent session for the meeting using the configured LLM provider.
 ///
-/// Priority: RustyClawd (needs ANTHROPIC_API_KEY) → local-harness fallback.
-/// Returns `None` if no agent backend can be initialised — the REPL will then
-/// degrade to note-taking mode.
+/// Returns `None` if the provider cannot be initialised — the REPL will then
+/// run in note-taking mode.
 pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::Error>> {
     // Try to launch the real Python memory bridge backed by Kuzu graph database.
     // Falls back to an in-memory stub if the bridge is unavailable (no Python,
@@ -417,7 +416,7 @@ pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::E
     } else {
         eprintln!("  ⚠ No agent backend available — meeting will be note-taking only.");
         eprintln!(
-            "    Set ANTHROPIC_API_KEY (RustyClawd) or ensure `gh auth status` passes (Copilot)."
+            "    Check SIMARD_LLM_PROVIDER and auth config (gh auth status / ANTHROPIC_API_KEY)."
         );
     }
 

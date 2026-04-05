@@ -126,7 +126,7 @@ pub fn plan_objective(objective: &str, inspection: &RepoInspection) -> SimardRes
         .adapter_tag("engineer-planner-rustyclawd")
         .open()
         .ok_or_else(|| SimardError::PlanningUnavailable {
-            reason: "no LLM session available (ANTHROPIC_API_KEY not set or adapter missing)"
+            reason: "no LLM session available (check SIMARD_LLM_PROVIDER and auth config)"
                 .to_string(),
         })?;
 
@@ -263,24 +263,30 @@ mod tests {
 
     #[test]
     fn plan_objective_without_api_key_returns_unavailable() {
+        // Force RustyClawd provider without ANTHROPIC_API_KEY → session may open
+        // but run_turn will fail.
         unsafe {
             std::env::remove_var("ANTHROPIC_API_KEY");
-            std::env::set_var("_SIMARD_NO_COPILOT_FALLBACK", "1");
+            std::env::set_var("SIMARD_LLM_PROVIDER", "rustyclawd");
         };
         let result = plan_objective("create a new module", &test_inspection());
-        unsafe { std::env::remove_var("_SIMARD_NO_COPILOT_FALLBACK") };
+        unsafe { std::env::remove_var("SIMARD_LLM_PROVIDER") };
         match result {
-            Err(SimardError::PlanningUnavailable { reason }) => {
-                assert!(reason.contains("no LLM session available"));
+            Err(SimardError::PlanningUnavailable { .. }) => {
+                // Any PlanningUnavailable is correct — whether from open() or run_turn().
             }
             other => panic!("expected PlanningUnavailable, got: {other:?}"),
         }
     }
 
     #[test]
-    fn fallback_uses_keyword_analysis_when_planning_unavailable() {
-        unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
+    fn uses_keyword_analysis_when_planning_unavailable() {
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::set_var("SIMARD_LLM_PROVIDER", "rustyclawd");
+        };
         assert!(plan_objective("create a new file", &test_inspection()).is_err());
+        unsafe { std::env::remove_var("SIMARD_LLM_PROVIDER") };
         assert_eq!(
             crate::engineer_loop::analyze_objective("create a new file at src/hello.rs"),
             AnalyzedAction::CreateFile,
