@@ -81,8 +81,15 @@ pub fn apply_and_review(patch: &ImprovementPatch, workspace_path: &Path) -> Appl
 
     // Review failures are non-fatal: if the review session can't open or
     // the LLM call fails, we treat it as no findings (auto-pass) rather
-    // than blocking the entire pipeline.
-    let findings = run_review(&diff_text).unwrap_or_default();
+    // than blocking the entire pipeline — but we log the error so review
+    // pipeline bugs remain visible.
+    let findings = match run_review(&diff_text) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("[self-improve] review failed, auto-passing: {e}");
+            Vec::new()
+        }
+    };
 
     if should_commit(&findings) {
         if let Err(e) = git_commit(workspace_path, &patch.description) {

@@ -62,7 +62,8 @@ pub(crate) fn git_commit(workspace: &Path, message: &str) -> SimardResult<()> {
 }
 
 pub(crate) fn rollback(workspace: &Path) -> SimardResult<()> {
-    let output = Command::new("git")
+    // Restore modified tracked files.
+    let checkout = Command::new("git")
         .args(["checkout", "--", "."])
         .current_dir(workspace)
         .output()
@@ -71,10 +72,27 @@ pub(crate) fn rollback(workspace: &Path) -> SimardResult<()> {
             reason: e.to_string(),
         })?;
 
-    if !output.status.success() {
+    if !checkout.status.success() {
         return Err(SimardError::GitCommandFailed {
             command: "git checkout -- .".into(),
-            reason: String::from_utf8_lossy(&output.stderr).into_owned(),
+            reason: String::from_utf8_lossy(&checkout.stderr).into_owned(),
+        });
+    }
+
+    // Remove untracked files/dirs created by plan steps.
+    let clean = Command::new("git")
+        .args(["clean", "-fd"])
+        .current_dir(workspace)
+        .output()
+        .map_err(|e| SimardError::GitCommandFailed {
+            command: "git clean -fd".into(),
+            reason: e.to_string(),
+        })?;
+
+    if !clean.status.success() {
+        return Err(SimardError::GitCommandFailed {
+            command: "git clean -fd".into(),
+            reason: String::from_utf8_lossy(&clean.stderr).into_owned(),
         });
     }
 

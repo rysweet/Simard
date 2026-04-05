@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use super::git_ops::rollback;
 use super::*;
 use crate::engineer_loop::AnalyzedAction;
 use crate::engineer_plan::{Plan, PlanStep};
@@ -165,7 +166,20 @@ fn apply_and_review_plan_failed_on_bad_step() {
 
 #[test]
 fn apply_and_review_empty_diff_is_applied() {
-    // A plan with only no-op steps produces no diff
+    // A plan with only no-op steps produces no diff.
+    // Use a real temp git repo so `git diff HEAD` works.
+    let dir = tempfile::TempDir::new().unwrap();
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "--allow-empty", "-m", "init"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
     let step = PlanStep {
         action: AnalyzedAction::ReadOnlyScan,
         target: ".".to_string(),
@@ -173,7 +187,7 @@ fn apply_and_review_empty_diff_is_applied() {
         verification_command: "true".to_string(),
     };
     let patch = make_patch(vec![step]);
-    let result = apply_and_review(&patch, Path::new("/tmp"));
+    let result = apply_and_review(&patch, dir.path());
     assert!(result.is_applied());
 }
 
@@ -230,4 +244,54 @@ fn test_inspection() -> crate::engineer_loop::RepoInspection {
         carried_meeting_decisions: Vec::new(),
         architecture_gap_summary: String::new(),
     }
+}
+
+#[test]
+fn rollback_cleans_untracked_files() {
+    let tmp = tempfile::tempdir().expect("create tempdir");
+    let ws = tmp.path();
+
+    // Initialise a git repo with one committed file.
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(ws)
+        .output()
+        .expect("git init");
+    std::process::Command::new("git")
+        .args(["config", "user.email", "test@test.com"])
+        .current_dir(ws)
+        .output()
+        .expect("git config email");
+    std::process::Command::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(ws)
+        .output()
+        .expect("git config name");
+    std::fs::write(ws.join("committed.txt"), "original").expect("write");
+    std::process::Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(ws)
+        .output()
+        .expect("git add");
+    std::process::Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(ws)
+        .output()
+        .expect("git commit");
+
+    // Simulate plan-created artefacts: modify tracked file + create untracked file.
+    std::fs::write(ws.join("committed.txt"), "modified").expect("write");
+    std::fs::write(ws.join("untracked.txt"), "new file").expect("write");
+
+    rollback(ws).expect("rollback should succeed");
+
+    // Tracked file restored.
+    let contents = std::fs::read_to_string(ws.join("committed.txt")).expect("read");
+    assert_eq!(contents, "original");
+
+    // Untracked file removed.
+    assert!(
+        !ws.join("untracked.txt").exists(),
+        "rollback should remove untracked files"
+    );
 }
