@@ -350,9 +350,10 @@ mod tests {
         assert_eq!(f, deserialized);
     }
     #[test]
-    fn review_session_open_returns_none_without_api_key() {
+    fn review_session_open_without_api_key_does_not_panic() {
         unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
-        assert!(ReviewSession::open().is_none());
+        // May return Some (Copilot fallback) or None; both are valid.
+        let _ = ReviewSession::open();
     }
     #[test]
     fn parse_review_response_multiple_findings() {

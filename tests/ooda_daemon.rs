@@ -318,13 +318,15 @@ fn daemon_degrades_gracefully_when_no_api_key() {
     // The OODA daemon should continue running OODA cycles even if
     // SessionBuilder::open() returns None (no API key).
     // It falls back to the existing bridge-based dispatch.
+    unsafe { std::env::set_var("_SIMARD_NO_COPILOT_FALLBACK", "1") };
     let session = SessionBuilder::new(OperatingMode::Engineer)
         .node_id("ooda-daemon")
         .address("ooda-daemon://local")
         .adapter_tag("nonexistent-adapter")
         .open();
+    unsafe { std::env::remove_var("_SIMARD_NO_COPILOT_FALLBACK") };
 
-    // Without ANTHROPIC_API_KEY, open() returns None
+    // Without ANTHROPIC_API_KEY and Copilot fallback disabled, open() returns None
     assert!(
         session.is_none(),
         "session should be None without API key — daemon degrades honestly"

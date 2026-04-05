@@ -88,6 +88,8 @@ pub struct ImprovementConfig {
     pub proposed_changes: Vec<ProposedChange>,
     /// Whether to auto-apply improvements via the plan+review pipeline.
     pub auto_apply: bool,
+    /// Dimensions scoring below this threshold are considered "weak" (default 0.6).
+    pub weak_threshold: f64,
 }
 
 impl Default for ImprovementConfig {
@@ -98,6 +100,7 @@ impl Default for ImprovementConfig {
             max_single_regression: 0.05,
             proposed_changes: Vec::new(),
             auto_apply: false,
+            weak_threshold: 0.6,
         }
     }
 }
@@ -117,6 +120,14 @@ pub struct ImprovementCycle {
     pub decision: Option<ImprovementDecision>,
     /// The phase the cycle reached before completing or aborting.
     pub final_phase: ImprovementPhase,
+    /// Dimensions that scored below the weak threshold during Analyze.
+    pub weak_dimensions: Vec<String>,
+}
+
+impl std::fmt::Display for ImprovementCycle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&summarize_cycle(self))
+    }
 }
 
 /// Run a full improvement cycle: Eval -> Analyze -> Research -> Improve -> ReEval -> Decide.
@@ -136,7 +147,7 @@ pub fn run_improvement_cycle(
     let baseline = suite_score_from_result(&baseline_result);
 
     // Phase 2: Analyze — identify weak dimensions
-    let weak_dimensions = find_weak_dimensions(&baseline);
+    let weak_dimensions = find_weak_dimensions(&baseline, config.weak_threshold);
 
     // Phase 3: Research — check if we have proposed changes
     if config.proposed_changes.is_empty() {
@@ -156,6 +167,7 @@ pub fn run_improvement_cycle(
                 ),
             }),
             final_phase: ImprovementPhase::Analyze,
+            weak_dimensions,
         });
     }
 
@@ -178,6 +190,7 @@ pub fn run_improvement_cycle(
         regressions,
         decision: Some(decision),
         final_phase: ImprovementPhase::Decide,
+        weak_dimensions,
     })
 }
 
@@ -230,9 +243,8 @@ fn decide(
     }
 }
 
-/// Identify dimensions scoring below 0.6 (the "weak" threshold).
-fn find_weak_dimensions(score: &GymSuiteScore) -> Vec<String> {
-    const WEAK_THRESHOLD: f64 = 0.6;
+/// Identify dimensions scoring below the given threshold.
+fn find_weak_dimensions(score: &GymSuiteScore, weak_threshold: f64) -> Vec<String> {
     let dims = &score.dimensions;
     let mut weak = Vec::new();
     let checks: [(&str, f64); 5] = [
@@ -243,7 +255,7 @@ fn find_weak_dimensions(score: &GymSuiteScore) -> Vec<String> {
         ("confidence_calibration", dims.confidence_calibration),
     ];
     for (name, value) in checks {
-        if value < WEAK_THRESHOLD {
+        if value < weak_threshold {
             weak.push(name.to_string());
         }
     }
@@ -377,7 +389,7 @@ mod tests {
     #[test]
     fn find_weak_dimensions_identifies_low_scores() {
         let score = make_score(0.50);
-        let weak = find_weak_dimensions(&score);
+        let weak = find_weak_dimensions(&score, 0.6);
         // At 0.50 overall, all dimension values (0.50, 0.45, 0.40, 0.35, 0.425)
         // are below 0.6
         assert!(!weak.is_empty());
@@ -386,8 +398,83 @@ mod tests {
     #[test]
     fn find_weak_dimensions_empty_when_strong() {
         let score = make_score(0.90);
-        let weak = find_weak_dimensions(&score);
+        let weak = find_weak_dimensions(&score, 0.6);
         assert!(weak.is_empty());
+    }
+
+    #[test]
+    fn find_weak_dimensions_custom_threshold() {
+        let score = make_score(0.50);
+        let weak = find_weak_dimensions(&score, 0.1);
+        assert!(weak.is_empty());
+    }
+
+    #[test]
+    fn summarize_cycle_commit() {
+        let cycle = ImprovementCycle {
+            baseline: make_score(0.70),
+            proposed_changes: vec![],
+            post_score: Some(make_score(0.75)),
+            regressions: vec![],
+            decision: Some(ImprovementDecision::Commit {
+                net_improvement: 0.05,
+            }),
+            final_phase: ImprovementPhase::Decide,
+            weak_dimensions: Vec::new(),
+        };
+        let summary = summarize_cycle(&cycle);
+        assert!(summary.contains("COMMIT"));
+        assert!(summary.contains("+5.0%"));
+    }
+
+    #[test]
+    fn summarize_cycle_revert() {
+        let cycle = ImprovementCycle {
+            baseline: make_score(0.70),
+            proposed_changes: vec![],
+            post_score: Some(make_score(0.71)),
+            regressions: vec![],
+            decision: Some(ImprovementDecision::Revert {
+                reason: "below threshold".into(),
+            }),
+            final_phase: ImprovementPhase::Decide,
+            weak_dimensions: Vec::new(),
+        };
+        let summary = summarize_cycle(&cycle);
+        assert!(summary.contains("REVERT"));
+        assert!(summary.contains("below threshold"));
+    }
+
+    #[test]
+    fn summarize_cycle_incomplete() {
+        let cycle = ImprovementCycle {
+            baseline: make_score(0.70),
+            proposed_changes: vec![],
+            post_score: None,
+            regressions: vec![],
+            decision: None,
+            final_phase: ImprovementPhase::Analyze,
+            weak_dimensions: Vec::new(),
+        };
+        let summary = summarize_cycle(&cycle);
+        assert!(summary.contains("INCOMPLETE"));
+        assert!(summary.contains("analyze"));
+    }
+
+    #[test]
+    fn improvement_cycle_display_delegates_to_summarize() {
+        let cycle = ImprovementCycle {
+            baseline: make_score(0.70),
+            proposed_changes: vec![],
+            post_score: Some(make_score(0.75)),
+            regressions: vec![],
+            decision: Some(ImprovementDecision::Commit {
+                net_improvement: 0.05,
+            }),
+            final_phase: ImprovementPhase::Decide,
+            weak_dimensions: Vec::new(),
+        };
+        assert_eq!(cycle.to_string(), summarize_cycle(&cycle));
     }
 
     fn make_score(v: f64) -> GymSuiteScore {

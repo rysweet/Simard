@@ -188,6 +188,7 @@ pub enum SimardError {
     BridgeCircuitOpen {
         bridge: String,
     },
+    BridgeError(String),
     PlanningUnavailable {
         reason: String,
     },
@@ -425,6 +426,9 @@ impl Display for SimardError {
                     f,
                     "bridge '{bridge}' circuit is open — calls are rejected until the bridge recovers"
                 )
+            }
+            Self::BridgeError(msg) => {
+                write!(f, "bridge error: {msg}")
             }
             Self::PlanningUnavailable { reason } => {
                 write!(f, "LLM-based planning is unavailable: {reason}")

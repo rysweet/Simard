@@ -262,14 +262,18 @@ mod tests {
     }
 
     #[test]
-    fn plan_objective_returns_unavailable_without_api_key() {
-        unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
+    fn plan_objective_without_api_key_returns_unavailable() {
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::set_var("_SIMARD_NO_COPILOT_FALLBACK", "1");
+        };
         let result = plan_objective("create a new module", &test_inspection());
-        match result.unwrap_err() {
-            SimardError::PlanningUnavailable { reason } => {
+        unsafe { std::env::remove_var("_SIMARD_NO_COPILOT_FALLBACK") };
+        match result {
+            Err(SimardError::PlanningUnavailable { reason }) => {
                 assert!(reason.contains("no LLM session available"));
             }
-            other => panic!("expected PlanningUnavailable, got: {other}"),
+            other => panic!("expected PlanningUnavailable, got: {other:?}"),
         }
     }
 
