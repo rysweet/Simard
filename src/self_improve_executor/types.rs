@@ -49,3 +49,22 @@ impl ApplyResult {
         findings.iter().any(|f| f.severity == Severity::Critical)
     }
 }
+
+impl std::fmt::Display for ApplyResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Applied { findings } => {
+                write!(f, "applied ({} findings)", findings.len())
+            }
+            Self::ReviewBlocked { findings } => {
+                write!(f, "review-blocked ({} findings)", findings.len())
+            }
+            Self::PlanFailed { reason } => {
+                write!(f, "plan-failed: {reason}")
+            }
+            Self::CommitFailed { reason, findings } => {
+                write!(f, "commit-failed: {reason} ({} findings)", findings.len())
+            }
+        }
+    }
+}

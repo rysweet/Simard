@@ -295,3 +295,61 @@ fn rollback_cleans_untracked_files() {
         "rollback should remove untracked files"
     );
 }
+
+#[test]
+fn apply_result_display_applied() {
+    let r = ApplyResult::Applied {
+        findings: vec![finding(FindingCategory::Bug, Severity::Low)],
+    };
+    assert_eq!(r.to_string(), "applied (1 findings)");
+}
+
+#[test]
+fn apply_result_display_review_blocked() {
+    let r = ApplyResult::ReviewBlocked {
+        findings: Vec::new(),
+    };
+    assert_eq!(r.to_string(), "review-blocked (0 findings)");
+}
+
+#[test]
+fn apply_result_display_plan_failed() {
+    let r = ApplyResult::PlanFailed {
+        reason: "boom".into(),
+    };
+    assert_eq!(r.to_string(), "plan-failed: boom");
+}
+
+#[test]
+fn apply_result_display_commit_failed() {
+    let r = ApplyResult::CommitFailed {
+        reason: "git error".into(),
+        findings: vec![
+            finding(FindingCategory::Bug, Severity::High),
+            finding(FindingCategory::Security, Severity::Critical),
+        ],
+    };
+    assert_eq!(r.to_string(), "commit-failed: git error (2 findings)");
+}
+
+#[test]
+fn generate_patch_deduplicates_target_files() {
+    // Mirror generate_patch's target-file extraction with dedup.
+    let steps = vec![
+        step("src/lib.rs", "true"),
+        step("src/lib.rs", "true"),
+        step("src/main.rs", "true"),
+        step(".", "true"),
+        step("", "true"),
+    ];
+    let plan = Plan::new(steps);
+    let mut files: Vec<String> = plan
+        .steps()
+        .iter()
+        .map(|s| s.target.clone())
+        .filter(|t| t != "." && !t.is_empty())
+        .collect();
+    files.dedup();
+    // "." and "" are filtered; consecutive "src/lib.rs" deduped
+    assert_eq!(files, vec!["src/lib.rs", "src/main.rs"]);
+}

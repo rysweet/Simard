@@ -25,12 +25,16 @@ pub fn generate_patch(
     inspection: &RepoInspection,
 ) -> SimardResult<ImprovementPatch> {
     let plan = plan_objective(proposal, inspection)?;
-    let target_files: Vec<String> = plan
-        .steps()
-        .iter()
-        .map(|s| s.target.clone())
-        .filter(|t| t != "." && !t.is_empty())
-        .collect();
+    let target_files: Vec<String> = {
+        let mut files: Vec<String> = plan
+            .steps()
+            .iter()
+            .map(|s| s.target.clone())
+            .filter(|t| t != "." && !t.is_empty())
+            .collect();
+        files.dedup();
+        files
+    };
 
     Ok(ImprovementPatch {
         description: proposal.to_string(),
@@ -131,7 +135,13 @@ pub fn run_autonomous_improvement(
 ) -> Vec<ApplyResult> {
     let mut results = Vec::with_capacity(proposals.len());
 
-    for proposal in proposals {
+    for (i, proposal) in proposals.iter().enumerate() {
+        eprintln!(
+            "[self-improve] proposal {}/{}: {}",
+            i + 1,
+            proposals.len(),
+            proposal
+        );
         let patch = match generate_patch(proposal, inspection) {
             Ok(p) => p,
             Err(e) => {
