@@ -408,7 +408,7 @@ fn reflection_snapshot_exposes_adapter_capabilities_and_topologies() {
 
 #[test]
 fn manifest_contract_carries_provenance_and_freshness_directly() {
-    let identity_rs = include_str!("../src/identity.rs");
+    let identity_rs = include_str!("../src/identity/contract.rs");
     let manifest_contract_section = identity_rs
         .split("pub struct ManifestContract")
         .nth(1)
@@ -487,7 +487,10 @@ fn session_ids_can_be_canonicalized_from_uuid_strings() {
 #[test]
 fn session_id_generator_is_not_hidden_inside_runtime_ports() {
     let runtime_rs = include_str!("../src/runtime/mod.rs");
-    let bootstrap_rs = include_str!("../src/bootstrap.rs");
+    let bootstrap_rs = concat!(
+        include_str!("../src/bootstrap/mod.rs"),
+        include_str!("../src/bootstrap/assembly.rs"),
+    );
 
     assert!(
         !runtime_rs.contains("Arc::new(UuidSessionIdGenerator)"),

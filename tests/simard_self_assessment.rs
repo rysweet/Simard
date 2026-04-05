@@ -3,6 +3,11 @@
 
 use std::path::Path;
 
+/// Check if a module exists — either as `foo.rs` or `foo/` directory (post-split).
+fn module_exists(src: &Path, name: &str) -> bool {
+    src.join(format!("{name}.rs")).exists() || src.join(name).is_dir()
+}
+
 /// Feature from the original prompt with its implementation status.
 struct Feature {
     id: &'static str,
@@ -31,8 +36,8 @@ fn assess_features() -> Vec<Feature> {
                 "src/operator_commands_terminal.rs — engineer terminal subcommand",
                 "CLI: engineer terminal <topology> <objective>",
             ],
-            status: if src.join("terminal_session.rs").exists()
-                && src.join("terminal_engineer_bridge.rs").exists()
+            status: if module_exists(src, "terminal_session")
+                && module_exists(src, "terminal_engineer_bridge")
             {
                 Status::Implemented
             } else {
@@ -47,8 +52,8 @@ fn assess_features() -> Vec<Feature> {
                 "src/knowledge_context.rs — context injection from knowledge graph",
                 "src/research_tracker.rs — ResearchTracker for topics and developer watch",
             ],
-            status: if src.join("knowledge_bridge.rs").exists()
-                && src.join("research_tracker.rs").exists()
+            status: if module_exists(src, "knowledge_bridge")
+                && module_exists(src, "research_tracker")
             {
                 Status::Implemented
             } else {
@@ -64,7 +69,7 @@ fn assess_features() -> Vec<Feature> {
                 "seed_developer_watches() — persists to cognitive memory",
                 "ResearchTracker::with_default_watches() — pre-populated tracker",
             ],
-            status: if src.join("research_tracker.rs").exists() {
+            status: if module_exists(src, "research_tracker") {
                 Status::Implemented
             } else {
                 Status::Missing
@@ -78,8 +83,7 @@ fn assess_features() -> Vec<Feature> {
                 "src/improvements.rs — ImprovementDirective proposals",
                 "CLI: goal-curation run/read, improvement-curation run/read",
             ],
-            status: if src.join("goal_curation.rs").exists() && src.join("improvements.rs").exists()
-            {
+            status: if module_exists(src, "goal_curation") && module_exists(src, "improvements") {
                 Status::Implemented
             } else {
                 Status::Missing
@@ -93,9 +97,7 @@ fn assess_features() -> Vec<Feature> {
                 "src/remote_session.rs — RemoteSession abstraction",
                 "src/remote_transfer.rs — state transfer between machines",
             ],
-            status: if src.join("remote_azlin.rs").exists()
-                && src.join("remote_session.rs").exists()
-            {
+            status: if module_exists(src, "remote_azlin") && module_exists(src, "remote_session") {
                 Status::Implemented
             } else {
                 Status::Missing
@@ -109,7 +111,7 @@ fn assess_features() -> Vec<Feature> {
                 "seed_default_board() — ensures board always has 5 goals",
                 "promote_backlog_into() — fills empty slots from backlog",
             ],
-            status: if src.join("goal_curation.rs").exists() {
+            status: if module_exists(src, "goal_curation") {
                 Status::Implemented
             } else {
                 Status::Missing
@@ -124,7 +126,7 @@ fn assess_features() -> Vec<Feature> {
                 "src/handoff.rs — handoff/handover protocol",
                 "CLI: handover command",
             ],
-            status: if src.join("remote_transfer.rs").exists() && src.join("handoff.rs").exists() {
+            status: if module_exists(src, "remote_transfer") && module_exists(src, "handoff") {
                 Status::Implemented
             } else {
                 Status::Partial
@@ -139,8 +141,8 @@ fn assess_features() -> Vec<Feature> {
                 "src/gym_bridge.rs — GymBridge for external gym engines",
                 "CLI: gym list/run/compare/run-suite",
             ],
-            status: if (src.join("gym.rs").exists() || src.join("gym").is_dir())
-                && src.join("gym_scoring.rs").exists()
+            status: if (module_exists(src, "gym") || src.join("gym").is_dir())
+                && module_exists(src, "gym_scoring")
             {
                 Status::Implemented
             } else {
@@ -156,8 +158,8 @@ fn assess_features() -> Vec<Feature> {
                 "src/meetings.rs — meeting types and state",
                 "CLI: meeting run/read/repl",
             ],
-            status: if src.join("meeting_repl.rs").exists()
-                && src.join("meeting_facilitator.rs").exists()
+            status: if module_exists(src, "meeting_repl")
+                && module_exists(src, "meeting_facilitator")
             {
                 Status::Implemented
             } else {
@@ -172,7 +174,7 @@ fn assess_features() -> Vec<Feature> {
                 "CLI: spawn <agent-name> <goal> <worktree-path>",
                 "src/ooda_actions.rs — dispatch_launch_session",
             ],
-            status: if src.join("agent_supervisor.rs").exists() {
+            status: if module_exists(src, "agent_supervisor") {
                 Status::Implemented
             } else {
                 Status::Partial
@@ -185,7 +187,7 @@ fn assess_features() -> Vec<Feature> {
                 "src/self_relaunch.rs — relaunch protocol with canary health check",
                 "CLI: handover command with canary verification",
             ],
-            status: if src.join("self_relaunch.rs").exists() {
+            status: if module_exists(src, "self_relaunch") {
                 Status::Implemented
             } else {
                 Status::Missing
@@ -200,7 +202,7 @@ fn assess_features() -> Vec<Feature> {
                 "identity_config_from_env() — env var overrides with defaults",
                 "env_for_identity() — generates GIT_AUTHOR/GITHUB_USER env vars",
             ],
-            status: if src.join("identity_auth.rs").exists() {
+            status: if module_exists(src, "identity_auth") {
                 Status::Implemented
             } else {
                 Status::Missing
@@ -215,7 +217,7 @@ fn assess_features() -> Vec<Feature> {
                 "src/ooda_scheduler.rs — cycle scheduling",
                 "CLI: ooda run [--cycles=N]",
             ],
-            status: if src.join("ooda_loop.rs").exists() && src.join("ooda_actions.rs").exists() {
+            status: if module_exists(src, "ooda_loop") && module_exists(src, "ooda_actions") {
                 Status::Implemented
             } else {
                 Status::Missing
@@ -228,7 +230,7 @@ fn assess_features() -> Vec<Feature> {
                 "src/research_tracker.rs — topic tracking and developer watch",
                 "src/knowledge_bridge.rs — knowledge ingestion",
             ],
-            status: if src.join("research_tracker.rs").exists() {
+            status: if module_exists(src, "research_tracker") {
                 Status::Implemented
             } else {
                 Status::Missing
@@ -247,10 +249,10 @@ fn assess_features() -> Vec<Feature> {
                 "src/base_type_ms_agent.rs — Microsoft Agent Framework base type",
                 "src/base_type_harness.rs — Local harness base type",
             ],
-            status: if src.join("identity.rs").exists()
-                && (src.join("runtime.rs").exists() || src.join("runtime").is_dir())
-                && src.join("base_types.rs").exists()
-                && src.join("identity_composition.rs").exists()
+            status: if module_exists(src, "identity")
+                && (module_exists(src, "runtime") || src.join("runtime").is_dir())
+                && module_exists(src, "base_types")
+                && module_exists(src, "identity_composition")
             {
                 Status::Implemented
             } else {
