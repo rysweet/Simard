@@ -11,7 +11,7 @@ use crate::base_type_ms_agent::ms_agent_framework_adapter;
 use crate::base_type_rustyclawd::RustyClawdAdapter;
 use crate::base_types::BaseTypeId;
 use crate::bridge_launcher::{cognitive_memory_db_path, find_python_dir, launch_memory_bridge};
-use crate::error::SimardResult;
+use crate::error::{SimardError, SimardResult};
 use crate::evidence::{EvidenceStore, FileBackedEvidenceStore};
 use crate::goals::{FileBackedGoalStore, GoalStore};
 use crate::handoff::{FileBackedHandoffStore, RuntimeHandoffSnapshot, RuntimeHandoffStore};
@@ -19,7 +19,7 @@ use crate::identity::{
     BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader, IdentityManifest, ManifestContract,
     OperatingMode,
 };
-use crate::memory::{FileBackedMemoryStore, MemoryStore};
+use crate::memory::MemoryStore;
 use crate::memory_bridge_adapter::CognitiveBridgeMemoryStore;
 use crate::metadata::{Freshness, Provenance};
 use crate::prompt_assets::{FilePromptAssetStore, PromptAssetStore};
@@ -44,29 +44,26 @@ pub struct LocalSessionExecution {
     pub stopped_snapshot: ReflectionSnapshot,
 }
 
-/// Build the memory store, attempting cognitive bridge first with file fallback.
+/// Build the memory store — cognitive bridge is mandatory.
 ///
 /// Only launches the memory bridge — knowledge and gym bridges are launched
 /// on-demand by subsystems that need them, avoiding unnecessary subprocess spawns.
 fn build_memory_store(config: &BootstrapConfig) -> SimardResult<Arc<dyn MemoryStore>> {
-    let bridge = find_python_dir().ok().and_then(|python_dir| {
-        let db_path = cognitive_memory_db_path(&config.state_root.value);
-        launch_memory_bridge(&config.identity, &db_path, &python_dir).ok()
-    });
-
-    if let Some(bridge) = bridge {
-        eprintln!("[simard] cognitive memory bridge active — using Kuzu backend");
-        let store = CognitiveBridgeMemoryStore::new(bridge, config.memory_store_path())?;
-        // Pull cross-session records from the cognitive bridge to supplement
-        // local fallback hydration — recovers data written by other processes.
-        store.hydrate_from_bridge();
-        Ok(Arc::new(store))
-    } else {
-        eprintln!("[simard] cognitive memory bridge unavailable — using JSON file backend");
-        Ok(Arc::new(FileBackedMemoryStore::try_new(
-            config.memory_store_path(),
-        )?))
-    }
+    let python_dir = find_python_dir().map_err(|e| SimardError::BridgeSpawnFailed {
+        bridge: "cognitive-memory".into(),
+        reason: format!("cognitive memory requires Python bridge: {e}"),
+    })?;
+    let db_path = cognitive_memory_db_path(&config.state_root.value);
+    let bridge = launch_memory_bridge(&config.identity, &db_path, &python_dir).map_err(|e| {
+        SimardError::BridgeSpawnFailed {
+            bridge: "cognitive-memory".into(),
+            reason: format!("cognitive memory bridge failed to start: {e}"),
+        }
+    })?;
+    eprintln!("[simard] cognitive memory bridge active — using LadybugDB backend");
+    let store = CognitiveBridgeMemoryStore::new(bridge, config.memory_store_path())?;
+    store.hydrate_from_bridge();
+    Ok(Arc::new(store))
 }
 
 /// Resolved runtime pieces shared by fresh and handoff assembly paths.
