@@ -8,6 +8,7 @@ use crate::error::{SimardError, SimardResult};
 use crate::identity::OperatingMode;
 use crate::sanitization::{normalize_objective_metadata, objective_metadata};
 
+/// Opaque session identifier wrapping `session-<uuid>`.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub struct SessionId(String);
 
@@ -51,6 +52,7 @@ impl TryFrom<&str> for SessionId {
     }
 }
 
+/// Generates unique [`SessionId`] values.
 pub trait SessionIdGenerator: Send + Sync {
     fn next_id(&self) -> SessionId;
 }
@@ -64,6 +66,7 @@ impl SessionIdGenerator for UuidSessionIdGenerator {
     }
 }
 
+/// Lifecycle phase of an agent session (intake → complete or failed).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SessionPhase {
@@ -108,6 +111,7 @@ impl SessionPhase {
     }
 }
 
+/// Persisted record of a completed or in-progress session.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SessionRecord {
     pub id: SessionId,

@@ -18,7 +18,7 @@ pub(crate) fn download_and_replace(
 
     println!("Downloading simard v{version}...");
 
-    let archive_str = archive_path.to_str().unwrap();
+    let archive_str = archive_path.to_str().unwrap_or("simard.tar.gz");
     let mut last_err = String::from("Download failed");
     let mut downloaded = false;
     for attempt in 0..3u32 {
@@ -69,9 +69,9 @@ pub(crate) fn download_and_replace(
     let tar_status = std::process::Command::new("tar")
         .args([
             "xzf",
-            archive_path.to_str().unwrap(),
+            archive_path.to_str().expect("archive path is valid UTF-8"),
             "-C",
-            tmp_dir.to_str().unwrap(),
+            tmp_dir.to_str().expect("temp dir path is valid UTF-8"),
         ])
         .status()
         .map_err(|e| format!("Failed to extract archive: {e}"))?;

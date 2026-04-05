@@ -32,6 +32,7 @@ pub fn generate_patch(
             .map(|s| s.target.clone())
             .filter(|t| t != "." && !t.is_empty())
             .collect();
+        files.sort();
         files.dedup();
         files
     };
@@ -70,9 +71,14 @@ pub fn apply_and_review(patch: &ImprovementPatch, workspace_path: &Path) -> Appl
     let diff_text = match git_diff(workspace_path) {
         Ok(d) => d,
         Err(e) => {
-            let _ = rollback(workspace_path);
+            let diff_reason = format!("git diff failed: {e}");
+            if let Err(rb_err) = rollback(workspace_path) {
+                return ApplyResult::PlanFailed {
+                    reason: format!("{diff_reason}; rollback also failed: {rb_err}"),
+                };
+            }
             return ApplyResult::PlanFailed {
-                reason: format!("git diff failed: {e}"),
+                reason: diff_reason,
             };
         }
     };

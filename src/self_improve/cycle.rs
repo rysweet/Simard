@@ -359,6 +359,108 @@ mod tests {
         assert_eq!(cycle.to_string(), summarize_cycle(&cycle));
     }
 
+    #[test]
+    fn decide_reverts_on_negative_net() {
+        let cfg = ImprovementConfig::default();
+        let baseline = make_score(0.75);
+        let post = make_score(0.70);
+        let d = decide(&cfg, &baseline, &post, &[]);
+        match d {
+            ImprovementDecision::Revert { reason } => {
+                assert!(reason.contains("below minimum threshold"));
+            }
+            ImprovementDecision::Commit { .. } => panic!("expected revert on negative net"),
+        }
+    }
+
+    #[test]
+    fn decide_commits_at_exact_threshold() {
+        let cfg = ImprovementConfig::default(); // min_net_improvement = 0.02
+        let baseline = make_score(0.70);
+        let post = make_score(0.72); // net = 0.02, exactly at threshold
+        let d = decide(&cfg, &baseline, &post, &[]);
+        assert!(
+            matches!(d, ImprovementDecision::Commit { .. }),
+            "expected commit at exact threshold, got revert"
+        );
+    }
+
+    #[test]
+    fn decide_regression_at_exact_max_commits() {
+        let cfg = ImprovementConfig::default(); // max_single_regression = 0.05
+        let baseline = make_score(0.70);
+        let post = make_score(0.80);
+        let regressions = vec![Regression {
+            dimension: "specificity".to_string(),
+            baseline_score: 0.7,
+            current_score: 0.65,
+            delta: -0.05, // exactly at max — should NOT trigger revert
+            severity: RegressionSeverity::Minor,
+        }];
+        let d = decide(&cfg, &baseline, &post, &regressions);
+        assert!(
+            matches!(d, ImprovementDecision::Commit { .. }),
+            "expected commit when regression is exactly at max, got revert"
+        );
+    }
+
+    #[test]
+    fn find_weak_dimensions_mixed() {
+        // Build a score where some dimensions are above and some below 0.6.
+        use crate::gym_bridge::ScoreDimensions;
+        let score = GymSuiteScore {
+            suite_id: "test".to_string(),
+            overall: 0.65,
+            dimensions: ScoreDimensions {
+                factual_accuracy: 0.80,       // above
+                specificity: 0.50,            // below
+                temporal_awareness: 0.70,     // above
+                source_attribution: 0.40,     // below
+                confidence_calibration: 0.90, // above
+            },
+            scenario_count: 6,
+            scenarios_passed: 6,
+            pass_rate: 1.0,
+            recorded_at_unix_ms: None,
+        };
+        let weak = find_weak_dimensions(&score, 0.6);
+        assert_eq!(weak.len(), 2);
+        assert!(weak.contains(&"specificity".to_string()));
+        assert!(weak.contains(&"source_attribution".to_string()));
+    }
+
+    #[test]
+    fn summarize_cycle_with_regressions() {
+        let cycle = ImprovementCycle {
+            baseline: make_score(0.70),
+            proposed_changes: vec![],
+            post_score: Some(make_score(0.75)),
+            regressions: vec![
+                Regression {
+                    dimension: "specificity".to_string(),
+                    baseline_score: 0.7,
+                    current_score: 0.6,
+                    delta: -0.10,
+                    severity: RegressionSeverity::Severe,
+                },
+                Regression {
+                    dimension: "temporal_awareness".to_string(),
+                    baseline_score: 0.6,
+                    current_score: 0.55,
+                    delta: -0.05,
+                    severity: RegressionSeverity::Minor,
+                },
+            ],
+            decision: Some(ImprovementDecision::Revert {
+                reason: "regression".into(),
+            }),
+            final_phase: ImprovementPhase::Decide,
+            weak_dimensions: Vec::new(),
+        };
+        let summary = summarize_cycle(&cycle);
+        assert!(summary.contains("Regressions: 2 total (1 severe)"));
+    }
+
     fn make_score(v: f64) -> GymSuiteScore {
         use crate::gym_bridge::ScoreDimensions;
         GymSuiteScore {

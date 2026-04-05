@@ -1,5 +1,7 @@
 mod evidence;
 mod execution;
+#[cfg(test)]
+mod integration_tests;
 mod parsing;
 mod session;
 mod types;

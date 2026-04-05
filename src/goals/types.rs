@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{SimardError, SimardResult};
 use crate::session::{SessionId, SessionPhase};
 
+/// Lifecycle status of a goal in the goal curation system.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GoalStatus {
@@ -51,6 +52,7 @@ impl Display for GoalStatus {
     }
 }
 
+/// A proposed change to a goal (parsed from agent output).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GoalUpdate {
     pub slug: String,
@@ -81,6 +83,7 @@ impl GoalUpdate {
     }
 }
 
+/// Persisted goal with ownership and provenance metadata.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GoalRecord {
     pub slug: String,

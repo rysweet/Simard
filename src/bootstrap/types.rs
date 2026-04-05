@@ -5,9 +5,12 @@ use std::path::PathBuf;
 use crate::error::{SimardError, SimardResult};
 use crate::runtime::RuntimeTopology;
 
+/// How the bootstrap system resolves configuration values.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BootstrapMode {
+    /// Read all config from env vars / CLI flags (production default).
     ExplicitConfig,
+    /// Use hardcoded defaults for testing and development.
     BuiltinDefaults,
 }
 
@@ -36,6 +39,7 @@ impl Display for BootstrapMode {
     }
 }
 
+/// Where a configuration value was resolved from.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConfigValueSource {
     Environment(&'static str),
@@ -51,12 +55,14 @@ impl Display for ConfigValueSource {
     }
 }
 
+/// A resolved config value paired with its provenance.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConfigValue<T> {
     pub value: T,
     pub source: ConfigValueSource,
 }
 
+/// Raw inputs collected from CLI args or env vars before validation.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BootstrapInputs {
     pub prompt_root: Option<PathBuf>,

@@ -5,14 +5,22 @@ use serde::{Deserialize, Serialize};
 use crate::error::{SimardError, SimardResult};
 use crate::memory::MemoryScope;
 
+/// Behavioral mode that determines which prompt assets, memory policies,
+/// and session configurations Simard loads.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum OperatingMode {
+    /// Primary engineering loop — code generation, review, debugging.
     Engineer,
+    /// Multi-agent meeting facilitation with agenda and consensus.
     Meeting,
+    /// Memory curation and knowledge graph maintenance.
     Curator,
+    /// Self-improvement cycle — assess, plan, apply, verify.
     Improvement,
+    /// Evaluation gym — progressive scenario execution (L1–L12).
     Gym,
+    /// Workflow orchestration — recipe routing and workstream dispatch.
     Orchestrator,
 }
 
@@ -30,6 +38,7 @@ impl Display for OperatingMode {
     }
 }
 
+/// Controls what a session is allowed to write to long-term memory.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MemoryPolicy {
     pub allow_project_writes: bool,

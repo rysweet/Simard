@@ -30,3 +30,16 @@ jobs:
 
       - name: Run pre-push stage
         run: python -m pre_commit run --all-files --show-diff-on-failure --hook-stage pre-push
+
+  install-smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run install smoke test
+        run: cargo test --test install_smoke -- --nocapture
