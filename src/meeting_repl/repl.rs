@@ -1,0 +1,327 @@
+//! Core meeting REPL loop, dispatch, and banner.
+
+use std::io::{BufRead, Write};
+
+use crate::base_types::{BaseTypeSession, BaseTypeTurnInput};
+use crate::error::{SimardError, SimardResult};
+use crate::meeting_facilitator::{
+    ActionItem, MeetingDecision, MeetingSession, add_note, close_meeting, record_action_item,
+    record_decision, start_meeting,
+};
+use crate::memory_bridge::CognitiveMemoryBridge;
+
+use super::auto_capture::auto_capture_structured_items;
+use super::command::{HELP_TEXT, MeetingCommand, parse_meeting_command};
+use super::persist::{persist_meeting_to_memory, write_meeting_handoff_artifact};
+
+const PROMPT: &str = "simard:meeting> ";
+
+/// Run the interactive meeting REPL.
+///
+/// When `agent` is `Some`, natural-language lines are forwarded to the base-type
+/// session via `run_turn` and the agent's response is displayed.
+///
+/// When `agent` is `None`, natural language is recorded as notes (fallback).
+pub fn run_meeting_repl<R: BufRead, W: Write>(
+    topic: &str,
+    bridge: &CognitiveMemoryBridge,
+    agent: Option<&mut dyn BaseTypeSession>,
+    meeting_system_prompt: &str,
+    input: &mut R,
+    output: &mut W,
+) -> SimardResult<MeetingSession> {
+    let mut session = start_meeting(topic, bridge)?;
+    let mut agent = agent;
+
+    print_banner(topic, agent.is_some(), output);
+
+    let mut line = String::new();
+    loop {
+        write!(output, "{PROMPT}").ok();
+        output.flush().ok();
+
+        line.clear();
+        match input.read_line(&mut line) {
+            Ok(0) => {
+                writeln!(output, "\n[EOF] Closing meeting.").ok();
+                break;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                return Err(SimardError::ActionExecutionFailed {
+                    action: "meeting-repl-read".to_string(),
+                    reason: e.to_string(),
+                });
+            }
+        }
+
+        let cmd = parse_meeting_command(&line);
+        if matches!(cmd, MeetingCommand::Close) {
+            writeln!(output, "Closing meeting.").ok();
+            break;
+        }
+        dispatch_command(
+            cmd,
+            &mut session,
+            &mut agent,
+            topic,
+            meeting_system_prompt,
+            output,
+        );
+    }
+
+    let closed = close_meeting(session, bridge)?;
+    let summary = closed.durable_summary();
+    writeln!(output, "Meeting record: {summary}").ok();
+
+    write_meeting_handoff_artifact(&closed, output);
+    persist_meeting_to_memory(&closed, bridge, output);
+
+    Ok(closed)
+}
+
+fn print_banner<W: Write>(topic: &str, has_agent: bool, output: &mut W) {
+    writeln!(
+        output,
+        "Simard v{} — meeting mode",
+        env!("CARGO_PKG_VERSION")
+    )
+    .ok();
+    writeln!(output, "Topic: {topic}").ok();
+    if has_agent {
+        writeln!(
+            output,
+            "Simard is listening. Speak naturally — /help for commands, /close to end."
+        )
+    } else {
+        writeln!(
+            output,
+            "Note-taking mode (no agent backend). /help for commands, /close to end."
+        )
+    }
+    .ok();
+    writeln!(output).ok();
+}
+
+fn dispatch_command<W: Write>(
+    cmd: MeetingCommand,
+    session: &mut MeetingSession,
+    agent: &mut Option<&mut dyn BaseTypeSession>,
+    topic: &str,
+    meeting_system_prompt: &str,
+    output: &mut W,
+) {
+    match cmd {
+        MeetingCommand::Decision {
+            description,
+            rationale,
+        } => {
+            let decision = MeetingDecision {
+                description: description.clone(),
+                rationale,
+                participants: Vec::new(),
+            };
+            match record_decision(session, decision) {
+                Ok(()) => writeln!(output, "Recorded decision: {description}").ok(),
+                Err(e) => writeln!(output, "Error: {e}").ok(),
+            };
+        }
+        MeetingCommand::Action {
+            description,
+            owner,
+            priority,
+        } => {
+            let item = ActionItem {
+                description: description.clone(),
+                owner: owner.clone(),
+                priority,
+                due_description: None,
+            };
+            match record_action_item(session, item) {
+                Ok(()) => writeln!(output, "Recorded action: {description} (owner={owner})").ok(),
+                Err(e) => writeln!(output, "Error: {e}").ok(),
+            };
+        }
+        MeetingCommand::Note(text) => match add_note(session, &text) {
+            Ok(()) => {
+                writeln!(output, "Note added.").ok();
+            }
+            Err(e) => {
+                writeln!(output, "Error: {e}").ok();
+            }
+        },
+        MeetingCommand::Conversation(text) => {
+            if let Some(agent_session) = agent {
+                let turn_input = BaseTypeTurnInput {
+                    objective: text.clone(),
+                    identity_context: meeting_system_prompt.to_string(),
+                    prompt_preamble: format!("Meeting topic: {topic}"),
+                };
+                match agent_session.run_turn(turn_input) {
+                    Ok(outcome) => {
+                        let response = outcome.execution_summary.trim();
+                        writeln!(output, "\n{response}\n").ok();
+                        add_note(session, &format!("operator: {text}")).ok();
+                        add_note(session, &format!("simard: {response}")).ok();
+                        auto_capture_structured_items(session, &text, response, output);
+                    }
+                    Err(e) => {
+                        writeln!(output, "[agent error: {e}]").ok();
+                        add_note(session, &text).ok();
+                    }
+                }
+            } else {
+                add_note(session, &text).ok();
+                writeln!(output, "Note added.").ok();
+            }
+        }
+        MeetingCommand::Close => unreachable!(),
+        MeetingCommand::Help => {
+            write!(output, "{HELP_TEXT}").ok();
+        }
+        MeetingCommand::Empty => {}
+        MeetingCommand::Unknown(input) => {
+            writeln!(output, "Could not parse command: {input}").ok();
+            writeln!(
+                output,
+                "Try /help for command syntax, or just type naturally."
+            )
+            .ok();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::test_support::{MockAgentSession, mock_bridge};
+    use crate::meeting_facilitator::MeetingSessionStatus;
+
+    #[test]
+    fn repl_records_decision_and_closes() {
+        let bridge = mock_bridge();
+        let input = b"/decision Ship it | Ready for production\n/close\n";
+        let mut reader = &input[..];
+        let mut output = Vec::new();
+
+        let session = run_meeting_repl(
+            "Sprint planning",
+            &bridge,
+            None,
+            "",
+            &mut reader,
+            &mut output,
+        )
+        .unwrap();
+
+        assert_eq!(session.status, MeetingSessionStatus::Closed);
+        assert_eq!(session.decisions.len(), 1);
+        assert_eq!(session.decisions[0].description, "Ship it");
+    }
+
+    #[test]
+    fn repl_records_action_item_and_closes() {
+        let bridge = mock_bridge();
+        let input = b"/action Write tests | bob | 2\n/close\n";
+        let mut reader = &input[..];
+        let mut output = Vec::new();
+
+        let session =
+            run_meeting_repl("Retro", &bridge, None, "", &mut reader, &mut output).unwrap();
+
+        assert_eq!(session.status, MeetingSessionStatus::Closed);
+        assert_eq!(session.action_items.len(), 1);
+        assert_eq!(session.action_items[0].owner, "bob");
+    }
+
+    #[test]
+    fn repl_shows_help() {
+        let bridge = mock_bridge();
+        let input = b"/help\n/close\n";
+        let mut reader = &input[..];
+        let mut output = Vec::new();
+
+        run_meeting_repl("Help test", &bridge, None, "", &mut reader, &mut output).unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(output_str.contains("/decision"));
+        assert!(output_str.contains("/close"));
+    }
+
+    #[test]
+    fn repl_natural_language_without_agent_falls_back_to_note() {
+        let bridge = mock_bridge();
+        let input = b"Hello tell me about projects\n/close\n";
+        let mut reader = &input[..];
+        let mut output = Vec::new();
+
+        let session =
+            run_meeting_repl("Test", &bridge, None, "", &mut reader, &mut output).unwrap();
+
+        assert_eq!(session.status, MeetingSessionStatus::Closed);
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(output_str.contains("Note added"));
+    }
+
+    #[test]
+    fn repl_sends_natural_language_to_agent() {
+        let bridge = mock_bridge();
+        let mut agent = MockAgentSession::new("Hello! I'm Simard, ready to discuss your project.");
+        let input = b"Hello Simard\n/close\n";
+        let mut reader = &input[..];
+        let mut output = Vec::new();
+
+        let session = run_meeting_repl(
+            "Test conversation",
+            &bridge,
+            Some(&mut agent),
+            "You are Simard in meeting mode.",
+            &mut reader,
+            &mut output,
+        )
+        .unwrap();
+
+        assert_eq!(session.status, MeetingSessionStatus::Closed);
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(
+            output_str.contains("Hello! I'm Simard"),
+            "agent response should be displayed: {output_str}"
+        );
+        assert!(
+            session
+                .notes
+                .iter()
+                .any(|n| n.contains("operator: Hello Simard"))
+        );
+        assert!(
+            session
+                .notes
+                .iter()
+                .any(|n| n.contains("simard: Hello! I'm Simard"))
+        );
+    }
+
+    #[test]
+    fn repl_slash_commands_bypass_agent() {
+        let bridge = mock_bridge();
+        let mut agent = MockAgentSession::new("Agent response");
+        let input = b"/note This is an explicit note\n/close\n";
+        let mut reader = &input[..];
+        let mut output = Vec::new();
+
+        let session = run_meeting_repl(
+            "Test",
+            &bridge,
+            Some(&mut agent),
+            "",
+            &mut reader,
+            &mut output,
+        )
+        .unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(output_str.contains("Note added"));
+        assert!(!output_str.contains("Agent response"));
+        assert_eq!(session.notes, vec!["This is an explicit note"]);
+    }
+}

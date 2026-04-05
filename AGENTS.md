@@ -1,20 +1,6 @@
 
 
-<!-- AMPLIHACK_CONTEXT_START -->
-
-## 🎯 USER PREFERENCES (MANDATORY - MUST FOLLOW)
-
-## Amplihack Copilot Workflow Rules
-
-For any DEV, INVESTIGATE, or HYBRID request, invoke `Skill(skill="dev-orchestrator")` immediately.
-
-After the skill is activated, the next tool call must execute the `smart-orchestrator` recipe via `run_recipe_by_name("smart-orchestrator")`.
-
-Do not follow the workflow manually and do not fall back to legacy `ultrathink` behavior.
-
-## Auto-routing prompt
-
-<system-reminder source="auto-intent-router">
+eminder source="auto-intent-router">
 Before responding, classify this prompt using parallel signal evaluation:
 
 ```mermaid
@@ -177,6 +163,22 @@ shell-policy-safe alternatives instead:
 
 ```bash
 # Option A (preferred): use a unique session name per run to avoid collisions
+
+<!-- AMPLIHACK_CONTEXT_START -->
+
+## 🎯 USER PREFERENCES (MANDATORY - MUST FOLLOW)
+
+## Amplihack Copilot Workflow Rules
+
+For any DEV, INVESTIGATE, or HYBRID request, invoke `Skill(skill="dev-orchestrator")` immediately.
+
+After the skill is activated, the next tool call must execute the `smart-orchestrator` recipe via `run_recipe_by_name("smart-orchestrator")`.
+
+Do not follow the workflow manually and do not fall back to legacy `ultrathink` behavior.
+
+<!-- AMPLIHACK_CONTEXT_END -->
+
+
 tmux new-session -d -s "recipe-$(date +%s)" "..."
 
 # Option B: locate the tmux server PID and terminate with numeric kill

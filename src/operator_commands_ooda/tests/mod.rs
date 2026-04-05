@@ -1,9 +1,7 @@
 mod persistence_tests;
 mod report_tests;
 
-use std::path::PathBuf;
-
-use super::persistence::{persist_cycle_report, persist_cycle_to_memory};
+use super::persistence::persist_cycle_report;
 use crate::ooda_loop::{
     ActionKind, ActionOutcome, CycleReport, EnvironmentSnapshot, GoalSnapshot, Observation,
     PlannedAction, Priority,
