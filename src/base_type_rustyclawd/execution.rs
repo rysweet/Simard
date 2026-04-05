@@ -1,8 +1,7 @@
 use std::process::{Command, Stdio};
 
 use rustyclawd_core::client::{
-    Client as RcClient, ContentBlock as RcContentBlock, CreateMessageRequest,
-    Message as RcMessage,
+    Client as RcClient, ContentBlock as RcContentBlock, CreateMessageRequest, Message as RcMessage,
 };
 
 use crate::base_types::{
@@ -10,9 +9,9 @@ use crate::base_types::{
 };
 use crate::error::{SimardError, SimardResult};
 
+use super::MAX_HISTORY_MESSAGES;
 use super::tool_executor::execute_tool_locally;
 use super::tools::rustyclawd_tool_definitions;
-use super::MAX_HISTORY_MESSAGES;
 
 /// Execute a turn using the RustyClawd crate Client API and tool loop.
 ///

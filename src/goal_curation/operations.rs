@@ -5,9 +5,7 @@ use serde_json::json;
 use crate::error::{SimardError, SimardResult};
 use crate::memory_bridge::CognitiveMemoryBridge;
 
-use super::types::{
-    ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS,
-};
+use super::types::{ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS};
 
 // ---------------------------------------------------------------------------
 // Validation helpers

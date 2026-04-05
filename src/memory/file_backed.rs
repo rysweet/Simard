@@ -7,7 +7,7 @@ use crate::persistence::{load_json_or_default, persist_json};
 use crate::session::SessionId;
 
 use super::store::MemoryStore;
-use super::types::{MemoryRecord, MemoryScope, MEMORY_STORE_NAME};
+use super::types::{MEMORY_STORE_NAME, MemoryRecord, MemoryScope};
 
 #[derive(Debug)]
 pub struct FileBackedMemoryStore {

@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use crate::operator_commands::{
     optional_terminal_evidence_value, print_display, print_text,
-    render_redacted_objective_metadata, required_terminal_evidence_value,
-    terminal_evidence_values, validated_terminal_read_artifacts,
+    render_redacted_objective_metadata, required_terminal_evidence_value, terminal_evidence_values,
+    validated_terminal_read_artifacts,
 };
 use crate::terminal_engineer_bridge::{
     TERMINAL_HANDOFF_FILE_NAME, TERMINAL_MODE_BOUNDARY, load_runtime_handoff_snapshot,

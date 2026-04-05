@@ -89,15 +89,14 @@ fn hydration_loads_records_from_fallback() {
     }
 
     // Step 2: create a CognitiveBridgeMemoryStore that reads the same path.
-    let transport =
-        InMemoryBridgeTransport::new("test-hydrate", |method, _params| match method {
-            "memory.store_fact" => Ok(json!({"id": "sem_hydrate"})),
-            "memory.search_facts" => Ok(json!({"facts": []})),
-            _ => Err(crate::bridge::BridgeErrorPayload {
-                code: -32601,
-                message: format!("unknown method: {method}"),
-            }),
-        });
+    let transport = InMemoryBridgeTransport::new("test-hydrate", |method, _params| match method {
+        "memory.store_fact" => Ok(json!({"id": "sem_hydrate"})),
+        "memory.search_facts" => Ok(json!({"facts": []})),
+        _ => Err(crate::bridge::BridgeErrorPayload {
+            code: -32601,
+            message: format!("unknown method: {method}"),
+        }),
+    });
     let bridge = CognitiveMemoryBridge::new(Box::new(transport));
     let store = CognitiveBridgeMemoryStore::new(bridge, &path).unwrap();
 
@@ -166,15 +165,14 @@ fn hydration_plus_new_put_merge_correctly() {
             .unwrap();
     }
 
-    let transport =
-        InMemoryBridgeTransport::new("test-merge", |method, _params| match method {
-            "memory.store_fact" => Ok(json!({"id": "sem_merge"})),
-            "memory.search_facts" => Ok(json!({"facts": []})),
-            _ => Err(crate::bridge::BridgeErrorPayload {
-                code: -32601,
-                message: format!("unknown method: {method}"),
-            }),
-        });
+    let transport = InMemoryBridgeTransport::new("test-merge", |method, _params| match method {
+        "memory.store_fact" => Ok(json!({"id": "sem_merge"})),
+        "memory.search_facts" => Ok(json!({"facts": []})),
+        _ => Err(crate::bridge::BridgeErrorPayload {
+            code: -32601,
+            message: format!("unknown method: {method}"),
+        }),
+    });
     let bridge = CognitiveMemoryBridge::new(Box::new(transport));
     let store = CognitiveBridgeMemoryStore::new(bridge, &path).unwrap();
 
@@ -207,15 +205,14 @@ fn list_for_session_includes_hydrated_records() {
             .unwrap();
     }
 
-    let transport =
-        InMemoryBridgeTransport::new("test-session", |method, _params| match method {
-            "memory.store_fact" => Ok(json!({"id": "sem_sess"})),
-            "memory.search_facts" => Ok(json!({"facts": []})),
-            _ => Err(crate::bridge::BridgeErrorPayload {
-                code: -32601,
-                message: format!("unknown method: {method}"),
-            }),
-        });
+    let transport = InMemoryBridgeTransport::new("test-session", |method, _params| match method {
+        "memory.store_fact" => Ok(json!({"id": "sem_sess"})),
+        "memory.search_facts" => Ok(json!({"facts": []})),
+        _ => Err(crate::bridge::BridgeErrorPayload {
+            code: -32601,
+            message: format!("unknown method: {method}"),
+        }),
+    });
     let bridge = CognitiveMemoryBridge::new(Box::new(transport));
     let store = CognitiveBridgeMemoryStore::new(bridge, &path).unwrap();
 

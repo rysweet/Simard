@@ -5,9 +5,7 @@ use serde_json::json;
 use crate::error::{SimardError, SimardResult};
 use crate::memory_bridge::CognitiveMemoryBridge;
 
-use super::types::{
-    ActionItem, MeetingDecision, MeetingSession, MeetingSessionStatus,
-};
+use super::types::{ActionItem, MeetingDecision, MeetingSession, MeetingSessionStatus};
 
 // ---------------------------------------------------------------------------
 // Validation helpers

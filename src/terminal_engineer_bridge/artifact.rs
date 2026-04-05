@@ -4,9 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{SimardError, SimardResult};
 use crate::handoff::{FileBackedHandoffStore, RuntimeHandoffSnapshot, RuntimeHandoffStore};
 
-use super::types::{
-    ScopedHandoffMode, SelectedHandoffArtifact, COMPATIBILITY_HANDOFF_FILE_NAME,
-};
+use super::types::{COMPATIBILITY_HANDOFF_FILE_NAME, ScopedHandoffMode, SelectedHandoffArtifact};
 
 pub fn compatibility_handoff_path(state_root: &Path) -> PathBuf {
     state_root.join(COMPATIBILITY_HANDOFF_FILE_NAME)

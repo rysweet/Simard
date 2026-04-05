@@ -7,9 +7,9 @@ use crate::sanitization::sanitize_terminal_text;
 
 use super::artifact::{load_runtime_handoff_snapshot, select_optional_handoff_artifact};
 use super::types::{
-    ScopedHandoffMode, TerminalBridgeContext, COMPATIBILITY_HANDOFF_FILE_NAME,
-    SHARED_DEFAULT_STATE_ROOT_SOURCE, SHARED_EXPLICIT_STATE_ROOT_SOURCE,
-    TERMINAL_HANDOFF_FILE_NAME,
+    COMPATIBILITY_HANDOFF_FILE_NAME, SHARED_DEFAULT_STATE_ROOT_SOURCE,
+    SHARED_EXPLICIT_STATE_ROOT_SOURCE, ScopedHandoffMode, TERMINAL_HANDOFF_FILE_NAME,
+    TerminalBridgeContext,
 };
 
 const BRIDGE_SOURCE_PREFIX: &str = "terminal-continuity-source=";

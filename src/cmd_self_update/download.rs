@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use super::platform::CURRENT_VERSION;
 
 /// Download and extract the binary, replacing the current executable.
-pub(crate) fn download_and_replace(url: &str, version: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn download_and_replace(
+    url: &str,
+    version: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let current_exe =
         std::env::current_exe().map_err(|e| format!("Cannot determine current executable: {e}"))?;
     let tmp_dir = std::env::temp_dir().join(format!("simard-update-{}", std::process::id()));

@@ -260,8 +260,7 @@ fn engineer_evidence_details_with_last_output_line() {
 fn select_optional_handoff_artifact_returns_none_for_empty_dir() {
     let dir = TempDir::new().unwrap();
     let result =
-        select_optional_handoff_artifact(dir.path(), ScopedHandoffMode::Terminal, "test")
-            .unwrap();
+        select_optional_handoff_artifact(dir.path(), ScopedHandoffMode::Terminal, "test").unwrap();
     assert!(result.is_none());
 }
 
@@ -269,8 +268,7 @@ fn select_optional_handoff_artifact_returns_none_for_empty_dir() {
 fn select_optional_handoff_artifact_returns_none_for_engineer_mode() {
     let dir = TempDir::new().unwrap();
     let result =
-        select_optional_handoff_artifact(dir.path(), ScopedHandoffMode::Engineer, "test")
-            .unwrap();
+        select_optional_handoff_artifact(dir.path(), ScopedHandoffMode::Engineer, "test").unwrap();
     assert!(result.is_none());
 }
 
@@ -287,8 +285,7 @@ fn persist_and_select_roundtrip_terminal() {
     assert!(compatibility_handoff_path(dir.path()).exists());
 
     let artifact =
-        select_handoff_artifact_for_read(dir.path(), ScopedHandoffMode::Terminal, "test")
-            .unwrap();
+        select_handoff_artifact_for_read(dir.path(), ScopedHandoffMode::Terminal, "test").unwrap();
     assert_eq!(artifact.file_name, TERMINAL_HANDOFF_FILE_NAME);
     assert_eq!(
         artifact.path,
@@ -310,8 +307,7 @@ fn persist_and_select_roundtrip_engineer() {
     assert!(compatibility_handoff_path(dir.path()).exists());
 
     let artifact =
-        select_handoff_artifact_for_read(dir.path(), ScopedHandoffMode::Engineer, "test")
-            .unwrap();
+        select_handoff_artifact_for_read(dir.path(), ScopedHandoffMode::Engineer, "test").unwrap();
     assert_eq!(artifact.file_name, ENGINEER_HANDOFF_FILE_NAME);
 
     let loaded = load_runtime_handoff_snapshot(&artifact, "test").unwrap();
@@ -346,23 +342,20 @@ fn select_for_read_falls_back_to_compatibility() {
     fs::remove_file(scoped_handoff_path(dir.path(), ScopedHandoffMode::Terminal)).unwrap();
 
     let artifact =
-        select_handoff_artifact_for_read(dir.path(), ScopedHandoffMode::Terminal, "test")
-            .unwrap();
+        select_handoff_artifact_for_read(dir.path(), ScopedHandoffMode::Terminal, "test").unwrap();
     assert_eq!(artifact.file_name, COMPATIBILITY_HANDOFF_FILE_NAME);
 }
 
 #[test]
 fn select_for_read_errors_when_no_files_exist() {
     let dir = TempDir::new().unwrap();
-    let result =
-        select_handoff_artifact_for_read(dir.path(), ScopedHandoffMode::Terminal, "test");
+    let result = select_handoff_artifact_for_read(dir.path(), ScopedHandoffMode::Terminal, "test");
     assert!(result.is_err());
 }
 
 #[test]
 fn load_from_state_root_returns_none_when_no_files() {
     let dir = TempDir::new().unwrap();
-    let result =
-        TerminalBridgeContext::load_from_state_root(dir.path(), "test-source").unwrap();
+    let result = TerminalBridgeContext::load_from_state_root(dir.path(), "test-source").unwrap();
     assert!(result.is_none());
 }

@@ -11,15 +11,14 @@ use uuid::Uuid;
 use super::store::CognitiveBridgeMemoryStore;
 
 pub(super) fn test_store() -> CognitiveBridgeMemoryStore {
-    let transport =
-        InMemoryBridgeTransport::new("test-adapter", |method, _params| match method {
-            "memory.store_fact" => Ok(json!({"id": "sem_adapter_test"})),
-            "memory.search_facts" => Ok(json!({"facts": []})),
-            _ => Err(crate::bridge::BridgeErrorPayload {
-                code: -32601,
-                message: format!("unknown method: {method}"),
-            }),
-        });
+    let transport = InMemoryBridgeTransport::new("test-adapter", |method, _params| match method {
+        "memory.store_fact" => Ok(json!({"id": "sem_adapter_test"})),
+        "memory.search_facts" => Ok(json!({"facts": []})),
+        _ => Err(crate::bridge::BridgeErrorPayload {
+            code: -32601,
+            message: format!("unknown method: {method}"),
+        }),
+    });
     let bridge = CognitiveMemoryBridge::new(Box::new(transport));
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)

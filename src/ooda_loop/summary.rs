@@ -28,12 +28,12 @@ pub fn summarize_cycle_report(report: &CycleReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::goal_curation::GoalProgress;
     use crate::memory_cognitive::CognitiveStatistics;
     use crate::ooda_loop::{
         ActionKind, ActionOutcome, CycleReport, EnvironmentSnapshot, GoalSnapshot, Observation,
         PlannedAction, Priority,
     };
-    use crate::goal_curation::GoalProgress;
 
     #[test]
     fn summarize_cycle_report_format() {

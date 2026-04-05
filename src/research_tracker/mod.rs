@@ -9,7 +9,9 @@ mod types;
 mod watches;
 
 // Re-export all public items so `crate::research_tracker::X` still works.
-pub use operations::{add_research_topic, load_research_topics, track_developer, update_topic_status};
+pub use operations::{
+    add_research_topic, load_research_topics, track_developer, update_topic_status,
+};
 pub use types::{DeveloperWatch, ResearchStatus, ResearchTopic, ResearchTracker};
 pub use watches::{DEFAULT_DEVELOPER_WATCHES, default_developer_watches, seed_developer_watches};
 

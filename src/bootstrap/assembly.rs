@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use super::config::BootstrapConfig;
 use super::LOCAL_BASE_TYPE;
+use super::config::BootstrapConfig;
 use crate::agent_program::{
     AgentProgram, GoalCuratorProgram, ImprovementCuratorProgram, MeetingFacilitatorProgram,
     ObjectiveRelayProgram,
@@ -270,7 +270,9 @@ fn register_builtin_base_type(
 
 #[cfg(test)]
 mod tests {
-    use super::{builtin_base_type_registry_for_manifest, register_builtin_base_type, LOCAL_BASE_TYPE};
+    use super::{
+        LOCAL_BASE_TYPE, builtin_base_type_registry_for_manifest, register_builtin_base_type,
+    };
     use crate::base_type_rustyclawd::RustyClawdAdapter;
     use crate::base_types::{BaseTypeFactory, BaseTypeId};
     use crate::identity::{
@@ -368,8 +370,7 @@ mod tests {
     #[test]
     fn register_terminal_shell_base_type_succeeds() {
         let mut registry = BaseTypeRegistry::default();
-        let result =
-            register_builtin_base_type(&mut registry, &BaseTypeId::new("terminal-shell"));
+        let result = register_builtin_base_type(&mut registry, &BaseTypeId::new("terminal-shell"));
         assert!(result.is_ok());
         assert!(registry.get(&BaseTypeId::new("terminal-shell")).is_some());
     }

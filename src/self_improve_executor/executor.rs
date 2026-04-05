@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use crate::engineer_loop::RepoInspection;
-use crate::engineer_plan::{execute_plan, plan_objective, PlanExecutionResult};
+use crate::engineer_plan::{PlanExecutionResult, execute_plan, plan_objective};
 use crate::error::SimardResult;
 use crate::review_pipeline::{ReviewFinding, ReviewSession, review_diff, should_commit};
 

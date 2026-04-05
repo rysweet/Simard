@@ -143,12 +143,8 @@ fn from_handoff_with_invalid_objective_metadata() {
     let mut session = make_session_record();
     session.objective = "not a valid metadata format".to_string();
     let handoff = make_handoff(Some(session), required_evidence_records());
-    let result = TerminalReadView::from_handoff(
-        PathBuf::from("/test"),
-        handoff,
-        "h.json".to_string(),
-        None,
-    );
+    let result =
+        TerminalReadView::from_handoff(PathBuf::from("/test"), handoff, "h.json".to_string(), None);
     assert!(
         result.is_err(),
         "should fail for invalid objective metadata format"
@@ -251,13 +247,9 @@ fn print_with_copilot_audit_no_reason_code_does_not_panic() {
 #[test]
 fn print_terminal_run_empty_capabilities_does_not_panic() {
     let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
-    let view = TerminalReadView::from_handoff(
-        PathBuf::from("/test"),
-        handoff,
-        "h.json".to_string(),
-        None,
-    )
-    .unwrap();
+    let view =
+        TerminalReadView::from_handoff(PathBuf::from("/test"), handoff, "h.json".to_string(), None)
+            .unwrap();
     view.print_terminal_run(&[], "summary", "reflection");
 }
 
@@ -281,13 +273,9 @@ fn print_terminal_run_multiple_capabilities() {
 #[test]
 fn print_with_no_last_output_line_does_not_panic() {
     let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
-    let view = TerminalReadView::from_handoff(
-        PathBuf::from("/test"),
-        handoff,
-        "h.json".to_string(),
-        None,
-    )
-    .unwrap();
+    let view =
+        TerminalReadView::from_handoff(PathBuf::from("/test"), handoff, "h.json".to_string(), None)
+            .unwrap();
     assert!(view.last_output_line.is_none());
     view.print();
 }

@@ -12,11 +12,11 @@ mod convert;
 mod store;
 
 #[cfg(test)]
+mod bridge_tests;
+#[cfg(test)]
 mod test_helpers;
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod bridge_tests;
 
 const STORE_NAME: &str = "cognitive-bridge-memory";
 

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use super::types::{parse_runtime_topology, BootstrapMode, ConfigValue, ConfigValueSource};
+use super::types::{BootstrapMode, ConfigValue, ConfigValueSource, parse_runtime_topology};
 use super::validation::validate_state_root;
 use super::{DEFAULT_IDENTITY, DEFAULT_OBJECTIVE, DEFAULT_STATE_ROOT, LOCAL_BASE_TYPE};
 use crate::base_types::BaseTypeId;

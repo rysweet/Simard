@@ -7,8 +7,8 @@ use crate::agent_goal_assignment::{SubordinateProgress, poll_progress};
 use crate::error::{SimardError, SimardResult};
 use crate::memory_bridge::CognitiveMemoryBridge;
 
-use super::types::{HeartbeatStatus, SubordinateConfig, SubordinateHandle};
 use super::STALE_THRESHOLD_SECONDS;
+use super::types::{HeartbeatStatus, SubordinateConfig, SubordinateHandle};
 
 /// Spawn a subordinate agent as a real child process.
 ///

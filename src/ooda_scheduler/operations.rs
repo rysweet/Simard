@@ -5,8 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::error::{SimardError, SimardResult};
 use crate::ooda_loop::{ActionOutcome, PlannedAction};
 
-use super::types::{CompletedSlot, ScheduledAction, SchedulerSlot, SlotStatus};
 use super::Scheduler;
+use super::types::{CompletedSlot, ScheduledAction, SchedulerSlot, SlotStatus};
 
 /// Schedule a batch of actions, assigning each to a slot.
 ///

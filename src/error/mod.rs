@@ -1,9 +1,9 @@
 mod display;
 
 #[cfg(test)]
-mod tests_variants;
-#[cfg(test)]
 mod tests_infra;
+#[cfg(test)]
+mod tests_variants;
 
 use std::error::Error;
 use std::path::PathBuf;

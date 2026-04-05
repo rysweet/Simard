@@ -108,8 +108,8 @@ pub(super) fn build_live_meeting_context(bridge: &CognitiveMemoryBridge) -> Stri
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::test_support::*;
+    use super::*;
 
     // ── build_live_meeting_context ──────────────────────────────────────
 

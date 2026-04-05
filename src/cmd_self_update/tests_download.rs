@@ -213,8 +213,7 @@ fn test_find_binary_with_symlink_named_simard() {
 
 #[test]
 fn test_find_binary_deeply_nested_multiple_dirs() {
-    let tmp =
-        std::env::temp_dir().join(format!("simard-test-multi-nested-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("simard-test-multi-nested-{}", std::process::id()));
     fs::create_dir_all(tmp.join("dir_a/sub_a")).unwrap();
     fs::create_dir_all(tmp.join("dir_b/sub_b")).unwrap();
     fs::write(tmp.join("dir_a/sub_a/not_simard"), b"wrong").unwrap();

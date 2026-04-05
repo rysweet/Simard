@@ -18,24 +18,23 @@ fn empty_bridge() -> CognitiveMemoryBridge {
 }
 
 fn bridge_with_goal_fact() -> CognitiveMemoryBridge {
-    let transport =
-        InMemoryBridgeTransport::new("test-goals", |method, _params| match method {
-            "memory.store_fact" => Ok(serde_json::json!({"id": "fact_1"})),
-            "memory.search_facts" => Ok(serde_json::json!({
-                "facts": [{
-                    "node_id": "g1",
-                    "concept": "goal-assignment",
-                    "content": "build feature X",
-                    "confidence": 0.95,
-                    "source_id": "supervisor:goal:agent-1",
-                    "tags": ["sub:agent-1"]
-                }]
-            })),
-            _ => Err(BridgeErrorPayload {
-                code: -32601,
-                message: format!("unknown: {method}"),
-            }),
-        });
+    let transport = InMemoryBridgeTransport::new("test-goals", |method, _params| match method {
+        "memory.store_fact" => Ok(serde_json::json!({"id": "fact_1"})),
+        "memory.search_facts" => Ok(serde_json::json!({
+            "facts": [{
+                "node_id": "g1",
+                "concept": "goal-assignment",
+                "content": "build feature X",
+                "confidence": 0.95,
+                "source_id": "supervisor:goal:agent-1",
+                "tags": ["sub:agent-1"]
+            }]
+        })),
+        _ => Err(BridgeErrorPayload {
+            code: -32601,
+            message: format!("unknown: {method}"),
+        }),
+    });
     CognitiveMemoryBridge::new(Box::new(transport))
 }
 

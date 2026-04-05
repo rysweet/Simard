@@ -13,7 +13,5 @@ pub use handoff::{
     MEETING_HANDOFF_FILENAME, MeetingHandoff, default_handoff_dir, load_meeting_handoff,
     mark_handoff_processed_in_place, mark_meeting_handoff_processed, write_meeting_handoff,
 };
-pub use session::{
-    add_note, close_meeting, record_action_item, record_decision, start_meeting,
-};
+pub use session::{add_note, close_meeting, record_action_item, record_decision, start_meeting};
 pub use types::{ActionItem, MeetingDecision, MeetingSession, MeetingSessionStatus};

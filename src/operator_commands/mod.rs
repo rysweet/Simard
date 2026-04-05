@@ -30,8 +30,7 @@ pub use probe::{run_bootstrap_probe, run_copilot_submit_probe, run_handoff_probe
 // `crate::operator_commands::<item>` continue to compile.
 pub(crate) use evidence::{
     load_terminal_objective_file, optional_terminal_evidence_value,
-    render_redacted_objective_metadata, required_terminal_evidence_value,
-    terminal_evidence_values,
+    render_redacted_objective_metadata, required_terminal_evidence_value, terminal_evidence_values,
 };
 pub(crate) use format::{
     print_display, print_goal_section, print_meeting_goal_section, print_string_section,

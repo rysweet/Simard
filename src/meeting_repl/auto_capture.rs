@@ -3,7 +3,9 @@
 
 use std::io::Write;
 
-use crate::meeting_facilitator::{ActionItem, MeetingDecision, MeetingSession, record_action_item, record_decision};
+use crate::meeting_facilitator::{
+    ActionItem, MeetingDecision, MeetingSession, record_action_item, record_decision,
+};
 
 /// A structured item auto-detected from natural conversation.
 #[derive(Clone, Debug)]

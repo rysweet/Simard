@@ -193,8 +193,8 @@ fn dispatch_command<W: Write>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::test_support::{MockAgentSession, mock_bridge};
+    use super::*;
     use crate::meeting_facilitator::MeetingSessionStatus;
 
     #[test]

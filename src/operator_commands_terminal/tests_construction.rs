@@ -267,13 +267,9 @@ fn from_handoff_multiple_steps_are_ordered() {
     evidence.push(make_evidence("terminal-step-3=third"));
 
     let handoff = make_handoff(Some(make_session_record()), evidence);
-    let view = TerminalReadView::from_handoff(
-        PathBuf::from("/test"),
-        handoff,
-        "h.json".to_string(),
-        None,
-    )
-    .unwrap();
+    let view =
+        TerminalReadView::from_handoff(PathBuf::from("/test"), handoff, "h.json".to_string(), None)
+            .unwrap();
     assert_eq!(view.step_count, 3);
     assert_eq!(view.steps.len(), 3);
 }
@@ -285,65 +281,45 @@ fn from_handoff_multiple_checkpoints() {
     evidence.push(make_evidence("terminal-checkpoint-2=cp2"));
 
     let handoff = make_handoff(Some(make_session_record()), evidence);
-    let view = TerminalReadView::from_handoff(
-        PathBuf::from("/test"),
-        handoff,
-        "h.json".to_string(),
-        None,
-    )
-    .unwrap();
+    let view =
+        TerminalReadView::from_handoff(PathBuf::from("/test"), handoff, "h.json".to_string(), None)
+            .unwrap();
     assert_eq!(view.checkpoints.len(), 2);
 }
 
 #[test]
 fn from_handoff_no_continuity_source() {
     let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
-    let view = TerminalReadView::from_handoff(
-        PathBuf::from("/test"),
-        handoff,
-        "h.json".to_string(),
-        None,
-    )
-    .unwrap();
+    let view =
+        TerminalReadView::from_handoff(PathBuf::from("/test"), handoff, "h.json".to_string(), None)
+            .unwrap();
     assert!(view.continuity_source.is_none());
 }
 
 #[test]
 fn from_handoff_selected_base_type_string() {
     let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
-    let view = TerminalReadView::from_handoff(
-        PathBuf::from("/test"),
-        handoff,
-        "h.json".to_string(),
-        None,
-    )
-    .unwrap();
+    let view =
+        TerminalReadView::from_handoff(PathBuf::from("/test"), handoff, "h.json".to_string(), None)
+            .unwrap();
     assert_eq!(view.selected_base_type, "terminal-shell");
 }
 
 #[test]
 fn from_handoff_topology_string() {
     let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
-    let view = TerminalReadView::from_handoff(
-        PathBuf::from("/test"),
-        handoff,
-        "h.json".to_string(),
-        None,
-    )
-    .unwrap();
+    let view =
+        TerminalReadView::from_handoff(PathBuf::from("/test"), handoff, "h.json".to_string(), None)
+            .unwrap();
     assert_eq!(view.topology, "single-process");
 }
 
 #[test]
 fn from_handoff_no_copilot_audit_by_default() {
     let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
-    let view = TerminalReadView::from_handoff(
-        PathBuf::from("/test"),
-        handoff,
-        "h.json".to_string(),
-        None,
-    )
-    .unwrap();
+    let view =
+        TerminalReadView::from_handoff(PathBuf::from("/test"), handoff, "h.json".to_string(), None)
+            .unwrap();
     assert!(view.copilot_submit_audit.is_none());
 }
 
@@ -360,13 +336,9 @@ fn from_handoff_memory_and_evidence_counts_with_multiple() {
         });
     }
     let evidence_count = handoff.evidence_records.len();
-    let view = TerminalReadView::from_handoff(
-        PathBuf::from("/test"),
-        handoff,
-        "h.json".to_string(),
-        None,
-    )
-    .unwrap();
+    let view =
+        TerminalReadView::from_handoff(PathBuf::from("/test"), handoff, "h.json".to_string(), None)
+            .unwrap();
     assert_eq!(view.memory_record_count, 5);
     assert_eq!(view.evidence_record_count, evidence_count);
 }
@@ -379,13 +351,9 @@ fn from_handoff_step_count_matches_steps_len() {
     evidence.push(make_evidence("terminal-step-3=c"));
     evidence.push(make_evidence("terminal-step-4=d"));
     let handoff = make_handoff(Some(make_session_record()), evidence);
-    let view = TerminalReadView::from_handoff(
-        PathBuf::from("/test"),
-        handoff,
-        "h.json".to_string(),
-        None,
-    )
-    .unwrap();
+    let view =
+        TerminalReadView::from_handoff(PathBuf::from("/test"), handoff, "h.json".to_string(), None)
+            .unwrap();
     assert_eq!(view.step_count, view.steps.len());
     assert_eq!(view.step_count, 4);
 }
@@ -393,39 +361,27 @@ fn from_handoff_step_count_matches_steps_len() {
 #[test]
 fn from_handoff_objective_metadata_contains_chars() {
     let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
-    let view = TerminalReadView::from_handoff(
-        PathBuf::from("/test"),
-        handoff,
-        "h.json".to_string(),
-        None,
-    )
-    .unwrap();
+    let view =
+        TerminalReadView::from_handoff(PathBuf::from("/test"), handoff, "h.json".to_string(), None)
+            .unwrap();
     assert!(view.objective_metadata.contains("chars="));
 }
 
 #[test]
 fn from_handoff_identity_is_simard_engineer() {
     let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
-    let view = TerminalReadView::from_handoff(
-        PathBuf::from("/test"),
-        handoff,
-        "h.json".to_string(),
-        None,
-    )
-    .unwrap();
+    let view =
+        TerminalReadView::from_handoff(PathBuf::from("/test"), handoff, "h.json".to_string(), None)
+            .unwrap();
     assert_eq!(view.identity, "simard-engineer");
 }
 
 #[test]
 fn from_handoff_default_wait_values() {
     let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
-    let view = TerminalReadView::from_handoff(
-        PathBuf::from("/test"),
-        handoff,
-        "h.json".to_string(),
-        None,
-    )
-    .unwrap();
+    let view =
+        TerminalReadView::from_handoff(PathBuf::from("/test"), handoff, "h.json".to_string(), None)
+            .unwrap();
     assert_eq!(view.wait_count, "0");
     assert_eq!(view.wait_timeout_seconds, "5");
 }

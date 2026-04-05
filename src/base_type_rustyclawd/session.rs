@@ -147,8 +147,8 @@ mod tests {
     use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeTopology};
     use crate::session::SessionId;
 
-    use super::super::adapter::RustyClawdAdapter;
     use super::super::MAX_HISTORY_MESSAGES;
+    use super::super::adapter::RustyClawdAdapter;
 
     // ── RustyClawdSession debug format ──
 

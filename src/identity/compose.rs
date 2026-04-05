@@ -38,8 +38,7 @@ impl IdentityManifest {
             }
         }
 
-        let mut supported_base_types: Vec<BaseTypeId> =
-            components[0].supported_base_types.clone();
+        let mut supported_base_types: Vec<BaseTypeId> = components[0].supported_base_types.clone();
         supported_base_types.retain(|candidate| {
             components
                 .iter()

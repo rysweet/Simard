@@ -21,9 +21,7 @@ const MAX_RETRIES_PER_GOAL: u32 = 2;
 const STALE_THRESHOLD_SECONDS: u64 = 120;
 
 // Re-export all public items so `crate::agent_supervisor::X` still works.
-pub use lifecycle::{
-    check_heartbeat, is_goal_complete, kill_subordinate, spawn_subordinate,
-};
+pub use lifecycle::{check_heartbeat, is_goal_complete, kill_subordinate, spawn_subordinate};
 pub use types::{
     HeartbeatStatus, SubordinateConfig, SubordinateHandle, max_retries_per_goal,
     stale_threshold_seconds,

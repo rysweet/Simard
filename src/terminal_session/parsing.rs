@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::error::{SimardError, SimardResult};
 
-use super::types::{DEFAULT_SHELL, WAIT_STEP_TIMEOUT, TerminalStep, TerminalTurnSpec};
+use super::types::{DEFAULT_SHELL, TerminalStep, TerminalTurnSpec, WAIT_STEP_TIMEOUT};
 
 impl TerminalTurnSpec {
     pub(crate) fn parse(raw: &str, base_type: &str) -> SimardResult<Self> {

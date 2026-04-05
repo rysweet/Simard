@@ -54,8 +54,8 @@ fn local_miss_triggers_bridge_fallback() {
 #[test]
 fn bridge_timeout_triggers_retry() {
     // Bridge fails on first call, succeeds on second.
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     let call_count = Arc::new(AtomicUsize::new(0));
     let cc = call_count.clone();

@@ -5,8 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::bridge::{
-    BRIDGE_ERROR_TIMEOUT, BRIDGE_ERROR_TRANSPORT, BridgeErrorPayload, BridgeRequest,
-    BridgeResponse,
+    BRIDGE_ERROR_TIMEOUT, BRIDGE_ERROR_TRANSPORT, BridgeErrorPayload, BridgeRequest, BridgeResponse,
 };
 use crate::error::{SimardError, SimardResult};
 use crate::metadata::{BackendDescriptor, Freshness};

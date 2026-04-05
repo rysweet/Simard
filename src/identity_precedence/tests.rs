@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
-use crate::base_types::{capability_set, BaseTypeCapability, BaseTypeId};
+use crate::base_types::{BaseTypeCapability, BaseTypeId, capability_set};
 use crate::identity::{ManifestContract, MemoryPolicy, OperatingMode};
 use crate::metadata::{Freshness, Provenance};
 use crate::prompt_assets::{PromptAssetId, PromptAssetRef};
