@@ -315,6 +315,7 @@ fn collect_pending_improvements(
                 regressions,
                 decision: None,
                 final_phase: ImprovementPhase::Eval,
+                weak_dimensions: Vec::new(),
             });
         }
     }
@@ -338,6 +339,7 @@ fn collect_pending_improvements(
                 regressions: Vec::new(),
                 decision: None,
                 final_phase: ImprovementPhase::Eval,
+                weak_dimensions: Vec::new(),
             });
         }
         Ok(false) => {}
@@ -382,6 +384,7 @@ fn collect_pending_improvements(
                     regressions: Vec::new(),
                     decision: None,
                     final_phase: ImprovementPhase::Eval,
+                    weak_dimensions: Vec::new(),
                 });
             }
         }
@@ -644,6 +647,7 @@ pub fn run_ooda_cycle(
                 regressions: Vec::new(),
                 decision: None,
                 final_phase: ImprovementPhase::Eval,
+                weak_dimensions: Vec::new(),
             });
         }
     }
@@ -2023,6 +2027,7 @@ mod tests {
             regressions: Vec::new(),
             decision: None,
             final_phase: ImprovementPhase::Eval,
+            weak_dimensions: Vec::new(),
         });
         let result = collect_pending_improvements(&mut state, &None);
         assert!(

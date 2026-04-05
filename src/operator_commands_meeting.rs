@@ -416,7 +416,9 @@ pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::E
         eprintln!("  Agent: ready");
     } else {
         eprintln!("  ⚠ No agent backend available — meeting will be note-taking only.");
-        eprintln!("    Set ANTHROPIC_API_KEY for RustyClawd conversation.");
+        eprintln!(
+            "    Set ANTHROPIC_API_KEY (RustyClawd) or ensure `gh auth status` passes (Copilot)."
+        );
     }
 
     let stdin = io::stdin();

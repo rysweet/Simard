@@ -150,9 +150,23 @@ impl CopilotSdkSession {
     /// The enriched objective includes a shell/command preamble that the
     /// terminal session infrastructure parses, followed by the formatted
     /// turn context as the command payload.
+    ///
+    /// When `identity_context` or `prompt_preamble` are provided (e.g. in
+    /// meeting mode), they are prepended to the objective so the agent
+    /// receives the full conversational context.
     fn build_enriched_objective(&self, input: &BaseTypeTurnInput) -> String {
+        let mut parts = Vec::new();
+        if !input.prompt_preamble.is_empty() {
+            parts.push(input.prompt_preamble.as_str());
+        }
+        if !input.identity_context.is_empty() {
+            parts.push(input.identity_context.as_str());
+        }
+        parts.push(&input.objective);
+
+        let combined_objective = parts.join("\n\n");
         let context = prepare_turn_context(
-            &input.objective,
+            &combined_objective,
             self.memory_bridge.as_ref(),
             self.knowledge_bridge.as_ref(),
         );

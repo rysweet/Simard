@@ -303,15 +303,19 @@ mod tests {
     }
 
     #[test]
-    fn generate_patch_returns_planning_unavailable_without_api_key() {
-        unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
+    fn generate_patch_without_api_key_returns_unavailable() {
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::set_var("_SIMARD_NO_COPILOT_FALLBACK", "1");
+        };
         let inspection = test_inspection();
         let result = generate_patch("improve error handling", &inspection);
-        match result.unwrap_err() {
-            SimardError::PlanningUnavailable { reason } => {
+        unsafe { std::env::remove_var("_SIMARD_NO_COPILOT_FALLBACK") };
+        match result {
+            Err(SimardError::PlanningUnavailable { reason }) => {
                 assert!(reason.contains("no LLM session available"));
             }
-            other => panic!("expected PlanningUnavailable, got: {other}"),
+            other => panic!("expected PlanningUnavailable, got: {other:?}"),
         }
     }
 
