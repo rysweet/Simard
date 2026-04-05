@@ -174,11 +174,27 @@ fn apply_and_review_empty_diff_is_applied() {
         .current_dir(dir.path())
         .output()
         .unwrap();
+    // Configure git user for CI environments where no global config exists.
     std::process::Command::new("git")
+        .args(["config", "user.email", "test@test.com"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let commit_out = std::process::Command::new("git")
         .args(["commit", "--allow-empty", "-m", "init"])
         .current_dir(dir.path())
         .output()
         .unwrap();
+    assert!(
+        commit_out.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&commit_out.stderr)
+    );
 
     let step = PlanStep {
         action: AnalyzedAction::ReadOnlyScan,
