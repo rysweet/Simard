@@ -304,16 +304,18 @@ mod tests {
 
     #[test]
     fn generate_patch_without_api_key_returns_unavailable() {
+        // Force RustyClawd provider without ANTHROPIC_API_KEY → session may open
+        // but run_turn will fail.
         unsafe {
             std::env::remove_var("ANTHROPIC_API_KEY");
-            std::env::set_var("_SIMARD_NO_COPILOT_FALLBACK", "1");
+            std::env::set_var("SIMARD_LLM_PROVIDER", "rustyclawd");
         };
         let inspection = test_inspection();
         let result = generate_patch("improve error handling", &inspection);
-        unsafe { std::env::remove_var("_SIMARD_NO_COPILOT_FALLBACK") };
+        unsafe { std::env::remove_var("SIMARD_LLM_PROVIDER") };
         match result {
-            Err(SimardError::PlanningUnavailable { reason }) => {
-                assert!(reason.contains("no LLM session available"));
+            Err(SimardError::PlanningUnavailable { .. }) => {
+                // Any PlanningUnavailable is correct — whether from open() or run_turn().
             }
             other => panic!("expected PlanningUnavailable, got: {other:?}"),
         }

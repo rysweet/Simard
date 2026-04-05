@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn review_session_open_without_api_key_does_not_panic() {
         unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
-        // May return Some (Copilot fallback) or None; both are valid.
+        // Default provider (Copilot) may or may not open; no panic is the invariant.
         let _ = ReviewSession::open();
     }
     #[test]
