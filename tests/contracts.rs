@@ -408,7 +408,7 @@ fn reflection_snapshot_exposes_adapter_capabilities_and_topologies() {
 
 #[test]
 fn manifest_contract_carries_provenance_and_freshness_directly() {
-    let identity_rs = include_str!("../src/identity.rs");
+    let identity_rs = include_str!("../src/identity/contract.rs");
     let manifest_contract_section = identity_rs
         .split("pub struct ManifestContract")
         .nth(1)
