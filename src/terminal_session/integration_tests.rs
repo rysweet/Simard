@@ -14,7 +14,10 @@ mod tests {
         let raw = "command: echo hello world";
         let spec = TerminalTurnSpec::parse(raw, "test").unwrap();
 
-        assert_eq!(spec.steps, vec![TerminalStep::Input("echo hello world".into())]);
+        assert_eq!(
+            spec.steps,
+            vec![TerminalStep::Input("echo hello world".into())]
+        );
         assert_eq!(spec.shell, "/usr/bin/bash");
         assert_eq!(spec.wait_timeout, Duration::from_secs(5));
         assert!(spec.working_directory.is_none());
@@ -54,7 +57,10 @@ mod tests {
         let spec = TerminalTurnSpec::parse(raw, "test").unwrap();
 
         assert_eq!(spec.shell, "/usr/bin/bash");
-        assert_eq!(spec.working_directory, Some(PathBuf::from("/home/user/project")));
+        assert_eq!(
+            spec.working_directory,
+            Some(PathBuf::from("/home/user/project"))
+        );
         assert_eq!(spec.wait_timeout, Duration::from_secs(30));
         assert_eq!(spec.steps, vec![TerminalStep::Input("ls -la".into())]);
     }
@@ -84,7 +90,10 @@ mod tests {
         let raw = "echo bare line without label";
         let spec = TerminalTurnSpec::parse(raw, "test").unwrap();
 
-        assert_eq!(spec.steps, vec![TerminalStep::Input("echo bare line without label".into())]);
+        assert_eq!(
+            spec.steps,
+            vec![TerminalStep::Input("echo bare line without label".into())]
+        );
     }
 
     #[test]
@@ -92,7 +101,10 @@ mod tests {
         let raw = "unknown-label: some value\ncommand: real";
         let spec = TerminalTurnSpec::parse(raw, "test").unwrap();
 
-        assert_eq!(spec.steps[0], TerminalStep::Input("unknown-label: some value".into()));
+        assert_eq!(
+            spec.steps[0],
+            TerminalStep::Input("unknown-label: some value".into())
+        );
         assert_eq!(spec.steps[1], TerminalStep::Input("real".into()));
     }
 
@@ -178,7 +190,10 @@ mod tests {
 
         assert_eq!(spec.input_count(), 4);
         assert_eq!(spec.wait_count(), 3);
-        assert_eq!(spec.working_directory, Some(PathBuf::from("/home/azureuser")));
+        assert_eq!(
+            spec.working_directory,
+            Some(PathBuf::from("/home/azureuser"))
+        );
         assert_eq!(spec.wait_timeout, Duration::from_secs(10));
     }
 }

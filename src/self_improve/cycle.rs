@@ -412,10 +412,10 @@ mod tests {
             suite_id: "test".to_string(),
             overall: 0.65,
             dimensions: ScoreDimensions {
-                factual_accuracy: 0.80,      // above
-                specificity: 0.50,           // below
-                temporal_awareness: 0.70,    // above
-                source_attribution: 0.40,    // below
+                factual_accuracy: 0.80,       // above
+                specificity: 0.50,            // below
+                temporal_awareness: 0.70,     // above
+                source_attribution: 0.40,     // below
                 confidence_calibration: 0.90, // above
             },
             scenario_count: 6,
