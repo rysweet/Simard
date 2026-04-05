@@ -146,4 +146,94 @@ mod tests {
 
         fs::remove_dir_all(&tmp).unwrap();
     }
+
+    // --- install_dir structure ---
+
+    #[test]
+    fn install_dir_ends_with_bin() {
+        let dir = install_dir();
+        assert!(
+            dir.ends_with("bin"),
+            "install dir should end with 'bin': {}",
+            dir.display()
+        );
+    }
+
+    #[test]
+    fn install_dir_parent_is_dot_simard() {
+        let dir = install_dir();
+        let parent = dir.parent().unwrap();
+        let name = parent.file_name().unwrap().to_str().unwrap();
+        assert_eq!(name, ".simard");
+    }
+
+    // --- dirs_or_home ---
+
+    #[test]
+    fn dirs_or_home_returns_absolute_path() {
+        let home = dirs_or_home();
+        assert!(home.is_absolute());
+    }
+
+    #[test]
+    fn dirs_or_home_is_not_empty() {
+        let home = dirs_or_home();
+        assert!(
+            !home.as_os_str().is_empty(),
+            "home directory should not be empty"
+        );
+    }
+
+    // --- handle_install: binary copy ---
+
+    #[test]
+    fn current_exe_is_available() {
+        let exe = std::env::current_exe();
+        assert!(exe.is_ok(), "should be able to determine current exe");
+        assert!(
+            exe.unwrap().exists(),
+            "current exe should exist on filesystem"
+        );
+    }
+
+    #[test]
+    fn install_dir_does_not_contain_double_slash() {
+        let dir = install_dir();
+        let dir_str = dir.to_string_lossy();
+        assert!(
+            !dir_str.contains("//"),
+            "path should not have double slashes: {dir_str}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_copy_and_permissions_roundtrip() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp =
+            std::env::temp_dir().join(format!("simard-roundtrip-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let src = tmp.join("source");
+        fs::write(&src, b"test-binary-content").unwrap();
+        let dest = tmp.join("dest");
+        fs::copy(&src, &dest).unwrap();
+        fs::set_permissions(&dest, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(dest.exists());
+        let meta = fs::metadata(&dest).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o755, 0o755);
+        assert_eq!(meta.len(), 19); // "test-binary-content".len()
+
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn install_dir_join_simard_gives_full_path() {
+        let dir = install_dir();
+        let full = dir.join("simard");
+        assert!(full.to_string_lossy().ends_with(".simard/bin/simard"));
+    }
 }

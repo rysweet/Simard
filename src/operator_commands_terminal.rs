@@ -1020,4 +1020,216 @@ mod tests {
         let result = run_terminal_recipe_show_probe("nonexistent-recipe-xyz-99999");
         assert!(result.is_err(), "should fail for unknown recipe");
     }
+
+    // --- run_terminal_read_probe: additional error paths ---
+
+    #[test]
+    fn terminal_read_probe_errors_with_empty_state_root() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let result = run_terminal_read_probe("single-process", Some(dir.path().to_path_buf()));
+        assert!(
+            result.is_err(),
+            "should fail when state root has no handoff artifacts"
+        );
+    }
+
+    #[test]
+    fn terminal_read_probe_invalid_topology() {
+        let result = run_terminal_read_probe("invalid-topo", None);
+        assert!(result.is_err(), "should fail for invalid topology");
+    }
+
+    // --- run_terminal_recipe_probe: error paths ---
+
+    #[test]
+    fn terminal_recipe_probe_errors_for_nonexistent_recipe() {
+        let result =
+            run_terminal_recipe_probe("single-process", "nonexistent-recipe-xyz-99999", None);
+        assert!(result.is_err(), "should fail for unknown recipe");
+    }
+
+    #[test]
+    fn terminal_recipe_probe_errors_for_invalid_recipe_name() {
+        let result = run_terminal_recipe_probe("single-process", "INVALID_NAME", None);
+        assert!(result.is_err(), "should fail for invalid recipe name");
+    }
+
+    // --- run_terminal_recipe_show_probe: additional patterns ---
+
+    #[test]
+    fn terminal_recipe_show_errors_for_empty_name() {
+        let result = run_terminal_recipe_show_probe("");
+        assert!(result.is_err(), "should fail for empty recipe name");
+    }
+
+    #[test]
+    fn terminal_recipe_show_errors_for_invalid_chars() {
+        let result = run_terminal_recipe_show_probe("recipe/with/slashes");
+        assert!(result.is_err(), "should fail for recipe name with slashes");
+    }
+
+    // --- TerminalReadView::from_handoff: more edge cases ---
+
+    #[test]
+    fn from_handoff_with_invalid_objective_metadata() {
+        let mut session = make_session_record();
+        session.objective = "not a valid metadata format".to_string();
+        let handoff = make_handoff(Some(session), required_evidence_records());
+        let result = TerminalReadView::from_handoff(
+            PathBuf::from("/test"),
+            handoff,
+            "h.json".to_string(),
+            None,
+        );
+        assert!(
+            result.is_err(),
+            "should fail for invalid objective metadata format"
+        );
+    }
+
+    #[test]
+    fn from_handoff_memory_and_evidence_counts_with_multiple() {
+        let mut handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        // Add multiple memory records
+        for i in 0..5 {
+            handoff.memory_records.push(MemoryRecord {
+                key: format!("key-{i}"),
+                scope: crate::MemoryScope::SessionScratch,
+                value: format!("value-{i}"),
+                session_id: SessionId::parse("00000000-0000-0000-0000-000000000001").unwrap(),
+                recorded_in: SessionPhase::Execution,
+            });
+        }
+        let evidence_count = handoff.evidence_records.len();
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test"),
+            handoff,
+            "h.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(view.memory_record_count, 5);
+        assert_eq!(view.evidence_record_count, evidence_count);
+    }
+
+    #[test]
+    fn from_handoff_step_count_matches_steps_len() {
+        let mut evidence = required_evidence_records();
+        evidence.push(make_evidence("terminal-step-1=a"));
+        evidence.push(make_evidence("terminal-step-2=b"));
+        evidence.push(make_evidence("terminal-step-3=c"));
+        evidence.push(make_evidence("terminal-step-4=d"));
+        let handoff = make_handoff(Some(make_session_record()), evidence);
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test"),
+            handoff,
+            "h.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(view.step_count, view.steps.len());
+        assert_eq!(view.step_count, 4);
+    }
+
+    // --- print methods: edge cases ---
+
+    #[test]
+    fn print_with_no_last_output_line_does_not_panic() {
+        let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test"),
+            handoff,
+            "h.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert!(view.last_output_line.is_none());
+        view.print(); // should not panic with None last_output_line
+    }
+
+    #[test]
+    fn print_with_continuity_source_does_not_panic() {
+        let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test"),
+            handoff,
+            "h.json".to_string(),
+            Some("test-continuity-source".to_string()),
+        )
+        .unwrap();
+        view.print(); // should not panic
+    }
+
+    // --- run_terminal_recipe_list_probe: structural ---
+
+    #[test]
+    fn terminal_recipe_list_returns_result() {
+        // May succeed or fail, but should not panic
+        let result = run_terminal_recipe_list_probe();
+        // If it succeeds, it printed recipes
+        // If it fails, the prompt_assets directory might be missing
+        let _ = result;
+    }
+
+    // --- run_terminal_probe_from_file: error paths ---
+
+    #[test]
+    fn terminal_probe_from_file_errors_for_nonexistent_file() {
+        let result = run_terminal_probe_from_file(
+            "single-process",
+            std::path::Path::new("/nonexistent/objective.txt"),
+            None,
+        );
+        assert!(result.is_err(), "should fail for missing objective file");
+    }
+
+    #[test]
+    fn terminal_probe_from_file_errors_for_directory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let result = run_terminal_probe_from_file("single-process", dir.path(), None);
+        assert!(result.is_err(), "should fail when path is a directory");
+    }
+
+    // --- TerminalReadView: field access verification ---
+
+    #[test]
+    fn from_handoff_objective_metadata_contains_chars() {
+        let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test"),
+            handoff,
+            "h.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert!(view.objective_metadata.contains("chars="));
+    }
+
+    #[test]
+    fn from_handoff_identity_is_simard_engineer() {
+        let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test"),
+            handoff,
+            "h.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(view.identity, "simard-engineer");
+    }
+
+    #[test]
+    fn from_handoff_default_wait_values() {
+        let handoff = make_handoff(Some(make_session_record()), required_evidence_records());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test"),
+            handoff,
+            "h.json".to_string(),
+            None,
+        )
+        .unwrap();
+        // Default values when evidence not present
+        assert_eq!(view.wait_count, "0");
+        assert_eq!(view.wait_timeout_seconds, "5");
+    }
 }

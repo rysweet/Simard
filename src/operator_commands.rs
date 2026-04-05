@@ -1943,4 +1943,422 @@ mod tests {
         let values = terminal_evidence_values(&records, "step");
         assert_eq!(values, vec!["a match"]);
     }
+
+    // --- dispatch_operator_probe: trailing argument rejection ---
+
+    #[test]
+    fn dispatch_operator_probe_bootstrap_rejects_extra_args() {
+        let err = dispatch_operator_probe(args(&[
+            "bootstrap-run",
+            "id",
+            "local-harness",
+            "single-process",
+            "objective",
+            "/some/path",
+            "extra-trailing",
+        ]))
+        .unwrap_err();
+        assert!(err.to_string().contains("trailing arguments"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_handoff_rejects_extra_args() {
+        let err = dispatch_operator_probe(args(&[
+            "handoff-roundtrip",
+            "id",
+            "local-harness",
+            "single-process",
+            "objective",
+            "extra",
+        ]))
+        .unwrap_err();
+        assert!(err.to_string().contains("trailing arguments"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_meeting_run_missing_objective() {
+        let err =
+            dispatch_operator_probe(args(&["meeting-run", "local-harness", "single-process"]))
+                .unwrap_err();
+        assert!(err.to_string().contains("expected objective"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_meeting_read_missing_topology() {
+        let err = dispatch_operator_probe(args(&["meeting-read", "local-harness"])).unwrap_err();
+        assert!(err.to_string().contains("expected topology"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_terminal_run_missing_objective() {
+        let err = dispatch_operator_probe(args(&["terminal-run", "single-process"])).unwrap_err();
+        assert!(err.to_string().contains("expected objective"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_terminal_run_file_missing_objective_file() {
+        let err =
+            dispatch_operator_probe(args(&["terminal-run-file", "single-process"])).unwrap_err();
+        assert!(err.to_string().contains("expected objective file"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_terminal_recipe_run_missing_recipe_name() {
+        let err =
+            dispatch_operator_probe(args(&["terminal-recipe-run", "single-process"])).unwrap_err();
+        assert!(err.to_string().contains("expected recipe name"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_engineer_loop_missing_workspace() {
+        let err =
+            dispatch_operator_probe(args(&["engineer-loop-run", "single-process"])).unwrap_err();
+        assert!(err.to_string().contains("expected workspace root"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_engineer_loop_missing_objective() {
+        let err = dispatch_operator_probe(args(&[
+            "engineer-loop-run",
+            "single-process",
+            "/tmp/workspace",
+        ]))
+        .unwrap_err();
+        assert!(err.to_string().contains("expected objective"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_review_run_missing_topology() {
+        let err = dispatch_operator_probe(args(&["review-run", "local-harness"])).unwrap_err();
+        assert!(err.to_string().contains("expected topology"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_review_run_missing_objective() {
+        let err = dispatch_operator_probe(args(&["review-run", "local-harness", "single-process"]))
+            .unwrap_err();
+        assert!(err.to_string().contains("expected objective"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_improvement_curation_run_missing_topology() {
+        let err = dispatch_operator_probe(args(&["improvement-curation-run", "local-harness"]))
+            .unwrap_err();
+        assert!(err.to_string().contains("expected topology"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_improvement_curation_read_missing_topology() {
+        let err = dispatch_operator_probe(args(&["improvement-curation-read", "local-harness"]))
+            .unwrap_err();
+        assert!(err.to_string().contains("expected topology"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_goal_curation_missing_topology() {
+        let err =
+            dispatch_operator_probe(args(&["goal-curation-run", "local-harness"])).unwrap_err();
+        assert!(err.to_string().contains("expected topology"));
+    }
+
+    #[test]
+    fn dispatch_operator_probe_goal_curation_missing_objective() {
+        let err = dispatch_operator_probe(args(&[
+            "goal-curation-run",
+            "local-harness",
+            "single-process",
+        ]))
+        .unwrap_err();
+        assert!(err.to_string().contains("expected objective"));
+    }
+
+    // --- dispatch_legacy_gym_cli: more edge cases ---
+
+    #[test]
+    fn dispatch_legacy_gym_cli_compare_rejects_extra_args() {
+        let err = dispatch_legacy_gym_cli(args(&["compare", "scenario-1", "extra"])).unwrap_err();
+        assert!(err.to_string().contains("trailing arguments"));
+    }
+
+    #[test]
+    fn dispatch_legacy_gym_cli_run_suite_rejects_extra_args() {
+        let err = dispatch_legacy_gym_cli(args(&["run-suite", "suite-1", "extra"])).unwrap_err();
+        assert!(err.to_string().contains("trailing arguments"));
+    }
+
+    // --- terminal_recipe_reference: more patterns ---
+
+    #[test]
+    fn terminal_recipe_reference_rejects_special_chars() {
+        assert!(terminal_recipe_reference("recipe!").is_err());
+        assert!(terminal_recipe_reference("recipe@name").is_err());
+        assert!(terminal_recipe_reference("recipe#1").is_err());
+    }
+
+    #[test]
+    fn terminal_recipe_reference_accepts_all_lowercase_digits_hyphens() {
+        assert!(terminal_recipe_reference("a").is_ok());
+        assert!(terminal_recipe_reference("abc-def-123").is_ok());
+        assert!(terminal_recipe_reference("0").is_ok());
+    }
+
+    // --- parse_runtime_topology: exhaustive ---
+
+    #[test]
+    fn parse_runtime_topology_empty_string() {
+        assert!(parse_runtime_topology("").is_err());
+    }
+
+    #[test]
+    fn parse_runtime_topology_case_sensitive() {
+        assert!(parse_runtime_topology("Single-Process").is_err());
+        assert!(parse_runtime_topology("DISTRIBUTED").is_err());
+    }
+
+    // --- GoalRegisterView: edge cases ---
+
+    #[test]
+    fn goal_register_view_single_goal_each_status() {
+        let records = vec![
+            make_goal("A", GoalStatus::Active, 1),
+            make_goal("B", GoalStatus::Proposed, 1),
+            make_goal("C", GoalStatus::Paused, 1),
+            make_goal("D", GoalStatus::Completed, 1),
+        ];
+        let view = GoalRegisterView::from_records(records);
+        for section in &view.sections {
+            assert_eq!(section.goals.len(), 1);
+        }
+    }
+
+    #[test]
+    fn goal_register_view_print_does_not_panic_with_goals() {
+        let records = vec![
+            make_goal("Alpha", GoalStatus::Active, 1),
+            make_goal("Beta", GoalStatus::Proposed, 2),
+        ];
+        let view = GoalRegisterView::from_records(records);
+        view.print(); // should not panic
+    }
+
+    #[test]
+    fn goal_register_view_print_does_not_panic_empty() {
+        let view = GoalRegisterView::from_records(vec![]);
+        view.print(); // should not panic
+    }
+
+    // --- GoalRegisterSection: priority sort tiebreaking ---
+
+    #[test]
+    fn goal_register_section_sorts_by_slug_as_final_tiebreak() {
+        let records = vec![
+            make_goal("Same", GoalStatus::Active, 1),
+            make_goal("Same", GoalStatus::Active, 1),
+        ];
+        let view = GoalRegisterView::from_records(records);
+        // Both have same title and priority, slug is derived from title
+        assert_eq!(view.sections[0].goals.len(), 2);
+    }
+
+    // --- print_string_section ---
+
+    #[test]
+    fn print_string_section_empty_does_not_panic() {
+        print_string_section("Items", &[]);
+    }
+
+    #[test]
+    fn print_string_section_with_values_does_not_panic() {
+        print_string_section("Items", &["first".to_string(), "second".to_string()]);
+    }
+
+    // --- print_meeting_goal_section ---
+
+    #[test]
+    fn print_meeting_goal_section_empty_does_not_panic() {
+        print_meeting_goal_section(&[]);
+    }
+
+    // --- print_goal_section ---
+
+    #[test]
+    fn print_goal_section_empty_does_not_panic() {
+        print_goal_section(&[], GoalStatus::Active, "Active");
+    }
+
+    #[test]
+    fn print_goal_section_with_matching_goals_does_not_panic() {
+        let goals = vec![
+            make_goal("X", GoalStatus::Active, 1),
+            make_goal("Y", GoalStatus::Active, 2),
+        ];
+        print_goal_section(&goals, GoalStatus::Active, "Active");
+    }
+
+    #[test]
+    fn print_goal_section_with_no_matching_status() {
+        let goals = vec![make_goal("X", GoalStatus::Active, 1)];
+        print_goal_section(&goals, GoalStatus::Completed, "Completed");
+    }
+
+    // --- print_terminal_bridge_section ---
+
+    #[test]
+    fn print_terminal_bridge_section_none_does_not_panic() {
+        print_terminal_bridge_section(None, "default-source");
+    }
+
+    // --- load_terminal_objective_file: symlink test ---
+
+    #[cfg(unix)]
+    #[test]
+    fn load_terminal_objective_file_rejects_symlink() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real_file = dir.path().join("real.txt");
+        std::fs::write(&real_file, "content").unwrap();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&real_file, &link).unwrap();
+        let result = load_terminal_objective_file(&link);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("symlink"));
+    }
+
+    // --- require_existing_read_file_for_mode: symlink test ---
+
+    #[cfg(unix)]
+    #[test]
+    fn require_existing_read_file_rejects_symlink() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real_file = dir.path().join("real.json");
+        std::fs::write(&real_file, "{}").unwrap();
+        let link = dir.path().join("link.json");
+        std::os::unix::fs::symlink(&real_file, &link).unwrap();
+        let result = require_existing_read_file_for_mode("test", dir.path(), &link);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("symlink"));
+    }
+
+    // --- require_existing_read_directory_for_mode: symlink test ---
+
+    #[cfg(unix)]
+    #[test]
+    fn require_existing_read_directory_rejects_symlink() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real_dir = dir.path().join("real_dir");
+        std::fs::create_dir(&real_dir).unwrap();
+        let link = dir.path().join("link_dir");
+        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
+        let result =
+            require_existing_read_directory_for_mode("test", dir.path(), &link, "link_dir/");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("symlink"));
+    }
+
+    // --- validate_existing_read_state_root_root: symlink test ---
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_existing_read_state_root_root_rejects_symlink() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real_dir = dir.path().join("real");
+        std::fs::create_dir(&real_dir).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
+        let result = validate_existing_read_state_root_root("test", &link);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("symlink"));
+    }
+
+    // --- artifact_name: more edge cases ---
+
+    #[test]
+    fn artifact_name_with_nested_path() {
+        assert_eq!(artifact_name(Path::new("/a/b/c/d/file.json")), "file.json");
+    }
+
+    #[test]
+    fn artifact_name_with_no_extension() {
+        assert_eq!(artifact_name(Path::new("/a/b/Makefile")), "Makefile");
+    }
+
+    #[test]
+    fn artifact_name_with_empty_path() {
+        assert_eq!(artifact_name(Path::new("")), "file");
+    }
+
+    // --- optional_terminal_evidence_value: empty records ---
+
+    #[test]
+    fn optional_terminal_evidence_value_empty_records() {
+        let records: Vec<crate::EvidenceRecord> = vec![];
+        assert_eq!(
+            optional_terminal_evidence_value(&records, "terminal-cwd="),
+            None
+        );
+    }
+
+    #[test]
+    fn optional_terminal_evidence_value_returns_last_match() {
+        let records = vec![
+            make_evidence("terminal-cwd=/first"),
+            make_evidence("terminal-cwd=/second"),
+        ];
+        assert_eq!(
+            optional_terminal_evidence_value(&records, "terminal-cwd="),
+            Some("/second")
+        );
+    }
+
+    // --- terminal_evidence_values: multi-digit indices ---
+
+    #[test]
+    fn terminal_evidence_values_handles_multi_digit_indices() {
+        let records = vec![
+            make_evidence("step10=ten"),
+            make_evidence("step99=ninety-nine"),
+        ];
+        let values = terminal_evidence_values(&records, "step");
+        assert_eq!(values, vec!["ten", "ninety-nine"]);
+    }
+
+    // --- render_redacted_objective_metadata: edge cases ---
+
+    #[test]
+    fn render_redacted_objective_metadata_empty_string() {
+        assert!(render_redacted_objective_metadata("").is_err());
+    }
+
+    #[test]
+    fn render_redacted_objective_metadata_partial_format() {
+        assert!(render_redacted_objective_metadata("objective-metadata(chars=10").is_err());
+    }
+
+    // --- next_required with multiple items ---
+
+    #[test]
+    fn next_required_consumes_only_first_item() {
+        let mut iter = args(&["first", "second"]).into_iter();
+        assert_eq!(next_required(&mut iter, "a").unwrap(), "first");
+        assert_eq!(next_required(&mut iter, "b").unwrap(), "second");
+    }
+
+    // --- reject_extra_args with single extra ---
+
+    #[test]
+    fn reject_extra_args_single_trailing() {
+        let err = reject_extra_args(args(&["only_one"]).into_iter()).unwrap_err();
+        assert!(err.to_string().contains("only_one"));
+    }
+
+    // --- print_text / print_display smoke tests ---
+
+    #[test]
+    fn print_text_does_not_panic() {
+        print_text("label", "value");
+    }
+
+    #[test]
+    fn print_display_does_not_panic() {
+        print_display("label", 42);
+    }
 }

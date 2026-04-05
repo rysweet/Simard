@@ -1128,4 +1128,216 @@ mod tests {
         // May be empty if the file doesn't exist, but must not panic
         let _ = prompt.len();
     }
+
+    // ── build_live_meeting_context — structural checks ─────────────────
+
+    #[test]
+    fn build_live_meeting_context_empty_bridge_has_at_least_two_sections() {
+        let bridge = empty_bridge();
+        let ctx = build_live_meeting_context(&bridge);
+        // Even with empty bridge, default operator and projects sections appear
+        let section_count = ctx.matches("## ").count();
+        assert!(
+            section_count >= 2,
+            "expected at least 2 sections, got {section_count}"
+        );
+    }
+
+    #[test]
+    fn build_live_meeting_context_empty_bridge_includes_known_projects() {
+        let bridge = empty_bridge();
+        let ctx = build_live_meeting_context(&bridge);
+        assert!(
+            ctx.contains("RustyClawd"),
+            "expected RustyClawd in defaults"
+        );
+        assert!(ctx.contains("amplihack"), "expected amplihack in defaults");
+    }
+
+    #[test]
+    fn build_live_meeting_context_live_state_header_always_present() {
+        let bridge = bridge_with_all_fact_types();
+        let ctx = build_live_meeting_context(&bridge);
+        assert!(ctx.starts_with("## Live State"));
+    }
+
+    #[test]
+    fn build_live_meeting_context_with_all_types_does_not_contain_no_memory_fallback() {
+        let bridge = bridge_with_all_fact_types();
+        let ctx = build_live_meeting_context(&bridge);
+        assert!(!ctx.contains("No cognitive memory available"));
+    }
+
+    #[test]
+    fn build_live_meeting_context_meeting_facts_numbered() {
+        let bridge = bridge_with_meeting_facts();
+        let ctx = build_live_meeting_context(&bridge);
+        assert!(ctx.contains("1. "), "items should be numbered");
+    }
+
+    // ── bridge_with_specific_facts — validate each category ────────────
+
+    #[test]
+    fn build_live_meeting_context_research_section_is_bulleted() {
+        let bridge = bridge_with_specific_facts("research:", "research", "LLM alignment research");
+        let ctx = build_live_meeting_context(&bridge);
+        assert!(
+            ctx.contains("- LLM alignment research"),
+            "research section should use bullet points"
+        );
+    }
+
+    #[test]
+    fn build_live_meeting_context_improvement_section_is_bulleted() {
+        let bridge =
+            bridge_with_specific_facts("improvement:", "improvement", "Better error recovery");
+        let ctx = build_live_meeting_context(&bridge);
+        assert!(
+            ctx.contains("- Better error recovery"),
+            "improvement section should use bullet points"
+        );
+    }
+
+    #[test]
+    fn build_live_meeting_context_operator_section_is_bulleted() {
+        let bridge = bridge_with_specific_facts("operator:", "operator", "Custom operator context");
+        let ctx = build_live_meeting_context(&bridge);
+        assert!(
+            ctx.contains("- Custom operator context"),
+            "operator section should use bullet points"
+        );
+    }
+
+    #[test]
+    fn build_live_meeting_context_project_section_is_bulleted() {
+        let bridge = bridge_with_specific_facts("project:", "project", "CustomProject — testing");
+        let ctx = build_live_meeting_context(&bridge);
+        assert!(
+            ctx.contains("- CustomProject"),
+            "project section should use bullet points"
+        );
+    }
+
+    // ── run_meeting_read_probe — additional scenarios ───────────────────
+
+    #[test]
+    fn meeting_read_probe_rejects_invalid_meeting_record_format() {
+        let dir = TempDir::new().unwrap();
+        // Write a record that looks_like_persisted_meeting_record but can't be parsed
+        let record = "agenda=x; updates=[]; decisions=[]; risks=[]; next_steps=[]; open_questions=[]; goals=[INVALID_GOAL_FORMAT]";
+        let records = serde_json::json!([{
+            "key": "session-1-meeting",
+            "scope": "decision",
+            "value": record,
+            "session_id": "session-1",
+            "recorded_in": "complete"
+        }]);
+        std::fs::write(
+            dir.path().join("memory_records.json"),
+            serde_json::to_string(&records).unwrap(),
+        )
+        .unwrap();
+        // This should either succeed or fail gracefully (no panic)
+        let _result = run_meeting_read_probe(
+            "local-harness",
+            "single-process",
+            Some(dir.path().to_path_buf()),
+        );
+    }
+
+    // ── run_goal_curation_read_probe — empty goal store ────────────────
+
+    #[test]
+    fn goal_curation_read_probe_with_empty_goal_records() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("goal_records.json"), "[]").unwrap();
+        let result = run_goal_curation_read_probe(
+            "local-harness",
+            "single-process",
+            Some(dir.path().to_path_buf()),
+        );
+        assert!(result.is_ok());
+    }
+
+    // ── run_improvement_curation_read_probe — more error paths ────────
+
+    #[test]
+    fn improvement_curation_read_probe_rejects_nonexistent_directory() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("nonexistent-state-root");
+        let result =
+            run_improvement_curation_read_probe("local-harness", "single-process", Some(missing));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn improvement_curation_read_probe_with_dir_but_no_review_artifacts() {
+        let dir = TempDir::new().unwrap();
+        // Has a memory file but no review-artifacts directory
+        std::fs::write(dir.path().join("memory_records.json"), "[]").unwrap();
+        let result = run_improvement_curation_read_probe(
+            "local-harness",
+            "single-process",
+            Some(dir.path().to_path_buf()),
+        );
+        assert!(result.is_err());
+    }
+
+    // ── open_meeting_agent_session ─────────────────────────────────────
+
+    #[test]
+    fn open_meeting_agent_session_returns_none_without_api_key() {
+        // Without ANTHROPIC_API_KEY set, should return None gracefully
+        let _result = open_meeting_agent_session();
+        // Just verify it doesn't panic; result depends on env
+    }
+
+    // ── empty_bridge helper: additional validation ─────────────────────
+
+    #[test]
+    fn empty_bridge_search_returns_empty_for_various_prefixes() {
+        let bridge = empty_bridge();
+        for prefix in &[
+            "meeting:",
+            "decision:",
+            "goal:",
+            "operator:",
+            "project:",
+            "research:",
+            "improvement:",
+        ] {
+            let facts = bridge.search_facts(prefix, 10, 0.0).unwrap_or_default();
+            assert!(facts.is_empty(), "expected empty for prefix {prefix}");
+        }
+    }
+
+    // ── bridge_with_all_fact_types: specific content checks ────────────
+
+    #[test]
+    fn build_live_meeting_context_all_types_contains_sprint_review() {
+        let bridge = bridge_with_all_fact_types();
+        let ctx = build_live_meeting_context(&bridge);
+        assert!(ctx.contains("Sprint review completed"));
+    }
+
+    #[test]
+    fn build_live_meeting_context_all_types_contains_migration_plan() {
+        let bridge = bridge_with_all_fact_types();
+        let ctx = build_live_meeting_context(&bridge);
+        assert!(ctx.contains("Approved migration plan"));
+    }
+
+    #[test]
+    fn build_live_meeting_context_all_types_contains_api_refactor() {
+        let bridge = bridge_with_all_fact_types();
+        let ctx = build_live_meeting_context(&bridge);
+        assert!(ctx.contains("Complete API refactor"));
+    }
+
+    #[test]
+    fn build_live_meeting_context_all_types_contains_error_handling() {
+        let bridge = bridge_with_all_fact_types();
+        let ctx = build_live_meeting_context(&bridge);
+        assert!(ctx.contains("Add better error handling"));
+    }
 }

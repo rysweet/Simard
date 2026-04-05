@@ -271,4 +271,129 @@ mod tests {
         assert!(result.contains("line1"), "line content should be preserved");
         assert!(result.contains("line2"), "line content should be preserved");
     }
+
+    // --- run_review_probe argument edge cases ---
+
+    #[test]
+    fn review_probe_errors_with_unusual_base_type() {
+        let result = run_review_probe(
+            "nonexistent-base-type",
+            "single-process",
+            "test objective",
+            Some(PathBuf::from("/nonexistent/path-99999")),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn review_probe_errors_with_unusual_topology() {
+        let result = run_review_probe(
+            "terminal-shell",
+            "nonexistent-topology",
+            "test objective",
+            Some(PathBuf::from("/nonexistent/path-99998")),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn review_read_probe_errors_with_unusual_base_type() {
+        let result = run_review_read_probe(
+            "nonexistent-base-type",
+            "single-process",
+            Some(PathBuf::from("/nonexistent/path-99997")),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn review_read_probe_errors_with_unusual_topology() {
+        let result = run_review_read_probe(
+            "terminal-shell",
+            "nonexistent-topology",
+            Some(PathBuf::from("/nonexistent/path-99996")),
+        );
+        assert!(result.is_err());
+    }
+
+    // --- sanitize_terminal_text additional ---
+
+    #[test]
+    fn sanitize_terminal_text_tab_characters() {
+        let input = "col1\tcol2\tcol3";
+        let result = sanitize_terminal_text(input);
+        assert!(
+            result.contains("col1") && result.contains("col2") && result.contains("col3"),
+            "tab-separated content should be preserved: {result}"
+        );
+    }
+
+    #[test]
+    fn sanitize_terminal_text_nested_ansi() {
+        let input = "\x1b[1m\x1b[31mbold red\x1b[0m normal";
+        let result = sanitize_terminal_text(input);
+        assert!(
+            !result.contains("\x1b"),
+            "nested escapes stripped: {result}"
+        );
+        assert!(result.contains("normal"), "text preserved: {result}");
+    }
+
+    #[test]
+    fn sanitize_terminal_text_long_input() {
+        let input = "a".repeat(10_000);
+        let result = sanitize_terminal_text(&input);
+        assert_eq!(result.len(), 10_000);
+    }
+
+    #[test]
+    fn sanitize_terminal_text_mixed_unicode_and_ansi() {
+        let input = "\x1b[32m日本語\x1b[0m テスト";
+        let result = sanitize_terminal_text(input);
+        assert!(!result.contains("\x1b"));
+        assert!(result.contains("テスト"));
+    }
+
+    // --- review_read_probe with scratch dirs ---
+
+    #[test]
+    fn review_read_probe_with_files_but_no_review_artifact() {
+        let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-scratch")
+            .join(format!("review-no-artifact-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&scratch);
+        // Write a dummy file that isn't a review artifact
+        let _ = std::fs::write(scratch.join("dummy.txt"), "not a review");
+
+        let result =
+            run_review_read_probe("terminal-shell", "single-process", Some(scratch.clone()));
+        assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn review_probe_with_long_objective() {
+        let long_objective = "a".repeat(5000);
+        let result = run_review_probe(
+            "terminal-shell",
+            "single-process",
+            &long_objective,
+            Some(PathBuf::from("/nonexistent/path-long-obj")),
+        );
+        assert!(result.is_err());
+    }
+
+    // --- BootstrapInputs default ---
+
+    #[test]
+    fn bootstrap_inputs_default_has_all_none() {
+        let inputs = BootstrapInputs::default();
+        assert!(inputs.prompt_root.is_none());
+        assert!(inputs.objective.is_none());
+        assert!(inputs.state_root.is_none());
+        assert!(inputs.identity.is_none());
+        assert!(inputs.base_type.is_none());
+        assert!(inputs.topology.is_none());
+    }
 }

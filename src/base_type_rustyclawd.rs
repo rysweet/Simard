@@ -877,4 +877,264 @@ mod tests {
         let debug = format!("{adapter:?}");
         assert!(debug.contains("RustyClawdAdapter"));
     }
+
+    // ── RustyClawdAdapter: additional construction tests ──
+
+    #[test]
+    fn registered_adapter_with_empty_id() {
+        let adapter = RustyClawdAdapter::registered("");
+        assert!(adapter.is_ok(), "empty id should still construct");
+        assert_eq!(adapter.unwrap().descriptor().id.as_str(), "");
+    }
+
+    #[test]
+    fn registered_adapter_with_hyphenated_id() {
+        let adapter = RustyClawdAdapter::registered("my-custom-agent-type").unwrap();
+        assert_eq!(adapter.descriptor().id.as_str(), "my-custom-agent-type");
+    }
+
+    #[test]
+    fn registered_adapter_backend_identity_is_stable() {
+        let a1 = RustyClawdAdapter::registered("test1").unwrap();
+        let a2 = RustyClawdAdapter::registered("test2").unwrap();
+        assert_eq!(
+            a1.descriptor().backend.identity,
+            a2.descriptor().backend.identity,
+            "backend identity should be the same regardless of adapter id"
+        );
+    }
+
+    #[test]
+    fn registered_adapter_does_not_support_distributed() {
+        let adapter = RustyClawdAdapter::registered("rc").unwrap();
+        assert!(
+            !adapter
+                .descriptor()
+                .supports_topology(RuntimeTopology::Distributed),
+        );
+    }
+
+    // ── open_session: supported topologies ──
+
+    #[test]
+    fn open_session_succeeds_for_multi_process() {
+        use crate::base_types::BaseTypeSessionRequest;
+        use crate::identity::OperatingMode;
+        use crate::runtime::{RuntimeAddress, RuntimeNodeId};
+        use crate::session::SessionId;
+
+        let adapter = RustyClawdAdapter::registered("rc-test").unwrap();
+        let request = BaseTypeSessionRequest {
+            session_id: SessionId::try_from("session-00000000-0000-0000-0000-000000000010")
+                .unwrap(),
+            mode: OperatingMode::Engineer,
+            topology: RuntimeTopology::MultiProcess,
+            prompt_assets: vec![],
+            runtime_node: RuntimeNodeId::local(),
+            mailbox_address: RuntimeAddress::new("test-addr"),
+        };
+        let result = adapter.open_session(request);
+        assert!(result.is_ok());
+    }
+
+    // ── Session lifecycle: double-close, double-open guards ──
+
+    #[test]
+    fn session_descriptor_matches_adapter_descriptor() {
+        use crate::base_types::BaseTypeSessionRequest;
+        use crate::identity::OperatingMode;
+        use crate::runtime::{RuntimeAddress, RuntimeNodeId};
+        use crate::session::SessionId;
+
+        let adapter = RustyClawdAdapter::registered("rc-desc").unwrap();
+        let request = BaseTypeSessionRequest {
+            session_id: SessionId::try_from("session-00000000-0000-0000-0000-000000000011")
+                .unwrap(),
+            mode: OperatingMode::Engineer,
+            topology: RuntimeTopology::SingleProcess,
+            prompt_assets: vec![],
+            runtime_node: RuntimeNodeId::local(),
+            mailbox_address: RuntimeAddress::new("test-addr"),
+        };
+        let session = adapter.open_session(request).unwrap();
+        assert_eq!(
+            session.descriptor().id.as_str(),
+            adapter.descriptor().id.as_str()
+        );
+    }
+
+    // ── Tool definitions: structural validation ──
+
+    #[test]
+    fn tool_definitions_have_valid_json_schemas() {
+        let tools = rustyclawd_tool_definitions();
+        for tool in &tools {
+            let schema = &tool.input_schema;
+            assert_eq!(
+                schema["type"].as_str(),
+                Some("object"),
+                "tool {} schema should be object type",
+                tool.name
+            );
+            assert!(
+                schema["properties"].is_object(),
+                "tool {} should have properties",
+                tool.name
+            );
+        }
+    }
+
+    #[test]
+    fn tool_definitions_bash_has_command_required() {
+        let tools = rustyclawd_tool_definitions();
+        let bash = tools.iter().find(|t| t.name == "Bash").unwrap();
+        let required = bash.input_schema["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v.as_str() == Some("command")));
+    }
+
+    #[test]
+    fn tool_definitions_write_has_file_path_and_content_required() {
+        let tools = rustyclawd_tool_definitions();
+        let write = tools.iter().find(|t| t.name == "Write").unwrap();
+        let required = write.input_schema["required"].as_array().unwrap();
+        let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(required_strs.contains(&"file_path"));
+        assert!(required_strs.contains(&"content"));
+    }
+
+    #[test]
+    fn tool_definitions_edit_has_three_required_fields() {
+        let tools = rustyclawd_tool_definitions();
+        let edit = tools.iter().find(|t| t.name == "Edit").unwrap();
+        let required = edit.input_schema["required"].as_array().unwrap();
+        assert_eq!(required.len(), 3);
+    }
+
+    #[test]
+    fn tool_definitions_read_has_file_path_required() {
+        let tools = rustyclawd_tool_definitions();
+        let read = tools.iter().find(|t| t.name == "Read").unwrap();
+        let required = read.input_schema["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v.as_str() == Some("file_path")));
+    }
+
+    // ── execute_tool_locally: more tool coverage ──
+
+    #[tokio::test]
+    async fn execute_tool_locally_bash_with_timeout_param() {
+        let input = serde_json::json!({ "command": "echo timeout_test", "timeout": 5000 });
+        let result = execute_tool_locally("Bash", &input).await.unwrap();
+        let stdout = result.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(stdout.contains("timeout_test"));
+    }
+
+    #[tokio::test]
+    async fn execute_tool_locally_bash_stderr_capture() {
+        let input = serde_json::json!({ "command": "echo stderr_test >&2" });
+        let result = execute_tool_locally("Bash", &input).await.unwrap();
+        let stderr = result.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(stderr.contains("stderr_test"));
+    }
+
+    #[tokio::test]
+    async fn execute_tool_locally_write_empty_content() {
+        let dir =
+            std::env::temp_dir().join(format!("simard-test-empty-write-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("empty.txt");
+        let input = serde_json::json!({ "file_path": file_path.to_str().unwrap(), "content": "" });
+        let result = execute_tool_locally("Write", &input).await.unwrap();
+        assert_eq!(result.get("status").and_then(|v| v.as_str()), Some("ok"));
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert!(content.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn execute_tool_locally_edit_no_match_still_writes() {
+        let dir =
+            std::env::temp_dir().join(format!("simard-test-edit-nomatch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("edit_nomatch.txt");
+        std::fs::write(&file_path, "original content").unwrap();
+        let input = serde_json::json!({
+            "file_path": file_path.to_str().unwrap(),
+            "old_string": "nonexistent",
+            "new_string": "replacement"
+        });
+        let result = execute_tool_locally("Edit", &input).await.unwrap();
+        assert_eq!(result.get("status").and_then(|v| v.as_str()), Some("ok"));
+        // Content should be unchanged since old_string wasn't found
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "original content");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn execute_tool_locally_read_existing_file() {
+        let dir = std::env::temp_dir().join(format!("simard-test-read-ok-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("readable.txt");
+        std::fs::write(&file_path, "test content here").unwrap();
+        let input = serde_json::json!({ "file_path": file_path.to_str().unwrap() });
+        let result = execute_tool_locally("Read", &input).await.unwrap();
+        let content = result.get("content").and_then(|v| v.as_str()).unwrap();
+        assert_eq!(content, "test content here");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn execute_tool_locally_write_with_missing_content_writes_empty() {
+        let dir =
+            std::env::temp_dir().join(format!("simard-test-write-nocon-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("no_content.txt");
+        let input = serde_json::json!({ "file_path": file_path.to_str().unwrap() });
+        let result = execute_tool_locally("Write", &input).await.unwrap();
+        assert_eq!(result.get("status").and_then(|v| v.as_str()), Some("ok"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── MAX_HISTORY_MESSAGES bounds ──
+
+    #[test]
+    fn max_history_messages_is_at_least_10() {
+        let m = MAX_HISTORY_MESSAGES;
+        assert!(m >= 10, "too low: {m}");
+    }
+
+    // ── Session debug: more fields ──
+
+    #[test]
+    fn session_debug_format_shows_client_none() {
+        use crate::base_types::BaseTypeSessionRequest;
+        use crate::identity::OperatingMode;
+        use crate::runtime::{RuntimeAddress, RuntimeNodeId};
+        use crate::session::SessionId;
+
+        let descriptor = RustyClawdAdapter::registered("rc-dbg2")
+            .unwrap()
+            .descriptor
+            .clone();
+        let session = RustyClawdSession {
+            descriptor,
+            request: BaseTypeSessionRequest {
+                session_id: SessionId::try_from("session-00000000-0000-0000-0000-000000000020")
+                    .unwrap(),
+                mode: OperatingMode::Engineer,
+                topology: RuntimeTopology::SingleProcess,
+                prompt_assets: vec![],
+                runtime_node: RuntimeNodeId::local(),
+                mailbox_address: RuntimeAddress::new("test-addr"),
+            },
+            is_open: false,
+            is_closed: false,
+            client: None,
+            rt: None,
+            conversation_history: Vec::new(),
+        };
+        let debug_str = format!("{session:?}");
+        assert!(debug_str.contains("false")); // is_open and is_closed
+        assert!(debug_str.contains("RustyClawdSession"));
+    }
 }
