@@ -1,6 +1,6 @@
 [package]
 name = "simard"
-version = "0.14.0"
+version = "0.14.2"
 edition = "2024"
 default-run = "simard"
 
@@ -23,7 +23,9 @@ chrono = "0.4"
 libc = "0.2"
 
 [dev-dependencies]
+assert_cmd = "2"
 tempfile = "3"
+proptest = "1"
 
 [profile.release]
 lto = "thin"

@@ -1,5 +1,7 @@
 mod file_backed;
 mod in_memory;
+#[cfg(test)]
+mod proptest_tests;
 mod sqlite;
 mod store;
 mod types;

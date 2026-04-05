@@ -196,7 +196,8 @@ pub fn generate_signals(history: &ScoreHistory, suite_id: &str) -> Vec<ScenarioS
             if records.len() < 2 {
                 return None;
             }
-            let current = records.last().unwrap().score;
+            // Safe: we checked records.len() >= 2 above
+            let current = records.last().expect("records has >= 2 elements").score;
             let previous = records[records.len() - 2].score;
 
             let signal = if check_promotion(&records, PROMOTION_STREAK) {
