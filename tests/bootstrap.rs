@@ -250,7 +250,14 @@ fn bootstrap_assembly_produces_truthful_manifest_metadata() {
 #[test]
 fn main_is_thin_and_bootstrap_owns_identity_and_runtime_assembly() {
     let main_rs = include_str!("../src/main.rs");
-    let bootstrap_rs = include_str!("../src/bootstrap/mod.rs");
+    // Read all bootstrap sub-modules to check the full module content.
+    let bootstrap_rs = concat!(
+        include_str!("../src/bootstrap/mod.rs"),
+        include_str!("../src/bootstrap/assembly.rs"),
+        include_str!("../src/bootstrap/config.rs"),
+        include_str!("../src/bootstrap/types.rs"),
+        include_str!("../src/bootstrap/validation.rs"),
+    );
 
     for forbidden in [
         "BuiltinIdentityLoader",
