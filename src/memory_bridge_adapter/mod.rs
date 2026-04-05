@@ -1,7 +1,7 @@
 //! Adapter that implements [`MemoryStore`] by delegating to [`CognitiveMemoryBridge`].
 //!
 //! This bridges the gap between the simple key-value `MemoryStore` trait (used
-//! by `RuntimePorts`) and the six-type cognitive memory system backed by Kuzu.
+//! by `RuntimePorts`) and the six-type cognitive memory system backed by LadybugDB.
 //! Each `MemoryRecord` is stored as a semantic fact in the cognitive graph, with
 //! the record key as concept and scope+session encoded in tags.
 //!

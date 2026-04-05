@@ -2,7 +2,6 @@ use std::io::{self, BufReader};
 use std::path::PathBuf;
 
 use crate::bridge_launcher::{cognitive_memory_db_path, find_python_dir, launch_memory_bridge};
-use crate::error::SimardError;
 use crate::greeting_banner::print_greeting_banner;
 use crate::identity::OperatingMode;
 use crate::meeting_repl::run_meeting_repl;
@@ -17,25 +16,20 @@ fn load_meeting_system_prompt() -> String {
     std::fs::read_to_string(&path).unwrap_or_default()
 }
 
-/// Launch the Python memory bridge for meeting mode — mandatory.
+/// Launch the Python memory bridge for meeting mode (mandatory).
 ///
 /// Uses the same `BridgeLauncher` infrastructure as engineer mode: locates the
-/// `python/` directory, starts `simard_memory_bridge.py`, and connects to the
-/// graph database. Returns an error if any step fails.
-fn launch_real_meeting_bridge() -> Result<CognitiveMemoryBridge, SimardError> {
-    let python_dir = find_python_dir().map_err(|e| SimardError::BridgeSpawnFailed {
-        bridge: "cognitive-memory-meeting".into(),
-        reason: format!("meeting memory bridge requires Python: {e}"),
-    })?;
+/// `python/` directory, starts `simard_memory_bridge.py`, and connects to LadybugDB.
+/// Fails if the bridge cannot start — cognitive memory is required.
+fn launch_real_meeting_bridge() -> Result<CognitiveMemoryBridge, Box<dyn std::error::Error>> {
+    let python_dir =
+        find_python_dir().map_err(|e| format!("cognitive memory requires Python bridge: {e}"))?;
     let state_root = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/target/simard-state"));
     let _ = std::fs::create_dir_all(&state_root);
     let db_path = cognitive_memory_db_path(&state_root);
-    launch_memory_bridge("simard-meeting", &db_path, &python_dir).map_err(|e| {
-        SimardError::BridgeSpawnFailed {
-            bridge: "cognitive-memory-meeting".into(),
-            reason: format!("meeting memory bridge failed to start: {e}"),
-        }
-    })
+    let bridge = launch_memory_bridge("simard-meeting", &db_path, &python_dir)
+        .map_err(|e| format!("cognitive memory bridge failed to start: {e}"))?;
+    Ok(bridge)
 }
 
 /// Open an agent session for the meeting REPL using the standard base type
@@ -53,6 +47,7 @@ fn open_meeting_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeSes
 /// Returns `None` if the provider cannot be initialised — the REPL will then
 /// run in note-taking mode.
 pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // Launch the cognitive memory bridge (mandatory).
     let bridge = launch_real_meeting_bridge()?;
     eprintln!("  Memory: cognitive bridge active (LadybugDB backend)");
 
