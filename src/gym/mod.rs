@@ -188,15 +188,15 @@ fn runtime_ports_for_topology(
     topology: RuntimeTopology,
 ) -> SimardResult<RuntimePorts> {
     match topology {
-        RuntimeTopology::SingleProcess => Ok(RuntimePorts::new(
+        RuntimeTopology::SingleProcess => RuntimePorts::new(
             prompt_store,
             memory_store,
             evidence_store,
             base_types,
             Arc::new(UuidSessionIdGenerator),
-        )),
+        ),
         RuntimeTopology::MultiProcess | RuntimeTopology::Distributed => {
-            Ok(RuntimePorts::with_runtime_services(
+            RuntimePorts::with_runtime_services(
                 prompt_store,
                 memory_store,
                 evidence_store,
@@ -206,7 +206,7 @@ fn runtime_ports_for_topology(
                 Arc::new(LoopbackMailboxTransport::try_default()?),
                 Arc::new(CoordinatedSupervisor::try_default()?),
                 Arc::new(UuidSessionIdGenerator),
-            ))
+            )
         }
     }
 }

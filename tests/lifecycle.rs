@@ -219,7 +219,8 @@ fn local_runtime_runs_session_and_persists_boundaries() {
             evidence.clone(),
             base_types,
             Arc::new(UuidSessionIdGenerator),
-        ),
+        )
+        .expect("runtime ports should construct"),
         request,
     )
     .expect("composition should succeed");
@@ -390,7 +391,8 @@ fn stopped_runtime_surfaces_dedicated_lifecycle_errors() {
             evidence,
             base_types,
             Arc::new(UuidSessionIdGenerator),
-        ),
+        )
+        .expect("runtime ports should construct"),
         request,
     )
     .expect("composition should succeed");
@@ -452,7 +454,8 @@ fn runtime_can_stop_before_start_and_preserve_a_stale_snapshot() {
             evidence,
             base_types,
             Arc::new(UuidSessionIdGenerator),
-        ),
+        )
+        .expect("runtime ports should construct"),
         request,
     )
     .expect("composition should succeed");
@@ -500,7 +503,8 @@ fn failed_runs_preserve_failed_session_metadata_until_shutdown() {
             evidence,
             base_types,
             Arc::new(UuidSessionIdGenerator),
-        ),
+        )
+        .expect("runtime ports should construct"),
         request,
     )
     .expect("composition should succeed");

@@ -69,9 +69,16 @@ pub(crate) fn download_and_replace(
     let tar_status = std::process::Command::new("tar")
         .args([
             "xzf",
-            archive_path.to_str().expect("archive path is valid UTF-8"),
+            archive_path.to_str().ok_or_else(|| {
+                format!(
+                    "archive path is not valid UTF-8: {}",
+                    archive_path.display()
+                )
+            })?,
             "-C",
-            tmp_dir.to_str().expect("temp dir path is valid UTF-8"),
+            tmp_dir.to_str().ok_or_else(|| {
+                format!("temp dir path is not valid UTF-8: {}", tmp_dir.display())
+            })?,
         ])
         .status()
         .map_err(|e| format!("Failed to extract archive: {e}"))?;

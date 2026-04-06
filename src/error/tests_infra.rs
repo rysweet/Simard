@@ -351,3 +351,33 @@ fn fmt_field_reason_improvement_record() {
         "{msg}"
     );
 }
+
+#[test]
+fn display_bridge_error() {
+    let err = SimardError::BridgeError("general bridge failure".to_string());
+    let msg = err.to_string();
+    assert!(msg.contains("general bridge failure"), "{msg}");
+    assert!(msg.contains("bridge error"), "{msg}");
+}
+
+#[test]
+fn display_gym_history_db() {
+    let err = SimardError::GymHistoryDb {
+        action: "insert".to_string(),
+        reason: "database locked".to_string(),
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("insert"), "{msg}");
+    assert!(msg.contains("database locked"), "{msg}");
+}
+
+#[test]
+fn display_runtime_init_failed() {
+    let err = SimardError::RuntimeInitFailed {
+        component: "memory-bridge".to_string(),
+        reason: "port in use".to_string(),
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("memory-bridge"), "{msg}");
+    assert!(msg.contains("port in use"), "{msg}");
+}

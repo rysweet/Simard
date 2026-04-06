@@ -6,10 +6,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use simard::bridge_subprocess::InMemoryBridgeTransport;
 use simard::gym_bridge::GymBridge;
 use simard::self_improve::{
-    run_improvement_cycle, summarize_cycle, ImprovementConfig, ImprovementDecision,
-    ImprovementPhase, ProposedChange,
+    ImprovementConfig, ImprovementDecision, ImprovementPhase, ProposedChange,
+    run_improvement_cycle, summarize_cycle,
 };
-use simard::self_relaunch::{all_gates_passed, default_gates, handover, GateResult, RelaunchGate};
+use simard::self_relaunch::{GateResult, RelaunchGate, all_gates_passed, default_gates, handover};
 
 fn suite_json(suite_id: &str, overall: f64) -> serde_json::Value {
     let d = |v: f64| {

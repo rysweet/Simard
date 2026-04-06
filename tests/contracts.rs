@@ -86,7 +86,8 @@ fn compose_rejects_missing_capability() {
             evidence,
             base_types,
             Arc::new(UuidSessionIdGenerator),
-        ),
+        )
+        .expect("runtime ports should construct"),
         request,
     ) {
         Ok(_) => panic!("composition should have failed"),
@@ -124,7 +125,8 @@ fn start_rejects_missing_prompt_asset() {
             evidence,
             base_types,
             Arc::new(UuidSessionIdGenerator),
-        ),
+        )
+        .expect("runtime ports should construct"),
         request,
     )
     .expect("composition should succeed before prompt loading");
@@ -178,7 +180,8 @@ fn compose_rejects_manifest_supported_base_types_without_registered_adapters() {
             evidence,
             base_types,
             Arc::new(UuidSessionIdGenerator),
-        ),
+        )
+        .expect("runtime ports should construct"),
         request,
     ) {
         Ok(_) => panic!("composition should have failed"),
@@ -263,7 +266,8 @@ fn runtime_compose_rejects_project_write_policy_even_if_manifest_is_mutated() {
             evidence,
             base_types,
             Arc::new(UuidSessionIdGenerator),
-        ),
+        )
+        .expect("runtime ports should construct"),
         request,
     ) {
         Ok(_) => panic!("runtime composition should reject unsupported memory policies"),
@@ -331,7 +335,8 @@ fn runtime_uses_injected_session_id_strategy() {
             evidence,
             base_types,
             Arc::new(FixedSessionIds),
-        ),
+        )
+        .expect("runtime ports should construct"),
         request,
     )
     .expect("composition should succeed");

@@ -6,7 +6,7 @@ use crate::engineer_loop::RepoInspection;
 use crate::error::SimardResult;
 use crate::gym_bridge::GymBridge;
 use crate::gym_scoring::{
-    detect_regression, suite_score_from_result, GymSuiteScore, Regression, RegressionSeverity,
+    GymSuiteScore, Regression, RegressionSeverity, detect_regression, suite_score_from_result,
 };
 use crate::self_improve_executor::ApplyResult;
 

@@ -127,3 +127,111 @@ fn seed_default_board_is_idempotent() {
     assert_eq!(count, 0);
     assert_eq!(board.active.len(), 5);
 }
+
+#[test]
+fn rejects_duplicate_active_goal_id() {
+    let mut board = GoalBoard::new();
+    add_active_goal(&mut board, sample_goal("dup", 1)).unwrap();
+    let err = add_active_goal(&mut board, sample_goal("dup", 2)).unwrap_err();
+    assert!(err.to_string().contains("already active"), "{}", err);
+}
+
+#[test]
+fn rejects_duplicate_backlog_item_id() {
+    let mut board = GoalBoard::new();
+    let item = || BacklogItem {
+        id: "bl-dup".to_string(),
+        description: "Duplicate item".to_string(),
+        source: "test".to_string(),
+        score: 0.5,
+    };
+    add_backlog_item(&mut board, item()).unwrap();
+    let err = add_backlog_item(&mut board, item()).unwrap_err();
+    assert!(err.to_string().contains("already exists"), "{}", err);
+}
+
+#[test]
+fn rejects_empty_goal_id() {
+    let mut board = GoalBoard::new();
+    let err = add_active_goal(
+        &mut board,
+        ActiveGoal {
+            id: "  ".to_string(),
+            description: "Has description".to_string(),
+            priority: 1,
+            status: GoalProgress::NotStarted,
+            assigned_to: None,
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("empty"), "{}", err);
+}
+
+#[test]
+fn rejects_empty_backlog_source() {
+    let mut board = GoalBoard::new();
+    let err = add_backlog_item(
+        &mut board,
+        BacklogItem {
+            id: "bl-src".to_string(),
+            description: "Valid description".to_string(),
+            source: "".to_string(),
+            score: 0.5,
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("empty"), "{}", err);
+}
+
+#[test]
+fn promote_nonexistent_backlog_fails() {
+    let mut board = GoalBoard::new();
+    let err = promote_to_active(&mut board, "no-such-item", 1, None).unwrap_err();
+    assert!(err.to_string().contains("not found"), "{}", err);
+}
+
+#[test]
+fn update_progress_nonexistent_goal_fails() {
+    let mut board = GoalBoard::new();
+    let err = update_goal_progress(
+        &mut board,
+        "ghost",
+        GoalProgress::InProgress { percent: 50 },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("not found"), "{}", err);
+}
+
+#[test]
+fn archive_completed_leaves_in_progress() {
+    let mut board = GoalBoard::new();
+    add_active_goal(&mut board, sample_goal("done", 1)).unwrap();
+    add_active_goal(&mut board, sample_goal("wip", 2)).unwrap();
+    update_goal_progress(&mut board, "done", GoalProgress::Completed).unwrap();
+    update_goal_progress(&mut board, "wip", GoalProgress::InProgress { percent: 50 }).unwrap();
+    let archived = archive_completed(&mut board);
+    assert_eq!(archived.len(), 1);
+    assert_eq!(archived[0].id, "done");
+    assert_eq!(board.active.len(), 1);
+    assert_eq!(board.active[0].id, "wip");
+}
+
+#[test]
+fn promote_at_capacity_fails() {
+    let mut board = GoalBoard::new();
+    for i in 1..=MAX_ACTIVE_GOALS {
+        add_active_goal(&mut board, sample_goal(&format!("g{i}"), i as u32)).unwrap();
+    }
+    add_backlog_item(
+        &mut board,
+        BacklogItem {
+            id: "bl-cap".to_string(),
+            description: "Blocked by capacity".to_string(),
+            source: "test".to_string(),
+            score: 0.9,
+        },
+    )
+    .unwrap();
+    let err = promote_to_active(&mut board, "bl-cap", 1, None).unwrap_err();
+    assert!(err.to_string().contains("capacity"), "{}", err);
+}

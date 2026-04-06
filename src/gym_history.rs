@@ -3,6 +3,7 @@
 //! Backs score records with SQLite (via `rusqlite`) so the OODA loop can detect
 //! regressions and promotions across runs without in-memory state.
 
+use crate::error::{SimardError, SimardResult};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -75,8 +76,11 @@ pub struct ScoreHistory {
 
 impl ScoreHistory {
     /// Open (or create) the score-history database at `db_path`.
-    pub fn open<P: AsRef<Path>>(db_path: P) -> Self {
-        let conn = Connection::open(db_path).expect("failed to open gym history db");
+    pub fn open<P: AsRef<Path>>(db_path: P) -> SimardResult<Self> {
+        let conn = Connection::open(db_path).map_err(|e| SimardError::GymHistoryDb {
+            action: "open".into(),
+            reason: e.to_string(),
+        })?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS score_records (
                  id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -89,8 +93,11 @@ impl ScoreHistory {
              CREATE INDEX IF NOT EXISTS idx_suite_scenario
                  ON score_records (suite_id, scenario_id, timestamp DESC);",
         )
-        .expect("failed to initialize gym history schema");
-        Self { conn }
+        .map_err(|e| SimardError::GymHistoryDb {
+            action: "initialize_schema".into(),
+            reason: e.to_string(),
+        })?;
+        Ok(Self { conn })
     }
 
     /// Persist a new score record.
@@ -134,7 +141,12 @@ impl ScoreHistory {
 
     /// Return the last `limit` records for a (suite, scenario) pair, ordered
     /// oldest-first (ascending timestamp).
-    pub fn history(&self, suite_id: &str, scenario_id: &str, limit: usize) -> Vec<ScoreRecord> {
+    pub fn history(
+        &self,
+        suite_id: &str,
+        scenario_id: &str,
+        limit: usize,
+    ) -> SimardResult<Vec<ScoreRecord>> {
         // Sub-select the most recent N, then flip to ascending order.
         let mut stmt = self
             .conn
@@ -149,35 +161,51 @@ impl ScoreHistory {
                  ) sub
                  ORDER BY timestamp ASC",
             )
-            .expect("failed to prepare history query");
+            .map_err(|e| SimardError::GymHistoryDb {
+                action: "prepare_history".into(),
+                reason: e.to_string(),
+            })?;
 
-        stmt.query_map(params![suite_id, scenario_id, limit as i64], |row| {
-            Ok(ScoreRecord {
-                suite_id: row.get(0)?,
-                scenario_id: row.get(1)?,
-                score: row.get(2)?,
-                timestamp: row.get(3)?,
-                commit_hash: row.get(4)?,
+        let rows = stmt
+            .query_map(params![suite_id, scenario_id, limit as i64], |row| {
+                Ok(ScoreRecord {
+                    suite_id: row.get(0)?,
+                    scenario_id: row.get(1)?,
+                    score: row.get(2)?,
+                    timestamp: row.get(3)?,
+                    commit_hash: row.get(4)?,
+                })
             })
-        })
-        .expect("history query failed")
-        .filter_map(|r| r.ok())
-        .collect()
+            .map_err(|e| SimardError::GymHistoryDb {
+                action: "query_history".into(),
+                reason: e.to_string(),
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
     }
 
     /// List distinct scenario IDs that have at least one record for `suite_id`.
-    pub fn scenario_ids(&self, suite_id: &str) -> Vec<String> {
+    pub fn scenario_ids(&self, suite_id: &str) -> SimardResult<Vec<String>> {
         let mut stmt = self
             .conn
             .prepare(
                 "SELECT DISTINCT scenario_id FROM score_records WHERE suite_id = ?1 ORDER BY scenario_id",
             )
-            .expect("failed to prepare scenario_ids query");
+            .map_err(|e| SimardError::GymHistoryDb {
+                action: "prepare_scenario_ids".into(),
+                reason: e.to_string(),
+            })?;
 
-        stmt.query_map(params![suite_id], |row| row.get(0))
-            .expect("scenario_ids query failed")
+        let rows = stmt
+            .query_map(params![suite_id], |row| row.get(0))
+            .map_err(|e| SimardError::GymHistoryDb {
+                action: "query_scenario_ids".into(),
+                reason: e.to_string(),
+            })?
             .filter_map(|r| r.ok())
-            .collect()
+            .collect();
+        Ok(rows)
     }
 }
 
@@ -187,17 +215,19 @@ const REGRESSION_THRESHOLD: f64 = 0.01;
 const PROMOTION_STREAK: usize = 3;
 
 /// Produce a signal for each scenario in the given suite based on recent history.
-pub fn generate_signals(history: &ScoreHistory, suite_id: &str) -> Vec<ScenarioSignal> {
-    let scenario_ids = history.scenario_ids(suite_id);
-    scenario_ids
+pub fn generate_signals(
+    history: &ScoreHistory,
+    suite_id: &str,
+) -> SimardResult<Vec<ScenarioSignal>> {
+    let scenario_ids = history.scenario_ids(suite_id)?;
+    let signals = scenario_ids
         .into_iter()
         .filter_map(|sid| {
-            let records = history.history(suite_id, &sid, PROMOTION_STREAK + 1);
+            let records = history.history(suite_id, &sid, PROMOTION_STREAK + 1).ok()?;
             if records.len() < 2 {
                 return None;
             }
-            // Safe: we checked records.len() >= 2 above
-            let current = records.last().expect("records has >= 2 elements").score;
+            let current = records.last()?.score;
             let previous = records[records.len() - 2].score;
 
             let signal = if check_promotion(&records, PROMOTION_STREAK) {
@@ -219,7 +249,8 @@ pub fn generate_signals(history: &ScoreHistory, suite_id: &str) -> Vec<ScenarioS
                 signal,
             })
         })
-        .collect()
+        .collect();
+    Ok(signals)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -239,7 +270,7 @@ mod tests {
     }
 
     fn mem_history() -> ScoreHistory {
-        ScoreHistory::open(":memory:")
+        ScoreHistory::open(":memory:").unwrap()
     }
 
     #[test]
@@ -290,7 +321,7 @@ mod tests {
         for i in 1..=5 {
             h.record(&rec("L1", i as f64 * 0.1, i)).unwrap();
         }
-        let rows = h.history("progressive", "L1", 3);
+        let rows = h.history("progressive", "L1", 3).unwrap();
         assert_eq!(rows.len(), 3);
         assert!(rows[0].timestamp < rows[1].timestamp);
         assert!(rows[1].timestamp < rows[2].timestamp);
@@ -353,7 +384,7 @@ mod tests {
         h.record(&rec("C", 0.8, 1)).unwrap();
         h.record(&rec("C", 0.805, 2)).unwrap();
 
-        let sigs = generate_signals(&h, "progressive");
+        let sigs = generate_signals(&h, "progressive").unwrap();
         assert_eq!(sigs.len(), 3);
 
         let find = |id: &str| sigs.iter().find(|s| s.scenario_id == id).unwrap();
@@ -368,7 +399,7 @@ mod tests {
         for i in 1..=5 {
             h.record(&rec("P", 0.5 + i as f64 * 0.05, i)).unwrap();
         }
-        let sigs = generate_signals(&h, "progressive");
+        let sigs = generate_signals(&h, "progressive").unwrap();
         let sig = sigs.iter().find(|s| s.scenario_id == "P").unwrap();
         assert_eq!(sig.signal, GymSignal::Promoted);
     }
@@ -379,7 +410,7 @@ mod tests {
         h.record(&rec("X", 0.1, 1)).unwrap();
         h.record(&rec("Y", 0.2, 1)).unwrap();
         h.record(&rec("X", 0.3, 2)).unwrap();
-        let ids = h.scenario_ids("progressive");
+        let ids = h.scenario_ids("progressive").unwrap();
         assert_eq!(ids, vec!["X", "Y"]);
     }
 
@@ -394,7 +425,7 @@ mod tests {
     fn generate_signals_skips_single_record() {
         let h = mem_history();
         h.record(&rec("solo", 0.5, 1)).unwrap();
-        let sigs = generate_signals(&h, "progressive");
+        let sigs = generate_signals(&h, "progressive").unwrap();
         assert!(sigs.is_empty());
     }
 }

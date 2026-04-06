@@ -17,7 +17,7 @@ pub struct ImprovementPatch {
 }
 
 /// Outcome of attempting to apply a single improvement patch.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ApplyResult {
     /// The patch was applied, reviewed, and committed.
     Applied { findings: Vec<ReviewFinding> },
@@ -47,6 +47,16 @@ impl ApplyResult {
             Self::PlanFailed { .. } => return false,
         };
         findings.iter().any(|f| f.severity == Severity::Critical)
+    }
+
+    /// Extracts findings from any variant that carries them.
+    pub fn findings(&self) -> &[ReviewFinding] {
+        match self {
+            Self::Applied { findings }
+            | Self::ReviewBlocked { findings }
+            | Self::CommitFailed { findings, .. } => findings,
+            Self::PlanFailed { .. } => &[],
+        }
     }
 }
 

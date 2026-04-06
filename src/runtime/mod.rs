@@ -39,27 +39,36 @@ impl RuntimePorts {
         evidence_store: Arc<dyn EvidenceStore>,
         base_types: BaseTypeRegistry,
         session_ids: Arc<dyn SessionIdGenerator>,
-    ) -> Self {
+    ) -> SimardResult<Self> {
         Self::with_runtime_services(
             prompt_store,
             memory_store,
             evidence_store,
-            Arc::new(
-                InMemoryGoalStore::try_default().expect("default goal store should initialize"),
-            ),
+            Arc::new(InMemoryGoalStore::try_default().map_err(|e| {
+                SimardError::RuntimeInitFailed {
+                    component: "goal_store".into(),
+                    reason: e.to_string(),
+                }
+            })?),
             base_types,
-            Arc::new(
-                InProcessTopologyDriver::try_default()
-                    .expect("in-process topology driver should initialize"),
-            ),
-            Arc::new(
-                InMemoryMailboxTransport::try_default()
-                    .expect("in-memory transport should initialize"),
-            ),
-            Arc::new(
-                InProcessSupervisor::try_default()
-                    .expect("in-process supervisor should initialize"),
-            ),
+            Arc::new(InProcessTopologyDriver::try_default().map_err(|e| {
+                SimardError::RuntimeInitFailed {
+                    component: "topology_driver".into(),
+                    reason: e.to_string(),
+                }
+            })?),
+            Arc::new(InMemoryMailboxTransport::try_default().map_err(|e| {
+                SimardError::RuntimeInitFailed {
+                    component: "transport".into(),
+                    reason: e.to_string(),
+                }
+            })?),
+            Arc::new(InProcessSupervisor::try_default().map_err(|e| {
+                SimardError::RuntimeInitFailed {
+                    component: "supervisor".into(),
+                    reason: e.to_string(),
+                }
+            })?),
             session_ids,
         )
     }
@@ -70,7 +79,7 @@ impl RuntimePorts {
         evidence_store: Arc<dyn EvidenceStore>,
         base_types: BaseTypeRegistry,
         session_ids: Arc<dyn SessionIdGenerator>,
-    ) -> Self {
+    ) -> SimardResult<Self> {
         Self::new(
             prompt_store,
             memory_store,
@@ -94,8 +103,8 @@ impl RuntimePorts {
         transport: Arc<dyn RuntimeMailboxTransport>,
         supervisor: Arc<dyn RuntimeSupervisor>,
         session_ids: Arc<dyn SessionIdGenerator>,
-    ) -> Self {
-        Self::with_runtime_services_and_program(
+    ) -> SimardResult<Self> {
+        Ok(Self::with_runtime_services_and_program(
             prompt_store,
             memory_store,
             evidence_store,
@@ -104,16 +113,20 @@ impl RuntimePorts {
             topology_driver,
             transport,
             supervisor,
-            Arc::new(
-                ObjectiveRelayProgram::try_default()
-                    .expect("default agent program should initialize"),
-            ),
-            Arc::new(
-                InMemoryHandoffStore::try_default()
-                    .expect("default handoff store should initialize"),
-            ),
+            Arc::new(ObjectiveRelayProgram::try_default().map_err(|e| {
+                SimardError::RuntimeInitFailed {
+                    component: "agent_program".into(),
+                    reason: e.to_string(),
+                }
+            })?),
+            Arc::new(InMemoryHandoffStore::try_default().map_err(|e| {
+                SimardError::RuntimeInitFailed {
+                    component: "handoff_store".into(),
+                    reason: e.to_string(),
+                }
+            })?),
             session_ids,
-        )
+        ))
     }
 
     #[expect(
@@ -511,6 +524,7 @@ mod tests {
             registry,
             Arc::new(TestSessionIds::new()),
         )
+        .unwrap()
     }
 
     fn test_request() -> RuntimeRequest {
