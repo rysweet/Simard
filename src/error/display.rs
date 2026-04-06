@@ -242,9 +242,6 @@ impl Display for SimardError {
             Self::GitCommandFailed { command, reason } => {
                 write!(f, "git command '{command}' failed: {reason}")
             }
-            Self::GymHistoryDb { action, reason } => {
-                write!(f, "gym history db '{action}' failed: {reason}")
-            }
         }
     }
 }

@@ -208,10 +208,6 @@ pub enum SimardError {
         command: String,
         reason: String,
     },
-    GymHistoryDb {
-        action: String,
-        reason: String,
-    },
 }
 
 pub type SimardResult<T> = Result<T, SimardError>;
