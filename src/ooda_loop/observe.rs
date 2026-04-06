@@ -179,20 +179,8 @@ fn collect_pending_improvements(
     // Signal 4: persistent gym score history (regression / promotion signals).
     let history_path = std::path::Path::new("gym_history.db");
     if history_path.exists() {
-        let history = match ScoreHistory::open(history_path) {
-            Ok(h) => h,
-            Err(e) => {
-                eprintln!("[simard] OODA observe: failed to open gym history: {e}");
-                return improvements;
-            }
-        };
-        let signals = match generate_signals(&history, "progressive") {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("[simard] OODA observe: failed to generate gym signals: {e}");
-                return improvements;
-            }
-        };
+        let history = ScoreHistory::open(history_path);
+        let signals = generate_signals(&history, "progressive");
         for sig in &signals {
             if matches!(sig.signal, GymSignal::Regression { .. }) {
                 let baseline = current_gym.clone().unwrap_or_else(|| GymSuiteScore {
