@@ -63,7 +63,7 @@ pub struct ConfigValue<T> {
 }
 
 /// Raw inputs collected from CLI args or env vars before validation.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BootstrapInputs {
     pub prompt_root: Option<PathBuf>,
     pub objective: Option<String>,
@@ -72,6 +72,23 @@ pub struct BootstrapInputs {
     pub identity: Option<String>,
     pub base_type: Option<String>,
     pub topology: Option<String>,
+}
+
+impl Default for BootstrapInputs {
+    /// Default reads `SIMARD_BOOTSTRAP_MODE` from the environment so that
+    /// callers who construct partial inputs with `..BootstrapInputs::default()`
+    /// still respect the env-driven mode setting.
+    fn default() -> Self {
+        Self {
+            prompt_root: None,
+            objective: None,
+            state_root: None,
+            mode: std::env::var("SIMARD_BOOTSTRAP_MODE").ok(),
+            identity: None,
+            base_type: None,
+            topology: None,
+        }
+    }
 }
 
 impl BootstrapInputs {
