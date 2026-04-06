@@ -3,6 +3,7 @@ mod review_persist;
 mod selection;
 mod types;
 mod verification;
+mod verification_actions;
 
 #[cfg(test)]
 mod tests_execution;

@@ -1,4 +1,5 @@
 mod executor;
+mod executor_metrics;
 mod reporting;
 mod scenarios;
 mod types;
