@@ -7,6 +7,9 @@ mod recipes;
 mod state_root;
 mod validation;
 
+#[cfg(test)]
+mod tests_dispatch;
+
 // Re-export all public functions from sibling operator_commands_* modules.
 pub use crate::operator_commands_engineer::{run_engineer_loop_probe, run_engineer_read_probe};
 pub use crate::operator_commands_gym::{

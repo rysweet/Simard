@@ -11,6 +11,9 @@
 pub(crate) mod cycle;
 mod types;
 
+#[cfg(test)]
+mod tests_cycle;
+
 // Re-export all public items so `crate::self_improve::X` still works.
 pub use cycle::{apply_improvements, run_improvement_cycle, summarize_cycle};
 pub use types::{

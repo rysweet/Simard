@@ -5,6 +5,8 @@ mod validation;
 
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+mod tests_config;
 
 // Shared constants accessible to child modules.
 const DEFAULT_IDENTITY: &str = "simard-engineer";

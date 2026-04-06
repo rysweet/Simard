@@ -13,6 +13,9 @@ mod review;
 mod summary;
 mod types;
 
+#[cfg(test)]
+mod tests_observe;
+
 // Re-export all public items so `crate::ooda_loop::X` still works.
 pub use curate::check_meeting_handoffs;
 pub use decide::decide;

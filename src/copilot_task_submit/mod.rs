@@ -2,6 +2,11 @@ mod orchestration;
 mod transcript;
 mod types;
 
+#[cfg(test)]
+mod tests_orchestration;
+#[cfg(test)]
+mod tests_transcript;
+
 use std::path::Path;
 
 pub(crate) use types::{CopilotSubmitOutcome, CopilotSubmitReport, CopilotSubmitRun};

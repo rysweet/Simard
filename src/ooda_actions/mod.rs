@@ -12,6 +12,8 @@ mod verification;
 
 #[cfg(test)]
 mod test_helpers;
+#[cfg(test)]
+mod tests_goal_session;
 
 use crate::error::SimardResult;
 use crate::goal_curation::GoalProgress;
