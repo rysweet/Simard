@@ -53,6 +53,7 @@ goal: Build realistic tool driving | priority=5 | status=active | rationale=term
 goal: Track future remote orchestration | priority=6 | status=active | rationale=important but not top-five current work";
 
     let output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("goal-curation-run")
         .arg("local-harness")
         .arg("single-process")
@@ -91,6 +92,7 @@ goal: Keep outside-in verification strong | priority=2 | status=active | rationa
 
     let handoff_dir = state_root.path().join("handoffs");
     let meeting_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("meeting-run")
         .arg("local-harness")
         .arg("single-process")
@@ -107,6 +109,7 @@ goal: Keep outside-in verification strong | priority=2 | status=active | rationa
     assert!(meeting_rendered.contains("Active goals count: 2"));
 
     let engineer_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("engineer-loop-run")
         .arg("single-process")
         .arg(repo_root())
@@ -156,6 +159,7 @@ open-question: what changes after meeting {meeting_number}?"
         );
 
         let output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+            .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
             .arg("meeting-run")
             .arg("local-harness")
             .arg("single-process")
@@ -174,6 +178,7 @@ open-question: what changes after meeting {meeting_number}?"
     }
 
     let engineer_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("engineer-loop-run")
         .arg("single-process")
         .arg(repo_root())

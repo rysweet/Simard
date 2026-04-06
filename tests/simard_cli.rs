@@ -867,6 +867,7 @@ goal: Preserve \u{1b}]8;;https://example.invalid\u{7}meeting handoff\u{1b}]8;;\u
     let simard_read_rendered = rendered_output(&simard_read_output);
 
     let probe_read_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("engineer-read")
         .arg("single-process")
         .arg(state_root.path())
@@ -967,6 +968,7 @@ command: printf \"terminal-cli-ok\\n\"";
     }
 
     let legacy_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("terminal-run")
         .arg("single-process")
         .arg(objective)
@@ -1045,6 +1047,7 @@ fn simard_engineer_terminal_file_runs_a_bounded_terminal_session_from_a_recipe_f
     }
 
     let legacy_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("terminal-run-file")
         .arg("single-process")
         .arg(&objective_path)
@@ -1125,6 +1128,7 @@ fn simard_engineer_terminal_recipe_list_and_show_surface_builtin_named_recipes()
         );
     }
     let legacy_list_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("terminal-recipe-list")
         .output()
         .expect("simard_operator_probe terminal-recipe-list should launch");
@@ -1162,6 +1166,7 @@ fn simard_engineer_terminal_recipe_list_and_show_surface_builtin_named_recipes()
         );
     }
     let legacy_show_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("terminal-recipe-show")
         .arg("foundation-check")
         .output()
@@ -1208,6 +1213,7 @@ fn simard_engineer_terminal_recipe_runs_builtin_named_recipe_with_probe_parity()
     }
 
     let legacy_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("terminal-recipe-run")
         .arg("single-process")
         .arg("foundation-check")
@@ -1303,6 +1309,7 @@ fn simard_engineer_terminal_recipe_runs_truthful_copilot_status_probe_with_probe
     }
 
     let legacy_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("terminal-recipe-run")
         .arg("single-process")
         .arg("copilot-status-check")
@@ -1402,6 +1409,7 @@ fn simard_engineer_terminal_recipe_runs_truthful_copilot_prompt_check_with_probe
     }
 
     let legacy_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("terminal-recipe-run")
         .arg("single-process")
         .arg("copilot-prompt-check")
@@ -2107,6 +2115,7 @@ input: printf \"terminal-read-ok\\n\"";
     let simard_read_rendered = rendered_output(&simard_read_output);
 
     let probe_read_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("terminal-read")
         .arg("single-process")
         .arg(state_root.path())
