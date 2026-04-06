@@ -59,6 +59,17 @@ pub enum ImprovementDecision {
     },
 }
 
+impl std::fmt::Display for ImprovementDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Commit { net_improvement } => {
+                write!(f, "commit (net +{:.1}%)", net_improvement * 100.0)
+            }
+            Self::Revert { reason } => write!(f, "revert: {reason}"),
+        }
+    }
+}
+
 /// Configuration for an improvement cycle.
 #[derive(Clone, Debug)]
 pub struct ImprovementConfig {

@@ -211,11 +211,15 @@ pub fn apply_improvements(
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::ProposedChange;
     use super::*;
 
     #[test]
     fn improvement_phase_display() {
         assert_eq!(ImprovementPhase::Eval.to_string(), "eval");
+        assert_eq!(ImprovementPhase::Analyze.to_string(), "analyze");
+        assert_eq!(ImprovementPhase::Research.to_string(), "research");
+        assert_eq!(ImprovementPhase::Improve.to_string(), "improve");
         assert_eq!(ImprovementPhase::ReEval.to_string(), "re-eval");
         assert_eq!(ImprovementPhase::Decide.to_string(), "decide");
     }
@@ -459,6 +463,97 @@ mod tests {
         };
         let summary = summarize_cycle(&cycle);
         assert!(summary.contains("Regressions: 2 total (1 severe)"));
+    }
+
+    #[test]
+    fn improvement_decision_display_commit() {
+        let d = ImprovementDecision::Commit {
+            net_improvement: 0.05,
+        };
+        assert_eq!(d.to_string(), "commit (net +5.0%)");
+    }
+
+    #[test]
+    fn improvement_decision_display_revert() {
+        let d = ImprovementDecision::Revert {
+            reason: "below threshold".into(),
+        };
+        assert_eq!(d.to_string(), "revert: below threshold");
+    }
+
+    #[test]
+    fn proposed_change_equality() {
+        let a = ProposedChange {
+            file_path: "src/lib.rs".into(),
+            description: "add test".into(),
+            expected_impact: "better coverage".into(),
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn improvement_config_custom_thresholds() {
+        let cfg = ImprovementConfig {
+            suite_id: "custom".into(),
+            min_net_improvement: 0.10,
+            max_single_regression: 0.01,
+            proposed_changes: Vec::new(),
+            auto_apply: true,
+            weak_threshold: 0.8,
+        };
+        assert_eq!(cfg.suite_id, "custom");
+        assert!(cfg.auto_apply);
+        assert!((cfg.weak_threshold - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn summarize_cycle_no_post_score_with_revert() {
+        let cycle = ImprovementCycle {
+            baseline: make_score(0.70),
+            proposed_changes: vec![],
+            post_score: None,
+            regressions: vec![],
+            decision: Some(ImprovementDecision::Revert {
+                reason: "no changes proposed".into(),
+            }),
+            final_phase: ImprovementPhase::Analyze,
+            weak_dimensions: Vec::new(),
+        };
+        let summary = summarize_cycle(&cycle);
+        assert!(summary.contains("REVERT"));
+        assert!(!summary.contains("Post-change"));
+    }
+
+    #[test]
+    fn decide_revert_reason_names_offending_dimension() {
+        let cfg = ImprovementConfig::default();
+        let baseline = make_score(0.70);
+        let post = make_score(0.80);
+        let regressions = vec![Regression {
+            dimension: "specificity".to_string(),
+            baseline_score: 0.7,
+            current_score: 0.6,
+            delta: -0.10,
+            severity: RegressionSeverity::Severe,
+        }];
+        let d = decide(&cfg, &baseline, &post, &regressions);
+        match d {
+            ImprovementDecision::Revert { reason } => {
+                assert!(reason.contains("regression exceeds max"));
+                assert!(reason.contains("specificity"));
+            }
+            _ => panic!("expected revert with detail message"),
+        }
+    }
+
+    #[test]
+    fn default_config_auto_apply_off() {
+        let cfg = ImprovementConfig::default();
+        assert!(!cfg.auto_apply);
+        assert!((cfg.weak_threshold - 0.6).abs() < 1e-9);
+        assert_eq!(cfg.suite_id, "progressive");
+        assert!(cfg.proposed_changes.is_empty());
     }
 
     fn make_score(v: f64) -> GymSuiteScore {
