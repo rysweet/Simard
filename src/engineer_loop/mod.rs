@@ -15,6 +15,8 @@ mod tests_selection;
 #[cfg(test)]
 mod tests_types;
 #[cfg(test)]
+mod tests_types_inline;
+#[cfg(test)]
 mod tests_verification;
 
 use std::fs;
