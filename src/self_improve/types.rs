@@ -223,8 +223,10 @@ mod tests {
 
     #[test]
     fn improvement_config_custom_target_dimension() {
-        let mut cfg = ImprovementConfig::default();
-        cfg.target_dimension = Some("specificity".into());
+        let cfg = ImprovementConfig {
+            target_dimension: Some("specificity".into()),
+            ..Default::default()
+        };
         assert_eq!(cfg.target_dimension.as_deref(), Some("specificity"));
     }
 

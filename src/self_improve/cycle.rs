@@ -150,10 +150,10 @@ pub(super) fn find_weak_dimensions(
     ];
     let mut weak = Vec::new();
     for (name, value) in checks {
-        if let Some(t) = target {
-            if name != t {
-                continue;
-            }
+        if let Some(t) = target
+            && name != t
+        {
+            continue;
         }
         if value < weak_threshold {
             weak.push(name.to_string());

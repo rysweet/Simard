@@ -15,10 +15,8 @@ use std::time::Instant;
 
 use crate::base_types::BaseTypeFactory;
 use crate::error::{SimardError, SimardResult};
-use crate::evidence::EvidenceStore;
-use crate::handoff::{RuntimeHandoffSnapshot, RuntimeHandoffStore};
-use crate::memory::MemoryStore;
-use crate::prompt_assets::{PromptAssetRef, PromptAssetStore};
+use crate::handoff::RuntimeHandoffSnapshot;
+use crate::prompt_assets::PromptAssetRef;
 use crate::session::SessionRecord;
 
 pub struct RuntimeKernel {

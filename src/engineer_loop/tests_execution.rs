@@ -1,5 +1,5 @@
 use super::execution::*;
-use super::types::{EngineerActionKind, SelectedEngineerAction, StructuredEditRequest};
+use super::types::{EngineerActionKind, SelectedEngineerAction};
 use super::{CARGO_COMMAND_TIMEOUT_SECS, GIT_COMMAND_TIMEOUT_SECS};
 use crate::error::SimardError;
 use std::time::Duration;

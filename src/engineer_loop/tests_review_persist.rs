@@ -1,7 +1,6 @@
 use super::review_persist::*;
 use super::types::{
     EngineerActionKind, ExecutedEngineerAction, RepoInspection, SelectedEngineerAction,
-    VerificationReport,
 };
 use crate::runtime::RuntimeTopology;
 use std::path::PathBuf;
