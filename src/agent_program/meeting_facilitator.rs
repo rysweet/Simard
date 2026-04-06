@@ -209,38 +209,42 @@ mod tests {
 
     #[test]
     fn meeting_facilitator_parses_structured_notes() {
-        let program = MeetingFacilitatorProgram::try_default().unwrap();
+        let program = MeetingFacilitatorProgram::try_default().expect("create test program");
         let context = test_context("agenda: Sprint planning\ndecision: Ship by Friday");
-        let input = program.plan_turn(&context).unwrap();
+        let input = program
+            .plan_turn(&context)
+            .expect("plan_turn should succeed");
         assert!(input.objective.contains("Sprint planning"));
         assert!(input.objective.contains("decisions=1"));
     }
 
     #[test]
     fn meeting_facilitator_reflection_includes_counts() {
-        let program = MeetingFacilitatorProgram::try_default().unwrap();
+        let program = MeetingFacilitatorProgram::try_default().expect("create test program");
         let context = test_context("agenda: Retro\nrisk: Scope creep\nnext-step: Write tests");
         let summary = program
             .reflection_summary(&context, &test_outcome())
-            .unwrap();
+            .expect("reflection_summary should succeed");
         assert!(summary.contains("1 risks"));
         assert!(summary.contains("1 next steps"));
     }
 
     #[test]
     fn meeting_facilitator_descriptor_has_identity() {
-        let program = MeetingFacilitatorProgram::try_default().unwrap();
+        let program = MeetingFacilitatorProgram::try_default().expect("create test program");
         let desc = program.descriptor();
         assert!(desc.identity.contains("meeting-facilitator"));
     }
 
     #[test]
     fn meeting_facilitator_parses_multiple_note_types() {
-        let program = MeetingFacilitatorProgram::try_default().unwrap();
+        let program = MeetingFacilitatorProgram::try_default().expect("create test program");
         let context = test_context(
             "agenda: Sprint 42\nupdate: PR merged\ndecision: Ship Friday\nrisk: Scope creep\nnext-step: Write tests\nopen-question: Deploy strategy?",
         );
-        let input = program.plan_turn(&context).unwrap();
+        let input = program
+            .plan_turn(&context)
+            .expect("plan_turn should succeed");
         assert!(input.objective.contains("Sprint 42"));
         assert!(input.objective.contains("updates=1"));
         assert!(input.objective.contains("decisions=1"));
@@ -251,22 +255,22 @@ mod tests {
 
     #[test]
     fn meeting_facilitator_persistence_summary_includes_meeting_record() {
-        let program = MeetingFacilitatorProgram::try_default().unwrap();
+        let program = MeetingFacilitatorProgram::try_default().expect("create test program");
         let context = test_context("agenda: Retro\ndecision: Move to Rust");
         let summary = program
             .persistence_summary(&context, &test_outcome())
-            .unwrap();
+            .expect("persistence_summary should succeed");
         assert!(summary.contains("meeting-record"));
         assert!(summary.contains("Retro"));
     }
 
     #[test]
     fn meeting_facilitator_additional_memory_records_with_outputs() {
-        let program = MeetingFacilitatorProgram::try_default().unwrap();
+        let program = MeetingFacilitatorProgram::try_default().expect("create test program");
         let context = test_context("agenda: Standup\ndecision: Deploy v2");
         let records = program
             .additional_memory_records(&context, &test_outcome())
-            .unwrap();
+            .expect("additional_memory_records should succeed");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].key_suffix, "decision-record");
         assert_eq!(records[0].scope, MemoryScope::Decision);
@@ -275,28 +279,32 @@ mod tests {
 
     #[test]
     fn meeting_facilitator_additional_memory_records_empty_when_no_outputs() {
-        let program = MeetingFacilitatorProgram::try_default().unwrap();
+        let program = MeetingFacilitatorProgram::try_default().expect("create test program");
         let context = test_context("just some freetext");
         let records = program
             .additional_memory_records(&context, &test_outcome())
-            .unwrap();
+            .expect("additional_memory_records should succeed");
         assert!(records.is_empty());
     }
 
     #[test]
     fn meeting_facilitator_goal_updates_from_structured() {
-        let program = MeetingFacilitatorProgram::try_default().unwrap();
+        let program = MeetingFacilitatorProgram::try_default().expect("create test program");
         let context = test_context("agenda: Planning\ngoal: Ship v3 | priority=1 | status=active");
-        let updates = program.goal_updates(&context, &test_outcome()).unwrap();
+        let updates = program
+            .goal_updates(&context, &test_outcome())
+            .expect("goal_updates should succeed");
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].title, "Ship v3");
     }
 
     #[test]
     fn meeting_facilitator_goal_updates_empty_when_no_goals() {
-        let program = MeetingFacilitatorProgram::try_default().unwrap();
+        let program = MeetingFacilitatorProgram::try_default().expect("create test program");
         let context = test_context("agenda: Quick sync\nupdate: All good");
-        let updates = program.goal_updates(&context, &test_outcome()).unwrap();
+        let updates = program
+            .goal_updates(&context, &test_outcome())
+            .expect("goal_updates should succeed");
         assert!(updates.is_empty());
     }
 
@@ -304,7 +312,8 @@ mod tests {
 
     #[test]
     fn meeting_notes_parse_multiple_agendas_concatenated() {
-        let notes = StructuredMeetingNotes::parse("agenda: Topic A\nagenda: Topic B").unwrap();
+        let notes = StructuredMeetingNotes::parse("agenda: Topic A\nagenda: Topic B")
+            .expect("parse test meeting notes");
         assert!(notes.agenda.contains("Topic A"));
         assert!(notes.agenda.contains("Topic B"));
         assert!(notes.agenda.contains("/"));
@@ -312,13 +321,15 @@ mod tests {
 
     #[test]
     fn meeting_notes_parse_topic_alias_for_agenda() {
-        let notes = StructuredMeetingNotes::parse("topic: My Topic").unwrap();
+        let notes =
+            StructuredMeetingNotes::parse("topic: My Topic").expect("parse test meeting notes");
         assert_eq!(notes.agenda, "My Topic");
     }
 
     #[test]
     fn meeting_notes_parse_status_alias_for_update() {
-        let notes = StructuredMeetingNotes::parse("status: All green").unwrap();
+        let notes =
+            StructuredMeetingNotes::parse("status: All green").expect("parse test meeting notes");
         assert_eq!(notes.updates, vec!["All green"]);
     }
 
@@ -326,7 +337,7 @@ mod tests {
     fn meeting_notes_parse_action_item_aliases() {
         let notes =
             StructuredMeetingNotes::parse("next_step: Do A\naction: Do B\naction-item: Do C")
-                .unwrap();
+                .expect("test operation should succeed");
         assert_eq!(notes.next_steps.len(), 3);
     }
 
@@ -334,40 +345,44 @@ mod tests {
     fn meeting_notes_parse_question_aliases() {
         let notes =
             StructuredMeetingNotes::parse("open-question: Q1\nopen_question: Q2\nquestion: Q3")
-                .unwrap();
+                .expect("test operation should succeed");
         assert_eq!(notes.open_questions.len(), 3);
     }
 
     #[test]
     fn meeting_notes_parse_empty_value_skipped() {
-        let notes = StructuredMeetingNotes::parse("decision:\nrisk: Real risk").unwrap();
+        let notes = StructuredMeetingNotes::parse("decision:\nrisk: Real risk")
+            .expect("parse test meeting notes");
         assert!(notes.decisions.is_empty());
         assert_eq!(notes.risks.len(), 1);
     }
 
     #[test]
     fn meeting_notes_parse_freetext_lines_become_agenda() {
-        let notes = StructuredMeetingNotes::parse("Some freetext line\nAnother line").unwrap();
+        let notes = StructuredMeetingNotes::parse("Some freetext line\nAnother line")
+            .expect("parse test meeting notes");
         assert!(notes.agenda.contains("Some freetext line"));
         assert!(notes.agenda.contains("Another line"));
     }
 
     #[test]
     fn meeting_notes_has_persistable_outputs_false_when_empty() {
-        let notes = StructuredMeetingNotes::parse("just freetext").unwrap();
+        let notes =
+            StructuredMeetingNotes::parse("just freetext").expect("parse test meeting notes");
         assert!(!notes.has_persistable_outputs());
     }
 
     #[test]
     fn meeting_notes_has_persistable_outputs_true_with_decisions() {
-        let notes = StructuredMeetingNotes::parse("decision: Ship it").unwrap();
+        let notes =
+            StructuredMeetingNotes::parse("decision: Ship it").expect("parse test meeting notes");
         assert!(notes.has_persistable_outputs());
     }
 
     #[test]
     fn meeting_notes_concise_record_format() {
-        let notes =
-            StructuredMeetingNotes::parse("agenda: Sprint\ndecision: Yes\nrisk: Maybe").unwrap();
+        let notes = StructuredMeetingNotes::parse("agenda: Sprint\ndecision: Yes\nrisk: Maybe")
+            .expect("parse test meeting notes");
         let record = notes.concise_record();
         assert!(record.contains("agenda=Sprint"));
         assert!(record.contains("decisions=[Yes]"));

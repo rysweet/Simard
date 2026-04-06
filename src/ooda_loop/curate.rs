@@ -160,15 +160,16 @@ mod tests {
 
     #[test]
     fn check_meeting_handoffs_converts_decisions_to_goals() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("create temp dir");
         let handoff = sample_handoff(vec![
             sample_decision("Migrate to async runtime"),
             sample_decision("Add integration tests"),
         ]);
-        write_meeting_handoff(dir.path(), &handoff).unwrap();
+        write_meeting_handoff(dir.path(), &handoff).expect("write test handoff");
 
         let mut board = GoalBoard::new();
-        let count = check_meeting_handoffs(&mut board, dir.path()).unwrap();
+        let count = check_meeting_handoffs(&mut board, dir.path())
+            .expect("check_meeting_handoffs should succeed");
 
         assert_eq!(count, 2);
         assert_eq!(board.active.len(), 2);
@@ -185,16 +186,17 @@ mod tests {
 
     #[test]
     fn check_meeting_handoffs_assigns_position_based_priority() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("create temp dir");
         let handoff = sample_handoff(vec![
             sample_decision("First decision"),
             sample_decision("Second decision"),
             sample_decision("Third decision"),
         ]);
-        write_meeting_handoff(dir.path(), &handoff).unwrap();
+        write_meeting_handoff(dir.path(), &handoff).expect("write test handoff");
 
         let mut board = GoalBoard::new();
-        check_meeting_handoffs(&mut board, dir.path()).unwrap();
+        check_meeting_handoffs(&mut board, dir.path())
+            .expect("check_meeting_handoffs should succeed");
 
         assert_eq!(board.active[0].priority, 1);
         assert_eq!(board.active[1].priority, 2);
@@ -203,26 +205,30 @@ mod tests {
 
     #[test]
     fn check_meeting_handoffs_marks_handoff_processed() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("create temp dir");
         let handoff = sample_handoff(vec![sample_decision("Ship v2")]);
-        write_meeting_handoff(dir.path(), &handoff).unwrap();
+        write_meeting_handoff(dir.path(), &handoff).expect("write test handoff");
 
         let mut board = GoalBoard::new();
-        check_meeting_handoffs(&mut board, dir.path()).unwrap();
+        check_meeting_handoffs(&mut board, dir.path())
+            .expect("check_meeting_handoffs should succeed");
 
-        let reloaded = load_meeting_handoff(dir.path()).unwrap().unwrap();
+        let reloaded = load_meeting_handoff(dir.path())
+            .expect("load test handoff")
+            .expect("handoff should exist");
         assert!(reloaded.processed);
     }
 
     #[test]
     fn check_meeting_handoffs_skips_already_processed() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("create temp dir");
         let mut handoff = sample_handoff(vec![sample_decision("Already done")]);
         handoff.processed = true;
-        write_meeting_handoff(dir.path(), &handoff).unwrap();
+        write_meeting_handoff(dir.path(), &handoff).expect("write test handoff");
 
         let mut board = GoalBoard::new();
-        let count = check_meeting_handoffs(&mut board, dir.path()).unwrap();
+        let count = check_meeting_handoffs(&mut board, dir.path())
+            .expect("check_meeting_handoffs should succeed");
 
         assert_eq!(count, 0);
         assert!(board.active.is_empty());
@@ -230,23 +236,25 @@ mod tests {
 
     #[test]
     fn check_meeting_handoffs_no_file_returns_zero() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("create temp dir");
         let mut board = GoalBoard::new();
-        let count = check_meeting_handoffs(&mut board, dir.path()).unwrap();
+        let count = check_meeting_handoffs(&mut board, dir.path())
+            .expect("check_meeting_handoffs should succeed");
         assert_eq!(count, 0);
     }
 
     #[test]
     fn check_meeting_handoffs_overflow_goes_to_backlog() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("create temp dir");
         // 7 decisions: 5 fit active, 2 overflow to backlog.
         let decisions: Vec<MeetingDecision> = (1..=7)
             .map(|i| sample_decision(&format!("Goal {i}")))
             .collect();
-        write_meeting_handoff(dir.path(), &sample_handoff(decisions)).unwrap();
+        write_meeting_handoff(dir.path(), &sample_handoff(decisions)).expect("write test handoff");
 
         let mut board = GoalBoard::new();
-        let count = check_meeting_handoffs(&mut board, dir.path()).unwrap();
+        let count = check_meeting_handoffs(&mut board, dir.path())
+            .expect("check_meeting_handoffs should succeed");
 
         assert_eq!(count, 7);
         assert_eq!(board.active.len(), crate::goal_curation::MAX_ACTIVE_GOALS);
@@ -257,22 +265,23 @@ mod tests {
 
     #[test]
     fn check_meeting_handoffs_skips_duplicate_goal_ids() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("create temp dir");
         let handoff = sample_handoff(vec![
             sample_decision("Ship v2"),
             sample_decision("Ship v2"), // duplicate
         ]);
-        write_meeting_handoff(dir.path(), &handoff).unwrap();
+        write_meeting_handoff(dir.path(), &handoff).expect("write test handoff");
 
         let mut board = GoalBoard::new();
-        check_meeting_handoffs(&mut board, dir.path()).unwrap();
+        check_meeting_handoffs(&mut board, dir.path())
+            .expect("check_meeting_handoffs should succeed");
 
         assert_eq!(board.active.len(), 1);
     }
 
     #[test]
     fn check_meeting_handoffs_converts_action_items_to_backlog() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("create temp dir");
         let handoff = sample_handoff_with_actions(
             vec![sample_decision("Main decision")],
             vec![
@@ -281,10 +290,11 @@ mod tests {
                 sample_action("Add metrics", "carol", 2), // priority >= 2 → backlog
             ],
         );
-        write_meeting_handoff(dir.path(), &handoff).unwrap();
+        write_meeting_handoff(dir.path(), &handoff).expect("write test handoff");
 
         let mut board = GoalBoard::new();
-        let count = check_meeting_handoffs(&mut board, dir.path()).unwrap();
+        let count = check_meeting_handoffs(&mut board, dir.path())
+            .expect("check_meeting_handoffs should succeed");
 
         assert_eq!(count, 3); // 1 decision + 2 qualifying action items
         assert_eq!(board.active.len(), 1);

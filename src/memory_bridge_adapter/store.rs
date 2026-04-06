@@ -156,7 +156,7 @@ impl CognitiveBridgeMemoryStore {
                 }
             }
         }
-        Err(last_err.unwrap())
+        Err(last_err.expect("retry loop ensures last_err is set on all-failures path"))
     }
 
     /// Query the bridge for records matching a scope, converting facts back to
