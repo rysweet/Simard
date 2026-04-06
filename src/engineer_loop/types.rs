@@ -142,18 +142,16 @@ pub enum AnalyzedAction {
 pub fn analyze_objective(objective: &str) -> AnalyzedAction {
     let lower = objective.to_lowercase();
 
-    // Most specific compound patterns first
-    if lower.contains("new file") || lower.contains("create") || lower.contains("add file") {
+    // Issue/bug patterns before "create" — "create a feature request" is an issue, not a file
+    if lower.contains("issue") || lower.contains("bug report") || lower.contains("feature request")
+    {
+        AnalyzedAction::OpenIssue
+    } else if lower.contains("new file") || lower.contains("create") || lower.contains("add file") {
         AnalyzedAction::CreateFile
     } else if lower.contains("append") || lower.contains("add to") {
         AnalyzedAction::AppendToFile
     } else if lower.contains("commit") || lower.contains("save changes") {
         AnalyzedAction::GitCommit
-    } else if lower.contains("issue")
-        || lower.contains("bug report")
-        || lower.contains("feature request")
-    {
-        AnalyzedAction::OpenIssue
     } else if lower.contains("cargo test")
         || lower.contains("run tests")
         || lower.contains("test suite")
