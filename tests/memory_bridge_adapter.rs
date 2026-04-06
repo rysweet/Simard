@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use simard::bridge_launcher::{find_python_dir, launch_memory_bridge};
-use simard::memory::{MemoryRecord, MemoryScope, MemoryStore};
+use simard::memory::{CognitiveMemoryType, MemoryRecord, MemoryStore};
 use simard::memory_bridge_adapter::CognitiveBridgeMemoryStore;
 use simard::session::SessionPhase;
 
@@ -47,12 +47,12 @@ fn test_session_id() -> simard::session::SessionId {
 
 fn make_record(
     key: &str,
-    scope: MemoryScope,
+    memory_type: CognitiveMemoryType,
     session: &simard::session::SessionId,
 ) -> MemoryRecord {
     MemoryRecord {
         key: key.to_string(),
-        scope,
+        memory_type,
         value: format!("value-for-{key}"),
         session_id: session.clone(),
         recorded_in: SessionPhase::Execution,
@@ -69,21 +69,33 @@ fn live_adapter_put_and_list_by_scope() {
 
     fixture
         .store
-        .put(make_record("decision-1", MemoryScope::Decision, &session))
+        .put(make_record(
+            "decision-1",
+            CognitiveMemoryType::Semantic,
+            &session,
+        ))
         .expect("put decision");
     fixture
         .store
-        .put(make_record("project-1", MemoryScope::Project, &session))
+        .put(make_record(
+            "project-1",
+            CognitiveMemoryType::Semantic,
+            &session,
+        ))
         .expect("put project");
     fixture
         .store
-        .put(make_record("decision-2", MemoryScope::Decision, &session))
+        .put(make_record(
+            "decision-2",
+            CognitiveMemoryType::Semantic,
+            &session,
+        ))
         .expect("put decision 2");
 
     assert_eq!(
         fixture
             .store
-            .list(MemoryScope::Decision)
+            .list(CognitiveMemoryType::Semantic)
             .expect("list decisions")
             .len(),
         2
@@ -91,7 +103,7 @@ fn live_adapter_put_and_list_by_scope() {
     assert_eq!(
         fixture
             .store
-            .list(MemoryScope::Project)
+            .list(CognitiveMemoryType::Semantic)
             .expect("list projects")
             .len(),
         1
@@ -99,7 +111,7 @@ fn live_adapter_put_and_list_by_scope() {
     assert_eq!(
         fixture
             .store
-            .list(MemoryScope::Benchmark)
+            .list(CognitiveMemoryType::Procedural)
             .expect("list benchmarks")
             .len(),
         0
@@ -116,17 +128,25 @@ fn live_adapter_deduplicates_by_key() {
 
     fixture
         .store
-        .put(make_record("same-key", MemoryScope::Decision, &session))
+        .put(make_record(
+            "same-key",
+            CognitiveMemoryType::Semantic,
+            &session,
+        ))
         .expect("first put");
     fixture
         .store
-        .put(make_record("same-key", MemoryScope::Decision, &session))
+        .put(make_record(
+            "same-key",
+            CognitiveMemoryType::Semantic,
+            &session,
+        ))
         .expect("second put");
 
     assert_eq!(
         fixture
             .store
-            .list(MemoryScope::Decision)
+            .list(CognitiveMemoryType::Semantic)
             .expect("list")
             .len(),
         1,
@@ -147,7 +167,7 @@ fn live_adapter_session_isolation() {
         .store
         .put(make_record(
             "rec-a1",
-            MemoryScope::SessionScratch,
+            CognitiveMemoryType::Working,
             &session_a,
         ))
         .expect("put a1");
@@ -155,7 +175,7 @@ fn live_adapter_session_isolation() {
         .store
         .put(make_record(
             "rec-a2",
-            MemoryScope::SessionScratch,
+            CognitiveMemoryType::Working,
             &session_a,
         ))
         .expect("put a2");
@@ -163,7 +183,7 @@ fn live_adapter_session_isolation() {
         .store
         .put(make_record(
             "rec-b1",
-            MemoryScope::SessionScratch,
+            CognitiveMemoryType::Working,
             &session_b,
         ))
         .expect("put b1");
@@ -233,7 +253,7 @@ fn live_adapter_full_lifecycle() {
     assert!(
         fixture
             .store
-            .list(MemoryScope::Decision)
+            .list(CognitiveMemoryType::Semantic)
             .expect("empty list")
             .is_empty()
     );
@@ -241,22 +261,22 @@ fn live_adapter_full_lifecycle() {
     // Put records
     fixture
         .store
-        .put(make_record("k1", MemoryScope::Decision, &session))
+        .put(make_record("k1", CognitiveMemoryType::Semantic, &session))
         .expect("put k1");
     fixture
         .store
-        .put(make_record("k2", MemoryScope::SessionSummary, &session))
+        .put(make_record("k2", CognitiveMemoryType::Episodic, &session))
         .expect("put k2");
     assert_eq!(fixture.store.count_for_session(&session).expect("count"), 2);
 
     // Overwrite k1
-    let mut updated = make_record("k1", MemoryScope::Decision, &session);
+    let mut updated = make_record("k1", CognitiveMemoryType::Semantic, &session);
     updated.value = "updated-value".to_string();
     fixture.store.put(updated).expect("overwrite k1");
 
     let decisions = fixture
         .store
-        .list(MemoryScope::Decision)
+        .list(CognitiveMemoryType::Semantic)
         .expect("list after update");
     assert_eq!(decisions.len(), 1);
     assert_eq!(decisions[0].value, "updated-value");

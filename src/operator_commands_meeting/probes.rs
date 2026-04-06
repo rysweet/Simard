@@ -7,7 +7,7 @@ use crate::operator_commands::{
     resolved_meeting_read_state_root, resolved_state_root,
 };
 use crate::{
-    BootstrapConfig, BootstrapInputs, FileBackedMemoryStore, MemoryScope, MemoryStore,
+    BootstrapConfig, BootstrapInputs, CognitiveMemoryType, FileBackedMemoryStore, MemoryStore,
     latest_local_handoff, run_local_session,
 };
 
@@ -42,7 +42,7 @@ pub fn run_meeting_probe(
     let decision_records = exported
         .memory_records
         .iter()
-        .filter(|record| record.scope == MemoryScope::Decision)
+        .filter(|record| record.memory_type == CognitiveMemoryType::Semantic)
         .map(|record| record.value.clone())
         .collect::<Vec<_>>();
 
@@ -79,7 +79,7 @@ pub fn run_meeting_read_probe(
     let state_root = resolved_meeting_read_state_root(state_root_override, base_type, topology)?;
     let memory_store = FileBackedMemoryStore::try_new(state_root.join("memory_records.json"))?;
     let meeting_records = memory_store
-        .list(MemoryScope::Decision)?
+        .list(CognitiveMemoryType::Semantic)?
         .into_iter()
         .filter(|record| crate::looks_like_persisted_meeting_record(&record.value))
         .collect::<Vec<_>>();

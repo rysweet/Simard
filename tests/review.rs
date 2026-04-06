@@ -3,10 +3,10 @@ use std::path::PathBuf;
 
 use serde_json::json;
 use simard::{
-    BaseTypeId, EvidenceRecord, EvidenceSource, ImprovementProposal, MemoryRecord, MemoryScope,
-    ReviewRequest, ReviewTargetKind, RuntimeAddress, RuntimeHandoffSnapshot, RuntimeNodeId,
-    RuntimeState, RuntimeTopology, SessionId, SessionPhase, SessionRecord, SimardError,
-    build_review_artifact, compare_latest_benchmark_runs, latest_review_artifact,
+    BaseTypeId, CognitiveMemoryType, EvidenceRecord, EvidenceSource, ImprovementProposal,
+    MemoryRecord, ReviewRequest, ReviewTargetKind, RuntimeAddress, RuntimeHandoffSnapshot,
+    RuntimeNodeId, RuntimeState, RuntimeTopology, SessionId, SessionPhase, SessionRecord,
+    SimardError, build_review_artifact, compare_latest_benchmark_runs, latest_review_artifact,
     load_review_artifact, persist_review_artifact, run_benchmark_scenario,
 };
 use uuid::Uuid;
@@ -32,14 +32,14 @@ fn fixture_handoff() -> RuntimeHandoffSnapshot {
         memory_records: vec![
             MemoryRecord {
                 key: "mem-1".to_string(),
-                scope: MemoryScope::SessionScratch,
+                memory_type: CognitiveMemoryType::Working,
                 value: "objective-metadata(chars=64, words=9, lines=1)".to_string(),
                 session_id: session_id.clone(),
                 recorded_in: SessionPhase::Preparation,
             },
             MemoryRecord {
                 key: "mem-2".to_string(),
-                scope: MemoryScope::SessionSummary,
+                memory_type: CognitiveMemoryType::Episodic,
                 value: "summary".to_string(),
                 session_id: session_id.clone(),
                 recorded_in: SessionPhase::Persistence,

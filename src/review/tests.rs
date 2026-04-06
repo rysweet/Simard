@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::base_types::BaseTypeId;
 use crate::evidence::{EvidenceRecord, EvidenceSource};
 use crate::identity::OperatingMode;
-use crate::memory::{MemoryRecord, MemoryScope};
+use crate::memory::{CognitiveMemoryType, MemoryRecord};
 use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeState, RuntimeTopology};
 use crate::session::{SessionId, SessionPhase, SessionRecord};
 use tempfile::TempDir;
@@ -50,21 +50,21 @@ fn make_handoff_with_records() -> crate::handoff::RuntimeHandoffSnapshot {
     handoff.memory_records = vec![
         MemoryRecord {
             key: "decision-1".to_string(),
-            scope: MemoryScope::Decision,
+            memory_type: CognitiveMemoryType::Semantic,
             value: "decided something".to_string(),
             session_id: sid.clone(),
             recorded_in: SessionPhase::Execution,
         },
         MemoryRecord {
             key: "bench-1".to_string(),
-            scope: MemoryScope::Benchmark,
+            memory_type: CognitiveMemoryType::Procedural,
             value: "benchmark data".to_string(),
             session_id: sid.clone(),
             recorded_in: SessionPhase::Execution,
         },
         MemoryRecord {
             key: "scratch-1".to_string(),
-            scope: MemoryScope::SessionScratch,
+            memory_type: CognitiveMemoryType::Working,
             value: "scratch".to_string(),
             session_id: sid.clone(),
             recorded_in: SessionPhase::Execution,

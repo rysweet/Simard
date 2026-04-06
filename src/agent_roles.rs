@@ -11,7 +11,7 @@ use std::fmt::{self, Display, Formatter};
 use crate::base_types::{BaseTypeCapability, BaseTypeId, capability_set};
 use crate::error::SimardResult;
 use crate::identity::{IdentityManifest, ManifestContract, MemoryPolicy, OperatingMode};
-use crate::memory::MemoryScope;
+use crate::memory::CognitiveMemoryType;
 use crate::metadata::{Freshness, Provenance};
 use crate::prompt_assets::PromptAssetRef;
 
@@ -174,9 +174,9 @@ pub fn identity_for_role(role: AgentRole) -> SimardResult<IdentityManifest> {
         mode,
         MemoryPolicy {
             allow_project_writes: false,
-            summary_scope: match role {
-                AgentRole::GymRunner => MemoryScope::Benchmark,
-                _ => MemoryScope::SessionSummary,
+            summary_memory_type: match role {
+                AgentRole::GymRunner => CognitiveMemoryType::Procedural,
+                _ => CognitiveMemoryType::Episodic,
             },
         },
         contract,

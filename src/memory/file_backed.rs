@@ -7,7 +7,7 @@ use crate::persistence::{load_json_or_default, persist_json};
 use crate::session::SessionId;
 
 use super::store::MemoryStore;
-use super::types::{MEMORY_STORE_NAME, MemoryRecord, MemoryScope};
+use super::types::{CognitiveMemoryType, MEMORY_STORE_NAME, MemoryRecord};
 
 #[derive(Debug)]
 pub struct FileBackedMemoryStore {
@@ -70,7 +70,7 @@ impl MemoryStore for FileBackedMemoryStore {
         self.persist(&records)
     }
 
-    fn list(&self, scope: MemoryScope) -> SimardResult<Vec<MemoryRecord>> {
+    fn list(&self, memory_type: CognitiveMemoryType) -> SimardResult<Vec<MemoryRecord>> {
         Ok(self
             .records
             .lock()
@@ -78,7 +78,7 @@ impl MemoryStore for FileBackedMemoryStore {
                 store: MEMORY_STORE_NAME.to_string(),
             })?
             .iter()
-            .filter(|record| record.scope == scope)
+            .filter(|record| record.memory_type == memory_type)
             .cloned()
             .collect())
     }

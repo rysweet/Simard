@@ -18,7 +18,7 @@ use crate::error::{SimardError, SimardResult};
 use crate::evidence::{EvidenceRecord, EvidenceSource, EvidenceStore, FileBackedEvidenceStore};
 use crate::handoff::{CopilotSubmitAudit, RuntimeHandoffSnapshot};
 use crate::identity::OperatingMode;
-use crate::memory::{FileBackedMemoryStore, MemoryRecord, MemoryScope, MemoryStore};
+use crate::memory::{CognitiveMemoryType, FileBackedMemoryStore, MemoryRecord, MemoryStore};
 use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeState, RuntimeTopology};
 use crate::session::{SessionPhase, SessionRecord, UuidSessionIdGenerator};
 use crate::terminal_engineer_bridge::{ScopedHandoffMode, persist_handoff_artifacts};
@@ -209,7 +209,7 @@ pub(super) fn persist_report(inputs: PersistReportInputs<'_>) -> SimardResult<Co
     let runtime_address = RuntimeAddress::local(&runtime_node);
     let memory_record = MemoryRecord {
         key: format!("{}-{COPILOT_SUBMIT_MEMORY_KEY}", session.id),
-        scope: MemoryScope::SessionSummary,
+        memory_type: CognitiveMemoryType::Episodic,
         value: format!(
             "copilot-submit outcome={} payload_id={} reason_code={}",
             report.outcome.as_str(),

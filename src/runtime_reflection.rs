@@ -136,7 +136,7 @@ mod tests {
             RuntimeTopology::SingleProcess,
             Instant::now(),
             vec!["copilot".to_string(), "harness".to_string()],
-            vec!["sqlite".to_string()],
+            vec!["cognitive-bridge".to_string()],
             vec!["alpha".to_string(), "beta".to_string()],
         )
     }
@@ -170,7 +170,7 @@ mod tests {
     #[test]
     fn memory_backends_returns_stores() {
         let r = test_reflector();
-        assert_eq!(r.memory_backends(), vec!["sqlite"]);
+        assert_eq!(r.memory_backends(), vec!["cognitive-bridge"]);
     }
 
     #[test]
@@ -225,7 +225,7 @@ mod tests {
         let snap = snapshot(&r);
         assert_eq!(snap.topology, RuntimeTopology::SingleProcess);
         assert_eq!(snap.active_base_types, vec!["copilot", "harness"]);
-        assert_eq!(snap.memory_backends, vec!["sqlite"]);
+        assert_eq!(snap.memory_backends, vec!["cognitive-bridge"]);
         assert_eq!(snap.session_state, SessionPhase::Planning);
         assert_eq!(snap.sibling_identities, vec!["alpha", "beta"]);
         assert_eq!(snap.resource_usage.active_sessions, 2);

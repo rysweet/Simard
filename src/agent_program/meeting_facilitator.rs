@@ -1,7 +1,7 @@
 use crate::base_types::{BaseTypeOutcome, BaseTypeTurnInput};
 use crate::error::SimardResult;
 use crate::goals::GoalUpdate;
-use crate::memory::MemoryScope;
+use crate::memory::CognitiveMemoryType;
 use crate::metadata::{BackendDescriptor, Freshness};
 use crate::sanitization::objective_metadata;
 
@@ -85,7 +85,7 @@ impl AgentProgram for MeetingFacilitatorProgram {
 
         Ok(vec![AgentProgramMemoryRecord {
             key_suffix: "decision-record".to_string(),
-            scope: MemoryScope::Decision,
+            memory_type: CognitiveMemoryType::Semantic,
             value: notes.concise_record(),
         }])
     }
@@ -269,7 +269,7 @@ mod tests {
             .unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].key_suffix, "decision-record");
-        assert_eq!(records[0].scope, MemoryScope::Decision);
+        assert_eq!(records[0].memory_type, CognitiveMemoryType::Semantic);
         assert!(records[0].value.contains("Standup"));
     }
 

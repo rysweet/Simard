@@ -576,7 +576,9 @@ fn all_production_adapters_have_standard_capabilities() {
 
 #[test]
 fn in_memory_store_works_as_memory_backend() {
-    use simard::{InMemoryMemoryStore, MemoryRecord, MemoryScope, MemoryStore, SessionPhase};
+    use simard::{
+        CognitiveMemoryType, InMemoryMemoryStore, MemoryRecord, MemoryStore, SessionPhase,
+    };
 
     let store = InMemoryMemoryStore::try_default().unwrap();
     let session = SessionId::parse("session-00000000-0000-0000-0000-000000000001").unwrap();
@@ -584,7 +586,7 @@ fn in_memory_store_works_as_memory_backend() {
     store
         .put(MemoryRecord {
             key: "test".to_string(),
-            scope: MemoryScope::SessionScratch,
+            memory_type: CognitiveMemoryType::Working,
             value: "data".to_string(),
             session_id: session.clone(),
             recorded_in: SessionPhase::Preparation,
