@@ -21,7 +21,6 @@ use crate::memory::MemoryStore;
 use crate::prompt_assets::{PromptAssetRef, PromptAssetStore};
 use crate::session::SessionRecord;
 
-
 pub struct RuntimeKernel {
     ports: RuntimePorts,
     request: RuntimeRequest,

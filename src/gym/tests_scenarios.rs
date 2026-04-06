@@ -7,7 +7,9 @@ use crate::identity::OperatingMode;
 use crate::memory::{MemoryRecord, MemoryScope};
 use crate::metadata::{BackendDescriptor, Freshness, Provenance};
 use crate::reflection::{ReflectionReport, ReflectionSnapshot};
-use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeState, RuntimeTopology, SessionOutcome};
+use crate::runtime::{
+    RuntimeAddress, RuntimeNodeId, RuntimeState, RuntimeTopology, SessionOutcome,
+};
 use crate::session::{SessionId, SessionPhase, SessionRecord};
 // --- benchmark_scenarios ---
 
@@ -138,11 +140,7 @@ fn dummy_snapshot() -> ReflectionSnapshot {
     }
 }
 
-fn dummy_outcome(
-    plan: &str,
-    execution_summary: &str,
-    reflection_summary: &str,
-) -> SessionOutcome {
+fn dummy_outcome(plan: &str, execution_summary: &str, reflection_summary: &str) -> SessionOutcome {
     SessionOutcome {
         session: SessionRecord {
             id: SessionId::parse("session-00000000-0000-0000-0000-000000000001").unwrap(),

@@ -2,10 +2,10 @@ use std::path::PathBuf;
 
 use super::reporting::*;
 use crate::gym::types::{
-    BenchmarkArtifactPaths, BenchmarkCheckResult, BenchmarkClass,
-    BenchmarkComparisonArtifactPaths, BenchmarkComparisonDelta, BenchmarkComparisonReport,
-    BenchmarkComparisonRunSummary, BenchmarkComparisonStatus, BenchmarkHandoffReport,
-    BenchmarkRunReport, BenchmarkRuntimeReport, BenchmarkScenario, BenchmarkScorecard,
+    BenchmarkArtifactPaths, BenchmarkCheckResult, BenchmarkClass, BenchmarkComparisonArtifactPaths,
+    BenchmarkComparisonDelta, BenchmarkComparisonReport, BenchmarkComparisonRunSummary,
+    BenchmarkComparisonStatus, BenchmarkHandoffReport, BenchmarkRunReport, BenchmarkRuntimeReport,
+    BenchmarkScenario, BenchmarkScorecard,
 };
 use crate::runtime::RuntimeTopology;
 // --- render_benchmark_count ---

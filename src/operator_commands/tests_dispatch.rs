@@ -114,8 +114,7 @@ fn dispatch_operator_probe_bootstrap_missing_topology() {
 
 #[test]
 fn dispatch_operator_probe_bootstrap_missing_objective() {
-    let err =
-        dispatch_operator_probe(args(&["bootstrap-run", "id", "type", "topo"])).unwrap_err();
+    let err = dispatch_operator_probe(args(&["bootstrap-run", "id", "type", "topo"])).unwrap_err();
     assert!(err.to_string().contains("expected objective"));
 }
 
@@ -268,9 +267,8 @@ fn dispatch_operator_probe_handoff_rejects_extra_args() {
 
 #[test]
 fn dispatch_operator_probe_meeting_run_missing_objective() {
-    let err =
-        dispatch_operator_probe(args(&["meeting-run", "local-harness", "single-process"]))
-            .unwrap_err();
+    let err = dispatch_operator_probe(args(&["meeting-run", "local-harness", "single-process"]))
+        .unwrap_err();
     assert!(err.to_string().contains("expected objective"));
 }
 
@@ -288,8 +286,7 @@ fn dispatch_operator_probe_terminal_run_missing_objective() {
 
 #[test]
 fn dispatch_operator_probe_terminal_run_file_missing_objective_file() {
-    let err =
-        dispatch_operator_probe(args(&["terminal-run-file", "single-process"])).unwrap_err();
+    let err = dispatch_operator_probe(args(&["terminal-run-file", "single-process"])).unwrap_err();
     assert!(err.to_string().contains("expected objective file"));
 }
 
@@ -302,8 +299,7 @@ fn dispatch_operator_probe_terminal_recipe_run_missing_recipe_name() {
 
 #[test]
 fn dispatch_operator_probe_engineer_loop_missing_workspace() {
-    let err =
-        dispatch_operator_probe(args(&["engineer-loop-run", "single-process"])).unwrap_err();
+    let err = dispatch_operator_probe(args(&["engineer-loop-run", "single-process"])).unwrap_err();
     assert!(err.to_string().contains("expected workspace root"));
 }
 
@@ -333,22 +329,21 @@ fn dispatch_operator_probe_review_run_missing_objective() {
 
 #[test]
 fn dispatch_operator_probe_improvement_curation_run_missing_topology() {
-    let err = dispatch_operator_probe(args(&["improvement-curation-run", "local-harness"]))
-        .unwrap_err();
+    let err =
+        dispatch_operator_probe(args(&["improvement-curation-run", "local-harness"])).unwrap_err();
     assert!(err.to_string().contains("expected topology"));
 }
 
 #[test]
 fn dispatch_operator_probe_improvement_curation_read_missing_topology() {
-    let err = dispatch_operator_probe(args(&["improvement-curation-read", "local-harness"]))
-        .unwrap_err();
+    let err =
+        dispatch_operator_probe(args(&["improvement-curation-read", "local-harness"])).unwrap_err();
     assert!(err.to_string().contains("expected topology"));
 }
 
 #[test]
 fn dispatch_operator_probe_goal_curation_missing_topology() {
-    let err =
-        dispatch_operator_probe(args(&["goal-curation-run", "local-harness"])).unwrap_err();
+    let err = dispatch_operator_probe(args(&["goal-curation-run", "local-harness"])).unwrap_err();
     assert!(err.to_string().contains("expected topology"));
 }
 

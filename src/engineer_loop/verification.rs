@@ -3,7 +3,9 @@ use std::path::Path;
 use crate::error::{SimardError, SimardResult};
 
 use super::inspect_workspace;
-use super::types::{EngineerActionKind, ExecutedEngineerAction, RepoInspection, VerificationReport};
+use super::types::{
+    EngineerActionKind, ExecutedEngineerAction, RepoInspection, VerificationReport,
+};
 
 // Re-export per-action verifiers so `use super::verification::*` in tests still works.
 pub(crate) use super::verification_actions::*;
@@ -210,5 +212,3 @@ pub(crate) fn verify_engineer_action(
         checks,
     })
 }
-
-

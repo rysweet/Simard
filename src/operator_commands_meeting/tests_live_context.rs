@@ -72,8 +72,7 @@ fn includes_goal_facts() {
 
 #[test]
 fn includes_operator_facts() {
-    let bridge =
-        bridge_with_specific_facts("operator:", "operator", "Custom operator identity");
+    let bridge = bridge_with_specific_facts("operator:", "operator", "Custom operator identity");
     let ctx = build_live_meeting_context(&bridge);
     assert!(
         ctx.contains("Operator Context"),
@@ -92,8 +91,7 @@ fn includes_operator_facts() {
 
 #[test]
 fn includes_project_facts() {
-    let bridge =
-        bridge_with_specific_facts("project:", "project", "CustomProject — custom suite");
+    let bridge = bridge_with_specific_facts("project:", "project", "CustomProject — custom suite");
     let ctx = build_live_meeting_context(&bridge);
     assert!(
         ctx.contains("Known Projects"),
@@ -107,8 +105,7 @@ fn includes_project_facts() {
 
 #[test]
 fn includes_research_facts() {
-    let bridge =
-        bridge_with_specific_facts("research:", "research", "Investigating LLM patterns");
+    let bridge = bridge_with_specific_facts("research:", "research", "Investigating LLM patterns");
     let ctx = build_live_meeting_context(&bridge);
     assert!(
         ctx.contains("Research Topics"),
@@ -268,8 +265,7 @@ fn research_section_is_bulleted() {
 
 #[test]
 fn improvement_section_is_bulleted() {
-    let bridge =
-        bridge_with_specific_facts("improvement:", "improvement", "Better error recovery");
+    let bridge = bridge_with_specific_facts("improvement:", "improvement", "Better error recovery");
     let ctx = build_live_meeting_context(&bridge);
     assert!(
         ctx.contains("- Better error recovery"),

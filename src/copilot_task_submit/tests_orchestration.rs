@@ -4,12 +4,12 @@ use super::types::{
     CopilotSubmitFlowAsset, CopilotSubmitOutcome, StartupStatus, SubmitStatus,
 };
 
+use crate::base_types::BaseTypeId;
 use crate::evidence::EvidenceSource;
 use crate::handoff::CopilotSubmitAudit;
 use crate::identity::OperatingMode;
 use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeTopology};
 use crate::session::{SessionPhase, SessionRecord, UuidSessionIdGenerator};
-use crate::base_types::BaseTypeId;
 
 use std::path::PathBuf;
 
@@ -341,8 +341,7 @@ fn build_evidence_record_ids_are_unique() {
     let wd = PathBuf::from("/test");
     let (_node, addr) = test_runtime_address();
 
-    let records =
-        build_evidence_records(&session, &flow, &["s1".to_string()], &audit, &wd, &addr);
+    let records = build_evidence_records(&session, &flow, &["s1".to_string()], &audit, &wd, &addr);
 
     let ids: std::collections::HashSet<_> = records.iter().map(|r| &r.id).collect();
     assert_eq!(

@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
-use super::types::{CopilotSubmitFlowAsset, StartupStatus, SubmitStatus};
 use super::transcript::{
     classify_startup, classify_startup_timeout, classify_submit, scan_transcript,
     scan_transcript_lines,
 };
+use super::types::{CopilotSubmitFlowAsset, StartupStatus, SubmitStatus};
 
 fn flow() -> CopilotSubmitFlowAsset {
     CopilotSubmitFlowAsset {
@@ -18,9 +18,7 @@ fn flow() -> CopilotSubmitFlowAsset {
         submit_hint: "ctrl+s run command".to_string(),
         post_submit_checkpoint: Some("READY".to_string()),
         trust_prompt: Some("Do you trust the files in this folder?".to_string()),
-        wrapper_error_signal: Some(
-            "unknown option '--dangerously-skip-permissions'".to_string(),
-        ),
+        wrapper_error_signal: Some("unknown option '--dangerously-skip-permissions'".to_string()),
         workflow_noise_signals: vec![
             "✅ Copied".to_string(),
             "🔐 Set execute permissions".to_string(),

@@ -265,8 +265,7 @@ fn test_bootstrap_run_missing_objective() {
 
 #[test]
 fn test_handover_rejects_unexpected_arg() {
-    let result =
-        dispatch_operator_cli(vec!["handover".to_string(), "--bad-flag=x".to_string()]);
+    let result = dispatch_operator_cli(vec!["handover".to_string(), "--bad-flag=x".to_string()]);
     assert!(result.is_err());
     assert!(
         result
