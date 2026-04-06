@@ -96,10 +96,10 @@ pub use agent_supervisor::{
     HeartbeatStatus, SubordinateConfig, SubordinateHandle, check_heartbeat, kill_subordinate,
     spawn_subordinate,
 };
-pub use base_type_claude_agent_sdk::{ClaudeAgentSdkAdapter, claude_agent_sdk_adapter};
+pub use base_type_claude_agent_sdk::claude_agent_sdk_adapter;
 pub use base_type_copilot::{CopilotAdapterConfig, CopilotSdkAdapter, parse_copilot_response};
 pub use base_type_harness::{HarnessConfig, RealLocalHarnessAdapter};
-pub use base_type_ms_agent::{MsAgentFrameworkAdapter, ms_agent_framework_adapter};
+pub use base_type_ms_agent::ms_agent_framework_adapter;
 pub use base_type_pending_sdk::PendingSdkAdapter;
 pub use base_type_rustyclawd::RustyClawdAdapter;
 pub use base_type_turn::{
@@ -197,7 +197,6 @@ pub use meetings::{
 };
 pub use memory::{
     FileBackedMemoryStore, InMemoryMemoryStore, MemoryRecord, MemoryScope, MemoryStore,
-    SqliteMemoryStore,
 };
 pub use memory_bridge::CognitiveMemoryBridge;
 pub use memory_bridge_adapter::CognitiveBridgeMemoryStore;
@@ -209,7 +208,6 @@ pub use memory_consolidation::{
     FactExtraction, PreparedContext, execution_memory_operations, intake_memory_operations,
     persistence_memory_operations, preparation_memory_operations, reflection_memory_operations,
 };
-pub use memory_hive::{HiveConfig, hive_config_from_identity};
 pub use ooda_actions::dispatch_actions;
 pub use ooda_loop::{
     ActionKind, ActionOutcome, CycleReport, EnvironmentSnapshot, GoalSnapshot, Observation,
