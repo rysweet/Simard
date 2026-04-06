@@ -214,7 +214,7 @@ fn bootstrap_assembly_produces_truthful_manifest_metadata() {
         base_type: Some("local-harness".to_string()),
         topology: Some("single-process".to_string()),
         state_root: Some(state_root("assembly")),
-        ..BootstrapInputs::default()
+        mode: Some("builtin-defaults".into()),
     })
     .expect("explicit bootstrap config should resolve");
 
@@ -326,7 +326,7 @@ fn bootstrap_run_local_session_executes_the_cli_lifecycle() {
         base_type: Some("local-harness".to_string()),
         topology: Some("single-process".to_string()),
         state_root: Some(state_root("run-loop")),
-        ..BootstrapInputs::default()
+        mode: Some("builtin-defaults".into()),
     })
     .expect("explicit bootstrap config should resolve");
 
@@ -357,7 +357,7 @@ fn bootstrap_persists_durable_state_and_restores_latest_handoff() {
         identity: Some("simard-engineer".to_string()),
         base_type: Some("local-harness".to_string()),
         topology: Some("single-process".to_string()),
-        ..BootstrapInputs::default()
+        mode: Some("builtin-defaults".into()),
     })
     .expect("explicit bootstrap config should resolve");
 
@@ -422,7 +422,7 @@ fn bootstrap_supports_composite_identity_execution() {
         base_type: Some("local-harness".to_string()),
         topology: Some("single-process".to_string()),
         state_root: Some(state_root("composite")),
-        ..BootstrapInputs::default()
+        mode: Some("builtin-defaults".into()),
     })
     .expect("explicit composite bootstrap config should resolve");
 
@@ -462,7 +462,7 @@ fn bootstrap_meeting_mode_persists_structured_decision_memory() {
         base_type: Some("local-harness".to_string()),
         topology: Some("single-process".to_string()),
         state_root: Some(state_root("meeting-mode")),
-        ..BootstrapInputs::default()
+        mode: Some("builtin-defaults".into()),
     })
     .expect("meeting bootstrap config should resolve");
 
@@ -527,7 +527,7 @@ fn bootstrap_goal_curator_mode_persists_top_five_goal_state() {
         base_type: Some("local-harness".to_string()),
         topology: Some("single-process".to_string()),
         state_root: Some(state_root("goal-curator")),
-        ..BootstrapInputs::default()
+        mode: Some("builtin-defaults".into()),
     })
     .expect("goal curator bootstrap config should resolve");
 
@@ -561,7 +561,7 @@ fn bootstrap_improvement_curator_mode_promotes_review_findings_into_durable_prio
         base_type: Some("local-harness".to_string()),
         topology: Some("single-process".to_string()),
         state_root: Some(state_root("improvement-curator")),
-        ..BootstrapInputs::default()
+        mode: Some("builtin-defaults".into()),
     })
     .expect("improvement curator bootstrap config should resolve");
 
@@ -621,7 +621,7 @@ fn bootstrap_assembly_supports_multiple_builtin_manifest_base_types() {
             base_type: Some(base_type.to_string()),
             topology: Some("single-process".to_string()),
             state_root: Some(state_root(base_type)),
-            ..BootstrapInputs::default()
+            mode: Some("builtin-defaults".into()),
         })
         .expect("explicit bootstrap config should resolve");
 
@@ -687,7 +687,7 @@ fn bootstrap_supports_terminal_shell_execution() {
         base_type: Some("terminal-shell".to_string()),
         topology: Some("single-process".to_string()),
         state_root: Some(state_root("terminal-shell-execution")),
-        ..BootstrapInputs::default()
+        mode: Some("builtin-defaults".into()),
     })
     .expect("terminal-shell config should resolve");
 
@@ -803,7 +803,7 @@ fn bootstrap_assembly_surfaces_identity_base_type_mismatches_explicitly() {
         base_type: Some("meeting-bot".to_string()),
         topology: Some("single-process".to_string()),
         state_root: Some(state_root("identity-base-mismatch")),
-        ..BootstrapInputs::default()
+        mode: Some("builtin-defaults".into()),
     })
     .expect("explicit bootstrap config should resolve");
 
@@ -830,7 +830,7 @@ fn bootstrap_assembly_surfaces_unsupported_topologies_explicitly() {
         base_type: Some("local-harness".to_string()),
         topology: Some("distributed".to_string()),
         state_root: Some(state_root("unsupported-topology")),
-        ..BootstrapInputs::default()
+        mode: Some("builtin-defaults".into()),
     })
     .expect("explicit bootstrap config should resolve");
 

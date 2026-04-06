@@ -153,10 +153,10 @@ When multiple Simard processes run concurrently (parent + subordinates), they sh
 ```mermaid
 graph TB
     subgraph "Agent: simard-main"
-        LM1[Local Memory<br/>Kuzu agent_id=simard-main]
+        LM1[Local Memory<br/>LadybugDB agent_id=simard-main]
     end
     subgraph "Agent: simard-sub-001"
-        LM2[Local Memory<br/>Kuzu agent_id=simard-sub-001]
+        LM2[Local Memory<br/>LadybugDB agent_id=simard-sub-001]
     end
     subgraph "Shared Hive"
         HG[Hive Graph<br/>Quality Gate ≥ 0.3]
@@ -168,7 +168,7 @@ graph TB
     HG -->|federated_query| LM2
 ```
 
-- Each agent has its own `agent_name` → row-level isolation in Kuzu
+- Each agent has its own `agent_name` → row-level isolation in LadybugDB
 - Facts are auto-promoted to the shared hive when quality score ≥ 0.3
 - Cross-agent queries merge local + hive results via Reciprocal Rank Fusion (RRF)
 - CRDTs (ORSet, LWWRegister) ensure eventual consistency
@@ -192,9 +192,9 @@ confidence_new = confidence_original * exp(-0.01 * elapsed_hours)
 
 This creates a natural recency bias without deleting old knowledge. A fact with confidence 0.8 decays to ~0.72 after 10 hours, ~0.58 after 50 hours.
 
-## Kuzu Graph Schema
+## LadybugDB Graph Schema
 
-The Python `CognitiveMemory` class manages seven node tables and five relationship tables in Kuzu:
+The Python `CognitiveMemory` class manages seven node tables and five relationship tables in LadybugDB:
 
 ### Node Tables
 

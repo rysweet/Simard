@@ -323,7 +323,7 @@ def main() -> None:
     parser.add_argument(
         "--db-path",
         default=None,
-        help="Path for the Kuzu database directory (default: temp dir)",
+        help="Path for the LadybugDB database directory (default: temp dir)",
     )
     args = parser.parse_args()
 

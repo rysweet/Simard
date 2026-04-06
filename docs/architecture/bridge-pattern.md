@@ -20,7 +20,7 @@ Simard is Rust. The amplihack ecosystem (memory-lib, kg-packs, agent-eval) is Py
 
 Bridges win because:
 - The Python ecosystem already works — we don't want to port 3,000+ LOC of production Python code
-- Kuzu and LadybugDB have Python bindings but no Rust bindings
+- LadybugDB has Python bindings but no Rust bindings
 - Process isolation means a Python crash can't take down Simard
 - The circuit breaker pattern handles intermittent failures gracefully
 
@@ -142,8 +142,8 @@ The built-in `bridge.health` method is always registered and returns `{"server_n
 
 ### Data Loss Prevention
 
-- Memory writes are idempotent (Kuzu `node_id` is primary key)
-- Python bridge wraps each write in a Kuzu transaction
+- Memory writes are idempotent (LadybugDB `node_id` is primary key)
+- Python bridge wraps each write in a LadybugDB transaction
 - If bridge dies mid-write, the transaction rolls back
 - On reconnect, Simard re-issues the last failed write
 

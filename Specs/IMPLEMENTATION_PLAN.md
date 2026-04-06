@@ -23,7 +23,7 @@ Simard is Rust. The ecosystem (memory-lib, kg-packs, agent-eval, hive mind) is P
 Rather than port everything, we use subprocess bridges with JSON-line protocol.
 
 ```
-Simard (Rust) ──→ BridgeTransport trait ──→ Python subprocess (amplihack-memory-lib + Kuzu)
+Simard (Rust) ──→ BridgeTransport trait ──→ Python subprocess (amplihack-memory-lib + LadybugDB)
                ──→ BridgeTransport trait ──→ Python subprocess (agent-kgpacks + LadybugDB)
                ──→ BridgeTransport trait ──→ Python subprocess (amplihack-agent-eval)
 ```
@@ -132,7 +132,7 @@ See IMPLEMENTATION_PLAN_WIRE_PROTOCOLS.md (to be created with Phase 1 design).
 | Persistence | consolidate_episodes, clear_working, prune_expired_sensory |
 
 ### Concurrency Model
-- Each subordinate Simard gets its own agent_name → Kuzu agent_id isolation
+- Each subordinate Simard gets its own agent_name → LadybugDB agent_id isolation
 - Writes serialized through bridge subprocess (one bridge per agent process)
 - Hive reads use CognitiveAdapter.search() which merges local + hive via RRF
 - Quality gate (threshold 0.3) before hive promotion
@@ -146,7 +146,7 @@ See IMPLEMENTATION_PLAN_WIRE_PROTOCOLS.md (to be created with Phase 1 design).
 - Empty concept → rejection
 - 10MB content → rejection
 - consolidate with < batch_size episodes → null result
-- Two processes sharing Kuzu with different agent_name → isolation verified
+- Two processes sharing LadybugDB with different agent_name → isolation verified
 
 ## Phase 2: Knowledge Graph Integration
 
@@ -214,7 +214,7 @@ Simard can measure her own capability via amplihack-agent-eval's progressive sui
 Simard can compose multiple agent identities and spawn subordinate agents.
 
 ### Supervisor Protocol
-- Parent ↔ subordinate communicate via shared Kuzu hive (semantic facts)
+- Parent ↔ subordinate communicate via shared LadybugDB hive (semantic facts)
 - Progress reported as JSON in fact content with heartbeat_epoch
 - Liveness: 3 stale heartbeats (>120s each) → kill + mark abandoned
 - Crash recovery: parent inspects subordinate's episodic memory

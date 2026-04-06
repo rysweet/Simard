@@ -18,10 +18,10 @@ use crate::memory_bridge::CognitiveMemoryBridge;
 
 const DEFAULT_BRIDGE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Canonical filename for the Kuzu cognitive-memory database.
-const COGNITIVE_MEMORY_DB: &str = "cognitive_memory.kuzu";
+/// Canonical filename for the LadybugDB cognitive-memory database.
+const COGNITIVE_MEMORY_DB: &str = "cognitive_memory.ladybug";
 
-/// Return the canonical path to the Kuzu cognitive-memory database.
+/// Return the canonical path to the LadybugDB cognitive-memory database.
 pub fn cognitive_memory_db_path(state_root: &Path) -> PathBuf {
     state_root.join(COGNITIVE_MEMORY_DB)
 }
@@ -179,7 +179,7 @@ pub fn launch_all_bridges(
     let gym = launch_gym_bridge(&python_dir).ok();
 
     if memory.is_none() {
-        eprintln!("[simard] memory bridge unavailable — memories will not persist to Kuzu");
+        eprintln!("[simard] memory bridge unavailable — memories will not persist to LadybugDB");
     }
     if knowledge.is_none() {
         eprintln!("[simard] knowledge bridge unavailable — domain knowledge disabled");
@@ -216,19 +216,19 @@ mod tests {
     #[test]
     fn cognitive_memory_db_path_joins_correctly() {
         let path = cognitive_memory_db_path(Path::new("/state"));
-        assert_eq!(path, PathBuf::from("/state/cognitive_memory.kuzu"));
+        assert_eq!(path, PathBuf::from("/state/cognitive_memory.ladybug"));
     }
 
     #[test]
     fn cognitive_memory_db_path_with_nested_root() {
         let path = cognitive_memory_db_path(Path::new("/a/b/c"));
-        assert_eq!(path, PathBuf::from("/a/b/c/cognitive_memory.kuzu"));
+        assert_eq!(path, PathBuf::from("/a/b/c/cognitive_memory.ladybug"));
     }
 
     #[test]
     fn cognitive_memory_db_path_relative() {
         let path = cognitive_memory_db_path(Path::new("target/state"));
-        assert_eq!(path, PathBuf::from("target/state/cognitive_memory.kuzu"));
+        assert_eq!(path, PathBuf::from("target/state/cognitive_memory.ladybug"));
     }
 
     // ── Constants ──
@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn cognitive_memory_db_constant() {
-        assert_eq!(COGNITIVE_MEMORY_DB, "cognitive_memory.kuzu");
+        assert_eq!(COGNITIVE_MEMORY_DB, "cognitive_memory.ladybug");
     }
 
     // ── default_circuit_breaker ──

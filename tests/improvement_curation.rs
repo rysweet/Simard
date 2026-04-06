@@ -53,6 +53,7 @@ fn review_artifacts_can_be_promoted_into_durable_improvement_goals() {
     let state_root = TempDirGuard::new("simard-improvement-curation-state");
 
     let review_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("review-run")
         .arg("local-harness")
         .arg("single-process")
@@ -74,6 +75,7 @@ approve: Capture denser execution evidence | priority=1 | status=active | ration
 approve: Promote this pattern into a repeatable benchmark | priority=2 | status=proposed | rationale=carry this into the next benchmark planning pass";
 
     let improvement_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("improvement-curation-run")
         .arg("local-harness")
         .arg("single-process")
@@ -102,6 +104,7 @@ approve: Promote this pattern into a repeatable benchmark | priority=2 | status=
     ));
 
     let engineer_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("engineer-loop-run")
         .arg("single-process")
         .arg(repo_root())
@@ -127,6 +130,7 @@ fn improvement_curation_read_probe_surfaces_persisted_review_decisions_without_m
     let state_root = TempDirGuard::new("simard-improvement-curation-read-probe");
 
     let review_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("review-run")
         .arg("local-harness")
         .arg("single-process")
@@ -145,6 +149,7 @@ fn improvement_curation_read_probe_surfaces_persisted_review_decisions_without_m
 approve: Capture denser execution evidence | priority=1 | status=active | rationale=operators need denser execution evidence now\n\
 defer: Promote this pattern into a repeatable benchmark | rationale=wait for the next benchmark planning pass";
     let improvement_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("improvement-curation-run")
         .arg("local-harness")
         .arg("single-process")
@@ -165,6 +170,7 @@ defer: Promote this pattern into a repeatable benchmark | rationale=wait for the
         fs::read(state_root.path().join("goal_records.json")).expect("goal store should exist");
 
     let read_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("improvement-curation-read")
         .arg("local-harness")
         .arg("single-process")
@@ -220,6 +226,7 @@ fn improvement_curation_read_probe_rejects_nonexistent_and_empty_state_roots_bef
     fs::create_dir_all(&empty_root).expect("empty state root fixture should be created");
 
     let missing_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("improvement-curation-read")
         .arg("local-harness")
         .arg("single-process")
@@ -247,6 +254,7 @@ fn improvement_curation_read_probe_rejects_nonexistent_and_empty_state_roots_bef
     );
 
     let empty_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("improvement-curation-read")
         .arg("local-harness")
         .arg("single-process")
@@ -279,6 +287,7 @@ fn improvement_curation_read_probe_fails_closed_on_malformed_latest_improvement_
     let state_root = TempDirGuard::new("simard-improvement-curation-read-malformed");
 
     let review_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("review-run")
         .arg("local-harness")
         .arg("single-process")
@@ -297,6 +306,7 @@ fn improvement_curation_read_probe_fails_closed_on_malformed_latest_improvement_
 approve: Capture denser execution evidence | priority=1 | status=active | rationale=operators need denser execution evidence now\n\
 defer: Promote this pattern into a repeatable benchmark | rationale=wait for the next benchmark planning pass";
     let improvement_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("improvement-curation-run")
         .arg("local-harness")
         .arg("single-process")
@@ -337,6 +347,7 @@ defer: Promote this pattern into a repeatable benchmark | rationale=wait for the
     .expect("corrupted memory store should be written");
 
     let read_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("improvement-curation-read")
         .arg("local-harness")
         .arg("single-process")

@@ -31,6 +31,7 @@ fn run_engineer_loop_probe_with_state_root(
     state_root: Option<&Path>,
 ) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"));
+    cmd.env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults");
     cmd.arg("engineer-loop-run")
         .arg("single-process")
         .arg(workspace_root)
@@ -295,6 +296,7 @@ with: Current status: DONE
 verify-contains: Current status: DONE";
 
     let output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("engineer-loop-run")
         .arg("single-process")
         .arg(repo.path())
@@ -381,6 +383,7 @@ with: Current status: DONE
 verify-contains: Current status: DONE";
 
     let output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("engineer-loop-run")
         .arg("single-process")
         .arg(repo.path())
@@ -535,6 +538,7 @@ fn engineer_loop_meeting_handoff_load_failure_surfaces_in_stderr() {
     .expect("corrupt handoff should be written");
 
     let output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("engineer-loop-run")
         .arg("single-process")
         .arg(repo.path())
@@ -584,6 +588,7 @@ with: /// Greets a person by name.\\nfn greet(name: &str) -> String {
 verify-contains: /// Greets a person by name.";
 
     let output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
+        .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
         .arg("engineer-loop-run")
         .arg("single-process")
         .arg(repo.path())

@@ -11,7 +11,7 @@ use crate::base_type_ms_agent::ms_agent_framework_adapter;
 use crate::base_type_rustyclawd::RustyClawdAdapter;
 use crate::base_types::BaseTypeId;
 use crate::bridge_launcher::{cognitive_memory_db_path, find_python_dir, launch_memory_bridge};
-use crate::error::SimardResult;
+use crate::error::{SimardError, SimardResult};
 use crate::evidence::{EvidenceStore, FileBackedEvidenceStore};
 use crate::goals::{FileBackedGoalStore, GoalStore};
 use crate::handoff::{FileBackedHandoffStore, RuntimeHandoffSnapshot, RuntimeHandoffStore};
@@ -44,10 +44,11 @@ pub struct LocalSessionExecution {
     pub stopped_snapshot: ReflectionSnapshot,
 }
 
-/// Build the memory store, attempting cognitive bridge first with file fallback.
+/// Build the memory store — cognitive bridge is mandatory in production.
 ///
-/// Only launches the memory bridge — knowledge and gym bridges are launched
-/// on-demand by subsystems that need them, avoiding unnecessary subprocess spawns.
+/// In `BuiltinDefaults` mode (tests/dev), falls back to file-backed store
+/// when the Python bridge is unavailable. In `ExplicitConfig` mode (production),
+/// the cognitive bridge MUST succeed or startup fails.
 fn build_memory_store(config: &BootstrapConfig) -> SimardResult<Arc<dyn MemoryStore>> {
     let bridge = find_python_dir().ok().and_then(|python_dir| {
         let db_path = cognitive_memory_db_path(&config.state_root.value);
@@ -55,17 +56,25 @@ fn build_memory_store(config: &BootstrapConfig) -> SimardResult<Arc<dyn MemorySt
     });
 
     if let Some(bridge) = bridge {
-        eprintln!("[simard] cognitive memory bridge active — using Kuzu backend");
+        eprintln!("[simard] cognitive memory bridge active — using LadybugDB backend");
         let store = CognitiveBridgeMemoryStore::new(bridge, config.memory_store_path())?;
-        // Pull cross-session records from the cognitive bridge to supplement
-        // local fallback hydration — recovers data written by other processes.
         store.hydrate_from_bridge();
         Ok(Arc::new(store))
-    } else {
-        eprintln!("[simard] cognitive memory bridge unavailable — using JSON file backend");
+    } else if config.mode == crate::bootstrap::BootstrapMode::BuiltinDefaults {
+        eprintln!(
+            "[simard] cognitive memory bridge unavailable (builtin-defaults mode) — using file backend for testing"
+        );
         Ok(Arc::new(FileBackedMemoryStore::try_new(
             config.memory_store_path(),
         )?))
+    } else {
+        Err(SimardError::BridgeSpawnFailed {
+            bridge: "cognitive-memory".into(),
+            reason: "cognitive memory bridge is required in production mode. \
+                     Ensure Python and the bridge server are available, or set \
+                     SIMARD_BOOTSTRAP_MODE=builtin-defaults for testing."
+                .into(),
+        })
     }
 }
 

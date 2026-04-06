@@ -58,14 +58,13 @@ graph TB
         CMA[CognitiveAdapter + Hive Mind]
         KGA[KnowledgeGraphAgent]
         EVA[Progressive Test Suite]
-        KUZU[(Kuzu Graph DB)]
-        LDB[(LadybugDB)]
+        LBUG[(LadybugDB)]
 
         MB --> CMA
         KB --> KGA
         GB --> EVA
-        CMA --> KUZU
-        KGA --> LDB
+        CMA --> LBUG
+        KGA --> LBUG
     end
 
     subgraph "External Systems"
@@ -130,7 +129,7 @@ See [Base Type Adapters](../reference/base-type-adapters.md) for the full refere
 Simard communicates with the Python ecosystem through subprocess bridges using newline-delimited JSON on stdin/stdout:
 
 ```
-Simard (Rust) ──stdin──→ Python subprocess ──→ amplihack-memory-lib (Kuzu)
+Simard (Rust) ──stdin──→ Python subprocess ──→ amplihack-memory-lib (LadybugDB)
               ←stdout──                    ──→ agent-kgpacks (LadybugDB)
                                            ──→ amplihack-agent-eval
 ```

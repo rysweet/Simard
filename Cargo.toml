@@ -1,6 +1,6 @@
 [package]
 name = "simard"
-version = "0.14.2"
+version = "0.15.0"
 edition = "2024"
 default-run = "simard"
 
@@ -9,6 +9,8 @@ name = "simard-gym"
 path = "src/bin/simard_gym.rs"
 
 [dependencies]
+# TODO: enable `ladybug` feature once amplihack-memory-lib publishes ladybug-graph-rs to crates.io
+# amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", features = ["ladybug"] }
 amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git" }
 rustyclawd-core = { git = "https://github.com/rysweet/RustyClawd.git" }
 rustyclawd-tools = { git = "https://github.com/rysweet/RustyClawd.git" }
