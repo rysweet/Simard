@@ -20,13 +20,13 @@ fn put_and_list_by_scope() {
         .put(make_record("b", CognitiveMemoryType::Semantic))
         .unwrap();
     store
-        .put(make_record("c", CognitiveMemoryType::Semantic))
+        .put(make_record("c", CognitiveMemoryType::Episodic))
         .unwrap();
 
-    let decisions = store.list(CognitiveMemoryType::Semantic).unwrap();
-    assert_eq!(decisions.len(), 2);
-    let projects = store.list(CognitiveMemoryType::Semantic).unwrap();
-    assert_eq!(projects.len(), 1);
+    let semantic = store.list(CognitiveMemoryType::Semantic).unwrap();
+    assert_eq!(semantic.len(), 2);
+    let episodic = store.list(CognitiveMemoryType::Episodic).unwrap();
+    assert_eq!(episodic.len(), 1);
 }
 
 #[test]
@@ -94,7 +94,7 @@ fn hydration_loads_records_from_fallback() {
         let seed = FileBackedMemoryStore::try_new(&path).unwrap();
         seed.put(make_record("prior-a", CognitiveMemoryType::Semantic))
             .unwrap();
-        seed.put(make_record("prior-b", CognitiveMemoryType::Semantic))
+        seed.put(make_record("prior-b", CognitiveMemoryType::Episodic))
             .unwrap();
     }
 
@@ -111,13 +111,13 @@ fn hydration_loads_records_from_fallback() {
     let store = CognitiveBridgeMemoryStore::new(bridge, &path).unwrap();
 
     // Step 3: verify hydration — records visible without any put().
-    let decisions = store.list(CognitiveMemoryType::Semantic).unwrap();
-    assert_eq!(decisions.len(), 1, "decision record should be hydrated");
-    assert_eq!(decisions[0].key, "prior-a");
+    let semantic = store.list(CognitiveMemoryType::Semantic).unwrap();
+    assert_eq!(semantic.len(), 1, "semantic record should be hydrated");
+    assert_eq!(semantic[0].key, "prior-a");
 
-    let projects = store.list(CognitiveMemoryType::Semantic).unwrap();
-    assert_eq!(projects.len(), 1, "project record should be hydrated");
-    assert_eq!(projects[0].key, "prior-b");
+    let episodic = store.list(CognitiveMemoryType::Episodic).unwrap();
+    assert_eq!(episodic.len(), 1, "episodic record should be hydrated");
+    assert_eq!(episodic[0].key, "prior-b");
 
     // Clean up.
     let _ = std::fs::remove_file(&path);
@@ -144,16 +144,17 @@ fn hydration_with_empty_fallback_starts_empty() {
     let store = CognitiveBridgeMemoryStore::new(bridge, &path).unwrap();
 
     // No records should exist — hydration from empty fallback is a no-op.
-    for scope in [
+    for mt in [
+        CognitiveMemoryType::Sensory,
         CognitiveMemoryType::Working,
         CognitiveMemoryType::Episodic,
         CognitiveMemoryType::Semantic,
-        CognitiveMemoryType::Semantic,
         CognitiveMemoryType::Procedural,
+        CognitiveMemoryType::Prospective,
     ] {
         assert!(
-            store.list(scope).unwrap().is_empty(),
-            "scope {scope:?} should be empty after hydrating empty fallback"
+            store.list(mt).unwrap().is_empty(),
+            "type {mt:?} should be empty after hydrating empty fallback"
         );
     }
 

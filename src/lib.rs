@@ -197,7 +197,6 @@ pub use meetings::{
 };
 pub use memory::{
     CognitiveMemoryType, FileBackedMemoryStore, InMemoryMemoryStore, MemoryRecord, MemoryStore,
-    SqliteMemoryStore,
 };
 pub use memory_bridge::CognitiveMemoryBridge;
 pub use memory_bridge_adapter::CognitiveBridgeMemoryStore;

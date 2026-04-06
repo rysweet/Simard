@@ -10,7 +10,7 @@ pub(crate) const MEMORY_STORE_NAME: &str = "memory";
 ///
 /// This replaces the old ad-hoc `MemoryScope` with the scientifically-grounded
 /// memory taxonomy used by `amplihack-memory-lib`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CognitiveMemoryType {
     /// Transient sensory buffer — raw observations with short TTL.
@@ -39,10 +39,66 @@ impl fmt::Display for CognitiveMemoryType {
         }
     }
 }
+/// Accept both new kebab-case names and legacy MemoryScope variant names.
+impl<'de> Deserialize<'de> for CognitiveMemoryType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct CognitiveMemoryTypeVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for CognitiveMemoryTypeVisitor {
+            type Value = CognitiveMemoryType;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a cognitive memory type or legacy scope name")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<CognitiveMemoryType, E>
+            where
+                E: serde::de::Error,
+            {
+                match value {
+                    "sensory" => Ok(CognitiveMemoryType::Sensory),
+                    "working" => Ok(CognitiveMemoryType::Working),
+                    "episodic" => Ok(CognitiveMemoryType::Episodic),
+                    "semantic" => Ok(CognitiveMemoryType::Semantic),
+                    "procedural" => Ok(CognitiveMemoryType::Procedural),
+                    "prospective" => Ok(CognitiveMemoryType::Prospective),
+                    // Legacy MemoryScope variant names
+                    "session-scratch" => Ok(CognitiveMemoryType::Working),
+                    "session-summary" => Ok(CognitiveMemoryType::Episodic),
+                    "decision" => Ok(CognitiveMemoryType::Semantic),
+                    "project" => Ok(CognitiveMemoryType::Semantic),
+                    "benchmark" => Ok(CognitiveMemoryType::Procedural),
+                    _ => Err(serde::de::Error::unknown_variant(
+                        value,
+                        &[
+                            "sensory",
+                            "working",
+                            "episodic",
+                            "semantic",
+                            "procedural",
+                            "prospective",
+                            "session-scratch",
+                            "session-summary",
+                            "decision",
+                            "project",
+                            "benchmark",
+                        ],
+                    )),
+                }
+            }
+        }
+
+        deserializer.deserialize_str(CognitiveMemoryTypeVisitor)
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MemoryRecord {
     pub key: String,
+    #[serde(alias = "scope")]
     pub memory_type: CognitiveMemoryType,
     pub value: String,
     pub session_id: SessionId,

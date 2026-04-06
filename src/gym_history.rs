@@ -7,6 +7,8 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+use crate::error::{SimardError, SimardResult};
+
 /// A single recorded benchmark score.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ScoreRecord {
@@ -239,7 +241,7 @@ mod tests {
     }
 
     fn mem_history() -> ScoreHistory {
-        ScoreHistory::open(":memory:")
+        ScoreHistory::open(":memory:").unwrap()
     }
 
     #[test]
@@ -290,7 +292,7 @@ mod tests {
         for i in 1..=5 {
             h.record(&rec("L1", i as f64 * 0.1, i)).unwrap();
         }
-        let rows = h.history("progressive", "L1", 3);
+        let rows = h.history("progressive", "L1", 3).unwrap();
         assert_eq!(rows.len(), 3);
         assert!(rows[0].timestamp < rows[1].timestamp);
         assert!(rows[1].timestamp < rows[2].timestamp);
@@ -353,7 +355,7 @@ mod tests {
         h.record(&rec("C", 0.8, 1)).unwrap();
         h.record(&rec("C", 0.805, 2)).unwrap();
 
-        let sigs = generate_signals(&h, "progressive");
+        let sigs = generate_signals(&h, "progressive").unwrap();
         assert_eq!(sigs.len(), 3);
 
         let find = |id: &str| sigs.iter().find(|s| s.scenario_id == id).unwrap();
@@ -368,7 +370,7 @@ mod tests {
         for i in 1..=5 {
             h.record(&rec("P", 0.5 + i as f64 * 0.05, i)).unwrap();
         }
-        let sigs = generate_signals(&h, "progressive");
+        let sigs = generate_signals(&h, "progressive").unwrap();
         let sig = sigs.iter().find(|s| s.scenario_id == "P").unwrap();
         assert_eq!(sig.signal, GymSignal::Promoted);
     }
@@ -379,7 +381,7 @@ mod tests {
         h.record(&rec("X", 0.1, 1)).unwrap();
         h.record(&rec("Y", 0.2, 1)).unwrap();
         h.record(&rec("X", 0.3, 2)).unwrap();
-        let ids = h.scenario_ids("progressive");
+        let ids = h.scenario_ids("progressive").unwrap();
         assert_eq!(ids, vec!["X", "Y"]);
     }
 
@@ -394,7 +396,7 @@ mod tests {
     fn generate_signals_skips_single_record() {
         let h = mem_history();
         h.record(&rec("solo", 0.5, 1)).unwrap();
-        let sigs = generate_signals(&h, "progressive");
+        let sigs = generate_signals(&h, "progressive").unwrap();
         assert!(sigs.is_empty());
     }
 }
