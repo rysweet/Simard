@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use crate::error::{SimardError, SimardResult};
 use crate::goals::{FileBackedGoalStore, GoalStore};
-use crate::memory::{CognitiveMemoryType, FileBackedMemoryStore, MemoryStore};
+use crate::memory::{FileBackedMemoryStore, MemoryScope, MemoryStore};
 use crate::runtime::RuntimeTopology;
 use crate::terminal_engineer_bridge::{SHARED_EXPLICIT_STATE_ROOT_SOURCE, TerminalBridgeContext};
 
@@ -266,7 +266,7 @@ fn inspect_workspace(workspace_root: &Path, state_root: &Path) -> SimardResult<R
 fn load_carried_meeting_decisions(state_root: &Path) -> SimardResult<Vec<String>> {
     let memory_store = FileBackedMemoryStore::try_new(state_root.join("memory_records.json"))?;
     let mut carried = memory_store
-        .list(CognitiveMemoryType::Semantic)?
+        .list(MemoryScope::Decision)?
         .into_iter()
         .filter_map(|record| match is_meeting_decision_record(&record.value) {
             true => Some(record.value),

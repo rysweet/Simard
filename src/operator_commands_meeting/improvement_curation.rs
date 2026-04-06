@@ -8,7 +8,7 @@ use crate::operator_commands::{
 };
 use crate::sanitization::sanitize_terminal_text;
 use crate::{
-    BootstrapConfig, BootstrapInputs, CognitiveMemoryType, FileBackedMemoryStore, MemoryStore,
+    BootstrapConfig, BootstrapInputs, FileBackedMemoryStore, MemoryScope, MemoryStore,
     latest_review_artifact, render_review_context_directives, run_local_session,
 };
 
@@ -44,7 +44,7 @@ pub fn run_improvement_curation_probe(
     let plan = crate::ImprovementPromotionPlan::parse(&objective)?;
     let memory_store = FileBackedMemoryStore::try_new(config.memory_store_path())?;
     let improvement_records = memory_store
-        .list(CognitiveMemoryType::Semantic)?
+        .list(MemoryScope::Decision)?
         .into_iter()
         .filter(|record| record.key.ends_with("improvement-curation-record"))
         .collect::<Vec<_>>();
@@ -114,7 +114,7 @@ pub fn run_improvement_curation_read_probe(
         latest_review_artifact(&state_root)?.ok_or("expected persisted review artifact")?;
     let memory_store = FileBackedMemoryStore::try_new(state_root.join("memory_records.json"))?;
     let latest_record = memory_store
-        .list(CognitiveMemoryType::Semantic)?
+        .list(MemoryScope::Decision)?
         .into_iter()
         .rfind(|record| record.key.ends_with("improvement-curation-record"))
         .ok_or("expected persisted improvement decision record")?;

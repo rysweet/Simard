@@ -7,7 +7,7 @@ use crate::evidence::{EvidenceRecord, EvidenceSource, EvidenceStore, InMemoryEvi
 use crate::identity::{
     BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader, ManifestContract,
 };
-use crate::memory::{CognitiveMemoryType, InMemoryMemoryStore, MemoryRecord, MemoryStore};
+use crate::memory::{InMemoryMemoryStore, MemoryRecord, MemoryScope, MemoryStore};
 use crate::metadata::{Freshness, Provenance};
 use crate::prompt_assets::FilePromptAssetStore;
 use crate::reflection::ReflectiveRuntime;
@@ -202,7 +202,7 @@ fn run_scenario_runtime(
     let benchmark_memory_key = format!("{}-benchmark-summary", outcome.session.id);
     memory_store.put(MemoryRecord {
         key: benchmark_memory_key.clone(),
-        memory_type: CognitiveMemoryType::Procedural,
+        scope: MemoryScope::Benchmark,
         value: format!(
             "suite={suite_id}; scenario={}; class={}; identity={}; base_type={}; topology={}",
             scenario.id, scenario.class, scenario.identity, scenario.base_type, scenario.topology

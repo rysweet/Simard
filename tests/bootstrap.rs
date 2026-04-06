@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use simard::{
     BaseTypeId, BootstrapConfig, BootstrapInputs, BootstrapMode, BuiltinIdentityLoader,
-    CognitiveMemoryType, ConfigValueSource, IdentityLoadRequest, IdentityLoader, ManifestContract,
+    ConfigValueSource, IdentityLoadRequest, IdentityLoader, ManifestContract, MemoryScope,
     Provenance, ReflectiveRuntime, RuntimeState, RuntimeTopology, SimardError,
     assemble_local_runtime, assemble_local_runtime_from_handoff, bootstrap_entrypoint,
     latest_local_handoff, run_local_session,
@@ -473,7 +473,7 @@ fn bootstrap_meeting_mode_persists_structured_decision_memory() {
     let decision_records = exported
         .memory_records
         .iter()
-        .filter(|record| record.memory_type == CognitiveMemoryType::Semantic)
+        .filter(|record| record.scope == MemoryScope::Decision)
         .collect::<Vec<_>>();
 
     assert_eq!(execution.snapshot.identity_name, "simard-meeting");
@@ -573,7 +573,7 @@ fn bootstrap_improvement_curator_mode_promotes_review_findings_into_durable_prio
     let decision_records = exported
         .memory_records
         .iter()
-        .filter(|record| record.memory_type == CognitiveMemoryType::Semantic)
+        .filter(|record| record.scope == MemoryScope::Decision)
         .collect::<Vec<_>>();
 
     assert_eq!(

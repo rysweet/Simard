@@ -3,7 +3,7 @@ use crate::base_types::{BaseTypeOutcome, BaseTypeSessionRequest};
 use crate::error::SimardResult;
 use crate::evidence::{EvidenceRecord, EvidenceSource};
 use crate::goals::GoalRecord;
-use crate::memory::{CognitiveMemoryType, MemoryRecord};
+use crate::memory::{MemoryRecord, MemoryScope};
 use crate::metadata::{Freshness, FreshnessState};
 use crate::reflection::{ReflectionReport, ReflectionSnapshot, ReflectiveRuntime};
 use crate::sanitization::objective_metadata;
@@ -44,7 +44,7 @@ impl RuntimeKernel {
         let scratch_key = format!("{}-scratch", session.id);
         self.ports.memory_store.put(MemoryRecord {
             key: scratch_key.clone(),
-            memory_type: CognitiveMemoryType::Working,
+            scope: MemoryScope::SessionScratch,
             value: objective_metadata(&session.objective),
             session_id: session.id.clone(),
             recorded_in: SessionPhase::Preparation,
@@ -145,7 +145,7 @@ impl RuntimeKernel {
         let summary_key = format!("{}-summary", session.id);
         self.ports.memory_store.put(MemoryRecord {
             key: summary_key.clone(),
-            memory_type: self.request.manifest.memory_policy.summary_memory_type,
+            scope: self.request.manifest.memory_policy.summary_scope,
             value: self
                 .ports
                 .agent_program
@@ -163,7 +163,7 @@ impl RuntimeKernel {
             let key = format!("{}-{}", session.id, record.key_suffix);
             self.ports.memory_store.put(MemoryRecord {
                 key: key.clone(),
-                memory_type: record.memory_type,
+                scope: record.scope,
                 value: record.value,
                 session_id: session.id.clone(),
                 recorded_in: SessionPhase::Persistence,

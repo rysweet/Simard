@@ -325,7 +325,7 @@ mod tests {
     use crate::handoff::RuntimeHandoffSnapshot;
     use crate::identity::ManifestContract;
     use crate::identity::OperatingMode;
-    use crate::memory::{CognitiveMemoryType, MemoryRecord};
+    use crate::memory::{MemoryRecord, MemoryScope};
     use crate::metadata::{BackendDescriptor, Freshness, Provenance};
     use crate::reflection::{ReflectionReport, ReflectionSnapshot};
     use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeState, SessionOutcome};
@@ -497,7 +497,7 @@ mod tests {
             memory_records: (0..memory_count)
                 .map(|i| MemoryRecord {
                     key: format!("key-{i}"),
-                    memory_type: CognitiveMemoryType::Procedural,
+                    scope: MemoryScope::Benchmark,
                     value: format!("value-{i}"),
                     session_id: session_id.clone(),
                     recorded_in: SessionPhase::Complete,

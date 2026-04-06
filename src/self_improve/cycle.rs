@@ -6,7 +6,7 @@ use crate::engineer_loop::RepoInspection;
 use crate::error::SimardResult;
 use crate::gym_bridge::GymBridge;
 use crate::gym_scoring::{
-    GymSuiteScore, Regression, RegressionSeverity, detect_regression, suite_score_from_result,
+    detect_regression, suite_score_from_result, GymSuiteScore, Regression, RegressionSeverity,
 };
 use crate::self_improve_executor::ApplyResult;
 
@@ -29,7 +29,11 @@ pub fn run_improvement_cycle(
     let baseline = suite_score_from_result(&baseline_result);
 
     // Phase 2: Analyze — identify weak dimensions
-    let weak_dimensions = find_weak_dimensions(&baseline, config.weak_threshold);
+    let weak_dimensions = find_weak_dimensions(
+        &baseline,
+        config.weak_threshold,
+        config.target_dimension.as_deref(),
+    );
 
     // Phase 3: Research — check if we have proposed changes
     if config.proposed_changes.is_empty() {
@@ -50,6 +54,7 @@ pub fn run_improvement_cycle(
             }),
             final_phase: ImprovementPhase::Analyze,
             weak_dimensions,
+            target_dimension: config.target_dimension.clone(),
         });
     }
 
@@ -73,6 +78,7 @@ pub fn run_improvement_cycle(
         decision: Some(decision),
         final_phase: ImprovementPhase::Decide,
         weak_dimensions,
+        target_dimension: config.target_dimension.clone(),
     })
 }
 
@@ -126,9 +132,15 @@ fn decide(
 }
 
 /// Identify dimensions scoring below the given threshold.
-fn find_weak_dimensions(score: &GymSuiteScore, weak_threshold: f64) -> Vec<String> {
+///
+/// When `target` is `Some`, only that dimension is checked. When `None`, all
+/// five standard dimensions are checked.
+fn find_weak_dimensions(
+    score: &GymSuiteScore,
+    weak_threshold: f64,
+    target: Option<&str>,
+) -> Vec<String> {
     let dims = &score.dimensions;
-    let mut weak = Vec::new();
     let checks: [(&str, f64); 5] = [
         ("factual_accuracy", dims.factual_accuracy),
         ("specificity", dims.specificity),
@@ -136,7 +148,13 @@ fn find_weak_dimensions(score: &GymSuiteScore, weak_threshold: f64) -> Vec<Strin
         ("source_attribution", dims.source_attribution),
         ("confidence_calibration", dims.confidence_calibration),
     ];
+    let mut weak = Vec::new();
     for (name, value) in checks {
+        if let Some(t) = target {
+            if name != t {
+                continue;
+            }
+        }
         if value < weak_threshold {
             weak.push(name.to_string());
         }
@@ -147,6 +165,11 @@ fn find_weak_dimensions(score: &GymSuiteScore, weak_threshold: f64) -> Vec<Strin
 /// Summary of an improvement cycle suitable for persistence or display.
 pub fn summarize_cycle(cycle: &ImprovementCycle) -> String {
     let mut lines = Vec::new();
+
+    if let Some(ref dim) = cycle.target_dimension {
+        lines.push(format!("Target dimension: {dim}"));
+    }
+
     lines.push(format!(
         "Baseline: {:.1}% overall ({} scenarios)",
         cycle.baseline.overall * 100.0,
@@ -271,7 +294,7 @@ mod tests {
     #[test]
     fn find_weak_dimensions_identifies_low_scores() {
         let score = make_score(0.50);
-        let weak = find_weak_dimensions(&score, 0.6);
+        let weak = find_weak_dimensions(&score, 0.6, None);
         // At 0.50 overall, all dimension values (0.50, 0.45, 0.40, 0.35, 0.425)
         // are below 0.6
         assert!(!weak.is_empty());
@@ -280,14 +303,14 @@ mod tests {
     #[test]
     fn find_weak_dimensions_empty_when_strong() {
         let score = make_score(0.90);
-        let weak = find_weak_dimensions(&score, 0.6);
+        let weak = find_weak_dimensions(&score, 0.6, None);
         assert!(weak.is_empty());
     }
 
     #[test]
     fn find_weak_dimensions_custom_threshold() {
         let score = make_score(0.50);
-        let weak = find_weak_dimensions(&score, 0.1);
+        let weak = find_weak_dimensions(&score, 0.1, None);
         assert!(weak.is_empty());
     }
 
@@ -303,6 +326,7 @@ mod tests {
             }),
             final_phase: ImprovementPhase::Decide,
             weak_dimensions: Vec::new(),
+            target_dimension: None,
         };
         let summary = summarize_cycle(&cycle);
         assert!(summary.contains("COMMIT"));
@@ -321,6 +345,7 @@ mod tests {
             }),
             final_phase: ImprovementPhase::Decide,
             weak_dimensions: Vec::new(),
+            target_dimension: None,
         };
         let summary = summarize_cycle(&cycle);
         assert!(summary.contains("REVERT"));
@@ -337,6 +362,7 @@ mod tests {
             decision: None,
             final_phase: ImprovementPhase::Analyze,
             weak_dimensions: Vec::new(),
+            target_dimension: None,
         };
         let summary = summarize_cycle(&cycle);
         assert!(summary.contains("INCOMPLETE"));
@@ -355,6 +381,7 @@ mod tests {
             }),
             final_phase: ImprovementPhase::Decide,
             weak_dimensions: Vec::new(),
+            target_dimension: None,
         };
         assert_eq!(cycle.to_string(), summarize_cycle(&cycle));
     }
@@ -423,7 +450,7 @@ mod tests {
             pass_rate: 1.0,
             recorded_at_unix_ms: None,
         };
-        let weak = find_weak_dimensions(&score, 0.6);
+        let weak = find_weak_dimensions(&score, 0.6, None);
         assert_eq!(weak.len(), 2);
         assert!(weak.contains(&"specificity".to_string()));
         assert!(weak.contains(&"source_attribution".to_string()));
@@ -456,6 +483,7 @@ mod tests {
             }),
             final_phase: ImprovementPhase::Decide,
             weak_dimensions: Vec::new(),
+            target_dimension: None,
         };
         let summary = summarize_cycle(&cycle);
         assert!(summary.contains("Regressions: 2 total (1 severe)"));
@@ -478,5 +506,164 @@ mod tests {
             pass_rate: 1.0,
             recorded_at_unix_ms: None,
         }
+    }
+
+    #[test]
+    fn find_weak_dimensions_with_target_filters_single() {
+        use crate::gym_bridge::ScoreDimensions;
+        let score = GymSuiteScore {
+            suite_id: "test".to_string(),
+            overall: 0.65,
+            dimensions: ScoreDimensions {
+                factual_accuracy: 0.80,
+                specificity: 0.50,
+                temporal_awareness: 0.70,
+                source_attribution: 0.40,
+                confidence_calibration: 0.90,
+            },
+            scenario_count: 6,
+            scenarios_passed: 6,
+            pass_rate: 1.0,
+            recorded_at_unix_ms: None,
+        };
+        // Target specificity (weak) — should return it
+        let weak = find_weak_dimensions(&score, 0.6, Some("specificity"));
+        assert_eq!(weak, vec!["specificity"]);
+
+        // Target factual_accuracy (strong) — should return empty
+        let weak = find_weak_dimensions(&score, 0.6, Some("factual_accuracy"));
+        assert!(weak.is_empty());
+
+        // Target source_attribution (weak) — should return it
+        let weak = find_weak_dimensions(&score, 0.6, Some("source_attribution"));
+        assert_eq!(weak, vec!["source_attribution"]);
+    }
+
+    #[test]
+    fn find_weak_dimensions_unknown_target_returns_empty() {
+        let score = make_score(0.50);
+        let weak = find_weak_dimensions(&score, 0.6, Some("nonexistent_dim"));
+        assert!(weak.is_empty());
+    }
+
+    #[test]
+    fn summarize_cycle_shows_target_dimension() {
+        let cycle = ImprovementCycle {
+            baseline: make_score(0.70),
+            proposed_changes: vec![],
+            post_score: Some(make_score(0.75)),
+            regressions: vec![],
+            decision: Some(ImprovementDecision::Commit {
+                net_improvement: 0.05,
+            }),
+            final_phase: ImprovementPhase::Decide,
+            weak_dimensions: Vec::new(),
+            target_dimension: Some("specificity".to_string()),
+        };
+        let summary = summarize_cycle(&cycle);
+        assert!(summary.contains("Target dimension: specificity"));
+        assert!(summary.contains("COMMIT"));
+    }
+
+    #[test]
+    fn summarize_cycle_omits_target_when_none() {
+        let cycle = ImprovementCycle {
+            baseline: make_score(0.70),
+            proposed_changes: vec![],
+            post_score: Some(make_score(0.75)),
+            regressions: vec![],
+            decision: Some(ImprovementDecision::Commit {
+                net_improvement: 0.05,
+            }),
+            final_phase: ImprovementPhase::Decide,
+            weak_dimensions: Vec::new(),
+            target_dimension: None,
+        };
+        let summary = summarize_cycle(&cycle);
+        assert!(!summary.contains("Target dimension"));
+    }
+
+    #[test]
+    fn default_config_has_no_target_dimension() {
+        let cfg = ImprovementConfig::default();
+        assert!(cfg.target_dimension.is_none());
+    }
+
+    #[test]
+    fn decide_with_zero_scores() {
+        let cfg = ImprovementConfig::default();
+        let baseline = make_score(0.0);
+        let post = make_score(0.0);
+        let d = decide(&cfg, &baseline, &post, &[]);
+        assert!(
+            matches!(d, ImprovementDecision::Revert { .. }),
+            "zero net improvement should revert"
+        );
+    }
+
+    #[test]
+    fn decide_with_multiple_severe_regressions() {
+        let cfg = ImprovementConfig::default();
+        let baseline = make_score(0.70);
+        let post = make_score(0.80);
+        let regressions = vec![
+            Regression {
+                dimension: "specificity".into(),
+                baseline_score: 0.7,
+                current_score: 0.5,
+                delta: -0.20,
+                severity: RegressionSeverity::Severe,
+            },
+            Regression {
+                dimension: "temporal_awareness".into(),
+                baseline_score: 0.6,
+                current_score: 0.4,
+                delta: -0.20,
+                severity: RegressionSeverity::Severe,
+            },
+        ];
+        let d = decide(&cfg, &baseline, &post, &regressions);
+        match d {
+            ImprovementDecision::Revert { reason } => {
+                assert!(reason.contains("specificity"));
+                assert!(reason.contains("temporal_awareness"));
+            }
+            ImprovementDecision::Commit { .. } => {
+                panic!("expected revert with multiple severe regressions")
+            }
+        }
+    }
+
+    #[test]
+    fn find_weak_dimensions_threshold_zero_all_pass() {
+        let score = make_score(0.01);
+        let weak = find_weak_dimensions(&score, 0.0, None);
+        assert!(weak.is_empty(), "threshold 0.0 should pass all dimensions");
+    }
+
+    #[test]
+    fn find_weak_dimensions_threshold_one_all_fail() {
+        let score = make_score(0.99);
+        let weak = find_weak_dimensions(&score, 1.0, None);
+        assert_eq!(weak.len(), 5, "threshold 1.0 should flag all dimensions");
+    }
+
+    #[test]
+    fn summarize_cycle_negative_improvement() {
+        let cycle = ImprovementCycle {
+            baseline: make_score(0.80),
+            proposed_changes: vec![],
+            post_score: Some(make_score(0.70)),
+            regressions: vec![],
+            decision: Some(ImprovementDecision::Revert {
+                reason: "net negative".into(),
+            }),
+            final_phase: ImprovementPhase::Decide,
+            weak_dimensions: Vec::new(),
+            target_dimension: None,
+        };
+        let summary = summarize_cycle(&cycle);
+        assert!(summary.contains("REVERT"));
+        assert!(summary.contains("-10.0%"));
     }
 }

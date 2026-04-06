@@ -6,10 +6,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use simard::bridge_subprocess::InMemoryBridgeTransport;
 use simard::gym_bridge::GymBridge;
 use simard::self_improve::{
-    ImprovementConfig, ImprovementDecision, ImprovementPhase, ProposedChange,
-    run_improvement_cycle, summarize_cycle,
+    run_improvement_cycle, summarize_cycle, ImprovementConfig, ImprovementDecision,
+    ImprovementPhase, ProposedChange,
 };
-use simard::self_relaunch::{GateResult, RelaunchGate, all_gates_passed, default_gates, handover};
+use simard::self_relaunch::{all_gates_passed, default_gates, handover, GateResult, RelaunchGate};
 
 fn suite_json(suite_id: &str, overall: f64) -> serde_json::Value {
     let d = |v: f64| {
@@ -97,6 +97,7 @@ fn cfg(changes: Vec<ProposedChange>) -> ImprovementConfig {
         proposed_changes: changes,
         auto_apply: false,
         weak_threshold: 0.6,
+        target_dimension: None,
     }
 }
 
@@ -175,6 +176,7 @@ fn cycle_records_baseline_accurately() {
         proposed_changes: vec![],
         auto_apply: false,
         weak_threshold: 0.6,
+        target_dimension: None,
     };
 
     let cycle = run_improvement_cycle(&gym, &config).expect("cycle should succeed");

@@ -135,6 +135,7 @@ fn collect_pending_improvements(
                 decision: None,
                 final_phase: ImprovementPhase::Eval,
                 weak_dimensions: Vec::new(),
+                target_dimension: None,
             });
         }
     }
@@ -159,6 +160,7 @@ fn collect_pending_improvements(
                 decision: None,
                 final_phase: ImprovementPhase::Eval,
                 weak_dimensions: Vec::new(),
+                target_dimension: None,
             });
         }
         Ok(false) => {}
@@ -178,9 +180,10 @@ fn collect_pending_improvements(
 
     // Signal 4: persistent gym score history (regression / promotion signals).
     let history_path = std::path::Path::new("gym_history.db");
-    if history_path.exists() {
-        let history = ScoreHistory::open(history_path);
-        let signals = generate_signals(&history, "progressive");
+    if history_path.exists()
+        && let Ok(history) = ScoreHistory::open(history_path)
+    {
+        let signals = generate_signals(&history, "progressive").unwrap_or_default();
         for sig in &signals {
             if matches!(sig.signal, GymSignal::Regression { .. }) {
                 let baseline = current_gym.clone().unwrap_or_else(|| GymSuiteScore {
@@ -204,6 +207,7 @@ fn collect_pending_improvements(
                     decision: None,
                     final_phase: ImprovementPhase::Eval,
                     weak_dimensions: Vec::new(),
+                    target_dimension: None,
                 });
             }
         }
@@ -439,6 +443,7 @@ mod tests {
             decision: None,
             final_phase: ImprovementPhase::Eval,
             weak_dimensions: Vec::new(),
+            target_dimension: None,
         });
         let result = collect_pending_improvements(&mut state, &None);
         assert!(

@@ -166,6 +166,7 @@ pub fn run_ooda_cycle(
                 decision: None,
                 final_phase: ImprovementPhase::Eval,
                 weak_dimensions: Vec::new(),
+                target_dimension: None,
             });
         }
     }

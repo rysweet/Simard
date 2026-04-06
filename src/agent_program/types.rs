@@ -2,7 +2,7 @@ use crate::base_types::{BaseTypeId, BaseTypeOutcome, BaseTypeTurnInput};
 use crate::error::SimardResult;
 use crate::goals::{GoalRecord, GoalUpdate};
 use crate::identity::OperatingMode;
-use crate::memory::CognitiveMemoryType;
+use crate::memory::MemoryScope;
 use crate::metadata::BackendDescriptor;
 use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeTopology};
 use crate::session::SessionId;
@@ -23,7 +23,7 @@ pub struct AgentProgramContext {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentProgramMemoryRecord {
     pub key_suffix: String,
-    pub memory_type: CognitiveMemoryType,
+    pub scope: MemoryScope,
     pub value: String,
 }
 
@@ -84,11 +84,11 @@ mod tests {
     fn agent_program_memory_record_fields() {
         let record = AgentProgramMemoryRecord {
             key_suffix: "test-key".to_string(),
-            memory_type: CognitiveMemoryType::Semantic,
+            scope: MemoryScope::Decision,
             value: "test-value".to_string(),
         };
         assert_eq!(record.key_suffix, "test-key");
-        assert_eq!(record.memory_type, CognitiveMemoryType::Semantic);
+        assert_eq!(record.scope, MemoryScope::Decision);
         assert_eq!(record.value, "test-value");
     }
 }

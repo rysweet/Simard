@@ -5,7 +5,7 @@ use crate::metadata::{BackendDescriptor, Freshness};
 use crate::session::SessionId;
 
 use super::store::MemoryStore;
-use super::types::{CognitiveMemoryType, MemoryRecord};
+use super::types::{MemoryRecord, MemoryScope};
 
 #[derive(Debug)]
 pub struct InMemoryMemoryStore {
@@ -45,7 +45,7 @@ impl MemoryStore for InMemoryMemoryStore {
         Ok(())
     }
 
-    fn list(&self, memory_type: CognitiveMemoryType) -> SimardResult<Vec<MemoryRecord>> {
+    fn list(&self, scope: MemoryScope) -> SimardResult<Vec<MemoryRecord>> {
         Ok(self
             .records
             .lock()
@@ -53,7 +53,7 @@ impl MemoryStore for InMemoryMemoryStore {
                 store: "memory".to_string(),
             })?
             .iter()
-            .filter(|record| record.memory_type == memory_type)
+            .filter(|record| record.scope == scope)
             .cloned()
             .collect())
     }
