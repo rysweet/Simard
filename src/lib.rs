@@ -196,7 +196,8 @@ pub use meetings::{
     PersistedMeetingGoalUpdate, PersistedMeetingRecord, looks_like_persisted_meeting_record,
 };
 pub use memory::{
-    CognitiveMemoryType, FileBackedMemoryStore, InMemoryMemoryStore, MemoryRecord, MemoryStore,
+    FileBackedMemoryStore, InMemoryMemoryStore, MemoryRecord, MemoryScope, MemoryStore,
+    SqliteMemoryStore,
 };
 pub use memory_bridge::CognitiveMemoryBridge;
 pub use memory_bridge_adapter::CognitiveBridgeMemoryStore;

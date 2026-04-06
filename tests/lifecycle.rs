@@ -4,12 +4,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use simard::{
     AgentProgram, AgentProgramContext, BackendDescriptor, BaseTypeCapability, BaseTypeDescriptor,
     BaseTypeFactory, BaseTypeId, BaseTypeOutcome, BaseTypeRegistry, BaseTypeSession,
-    BaseTypeSessionRequest, BaseTypeTurnInput, CognitiveMemoryType, EvidenceStore, Freshness,
-    FreshnessState, IdentityManifest, InMemoryEvidenceStore, InMemoryGoalStore,
-    InMemoryHandoffStore, InMemoryMailboxTransport, InMemoryMemoryStore, InMemoryPromptAssetStore,
-    InProcessSupervisor, InProcessTopologyDriver, LocalRuntime, LoopbackMailboxTransport,
-    LoopbackMeshTopologyDriver, ManifestContract, MemoryPolicy, MemoryStore, OperatingMode,
-    PromptAsset, PromptAssetRef, Provenance, ReflectiveRuntime, RuntimeHandoffStore, RuntimePorts,
+    BaseTypeSessionRequest, BaseTypeTurnInput, EvidenceStore, Freshness, FreshnessState,
+    IdentityManifest, InMemoryEvidenceStore, InMemoryGoalStore, InMemoryHandoffStore,
+    InMemoryMailboxTransport, InMemoryMemoryStore, InMemoryPromptAssetStore, InProcessSupervisor,
+    InProcessTopologyDriver, LocalRuntime, LoopbackMailboxTransport, LoopbackMeshTopologyDriver,
+    ManifestContract, MemoryPolicy, MemoryScope, MemoryStore, OperatingMode, PromptAsset,
+    PromptAssetRef, Provenance, ReflectiveRuntime, RuntimeHandoffStore, RuntimePorts,
     RuntimeRequest, RuntimeState, RuntimeTopology, SessionPhase, SimardError, SimardResult,
     TestAdapter, UuidSessionIdGenerator, capability_set,
 };
@@ -219,7 +219,8 @@ fn local_runtime_runs_session_and_persists_boundaries() {
             evidence.clone(),
             base_types,
             Arc::new(UuidSessionIdGenerator),
-        ),
+        )
+        .expect("runtime ports should construct"),
         request,
     )
     .expect("composition should succeed");
@@ -261,13 +262,13 @@ fn local_runtime_runs_session_and_persists_boundaries() {
     );
 
     let scratch_records = memory
-        .list(CognitiveMemoryType::Working)
+        .list(MemoryScope::SessionScratch)
         .expect("scratch memory should be queryable");
     assert_eq!(scratch_records.len(), 1);
     assert_eq!(scratch_records[0].recorded_in, SessionPhase::Preparation);
 
     let summary_records = memory
-        .list(CognitiveMemoryType::Episodic)
+        .list(MemoryScope::SessionSummary)
         .expect("summary memory should be queryable");
     assert_eq!(summary_records.len(), 1);
     assert_eq!(summary_records[0].recorded_in, SessionPhase::Persistence);
@@ -390,7 +391,8 @@ fn stopped_runtime_surfaces_dedicated_lifecycle_errors() {
             evidence,
             base_types,
             Arc::new(UuidSessionIdGenerator),
-        ),
+        )
+        .expect("runtime ports should construct"),
         request,
     )
     .expect("composition should succeed");
@@ -452,7 +454,8 @@ fn runtime_can_stop_before_start_and_preserve_a_stale_snapshot() {
             evidence,
             base_types,
             Arc::new(UuidSessionIdGenerator),
-        ),
+        )
+        .expect("runtime ports should construct"),
         request,
     )
     .expect("composition should succeed");
@@ -500,7 +503,8 @@ fn failed_runs_preserve_failed_session_metadata_until_shutdown() {
             evidence,
             base_types,
             Arc::new(UuidSessionIdGenerator),
-        ),
+        )
+        .expect("runtime ports should construct"),
         request,
     )
     .expect("composition should succeed");
@@ -622,7 +626,7 @@ fn runtime_uses_injected_agent_program_for_reflection_and_persistence() {
     );
 
     let summary_records = memory
-        .list(CognitiveMemoryType::Episodic)
+        .list(MemoryScope::SessionSummary)
         .expect("summary memory should be queryable");
     assert_eq!(summary_records.len(), 1);
     assert_eq!(

@@ -5,7 +5,7 @@ use crate::operator_commands::{
 };
 use crate::sanitization::sanitize_terminal_text;
 use crate::{
-    BootstrapConfig, BootstrapInputs, CognitiveMemoryType, FileBackedMemoryStore, MemoryRecord,
+    BootstrapConfig, BootstrapInputs, FileBackedMemoryStore, MemoryRecord, MemoryScope,
     MemoryStore, ReviewRequest, ReviewTargetKind, build_review_artifact, latest_local_handoff,
     latest_review_artifact, persist_review_artifact, run_local_session,
 };
@@ -55,12 +55,12 @@ pub fn run_review_probe(
     let review_key = format!("{}-review-record", session_id);
     memory_store.put(MemoryRecord {
         key: review_key.clone(),
-        memory_type: CognitiveMemoryType::Semantic,
+        scope: MemoryScope::Decision,
         value: review.concise_record(),
         session_id,
         recorded_in: crate::SessionPhase::Complete,
     })?;
-    let decision_records = memory_store.list(CognitiveMemoryType::Semantic)?;
+    let decision_records = memory_store.list(MemoryScope::Decision)?;
 
     println!("Probe mode: review-run");
     println!("Identity: {}", execution.snapshot.identity_name);
@@ -99,7 +99,7 @@ pub fn run_review_read_probe(
         latest_review_artifact(&state_root)?.ok_or("expected persisted review artifact")?;
     let memory_store = FileBackedMemoryStore::try_new(state_root.join("memory_records.json"))?;
     let decision_records = memory_store
-        .list(CognitiveMemoryType::Semantic)?
+        .list(MemoryScope::Decision)?
         .into_iter()
         .filter(|record| record.value.starts_with("review-summary |"))
         .collect::<Vec<_>>();

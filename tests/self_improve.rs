@@ -97,6 +97,7 @@ fn cfg(changes: Vec<ProposedChange>) -> ImprovementConfig {
         proposed_changes: changes,
         auto_apply: false,
         weak_threshold: 0.6,
+        target_dimension: None,
     }
 }
 
@@ -175,6 +176,7 @@ fn cycle_records_baseline_accurately() {
         proposed_changes: vec![],
         auto_apply: false,
         weak_threshold: 0.6,
+        target_dimension: None,
     };
 
     let cycle = run_improvement_cycle(&gym, &config).expect("cycle should succeed");

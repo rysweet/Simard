@@ -213,7 +213,7 @@ fn from_handoff_tracks_record_counts() {
     let mut handoff = make_handoff(Some(make_session_record()), required_evidence_records());
     handoff.memory_records.push(MemoryRecord {
         key: "test-key".to_string(),
-        memory_type: crate::CognitiveMemoryType::Working,
+        scope: crate::MemoryScope::SessionScratch,
         value: "test-value".to_string(),
         session_id: SessionId::parse("00000000-0000-0000-0000-000000000001").unwrap(),
         recorded_in: SessionPhase::Execution,
@@ -329,7 +329,7 @@ fn from_handoff_memory_and_evidence_counts_with_multiple() {
     for i in 0..5 {
         handoff.memory_records.push(MemoryRecord {
             key: format!("key-{i}"),
-            memory_type: crate::CognitiveMemoryType::Working,
+            scope: crate::MemoryScope::SessionScratch,
             value: format!("value-{i}"),
             session_id: SessionId::parse("00000000-0000-0000-0000-000000000001").unwrap(),
             recorded_in: SessionPhase::Execution,

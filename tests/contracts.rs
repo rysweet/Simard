@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use simard::{
-    BaseTypeCapability, BaseTypeId, BaseTypeRegistry, CognitiveMemoryType, IdentityManifest,
-    InMemoryEvidenceStore, InMemoryMemoryStore, InMemoryPromptAssetStore, LocalRuntime,
-    ManifestContract, MemoryPolicy, OperatingMode, PromptAsset, PromptAssetRef, Provenance,
-    RuntimePorts, RuntimeRequest, RuntimeTopology, SessionId, SessionIdGenerator, SessionPhase,
-    SessionRecord, SimardError, TestAdapter, UuidSessionIdGenerator, capability_set,
+    BaseTypeCapability, BaseTypeId, BaseTypeRegistry, IdentityManifest, InMemoryEvidenceStore,
+    InMemoryMemoryStore, InMemoryPromptAssetStore, LocalRuntime, ManifestContract, MemoryPolicy,
+    MemoryScope, OperatingMode, PromptAsset, PromptAssetRef, Provenance, RuntimePorts,
+    RuntimeRequest, RuntimeTopology, SessionId, SessionIdGenerator, SessionPhase, SessionRecord,
+    SimardError, TestAdapter, UuidSessionIdGenerator, capability_set,
 };
 use uuid::Uuid;
 
@@ -86,7 +86,8 @@ fn compose_rejects_missing_capability() {
             evidence,
             base_types,
             Arc::new(UuidSessionIdGenerator),
-        ),
+        )
+        .expect("runtime ports should construct"),
         request,
     ) {
         Ok(_) => panic!("composition should have failed"),
@@ -124,7 +125,8 @@ fn start_rejects_missing_prompt_asset() {
             evidence,
             base_types,
             Arc::new(UuidSessionIdGenerator),
-        ),
+        )
+        .expect("runtime ports should construct"),
         request,
     )
     .expect("composition should succeed before prompt loading");
@@ -178,7 +180,8 @@ fn compose_rejects_manifest_supported_base_types_without_registered_adapters() {
             evidence,
             base_types,
             Arc::new(UuidSessionIdGenerator),
-        ),
+        )
+        .expect("runtime ports should construct"),
         request,
     ) {
         Ok(_) => panic!("composition should have failed"),
@@ -213,7 +216,7 @@ fn manifest_rejects_project_write_policy_in_v1() {
         OperatingMode::Engineer,
         MemoryPolicy {
             allow_project_writes: true,
-            summary_memory_type: CognitiveMemoryType::Episodic,
+            summary_scope: MemoryScope::SessionSummary,
         },
         ManifestContract::new(
             simard::bootstrap_entrypoint(),
@@ -247,7 +250,7 @@ fn runtime_compose_rejects_project_write_policy_even_if_manifest_is_mutated() {
     let mut mutated_manifest = manifest("local-harness");
     mutated_manifest.memory_policy = MemoryPolicy {
         allow_project_writes: true,
-        summary_memory_type: CognitiveMemoryType::Episodic,
+        summary_scope: MemoryScope::SessionSummary,
     };
 
     let request = RuntimeRequest::new(
@@ -263,7 +266,8 @@ fn runtime_compose_rejects_project_write_policy_even_if_manifest_is_mutated() {
             evidence,
             base_types,
             Arc::new(UuidSessionIdGenerator),
-        ),
+        )
+        .expect("runtime ports should construct"),
         request,
     ) {
         Ok(_) => panic!("runtime composition should reject unsupported memory policies"),
@@ -331,7 +335,8 @@ fn runtime_uses_injected_session_id_strategy() {
             evidence,
             base_types,
             Arc::new(FixedSessionIds),
-        ),
+        )
+        .expect("runtime ports should construct"),
         request,
     )
     .expect("composition should succeed");

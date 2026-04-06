@@ -242,6 +242,15 @@ impl Display for SimardError {
             Self::GitCommandFailed { command, reason } => {
                 write!(f, "git command '{command}' failed: {reason}")
             }
+            Self::GymHistoryDb { action, reason } => {
+                write!(f, "gym history database '{action}' failed: {reason}")
+            }
+            Self::RuntimeInitFailed { component, reason } => {
+                write!(
+                    f,
+                    "runtime component '{component}' failed to initialize: {reason}"
+                )
+            }
         }
     }
 }
@@ -265,5 +274,66 @@ fn fmt_field_reason(
         write!(f, "{prefix} '{field}' has invalid composition: {reason}")
     } else {
         write!(f, "{prefix} '{field}': {reason}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gym_history_db_display() {
+        let err = SimardError::GymHistoryDb {
+            action: "open".into(),
+            reason: "file not found".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "gym history database 'open' failed: file not found"
+        );
+    }
+
+    #[test]
+    fn runtime_init_failed_display() {
+        let err = SimardError::RuntimeInitFailed {
+            component: "goal_store".into(),
+            reason: "allocation failed".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "runtime component 'goal_store' failed to initialize: allocation failed"
+        );
+    }
+
+    #[test]
+    fn git_command_failed_display() {
+        let err = SimardError::GitCommandFailed {
+            command: "git diff".into(),
+            reason: "not a repository".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "git command 'git diff' failed: not a repository"
+        );
+    }
+
+    #[test]
+    fn missing_config_display() {
+        let err = SimardError::MissingRequiredConfig {
+            key: "API_KEY".into(),
+            help: "set via environment variable".into(),
+        };
+        assert!(err.to_string().contains("API_KEY"));
+        assert!(err.to_string().contains("missing required configuration"));
+    }
+
+    #[test]
+    fn bridge_transport_error_display() {
+        let err = SimardError::BridgeTransportError {
+            bridge: "subprocess".into(),
+            reason: "child missing".into(),
+        };
+        assert!(err.to_string().contains("subprocess"));
+        assert!(err.to_string().contains("child missing"));
     }
 }

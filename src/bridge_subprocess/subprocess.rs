@@ -104,11 +104,14 @@ impl SubprocessBridgeTransport {
         if state.child.is_none() {
             state.child = Some(self.spawn_child()?);
         }
-        // Safe: the `if` guard above guarantees `child` is `Some` at this point.
-        Ok(state
+        // The `if` guard above guarantees `child` is `Some` at this point.
+        state
             .child
             .as_mut()
-            .expect("child was set in the guard above"))
+            .ok_or_else(|| SimardError::BridgeTransportError {
+                bridge: "subprocess".into(),
+                reason: "child process unexpectedly missing after spawn".into(),
+            })
     }
 
     fn send_request(child: &mut ManagedChild, request: &BridgeRequest) -> SimardResult<()> {

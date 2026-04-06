@@ -2,7 +2,7 @@ use crate::base_types::{BaseTypeOutcome, BaseTypeTurnInput};
 use crate::error::SimardResult;
 use crate::goals::{GoalRecord, GoalUpdate};
 use crate::improvements::ImprovementPromotionPlan;
-use crate::memory::CognitiveMemoryType;
+use crate::memory::MemoryScope;
 use crate::metadata::{BackendDescriptor, Freshness};
 
 use super::types::{AgentProgram, AgentProgramContext, AgentProgramMemoryRecord};
@@ -112,7 +112,7 @@ impl AgentProgram for ImprovementCuratorProgram {
         let plan = ImprovementPromotionPlan::parse(&context.objective)?;
         Ok(vec![AgentProgramMemoryRecord {
             key_suffix: "improvement-curation-record".to_string(),
-            memory_type: CognitiveMemoryType::Semantic,
+            scope: MemoryScope::Decision,
             value: format!(
                 "review={} target={} approvals=[{}] deferred=[{}]",
                 plan.review_id,

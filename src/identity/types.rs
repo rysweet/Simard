@@ -3,7 +3,7 @@ use std::fmt::{self, Display, Formatter};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{SimardError, SimardResult};
-use crate::memory::CognitiveMemoryType;
+use crate::memory::MemoryScope;
 
 /// Behavioral mode that determines which prompt assets, memory policies,
 /// and session configurations Simard loads.
@@ -42,14 +42,14 @@ impl Display for OperatingMode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MemoryPolicy {
     pub allow_project_writes: bool,
-    pub summary_memory_type: CognitiveMemoryType,
+    pub summary_scope: MemoryScope,
 }
 
 impl Default for MemoryPolicy {
     fn default() -> Self {
         Self {
             allow_project_writes: false,
-            summary_memory_type: CognitiveMemoryType::Episodic,
+            summary_scope: MemoryScope::SessionSummary,
         }
     }
 }
@@ -90,7 +90,7 @@ mod tests {
     fn memory_policy_rejects_project_writes() {
         let policy = MemoryPolicy {
             allow_project_writes: true,
-            summary_memory_type: CognitiveMemoryType::Episodic,
+            summary_scope: MemoryScope::SessionSummary,
         };
         let err = policy.validate().unwrap_err();
         assert!(matches!(err, SimardError::UnsupportedMemoryPolicy { .. }));
@@ -143,14 +143,14 @@ mod tests {
     fn memory_policy_default_values() {
         let policy = MemoryPolicy::default();
         assert!(!policy.allow_project_writes);
-        assert_eq!(policy.summary_memory_type, CognitiveMemoryType::Episodic);
+        assert_eq!(policy.summary_scope, MemoryScope::SessionSummary);
     }
 
     #[test]
     fn memory_policy_project_writes_error_message() {
         let policy = MemoryPolicy {
             allow_project_writes: true,
-            summary_memory_type: CognitiveMemoryType::Episodic,
+            summary_scope: MemoryScope::SessionSummary,
         };
         let err = policy.validate().unwrap_err();
         let msg = err.to_string();

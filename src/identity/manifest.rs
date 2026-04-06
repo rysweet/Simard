@@ -138,7 +138,7 @@ mod tests {
     fn identity_manifest_new_rejects_project_writes_policy() {
         let policy = MemoryPolicy {
             allow_project_writes: true,
-            summary_memory_type: crate::memory::CognitiveMemoryType::Episodic,
+            summary_scope: crate::memory::MemoryScope::SessionSummary,
         };
         let err = IdentityManifest::new(
             "test",

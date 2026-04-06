@@ -74,6 +74,8 @@ pub struct ImprovementConfig {
     pub auto_apply: bool,
     /// Dimensions scoring below this threshold are considered "weak" (default 0.6).
     pub weak_threshold: f64,
+    /// If set, focus analysis on this single dimension instead of all dimensions.
+    pub target_dimension: Option<String>,
 }
 
 impl Default for ImprovementConfig {
@@ -85,6 +87,7 @@ impl Default for ImprovementConfig {
             proposed_changes: Vec::new(),
             auto_apply: false,
             weak_threshold: 0.6,
+            target_dimension: None,
         }
     }
 }
@@ -106,10 +109,182 @@ pub struct ImprovementCycle {
     pub final_phase: ImprovementPhase,
     /// Dimensions that scored below the weak threshold during Analyze.
     pub weak_dimensions: Vec<String>,
+    /// The dimension that was targeted for this cycle (if any).
+    pub target_dimension: Option<String>,
 }
 
 impl std::fmt::Display for ImprovementCycle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&super::cycle::summarize_cycle(self))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gym_bridge::ScoreDimensions;
+
+    fn make_score(v: f64) -> GymSuiteScore {
+        GymSuiteScore {
+            suite_id: "test".into(),
+            overall: v,
+            dimensions: ScoreDimensions {
+                factual_accuracy: v,
+                specificity: v * 0.9,
+                temporal_awareness: v * 0.8,
+                source_attribution: v * 0.7,
+                confidence_calibration: v * 0.85,
+            },
+            scenario_count: 4,
+            scenarios_passed: 4,
+            pass_rate: 1.0,
+            recorded_at_unix_ms: None,
+        }
+    }
+
+    #[test]
+    fn improvement_phase_display_all_variants() {
+        assert_eq!(ImprovementPhase::Eval.to_string(), "eval");
+        assert_eq!(ImprovementPhase::Analyze.to_string(), "analyze");
+        assert_eq!(ImprovementPhase::Research.to_string(), "research");
+        assert_eq!(ImprovementPhase::Improve.to_string(), "improve");
+        assert_eq!(ImprovementPhase::ReEval.to_string(), "re-eval");
+        assert_eq!(ImprovementPhase::Decide.to_string(), "decide");
+    }
+
+    #[test]
+    fn improvement_phase_clone_and_eq() {
+        let phase = ImprovementPhase::Research;
+        let cloned = phase;
+        assert_eq!(phase, cloned);
+        assert_ne!(ImprovementPhase::Eval, ImprovementPhase::Decide);
+    }
+
+    #[test]
+    fn proposed_change_construction() {
+        let change = ProposedChange {
+            file_path: "src/lib.rs".into(),
+            description: "refactor error handling".into(),
+            expected_impact: "reduce .expect() calls".into(),
+        };
+        assert_eq!(change.file_path, "src/lib.rs");
+        assert!(!change.description.is_empty());
+        assert!(!change.expected_impact.is_empty());
+    }
+
+    #[test]
+    fn proposed_change_clone_and_eq() {
+        let change = ProposedChange {
+            file_path: "a.rs".into(),
+            description: "d".into(),
+            expected_impact: "e".into(),
+        };
+        let cloned = change.clone();
+        assert_eq!(change, cloned);
+    }
+
+    #[test]
+    fn improvement_decision_commit() {
+        let d = ImprovementDecision::Commit {
+            net_improvement: 0.05,
+        };
+        match &d {
+            ImprovementDecision::Commit { net_improvement } => {
+                assert!((net_improvement - 0.05).abs() < 1e-9);
+            }
+            _ => panic!("expected Commit"),
+        }
+    }
+
+    #[test]
+    fn improvement_decision_revert() {
+        let d = ImprovementDecision::Revert {
+            reason: "regression too large".into(),
+        };
+        match &d {
+            ImprovementDecision::Revert { reason } => {
+                assert!(reason.contains("regression"));
+            }
+            _ => panic!("expected Revert"),
+        }
+    }
+
+    #[test]
+    fn improvement_config_default_all_fields() {
+        let cfg = ImprovementConfig::default();
+        assert_eq!(cfg.suite_id, "progressive");
+        assert!((cfg.min_net_improvement - 0.02).abs() < 1e-9);
+        assert!((cfg.max_single_regression - 0.05).abs() < 1e-9);
+        assert!(cfg.proposed_changes.is_empty());
+        assert!(!cfg.auto_apply);
+        assert!((cfg.weak_threshold - 0.6).abs() < 1e-9);
+        assert!(cfg.target_dimension.is_none());
+    }
+
+    #[test]
+    fn improvement_config_custom_target_dimension() {
+        let cfg = ImprovementConfig {
+            target_dimension: Some("specificity".into()),
+            ..Default::default()
+        };
+        assert_eq!(cfg.target_dimension.as_deref(), Some("specificity"));
+    }
+
+    #[test]
+    fn improvement_cycle_minimal() {
+        let cycle = ImprovementCycle {
+            baseline: make_score(0.5),
+            proposed_changes: Vec::new(),
+            post_score: None,
+            regressions: Vec::new(),
+            decision: None,
+            final_phase: ImprovementPhase::Eval,
+            weak_dimensions: Vec::new(),
+            target_dimension: None,
+        };
+        assert!(cycle.proposed_changes.is_empty());
+        assert!(cycle.post_score.is_none());
+        assert!(cycle.decision.is_none());
+        assert_eq!(cycle.final_phase, ImprovementPhase::Eval);
+    }
+
+    #[test]
+    fn improvement_cycle_with_target_dimension() {
+        let cycle = ImprovementCycle {
+            baseline: make_score(0.5),
+            proposed_changes: vec![ProposedChange {
+                file_path: "src/a.rs".into(),
+                description: "improve specificity".into(),
+                expected_impact: "better scores".into(),
+            }],
+            post_score: Some(make_score(0.7)),
+            regressions: Vec::new(),
+            decision: Some(ImprovementDecision::Commit {
+                net_improvement: 0.2,
+            }),
+            final_phase: ImprovementPhase::Decide,
+            weak_dimensions: vec!["specificity".into()],
+            target_dimension: Some("specificity".into()),
+        };
+        assert_eq!(cycle.target_dimension.as_deref(), Some("specificity"));
+        assert_eq!(cycle.proposed_changes.len(), 1);
+        assert_eq!(cycle.weak_dimensions.len(), 1);
+    }
+
+    #[test]
+    fn improvement_cycle_display_contains_baseline() {
+        let cycle = ImprovementCycle {
+            baseline: make_score(0.7),
+            proposed_changes: Vec::new(),
+            post_score: None,
+            regressions: Vec::new(),
+            decision: None,
+            final_phase: ImprovementPhase::Analyze,
+            weak_dimensions: Vec::new(),
+            target_dimension: None,
+        };
+        let display = cycle.to_string();
+        assert!(display.contains("Baseline"));
+        assert!(display.contains("70.0%"));
     }
 }

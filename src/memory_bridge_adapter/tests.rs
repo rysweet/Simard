@@ -3,7 +3,7 @@
 use super::store::CognitiveBridgeMemoryStore;
 use super::test_helpers::{make_record, test_store};
 use crate::bridge_subprocess::InMemoryBridgeTransport;
-use crate::memory::{CognitiveMemoryType, FileBackedMemoryStore, MemoryStore};
+use crate::memory::{FileBackedMemoryStore, MemoryScope, MemoryStore};
 use crate::memory_bridge::CognitiveMemoryBridge;
 use crate::session::SessionId;
 use serde_json::json;
@@ -13,33 +13,27 @@ use uuid::Uuid;
 #[test]
 fn put_and_list_by_scope() {
     let store = test_store();
-    store
-        .put(make_record("a", CognitiveMemoryType::Semantic))
-        .unwrap();
-    store
-        .put(make_record("b", CognitiveMemoryType::Semantic))
-        .unwrap();
-    store
-        .put(make_record("c", CognitiveMemoryType::Episodic))
-        .unwrap();
+    store.put(make_record("a", MemoryScope::Decision)).unwrap();
+    store.put(make_record("b", MemoryScope::Project)).unwrap();
+    store.put(make_record("c", MemoryScope::Decision)).unwrap();
 
-    let semantic = store.list(CognitiveMemoryType::Semantic).unwrap();
-    assert_eq!(semantic.len(), 2);
-    let episodic = store.list(CognitiveMemoryType::Episodic).unwrap();
-    assert_eq!(episodic.len(), 1);
+    let decisions = store.list(MemoryScope::Decision).unwrap();
+    assert_eq!(decisions.len(), 2);
+    let projects = store.list(MemoryScope::Project).unwrap();
+    assert_eq!(projects.len(), 1);
 }
 
 #[test]
 fn put_deduplicates_by_key() {
     let store = test_store();
     store
-        .put(make_record("dup", CognitiveMemoryType::Semantic))
+        .put(make_record("dup", MemoryScope::Decision))
         .unwrap();
     store
-        .put(make_record("dup", CognitiveMemoryType::Semantic))
+        .put(make_record("dup", MemoryScope::Decision))
         .unwrap();
 
-    let all = store.list(CognitiveMemoryType::Semantic).unwrap();
+    let all = store.list(MemoryScope::Decision).unwrap();
     assert_eq!(all.len(), 1);
 }
 
@@ -47,7 +41,7 @@ fn put_deduplicates_by_key() {
 fn list_for_session_filters_correctly() {
     let store = test_store();
     store
-        .put(make_record("x", CognitiveMemoryType::Working))
+        .put(make_record("x", MemoryScope::SessionScratch))
         .unwrap();
 
     let session = SessionId::from_uuid(Uuid::nil());
@@ -62,12 +56,8 @@ fn list_for_session_filters_correctly() {
 #[test]
 fn count_for_session() {
     let store = test_store();
-    store
-        .put(make_record("p", CognitiveMemoryType::Procedural))
-        .unwrap();
-    store
-        .put(make_record("q", CognitiveMemoryType::Procedural))
-        .unwrap();
+    store.put(make_record("p", MemoryScope::Benchmark)).unwrap();
+    store.put(make_record("q", MemoryScope::Benchmark)).unwrap();
 
     let session = SessionId::from_uuid(Uuid::nil());
     assert_eq!(store.count_for_session(&session).unwrap(), 2);
@@ -92,9 +82,9 @@ fn hydration_loads_records_from_fallback() {
     // Seed the fallback with records via a standalone FileBackedMemoryStore.
     {
         let seed = FileBackedMemoryStore::try_new(&path).unwrap();
-        seed.put(make_record("prior-a", CognitiveMemoryType::Semantic))
+        seed.put(make_record("prior-a", MemoryScope::Decision))
             .unwrap();
-        seed.put(make_record("prior-b", CognitiveMemoryType::Episodic))
+        seed.put(make_record("prior-b", MemoryScope::Project))
             .unwrap();
     }
 
@@ -111,13 +101,13 @@ fn hydration_loads_records_from_fallback() {
     let store = CognitiveBridgeMemoryStore::new(bridge, &path).unwrap();
 
     // Step 3: verify hydration — records visible without any put().
-    let semantic = store.list(CognitiveMemoryType::Semantic).unwrap();
-    assert_eq!(semantic.len(), 1, "semantic record should be hydrated");
-    assert_eq!(semantic[0].key, "prior-a");
+    let decisions = store.list(MemoryScope::Decision).unwrap();
+    assert_eq!(decisions.len(), 1, "decision record should be hydrated");
+    assert_eq!(decisions[0].key, "prior-a");
 
-    let episodic = store.list(CognitiveMemoryType::Episodic).unwrap();
-    assert_eq!(episodic.len(), 1, "episodic record should be hydrated");
-    assert_eq!(episodic[0].key, "prior-b");
+    let projects = store.list(MemoryScope::Project).unwrap();
+    assert_eq!(projects.len(), 1, "project record should be hydrated");
+    assert_eq!(projects[0].key, "prior-b");
 
     // Clean up.
     let _ = std::fs::remove_file(&path);
@@ -144,17 +134,16 @@ fn hydration_with_empty_fallback_starts_empty() {
     let store = CognitiveBridgeMemoryStore::new(bridge, &path).unwrap();
 
     // No records should exist — hydration from empty fallback is a no-op.
-    for mt in [
-        CognitiveMemoryType::Sensory,
-        CognitiveMemoryType::Working,
-        CognitiveMemoryType::Episodic,
-        CognitiveMemoryType::Semantic,
-        CognitiveMemoryType::Procedural,
-        CognitiveMemoryType::Prospective,
+    for scope in [
+        MemoryScope::SessionScratch,
+        MemoryScope::SessionSummary,
+        MemoryScope::Decision,
+        MemoryScope::Project,
+        MemoryScope::Benchmark,
     ] {
         assert!(
-            store.list(mt).unwrap().is_empty(),
-            "type {mt:?} should be empty after hydrating empty fallback"
+            store.list(scope).unwrap().is_empty(),
+            "scope {scope:?} should be empty after hydrating empty fallback"
         );
     }
 
@@ -172,7 +161,7 @@ fn hydration_plus_new_put_merge_correctly() {
     // Seed with one record.
     {
         let seed = FileBackedMemoryStore::try_new(&path).unwrap();
-        seed.put(make_record("old-key", CognitiveMemoryType::Semantic))
+        seed.put(make_record("old-key", MemoryScope::Decision))
             .unwrap();
     }
 
@@ -189,11 +178,11 @@ fn hydration_plus_new_put_merge_correctly() {
 
     // Add a new record via put.
     store
-        .put(make_record("new-key", CognitiveMemoryType::Semantic))
+        .put(make_record("new-key", MemoryScope::Decision))
         .unwrap();
 
     // Both old (hydrated) and new should be visible.
-    let decisions = store.list(CognitiveMemoryType::Semantic).unwrap();
+    let decisions = store.list(MemoryScope::Decision).unwrap();
     assert_eq!(decisions.len(), 2);
     let keys: Vec<&str> = decisions.iter().map(|r| r.key.as_str()).collect();
     assert!(keys.contains(&"old-key"));
@@ -212,7 +201,7 @@ fn list_for_session_includes_hydrated_records() {
 
     {
         let seed = FileBackedMemoryStore::try_new(&path).unwrap();
-        seed.put(make_record("sess-rec", CognitiveMemoryType::Working))
+        seed.put(make_record("sess-rec", MemoryScope::SessionScratch))
             .unwrap();
     }
 
@@ -243,10 +232,10 @@ fn local_read_hits_without_bridge() {
     // When local index has records, list() returns them without calling bridge.
     let store = test_store();
     store
-        .put(make_record("local-hit", CognitiveMemoryType::Semantic))
+        .put(make_record("local-hit", MemoryScope::Decision))
         .unwrap();
 
-    let results = store.list(CognitiveMemoryType::Semantic).unwrap();
+    let results = store.list(MemoryScope::Decision).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].key, "local-hit");
 }
@@ -257,16 +246,11 @@ fn write_through_updates_local_cache() {
     // without needing a bridge call.
     let store = test_store();
 
-    assert!(
-        store
-            .list(CognitiveMemoryType::Procedural)
-            .unwrap()
-            .is_empty()
-    );
+    assert!(store.list(MemoryScope::Benchmark).unwrap().is_empty());
     store
-        .put(make_record("cached", CognitiveMemoryType::Procedural))
+        .put(make_record("cached", MemoryScope::Benchmark))
         .unwrap();
-    let results = store.list(CognitiveMemoryType::Procedural).unwrap();
+    let results = store.list(MemoryScope::Benchmark).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].key, "cached");
 }

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use crate::error::{SimardError, SimardResult};
-use crate::memory::{CognitiveMemoryType, FileBackedMemoryStore, MemoryRecord, MemoryStore};
+use crate::memory::{FileBackedMemoryStore, MemoryRecord, MemoryScope, MemoryStore};
 use crate::memory_bridge::CognitiveMemoryBridge;
 use crate::memory_cognitive::CognitiveFact;
 use crate::metadata::{BackendDescriptor, Freshness};
@@ -59,20 +59,19 @@ impl CognitiveBridgeMemoryStore {
     /// is loaded independently — failures in one scope do not prevent others
     /// from hydrating (Pillar 11).
     fn hydrate_from_fallback(&mut self) {
-        use crate::memory::CognitiveMemoryType;
+        use crate::memory::MemoryScope;
 
-        const ALL_TYPES: [CognitiveMemoryType; 6] = [
-            CognitiveMemoryType::Sensory,
-            CognitiveMemoryType::Working,
-            CognitiveMemoryType::Episodic,
-            CognitiveMemoryType::Semantic,
-            CognitiveMemoryType::Procedural,
-            CognitiveMemoryType::Prospective,
+        const ALL_SCOPES: [MemoryScope; 5] = [
+            MemoryScope::SessionScratch,
+            MemoryScope::SessionSummary,
+            MemoryScope::Decision,
+            MemoryScope::Project,
+            MemoryScope::Benchmark,
         ];
 
         let mut hydrated = 0usize;
-        for memory_type in ALL_TYPES {
-            match self.fallback.list(memory_type) {
+        for scope in ALL_SCOPES {
+            match self.fallback.list(scope) {
                 Ok(records) => {
                     // Lock is safe here — called only during construction, no
                     // contention possible.
@@ -86,7 +85,7 @@ impl CognitiveBridgeMemoryStore {
                 Err(e) => {
                     eprintln!(
                         "[simard] cognitive-bridge hydration: \
-                         failed to load scope {memory_type:?}: {e}"
+                         failed to load scope {scope:?}: {e}"
                     );
                 }
             }
@@ -162,14 +161,14 @@ impl CognitiveBridgeMemoryStore {
 
     /// Query the bridge for records matching a scope, converting facts back to
     /// `MemoryRecord`s. Used as fallback when the local index has no results.
-    fn bridge_fallback_list(&self, memory_type: CognitiveMemoryType) -> Vec<MemoryRecord> {
-        let query = format!("scope:{memory_type:?}");
+    fn bridge_fallback_list(&self, scope: MemoryScope) -> Vec<MemoryRecord> {
+        let query = format!("scope:{scope:?}");
         match self.search_facts_with_retry(&query, 200, 0.0) {
             Ok(facts) => {
                 let records: Vec<MemoryRecord> = facts
                     .iter()
                     .map(fact_to_record)
-                    .filter(|r| r.memory_type == memory_type)
+                    .filter(|r| r.scope == scope)
                     .collect();
                 // Merge into local index for future reads.
                 if !records.is_empty()
@@ -184,7 +183,7 @@ impl CognitiveBridgeMemoryStore {
             }
             Err(e) => {
                 eprintln!(
-                    "[simard] cognitive-bridge: bridge fallback for scope {memory_type:?} failed: {e}"
+                    "[simard] cognitive-bridge: bridge fallback for scope {scope:?} failed: {e}"
                 );
                 Vec::new()
             }
@@ -194,7 +193,7 @@ impl CognitiveBridgeMemoryStore {
     /// Store a record in cognitive memory as a semantic fact.
     fn store_as_fact(&self, record: &MemoryRecord) -> SimardResult<String> {
         let tags = vec![
-            scope_tag(record.memory_type),
+            scope_tag(record.scope),
             session_tag(&record.session_id),
             format!("phase:{:?}", record.recorded_in),
         ];
@@ -232,7 +231,7 @@ impl MemoryStore for CognitiveBridgeMemoryStore {
         Ok(())
     }
 
-    fn list(&self, memory_type: CognitiveMemoryType) -> SimardResult<Vec<MemoryRecord>> {
+    fn list(&self, scope: MemoryScope) -> SimardResult<Vec<MemoryRecord>> {
         let records = self
             .records
             .lock()
@@ -241,7 +240,7 @@ impl MemoryStore for CognitiveBridgeMemoryStore {
             })?;
         let local: Vec<MemoryRecord> = records
             .values()
-            .filter(|r| r.memory_type == memory_type)
+            .filter(|r| r.scope == scope)
             .cloned()
             .collect();
         if !local.is_empty() {
@@ -249,7 +248,7 @@ impl MemoryStore for CognitiveBridgeMemoryStore {
         }
         // Local miss — try bridge fallback to recover cross-session data.
         drop(records); // release lock before bridge call
-        let bridged = self.bridge_fallback_list(memory_type);
+        let bridged = self.bridge_fallback_list(scope);
         Ok(bridged)
     }
 
