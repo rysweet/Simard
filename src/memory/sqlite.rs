@@ -8,7 +8,7 @@ use crate::metadata::{BackendDescriptor, Freshness};
 use crate::session::{SessionId, SessionPhase};
 
 use super::store::MemoryStore;
-use super::types::{MemoryRecord, MemoryScope};
+use super::types::{CognitiveMemoryType, MemoryRecord};
 
 /// SQLite-backed memory store for durable cognitive memory persistence.
 ///
@@ -90,7 +90,7 @@ impl MemoryStore for SqliteMemoryStore {
 
     fn put(&self, record: MemoryRecord) -> SimardResult<()> {
         let conn = self.lock_conn()?;
-        let scope_str = serde_json::to_string(&record.scope).unwrap_or_default();
+        let scope_str = serde_json::to_string(&record.memory_type).unwrap_or_default();
         let phase_str = serde_json::to_string(&record.recorded_in).unwrap_or_default();
         conn.execute(
             "INSERT INTO memory_records (key, scope, value, session_id, recorded_in)
@@ -112,9 +112,9 @@ impl MemoryStore for SqliteMemoryStore {
         Ok(())
     }
 
-    fn list(&self, scope: MemoryScope) -> SimardResult<Vec<MemoryRecord>> {
+    fn list(&self, memory_type: CognitiveMemoryType) -> SimardResult<Vec<MemoryRecord>> {
         let conn = self.lock_conn()?;
-        let scope_str = serde_json::to_string(&scope).unwrap_or_default();
+        let scope_str = serde_json::to_string(&memory_type).unwrap_or_default();
         let mut stmt = conn
             .prepare("SELECT key, scope, value, session_id, recorded_in FROM memory_records WHERE scope = ?1")
             .map_err(Self::map_sqlite_err)?;
@@ -183,7 +183,7 @@ struct RawRow {
 
 impl RawRow {
     fn into_record(self) -> SimardResult<MemoryRecord> {
-        let scope: MemoryScope =
+        let memory_type: CognitiveMemoryType =
             serde_json::from_str(&self.scope).map_err(|e| SimardError::PersistentStoreIo {
                 store: "memory-sqlite".to_string(),
                 action: "deserialize-scope".to_string(),
@@ -200,7 +200,7 @@ impl RawRow {
         })?;
         Ok(MemoryRecord {
             key: self.key,
-            scope,
+            memory_type,
             value: self.value,
             session_id: SessionId::parse(&self.session_id)?,
             recorded_in,
@@ -214,10 +214,10 @@ mod tests {
     use crate::session::SessionPhase;
     use uuid::Uuid;
 
-    fn make_record(key: &str, scope: MemoryScope) -> MemoryRecord {
+    fn make_record(key: &str, memory_type: CognitiveMemoryType) -> MemoryRecord {
         MemoryRecord {
             key: key.to_string(),
-            scope,
+            memory_type,
             value: format!("value-{key}"),
             session_id: SessionId::from_uuid(Uuid::nil()),
             recorded_in: SessionPhase::Execution,
@@ -235,13 +235,19 @@ mod tests {
     #[test]
     fn sqlite_put_and_list_by_scope() {
         let store = SqliteMemoryStore::new(temp_db_path("scope")).unwrap();
-        store.put(make_record("a", MemoryScope::Decision)).unwrap();
-        store.put(make_record("b", MemoryScope::Project)).unwrap();
-        store.put(make_record("c", MemoryScope::Decision)).unwrap();
+        store
+            .put(make_record("a", CognitiveMemoryType::Semantic))
+            .unwrap();
+        store
+            .put(make_record("b", CognitiveMemoryType::Semantic))
+            .unwrap();
+        store
+            .put(make_record("c", CognitiveMemoryType::Semantic))
+            .unwrap();
 
-        let decisions = store.list(MemoryScope::Decision).unwrap();
+        let decisions = store.list(CognitiveMemoryType::Semantic).unwrap();
         assert_eq!(decisions.len(), 2);
-        let projects = store.list(MemoryScope::Project).unwrap();
+        let projects = store.list(CognitiveMemoryType::Semantic).unwrap();
         assert_eq!(projects.len(), 1);
     }
 
@@ -249,13 +255,13 @@ mod tests {
     fn sqlite_upsert_deduplicates_by_key() {
         let store = SqliteMemoryStore::new(temp_db_path("upsert")).unwrap();
         store
-            .put(make_record("dup", MemoryScope::Decision))
+            .put(make_record("dup", CognitiveMemoryType::Semantic))
             .unwrap();
         store
-            .put(make_record("dup", MemoryScope::Decision))
+            .put(make_record("dup", CognitiveMemoryType::Semantic))
             .unwrap();
 
-        let all = store.list(MemoryScope::Decision).unwrap();
+        let all = store.list(CognitiveMemoryType::Semantic).unwrap();
         assert_eq!(all.len(), 1);
     }
 
@@ -263,7 +269,7 @@ mod tests {
     fn sqlite_list_for_session() {
         let store = SqliteMemoryStore::new(temp_db_path("session")).unwrap();
         store
-            .put(make_record("x", MemoryScope::SessionScratch))
+            .put(make_record("x", CognitiveMemoryType::Working))
             .unwrap();
 
         let session = SessionId::from_uuid(Uuid::nil());
@@ -276,8 +282,12 @@ mod tests {
     #[test]
     fn sqlite_count_for_session() {
         let store = SqliteMemoryStore::new(temp_db_path("count")).unwrap();
-        store.put(make_record("p", MemoryScope::Benchmark)).unwrap();
-        store.put(make_record("q", MemoryScope::Benchmark)).unwrap();
+        store
+            .put(make_record("p", CognitiveMemoryType::Procedural))
+            .unwrap();
+        store
+            .put(make_record("q", CognitiveMemoryType::Procedural))
+            .unwrap();
 
         let session = SessionId::from_uuid(Uuid::nil());
         assert_eq!(store.count_for_session(&session).unwrap(), 2);
@@ -295,11 +305,11 @@ mod tests {
         {
             let store = SqliteMemoryStore::new(&path).unwrap();
             store
-                .put(make_record("durable", MemoryScope::Project))
+                .put(make_record("durable", CognitiveMemoryType::Semantic))
                 .unwrap();
         }
         let store = SqliteMemoryStore::new(&path).unwrap();
-        let records = store.list(MemoryScope::Project).unwrap();
+        let records = store.list(CognitiveMemoryType::Semantic).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].key, "durable");
     }

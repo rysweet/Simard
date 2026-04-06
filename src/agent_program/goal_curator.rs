@@ -1,7 +1,7 @@
 use crate::base_types::{BaseTypeOutcome, BaseTypeTurnInput};
 use crate::error::SimardResult;
 use crate::goals::{GoalRecord, GoalStatus, GoalUpdate};
-use crate::memory::MemoryScope;
+use crate::memory::CognitiveMemoryType;
 use crate::metadata::{BackendDescriptor, Freshness};
 
 use super::parsing::parse_goal_directive;
@@ -83,7 +83,7 @@ impl AgentProgram for GoalCuratorProgram {
 
         Ok(vec![AgentProgramMemoryRecord {
             key_suffix: "goal-curation-record".to_string(),
-            scope: MemoryScope::Decision,
+            memory_type: CognitiveMemoryType::Semantic,
             value: format!("goal-curation-top-five={}", plan.concise_top_five()),
         }])
     }

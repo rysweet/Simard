@@ -6,7 +6,7 @@ use crate::error::{SimardError, SimardResult};
 use crate::evidence::{EvidenceRecord, EvidenceSource, EvidenceStore, FileBackedEvidenceStore};
 use crate::goals::GoalRecord;
 use crate::handoff::RuntimeHandoffSnapshot;
-use crate::memory::{FileBackedMemoryStore, MemoryRecord, MemoryScope, MemoryStore};
+use crate::memory::{CognitiveMemoryType, FileBackedMemoryStore, MemoryRecord, MemoryStore};
 use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeState, RuntimeTopology};
 use crate::sanitization::objective_metadata;
 use crate::session::{SessionPhase, SessionRecord, UuidSessionIdGenerator};
@@ -111,7 +111,7 @@ pub(crate) fn persist_engineer_loop_artifacts(
     let scratch_key = format!("{}-engineer-loop-scratch", session.id);
     memory_store.put(MemoryRecord {
         key: scratch_key.clone(),
-        scope: MemoryScope::SessionScratch,
+        memory_type: CognitiveMemoryType::Working,
         value: objective_metadata(objective),
         session_id: session.id.clone(),
         recorded_in: SessionPhase::Preparation,
@@ -200,7 +200,7 @@ pub(crate) fn persist_engineer_loop_artifacts(
     let summary_key = format!("{}-engineer-loop-summary", session.id);
     memory_store.put(MemoryRecord {
         key: summary_key.clone(),
-        scope: MemoryScope::SessionSummary,
+        memory_type: CognitiveMemoryType::Episodic,
         value: format!(
             "engineer-loop-summary | repo-root={} | repo-branch={} | worktree-dirty={} | active-goals={} | carried-meeting-decisions={} | selected-action={} | verification-status={} | execution-scope={EXECUTION_SCOPE}",
             inspection.repo_root.display(),
@@ -228,7 +228,7 @@ pub(crate) fn persist_engineer_loop_artifacts(
     let decision_key = format!("{}-engineer-loop-decision", session.id);
     memory_store.put(MemoryRecord {
         key: decision_key.clone(),
-        scope: MemoryScope::Decision,
+        memory_type: CognitiveMemoryType::Semantic,
         value: format!(
             "engineer-loop-decision | carried-meeting-decisions={} | {} | {}",
             inspection.carried_meeting_decisions.len(),

@@ -3,7 +3,7 @@
 use super::store::CognitiveBridgeMemoryStore;
 use super::test_helpers::make_record;
 use crate::bridge_subprocess::InMemoryBridgeTransport;
-use crate::memory::{MemoryScope, MemoryStore};
+use crate::memory::{CognitiveMemoryType, MemoryStore};
 use crate::memory_bridge::CognitiveMemoryBridge;
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -43,7 +43,7 @@ fn local_miss_triggers_bridge_fallback() {
     let store = CognitiveBridgeMemoryStore::new(bridge, path.clone()).unwrap();
 
     // No local records in Decision scope — should fall back to bridge.
-    let results = store.list(MemoryScope::Decision).unwrap();
+    let results = store.list(CognitiveMemoryType::Semantic).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].key, "bridge-fact");
     assert_eq!(results[0].value, "from-bridge");
@@ -97,7 +97,7 @@ fn bridge_timeout_triggers_retry() {
     let store = CognitiveBridgeMemoryStore::new(bridge, path.clone()).unwrap();
 
     // list() for empty scope should trigger bridge fallback with retry.
-    let results = store.list(MemoryScope::Project).unwrap();
+    let results = store.list(CognitiveMemoryType::Semantic).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].key, "retried-fact");
     // Two calls should have been made (initial + 1 retry).
@@ -178,7 +178,7 @@ fn hydrate_from_bridge_does_not_overwrite_local() {
 
     // Put a local record with the same key.
     store
-        .put(make_record("shared-key", MemoryScope::Decision))
+        .put(make_record("shared-key", CognitiveMemoryType::Semantic))
         .unwrap();
 
     // Hydrate — should NOT overwrite the local version.

@@ -2,7 +2,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{SimardError, SimardResult};
 use crate::handoff::RuntimeHandoffSnapshot;
-use crate::memory::MemoryScope;
+use crate::memory::CognitiveMemoryType;
 
 use super::types::{
     ImprovementProposal, ReviewArtifact, ReviewEvidenceSummary, ReviewRequest, ReviewSignal,
@@ -32,12 +32,12 @@ pub fn build_review_artifact(
         decision_records: handoff
             .memory_records
             .iter()
-            .filter(|record| record.scope == MemoryScope::Decision)
+            .filter(|record| record.memory_type == CognitiveMemoryType::Semantic)
             .count(),
         benchmark_records: handoff
             .memory_records
             .iter()
-            .filter(|record| record.scope == MemoryScope::Benchmark)
+            .filter(|record| record.memory_type == CognitiveMemoryType::Procedural)
             .count(),
         exported_state: handoff.exported_state.to_string(),
         session_phase: handoff

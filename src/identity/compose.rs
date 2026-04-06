@@ -87,7 +87,7 @@ mod tests {
     use super::*;
     use crate::base_types::{BaseTypeCapability, capability_set};
     use crate::identity::MemoryPolicy;
-    use crate::memory::MemoryScope;
+    use crate::memory::CognitiveMemoryType;
     use crate::metadata::{Freshness, Provenance};
 
     fn test_contract() -> ManifestContract {
@@ -177,7 +177,7 @@ mod tests {
             test_contract(),
         )
         .unwrap();
-        m2.memory_policy.summary_scope = MemoryScope::Decision;
+        m2.memory_policy.summary_memory_type = CognitiveMemoryType::Semantic;
         let err = IdentityManifest::compose(
             "composite",
             "1.0",

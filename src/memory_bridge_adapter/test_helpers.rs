@@ -1,7 +1,7 @@
 //! Shared test helpers for the `memory_bridge_adapter` module.
 
 use crate::bridge_subprocess::InMemoryBridgeTransport;
-use crate::memory::{MemoryRecord, MemoryScope};
+use crate::memory::{CognitiveMemoryType, MemoryRecord};
 use crate::memory_bridge::CognitiveMemoryBridge;
 use crate::session::{SessionId, SessionPhase};
 use serde_json::json;
@@ -28,10 +28,10 @@ pub(super) fn test_store() -> CognitiveBridgeMemoryStore {
     CognitiveBridgeMemoryStore::new(bridge, path).unwrap()
 }
 
-pub(super) fn make_record(key: &str, scope: MemoryScope) -> MemoryRecord {
+pub(super) fn make_record(key: &str, memory_type: CognitiveMemoryType) -> MemoryRecord {
     MemoryRecord {
         key: key.to_string(),
-        scope,
+        memory_type,
         value: format!("value-for-{key}"),
         session_id: SessionId::from_uuid(Uuid::nil()),
         recorded_in: SessionPhase::Execution,
