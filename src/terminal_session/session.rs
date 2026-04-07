@@ -137,7 +137,7 @@ impl PtyTerminalSession {
     }
 
     pub(crate) fn read_transcript(&self) -> SimardResult<String> {
-        fs::read_to_string(&self.transcript_path).map_err(|error| {
+        let bytes = fs::read(&self.transcript_path).map_err(|error| {
             SimardError::AdapterInvocationFailed {
                 base_type: self.base_type.clone(),
                 reason: format!(
@@ -145,7 +145,11 @@ impl PtyTerminalSession {
                     self.transcript_path.display()
                 ),
             }
-        })
+        })?;
+        // Terminal transcripts may contain raw ANSI escapes or other non-UTF-8
+        // bytes from the copilot process.  Use lossy conversion so we never
+        // fail just because the output includes terminal control sequences.
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     pub(crate) fn terminate(&mut self) -> SimardResult<()> {

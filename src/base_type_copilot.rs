@@ -193,12 +193,9 @@ impl BaseTypeSession for CopilotSdkSession {
 
         self.turn_count += 1;
 
-        // Build enriched objective and dispatch via terminal infrastructure.
         let enriched_objective = self.build_enriched_objective(&input);
         let enriched_input = BaseTypeTurnInput::objective_only(enriched_objective);
 
-        // Delegate to the terminal session infrastructure. If the terminal
-        // turn fails, wrap the error with copilot-specific context.
         let terminal_outcome =
             execute_terminal_turn(&self.descriptor, &self.request, &enriched_input).map_err(
                 |err| SimardError::AdapterInvocationFailed {
@@ -207,7 +204,12 @@ impl BaseTypeSession for CopilotSdkSession {
                 },
             )?;
 
-        // Augment evidence with copilot-specific metadata.
+        // Extract the actual LLM response from the transcript.  The transcript
+        // contains the command we sent, the copilot's response text, and then
+        // our sentinel marker.  We extract everything between the command echo
+        // and the sentinel as the meaningful response.
+        let response_text = extract_copilot_response_from_evidence(&terminal_outcome.evidence);
+
         let objective_summary = objective_metadata(&input.objective);
         let mut evidence = terminal_outcome.evidence;
         evidence.push(format!("copilot-adapter-command={}", self.config.command));
@@ -222,7 +224,7 @@ impl BaseTypeSession for CopilotSdkSession {
                 "Copilot SDK adapter dispatched {} via '{}' on '{}' (turn {}).",
                 objective_summary, self.config.command, self.request.topology, self.turn_count,
             ),
-            execution_summary: terminal_outcome.execution_summary,
+            execution_summary: response_text,
             evidence,
         })
     }
@@ -237,6 +239,12 @@ impl BaseTypeSession for CopilotSdkSession {
 
 /// Build a terminal-session-compatible objective string that launches the
 /// copilot command with the enriched prompt.
+///
+/// Strategy: write the prompt to a temp file, run `<copilot-cmd> -p @file`,
+/// then `exit` the shell.  The terminal infrastructure calls `finish()` which
+/// waits for the process to exit naturally — no artificial timeouts.  The
+/// copilot runs to completion however long it takes, and we read the full
+/// transcript afterward.
 fn build_copilot_terminal_objective(
     config: &CopilotAdapterConfig,
     formatted_prompt: &str,
@@ -247,18 +255,125 @@ fn build_copilot_terminal_objective(
         objective.push_str(&format!("working-directory: {cwd}\n"));
     }
 
-    // The command sends the formatted prompt to the copilot via stdin echo.
-    // We use printf to avoid issues with special characters in the prompt.
+    // Write the prompt to a temp file to avoid shell quoting issues with
+    // large multi-line prompts containing arbitrary characters.
+    // Chain the copilot command with `exit` so the shell exits naturally
+    // after the copilot finishes — no separate input step needed.
     let escaped = formatted_prompt
         .replace('\\', "\\\\")
         .replace('\'', "'\\''");
     objective.push_str(&format!(
-        "command: printf '%s' '{}' | {}\n",
-        escaped, config.command
+        "command: SIMARD_PROMPT_FILE=$(mktemp /tmp/simard-copilot-prompt.XXXXXX) && \
+         printf '%s' '{}' > \"$SIMARD_PROMPT_FILE\" && \
+         {} -p \"$(cat \"$SIMARD_PROMPT_FILE\")\" ; \
+         rm -f \"$SIMARD_PROMPT_FILE\" ; exit\n",
+        escaped, config.command,
     ));
-    objective.push_str("wait-for: $\n");
 
     objective
+}
+
+/// Extract the actual copilot LLM response from the terminal transcript
+/// embedded in the evidence vector.
+///
+/// Prefers the full transcript (`terminal-transcript-full`) over the
+/// truncated preview.  The full transcript is newline-delimited; the
+/// preview is pipe-delimited.
+fn extract_copilot_response_from_evidence(evidence: &[String]) -> String {
+    // Prefer full transcript; fall back to the preview.
+    let transcript = evidence
+        .iter()
+        .find_map(|e| e.strip_prefix("terminal-transcript-full="))
+        .or_else(|| {
+            evidence
+                .iter()
+                .find_map(|e| e.strip_prefix("terminal-transcript-preview="))
+        })
+        .unwrap_or("");
+
+    extract_response_from_transcript(transcript)
+}
+
+/// Parse the raw transcript text to isolate the copilot's response.
+///
+/// The transcript from `script` contains (in order):
+///   Script started on ...
+///   <bash prompt> <command echo>
+///   <copilot bootstrap lines — hooks, XPIA defender, etc.>
+///   <actual LLM response>
+///   Total usage est: ...
+///   API time spent: ...
+///   bash-5.2$ exit
+///   Script done on ...
+///
+/// We find the end of bootstrap noise and the start of usage stats to
+/// isolate the actual LLM response in between.
+fn extract_response_from_transcript(transcript: &str) -> String {
+    let lines: Vec<&str> = transcript.lines().collect();
+    // Also try pipe-delimited (preview format) if no newlines found.
+    let lines = if lines.len() <= 1 && transcript.contains(" | ") {
+        transcript.split(" | ").collect::<Vec<_>>()
+    } else {
+        lines
+    };
+
+    let mut response_start = 0;
+    let mut response_end = lines.len();
+
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        // Bootstrap output: hook staging, XPIA defender, prompt file creation
+        if trimmed.contains("Staged") && trimmed.contains("hook")
+            || trimmed.contains("XPIA")
+            || trimmed.contains("SIMARD_PROMPT_FILE")
+            || trimmed.contains("amplihack copilot")
+            || trimmed.starts_with("Script started on")
+            || trimmed.starts_with("bash-") && trimmed.contains("$") && trimmed.contains("cat ")
+        {
+            response_start = i + 1;
+        }
+        // Usage stats / session footer
+        if (trimmed.starts_with("Total usage est:")
+            || trimmed.starts_with("API time spent:")
+            || trimmed.starts_with("Total session time:"))
+            && response_end == lines.len()
+        {
+            response_end = i;
+        }
+        // Shell exit / script done
+        if (trimmed == "exit"
+            || trimmed.ends_with("$ exit")
+            || trimmed.starts_with("Script done on"))
+            && response_end == lines.len()
+        {
+            response_end = i;
+        }
+    }
+
+    if response_start >= response_end {
+        // Fallback: strip known noise lines
+        return lines
+            .iter()
+            .filter(|l| {
+                let t = l.trim();
+                !(t.is_empty()
+                    || t.starts_with("Script ")
+                    || t.contains("amplihack copilot")
+                    || t.contains("SIMARD_PROMPT_FILE")
+                    || t == "exit"
+                    || t.ends_with("$ exit"))
+            })
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+
+    lines[response_start..response_end]
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Parse copilot response text and extract a turn context summary for
@@ -380,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn build_copilot_objective_includes_command() {
+    fn build_copilot_objective_includes_command_and_exit() {
         let config = CopilotAdapterConfig {
             command: "my-copilot run".to_string(),
             working_directory: Some("/tmp/work".to_string()),
@@ -390,5 +505,122 @@ mod tests {
         assert!(objective.contains("my-copilot run"));
         assert!(objective.contains("working-directory: /tmp/work"));
         assert!(objective.contains("Do the thing."));
+        assert!(
+            objective.contains("; exit"),
+            "objective must chain exit to end the shell naturally"
+        );
+        assert!(
+            !objective.contains("wait-for:"),
+            "no wait-for — process exits naturally"
+        );
+        assert!(
+            !objective.contains("wait-timeout"),
+            "no timeout — process runs to completion"
+        );
+    }
+
+    #[test]
+    fn build_copilot_objective_without_working_directory() {
+        let config = CopilotAdapterConfig::default();
+        let prompt = "Hello world";
+        let objective = build_copilot_terminal_objective(&config, prompt);
+        assert!(!objective.contains("working-directory:"));
+        assert!(objective.contains("; exit"));
+        assert!(objective.contains("amplihack copilot"));
+    }
+
+    #[test]
+    fn build_copilot_objective_escapes_single_quotes() {
+        let config = CopilotAdapterConfig::default();
+        let prompt = "it's a test with 'quotes'";
+        let objective = build_copilot_terminal_objective(&config, prompt);
+        assert!(!objective.contains("it's"), "single quotes must be escaped");
+    }
+
+    #[test]
+    fn extract_response_from_transcript_isolates_copilot_output() {
+        // Full transcript format: newline-delimited lines from `script`
+        let transcript = "\
+Script started on 2025-04-07 02:55:00+00:00
+bash-5.2$ SIMARD_PROMPT_FILE=$(mktemp) && printf '%s' 'Hello' > \"$SIMARD_PROMPT_FILE\" && amplihack copilot -p \"$(cat \"$SIMARD_PROMPT_FILE\")\" ; rm -f \"$SIMARD_PROMPT_FILE\" ; exit
+I'm Simard, your engineering agent. How can I help?
+Total usage est: 0.012
+bash-5.2$ exit
+Script done on 2025-04-07 02:56:00+00:00";
+        let response = extract_response_from_transcript(transcript);
+        assert!(
+            response.contains("I'm Simard"),
+            "should extract copilot response: got '{response}'"
+        );
+        assert!(
+            !response.contains("exit"),
+            "exit command should be stripped"
+        );
+        assert!(
+            !response.contains("Total usage"),
+            "usage stats should be stripped"
+        );
+    }
+
+    #[test]
+    fn extract_response_from_transcript_pipe_delimited_fallback() {
+        // Preview format: pipe-delimited
+        let transcript = "SIMARD_PROMPT_FILE=x && amplihack copilot -p test | Hello from Simard | bash-5.2$ exit";
+        let response = extract_response_from_transcript(transcript);
+        assert!(
+            response.contains("Hello from Simard"),
+            "should handle pipe-delimited: got '{response}'"
+        );
+    }
+
+    #[test]
+    fn extract_response_from_transcript_handles_no_command_marker() {
+        let transcript = "some output\nactual response text\nmore text";
+        let response = extract_response_from_transcript(transcript);
+        assert!(!response.is_empty(), "should return all content lines");
+    }
+
+    #[test]
+    fn extract_response_from_transcript_handles_empty() {
+        let response = extract_response_from_transcript("");
+        assert!(response.is_empty() || response.trim().is_empty());
+    }
+
+    #[test]
+    fn extract_copilot_response_from_evidence_prefers_full_transcript() {
+        let evidence = vec![
+            "selected-base-type=copilot-test".to_string(),
+            "terminal-transcript-preview=SIMARD_PROMPT_FILE=x && amplihack copilot -p test | Preview only | bash-5.2$ exit".to_string(),
+            "terminal-transcript-full=Script started on 2025-04-07\nbash-5.2$ amplihack copilot -p test\nFull response from Simard\nTotal usage est: 0.01\nbash-5.2$ exit\nScript done on 2025-04-07".to_string(),
+        ];
+        let response = extract_copilot_response_from_evidence(&evidence);
+        assert!(
+            response.contains("Full response from Simard"),
+            "should prefer full transcript: got '{response}'"
+        );
+        assert!(
+            !response.contains("Preview only"),
+            "should not use preview when full is available"
+        );
+    }
+
+    #[test]
+    fn extract_copilot_response_from_evidence_falls_back_to_preview() {
+        let evidence = vec![
+            "selected-base-type=copilot-test".to_string(),
+            "terminal-transcript-preview=SIMARD_PROMPT_FILE=x && amplihack copilot -p test | Hello from Simard | bash-5.2$ exit".to_string(),
+        ];
+        let response = extract_copilot_response_from_evidence(&evidence);
+        assert!(
+            response.contains("Hello from Simard"),
+            "should fall back to preview: got '{response}'"
+        );
+    }
+
+    #[test]
+    fn extract_copilot_response_from_evidence_handles_missing_preview() {
+        let evidence = vec!["selected-base-type=copilot-test".to_string()];
+        let response = extract_copilot_response_from_evidence(&evidence);
+        assert!(response.is_empty());
     }
 }
