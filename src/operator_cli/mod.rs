@@ -1,5 +1,6 @@
 mod args;
 mod curation;
+mod dashboard;
 mod decisions;
 mod engineer;
 mod gym;
@@ -45,6 +46,7 @@ Product modes:
   gym compare <scenario-id>
   gym run-suite <suite-id>
   ooda run [--cycles=N] [state-root]
+  dashboard serve [--port=8080]
   spawn <agent-name> <goal> <worktree-path> [--depth=N]
   handover [--canary-dir=PATH] [--manifest-dir=PATH]
   update
@@ -83,6 +85,7 @@ where
         "review" => review::dispatch_review_command(args),
         "gym" => gym::dispatch_gym_command(args),
         "ooda" => ooda::dispatch_ooda_command(args),
+        "dashboard" => dashboard::dispatch_dashboard_command(args),
         "spawn" => dispatch_spawn_command(args),
         "handover" => dispatch_handover_command(args),
         "bootstrap" => dispatch_bootstrap_command(args),

@@ -53,6 +53,7 @@ pub mod ooda_loop;
 pub mod ooda_scheduler;
 pub mod operator_cli;
 pub mod operator_commands;
+mod operator_commands_dashboard;
 mod operator_commands_engineer;
 mod operator_commands_gym;
 mod operator_commands_meeting;
