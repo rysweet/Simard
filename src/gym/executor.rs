@@ -118,6 +118,7 @@ fn run_scenario_runtime(
         ),
         session_id: outcome.session.id.clone(),
         recorded_in: SessionPhase::Complete,
+            created_at: None,
     })?;
     metric_facts.record_required_action();
 

@@ -48,6 +48,7 @@ impl RuntimeKernel {
             value: objective_metadata(&session.objective),
             session_id: session.id.clone(),
             recorded_in: SessionPhase::Preparation,
+            created_at: None,
         })?;
         session.attach_memory(scratch_key);
         self.remember_session(session);
@@ -152,6 +153,7 @@ impl RuntimeKernel {
                 .persistence_summary(context, outcome)?,
             session_id: session.id.clone(),
             recorded_in: SessionPhase::Persistence,
+            created_at: None,
         })?;
         session.attach_memory(summary_key);
 
@@ -167,6 +169,7 @@ impl RuntimeKernel {
                 value: record.value,
                 session_id: session.id.clone(),
                 recorded_in: SessionPhase::Persistence,
+            created_at: None,
             })?;
             session.attach_memory(key);
         }

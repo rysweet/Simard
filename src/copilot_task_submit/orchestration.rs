@@ -218,6 +218,7 @@ pub(super) fn persist_report(inputs: PersistReportInputs<'_>) -> SimardResult<Co
         ),
         session_id: session.id.clone(),
         recorded_in: SessionPhase::Complete,
+            created_at: None,
     };
     session.attach_memory(memory_record.key.clone());
 

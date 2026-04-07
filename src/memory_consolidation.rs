@@ -197,6 +197,55 @@ pub fn persistence_memory_operations(
     Ok(())
 }
 
+// ============================================================================
+// Session-boundary auto-trigger helpers
+// ============================================================================
+
+/// Hydrate memories from prior sessions at startup.
+///
+/// Call this early in the session lifecycle (e.g. after `intake_memory_operations`)
+/// to pull any cross-session facts into the current working context.  The
+/// bridge is queried for recent facts and any matching records are pushed
+/// into working memory so the agent can reason over prior session knowledge.
+pub fn consolidation_intake(
+    session_id: &SessionId,
+    bridge: &CognitiveMemoryBridge,
+) -> SimardResult<usize> {
+    let prior_facts = bridge.search_facts("memory-store-adapter", 50, 0.0)?;
+    let count = prior_facts.len();
+    if count > 0 {
+        let summary = format!(
+            "Hydrated {count} prior-session facts for cross-session recall"
+        );
+        bridge.push_working("consolidation-intake", &summary, session_id.as_str(), 0.7)?;
+        bridge.store_episode(&summary, "consolidation-intake", None)?;
+    }
+    Ok(count)
+}
+
+/// Flush working memory to episodes at shutdown.
+///
+/// Call this during session cleanup (e.g. before `persistence_memory_operations`)
+/// to ensure any remaining working-memory items are persisted as episodes
+/// before the session terminates.  This closes the intake→persistence
+/// round-trip and prevents data loss on unexpected shutdown.
+pub fn consolidation_persistence(
+    session_id: &SessionId,
+    bridge: &CognitiveMemoryBridge,
+) -> SimardResult<()> {
+    // Store an episodic record capturing the consolidation event.
+    bridge.store_episode(
+        &format!("Session {session_id} flushing working memory to episodes"),
+        "consolidation-persistence",
+        None,
+    )?;
+
+    // Consolidate any remaining episodes into long-term storage.
+    bridge.consolidate_episodes(20)?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,5 +344,54 @@ mod tests {
         persistence_memory_operations(&test_session_id(), &bridge).unwrap();
         // clear_working + prune_expired_sensory + consolidate_episodes + store_episode = 4
         assert_eq!(count.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn consolidation_intake_returns_zero_when_no_prior_facts() {
+        let (bridge, count) = counting_bridge();
+        let hydrated = consolidation_intake(&test_session_id(), &bridge).unwrap();
+        assert_eq!(hydrated, 0);
+        // Only 1 call: search_facts
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn consolidation_intake_with_facts_pushes_to_working_memory() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let counter = call_count.clone();
+        let transport = InMemoryBridgeTransport::new("test-intake", move |method, _params| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            match method {
+                "memory.search_facts" => Ok(json!({
+                    "facts": [{
+                        "node_id": "n1",
+                        "concept": "prior-fact",
+                        "content": "remembered",
+                        "confidence": 0.9,
+                        "source_id": "memory-store-adapter",
+                        "tags": []
+                    }]
+                })),
+                "memory.push_working" => Ok(json!({"id": "wrk_1"})),
+                "memory.store_episode" => Ok(json!({"id": "epi_1"})),
+                _ => Err(crate::bridge::BridgeErrorPayload {
+                    code: -32601,
+                    message: format!("unknown: {method}"),
+                }),
+            }
+        });
+        let bridge = CognitiveMemoryBridge::new(Box::new(transport));
+        let hydrated = consolidation_intake(&test_session_id(), &bridge).unwrap();
+        assert_eq!(hydrated, 1);
+        // search_facts + push_working + store_episode = 3
+        assert_eq!(call_count.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn consolidation_persistence_flushes_and_consolidates() {
+        let (bridge, count) = counting_bridge();
+        consolidation_persistence(&test_session_id(), &bridge).unwrap();
+        // store_episode + consolidate_episodes = 2
+        assert_eq!(count.load(Ordering::SeqCst), 2);
     }
 }

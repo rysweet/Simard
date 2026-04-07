@@ -140,6 +140,7 @@ fn hydration_with_empty_fallback_starts_empty() {
         MemoryScope::Decision,
         MemoryScope::Project,
         MemoryScope::Benchmark,
+        MemoryScope::Untagged,
     ] {
         assert!(
             store.list(scope).unwrap().is_empty(),

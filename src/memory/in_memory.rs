@@ -1,5 +1,7 @@
 use std::sync::Mutex;
 
+use chrono::{DateTime, Utc};
+
 use crate::error::{SimardError, SimardResult};
 use crate::metadata::{BackendDescriptor, Freshness};
 use crate::session::SessionId;
@@ -36,6 +38,10 @@ impl MemoryStore for InMemoryMemoryStore {
     }
 
     fn put(&self, record: MemoryRecord) -> SimardResult<()> {
+        let mut record = record;
+        if record.created_at.is_none() {
+            record.created_at = Some(Utc::now());
+        }
         self.records
             .lock()
             .map_err(|_| SimardError::StoragePoisoned {
@@ -81,5 +87,36 @@ impl MemoryStore for InMemoryMemoryStore {
             .iter()
             .filter(|record| &record.session_id == session_id)
             .count())
+    }
+
+    fn list_all(&self) -> SimardResult<Vec<MemoryRecord>> {
+        Ok(self
+            .records
+            .lock()
+            .map_err(|_| SimardError::StoragePoisoned {
+                store: "memory".to_string(),
+            })?
+            .clone())
+    }
+
+    fn list_by_time_range(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> SimardResult<Vec<MemoryRecord>> {
+        Ok(self
+            .records
+            .lock()
+            .map_err(|_| SimardError::StoragePoisoned {
+                store: "memory".to_string(),
+            })?
+            .iter()
+            .filter(|r| {
+                r.created_at
+                    .map(|t| t >= start && t < end)
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect())
     }
 }

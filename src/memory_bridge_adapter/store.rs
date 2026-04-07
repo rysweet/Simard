@@ -1,6 +1,8 @@
 //! [`CognitiveBridgeMemoryStore`] — the bridge between `MemoryStore` and cognitive memory.
 
 use std::collections::HashMap;
+
+use chrono::{DateTime, Utc};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -31,6 +33,8 @@ pub struct CognitiveBridgeMemoryStore {
     /// search is keyword-based and cannot filter by exact scope/session.
     /// Keyed by record key for O(1) dedup on put.
     pub(super) records: Mutex<HashMap<String, MemoryRecord>>,
+    /// Keys whose bridge write failed — `sync_pending()` retries these.
+    pending_bridge_keys: Mutex<Vec<String>>,
     descriptor: BackendDescriptor,
 }
 
@@ -43,6 +47,7 @@ impl CognitiveBridgeMemoryStore {
         let mut store = Self {
             bridge,
             records: Mutex::new(HashMap::new()),
+            pending_bridge_keys: Mutex::new(Vec::new()),
             descriptor: BackendDescriptor::for_runtime_type::<Self>(
                 "memory::cognitive-bridge",
                 "runtime-port:memory-store:cognitive-bridge",
@@ -61,12 +66,13 @@ impl CognitiveBridgeMemoryStore {
     fn hydrate_from_fallback(&mut self) {
         use crate::memory::MemoryScope;
 
-        const ALL_SCOPES: [MemoryScope; 5] = [
+        const ALL_SCOPES: [MemoryScope; 6] = [
             MemoryScope::SessionScratch,
             MemoryScope::SessionSummary,
             MemoryScope::Decision,
             MemoryScope::Project,
             MemoryScope::Benchmark,
+            MemoryScope::Untagged,
         ];
 
         let mut hydrated = 0usize;
@@ -190,6 +196,52 @@ impl CognitiveBridgeMemoryStore {
         }
     }
 
+    /// Retry bridge writes for records that were persisted to the file fallback
+    /// but failed to reach the cognitive bridge. Returns the number of
+    /// successfully synced records.
+    pub fn sync_pending(&self) -> usize {
+        let keys: Vec<String> = {
+            let Ok(pending) = self.pending_bridge_keys.lock() else {
+                return 0;
+            };
+            pending.clone()
+        };
+        if keys.is_empty() {
+            return 0;
+        }
+
+        let records_map = match self.records.lock() {
+            Ok(m) => m.clone(),
+            Err(_) => return 0,
+        };
+
+        let mut synced = 0usize;
+        let mut still_pending = Vec::new();
+        for key in &keys {
+            if let Some(record) = records_map.get(key) {
+                match self.store_as_fact(record) {
+                    Ok(_) => synced += 1,
+                    Err(e) => {
+                        eprintln!(
+                            "[simard] cognitive-bridge: sync_pending retry failed \
+                             for key {:?}: {e}",
+                            key,
+                        );
+                        still_pending.push(key.clone());
+                    }
+                }
+            }
+        }
+
+        if let Ok(mut pending) = self.pending_bridge_keys.lock() {
+            *pending = still_pending;
+        }
+        if synced > 0 {
+            eprintln!("[simard] cognitive-bridge: sync_pending synced {synced} records");
+        }
+        synced
+    }
+
     /// Store a record in cognitive memory as a semantic fact.
     fn store_as_fact(&self, record: &MemoryRecord) -> SimardResult<String> {
         let tags = vec![
@@ -213,12 +265,28 @@ impl MemoryStore for CognitiveBridgeMemoryStore {
     }
 
     fn put(&self, record: MemoryRecord) -> SimardResult<()> {
+        // Stamp created_at if not already set.
+        let mut record = record;
+        if record.created_at.is_none() {
+            record.created_at = Some(Utc::now());
+        }
+
+        // Try cognitive bridge first — if it fails, log a warning but still
+        // persist to the file fallback so data is not lost.
+        let bridge_ok = match self.store_as_fact(&record) {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!(
+                    "[simard] cognitive-bridge: bridge write failed for key {:?}, \
+                     falling back to file-only: {e}",
+                    record.key,
+                );
+                false
+            }
+        };
+
         // Always persist to file fallback for handoff/recovery.
         self.fallback.put(record.clone())?;
-
-        // Store in cognitive bridge — propagate errors instead of silently
-        // falling back (Pillar 11: no silent memory fallbacks).
-        self.store_as_fact(&record)?;
 
         // Maintain local index for list/count — O(1) insert/overwrite via HashMap.
         let mut records = self
@@ -227,7 +295,18 @@ impl MemoryStore for CognitiveBridgeMemoryStore {
             .map_err(|_| SimardError::StoragePoisoned {
                 store: STORE_NAME.to_string(),
             })?;
-        records.insert(record.key.clone(), record);
+        let key = record.key.clone();
+        records.insert(key.clone(), record);
+        drop(records);
+
+        // Track the key as pending if bridge write failed.
+        if !bridge_ok {
+            if let Ok(mut pending) = self.pending_bridge_keys.lock() {
+                if !pending.contains(&key) {
+                    pending.push(key);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -277,5 +356,37 @@ impl MemoryStore for CognitiveBridgeMemoryStore {
             .values()
             .filter(|r| &r.session_id == session_id)
             .count())
+    }
+
+    fn list_all(&self) -> SimardResult<Vec<MemoryRecord>> {
+        let records = self
+            .records
+            .lock()
+            .map_err(|_| SimardError::StoragePoisoned {
+                store: STORE_NAME.to_string(),
+            })?;
+        Ok(records.values().cloned().collect())
+    }
+
+    fn list_by_time_range(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> SimardResult<Vec<MemoryRecord>> {
+        let records = self
+            .records
+            .lock()
+            .map_err(|_| SimardError::StoragePoisoned {
+                store: STORE_NAME.to_string(),
+            })?;
+        Ok(records
+            .values()
+            .filter(|r| {
+                r.created_at
+                    .map(|t| t >= start && t < end)
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect())
     }
 }

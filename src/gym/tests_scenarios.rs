@@ -177,6 +177,7 @@ fn dummy_handoff(memory_count: usize) -> RuntimeHandoffSnapshot {
                 value: format!("value-{i}"),
                 session_id: session_id.clone(),
                 recorded_in: SessionPhase::Complete,
+            created_at: None,
             })
             .collect(),
         evidence_records: vec![],
