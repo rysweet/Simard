@@ -17,6 +17,18 @@ impl RuntimeKernel {
         self.transition(RuntimeState::Active)?;
 
         let mut session = self.new_session(objective);
+
+        // --- Memory consolidation: intake at session start ---
+        if let Some(bridge) = &self.cognitive_bridge
+            && let Err(e) = crate::memory_consolidation::intake_memory_operations(
+                &session.objective,
+                &session.id,
+                bridge,
+            )
+        {
+            eprintln!("[simard] session consolidation: intake failed: {e}");
+        }
+
         self.persist_session_scratch(&mut session)?;
         let outcome = self.run_selected_base_type_session(&mut session)?;
         self.record_execution_evidence(&mut session, &outcome)?;
@@ -24,6 +36,15 @@ impl RuntimeKernel {
         let context = self.agent_program_context(&session);
         let reflection = self.build_reflection(&mut session, &outcome, &context)?;
         self.persist_session_summary(&mut session, &outcome, &context)?;
+
+        // --- Memory consolidation: persistence at session end ---
+        if let Some(bridge) = &self.cognitive_bridge
+            && let Err(e) =
+                crate::memory_consolidation::persistence_memory_operations(&session.id, bridge)
+        {
+            eprintln!("[simard] session consolidation: persistence failed: {e}");
+        }
+
         self.complete_session(session, outcome, reflection)
     }
 
