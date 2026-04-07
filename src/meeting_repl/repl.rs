@@ -11,7 +11,7 @@ use crate::meeting_facilitator::{
 use crate::memory_bridge::CognitiveMemoryBridge;
 
 use super::auto_capture::auto_capture_structured_items;
-use super::command::{HELP_TEXT, MeetingCommand, parse_meeting_command};
+use super::command::{MeetingCommand, help_text, parse_meeting_command};
 use super::persist::{persist_meeting_to_memory, write_meeting_handoff_artifact};
 
 const PROMPT: &str = "simard:meeting> ";
@@ -184,7 +184,7 @@ fn dispatch_command<W: Write>(
         }
         MeetingCommand::Close => unreachable!(),
         MeetingCommand::Help => {
-            write!(output, "{HELP_TEXT}").ok();
+            write!(output, "{}", help_text()).ok();
         }
         MeetingCommand::List => {
             let has_items = !session.decisions.is_empty()
@@ -273,10 +273,15 @@ fn dispatch_command<W: Write>(
         }
         MeetingCommand::Empty => {}
         MeetingCommand::Unknown(input) => {
-            writeln!(output, "Could not parse command: {input}").ok();
+            writeln!(output, "Unknown command: {input}").ok();
             writeln!(
                 output,
-                "Try /help for command syntax, or just type naturally."
+                "Available commands: /decision, /action, /note, /close, /done, /help"
+            )
+            .ok();
+            writeln!(
+                output,
+                "Type /help for full syntax, or just type naturally to talk with Simard."
             )
             .ok();
         }
