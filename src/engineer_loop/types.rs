@@ -259,6 +259,39 @@ pub(crate) fn unescape_edit_value(value: &str) -> String {
     value.replace("\\n", "\n").replace("\\t", "\t")
 }
 
+pub(crate) fn validate_repo_relative_path(relative_path: &str) -> SimardResult<String> {
+    let path = Path::new(relative_path);
+    if path.is_absolute() {
+        return Err(SimardError::UnsupportedEngineerAction {
+            reason: "structured edit target paths must stay relative to the selected repo"
+                .to_string(),
+        });
+    }
+
+    let mut normalized = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(segment) => normalized.push(segment.to_string_lossy().into_owned()),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(SimardError::UnsupportedEngineerAction {
+                    reason: "structured edit target paths must not escape the selected repo"
+                        .to_string(),
+                });
+            }
+        }
+    }
+
+    if normalized.is_empty() {
+        return Err(SimardError::UnsupportedEngineerAction {
+            reason: "structured edit target paths must identify a file under the selected repo"
+                .to_string(),
+        });
+    }
+
+    Ok(normalized.join("/"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,37 +501,4 @@ mod tests {
         assert_ne!(success, failed);
         assert_ne!(failed, skipped);
     }
-}
-
-pub(crate) fn validate_repo_relative_path(relative_path: &str) -> SimardResult<String> {
-    let path = Path::new(relative_path);
-    if path.is_absolute() {
-        return Err(SimardError::UnsupportedEngineerAction {
-            reason: "structured edit target paths must stay relative to the selected repo"
-                .to_string(),
-        });
-    }
-
-    let mut normalized = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(segment) => normalized.push(segment.to_string_lossy().into_owned()),
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(SimardError::UnsupportedEngineerAction {
-                    reason: "structured edit target paths must not escape the selected repo"
-                        .to_string(),
-                });
-            }
-        }
-    }
-
-    if normalized.is_empty() {
-        return Err(SimardError::UnsupportedEngineerAction {
-            reason: "structured edit target paths must identify a file under the selected repo"
-                .to_string(),
-        });
-    }
-
-    Ok(normalized.join("/"))
 }

@@ -324,6 +324,36 @@ fn is_ignorable_copilot_ui_fragment(fragment: &str) -> bool {
         || fragment.contains("[⎇ ")
 }
 
+pub(super) fn copilot_last_meaningful_output_line(
+    visible_fragments: &[String],
+    flow: &CopilotSubmitFlowAsset,
+) -> Option<String> {
+    visible_fragments
+        .iter()
+        .rev()
+        .find(|fragment| !fragment.contains(&flow.payload))
+        .map(|fragment| compact_terminal_evidence_value(fragment, 160))
+}
+
+pub(super) fn copilot_transcript_preview(
+    visible_fragments: &[String],
+    flow: &CopilotSubmitFlowAsset,
+) -> String {
+    let mut normalized = visible_fragments
+        .iter()
+        .filter(|fragment| !fragment.contains(&flow.payload))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" | ");
+
+    if normalized.len() > 512 {
+        normalized.truncate(512);
+        normalized.push_str("...");
+    }
+
+    normalized
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,16 +397,20 @@ mod tests {
 
     #[test]
     fn classify_startup_unsupported_on_wrapper_error() {
-        let mut scan = TranscriptCheckpointScan::default();
-        scan.has_wrapper_error = true;
+        let scan = TranscriptCheckpointScan {
+            has_wrapper_error: true,
+            ..Default::default()
+        };
         let status = classify_startup(&scan, false);
         assert_eq!(status, StartupStatus::Unsupported("copilot-wrapper-error"));
     }
 
     #[test]
     fn classify_startup_unsupported_on_trust_prompt() {
-        let mut scan = TranscriptCheckpointScan::default();
-        scan.has_trust_prompt = true;
+        let scan = TranscriptCheckpointScan {
+            has_trust_prompt: true,
+            ..Default::default()
+        };
         let status = classify_startup(&scan, false);
         assert_eq!(
             status,
@@ -410,8 +444,10 @@ mod tests {
 
     #[test]
     fn classify_submit_timeout_returns_copilot_wrapper_error() {
-        let mut scan = TranscriptCheckpointScan::default();
-        scan.has_wrapper_error = true;
+        let scan = TranscriptCheckpointScan {
+            has_wrapper_error: true,
+            ..Default::default()
+        };
         let flow = test_flow();
         assert_eq!(
             classify_submit_timeout(&scan, &flow),
@@ -456,34 +492,4 @@ mod tests {
         let preview = copilot_transcript_preview(&fragments, &flow);
         assert!(preview.len() <= 515); // 512 + "..."
     }
-}
-
-pub(super) fn copilot_last_meaningful_output_line(
-    visible_fragments: &[String],
-    flow: &CopilotSubmitFlowAsset,
-) -> Option<String> {
-    visible_fragments
-        .iter()
-        .rev()
-        .find(|fragment| !fragment.contains(&flow.payload))
-        .map(|fragment| compact_terminal_evidence_value(fragment, 160))
-}
-
-pub(super) fn copilot_transcript_preview(
-    visible_fragments: &[String],
-    flow: &CopilotSubmitFlowAsset,
-) -> String {
-    let mut normalized = visible_fragments
-        .iter()
-        .filter(|fragment| !fragment.contains(&flow.payload))
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(" | ");
-
-    if normalized.len() > 512 {
-        normalized.truncate(512);
-        normalized.push_str("...");
-    }
-
-    normalized
 }
