@@ -6,57 +6,49 @@ use super::make_outcome;
 
 /// Launch a bounded terminal session to work on a specific task.
 ///
-/// Uses `PtyTerminalSession` to start `amplihack copilot`, send the task
-/// description, wait for completion signals, and capture the transcript.
+/// Uses `PtyTerminalSession` to start `amplihack copilot -p <prompt>`,
+/// wait for natural process exit, and capture the transcript.
+/// This mirrors the copilot adapter pattern from `base_type_copilot.rs`:
+/// write the prompt to a temp file, invoke copilot with `-p`, chain `; exit`.
 pub(super) fn dispatch_launch_session(action: &PlannedAction) -> ActionOutcome {
     use crate::terminal_session::PtyTerminalSession;
-    use std::time::Duration;
 
     let task = &action.description;
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
-    // Launch amplihack copilot in a PTY.
-    let mut session =
-        match PtyTerminalSession::launch_command("terminal-shell", "amplihack copilot", &cwd) {
-            Ok(s) => s,
-            Err(e) => {
-                return make_outcome(
-                    action,
-                    false,
-                    format!("failed to launch amplihack copilot: {e}"),
-                );
-            }
-        };
-
-    // Wait for the copilot prompt to appear.
-    let prompt_timeout = Duration::from_secs(30);
-    match session.wait_for_output("$", prompt_timeout) {
-        Ok(_) => {}
+    // Launch bash in a PTY — we'll send the copilot command ourselves.
+    let mut session = match PtyTerminalSession::launch("terminal-shell", "/usr/bin/bash", &cwd) {
+        Ok(s) => s,
         Err(e) => {
-            eprintln!("[simard] OODA launch-session: copilot prompt not detected: {e}");
-            // Continue anyway — the session may still be responsive.
+            return make_outcome(
+                action,
+                false,
+                format!("failed to launch terminal session: {e}"),
+            );
         }
-    }
+    };
 
-    // Send the task description.
-    if let Err(e) = session.send_input(task) {
+    // Build a single command that writes the prompt to a temp file, invokes
+    // copilot with -p, cleans up, and exits. No sentinels, no timeouts.
+    let escaped = task.replace('\\', "\\\\").replace('\'', "'\\''");
+    let command = format!(
+        "SIMARD_PROMPT_FILE=$(mktemp /tmp/simard-ooda-prompt.XXXXXX) && \
+         printf '%s' '{escaped}' > \"$SIMARD_PROMPT_FILE\" && \
+         amplihack copilot -p \"$(cat \"$SIMARD_PROMPT_FILE\")\" ; \
+         rm -f \"$SIMARD_PROMPT_FILE\" ; exit\n"
+    );
+
+    if let Err(e) = session.send_input(&command) {
         let _ = session.finish();
         return make_outcome(
             action,
             false,
-            format!("failed to send task to copilot: {e}"),
+            format!("failed to send command to terminal: {e}"),
         );
     }
 
-    // Wait for the task to complete (up to 5 minutes).
-    let work_timeout = Duration::from_secs(300);
-    let _ = session.wait_for_output("$", work_timeout);
-
-    // Send /exit to cleanly close the copilot session.
-    let _ = session.send_input("/exit");
-    let _ = session.wait_for_output("Bye", Duration::from_secs(10));
-
-    // Capture transcript.
+    // Wait for natural process exit — copilot runs to completion, then
+    // bash exits via the chained `; exit`. finish() polls up to 600s.
     match session.finish() {
         Ok(capture) => {
             let preview = crate::terminal_session::transcript_preview(&capture.transcript);
