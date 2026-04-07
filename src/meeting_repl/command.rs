@@ -418,6 +418,7 @@ mod tests {
             "/done",
             "/help",
             "/status",
+            "/recap",
             "/participants",
         ] {
             assert!(text.contains(cmd), "help_text() should mention {cmd}");
