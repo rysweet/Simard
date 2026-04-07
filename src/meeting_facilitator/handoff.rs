@@ -37,6 +37,12 @@ pub struct MeetingHandoff {
     pub open_questions: Vec<String>,
     #[serde(default)]
     pub processed: bool,
+    #[serde(default)]
+    pub duration_secs: Option<u64>,
+    #[serde(default)]
+    pub transcript: Vec<String>,
+    #[serde(default)]
+    pub participants: Vec<String>,
 }
 
 impl MeetingHandoff {
@@ -50,6 +56,32 @@ impl MeetingHandoff {
             .cloned()
             .collect();
 
+        let duration_secs = chrono::DateTime::parse_from_rfc3339(&session.started_at)
+            .ok()
+            .map(|start| {
+                Utc::now()
+                    .signed_duration_since(start)
+                    .num_seconds()
+                    .max(0) as u64
+            });
+
+        let transcript = session.notes.clone();
+
+        // Collect unique participants from session.participants, decision participants, and action owners.
+        let mut all_participants: Vec<String> = session.participants.clone();
+        for d in &session.decisions {
+            for p in &d.participants {
+                if !all_participants.contains(p) {
+                    all_participants.push(p.clone());
+                }
+            }
+        }
+        for a in &session.action_items {
+            if !all_participants.contains(&a.owner) {
+                all_participants.push(a.owner.clone());
+            }
+        }
+
         Self {
             topic: session.topic.clone(),
             closed_at: Utc::now().to_rfc3339(),
@@ -57,6 +89,9 @@ impl MeetingHandoff {
             action_items: session.action_items.clone(),
             open_questions,
             processed: false,
+            duration_secs,
+            transcript,
+            participants: all_participants,
         }
     }
 }

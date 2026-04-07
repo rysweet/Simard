@@ -56,6 +56,8 @@ pub fn start_meeting(topic: &str, bridge: &CognitiveMemoryBridge) -> SimardResul
         action_items: Vec::new(),
         notes: Vec::new(),
         status: MeetingSessionStatus::Open,
+        started_at: chrono::Utc::now().to_rfc3339(),
+        participants: Vec::new(),
     })
 }
 

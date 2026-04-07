@@ -18,6 +18,12 @@ pub enum MeetingCommand {
     Note(String),
     /// Natural language — sent to the agent for a conversational response
     Conversation(String),
+    /// `/status` — show meeting status summary
+    Status,
+    /// `/participants add <name>` — add a participant
+    AddParticipant(String),
+    /// `/participants` — list current participants
+    ListParticipants,
     /// `/close` — end the meeting
     Close,
     /// `/help` — show available commands
@@ -87,6 +93,24 @@ pub fn parse_meeting_command(line: &str) -> MeetingCommand {
         return MeetingCommand::Help;
     }
 
+    if trimmed == "/status" {
+        return MeetingCommand::Status;
+    }
+
+    if trimmed == "/participants" {
+        return MeetingCommand::ListParticipants;
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("/participants ") {
+        if let Some(name) = rest.strip_prefix("add ") {
+            let name = name.trim().to_string();
+            if !name.is_empty() {
+                return MeetingCommand::AddParticipant(name);
+            }
+        }
+        return MeetingCommand::Unknown(trimmed.to_string());
+    }
+
     // Any non-command input is natural language — route to the agent.
     MeetingCommand::Conversation(trimmed.to_string())
 }
@@ -98,6 +122,9 @@ Commands (optional):
   /decision <description> | <rationale>   Record a formal decision
   /action <description> | <owner> [| <priority>]  Record an action item
   /note <text>                            Add an explicit note
+  /status                                 Show meeting status summary
+  /participants                           List current participants
+  /participants add <name>                Add a participant
   /close or /done                         Close the meeting and persist summary
   /help                                   Show this help
 
@@ -157,5 +184,34 @@ mod tests {
             parse_meeting_command("hello world"),
             MeetingCommand::Conversation("hello world".to_string())
         );
+    }
+
+    #[test]
+    fn parse_status_command() {
+        assert_eq!(parse_meeting_command("/status"), MeetingCommand::Status);
+    }
+
+    #[test]
+    fn parse_participants_list() {
+        assert_eq!(
+            parse_meeting_command("/participants"),
+            MeetingCommand::ListParticipants
+        );
+    }
+
+    #[test]
+    fn parse_participants_add() {
+        assert_eq!(
+            parse_meeting_command("/participants add Alice"),
+            MeetingCommand::AddParticipant("Alice".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_participants_add_empty_is_unknown() {
+        assert!(matches!(
+            parse_meeting_command("/participants add "),
+            MeetingCommand::Unknown(_)
+        ));
     }
 }
