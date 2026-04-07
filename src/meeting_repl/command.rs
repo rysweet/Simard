@@ -8,11 +8,12 @@ pub enum MeetingCommand {
         description: String,
         rationale: String,
     },
-    /// `/action <description> | <owner> [| <priority>]`
+    /// `/action <description> | <owner> [| <priority>] [due:<date-or-text>]`
     Action {
         description: String,
         owner: String,
         priority: u32,
+        due_description: Option<String>,
     },
     /// `/note <text>` — explicit note (not sent to agent)
     Note(String),
@@ -38,6 +39,8 @@ pub enum MeetingCommand {
     },
     /// `/delete <type> <number>` — remove an item
     Delete { item_type: String, index: usize },
+    /// `/preview` — show handoff preview without closing
+    Preview,
     /// `/close` — end the meeting
     Close,
     /// `/help` — show available commands
@@ -46,6 +49,27 @@ pub enum MeetingCommand {
     Empty,
     /// Unrecognized slash-command
     Unknown(String),
+}
+
+/// Extract an optional `due:...` suffix from action-command text.
+///
+/// Returns `(cleaned_text, Option<due_description>)`.  The `due:` token is
+/// recognised case-insensitively and may appear anywhere after the first `|`
+/// separator (i.e. it won't accidentally match inside the description).
+fn extract_due_suffix(raw: &str) -> (String, Option<String>) {
+    // Search for the last occurrence of ` due:` (case-insensitive).
+    let lower = raw.to_lowercase();
+    if let Some(idx) = lower.rfind(" due:") {
+        let due_text = raw[idx + 5..].trim().to_string();
+        let cleaned = raw[..idx].to_string();
+        if due_text.is_empty() {
+            (cleaned, None)
+        } else {
+            (cleaned, Some(due_text))
+        }
+    } else {
+        (raw.to_string(), None)
+    }
 }
 
 /// Parse a single line of REPL input into a `MeetingCommand`.
@@ -71,7 +95,9 @@ pub fn parse_meeting_command(line: &str) -> MeetingCommand {
     }
 
     if let Some(rest) = trimmed.strip_prefix("/action ") {
-        let parts: Vec<&str> = rest.splitn(3, '|').collect();
+        // Extract optional `due:...` suffix before pipe-splitting.
+        let (rest_clean, due_description) = extract_due_suffix(rest);
+        let parts: Vec<&str> = rest_clean.splitn(3, '|').collect();
         if parts.len() >= 2 {
             let description = parts[0].trim().to_string();
             let owner = parts[1].trim().to_string();
@@ -85,6 +111,7 @@ pub fn parse_meeting_command(line: &str) -> MeetingCommand {
                     description,
                     owner,
                     priority,
+                    due_description,
                 };
             }
         }
@@ -105,6 +132,10 @@ pub fn parse_meeting_command(line: &str) -> MeetingCommand {
             return MeetingCommand::Question(text);
         }
         return MeetingCommand::Unknown(trimmed.to_string());
+    }
+
+    if trimmed == "/preview" {
+        return MeetingCommand::Preview;
     }
 
     if trimmed == "/close" || trimmed == "/done" {
@@ -192,19 +223,20 @@ pub fn help_text() -> String {
 Simard meeting — speak naturally and Simard will respond.
 
 Commands (optional):
-  /decision <description> | <rationale>        Record a formal decision
-  /action <description> | <owner> [| <priority>]  Record an action item
-  /note <text>                                  Add an explicit note
-  /question <text>                              Add an explicit open question
-  /list                                         Show numbered list of all items
-  /edit <type> <number> <new text>              Edit an item (type: decision, action, note)
-  /delete <type> <number>                       Delete an item (type: decision, action, note)
-  /status                                       Show meeting status summary
-  /recap                                        Show formatted summary of all captured items
-  /participants                                 List current participants
-  /participants add <name>                      Add a participant
-  /close or /done                               Close the meeting and persist summary
-  /help                                         Show this help
+  /decision <description> | <rationale>                Record a formal decision
+  /action <desc> | <owner> [| <priority>] [due:<date>] Record an action item
+  /note <text>                                         Add an explicit note
+  /question <text>                                     Add an explicit open question
+  /list                                                Show numbered list of all items
+  /edit <type> <number> <new text>                     Edit an item (type: decision, action, note)
+  /delete <type> <number>                              Delete an item (type: decision, action, note)
+  /status                                              Show meeting status summary
+  /recap                                               Show formatted summary of all captured items
+  /preview                                             Preview handoff artifact without closing
+  /participants                                        List current participants
+  /participants add <name>                             Add a participant
+  /close or /done                                      Close the meeting and persist summary
+  /help                                                Show this help
 
 Anything else you type is a conversation with Simard.
 "
@@ -234,6 +266,7 @@ mod tests {
                 description: "Write integration tests".to_string(),
                 owner: "bob".to_string(),
                 priority: 2,
+                due_description: None,
             }
         );
     }
@@ -448,8 +481,81 @@ mod tests {
             "/status",
             "/recap",
             "/participants",
+            "/preview",
         ] {
             assert!(text.contains(cmd), "help_text() should mention {cmd}");
         }
+    }
+
+    #[test]
+    fn parse_preview_command() {
+        assert_eq!(parse_meeting_command("/preview"), MeetingCommand::Preview);
+    }
+
+    #[test]
+    fn parse_action_with_date_due() {
+        assert_eq!(
+            parse_meeting_command("/action Write tests | bob | 2 due:2026-04-15"),
+            MeetingCommand::Action {
+                description: "Write tests".to_string(),
+                owner: "bob".to_string(),
+                priority: 2,
+                due_description: Some("2026-04-15".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_action_with_text_due() {
+        assert_eq!(
+            parse_meeting_command("/action Deploy staging | alice due:next sprint"),
+            MeetingCommand::Action {
+                description: "Deploy staging".to_string(),
+                owner: "alice".to_string(),
+                priority: 1,
+                due_description: Some("next sprint".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_action_without_due() {
+        assert_eq!(
+            parse_meeting_command("/action Fix bug | carol | 3"),
+            MeetingCommand::Action {
+                description: "Fix bug".to_string(),
+                owner: "carol".to_string(),
+                priority: 3,
+                due_description: None,
+            }
+        );
+    }
+
+    #[test]
+    fn extract_due_suffix_returns_none_when_absent() {
+        let (cleaned, due) = extract_due_suffix("Write tests | bob | 2");
+        assert_eq!(cleaned, "Write tests | bob | 2");
+        assert_eq!(due, None);
+    }
+
+    #[test]
+    fn extract_due_suffix_parses_date() {
+        let (cleaned, due) = extract_due_suffix("Write tests | bob | 2 due:2026-04-15");
+        assert_eq!(cleaned, "Write tests | bob | 2");
+        assert_eq!(due, Some("2026-04-15".to_string()));
+    }
+
+    #[test]
+    fn extract_due_suffix_parses_freeform_text() {
+        let (cleaned, due) = extract_due_suffix("Deploy | alice due:end of week");
+        assert_eq!(cleaned, "Deploy | alice");
+        assert_eq!(due, Some("end of week".to_string()));
+    }
+
+    #[test]
+    fn extract_due_suffix_empty_value_is_none() {
+        let (cleaned, due) = extract_due_suffix("Deploy | alice due:");
+        assert_eq!(cleaned, "Deploy | alice");
+        assert_eq!(due, None);
     }
 }

@@ -5,8 +5,8 @@ use std::io::{BufRead, Write};
 use crate::base_types::{BaseTypeSession, BaseTypeTurnInput};
 use crate::error::{SimardError, SimardResult};
 use crate::meeting_facilitator::{
-    ActionItem, MeetingDecision, MeetingSession, add_note, add_question, close_meeting, edit_item,
-    record_action_item, record_decision, remove_item, start_meeting,
+    ActionItem, MeetingDecision, MeetingHandoff, MeetingSession, add_note, add_question,
+    close_meeting, edit_item, record_action_item, record_decision, remove_item, start_meeting,
 };
 use crate::memory_bridge::CognitiveMemoryBridge;
 
@@ -154,9 +154,14 @@ fn print_recap<W: Write>(header: &str, session: &MeetingSession, output: &mut W)
         writeln!(output, "  (none)").ok();
     } else {
         for (i, a) in session.action_items.iter().enumerate() {
+            let due_suffix = a
+                .due_description
+                .as_deref()
+                .map(|d| format!(" [due: {d}]"))
+                .unwrap_or_default();
             writeln!(
                 output,
-                "  {}. [P{}] {} (owner: {})",
+                "  {}. [P{}] {} (owner: {}){due_suffix}",
                 i + 1,
                 a.priority,
                 a.description,
@@ -175,6 +180,81 @@ fn print_recap<W: Write>(header: &str, session: &MeetingSession, output: &mut W)
             writeln!(output, "  - {n}").ok();
         }
     }
+}
+
+fn print_handoff_preview<W: Write>(session: &MeetingSession, output: &mut W) {
+    let handoff = MeetingHandoff::from_session(session);
+    let elapsed = format_elapsed(&session.started_at);
+
+    writeln!(output, "── Handoff Preview ──").ok();
+    writeln!(output, "Topic: {}", handoff.topic).ok();
+    writeln!(output, "Duration: {elapsed}").ok();
+    writeln!(
+        output,
+        "Participants: {}",
+        if handoff.participants.is_empty() {
+            "(none)".to_string()
+        } else {
+            handoff.participants.join(", ")
+        }
+    )
+    .ok();
+    writeln!(output).ok();
+
+    writeln!(output, "Decisions ({}):", handoff.decisions.len()).ok();
+    if handoff.decisions.is_empty() {
+        writeln!(output, "  (none)").ok();
+    } else {
+        for (i, d) in handoff.decisions.iter().enumerate() {
+            writeln!(output, "  {}. {} — {}", i + 1, d.description, d.rationale).ok();
+        }
+    }
+    writeln!(output).ok();
+
+    writeln!(output, "Action Items ({}):", handoff.action_items.len()).ok();
+    if handoff.action_items.is_empty() {
+        writeln!(output, "  (none)").ok();
+    } else {
+        for (i, a) in handoff.action_items.iter().enumerate() {
+            let due_suffix = a
+                .due_description
+                .as_deref()
+                .map(|d| format!(" [due: {d}]"))
+                .unwrap_or_default();
+            writeln!(
+                output,
+                "  {}. [P{}] {} (owner: {}){due_suffix}",
+                i + 1,
+                a.priority,
+                a.description,
+                a.owner
+            )
+            .ok();
+        }
+    }
+    writeln!(output).ok();
+
+    writeln!(
+        output,
+        "Open Questions ({}):",
+        handoff.open_questions.len()
+    )
+    .ok();
+    if handoff.open_questions.is_empty() {
+        writeln!(output, "  (none)").ok();
+    } else {
+        for (i, q) in handoff.open_questions.iter().enumerate() {
+            let tag = if q.explicit { " [explicit]" } else { "" };
+            writeln!(output, "  {}. {}{tag}", i + 1, q.text).ok();
+        }
+    }
+
+    writeln!(output).ok();
+    writeln!(
+        output,
+        "(This is a preview — the meeting is still open. Use /close to finalize.)"
+    )
+    .ok();
 }
 
 fn dispatch_command<W: Write>(
@@ -204,15 +284,26 @@ fn dispatch_command<W: Write>(
             description,
             owner,
             priority,
+            due_description,
         } => {
             let item = ActionItem {
                 description: description.clone(),
                 owner: owner.clone(),
                 priority,
-                due_description: None,
+                due_description: due_description.clone(),
             };
             match record_action_item(session, item) {
-                Ok(()) => writeln!(output, "Recorded action: {description} (owner={owner})").ok(),
+                Ok(()) => {
+                    let due_suffix = due_description
+                        .as_deref()
+                        .map(|d| format!(", due: {d}"))
+                        .unwrap_or_default();
+                    writeln!(
+                        output,
+                        "Recorded action: {description} (owner={owner}{due_suffix})"
+                    )
+                    .ok()
+                }
                 Err(e) => writeln!(output, "Error: {e}").ok(),
             };
         }
@@ -258,6 +349,9 @@ fn dispatch_command<W: Write>(
             }
         }
         MeetingCommand::Close => unreachable!(),
+        MeetingCommand::Preview => {
+            print_handoff_preview(session, output);
+        }
         MeetingCommand::Help => {
             write!(output, "{}", help_text()).ok();
         }
@@ -278,7 +372,19 @@ fn dispatch_command<W: Write>(
                 if !session.action_items.is_empty() {
                     writeln!(output, "Action items:").ok();
                     for (i, a) in session.action_items.iter().enumerate() {
-                        writeln!(output, "  {}. {} (owner={})", i + 1, a.description, a.owner).ok();
+                        let due_suffix = a
+                            .due_description
+                            .as_deref()
+                            .map(|d| format!(" [due: {d}]"))
+                            .unwrap_or_default();
+                        writeln!(
+                            output,
+                            "  {}. {} (owner={}){due_suffix}",
+                            i + 1,
+                            a.description,
+                            a.owner
+                        )
+                        .ok();
                     }
                 }
                 if !session.notes.is_empty() {
@@ -640,5 +746,99 @@ mod tests {
         let output_str = String::from_utf8(output).unwrap();
         assert!(output_str.contains("Questions:"));
         assert!(output_str.contains("1. Who owns rollback?"));
+    }
+
+    #[test]
+    fn repl_preview_shows_handoff_without_closing() {
+        let bridge = mock_bridge();
+        let input = b"/decision Ship it | Ready\n/action Write tests | bob | 2\n/question ETA?\n/preview\n/close\n";
+        let mut reader = &input[..];
+        let mut output = Vec::new();
+
+        let session =
+            run_meeting_repl("Preview", &bridge, None, "", &mut reader, &mut output).unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        // Preview header and content
+        assert!(
+            output_str.contains("Handoff Preview"),
+            "should show preview header: {output_str}"
+        );
+        assert!(output_str.contains("Decisions (1):"));
+        assert!(output_str.contains("Action Items (1):"));
+        assert!(output_str.contains("Open Questions"));
+        assert!(output_str.contains("still open"));
+        // Session should still close normally after /preview
+        assert_eq!(session.status, MeetingSessionStatus::Closed);
+        assert_eq!(session.decisions.len(), 1);
+    }
+
+    #[test]
+    fn repl_preview_empty_session() {
+        let bridge = mock_bridge();
+        let input = b"/preview\n/close\n";
+        let mut reader = &input[..];
+        let mut output = Vec::new();
+
+        run_meeting_repl("Empty preview", &bridge, None, "", &mut reader, &mut output).unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(output_str.contains("Handoff Preview"));
+        assert!(output_str.contains("Decisions (0):"));
+        assert!(output_str.contains("(none)"));
+    }
+
+    #[test]
+    fn repl_action_with_due_date() {
+        let bridge = mock_bridge();
+        let input = b"/action Write tests | bob | 2 due:2026-04-15\n/close\n";
+        let mut reader = &input[..];
+        let mut output = Vec::new();
+
+        let session = run_meeting_repl("Due date", &bridge, None, "", &mut reader, &mut output)
+            .unwrap();
+
+        assert_eq!(session.action_items.len(), 1);
+        assert_eq!(
+            session.action_items[0].due_description,
+            Some("2026-04-15".to_string())
+        );
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(
+            output_str.contains("due: 2026-04-15"),
+            "confirmation should show due date: {output_str}"
+        );
+    }
+
+    #[test]
+    fn repl_action_due_date_shows_in_list() {
+        let bridge = mock_bridge();
+        let input = b"/action Write tests | bob due:next Friday\n/list\n/close\n";
+        let mut reader = &input[..];
+        let mut output = Vec::new();
+
+        run_meeting_repl("Due list", &bridge, None, "", &mut reader, &mut output).unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(
+            output_str.contains("[due: next Friday]"),
+            "list should show due date: {output_str}"
+        );
+    }
+
+    #[test]
+    fn repl_action_due_date_shows_in_preview() {
+        let bridge = mock_bridge();
+        let input = b"/action Deploy | alice | 1 due:2026-05-01\n/preview\n/close\n";
+        let mut reader = &input[..];
+        let mut output = Vec::new();
+
+        run_meeting_repl("Due preview", &bridge, None, "", &mut reader, &mut output).unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(
+            output_str.contains("[due: 2026-05-01]"),
+            "preview should show due date: {output_str}"
+        );
     }
 }
