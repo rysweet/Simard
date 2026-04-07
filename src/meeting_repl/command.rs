@@ -16,6 +16,8 @@ pub enum MeetingCommand {
     },
     /// `/note <text>` — explicit note (not sent to agent)
     Note(String),
+    /// `/question <text>` — explicit open question
+    Question(String),
     /// Natural language — sent to the agent for a conversational response
     Conversation(String),
     /// `/status` — show meeting status summary
@@ -93,6 +95,14 @@ pub fn parse_meeting_command(line: &str) -> MeetingCommand {
         let text = rest.trim().to_string();
         if !text.is_empty() {
             return MeetingCommand::Note(text);
+        }
+        return MeetingCommand::Unknown(trimmed.to_string());
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("/question ") {
+        let text = rest.trim().to_string();
+        if !text.is_empty() {
+            return MeetingCommand::Question(text);
         }
         return MeetingCommand::Unknown(trimmed.to_string());
     }
@@ -185,6 +195,7 @@ Commands (optional):
   /decision <description> | <rationale>        Record a formal decision
   /action <description> | <owner> [| <priority>]  Record an action item
   /note <text>                                  Add an explicit note
+  /question <text>                              Add an explicit open question
   /list                                         Show numbered list of all items
   /edit <type> <number> <new text>              Edit an item (type: decision, action, note)
   /delete <type> <number>                       Delete an item (type: decision, action, note)
@@ -233,6 +244,22 @@ mod tests {
             parse_meeting_command("/note Check CI before merge"),
             MeetingCommand::Note("Check CI before merge".to_string())
         );
+    }
+
+    #[test]
+    fn parse_question_command() {
+        assert_eq!(
+            parse_meeting_command("/question What is the release timeline?"),
+            MeetingCommand::Question("What is the release timeline?".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_question_empty_is_unknown() {
+        assert!(matches!(
+            parse_meeting_command("/question "),
+            MeetingCommand::Unknown(_)
+        ));
     }
 
     #[test]
@@ -411,6 +438,7 @@ mod tests {
             "/decision",
             "/action",
             "/note",
+            "/question",
             "/list",
             "/edit",
             "/delete",

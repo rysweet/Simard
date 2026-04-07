@@ -64,6 +64,7 @@ fn sample_handoff() -> MeetingHandoff {
         status: MeetingSessionStatus::Closed,
         started_at: chrono::Utc::now().to_rfc3339(),
         participants: Vec::new(),
+        explicit_questions: Vec::new(),
     };
     MeetingHandoff::from_session(&session)
 }
@@ -256,6 +257,7 @@ fn act_on_decisions_with_empty_handoff_creates_no_issues() {
         status: MeetingSessionStatus::Closed,
         started_at: chrono::Utc::now().to_rfc3339(),
         participants: Vec::new(),
+        explicit_questions: Vec::new(),
     };
     let handoff = MeetingHandoff::from_session(&session);
     write_meeting_handoff(&dir, &handoff).unwrap();
@@ -285,7 +287,7 @@ fn open_questions_are_not_included_in_issue_count() {
 
     // Open questions are reported separately, not as issues
     assert_eq!(handoff.open_questions.len(), 1);
-    assert!(handoff.open_questions[0].contains("metrics?"));
+    assert!(handoff.open_questions[0].text.contains("metrics?"));
 }
 
 // ===========================================================================

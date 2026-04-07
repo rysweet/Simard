@@ -30,7 +30,8 @@ proptest! {
             | MeetingCommand::ListParticipants
             | MeetingCommand::List
             | MeetingCommand::Edit { .. }
-            | MeetingCommand::Delete { .. } => {}
+            | MeetingCommand::Delete { .. }
+            | MeetingCommand::Question(_) => {}
         }
     }
 

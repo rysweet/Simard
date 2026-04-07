@@ -86,7 +86,8 @@ pub(super) fn dispatch_act_on_decisions() -> Result<(), Box<dyn std::error::Erro
     if !handoff.open_questions.is_empty() {
         println!("\nOpen questions (not filed as issues):");
         for q in &handoff.open_questions {
-            println!("  - {q}");
+            let tag = if q.explicit { "explicit" } else { "inferred" };
+            println!("  - [{tag}] {}", q.text);
         }
     }
 

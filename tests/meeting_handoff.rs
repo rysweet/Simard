@@ -67,6 +67,7 @@ fn sample_session_with_questions() -> MeetingSession {
         status: MeetingSessionStatus::Closed,
         started_at: chrono::Utc::now().to_rfc3339(),
         participants: Vec::new(),
+        explicit_questions: Vec::new(),
     }
 }
 
@@ -79,6 +80,7 @@ fn sample_empty_session() -> MeetingSession {
         status: MeetingSessionStatus::Closed,
         started_at: chrono::Utc::now().to_rfc3339(),
         participants: Vec::new(),
+        explicit_questions: Vec::new(),
     }
 }
 
@@ -109,8 +111,8 @@ fn handoff_extracts_questions_from_notes() {
 
     // Notes containing '?' are extracted as open questions
     assert_eq!(handoff.open_questions.len(), 2);
-    assert!(handoff.open_questions[0].contains("error handling?"));
-    assert!(handoff.open_questions[1].contains("metrics?"));
+    assert!(handoff.open_questions[0].text.contains("error handling?"));
+    assert!(handoff.open_questions[1].text.contains("metrics?"));
 }
 
 #[test]
@@ -447,6 +449,7 @@ fn handoff_with_only_action_items_no_decisions() {
         status: MeetingSessionStatus::Closed,
         started_at: chrono::Utc::now().to_rfc3339(),
         participants: Vec::new(),
+        explicit_questions: Vec::new(),
     };
     let handoff = MeetingHandoff::from_session(&session);
     assert!(handoff.decisions.is_empty());
@@ -472,6 +475,7 @@ fn handoff_with_only_decisions_no_actions() {
         status: MeetingSessionStatus::Closed,
         started_at: chrono::Utc::now().to_rfc3339(),
         participants: Vec::new(),
+        explicit_questions: Vec::new(),
     };
     let handoff = MeetingHandoff::from_session(&session);
     assert_eq!(handoff.decisions.len(), 1);

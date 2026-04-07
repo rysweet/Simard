@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{SimardError, SimardResult};
 
-use super::types::{ActionItem, MeetingDecision, MeetingSession};
+use super::types::{ActionItem, MeetingDecision, MeetingSession, OpenQuestion};
 
 /// Well-known filename for meeting handoff artifacts.
 pub const MEETING_HANDOFF_FILENAME: &str = "meeting_handoff.json";
@@ -35,7 +35,7 @@ pub struct MeetingHandoff {
     pub closed_at: String,
     pub decisions: Vec<MeetingDecision>,
     pub action_items: Vec<ActionItem>,
-    pub open_questions: Vec<String>,
+    pub open_questions: Vec<OpenQuestion>,
     #[serde(default)]
     pub processed: bool,
     #[serde(default)]
@@ -100,18 +100,33 @@ fn is_open_question(note: &str) -> bool {
 impl MeetingHandoff {
     /// Create a handoff from a closed meeting session.
     ///
-    /// Open questions are extracted from notes using a simple heuristic:
-    /// * Notes containing `?` are included unless they look rhetorical (very
-    ///   short or matching common filler patterns).
-    /// * Notes starting with explicit markers (`OPEN:`, `TODO:`, `QUESTION:`,
-    ///   `TBD:`, `UNRESOLVED:`) are always included regardless of `?`.
+    /// Open questions are extracted from two sources:
+    /// 1. **Explicit** — questions added via `/question` during the meeting.
+    /// 2. **Inferred** — notes containing `?` (unless rhetorical) or notes
+    ///    starting with explicit markers (`OPEN:`, `TODO:`, `QUESTION:`,
+    ///    `TBD:`, `UNRESOLVED:`).
     pub fn from_session(session: &MeetingSession) -> Self {
-        let open_questions: Vec<String> = session
+        // Explicit questions from /question command.
+        let mut open_questions: Vec<OpenQuestion> = session
+            .explicit_questions
+            .iter()
+            .map(|q| OpenQuestion {
+                text: q.clone(),
+                explicit: true,
+            })
+            .collect();
+
+        // Inferred questions from notes heuristics.
+        let inferred: Vec<OpenQuestion> = session
             .notes
             .iter()
             .filter(|n| is_open_question(n))
-            .cloned()
+            .map(|n| OpenQuestion {
+                text: n.clone(),
+                explicit: false,
+            })
             .collect();
+        open_questions.extend(inferred);
 
         let duration_secs = chrono::DateTime::parse_from_rfc3339(&session.started_at)
             .ok()
@@ -290,6 +305,7 @@ mod tests {
             status: MeetingSessionStatus::Closed,
             started_at: chrono::Utc::now().to_rfc3339(),
             participants: participants.into_iter().map(String::from).collect(),
+            explicit_questions: Vec::new(),
         }
     }
 
@@ -378,7 +394,10 @@ mod tests {
         assert_eq!(handoff.action_items.len(), 1);
         assert_eq!(
             handoff.open_questions,
-            vec!["What is the timeline for phase 9?"]
+            vec![OpenQuestion {
+                text: "What is the timeline for phase 9?".to_string(),
+                explicit: false,
+            }]
         );
         assert!(!handoff.processed);
         assert!(handoff.duration_secs.is_some());
@@ -472,8 +491,10 @@ mod tests {
         );
         let handoff = MeetingHandoff::from_session(&session);
         assert_eq!(handoff.open_questions.len(), 2);
-        assert!(handoff.open_questions[0].starts_with("OPEN:"));
-        assert!(handoff.open_questions[1].starts_with("TODO:"));
+        assert!(handoff.open_questions[0].text.starts_with("OPEN:"));
+        assert!(!handoff.open_questions[0].explicit);
+        assert!(handoff.open_questions[1].text.starts_with("TODO:"));
+        assert!(!handoff.open_questions[1].explicit);
     }
 
     // -----------------------------------------------------------------------
@@ -584,5 +605,49 @@ mod tests {
         // returns a non-empty path.
         let dir = default_handoff_dir();
         assert!(!dir.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn from_session_explicit_questions_tagged() {
+        let mut session = make_session(
+            "Tagged",
+            vec!["What is the deadline for the release?"],
+            vec![],
+            vec![],
+            vec![],
+        );
+        session
+            .explicit_questions
+            .push("Who owns the rollback plan?".to_string());
+
+        let handoff = MeetingHandoff::from_session(&session);
+        assert_eq!(handoff.open_questions.len(), 2);
+
+        // Explicit question comes first.
+        assert_eq!(
+            handoff.open_questions[0].text,
+            "Who owns the rollback plan?"
+        );
+        assert!(handoff.open_questions[0].explicit);
+
+        // Inferred question from notes comes second.
+        assert_eq!(
+            handoff.open_questions[1].text,
+            "What is the deadline for the release?"
+        );
+        assert!(!handoff.open_questions[1].explicit);
+    }
+
+    #[test]
+    fn from_session_only_explicit_questions() {
+        let mut session = make_session("Explicit only", vec!["plain note"], vec![], vec![], vec![]);
+        session
+            .explicit_questions
+            .push("When do we ship?".to_string());
+
+        let handoff = MeetingHandoff::from_session(&session);
+        assert_eq!(handoff.open_questions.len(), 1);
+        assert_eq!(handoff.open_questions[0].text, "When do we ship?");
+        assert!(handoff.open_questions[0].explicit);
     }
 }

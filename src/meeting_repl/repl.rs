@@ -5,7 +5,7 @@ use std::io::{BufRead, Write};
 use crate::base_types::{BaseTypeSession, BaseTypeTurnInput};
 use crate::error::{SimardError, SimardResult};
 use crate::meeting_facilitator::{
-    ActionItem, MeetingDecision, MeetingSession, add_note, close_meeting, edit_item,
+    ActionItem, MeetingDecision, MeetingSession, add_note, add_question, close_meeting, edit_item,
     record_action_item, record_decision, remove_item, start_meeting,
 };
 use crate::memory_bridge::CognitiveMemoryBridge;
@@ -224,6 +224,14 @@ fn dispatch_command<W: Write>(
                 writeln!(output, "Error: {e}").ok();
             }
         },
+        MeetingCommand::Question(text) => match add_question(session, &text) {
+            Ok(()) => {
+                writeln!(output, "Question added: {text}").ok();
+            }
+            Err(e) => {
+                writeln!(output, "Error: {e}").ok();
+            }
+        },
         MeetingCommand::Conversation(text) => {
             if let Some(agent_session) = agent {
                 let turn_input = BaseTypeTurnInput {
@@ -256,7 +264,8 @@ fn dispatch_command<W: Write>(
         MeetingCommand::List => {
             let has_items = !session.decisions.is_empty()
                 || !session.action_items.is_empty()
-                || !session.notes.is_empty();
+                || !session.notes.is_empty()
+                || !session.explicit_questions.is_empty();
             if !has_items {
                 writeln!(output, "No items recorded yet.").ok();
             } else {
@@ -276,6 +285,12 @@ fn dispatch_command<W: Write>(
                     writeln!(output, "Notes:").ok();
                     for (i, n) in session.notes.iter().enumerate() {
                         writeln!(output, "  {}. {}", i + 1, n).ok();
+                    }
+                }
+                if !session.explicit_questions.is_empty() {
+                    writeln!(output, "Questions:").ok();
+                    for (i, q) in session.explicit_questions.iter().enumerate() {
+                        writeln!(output, "  {}. {}", i + 1, q).ok();
                     }
                 }
             }
@@ -309,6 +324,12 @@ fn dispatch_command<W: Write>(
             writeln!(output, "  Decisions:   {}", session.decisions.len()).ok();
             writeln!(output, "  Actions:     {}", session.action_items.len()).ok();
             writeln!(output, "  Notes:       {}", session.notes.len()).ok();
+            writeln!(
+                output,
+                "  Questions:   {}",
+                session.explicit_questions.len()
+            )
+            .ok();
             writeln!(output, "  Participants: {}", session.participants.len()).ok();
         }
         MeetingCommand::Recap => {
@@ -335,7 +356,7 @@ fn dispatch_command<W: Write>(
             writeln!(output, "Unknown command: {input}").ok();
             writeln!(
                 output,
-                "Available commands: /decision, /action, /note, /close, /done, /help"
+                "Available commands: /decision, /action, /note, /question, /close, /done, /help"
             )
             .ok();
             writeln!(
@@ -585,5 +606,39 @@ mod tests {
         assert!(output_str.contains("/list"));
         assert!(output_str.contains("/edit"));
         assert!(output_str.contains("/delete"));
+        assert!(output_str.contains("/question"));
+    }
+
+    #[test]
+    fn repl_question_command_adds_explicit_question() {
+        let bridge = mock_bridge();
+        let input = b"/question What is the release timeline?\n/close\n";
+        let mut reader = &input[..];
+        let mut output = Vec::new();
+
+        let session =
+            run_meeting_repl("Q test", &bridge, None, "", &mut reader, &mut output).unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(output_str.contains("Question added"));
+        assert_eq!(session.explicit_questions.len(), 1);
+        assert_eq!(
+            session.explicit_questions[0],
+            "What is the release timeline?"
+        );
+    }
+
+    #[test]
+    fn repl_question_appears_in_list() {
+        let bridge = mock_bridge();
+        let input = b"/question Who owns rollback?\n/list\n/close\n";
+        let mut reader = &input[..];
+        let mut output = Vec::new();
+
+        run_meeting_repl("Q list", &bridge, None, "", &mut reader, &mut output).unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(output_str.contains("Questions:"));
+        assert!(output_str.contains("1. Who owns rollback?"));
     }
 }
