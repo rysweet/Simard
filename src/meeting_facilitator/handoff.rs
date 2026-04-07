@@ -58,12 +58,7 @@ impl MeetingHandoff {
 
         let duration_secs = chrono::DateTime::parse_from_rfc3339(&session.started_at)
             .ok()
-            .map(|start| {
-                Utc::now()
-                    .signed_duration_since(start)
-                    .num_seconds()
-                    .max(0) as u64
-            });
+            .map(|start| Utc::now().signed_duration_since(start).num_seconds().max(0) as u64);
 
         let transcript = session.notes.clone();
 
