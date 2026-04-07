@@ -147,3 +147,142 @@ impl MemoryStore for FileBackedMemoryStore {
             .collect())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::SessionPhase;
+    use chrono::Duration;
+    use uuid::Uuid;
+
+    fn test_session_id() -> SessionId {
+        SessionId::from_uuid(Uuid::nil())
+    }
+
+    fn other_session_id() -> SessionId {
+        SessionId::from_uuid(Uuid::from_u128(1))
+    }
+
+    fn make_record(key: &str, scope: MemoryScope, session_id: &SessionId) -> MemoryRecord {
+        MemoryRecord {
+            key: key.to_string(),
+            scope,
+            value: format!("val-{key}"),
+            session_id: session_id.clone(),
+            recorded_in: SessionPhase::Execution,
+            created_at: None,
+        }
+    }
+
+    #[test]
+    fn put_and_reload_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.json");
+        let sid = test_session_id();
+
+        {
+            let store = FileBackedMemoryStore::try_new(&path).unwrap();
+            store.put(make_record("k1", MemoryScope::Project, &sid)).unwrap();
+            store.put(make_record("k2", MemoryScope::Decision, &sid)).unwrap();
+            assert_eq!(store.list_all().unwrap().len(), 2);
+        }
+
+        // Reload from the persisted file
+        let store2 = FileBackedMemoryStore::try_new(&path).unwrap();
+        assert_eq!(store2.list_all().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn put_upserts_by_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.json");
+        let sid = test_session_id();
+        let store = FileBackedMemoryStore::try_new(&path).unwrap();
+
+        store.put(make_record("dup", MemoryScope::Project, &sid)).unwrap();
+        let mut updated = make_record("dup", MemoryScope::Project, &sid);
+        updated.value = "new-value".to_string();
+        store.put(updated).unwrap();
+
+        let all = store.list_all().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].value, "new-value");
+    }
+
+    #[test]
+    fn put_stamps_created_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.json");
+        let sid = test_session_id();
+        let store = FileBackedMemoryStore::try_new(&path).unwrap();
+
+        let record = make_record("k", MemoryScope::Project, &sid);
+        assert!(record.created_at.is_none());
+        store.put(record).unwrap();
+        assert!(store.list_all().unwrap()[0].created_at.is_some());
+    }
+
+    #[test]
+    fn list_filters_by_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.json");
+        let sid = test_session_id();
+        let store = FileBackedMemoryStore::try_new(&path).unwrap();
+
+        store.put(make_record("a", MemoryScope::Project, &sid)).unwrap();
+        store.put(make_record("b", MemoryScope::Decision, &sid)).unwrap();
+
+        assert_eq!(store.list(MemoryScope::Project).unwrap().len(), 1);
+        assert_eq!(store.list(MemoryScope::Decision).unwrap().len(), 1);
+        assert_eq!(store.list(MemoryScope::Benchmark).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn list_for_session_filters() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.json");
+        let s1 = test_session_id();
+        let s2 = other_session_id();
+        let store = FileBackedMemoryStore::try_new(&path).unwrap();
+
+        store.put(make_record("a", MemoryScope::Project, &s1)).unwrap();
+        store.put(make_record("b", MemoryScope::Project, &s2)).unwrap();
+
+        assert_eq!(store.list_for_session(&s1).unwrap().len(), 1);
+        assert_eq!(store.count_for_session(&s2).unwrap(), 1);
+    }
+
+    #[test]
+    fn list_by_time_range_filters() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.json");
+        let sid = test_session_id();
+        let store = FileBackedMemoryStore::try_new(&path).unwrap();
+
+        store.put(make_record("a", MemoryScope::Project, &sid)).unwrap();
+
+        let now = Utc::now();
+        let start = now - Duration::seconds(5);
+        let end = now + Duration::seconds(5);
+        assert_eq!(store.list_by_time_range(start, end).unwrap().len(), 1);
+
+        let old_end = now - Duration::seconds(50);
+        assert_eq!(store.list_by_time_range(old_end - Duration::seconds(50), old_end).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn empty_file_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("not-yet.json");
+        let store = FileBackedMemoryStore::try_new(&path).unwrap();
+        assert!(store.list_all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn path_accessor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mem.json");
+        let store = FileBackedMemoryStore::try_new(&path).unwrap();
+        assert_eq!(store.path(), path);
+    }
+}
