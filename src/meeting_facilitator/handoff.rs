@@ -31,6 +31,7 @@ pub fn default_handoff_dir() -> PathBuf {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MeetingHandoff {
     pub topic: String,
+    pub started_at: String,
     pub closed_at: String,
     pub decisions: Vec<MeetingDecision>,
     pub action_items: Vec<ActionItem>,
@@ -79,6 +80,7 @@ impl MeetingHandoff {
 
         Self {
             topic: session.topic.clone(),
+            started_at: session.started_at.clone(),
             closed_at: Utc::now().to_rfc3339(),
             decisions: session.decisions.clone(),
             action_items: session.action_items.clone(),

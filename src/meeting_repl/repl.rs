@@ -78,8 +78,8 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
     }
 
     let closed = close_meeting(session, bridge)?;
-    let summary = closed.durable_summary();
-    writeln!(output, "Meeting record: {summary}").ok();
+    print_recap("Meeting Closed", &closed, output);
+    writeln!(output).ok();
 
     write_meeting_handoff_artifact(&closed, output);
     persist_meeting_to_memory(&closed, bridge, output);
@@ -108,6 +108,73 @@ fn print_banner<W: Write>(topic: &str, has_agent: bool, output: &mut W) {
     }
     .ok();
     writeln!(output).ok();
+}
+
+fn format_elapsed(started_at: &str) -> String {
+    if started_at.is_empty() {
+        return "unknown".to_string();
+    }
+    match chrono::DateTime::parse_from_rfc3339(started_at) {
+        Ok(start) => {
+            let total_secs = chrono::Utc::now()
+                .signed_duration_since(start)
+                .num_seconds()
+                .max(0);
+            let mins = total_secs / 60;
+            let secs = total_secs % 60;
+            if mins > 0 {
+                format!("{mins}m {secs}s")
+            } else {
+                format!("{secs}s")
+            }
+        }
+        Err(_) => "unknown".to_string(),
+    }
+}
+
+fn print_recap<W: Write>(header: &str, session: &MeetingSession, output: &mut W) {
+    let elapsed = format_elapsed(&session.started_at);
+    writeln!(output, "── {header} ──").ok();
+    writeln!(output, "Topic: {}", session.topic).ok();
+    writeln!(output, "Duration: {elapsed}").ok();
+    writeln!(output).ok();
+
+    writeln!(output, "Decisions ({}):", session.decisions.len()).ok();
+    if session.decisions.is_empty() {
+        writeln!(output, "  (none)").ok();
+    } else {
+        for (i, d) in session.decisions.iter().enumerate() {
+            writeln!(output, "  {}. {} — {}", i + 1, d.description, d.rationale).ok();
+        }
+    }
+    writeln!(output).ok();
+
+    writeln!(output, "Action Items ({}):", session.action_items.len()).ok();
+    if session.action_items.is_empty() {
+        writeln!(output, "  (none)").ok();
+    } else {
+        for (i, a) in session.action_items.iter().enumerate() {
+            writeln!(
+                output,
+                "  {}. [P{}] {} (owner: {})",
+                i + 1,
+                a.priority,
+                a.description,
+                a.owner
+            )
+            .ok();
+        }
+    }
+    writeln!(output).ok();
+
+    writeln!(output, "Notes ({}):", session.notes.len()).ok();
+    if session.notes.is_empty() {
+        writeln!(output, "  (none)").ok();
+    } else {
+        for n in &session.notes {
+            writeln!(output, "  - {n}").ok();
+        }
+    }
 }
 
 fn dispatch_command<W: Write>(
@@ -236,24 +303,16 @@ fn dispatch_command<W: Write>(
             }
         }
         MeetingCommand::Status => {
-            let elapsed = if !session.started_at.is_empty() {
-                if let Ok(start) = chrono::DateTime::parse_from_rfc3339(&session.started_at) {
-                    let secs = chrono::Utc::now()
-                        .signed_duration_since(start)
-                        .num_seconds();
-                    format!("{secs}s")
-                } else {
-                    "unknown".to_string()
-                }
-            } else {
-                "unknown".to_string()
-            };
+            let elapsed = format_elapsed(&session.started_at);
             writeln!(output, "Meeting: {}", topic).ok();
             writeln!(output, "  Elapsed:     {elapsed}").ok();
             writeln!(output, "  Decisions:   {}", session.decisions.len()).ok();
             writeln!(output, "  Actions:     {}", session.action_items.len()).ok();
             writeln!(output, "  Notes:       {}", session.notes.len()).ok();
             writeln!(output, "  Participants: {}", session.participants.len()).ok();
+        }
+        MeetingCommand::Recap => {
+            print_recap("Meeting Recap", session, output);
         }
         MeetingCommand::AddParticipant(name) => {
             if !session.participants.contains(&name) {
