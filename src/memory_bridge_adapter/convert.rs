@@ -44,9 +44,9 @@ pub(super) fn fact_to_record(fact: &CognitiveFact) -> MemoryRecord {
         .iter()
         .find_map(|t| parse_scope_tag(t))
         .unwrap_or_else(|| {
-            eprintln!(
-                "[simard] cognitive-bridge: fact {:?} missing scope tag, defaulting to Untagged",
-                fact.concept
+            tracing::warn!(
+                concept = %fact.concept,
+                "fact missing scope tag, defaulting to Untagged"
             );
             MemoryScope::Untagged
         });
@@ -55,9 +55,9 @@ pub(super) fn fact_to_record(fact: &CognitiveFact) -> MemoryRecord {
         .iter()
         .find_map(|t| parse_session_tag(t))
         .unwrap_or_else(|| {
-            eprintln!(
-                "[simard] cognitive-bridge: fact {:?} missing session tag, using nil UUID",
-                fact.concept
+            tracing::warn!(
+                concept = %fact.concept,
+                "fact missing session tag, using nil UUID"
             );
             SessionId::from_uuid(uuid::Uuid::nil())
         });

@@ -16,6 +16,7 @@ use std::time::Instant;
 use crate::base_types::BaseTypeFactory;
 use crate::error::{SimardError, SimardResult};
 use crate::handoff::RuntimeHandoffSnapshot;
+use crate::memory_bridge::CognitiveMemoryBridge;
 use crate::prompt_assets::PromptAssetRef;
 use crate::session::SessionRecord;
 
@@ -30,6 +31,8 @@ pub struct RuntimeKernel {
     mailbox_address: RuntimeAddress,
     start_time: Instant,
     subordinates: Vec<crate::runtime_ipc::IpcSubprocessHandle>,
+    /// Optional cognitive memory bridge for consolidation lifecycle hooks.
+    cognitive_bridge: Option<CognitiveMemoryBridge>,
 }
 
 pub type LocalRuntime = RuntimeKernel;
@@ -93,6 +96,7 @@ impl RuntimeKernel {
             mailbox_address,
             start_time: Instant::now(),
             subordinates: Vec::new(),
+            cognitive_bridge: None,
         })
     }
 
@@ -242,6 +246,11 @@ impl RuntimeKernel {
         }
 
         result
+    }
+
+    /// Attach a cognitive memory bridge for session lifecycle consolidation.
+    pub fn set_cognitive_bridge(&mut self, bridge: CognitiveMemoryBridge) {
+        self.cognitive_bridge = Some(bridge);
     }
 
     pub fn export_handoff(&self) -> SimardResult<RuntimeHandoffSnapshot> {
