@@ -310,7 +310,8 @@ fn handoff_deserializes_without_processed_field_defaulting_to_false() {
     // Write JSON manually without the "processed" field to simulate older format
     let json = serde_json::json!({
         "topic": "Legacy meeting",
-        "closed_at": "2025-01-01T00:00:00Z",
+        "started_at": "2025-01-01T00:00:00Z",
+        "closed_at": "2025-01-01T01:00:00Z",
         "decisions": [],
         "action_items": [],
         "open_questions": []
