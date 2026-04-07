@@ -3,6 +3,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use chrono::{Duration, Utc};
 use uuid::Uuid;
 
 use crate::memory::{FileBackedMemoryStore, InMemoryMemoryStore, MemoryRecord, MemoryScope, MemoryStore};
@@ -286,3 +287,170 @@ fn list_all_superset_of_scoped_lists() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+// ============================================================================
+// 6. Time-range queries
+// ============================================================================
+
+#[test]
+fn list_by_time_range_filters_correctly() {
+    let store = InMemoryMemoryStore::try_default().unwrap();
+    let sid = SessionId::from_uuid(Uuid::nil());
+
+    let now = Utc::now();
+    let mut old_record = make_record("old", MemoryScope::Project, &sid);
+    old_record.created_at = Some(now - Duration::hours(2));
+    let mut new_record = make_record("new", MemoryScope::Project, &sid);
+    new_record.created_at = Some(now);
+
+    store.put(old_record).unwrap();
+    store.put(new_record).unwrap();
+
+    // Query for last hour — should only get the new record.
+    let results = store
+        .list_by_time_range(now - Duration::hours(1), now + Duration::hours(1))
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].key, "new");
+
+    // Query for 3 hours ago to 1 hour ago — should only get the old record.
+    let results = store
+        .list_by_time_range(now - Duration::hours(3), now - Duration::hours(1))
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].key, "old");
+}
+
+#[test]
+fn file_backed_list_by_time_range() {
+    let path = unique_path("time-range-fb");
+    let store = FileBackedMemoryStore::try_new(&path).unwrap();
+    let sid = SessionId::from_uuid(Uuid::nil());
+
+    let now = Utc::now();
+    let mut r1 = make_record("r1", MemoryScope::Decision, &sid);
+    r1.created_at = Some(now - Duration::hours(5));
+    let mut r2 = make_record("r2", MemoryScope::Decision, &sid);
+    r2.created_at = Some(now);
+
+    store.put(r1).unwrap();
+    store.put(r2).unwrap();
+
+    let results = store
+        .list_by_time_range(now - Duration::hours(1), now + Duration::hours(1))
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].key, "r2");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn list_by_time_range_excludes_records_without_timestamp() {
+    let store = InMemoryMemoryStore::try_default().unwrap();
+    let sid = SessionId::from_uuid(Uuid::nil());
+
+    // put() auto-stamps, so the "timestamped" record will have a created_at.
+    store
+        .put(make_record("timestamped", MemoryScope::Project, &sid))
+        .unwrap();
+
+    let now = Utc::now();
+    let results = store
+        .list_by_time_range(now - Duration::hours(1), now + Duration::hours(1))
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].key, "timestamped");
+}
+
+// ============================================================================
+// 7. Untagged scope
+// ============================================================================
+
+#[test]
+fn untagged_scope_serialization_roundtrip() {
+    let sid = SessionId::from_uuid(Uuid::nil());
+    let record = MemoryRecord {
+        key: "untagged-key".to_string(),
+        scope: MemoryScope::Untagged,
+        value: "test".to_string(),
+        session_id: sid,
+        recorded_in: SessionPhase::Execution,
+        created_at: None,
+    };
+    let json = serde_json::to_string(&record).unwrap();
+    assert!(json.contains("untagged"), "scope should serialize as 'untagged'");
+    let deserialized: MemoryRecord = serde_json::from_str(&json).unwrap();
+    assert_eq!(deserialized.scope, MemoryScope::Untagged);
+}
+
+#[test]
+fn untagged_scope_in_file_backed_store() {
+    let path = unique_path("untagged-fb");
+    let store = FileBackedMemoryStore::try_new(&path).unwrap();
+    let sid = SessionId::from_uuid(Uuid::nil());
+
+    store
+        .put(make_record("u1", MemoryScope::Untagged, &sid))
+        .unwrap();
+    let results = store.list(MemoryScope::Untagged).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].key, "u1");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+// ============================================================================
+// 8. created_at auto-stamping
+// ============================================================================
+
+#[test]
+fn put_stamps_created_at_when_none() {
+    let store = InMemoryMemoryStore::try_default().unwrap();
+    let sid = SessionId::from_uuid(Uuid::nil());
+    let record = make_record("stamp-test", MemoryScope::Decision, &sid);
+    assert!(record.created_at.is_none());
+
+    store.put(record).unwrap();
+    let stored = store.list(MemoryScope::Decision).unwrap();
+    assert!(
+        stored[0].created_at.is_some(),
+        "put() should auto-stamp created_at"
+    );
+}
+
+#[test]
+fn put_preserves_existing_created_at() {
+    let store = InMemoryMemoryStore::try_default().unwrap();
+    let sid = SessionId::from_uuid(Uuid::nil());
+    let fixed_time = Utc::now() - Duration::days(7);
+    let mut record = make_record("preserve-test", MemoryScope::Decision, &sid);
+    record.created_at = Some(fixed_time);
+
+    store.put(record).unwrap();
+    let stored = store.list(MemoryScope::Decision).unwrap();
+    assert_eq!(
+        stored[0].created_at.unwrap(),
+        fixed_time,
+        "put() should not overwrite existing created_at"
+    );
+}
+
+#[test]
+fn file_backed_put_auto_stamps_created_at() {
+    let path = unique_path("auto-stamp-fb");
+    let store = FileBackedMemoryStore::try_new(&path).unwrap();
+    let sid = SessionId::from_uuid(Uuid::nil());
+
+    store.put(make_record("stamp-fb", MemoryScope::Decision, &sid)).unwrap();
+    let stored = store.list(MemoryScope::Decision).unwrap();
+    assert!(
+        stored[0].created_at.is_some(),
+        "file-backed put() should auto-stamp created_at"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+// Session lifecycle hooks would go here once on_session_start/on_session_end
+// are added to the MemoryStore trait.
