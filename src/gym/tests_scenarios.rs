@@ -15,7 +15,7 @@ use crate::session::{SessionId, SessionPhase, SessionRecord};
 
 #[test]
 fn benchmark_scenarios_returns_nine_scenarios() {
-    assert_eq!(benchmark_scenarios().len(), 15);
+    assert_eq!(benchmark_scenarios().len(), 21);
 }
 
 #[test]
@@ -49,6 +49,12 @@ fn benchmark_scenarios_contains_known_ids() {
     assert!(ids.contains(&"safe-code-change-rusty-clawd"));
     assert!(ids.contains(&"composite-session-review"));
     assert!(ids.contains(&"interactive-terminal-driving"));
+    assert!(ids.contains(&"doc-generation-multi-process"));
+    assert!(ids.contains(&"bug-fix-distributed"));
+    assert!(ids.contains(&"dep-analysis-cargo-audit"));
+    assert!(ids.contains(&"dep-analysis-module-coupling"));
+    assert!(ids.contains(&"error-handling-unwrap-audit"));
+    assert!(ids.contains(&"error-handling-propagation-chain"));
 }
 
 #[test]
@@ -62,6 +68,8 @@ fn benchmark_scenarios_covers_all_classes() {
     assert!(has_class(BenchmarkClass::TestWriting));
     assert!(has_class(BenchmarkClass::BugFix));
     assert!(has_class(BenchmarkClass::Refactoring));
+    assert!(has_class(BenchmarkClass::DependencyAnalysis));
+    assert!(has_class(BenchmarkClass::ErrorHandling));
 }
 
 // --- resolve_benchmark_scenario ---
@@ -681,6 +689,8 @@ fn benchmark_scenarios_each_class_has_at_least_two() {
     assert!(count(BenchmarkClass::TestWriting) >= 2);
     assert!(count(BenchmarkClass::BugFix) >= 2);
     assert!(count(BenchmarkClass::Refactoring) >= 2);
+    assert!(count(BenchmarkClass::DependencyAnalysis) >= 2);
+    assert!(count(BenchmarkClass::ErrorHandling) >= 2);
 }
 
 #[test]
@@ -704,5 +714,115 @@ fn benchmark_scenarios_copilot_sdk_coverage() {
     assert!(
         copilot >= 2,
         "need at least 2 copilot-sdk scenarios, got {copilot}"
+    );
+}
+
+// -- DependencyAnalysis checks --
+
+#[test]
+fn class_checks_dependency_analysis_passes_with_keywords() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::DependencyAnalysis,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome(
+        "analyzed cargo.toml dependencies and crate versions",
+        "import coupling between modules assessed",
+        "suggest decoupling the most coupled module",
+    );
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 3);
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "dep-analysis-performed" && c.passed)
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "dep-coupling-assessed" && c.passed)
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "dep-recommendations-present" && c.passed)
+    );
+}
+
+#[test]
+fn class_checks_dependency_analysis_fails_without_keywords() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::DependencyAnalysis,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome("nothing", "bland text", "empty");
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 3);
+    for check in &checks {
+        assert!(!check.passed, "check '{}' should have failed", check.id);
+    }
+}
+
+// -- ErrorHandling checks --
+
+#[test]
+fn class_checks_error_handling_passes_with_keywords() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::ErrorHandling,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome(
+        "found unwrap calls that could panic in production",
+        "classified as safe or risky based on context",
+        "error propagation chain traced through diagnostic output",
+    );
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 3);
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "error-analysis-performed" && c.passed)
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "error-classification-present" && c.passed)
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "error-propagation-traced" && c.passed)
+    );
+}
+
+#[test]
+fn class_checks_error_handling_fails_without_keywords() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::ErrorHandling,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome("nothing", "bland text", "empty");
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 3);
+    for check in &checks {
+        assert!(!check.passed, "check '{}' should have failed", check.id);
+    }
+}
+
+// -- Distributed topology coverage --
+
+#[test]
+fn benchmark_scenarios_distributed_topology_coverage() {
+    let distributed = benchmark_scenarios()
+        .iter()
+        .filter(|s| s.topology == RuntimeTopology::Distributed)
+        .count();
+    assert!(
+        distributed >= 1,
+        "need at least 1 Distributed scenario, got {distributed}"
     );
 }
