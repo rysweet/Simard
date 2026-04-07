@@ -18,6 +18,11 @@ fn benchmark_class_display_all_variants() {
     assert_eq!(BenchmarkClass::TestWriting.to_string(), "test-writing");
     assert_eq!(BenchmarkClass::BugFix.to_string(), "bug-fix");
     assert_eq!(BenchmarkClass::Refactoring.to_string(), "refactoring");
+    assert_eq!(
+        BenchmarkClass::DependencyAnalysis.to_string(),
+        "dependency-analysis"
+    );
+    assert_eq!(BenchmarkClass::ErrorHandling.to_string(), "error-handling");
 }
 
 #[test]
@@ -45,6 +50,10 @@ fn benchmark_class_serializes_to_kebab_case() {
     assert!(json.contains("bug-fix"));
     let json = serde_json::to_string(&BenchmarkClass::Refactoring).unwrap();
     assert!(json.contains("refactoring"));
+    let json = serde_json::to_string(&BenchmarkClass::DependencyAnalysis).unwrap();
+    assert!(json.contains("dependency-analysis"));
+    let json = serde_json::to_string(&BenchmarkClass::ErrorHandling).unwrap();
+    assert!(json.contains("error-handling"));
 }
 
 #[test]

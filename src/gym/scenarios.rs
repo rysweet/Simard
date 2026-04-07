@@ -4,7 +4,7 @@ use crate::runtime::RuntimeTopology;
 
 use super::types::{BenchmarkCheckResult, BenchmarkClass, BenchmarkScenario};
 
-const BENCHMARK_SCENARIOS: [BenchmarkScenario; 15] = [
+const BENCHMARK_SCENARIOS: [BenchmarkScenario; 21] = [
     BenchmarkScenario {
         id: "repo-exploration-local",
         title: "Repo exploration on local harness",
@@ -171,6 +171,72 @@ const BENCHMARK_SCENARIOS: [BenchmarkScenario; 15] = [
         topology: RuntimeTopology::MultiProcess,
         objective: "Analyze the repository at /home/azureuser/src/Simard under multi-process topology. Identify: (1) the top-level project structure and key directories, (2) all Cargo.toml dependencies and their purposes, (3) the main entry point(s), (4) at least five public modules and their responsibilities. Produce a structured summary covering all four areas.",
         expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "doc-generation-multi-process",
+        title: "Documentation generation on multi-process topology",
+        description: "Exercise documentation generation through the loopback multi-process topology to validate that doc tasks work correctly across process boundaries.",
+        class: BenchmarkClass::Documentation,
+        identity: "simard-gym",
+        base_type: "rusty-clawd",
+        topology: RuntimeTopology::MultiProcess,
+        objective: "Read the function `pub fn run_benchmark_suite()` in src/gym/mod.rs. Generate a comprehensive Rust doc comment (/// style) that: (1) describes the function's purpose and behavior, (2) documents the `suite_id` and `output_root` parameters, (3) explains the return type `SimardResult<BenchmarkSuiteReport>`, (4) notes error conditions. Output the doc comment text.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "bug-fix-distributed",
+        title: "Bug fix scenario on distributed topology",
+        description: "Exercise a bug-fix objective on the distributed topology to validate that diagnostic reasoning works across distributed process boundaries.",
+        class: BenchmarkClass::BugFix,
+        identity: "simard-gym",
+        base_type: "rusty-clawd",
+        topology: RuntimeTopology::Distributed,
+        objective: "Identify a potential panic site in the Simard codebase where an `.unwrap()` is called on a `Result` or `Option` that could reasonably fail at runtime. Describe: (1) the file and line, (2) the conditions under which it would panic, (3) the appropriate error handling replacement (e.g., `?` operator, `unwrap_or_default`, `match`). Do not modify code, only analyze and recommend.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "dep-analysis-cargo-audit",
+        title: "Dependency audit of Cargo.toml",
+        description: "Analyze the project's Cargo.toml to identify dependency health: version currency, potential conflicts, unused dependencies, and feature flag usage.",
+        class: BenchmarkClass::DependencyAnalysis,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze the Cargo.toml at the repository root. Report: (1) total number of direct dependencies, (2) any dependencies using path-based or git-based sources instead of crates.io, (3) dependencies with wildcard (*) version specs, (4) optional dependencies and their associated feature flags, (5) any dev-dependencies that could be moved to regular dependencies or vice versa. Produce a structured audit report.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "dep-analysis-module-coupling",
+        title: "Module coupling analysis",
+        description: "Analyze inter-module dependencies within the Simard codebase to identify tightly coupled modules and suggest decoupling opportunities.",
+        class: BenchmarkClass::DependencyAnalysis,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze the `use crate::` import statements across all modules in src/. Report: (1) which module is imported by the most other modules, (2) any circular dependency chains, (3) modules that import more than 5 sibling modules, (4) suggested decoupling strategies for the most coupled module. Produce a dependency matrix summary.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "error-handling-unwrap-audit",
+        title: "Unwrap usage audit",
+        description: "Systematically identify and classify .unwrap() calls across the codebase, distinguishing safe usage (e.g., after .is_some() check) from risky runtime panics.",
+        class: BenchmarkClass::ErrorHandling,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Scan the Simard src/ directory for all `.unwrap()` calls. For each occurrence, classify as: (A) safe — preceded by a guard or in test code, (B) risky — could panic in production. Report: (1) total unwrap count, (2) count of safe vs risky, (3) the top 3 riskiest unwrap sites with file, line, and justification. Produce a prioritized remediation list.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "error-handling-propagation-chain",
+        title: "Error propagation chain analysis",
+        description: "Trace error propagation paths through the SimardError type to verify that errors surface meaningful context to the operator.",
+        class: BenchmarkClass::ErrorHandling,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze the SimardError enum in src/error.rs. Trace how errors propagate from: (1) runtime failures through to CLI output, (2) benchmark execution through to gym reports. For each path, assess whether the error message preserved enough context for an operator to diagnose the issue without reading source code. Report any error variants that lose context during propagation.",
+        expected_min_runtime_evidence: 3,
     },
 ];
 
@@ -477,6 +543,103 @@ pub(super) fn class_specific_checks(
                     detail: format!(
                         "execution output {} code examples",
                         if code_shown { "includes" } else { "lacks" }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::DependencyAnalysis => {
+            let deps_analyzed = combined.contains("cargo.toml")
+                || combined.contains("dependenc")
+                || combined.contains("crate")
+                || combined.contains("version");
+            let coupling_assessed = combined.contains("import")
+                || combined.contains("coupling")
+                || combined.contains("module")
+                || combined.contains("use crate");
+            let recommendations_present = combined.contains("suggest")
+                || combined.contains("recommend")
+                || combined.contains("should")
+                || combined.contains("consider")
+                || combined.contains("audit");
+            vec![
+                BenchmarkCheckResult {
+                    id: "dep-analysis-performed".to_string(),
+                    passed: deps_analyzed,
+                    detail: format!(
+                        "execution output {} dependency analysis",
+                        if deps_analyzed { "contains" } else { "lacks" }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "dep-coupling-assessed".to_string(),
+                    passed: coupling_assessed,
+                    detail: format!(
+                        "execution output {} coupling assessment",
+                        if coupling_assessed {
+                            "contains"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "dep-recommendations-present".to_string(),
+                    passed: recommendations_present,
+                    detail: format!(
+                        "execution output {} actionable recommendations",
+                        if recommendations_present {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::ErrorHandling => {
+            let error_analysis = combined.contains("unwrap")
+                || combined.contains("error")
+                || combined.contains("panic")
+                || combined.contains("result");
+            let classification_present = combined.contains("safe")
+                || combined.contains("risky")
+                || combined.contains("classif")
+                || combined.contains("categor");
+            let propagation_traced = combined.contains("propagat")
+                || combined.contains("chain")
+                || combined.contains("context")
+                || combined.contains("diagnostic");
+            vec![
+                BenchmarkCheckResult {
+                    id: "error-analysis-performed".to_string(),
+                    passed: error_analysis,
+                    detail: format!(
+                        "execution output {} error analysis",
+                        if error_analysis { "contains" } else { "lacks" }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "error-classification-present".to_string(),
+                    passed: classification_present,
+                    detail: format!(
+                        "execution output {} error classification",
+                        if classification_present {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "error-propagation-traced".to_string(),
+                    passed: propagation_traced,
+                    detail: format!(
+                        "execution output {} propagation tracing",
+                        if propagation_traced {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
                     ),
                 },
             ]

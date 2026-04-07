@@ -14,6 +14,8 @@ pub enum BenchmarkClass {
     TestWriting,
     BugFix,
     Refactoring,
+    DependencyAnalysis,
+    ErrorHandling,
 }
 
 impl Display for BenchmarkClass {
@@ -26,6 +28,8 @@ impl Display for BenchmarkClass {
             Self::TestWriting => "test-writing",
             Self::BugFix => "bug-fix",
             Self::Refactoring => "refactoring",
+            Self::DependencyAnalysis => "dependency-analysis",
+            Self::ErrorHandling => "error-handling",
         };
         f.write_str(label)
     }
