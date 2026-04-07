@@ -43,17 +43,18 @@ pub fn run_ooda_daemon(
     let knowledge = launch_knowledge_bridge(&python_dir)?;
     let gym = launch_gym_bridge(&python_dir)?;
 
-    // Try to open a RustyClawd session for real autonomous work.
+    // Try to open an LLM session for real autonomous work.
+    // The provider is selected by SIMARD_LLM_PROVIDER (default: Copilot).
     let session = SessionBuilder::new(OperatingMode::Orchestrator)
         .node_id("ooda-daemon")
         .address("ooda-daemon://local")
-        .adapter_tag("ooda-rustyclawd")
+        .adapter_tag("ooda")
         .open();
 
     if session.is_some() {
-        eprintln!("[simard] OODA daemon: RustyClawd session opened for autonomous work");
+        eprintln!("[simard] OODA daemon: LLM session opened for autonomous work");
     } else {
-        eprintln!("[simard] OODA daemon: no API key — running in bridge-only mode");
+        eprintln!("[simard] OODA daemon: no LLM session available — running in bridge-only mode");
     }
 
     let mut bridges = OodaBridges {
