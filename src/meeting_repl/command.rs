@@ -20,6 +20,8 @@ pub enum MeetingCommand {
     Conversation(String),
     /// `/status` — show meeting status summary
     Status,
+    /// `/recap` — show formatted summary of all captured items
+    Recap,
     /// `/participants add <name>` — add a participant
     AddParticipant(String),
     /// `/participants` — list current participants
@@ -107,6 +109,10 @@ pub fn parse_meeting_command(line: &str) -> MeetingCommand {
         return MeetingCommand::Status;
     }
 
+    if trimmed == "/recap" {
+        return MeetingCommand::Recap;
+    }
+
     if trimmed == "/list" {
         return MeetingCommand::List;
     }
@@ -183,6 +189,7 @@ Commands (optional):
   /edit <type> <number> <new text>              Edit an item (type: decision, action, note)
   /delete <type> <number>                       Delete an item (type: decision, action, note)
   /status                                       Show meeting status summary
+  /recap                                        Show formatted summary of all captured items
   /participants                                 List current participants
   /participants add <name>                      Add a participant
   /close or /done                               Close the meeting and persist summary
@@ -251,6 +258,11 @@ mod tests {
     #[test]
     fn parse_status_command() {
         assert_eq!(parse_meeting_command("/status"), MeetingCommand::Status);
+    }
+
+    #[test]
+    fn parse_recap_command() {
+        assert_eq!(parse_meeting_command("/recap"), MeetingCommand::Recap);
     }
 
     #[test]
