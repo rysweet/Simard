@@ -315,5 +315,33 @@ pub(super) fn class_specific_checks(
                 ),
             }]
         }
+        BenchmarkClass::BugFix => {
+            let fix_mentioned = combined.contains("fix")
+                || combined.contains("bug")
+                || combined.contains("patch")
+                || combined.contains("resolve");
+            vec![BenchmarkCheckResult {
+                id: "bug-fix-attempted".to_string(),
+                passed: fix_mentioned,
+                detail: format!(
+                    "execution output {} bug-fix references",
+                    if fix_mentioned { "contains" } else { "lacks" }
+                ),
+            }]
+        }
+        BenchmarkClass::Refactoring => {
+            let refactor_mentioned = combined.contains("refactor")
+                || combined.contains("restructur")
+                || combined.contains("clean")
+                || combined.contains("simplif");
+            vec![BenchmarkCheckResult {
+                id: "refactoring-attempted".to_string(),
+                passed: refactor_mentioned,
+                detail: format!(
+                    "execution output {} refactoring references",
+                    if refactor_mentioned { "contains" } else { "lacks" }
+                ),
+            }]
+        }
     }
 }

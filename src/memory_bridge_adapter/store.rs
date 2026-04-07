@@ -300,12 +300,11 @@ impl MemoryStore for CognitiveBridgeMemoryStore {
         drop(records);
 
         // Track the key as pending if bridge write failed.
-        if !bridge_ok {
-            if let Ok(mut pending) = self.pending_bridge_keys.lock() {
-                if !pending.contains(&key) {
-                    pending.push(key);
-                }
-            }
+        if !bridge_ok
+            && let Ok(mut pending) = self.pending_bridge_keys.lock()
+            && !pending.contains(&key)
+        {
+            pending.push(key);
         }
         Ok(())
     }
