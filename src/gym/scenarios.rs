@@ -646,3 +646,85 @@ pub(super) fn class_specific_checks(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn benchmark_scenarios_not_empty() {
+        let scenarios = benchmark_scenarios();
+        assert!(!scenarios.is_empty());
+    }
+
+    #[test]
+    fn benchmark_scenarios_ids_are_unique() {
+        let scenarios = benchmark_scenarios();
+        let ids: Vec<_> = scenarios.iter().map(|s| s.id).collect();
+        let unique: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(ids.len(), unique.len(), "scenario IDs must be unique");
+    }
+
+    #[test]
+    fn resolve_known_scenario() {
+        let scenario = resolve_benchmark_scenario("repo-exploration-local").unwrap();
+        assert_eq!(scenario.id, "repo-exploration-local");
+        assert_eq!(scenario.class, BenchmarkClass::RepoExploration);
+    }
+
+    #[test]
+    fn resolve_unknown_scenario_errors() {
+        let result = resolve_benchmark_scenario("nonexistent-scenario");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn all_scenarios_have_nonempty_fields() {
+        for scenario in benchmark_scenarios() {
+            assert!(!scenario.id.is_empty(), "id must be non-empty");
+            assert!(
+                !scenario.title.is_empty(),
+                "title must be non-empty for {}",
+                scenario.id
+            );
+            assert!(
+                !scenario.description.is_empty(),
+                "description must be non-empty for {}",
+                scenario.id
+            );
+            assert!(
+                !scenario.identity.is_empty(),
+                "identity must be non-empty for {}",
+                scenario.id
+            );
+            assert!(
+                !scenario.base_type.is_empty(),
+                "base_type must be non-empty for {}",
+                scenario.id
+            );
+            assert!(
+                !scenario.objective.is_empty(),
+                "objective must be non-empty for {}",
+                scenario.id
+            );
+        }
+    }
+
+    #[test]
+    fn benchmark_class_display_roundtrip() {
+        let classes = [
+            (BenchmarkClass::RepoExploration, "repo-exploration"),
+            (BenchmarkClass::Documentation, "documentation"),
+            (BenchmarkClass::SafeCodeChange, "safe-code-change"),
+            (BenchmarkClass::SessionQuality, "session-quality"),
+            (BenchmarkClass::TestWriting, "test-writing"),
+            (BenchmarkClass::BugFix, "bug-fix"),
+            (BenchmarkClass::Refactoring, "refactoring"),
+            (BenchmarkClass::DependencyAnalysis, "dependency-analysis"),
+            (BenchmarkClass::ErrorHandling, "error-handling"),
+        ];
+        for (class, label) in classes {
+            assert_eq!(class.to_string(), label);
+        }
+    }
+}
