@@ -160,6 +160,96 @@ pub(crate) fn parse_status_paths(stdout: &str) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeout_for_cargo_command() {
+        let timeout = timeout_for_command(&["cargo", "test"]);
+        assert_eq!(timeout, Duration::from_secs(CARGO_COMMAND_TIMEOUT_SECS));
+    }
+
+    #[test]
+    fn timeout_for_git_command() {
+        let timeout = timeout_for_command(&["git", "status"]);
+        assert_eq!(timeout, Duration::from_secs(GIT_COMMAND_TIMEOUT_SECS));
+    }
+
+    #[test]
+    fn timeout_for_other_command() {
+        let timeout = timeout_for_command(&["ls", "-la"]);
+        assert_eq!(timeout, Duration::from_secs(GIT_COMMAND_TIMEOUT_SECS));
+    }
+
+    #[test]
+    fn parse_status_paths_typical_output() {
+        let stdout = " M src/main.rs\n M src/lib.rs\n";
+        let paths = parse_status_paths(stdout);
+        assert_eq!(paths, vec!["src/main.rs", "src/lib.rs"]);
+    }
+
+    #[test]
+    fn parse_status_paths_empty_input() {
+        let paths = parse_status_paths("");
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn parse_status_paths_short_line() {
+        let paths = parse_status_paths("AB\n");
+        assert_eq!(paths, vec!["AB"]);
+    }
+
+    #[test]
+    fn trimmed_stdout_non_empty() {
+        let output = CommandOutput {
+            status: std::process::Command::new("true").status().unwrap().into(),
+            stdout: "  hello world  ".to_string(),
+            stderr: String::new(),
+        };
+        assert_eq!(trimmed_stdout(&output).unwrap(), "hello world");
+    }
+
+    #[test]
+    fn trimmed_stdout_empty_errors() {
+        let output = CommandOutput {
+            status: std::process::Command::new("true").status().unwrap().into(),
+            stdout: "   ".to_string(),
+            stderr: String::new(),
+        };
+        assert!(trimmed_stdout(&output).is_err());
+    }
+
+    #[test]
+    fn trimmed_stdout_allow_empty_trims() {
+        let output = CommandOutput {
+            status: std::process::Command::new("true").status().unwrap().into(),
+            stdout: "  text  ".to_string(),
+            stderr: String::new(),
+        };
+        assert_eq!(trimmed_stdout_allow_empty(&output), "text");
+    }
+
+    #[test]
+    fn run_command_empty_argv_errors() {
+        let result = run_command(Path::new("."), &[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn run_command_rejects_newlines_in_args() {
+        let result = run_command(Path::new("."), &["echo", "hello\nworld"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn run_command_rejects_empty_segments() {
+        let result = run_command(Path::new("."), &["echo", ""]);
+        assert!(result.is_err());
+    }
+}
+
 pub(crate) fn execute_engineer_action(
     repo_root: &Path,
     selected: SelectedEngineerAction,
