@@ -1,10 +1,18 @@
 use super::live_context::*;
 use super::test_support::*;
 
+/// Mutex to serialize tests that mutate environment variables. `set_var` /
+/// `remove_var` are process-global so concurrent tests would race.
+static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 // ── build_live_meeting_context ──────────────────────────────────────
 
 #[test]
 fn defaults_with_empty_bridge() {
+    let _lock = ENV_MUTEX.lock().unwrap();
+    // Ensure the env var is unset so we test the true default path.
+    unsafe { std::env::remove_var("SIMARD_OPERATOR_NAME") };
+
     let bridge = empty_bridge();
     let ctx = build_live_meeting_context(&bridge);
 
@@ -16,14 +24,53 @@ fn defaults_with_empty_bridge() {
         ctx.contains("## Operator Context"),
         "expected default operator section"
     );
-    assert!(ctx.contains("Ryan Sweet"), "expected default operator name");
+    // No hardcoded personal names — falls back to env var or "operator"
     assert!(
-        ctx.contains("## Known Projects"),
-        "expected default projects section"
+        !ctx.contains("Ryan Sweet"),
+        "must not contain hardcoded personal name"
     );
     assert!(
-        ctx.contains("Simard"),
-        "expected Simard in default projects"
+        ctx.contains("operator"),
+        "expected generic operator fallback"
+    );
+    // No hardcoded project list when memory is empty
+    assert!(
+        !ctx.contains("## Known Projects"),
+        "projects section should be omitted when memory has no project facts"
+    );
+}
+
+#[test]
+fn empty_bridge_uses_env_var_operator_name() {
+    let _lock = ENV_MUTEX.lock().unwrap();
+    // SAFETY: Serialized by ENV_MUTEX; restored immediately after use.
+    unsafe { std::env::set_var("SIMARD_OPERATOR_NAME", "Test User") };
+    let bridge = empty_bridge();
+    let ctx = build_live_meeting_context(&bridge);
+    unsafe { std::env::remove_var("SIMARD_OPERATOR_NAME") };
+
+    assert!(
+        ctx.contains("Test User"),
+        "expected operator name from SIMARD_OPERATOR_NAME env var"
+    );
+    assert!(
+        !ctx.contains("Ryan Sweet"),
+        "must not contain hardcoded name"
+    );
+}
+
+#[test]
+fn empty_env_var_falls_back_to_generic() {
+    let _lock = ENV_MUTEX.lock().unwrap();
+    // SAFETY: Serialized by ENV_MUTEX; restored immediately after use.
+    unsafe { std::env::set_var("SIMARD_OPERATOR_NAME", "") };
+    let bridge = empty_bridge();
+    let ctx = build_live_meeting_context(&bridge);
+    unsafe { std::env::remove_var("SIMARD_OPERATOR_NAME") };
+
+    assert!(
+        ctx.contains("Your operator is operator"),
+        "empty env var should fall back to generic 'operator'"
     );
 }
 
@@ -82,7 +129,7 @@ fn includes_operator_facts() {
         ctx.contains("Custom operator identity"),
         "expected operator content from bridge"
     );
-    // Should NOT contain the default operator text when bridge provides facts
+    // Should NOT contain any fallback operator text when bridge provides facts
     assert!(
         !ctx.contains("Ryan Sweet"),
         "should not contain default operator when bridge provides custom operator"
@@ -151,7 +198,7 @@ fn with_all_fact_types() {
 fn has_live_state_header() {
     let bridge = empty_bridge();
     let ctx = build_live_meeting_context(&bridge);
-    // Even with only defaults, the sections are present so it uses the live header
+    // Even with only the operator fallback, the section is present so it uses the live header
     assert!(ctx.starts_with("## Live State"));
 }
 
@@ -208,26 +255,32 @@ fn empty_bridge_returns_empty_search_results() {
 // ── structural checks ──────────────────────────────────────────────
 
 #[test]
-fn empty_bridge_has_at_least_two_sections() {
+fn empty_bridge_has_operator_section_only() {
     let bridge = empty_bridge();
     let ctx = build_live_meeting_context(&bridge);
-    // Even with empty bridge, default operator and projects sections appear
+    // With empty bridge, only the operator fallback section appears (no hardcoded projects)
+    assert!(ctx.contains("## Operator Context"));
+    assert!(!ctx.contains("## Known Projects"));
     let section_count = ctx.matches("## ").count();
+    // Live State header + Operator Context = at least 2
     assert!(
         section_count >= 2,
-        "expected at least 2 sections, got {section_count}"
+        "expected at least 2 sections (header + operator), got {section_count}"
     );
 }
 
 #[test]
-fn empty_bridge_includes_known_projects() {
+fn empty_bridge_omits_hardcoded_projects() {
     let bridge = empty_bridge();
     let ctx = build_live_meeting_context(&bridge);
     assert!(
-        ctx.contains("RustyClawd"),
-        "expected RustyClawd in defaults"
+        !ctx.contains("RustyClawd"),
+        "must not contain hardcoded project names"
     );
-    assert!(ctx.contains("amplihack"), "expected amplihack in defaults");
+    assert!(
+        !ctx.contains("amplihack-memory-lib"),
+        "must not contain hardcoded project names"
+    );
 }
 
 #[test]
