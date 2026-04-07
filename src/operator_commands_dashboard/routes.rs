@@ -15,16 +15,25 @@ async fn status() -> Json<Value> {
     let version = env!("CARGO_PKG_VERSION");
 
     let ooda_running = std::process::Command::new("pgrep")
-        .args(["-f", "simard ooda"])
+        .args(["-f", "simard.*ooda run"])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
 
     let disk = disk_usage_pct().await;
 
+    let child_count = std::process::Command::new("pgrep")
+        .args(["-f", "-c", "copilot.*Simard|simard.*ooda|cargo.*simard"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+
     Json(json!({
         "version": version,
         "ooda_daemon": if ooda_running { "running" } else { "stopped" },
+        "active_processes": child_count,
         "disk_usage_pct": disk,
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
@@ -120,6 +129,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         document.getElementById('status').innerHTML = `
           <div class="stat"><span class="label">Version</span><span class="value">v${d.version}</span></div>
           <div class="stat"><span class="label">OODA Daemon</span><span class="value ${daemonClass}">${d.ooda_daemon}</span></div>
+          <div class="stat"><span class="label">Active Processes</span><span class="value">${d.active_processes ?? 0}</span></div>
           <div class="stat"><span class="label">Disk Usage</span><span class="value ${diskClass}">${d.disk_usage_pct ?? '?'}%</span></div>
           <div class="stat"><span class="label">Updated</span><span class="value">${new Date(d.timestamp).toLocaleTimeString()}</span></div>
         `;
