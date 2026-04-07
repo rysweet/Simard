@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use chrono::{DateTime, Utc};
+
 use crate::error::{SimardError, SimardResult};
 use crate::metadata::{BackendDescriptor, Freshness};
 use crate::persistence::{load_json_or_default, persist_json};
@@ -59,15 +61,25 @@ impl MemoryStore for FileBackedMemoryStore {
             .map_err(|_| SimardError::StoragePoisoned {
                 store: MEMORY_STORE_NAME.to_string(),
             })?;
-        if let Some(existing) = records
+        // Stamp created_at if not already set.
+        let mut record = record;
+        if record.created_at.is_none() {
+            record.created_at = Some(Utc::now());
+        }
+        // Build the updated list without mutating in-memory state yet.
+        let mut candidate = records.clone();
+        if let Some(existing) = candidate
             .iter_mut()
             .find(|existing| existing.key == record.key)
         {
             *existing = record;
         } else {
-            records.push(record);
+            candidate.push(record);
         }
-        self.persist(&records)
+        // Persist first — if this fails, in-memory state stays unchanged.
+        self.persist(&candidate)?;
+        *records = candidate;
+        Ok(())
     }
 
     fn list(&self, scope: MemoryScope) -> SimardResult<Vec<MemoryRecord>> {
@@ -106,5 +118,32 @@ impl MemoryStore for FileBackedMemoryStore {
             .iter()
             .filter(|record| &record.session_id == session_id)
             .count())
+    }
+
+    fn list_all(&self) -> SimardResult<Vec<MemoryRecord>> {
+        Ok(self
+            .records
+            .lock()
+            .map_err(|_| SimardError::StoragePoisoned {
+                store: MEMORY_STORE_NAME.to_string(),
+            })?
+            .clone())
+    }
+
+    fn list_by_time_range(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> SimardResult<Vec<MemoryRecord>> {
+        Ok(self
+            .records
+            .lock()
+            .map_err(|_| SimardError::StoragePoisoned {
+                store: MEMORY_STORE_NAME.to_string(),
+            })?
+            .iter()
+            .filter(|r| r.created_at.map(|t| t >= start && t < end).unwrap_or(false))
+            .cloned()
+            .collect())
     }
 }

@@ -205,8 +205,9 @@ pub use memory_cognitive::{
     CognitiveSensoryItem, CognitiveStatistics, CognitiveWorkingSlot,
 };
 pub use memory_consolidation::{
-    FactExtraction, PreparedContext, execution_memory_operations, intake_memory_operations,
-    persistence_memory_operations, preparation_memory_operations, reflection_memory_operations,
+    FactExtraction, PreparedContext, consolidation_intake, consolidation_persistence,
+    execution_memory_operations, intake_memory_operations, persistence_memory_operations,
+    preparation_memory_operations, reflection_memory_operations,
 };
 pub use ooda_actions::dispatch_actions;
 pub use ooda_loop::{

@@ -36,6 +36,7 @@ fn fixture_handoff() -> RuntimeHandoffSnapshot {
                 value: "objective-metadata(chars=64, words=9, lines=1)".to_string(),
                 session_id: session_id.clone(),
                 recorded_in: SessionPhase::Preparation,
+                created_at: None,
             },
             MemoryRecord {
                 key: "mem-2".to_string(),
@@ -43,6 +44,7 @@ fn fixture_handoff() -> RuntimeHandoffSnapshot {
                 value: "summary".to_string(),
                 session_id: session_id.clone(),
                 recorded_in: SessionPhase::Persistence,
+                created_at: None,
             },
         ],
         evidence_records: vec![

@@ -588,6 +588,7 @@ fn in_memory_store_works_as_memory_backend() {
             value: "data".to_string(),
             session_id: session.clone(),
             recorded_in: SessionPhase::Preparation,
+            created_at: None,
         })
         .unwrap();
 

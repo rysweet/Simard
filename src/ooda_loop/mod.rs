@@ -127,6 +127,15 @@ pub fn run_ooda_cycle(
 
     // --- Review: analyze outcomes and propose improvements ---
     let review_proposals = review::review_outcomes(&outcomes, act_elapsed);
+
+    // --- Consolidate: best-effort memory maintenance after each cycle ---
+    if let Err(e) = bridges.memory.consolidate_episodes(10) {
+        eprintln!("[simard] OODA consolidate: episode consolidation failed: {e}");
+    }
+    if let Err(e) = bridges.memory.prune_expired_sensory() {
+        eprintln!("[simard] OODA consolidate: sensory prune failed: {e}");
+    }
+
     if !review_proposals.is_empty() {
         eprintln!(
             "[simard] OODA review: generated {} improvement proposal(s)",

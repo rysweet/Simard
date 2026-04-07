@@ -59,6 +59,7 @@ pub fn run_review_probe(
         value: review.concise_record(),
         session_id,
         recorded_in: crate::SessionPhase::Complete,
+        created_at: None,
     })?;
     let decision_records = memory_store.list(MemoryScope::Decision)?;
 

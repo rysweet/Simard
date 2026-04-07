@@ -56,6 +56,7 @@ fn make_record(
         value: format!("value-for-{key}"),
         session_id: session.clone(),
         recorded_in: SessionPhase::Execution,
+        created_at: None,
     }
 }
 

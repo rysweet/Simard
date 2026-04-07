@@ -12,6 +12,8 @@ pub enum BenchmarkClass {
     SafeCodeChange,
     SessionQuality,
     TestWriting,
+    BugFix,
+    Refactoring,
 }
 
 impl Display for BenchmarkClass {
@@ -22,6 +24,8 @@ impl Display for BenchmarkClass {
             Self::SafeCodeChange => "safe-code-change",
             Self::SessionQuality => "session-quality",
             Self::TestWriting => "test-writing",
+            Self::BugFix => "bug-fix",
+            Self::Refactoring => "refactoring",
         };
         f.write_str(label)
     }

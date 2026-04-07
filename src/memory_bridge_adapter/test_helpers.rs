@@ -35,5 +35,6 @@ pub(super) fn make_record(key: &str, scope: MemoryScope) -> MemoryRecord {
         value: format!("value-for-{key}"),
         session_id: SessionId::from_uuid(Uuid::nil()),
         recorded_in: SessionPhase::Execution,
+        created_at: None,
     }
 }

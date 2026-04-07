@@ -115,6 +115,7 @@ pub(crate) fn persist_engineer_loop_artifacts(
         value: objective_metadata(objective),
         session_id: session.id.clone(),
         recorded_in: SessionPhase::Preparation,
+        created_at: None,
     })?;
     session.attach_memory(scratch_key);
 
@@ -222,6 +223,7 @@ pub(crate) fn persist_engineer_loop_artifacts(
         ),
         session_id: session.id.clone(),
         recorded_in: SessionPhase::Persistence,
+            created_at: None,
     })?;
     session.attach_memory(summary_key);
 
@@ -237,6 +239,7 @@ pub(crate) fn persist_engineer_loop_artifacts(
         ),
         session_id: session.id.clone(),
         recorded_in: SessionPhase::Persistence,
+        created_at: None,
     })?;
     session.attach_memory(decision_key);
 

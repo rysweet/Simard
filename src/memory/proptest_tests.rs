@@ -1,3 +1,4 @@
+use chrono::Utc;
 use proptest::prelude::*;
 use uuid::Uuid;
 
@@ -11,6 +12,7 @@ fn arb_scope() -> impl Strategy<Value = MemoryScope> {
         Just(MemoryScope::Decision),
         Just(MemoryScope::Project),
         Just(MemoryScope::Benchmark),
+        Just(MemoryScope::Untagged),
     ]
 }
 
@@ -39,6 +41,7 @@ fn arb_record() -> impl Strategy<Value = MemoryRecord> {
             value,
             session_id,
             recorded_in,
+            created_at: Some(Utc::now()),
         },
     )
 }
@@ -95,15 +98,22 @@ proptest! {
         let r1 = MemoryRecord {
             key: key.clone(), scope, value: v1,
             session_id: sid.clone(), recorded_in: phase,
+            created_at: None,
         };
         let r2 = MemoryRecord {
             key: key.clone(), scope, value: v2,
             session_id: sid.clone(), recorded_in: phase,
+            created_at: None,
         };
         store.put(r1).unwrap();
         store.put(r2.clone()).unwrap();
         let found = store.list(scope).unwrap();
-        prop_assert_eq!(found.last().unwrap(), &r2);
+        let last = found.last().unwrap();
+        prop_assert_eq!(&last.key, &r2.key);
+        prop_assert_eq!(&last.value, &r2.value);
+        prop_assert_eq!(&last.scope, &r2.scope);
+        prop_assert_eq!(&last.session_id, &r2.session_id);
+        // created_at is auto-stamped by put(), so skip comparing it
     }
 
     /// Records are partitioned correctly across scopes.
@@ -119,6 +129,7 @@ proptest! {
             MemoryScope::Decision,
             MemoryScope::Project,
             MemoryScope::Benchmark,
+            MemoryScope::Untagged,
         ];
         let total: usize = all_scopes
             .iter()
@@ -140,6 +151,7 @@ proptest! {
         let record = MemoryRecord {
             key: key.clone(), scope, value: value.clone(),
             session_id: sid.clone(), recorded_in: phase,
+            created_at: None,
         };
         store.put(record).unwrap();
         let found = store.list(scope).unwrap();

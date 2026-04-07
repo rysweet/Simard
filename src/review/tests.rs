@@ -54,6 +54,7 @@ fn make_handoff_with_records() -> crate::handoff::RuntimeHandoffSnapshot {
             value: "decided something".to_string(),
             session_id: sid.clone(),
             recorded_in: SessionPhase::Execution,
+            created_at: None,
         },
         MemoryRecord {
             key: "bench-1".to_string(),
@@ -61,6 +62,7 @@ fn make_handoff_with_records() -> crate::handoff::RuntimeHandoffSnapshot {
             value: "benchmark data".to_string(),
             session_id: sid.clone(),
             recorded_in: SessionPhase::Execution,
+            created_at: None,
         },
         MemoryRecord {
             key: "scratch-1".to_string(),
@@ -68,6 +70,7 @@ fn make_handoff_with_records() -> crate::handoff::RuntimeHandoffSnapshot {
             value: "scratch".to_string(),
             session_id: sid.clone(),
             recorded_in: SessionPhase::Execution,
+            created_at: None,
         },
     ];
     handoff.evidence_records = vec![

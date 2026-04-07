@@ -23,6 +23,7 @@ fn parse_scope_tag(tag: &str) -> Option<MemoryScope> {
         "Decision" => Some(MemoryScope::Decision),
         "Project" => Some(MemoryScope::Project),
         "Benchmark" => Some(MemoryScope::Benchmark),
+        "Untagged" => Some(MemoryScope::Untagged),
         _ => None,
     }
 }
@@ -34,23 +35,39 @@ fn parse_session_tag(tag: &str) -> Option<SessionId> {
 }
 
 /// Convert a `CognitiveFact` back to a `MemoryRecord` by parsing encoded tags.
+///
+/// When scope or session tags are missing, defaults are applied and a warning
+/// is logged so the data-loss is visible rather than silent.
 pub(super) fn fact_to_record(fact: &CognitiveFact) -> MemoryRecord {
     let scope = fact
         .tags
         .iter()
         .find_map(|t| parse_scope_tag(t))
-        .unwrap_or(MemoryScope::Project);
+        .unwrap_or_else(|| {
+            eprintln!(
+                "[simard] cognitive-bridge: fact {:?} missing scope tag, defaulting to Untagged",
+                fact.concept
+            );
+            MemoryScope::Untagged
+        });
     let session_id = fact
         .tags
         .iter()
         .find_map(|t| parse_session_tag(t))
-        .unwrap_or_else(|| SessionId::from_uuid(uuid::Uuid::nil()));
+        .unwrap_or_else(|| {
+            eprintln!(
+                "[simard] cognitive-bridge: fact {:?} missing session tag, using nil UUID",
+                fact.concept
+            );
+            SessionId::from_uuid(uuid::Uuid::nil())
+        });
     MemoryRecord {
         key: fact.concept.clone(),
         scope,
         value: fact.content.clone(),
         session_id,
         recorded_in: SessionPhase::Execution,
+        created_at: None,
     }
 }
 
@@ -89,6 +106,6 @@ mod tests {
             tags: vec![],
         };
         let record = fact_to_record(&fact);
-        assert_eq!(record.scope, MemoryScope::Project); // default
+        assert_eq!(record.scope, MemoryScope::Untagged); // default for missing tags
     }
 }
