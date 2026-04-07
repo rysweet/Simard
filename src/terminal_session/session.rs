@@ -3,7 +3,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use crate::error::{SimardError, SimardResult};
 
@@ -262,13 +262,9 @@ impl PtyTerminalSession {
 }
 
 fn unique_transcript_path(label: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
+    let id = uuid::Uuid::now_v7();
     std::env::temp_dir().join(format!(
-        "simard-terminal-shell-{label}-{}-{nanos}.log",
-        std::process::id()
+        "simard-terminal-shell-{label}-{id}.log",
     ))
 }
 
@@ -289,4 +285,38 @@ fn open_exclusive_temp_file(path: &Path, base_type: &str) -> SimardResult<File> 
                 path.display()
             ),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transcript_path_is_unique_per_call() {
+        let paths: Vec<PathBuf> = (0..50).map(|_| unique_transcript_path("transcript")).collect();
+        let unique: std::collections::HashSet<_> = paths.iter().collect();
+        assert_eq!(
+            paths.len(),
+            unique.len(),
+            "every transcript path must be unique; got {} duplicates out of {}",
+            paths.len() - unique.len(),
+            paths.len(),
+        );
+    }
+
+    #[test]
+    fn transcript_path_contains_label() {
+        let path = unique_transcript_path("my-label");
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert!(
+            name.contains("my-label"),
+            "path should contain the label: {name}"
+        );
+    }
+
+    #[test]
+    fn transcript_path_ends_with_log_extension() {
+        let path = unique_transcript_path("transcript");
+        assert_eq!(path.extension().and_then(|e| e.to_str()), Some("log"));
+    }
 }
