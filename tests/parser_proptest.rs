@@ -23,7 +23,10 @@ proptest! {
             | MeetingCommand::Conversation(_)
             | MeetingCommand::Unknown(_)
             | MeetingCommand::Decision { .. }
-            | MeetingCommand::Action { .. } => {}
+            | MeetingCommand::Action { .. }
+            | MeetingCommand::Status
+            | MeetingCommand::AddParticipant(_)
+            | MeetingCommand::ListParticipants => {}
         }
     }
 

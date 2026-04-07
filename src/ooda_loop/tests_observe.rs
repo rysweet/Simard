@@ -158,6 +158,9 @@ fn scan_unprocessed_handoffs_returns_true_for_unprocessed() {
         action_items: Vec::new(),
         open_questions: Vec::new(),
         processed: false,
+        duration_secs: None,
+        transcript: Vec::new(),
+        participants: Vec::new(),
     };
     write_meeting_handoff(dir.path(), &handoff).unwrap();
 
@@ -180,6 +183,9 @@ fn scan_unprocessed_handoffs_returns_false_when_processed() {
         action_items: Vec::new(),
         open_questions: Vec::new(),
         processed: true,
+        duration_secs: None,
+        transcript: Vec::new(),
+        participants: Vec::new(),
     };
     write_meeting_handoff(dir.path(), &handoff).unwrap();
 

@@ -57,6 +57,13 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
 
         let cmd = parse_meeting_command(&line);
         if matches!(cmd, MeetingCommand::Close) {
+            // Print duration before closing
+            if let Ok(start) = chrono::DateTime::parse_from_rfc3339(&session.started_at) {
+                let secs = chrono::Utc::now()
+                    .signed_duration_since(start)
+                    .num_seconds();
+                writeln!(output, "Meeting duration: {secs}s").ok();
+            }
             writeln!(output, "Closing meeting.").ok();
             break;
         }
@@ -178,6 +185,42 @@ fn dispatch_command<W: Write>(
         MeetingCommand::Close => unreachable!(),
         MeetingCommand::Help => {
             write!(output, "{HELP_TEXT}").ok();
+        }
+        MeetingCommand::Status => {
+            let elapsed = if !session.started_at.is_empty() {
+                if let Ok(start) = chrono::DateTime::parse_from_rfc3339(&session.started_at) {
+                    let secs = chrono::Utc::now()
+                        .signed_duration_since(start)
+                        .num_seconds();
+                    format!("{secs}s")
+                } else {
+                    "unknown".to_string()
+                }
+            } else {
+                "unknown".to_string()
+            };
+            writeln!(output, "Meeting: {}", topic).ok();
+            writeln!(output, "  Elapsed:     {elapsed}").ok();
+            writeln!(output, "  Decisions:   {}", session.decisions.len()).ok();
+            writeln!(output, "  Actions:     {}", session.action_items.len()).ok();
+            writeln!(output, "  Notes:       {}", session.notes.len()).ok();
+            writeln!(output, "  Participants: {}", session.participants.len()).ok();
+        }
+        MeetingCommand::AddParticipant(name) => {
+            if !session.participants.contains(&name) {
+                session.participants.push(name.clone());
+            }
+            writeln!(output, "Participant added: {name}").ok();
+        }
+        MeetingCommand::ListParticipants => {
+            if session.participants.is_empty() {
+                writeln!(output, "No participants recorded yet.").ok();
+            } else {
+                writeln!(output, "Participants:").ok();
+                for p in &session.participants {
+                    writeln!(output, "  - {p}").ok();
+                }
+            }
         }
         MeetingCommand::Empty => {}
         MeetingCommand::Unknown(input) => {

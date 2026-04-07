@@ -65,6 +65,8 @@ fn sample_session_with_questions() -> MeetingSession {
             "Should we add metrics?".to_string(),
         ],
         status: MeetingSessionStatus::Closed,
+        started_at: chrono::Utc::now().to_rfc3339(),
+        participants: Vec::new(),
     }
 }
 
@@ -75,6 +77,8 @@ fn sample_empty_session() -> MeetingSession {
         action_items: vec![],
         notes: vec!["No decisions today.".to_string()],
         status: MeetingSessionStatus::Closed,
+        started_at: chrono::Utc::now().to_rfc3339(),
+        participants: Vec::new(),
     }
 }
 
@@ -440,6 +444,8 @@ fn handoff_with_only_action_items_no_decisions() {
         }],
         notes: vec![],
         status: MeetingSessionStatus::Closed,
+        started_at: chrono::Utc::now().to_rfc3339(),
+        participants: Vec::new(),
     };
     let handoff = MeetingHandoff::from_session(&session);
     assert!(handoff.decisions.is_empty());
@@ -463,6 +469,8 @@ fn handoff_with_only_decisions_no_actions() {
         action_items: vec![],
         notes: vec![],
         status: MeetingSessionStatus::Closed,
+        started_at: chrono::Utc::now().to_rfc3339(),
+        participants: Vec::new(),
     };
     let handoff = MeetingHandoff::from_session(&session);
     assert_eq!(handoff.decisions.len(), 1);

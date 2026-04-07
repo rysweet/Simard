@@ -45,6 +45,8 @@ pub struct MeetingSession {
     pub action_items: Vec<ActionItem>,
     pub notes: Vec<String>,
     pub status: MeetingSessionStatus,
+    pub started_at: String,
+    pub participants: Vec<String>,
 }
 
 impl MeetingSession {
@@ -68,9 +70,24 @@ impl MeetingSession {
                 .collect::<Vec<_>>()
                 .join("; ")
         };
+        let participants = if self.participants.is_empty() {
+            "none".to_string()
+        } else {
+            self.participants.join(", ")
+        };
+        let duration = if !self.started_at.is_empty() {
+            if let Ok(start) = chrono::DateTime::parse_from_rfc3339(&self.started_at) {
+                let elapsed = chrono::Utc::now().signed_duration_since(start);
+                format!("{}s", elapsed.num_seconds())
+            } else {
+                "unknown".to_string()
+            }
+        } else {
+            "unknown".to_string()
+        };
         format!(
-            "meeting topic={}; decisions=[{}]; action_items=[{}]",
-            self.topic, decisions, action_items,
+            "meeting topic={}; duration={}; participants=[{}]; decisions=[{}]; action_items=[{}]",
+            self.topic, duration, participants, decisions, action_items,
         )
     }
 }

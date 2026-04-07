@@ -62,6 +62,8 @@ fn sample_handoff() -> MeetingHandoff {
         ],
         notes: vec!["Should we add metrics?".to_string()],
         status: MeetingSessionStatus::Closed,
+        started_at: chrono::Utc::now().to_rfc3339(),
+        participants: Vec::new(),
     };
     MeetingHandoff::from_session(&session)
 }
@@ -252,6 +254,8 @@ fn act_on_decisions_with_empty_handoff_creates_no_issues() {
         action_items: vec![],
         notes: vec![],
         status: MeetingSessionStatus::Closed,
+        started_at: chrono::Utc::now().to_rfc3339(),
+        participants: Vec::new(),
     };
     let handoff = MeetingHandoff::from_session(&session);
     write_meeting_handoff(&dir, &handoff).unwrap();

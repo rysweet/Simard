@@ -124,6 +124,9 @@ mod tests {
             action_items: Vec::new(),
             open_questions: Vec::new(),
             processed: false,
+            duration_secs: None,
+            transcript: Vec::new(),
+            participants: Vec::new(),
         }
     }
 
@@ -138,6 +141,9 @@ mod tests {
             action_items,
             open_questions: Vec::new(),
             processed: false,
+            duration_secs: None,
+            transcript: Vec::new(),
+            participants: Vec::new(),
         }
     }
 
