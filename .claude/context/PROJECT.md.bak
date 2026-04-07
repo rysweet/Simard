@@ -10,7 +10,7 @@ Replace the sections below with information about your project.
 
 ---
 
-## Project: unit-tests
+## Project: gym-scenarios
 
 ## Overview
 
