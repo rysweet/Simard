@@ -425,11 +425,7 @@ pub(super) fn class_specific_checks(
                     passed: safety_analysis,
                     detail: format!(
                         "execution output {} safety analysis",
-                        if safety_analysis {
-                            "includes"
-                        } else {
-                            "lacks"
-                        }
+                        if safety_analysis { "includes" } else { "lacks" }
                     ),
                 },
             ]

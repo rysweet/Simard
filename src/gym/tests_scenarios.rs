@@ -584,10 +584,7 @@ fn class_checks_bug_fix_detects_convert_for_fix() {
     let outcome = dummy_outcome("bland", "convert the call to use ? operator", "bland");
     let exported = dummy_handoff(0);
     let checks = class_specific_checks(&scenario, &outcome, &exported);
-    let check = checks
-        .iter()
-        .find(|c| c.id == "bug-fix-described")
-        .unwrap();
+    let check = checks.iter().find(|c| c.id == "bug-fix-described").unwrap();
     assert!(check.passed);
 }
 
