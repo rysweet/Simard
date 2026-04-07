@@ -149,6 +149,7 @@ fn scan_unprocessed_handoffs_returns_true_for_unprocessed() {
 
     let handoff = MeetingHandoff {
         topic: "Sprint planning".to_string(),
+        started_at: "2026-04-02T23:00:00Z".to_string(),
         closed_at: "2026-04-03T00:00:00Z".to_string(),
         decisions: vec![MeetingDecision {
             description: "Ship v3".to_string(),
@@ -174,6 +175,7 @@ fn scan_unprocessed_handoffs_returns_false_when_processed() {
 
     let handoff = MeetingHandoff {
         topic: "Sprint planning".to_string(),
+        started_at: "2026-04-02T23:00:00Z".to_string(),
         closed_at: "2026-04-03T00:00:00Z".to_string(),
         decisions: vec![MeetingDecision {
             description: "Done".to_string(),

@@ -25,8 +25,13 @@ proptest! {
             | MeetingCommand::Decision { .. }
             | MeetingCommand::Action { .. }
             | MeetingCommand::Status
+            | MeetingCommand::Recap
             | MeetingCommand::AddParticipant(_)
-            | MeetingCommand::ListParticipants => {}
+            | MeetingCommand::ListParticipants
+            | MeetingCommand::List
+            | MeetingCommand::Edit { .. }
+            | MeetingCommand::Delete { .. }
+            | MeetingCommand::Question(_) => {}
         }
     }
 

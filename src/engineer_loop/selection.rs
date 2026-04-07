@@ -346,3 +346,121 @@ pub(crate) fn select_engineer_action(
         ),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn carry_forward_note_empty_when_no_decisions() {
+        let inspection = RepoInspection {
+            workspace_root: PathBuf::from("."),
+            repo_root: PathBuf::from("."),
+            branch: "main".into(),
+            head: "abc123".into(),
+            worktree_dirty: false,
+            changed_files: vec![],
+            active_goals: vec![],
+            carried_meeting_decisions: vec![],
+            architecture_gap_summary: String::new(),
+        };
+        assert!(carry_forward_note(&inspection).is_empty());
+    }
+
+    #[test]
+    fn carry_forward_note_singular_decision() {
+        let inspection = RepoInspection {
+            workspace_root: PathBuf::from("."),
+            repo_root: PathBuf::from("."),
+            branch: "main".into(),
+            head: "abc123".into(),
+            worktree_dirty: false,
+            changed_files: vec![],
+            active_goals: vec![],
+            carried_meeting_decisions: vec!["decision-1".into()],
+            architecture_gap_summary: String::new(),
+        };
+        let note = carry_forward_note(&inspection);
+        assert!(note.contains("1 meeting decision record"));
+        assert!(!note.contains("records"));
+    }
+
+    #[test]
+    fn carry_forward_note_plural_decisions() {
+        let inspection = RepoInspection {
+            workspace_root: PathBuf::from("."),
+            repo_root: PathBuf::from("."),
+            branch: "main".into(),
+            head: "abc123".into(),
+            worktree_dirty: false,
+            changed_files: vec![],
+            active_goals: vec![],
+            carried_meeting_decisions: vec!["d1".into(), "d2".into()],
+            architecture_gap_summary: String::new(),
+        };
+        let note = carry_forward_note(&inspection);
+        assert!(note.contains("2 meeting decision records"));
+    }
+
+    #[test]
+    fn extract_content_body_extracts_after_content_line() {
+        let objective = "Some preamble\ncontent: start\nline1\nline2";
+        let body = extract_content_body(objective);
+        assert_eq!(body, "line1\nline2");
+    }
+
+    #[test]
+    fn extract_content_body_empty_when_no_content_directive() {
+        let body = extract_content_body("just some text");
+        assert!(body.is_empty());
+    }
+
+    #[test]
+    fn select_git_commit_extracts_message_after_commit() {
+        let action = select_git_commit("commit Fix the bug", "");
+        assert_eq!(action.label, "git-commit");
+        assert_eq!(action.argv[3], "Fix the bug");
+    }
+
+    #[test]
+    fn select_git_commit_uses_full_objective_when_no_commit_keyword() {
+        let action = select_git_commit("Save my changes now", "");
+        assert_eq!(action.label, "git-commit");
+        assert_eq!(action.argv[3], "Save my changes now");
+    }
+
+    #[test]
+    fn select_open_issue_creates_action() {
+        let action = select_open_issue("Report a bug", "");
+        assert_eq!(action.label, "open-issue");
+        assert!(action.argv.contains(&"--title".to_string()));
+    }
+
+    #[test]
+    fn select_cargo_action_detects_test() {
+        let action = select_cargo_action("run tests", "");
+        assert_eq!(action.label, "cargo-test");
+    }
+
+    #[test]
+    fn select_cargo_action_detects_check() {
+        let action = select_cargo_action("cargo check", "");
+        assert_eq!(action.label, "cargo-check");
+    }
+
+    #[test]
+    fn select_cargo_action_falls_back_to_metadata() {
+        let action = select_cargo_action("inspect the workspace", "");
+        assert_eq!(action.label, "cargo-metadata-scan");
+    }
+
+    #[test]
+    fn select_shell_command_respects_allowlist() {
+        let action = select_shell_command("run cargo test --all", "");
+        assert!(action.is_some());
+
+        let action = select_shell_command("run python script.py", "");
+        assert!(action.is_none());
+    }
+}

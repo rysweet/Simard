@@ -16,14 +16,28 @@ pub enum MeetingCommand {
     },
     /// `/note <text>` — explicit note (not sent to agent)
     Note(String),
+    /// `/question <text>` — explicit open question
+    Question(String),
     /// Natural language — sent to the agent for a conversational response
     Conversation(String),
     /// `/status` — show meeting status summary
     Status,
+    /// `/recap` — show formatted summary of all captured items
+    Recap,
     /// `/participants add <name>` — add a participant
     AddParticipant(String),
     /// `/participants` — list current participants
     ListParticipants,
+    /// `/list` — show numbered list of all decisions, action items, and notes
+    List,
+    /// `/edit <type> <number> <new text>` — edit an existing item
+    Edit {
+        item_type: String,
+        index: usize,
+        new_text: String,
+    },
+    /// `/delete <type> <number>` — remove an item
+    Delete { item_type: String, index: usize },
     /// `/close` — end the meeting
     Close,
     /// `/help` — show available commands
@@ -85,6 +99,14 @@ pub fn parse_meeting_command(line: &str) -> MeetingCommand {
         return MeetingCommand::Unknown(trimmed.to_string());
     }
 
+    if let Some(rest) = trimmed.strip_prefix("/question ") {
+        let text = rest.trim().to_string();
+        if !text.is_empty() {
+            return MeetingCommand::Question(text);
+        }
+        return MeetingCommand::Unknown(trimmed.to_string());
+    }
+
     if trimmed == "/close" || trimmed == "/done" {
         return MeetingCommand::Close;
     }
@@ -95,6 +117,50 @@ pub fn parse_meeting_command(line: &str) -> MeetingCommand {
 
     if trimmed == "/status" {
         return MeetingCommand::Status;
+    }
+
+    if trimmed == "/recap" {
+        return MeetingCommand::Recap;
+    }
+
+    if trimmed == "/list" {
+        return MeetingCommand::List;
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("/edit ") {
+        let parts: Vec<&str> = rest.splitn(3, ' ').collect();
+        if parts.len() == 3 {
+            let item_type = parts[0].to_string();
+            if let Ok(num) = parts[1].parse::<usize>()
+                && num >= 1
+            {
+                let new_text = parts[2].trim().to_string();
+                if !new_text.is_empty() {
+                    return MeetingCommand::Edit {
+                        item_type,
+                        index: num - 1,
+                        new_text,
+                    };
+                }
+            }
+        }
+        return MeetingCommand::Unknown(trimmed.to_string());
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("/delete ") {
+        let parts: Vec<&str> = rest.splitn(2, ' ').collect();
+        if parts.len() == 2 {
+            let item_type = parts[0].to_string();
+            if let Ok(num) = parts[1].trim().parse::<usize>()
+                && num >= 1
+            {
+                return MeetingCommand::Delete {
+                    item_type,
+                    index: num - 1,
+                };
+            }
+        }
+        return MeetingCommand::Unknown(trimmed.to_string());
     }
 
     if trimmed == "/participants" {
@@ -111,25 +177,39 @@ pub fn parse_meeting_command(line: &str) -> MeetingCommand {
         return MeetingCommand::Unknown(trimmed.to_string());
     }
 
-    // Any non-command input is natural language — route to the agent.
+    // Any line starting with `/` that didn't match above is an unknown command.
+    if trimmed.starts_with('/') {
+        return MeetingCommand::Unknown(trimmed.to_string());
+    }
+
+    // Non-command input is natural language — route to the agent.
     MeetingCommand::Conversation(trimmed.to_string())
 }
 
-pub(super) const HELP_TEXT: &str = "\
+/// Dynamically generated help text — stays in sync with the parser.
+pub fn help_text() -> String {
+    "\
 Simard meeting — speak naturally and Simard will respond.
 
 Commands (optional):
-  /decision <description> | <rationale>   Record a formal decision
+  /decision <description> | <rationale>        Record a formal decision
   /action <description> | <owner> [| <priority>]  Record an action item
-  /note <text>                            Add an explicit note
-  /status                                 Show meeting status summary
-  /participants                           List current participants
-  /participants add <name>                Add a participant
-  /close or /done                         Close the meeting and persist summary
-  /help                                   Show this help
+  /note <text>                                  Add an explicit note
+  /question <text>                              Add an explicit open question
+  /list                                         Show numbered list of all items
+  /edit <type> <number> <new text>              Edit an item (type: decision, action, note)
+  /delete <type> <number>                       Delete an item (type: decision, action, note)
+  /status                                       Show meeting status summary
+  /recap                                        Show formatted summary of all captured items
+  /participants                                 List current participants
+  /participants add <name>                      Add a participant
+  /close or /done                               Close the meeting and persist summary
+  /help                                         Show this help
 
 Anything else you type is a conversation with Simard.
-";
+"
+    .to_string()
+}
 
 #[cfg(test)]
 mod tests {
@@ -167,6 +247,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_question_command() {
+        assert_eq!(
+            parse_meeting_command("/question What is the release timeline?"),
+            MeetingCommand::Question("What is the release timeline?".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_question_empty_is_unknown() {
+        assert!(matches!(
+            parse_meeting_command("/question "),
+            MeetingCommand::Unknown(_)
+        ));
+    }
+
+    #[test]
     fn parse_close_command() {
         assert_eq!(parse_meeting_command("/close"), MeetingCommand::Close);
         assert_eq!(parse_meeting_command("/done"), MeetingCommand::Close);
@@ -192,6 +288,11 @@ mod tests {
     }
 
     #[test]
+    fn parse_recap_command() {
+        assert_eq!(parse_meeting_command("/recap"), MeetingCommand::Recap);
+    }
+
+    #[test]
     fn parse_participants_list() {
         assert_eq!(
             parse_meeting_command("/participants"),
@@ -213,5 +314,142 @@ mod tests {
             parse_meeting_command("/participants add "),
             MeetingCommand::Unknown(_)
         ));
+    }
+
+    #[test]
+    fn parse_list_command() {
+        assert_eq!(parse_meeting_command("/list"), MeetingCommand::List);
+    }
+
+    #[test]
+    fn parse_edit_decision() {
+        assert_eq!(
+            parse_meeting_command("/edit decision 1 Updated wording"),
+            MeetingCommand::Edit {
+                item_type: "decision".to_string(),
+                index: 0,
+                new_text: "Updated wording".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_unknown_slash_command() {
+        assert_eq!(
+            parse_meeting_command("/foobar"),
+            MeetingCommand::Unknown("/foobar".to_string())
+        );
+        assert_eq!(
+            parse_meeting_command("/status check"),
+            MeetingCommand::Unknown("/status check".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_edit_action() {
+        assert_eq!(
+            parse_meeting_command("/edit action 3 New description here"),
+            MeetingCommand::Edit {
+                item_type: "action".to_string(),
+                index: 2,
+                new_text: "New description here".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_edit_note() {
+        assert_eq!(
+            parse_meeting_command("/edit note 2 Corrected note"),
+            MeetingCommand::Edit {
+                item_type: "note".to_string(),
+                index: 1,
+                new_text: "Corrected note".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_edit_missing_text_is_unknown() {
+        assert!(matches!(
+            parse_meeting_command("/edit decision 1"),
+            MeetingCommand::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn parse_edit_zero_index_is_unknown() {
+        assert!(matches!(
+            parse_meeting_command("/edit decision 0 text"),
+            MeetingCommand::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn parse_edit_bad_number_is_unknown() {
+        assert!(matches!(
+            parse_meeting_command("/edit decision abc text"),
+            MeetingCommand::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn parse_delete_decision() {
+        assert_eq!(
+            parse_meeting_command("/delete decision 2"),
+            MeetingCommand::Delete {
+                item_type: "decision".to_string(),
+                index: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_delete_action() {
+        assert_eq!(
+            parse_meeting_command("/delete action 1"),
+            MeetingCommand::Delete {
+                item_type: "action".to_string(),
+                index: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_delete_missing_number_is_unknown() {
+        assert!(matches!(
+            parse_meeting_command("/delete decision"),
+            MeetingCommand::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn parse_delete_zero_index_is_unknown() {
+        assert!(matches!(
+            parse_meeting_command("/delete action 0"),
+            MeetingCommand::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn help_text_contains_all_commands() {
+        let text = help_text();
+        for cmd in &[
+            "/decision",
+            "/action",
+            "/note",
+            "/question",
+            "/list",
+            "/edit",
+            "/delete",
+            "/close",
+            "/done",
+            "/help",
+            "/status",
+            "/recap",
+            "/participants",
+        ] {
+            assert!(text.contains(cmd), "help_text() should mention {cmd}");
+        }
     }
 }

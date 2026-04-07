@@ -395,3 +395,158 @@ pub(super) fn now_unix_ms() -> SimardResult<u128> {
         })?
         .as_millis())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_benchmark_count_some() {
+        assert_eq!(render_benchmark_count(Some(42)), "42");
+    }
+
+    #[test]
+    fn render_benchmark_count_none() {
+        assert_eq!(render_benchmark_count(None), "unmeasured");
+    }
+
+    #[test]
+    fn render_benchmark_delta_positive() {
+        assert_eq!(render_benchmark_delta(Some(3)), "+3");
+    }
+
+    #[test]
+    fn render_benchmark_delta_negative() {
+        assert_eq!(render_benchmark_delta(Some(-5)), "-5");
+    }
+
+    #[test]
+    fn render_benchmark_delta_none() {
+        assert_eq!(render_benchmark_delta(None), "unmeasured");
+    }
+
+    #[test]
+    fn evidence_quality_rank_sufficient() {
+        assert_eq!(evidence_quality_rank("sufficient"), 2);
+    }
+
+    #[test]
+    fn evidence_quality_rank_thin() {
+        assert_eq!(evidence_quality_rank("thin"), 1);
+    }
+
+    #[test]
+    fn evidence_quality_rank_unknown() {
+        assert_eq!(evidence_quality_rank("garbage"), 0);
+        assert_eq!(evidence_quality_rank(""), 0);
+    }
+
+    #[test]
+    fn compare_lower_is_better_improved() {
+        assert_eq!(
+            compare_lower_is_better(Some(2), Some(5)),
+            Some(BenchmarkComparisonStatus::Improved)
+        );
+    }
+
+    #[test]
+    fn compare_lower_is_better_regressed() {
+        assert_eq!(
+            compare_lower_is_better(Some(5), Some(2)),
+            Some(BenchmarkComparisonStatus::Regressed)
+        );
+    }
+
+    #[test]
+    fn compare_lower_is_better_equal_returns_none() {
+        assert_eq!(compare_lower_is_better(Some(3), Some(3)), None);
+    }
+
+    #[test]
+    fn compare_lower_is_better_none_returns_none() {
+        assert_eq!(compare_lower_is_better(None, Some(3)), None);
+        assert_eq!(compare_lower_is_better(Some(3), None), None);
+        assert_eq!(compare_lower_is_better(None, None), None);
+    }
+
+    #[test]
+    fn benchmark_count_delta_both_some() {
+        assert_eq!(benchmark_count_delta(Some(10), Some(7)), Some(3));
+        assert_eq!(benchmark_count_delta(Some(3), Some(8)), Some(-5));
+    }
+
+    #[test]
+    fn benchmark_count_delta_any_none() {
+        assert_eq!(benchmark_count_delta(None, Some(5)), None);
+        assert_eq!(benchmark_count_delta(Some(5), None), None);
+        assert_eq!(benchmark_count_delta(None, None), None);
+    }
+
+    #[test]
+    fn display_path_renders_lossy() {
+        let path = PathBuf::from("/foo/bar/baz.json");
+        assert_eq!(display_path(&path), "/foo/bar/baz.json");
+    }
+
+    fn make_run_summary(
+        passed: bool,
+        checks_passed: usize,
+        evidence: usize,
+        memory: usize,
+    ) -> BenchmarkComparisonRunSummary {
+        BenchmarkComparisonRunSummary {
+            suite_id: "s".into(),
+            session_id: "sess".into(),
+            run_started_at_unix_ms: 0,
+            passed,
+            correctness_checks_passed: checks_passed,
+            correctness_checks_total: 10,
+            evidence_quality: "sufficient".into(),
+            unnecessary_action_count: None,
+            retry_count: None,
+            exported_memory_records: memory,
+            exported_evidence_records: evidence,
+            report_json: "r.json".into(),
+        }
+    }
+
+    #[test]
+    fn compare_runs_pass_vs_fail() {
+        let current = make_run_summary(true, 8, 4, 3);
+        let previous = make_run_summary(false, 8, 4, 3);
+        assert_eq!(
+            compare_runs(&current, &previous),
+            BenchmarkComparisonStatus::Improved
+        );
+
+        let current = make_run_summary(false, 8, 4, 3);
+        let previous = make_run_summary(true, 8, 4, 3);
+        assert_eq!(
+            compare_runs(&current, &previous),
+            BenchmarkComparisonStatus::Regressed
+        );
+    }
+
+    #[test]
+    fn compare_runs_checks_differ() {
+        let current = make_run_summary(true, 9, 4, 3);
+        let previous = make_run_summary(true, 7, 4, 3);
+        assert_eq!(
+            compare_runs(&current, &previous),
+            BenchmarkComparisonStatus::Improved
+        );
+    }
+
+    #[test]
+    fn compare_runs_unchanged() {
+        let a = make_run_summary(true, 8, 4, 3);
+        let b = make_run_summary(true, 8, 4, 3);
+        assert_eq!(compare_runs(&a, &b), BenchmarkComparisonStatus::Unchanged);
+    }
+
+    #[test]
+    fn now_unix_ms_returns_nonzero() {
+        let ms = now_unix_ms().unwrap();
+        assert!(ms > 0);
+    }
+}

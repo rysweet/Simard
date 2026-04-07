@@ -134,7 +134,7 @@ pub(super) fn auto_capture_structured_items<W: Write>(
                 if record_decision(session, decision).is_ok() {
                     writeln!(
                         output,
-                        "  [captured: decision \u{2014} {}]",
+                        "  Auto-captured decision: {}",
                         short_label(desc, 60)
                     )
                     .ok();
@@ -148,12 +148,7 @@ pub(super) fn auto_capture_structured_items<W: Write>(
                     due_description: None,
                 };
                 if record_action_item(session, action).is_ok() {
-                    writeln!(
-                        output,
-                        "  [captured: action \u{2014} {}]",
-                        short_label(desc, 60)
-                    )
-                    .ok();
+                    writeln!(output, "  Auto-captured action: {}", short_label(desc, 60)).ok();
                 }
             }
         }

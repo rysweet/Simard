@@ -5,13 +5,13 @@ use std::io::{BufRead, Write};
 use crate::base_types::{BaseTypeSession, BaseTypeTurnInput};
 use crate::error::{SimardError, SimardResult};
 use crate::meeting_facilitator::{
-    ActionItem, MeetingDecision, MeetingSession, add_note, close_meeting, record_action_item,
-    record_decision, start_meeting,
+    ActionItem, MeetingDecision, MeetingSession, add_note, add_question, close_meeting, edit_item,
+    record_action_item, record_decision, remove_item, start_meeting,
 };
 use crate::memory_bridge::CognitiveMemoryBridge;
 
 use super::auto_capture::auto_capture_structured_items;
-use super::command::{HELP_TEXT, MeetingCommand, parse_meeting_command};
+use super::command::{MeetingCommand, help_text, parse_meeting_command};
 use super::persist::{persist_meeting_to_memory, write_meeting_handoff_artifact};
 
 const PROMPT: &str = "simard:meeting> ";
@@ -78,8 +78,8 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
     }
 
     let closed = close_meeting(session, bridge)?;
-    let summary = closed.durable_summary();
-    writeln!(output, "Meeting record: {summary}").ok();
+    print_recap("Meeting Closed", &closed, output);
+    writeln!(output).ok();
 
     write_meeting_handoff_artifact(&closed, output);
     persist_meeting_to_memory(&closed, bridge, output);
@@ -108,6 +108,73 @@ fn print_banner<W: Write>(topic: &str, has_agent: bool, output: &mut W) {
     }
     .ok();
     writeln!(output).ok();
+}
+
+fn format_elapsed(started_at: &str) -> String {
+    if started_at.is_empty() {
+        return "unknown".to_string();
+    }
+    match chrono::DateTime::parse_from_rfc3339(started_at) {
+        Ok(start) => {
+            let total_secs = chrono::Utc::now()
+                .signed_duration_since(start)
+                .num_seconds()
+                .max(0);
+            let mins = total_secs / 60;
+            let secs = total_secs % 60;
+            if mins > 0 {
+                format!("{mins}m {secs}s")
+            } else {
+                format!("{secs}s")
+            }
+        }
+        Err(_) => "unknown".to_string(),
+    }
+}
+
+fn print_recap<W: Write>(header: &str, session: &MeetingSession, output: &mut W) {
+    let elapsed = format_elapsed(&session.started_at);
+    writeln!(output, "── {header} ──").ok();
+    writeln!(output, "Topic: {}", session.topic).ok();
+    writeln!(output, "Duration: {elapsed}").ok();
+    writeln!(output).ok();
+
+    writeln!(output, "Decisions ({}):", session.decisions.len()).ok();
+    if session.decisions.is_empty() {
+        writeln!(output, "  (none)").ok();
+    } else {
+        for (i, d) in session.decisions.iter().enumerate() {
+            writeln!(output, "  {}. {} — {}", i + 1, d.description, d.rationale).ok();
+        }
+    }
+    writeln!(output).ok();
+
+    writeln!(output, "Action Items ({}):", session.action_items.len()).ok();
+    if session.action_items.is_empty() {
+        writeln!(output, "  (none)").ok();
+    } else {
+        for (i, a) in session.action_items.iter().enumerate() {
+            writeln!(
+                output,
+                "  {}. [P{}] {} (owner: {})",
+                i + 1,
+                a.priority,
+                a.description,
+                a.owner
+            )
+            .ok();
+        }
+    }
+    writeln!(output).ok();
+
+    writeln!(output, "Notes ({}):", session.notes.len()).ok();
+    if session.notes.is_empty() {
+        writeln!(output, "  (none)").ok();
+    } else {
+        for n in &session.notes {
+            writeln!(output, "  - {n}").ok();
+        }
+    }
 }
 
 fn dispatch_command<W: Write>(
@@ -157,6 +224,14 @@ fn dispatch_command<W: Write>(
                 writeln!(output, "Error: {e}").ok();
             }
         },
+        MeetingCommand::Question(text) => match add_question(session, &text) {
+            Ok(()) => {
+                writeln!(output, "Question added: {text}").ok();
+            }
+            Err(e) => {
+                writeln!(output, "Error: {e}").ok();
+            }
+        },
         MeetingCommand::Conversation(text) => {
             if let Some(agent_session) = agent {
                 let turn_input = BaseTypeTurnInput {
@@ -184,27 +259,81 @@ fn dispatch_command<W: Write>(
         }
         MeetingCommand::Close => unreachable!(),
         MeetingCommand::Help => {
-            write!(output, "{HELP_TEXT}").ok();
+            write!(output, "{}", help_text()).ok();
+        }
+        MeetingCommand::List => {
+            let has_items = !session.decisions.is_empty()
+                || !session.action_items.is_empty()
+                || !session.notes.is_empty()
+                || !session.explicit_questions.is_empty();
+            if !has_items {
+                writeln!(output, "No items recorded yet.").ok();
+            } else {
+                if !session.decisions.is_empty() {
+                    writeln!(output, "Decisions:").ok();
+                    for (i, d) in session.decisions.iter().enumerate() {
+                        writeln!(output, "  {}. {}", i + 1, d.description).ok();
+                    }
+                }
+                if !session.action_items.is_empty() {
+                    writeln!(output, "Action items:").ok();
+                    for (i, a) in session.action_items.iter().enumerate() {
+                        writeln!(output, "  {}. {} (owner={})", i + 1, a.description, a.owner).ok();
+                    }
+                }
+                if !session.notes.is_empty() {
+                    writeln!(output, "Notes:").ok();
+                    for (i, n) in session.notes.iter().enumerate() {
+                        writeln!(output, "  {}. {}", i + 1, n).ok();
+                    }
+                }
+                if !session.explicit_questions.is_empty() {
+                    writeln!(output, "Questions:").ok();
+                    for (i, q) in session.explicit_questions.iter().enumerate() {
+                        writeln!(output, "  {}. {}", i + 1, q).ok();
+                    }
+                }
+            }
+        }
+        MeetingCommand::Edit {
+            item_type,
+            index,
+            new_text,
+        } => match edit_item(session, &item_type, index, &new_text) {
+            Ok(()) => {
+                writeln!(output, "Updated {item_type} {}.", index + 1).ok();
+            }
+            Err(e) => {
+                writeln!(output, "Error: {e}").ok();
+            }
+        },
+        MeetingCommand::Delete { item_type, index } => {
+            match remove_item(session, &item_type, index) {
+                Ok(()) => {
+                    writeln!(output, "Deleted {item_type} {}.", index + 1).ok();
+                }
+                Err(e) => {
+                    writeln!(output, "Error: {e}").ok();
+                }
+            }
         }
         MeetingCommand::Status => {
-            let elapsed = if !session.started_at.is_empty() {
-                if let Ok(start) = chrono::DateTime::parse_from_rfc3339(&session.started_at) {
-                    let secs = chrono::Utc::now()
-                        .signed_duration_since(start)
-                        .num_seconds();
-                    format!("{secs}s")
-                } else {
-                    "unknown".to_string()
-                }
-            } else {
-                "unknown".to_string()
-            };
+            let elapsed = format_elapsed(&session.started_at);
             writeln!(output, "Meeting: {}", topic).ok();
             writeln!(output, "  Elapsed:     {elapsed}").ok();
             writeln!(output, "  Decisions:   {}", session.decisions.len()).ok();
             writeln!(output, "  Actions:     {}", session.action_items.len()).ok();
             writeln!(output, "  Notes:       {}", session.notes.len()).ok();
+            writeln!(
+                output,
+                "  Questions:   {}",
+                session.explicit_questions.len()
+            )
+            .ok();
             writeln!(output, "  Participants: {}", session.participants.len()).ok();
+        }
+        MeetingCommand::Recap => {
+            print_recap("Meeting Recap", session, output);
         }
         MeetingCommand::AddParticipant(name) => {
             if !session.participants.contains(&name) {
@@ -224,10 +353,15 @@ fn dispatch_command<W: Write>(
         }
         MeetingCommand::Empty => {}
         MeetingCommand::Unknown(input) => {
-            writeln!(output, "Could not parse command: {input}").ok();
+            writeln!(output, "Unknown command: {input}").ok();
             writeln!(
                 output,
-                "Try /help for command syntax, or just type naturally."
+                "Available commands: /decision, /action, /note, /question, /close, /done, /help"
+            )
+            .ok();
+            writeln!(
+                output,
+                "Type /help for full syntax, or just type naturally to talk with Simard."
             )
             .ok();
         }
@@ -366,5 +500,145 @@ mod tests {
         assert!(output_str.contains("Note added"));
         assert!(!output_str.contains("Agent response"));
         assert_eq!(session.notes, vec!["This is an explicit note"]);
+    }
+
+    #[test]
+    fn repl_list_shows_items_grouped() {
+        let bridge = mock_bridge();
+        let input =
+            b"/decision Ship it | Ready\n/action Write tests | bob\n/note Remember CI\n/list\n/close\n";
+        let mut reader = &input[..];
+        let mut output = Vec::new();
+
+        run_meeting_repl("List test", &bridge, None, "", &mut reader, &mut output).unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(output_str.contains("Decisions:"));
+        assert!(output_str.contains("1. Ship it"));
+        assert!(output_str.contains("Action items:"));
+        assert!(output_str.contains("1. Write tests (owner=bob)"));
+        assert!(output_str.contains("Notes:"));
+        assert!(output_str.contains("1. Remember CI"));
+    }
+
+    #[test]
+    fn repl_list_empty() {
+        let bridge = mock_bridge();
+        let input = b"/list\n/close\n";
+        let mut reader = &input[..];
+        let mut output = Vec::new();
+
+        run_meeting_repl("Empty", &bridge, None, "", &mut reader, &mut output).unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(output_str.contains("No items recorded yet."));
+    }
+
+    #[test]
+    fn repl_edit_decision() {
+        let bridge = mock_bridge();
+        let input = b"/decision Old text | reason\n/edit decision 1 New text\n/close\n";
+        let mut reader = &input[..];
+        let mut output = Vec::new();
+
+        let session =
+            run_meeting_repl("Edit", &bridge, None, "", &mut reader, &mut output).unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(output_str.contains("Updated decision 1."));
+        assert_eq!(session.decisions[0].description, "New text");
+    }
+
+    #[test]
+    fn repl_delete_action() {
+        let bridge = mock_bridge();
+        let input = b"/action Task one | alice\n/action Task two | bob\n/delete action 1\n/close\n";
+        let mut reader = &input[..];
+        let mut output = Vec::new();
+
+        let session =
+            run_meeting_repl("Delete", &bridge, None, "", &mut reader, &mut output).unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(output_str.contains("Deleted action 1."));
+        assert_eq!(session.action_items.len(), 1);
+        assert_eq!(session.action_items[0].description, "Task two");
+    }
+
+    #[test]
+    fn repl_edit_out_of_bounds_shows_error() {
+        let bridge = mock_bridge();
+        let input = b"/edit decision 1 text\n/close\n";
+        let mut reader = &input[..];
+        let mut output = Vec::new();
+
+        run_meeting_repl("OOB", &bridge, None, "", &mut reader, &mut output).unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(output_str.contains("Error:"));
+        assert!(output_str.contains("out of range"));
+    }
+
+    #[test]
+    fn repl_delete_out_of_bounds_shows_error() {
+        let bridge = mock_bridge();
+        let input = b"/delete note 5\n/close\n";
+        let mut reader = &input[..];
+        let mut output = Vec::new();
+
+        run_meeting_repl("OOB", &bridge, None, "", &mut reader, &mut output).unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(output_str.contains("Error:"));
+        assert!(output_str.contains("out of range"));
+    }
+
+    #[test]
+    fn repl_help_includes_new_commands() {
+        let bridge = mock_bridge();
+        let input = b"/help\n/close\n";
+        let mut reader = &input[..];
+        let mut output = Vec::new();
+
+        run_meeting_repl("Help", &bridge, None, "", &mut reader, &mut output).unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(output_str.contains("/list"));
+        assert!(output_str.contains("/edit"));
+        assert!(output_str.contains("/delete"));
+        assert!(output_str.contains("/question"));
+    }
+
+    #[test]
+    fn repl_question_command_adds_explicit_question() {
+        let bridge = mock_bridge();
+        let input = b"/question What is the release timeline?\n/close\n";
+        let mut reader = &input[..];
+        let mut output = Vec::new();
+
+        let session =
+            run_meeting_repl("Q test", &bridge, None, "", &mut reader, &mut output).unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(output_str.contains("Question added"));
+        assert_eq!(session.explicit_questions.len(), 1);
+        assert_eq!(
+            session.explicit_questions[0],
+            "What is the release timeline?"
+        );
+    }
+
+    #[test]
+    fn repl_question_appears_in_list() {
+        let bridge = mock_bridge();
+        let input = b"/question Who owns rollback?\n/list\n/close\n";
+        let mut reader = &input[..];
+        let mut output = Vec::new();
+
+        run_meeting_repl("Q list", &bridge, None, "", &mut reader, &mut output).unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(output_str.contains("Questions:"));
+        assert!(output_str.contains("1. Who owns rollback?"));
     }
 }

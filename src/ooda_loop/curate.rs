@@ -119,6 +119,7 @@ mod tests {
     fn sample_handoff(decisions: Vec<MeetingDecision>) -> MeetingHandoff {
         MeetingHandoff {
             topic: "Sprint planning".to_string(),
+            started_at: "2026-04-02T23:00:00Z".to_string(),
             closed_at: "2026-04-03T00:00:00Z".to_string(),
             decisions,
             action_items: Vec::new(),
@@ -136,6 +137,7 @@ mod tests {
     ) -> MeetingHandoff {
         MeetingHandoff {
             topic: "Sprint planning".to_string(),
+            started_at: "2026-04-02T23:00:00Z".to_string(),
             closed_at: "2026-04-03T00:00:00Z".to_string(),
             decisions,
             action_items,
