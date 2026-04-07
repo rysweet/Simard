@@ -395,7 +395,19 @@ mod tests {
     #[test]
     fn help_text_contains_all_commands() {
         let text = help_text();
-        for cmd in &["/decision", "/action", "/note", "/list", "/edit", "/delete", "/close", "/done", "/help", "/status", "/participants"] {
+        for cmd in &[
+            "/decision",
+            "/action",
+            "/note",
+            "/list",
+            "/edit",
+            "/delete",
+            "/close",
+            "/done",
+            "/help",
+            "/status",
+            "/participants",
+        ] {
             assert!(text.contains(cmd), "help_text() should mention {cmd}");
         }
     }
