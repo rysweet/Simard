@@ -103,6 +103,135 @@ pub fn add_note(session: &mut MeetingSession, note: &str) -> SimardResult<()> {
     Ok(())
 }
 
+/// Edit an existing item (decision description, action-item description, or note)
+/// by 0-based index.
+pub fn edit_item(
+    session: &mut MeetingSession,
+    item_type: &str,
+    index: usize,
+    new_text: &str,
+) -> SimardResult<()> {
+    if session.status != MeetingSessionStatus::Open {
+        return Err(SimardError::InvalidMeetingRecord {
+            field: "session.status".to_string(),
+            reason: "cannot edit items in a closed meeting".to_string(),
+        });
+    }
+    required_field("new_text", new_text)?;
+
+    match item_type {
+        "decision" => {
+            if index >= session.decisions.len() {
+                return Err(SimardError::InvalidMeetingRecord {
+                    field: "index".to_string(),
+                    reason: format!(
+                        "decision index {idx} out of range (have {n})",
+                        idx = index + 1,
+                        n = session.decisions.len()
+                    ),
+                });
+            }
+            session.decisions[index].description = new_text.to_string();
+        }
+        "action" => {
+            if index >= session.action_items.len() {
+                return Err(SimardError::InvalidMeetingRecord {
+                    field: "index".to_string(),
+                    reason: format!(
+                        "action index {idx} out of range (have {n})",
+                        idx = index + 1,
+                        n = session.action_items.len()
+                    ),
+                });
+            }
+            session.action_items[index].description = new_text.to_string();
+        }
+        "note" => {
+            if index >= session.notes.len() {
+                return Err(SimardError::InvalidMeetingRecord {
+                    field: "index".to_string(),
+                    reason: format!(
+                        "note index {idx} out of range (have {n})",
+                        idx = index + 1,
+                        n = session.notes.len()
+                    ),
+                });
+            }
+            session.notes[index] = new_text.to_string();
+        }
+        _ => {
+            return Err(SimardError::InvalidMeetingRecord {
+                field: "item_type".to_string(),
+                reason: format!("unknown item type '{item_type}'; use decision, action, or note"),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Remove an existing item (decision, action item, or note) by 0-based index.
+pub fn remove_item(
+    session: &mut MeetingSession,
+    item_type: &str,
+    index: usize,
+) -> SimardResult<()> {
+    if session.status != MeetingSessionStatus::Open {
+        return Err(SimardError::InvalidMeetingRecord {
+            field: "session.status".to_string(),
+            reason: "cannot delete items in a closed meeting".to_string(),
+        });
+    }
+
+    match item_type {
+        "decision" => {
+            if index >= session.decisions.len() {
+                return Err(SimardError::InvalidMeetingRecord {
+                    field: "index".to_string(),
+                    reason: format!(
+                        "decision index {idx} out of range (have {n})",
+                        idx = index + 1,
+                        n = session.decisions.len()
+                    ),
+                });
+            }
+            session.decisions.remove(index);
+        }
+        "action" => {
+            if index >= session.action_items.len() {
+                return Err(SimardError::InvalidMeetingRecord {
+                    field: "index".to_string(),
+                    reason: format!(
+                        "action index {idx} out of range (have {n})",
+                        idx = index + 1,
+                        n = session.action_items.len()
+                    ),
+                });
+            }
+            session.action_items.remove(index);
+        }
+        "note" => {
+            if index >= session.notes.len() {
+                return Err(SimardError::InvalidMeetingRecord {
+                    field: "index".to_string(),
+                    reason: format!(
+                        "note index {idx} out of range (have {n})",
+                        idx = index + 1,
+                        n = session.notes.len()
+                    ),
+                });
+            }
+            session.notes.remove(index);
+        }
+        _ => {
+            return Err(SimardError::InvalidMeetingRecord {
+                field: "item_type".to_string(),
+                reason: format!("unknown item type '{item_type}'; use decision, action, or note"),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Close a meeting session and persist a durable summary as both an episode
 /// and a semantic fact in cognitive memory.
 pub fn close_meeting(
@@ -251,5 +380,137 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("priority"));
+    }
+
+    #[test]
+    fn edit_decision_description() {
+        let bridge = mock_bridge();
+        let mut session = start_meeting("Edit test", &bridge).unwrap();
+        record_decision(
+            &mut session,
+            MeetingDecision {
+                description: "Original".to_string(),
+                rationale: "reason".to_string(),
+                participants: vec![],
+            },
+        )
+        .unwrap();
+        edit_item(&mut session, "decision", 0, "Updated").unwrap();
+        assert_eq!(session.decisions[0].description, "Updated");
+    }
+
+    #[test]
+    fn edit_action_item_description() {
+        let bridge = mock_bridge();
+        let mut session = start_meeting("Edit test", &bridge).unwrap();
+        record_action_item(
+            &mut session,
+            ActionItem {
+                description: "Old task".to_string(),
+                owner: "alice".to_string(),
+                priority: 1,
+                due_description: None,
+            },
+        )
+        .unwrap();
+        edit_item(&mut session, "action", 0, "New task").unwrap();
+        assert_eq!(session.action_items[0].description, "New task");
+        assert_eq!(session.action_items[0].owner, "alice");
+    }
+
+    #[test]
+    fn edit_note() {
+        let bridge = mock_bridge();
+        let mut session = start_meeting("Edit test", &bridge).unwrap();
+        add_note(&mut session, "old note").unwrap();
+        edit_item(&mut session, "note", 0, "new note").unwrap();
+        assert_eq!(session.notes[0], "new note");
+    }
+
+    #[test]
+    fn edit_out_of_bounds_returns_error() {
+        let bridge = mock_bridge();
+        let mut session = start_meeting("Edit test", &bridge).unwrap();
+        let err = edit_item(&mut session, "decision", 0, "text").unwrap_err();
+        assert!(err.to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn edit_unknown_type_returns_error() {
+        let bridge = mock_bridge();
+        let mut session = start_meeting("Edit test", &bridge).unwrap();
+        let err = edit_item(&mut session, "bogus", 0, "text").unwrap_err();
+        assert!(err.to_string().contains("unknown item type"));
+    }
+
+    #[test]
+    fn remove_decision() {
+        let bridge = mock_bridge();
+        let mut session = start_meeting("Delete test", &bridge).unwrap();
+        record_decision(
+            &mut session,
+            MeetingDecision {
+                description: "D1".to_string(),
+                rationale: "r".to_string(),
+                participants: vec![],
+            },
+        )
+        .unwrap();
+        record_decision(
+            &mut session,
+            MeetingDecision {
+                description: "D2".to_string(),
+                rationale: "r".to_string(),
+                participants: vec![],
+            },
+        )
+        .unwrap();
+        remove_item(&mut session, "decision", 0).unwrap();
+        assert_eq!(session.decisions.len(), 1);
+        assert_eq!(session.decisions[0].description, "D2");
+    }
+
+    #[test]
+    fn remove_action_item() {
+        let bridge = mock_bridge();
+        let mut session = start_meeting("Delete test", &bridge).unwrap();
+        record_action_item(
+            &mut session,
+            ActionItem {
+                description: "task".to_string(),
+                owner: "me".to_string(),
+                priority: 1,
+                due_description: None,
+            },
+        )
+        .unwrap();
+        remove_item(&mut session, "action", 0).unwrap();
+        assert!(session.action_items.is_empty());
+    }
+
+    #[test]
+    fn remove_note() {
+        let bridge = mock_bridge();
+        let mut session = start_meeting("Delete test", &bridge).unwrap();
+        add_note(&mut session, "keep").unwrap();
+        add_note(&mut session, "remove").unwrap();
+        remove_item(&mut session, "note", 1).unwrap();
+        assert_eq!(session.notes, vec!["keep"]);
+    }
+
+    #[test]
+    fn remove_out_of_bounds_returns_error() {
+        let bridge = mock_bridge();
+        let mut session = start_meeting("Delete test", &bridge).unwrap();
+        let err = remove_item(&mut session, "action", 0).unwrap_err();
+        assert!(err.to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn remove_unknown_type_returns_error() {
+        let bridge = mock_bridge();
+        let mut session = start_meeting("Delete test", &bridge).unwrap();
+        let err = remove_item(&mut session, "bogus", 0).unwrap_err();
+        assert!(err.to_string().contains("unknown item type"));
     }
 }
