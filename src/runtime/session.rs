@@ -169,7 +169,7 @@ impl RuntimeKernel {
                 value: record.value,
                 session_id: session.id.clone(),
                 recorded_in: SessionPhase::Persistence,
-            created_at: None,
+                created_at: None,
             })?;
             session.attach_memory(key);
         }

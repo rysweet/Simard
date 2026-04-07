@@ -32,10 +32,7 @@ pub trait MemoryStore: Send + Sync {
     /// Return records matching the given scope from ALL sessions.
     /// Default implementation delegates to `list()` since most stores
     /// already return cross-session data.
-    fn list_by_scope_across_sessions(
-        &self,
-        scope: MemoryScope,
-    ) -> SimardResult<Vec<MemoryRecord>> {
+    fn list_by_scope_across_sessions(&self, scope: MemoryScope) -> SimardResult<Vec<MemoryRecord>> {
         self.list(scope)
     }
 }

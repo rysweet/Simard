@@ -6,7 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::{Duration, Utc};
 use uuid::Uuid;
 
-use crate::memory::{FileBackedMemoryStore, InMemoryMemoryStore, MemoryRecord, MemoryScope, MemoryStore};
+use crate::memory::{
+    FileBackedMemoryStore, InMemoryMemoryStore, MemoryRecord, MemoryScope, MemoryStore,
+};
 use crate::session::{SessionId, SessionPhase};
 
 fn make_record(key: &str, scope: MemoryScope, session_id: &SessionId) -> MemoryRecord {
@@ -192,9 +194,15 @@ fn in_memory_list_all_returns_all_records() {
     let store = InMemoryMemoryStore::try_default().unwrap();
     let sid = SessionId::from_uuid(Uuid::nil());
 
-    store.put(make_record("a", MemoryScope::Decision, &sid)).unwrap();
-    store.put(make_record("b", MemoryScope::Project, &sid)).unwrap();
-    store.put(make_record("c", MemoryScope::Benchmark, &sid)).unwrap();
+    store
+        .put(make_record("a", MemoryScope::Decision, &sid))
+        .unwrap();
+    store
+        .put(make_record("b", MemoryScope::Project, &sid))
+        .unwrap();
+    store
+        .put(make_record("c", MemoryScope::Benchmark, &sid))
+        .unwrap();
 
     let all = store.list_all().unwrap();
     assert_eq!(all.len(), 3);
@@ -260,9 +268,15 @@ fn count_matches_list_length() {
     let store = InMemoryMemoryStore::try_default().unwrap();
     let sid = SessionId::from_uuid(Uuid::nil());
 
-    store.put(make_record("x", MemoryScope::Decision, &sid)).unwrap();
-    store.put(make_record("y", MemoryScope::Decision, &sid)).unwrap();
-    store.put(make_record("z", MemoryScope::Project, &sid)).unwrap();
+    store
+        .put(make_record("x", MemoryScope::Decision, &sid))
+        .unwrap();
+    store
+        .put(make_record("y", MemoryScope::Decision, &sid))
+        .unwrap();
+    store
+        .put(make_record("z", MemoryScope::Project, &sid))
+        .unwrap();
 
     let count = store.count_for_session(&sid).unwrap();
     let list = store.list_for_session(&sid).unwrap();
@@ -276,8 +290,12 @@ fn list_all_superset_of_scoped_lists() {
     let store = FileBackedMemoryStore::try_new(&path).unwrap();
     let sid = SessionId::from_uuid(Uuid::nil());
 
-    store.put(make_record("d1", MemoryScope::Decision, &sid)).unwrap();
-    store.put(make_record("p1", MemoryScope::Project, &sid)).unwrap();
+    store
+        .put(make_record("d1", MemoryScope::Decision, &sid))
+        .unwrap();
+    store
+        .put(make_record("p1", MemoryScope::Project, &sid))
+        .unwrap();
 
     let all = store.list_all().unwrap();
     let decisions = store.list(MemoryScope::Decision).unwrap();
@@ -379,7 +397,10 @@ fn untagged_scope_serialization_roundtrip() {
         created_at: None,
     };
     let json = serde_json::to_string(&record).unwrap();
-    assert!(json.contains("untagged"), "scope should serialize as 'untagged'");
+    assert!(
+        json.contains("untagged"),
+        "scope should serialize as 'untagged'"
+    );
     let deserialized: MemoryRecord = serde_json::from_str(&json).unwrap();
     assert_eq!(deserialized.scope, MemoryScope::Untagged);
 }
@@ -442,7 +463,9 @@ fn file_backed_put_auto_stamps_created_at() {
     let store = FileBackedMemoryStore::try_new(&path).unwrap();
     let sid = SessionId::from_uuid(Uuid::nil());
 
-    store.put(make_record("stamp-fb", MemoryScope::Decision, &sid)).unwrap();
+    store
+        .put(make_record("stamp-fb", MemoryScope::Decision, &sid))
+        .unwrap();
     let stored = store.list(MemoryScope::Decision).unwrap();
     assert!(
         stored[0].created_at.is_some(),

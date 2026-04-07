@@ -339,7 +339,11 @@ pub(super) fn class_specific_checks(
                 passed: refactor_mentioned,
                 detail: format!(
                     "execution output {} refactoring references",
-                    if refactor_mentioned { "contains" } else { "lacks" }
+                    if refactor_mentioned {
+                        "contains"
+                    } else {
+                        "lacks"
+                    }
                 ),
             }]
         }

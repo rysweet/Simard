@@ -217,7 +217,7 @@ fn from_handoff_tracks_record_counts() {
         value: "test-value".to_string(),
         session_id: SessionId::parse("00000000-0000-0000-0000-000000000001").unwrap(),
         recorded_in: SessionPhase::Execution,
-            created_at: None,
+        created_at: None,
     });
 
     let evidence_count = handoff.evidence_records.len();

@@ -214,9 +214,7 @@ pub fn consolidation_intake(
     let prior_facts = bridge.search_facts("memory-store-adapter", 50, 0.0)?;
     let count = prior_facts.len();
     if count > 0 {
-        let summary = format!(
-            "Hydrated {count} prior-session facts for cross-session recall"
-        );
+        let summary = format!("Hydrated {count} prior-session facts for cross-session recall");
         bridge.push_working("consolidation-intake", &summary, session_id.as_str(), 0.7)?;
         bridge.store_episode(&summary, "consolidation-intake", None)?;
     }

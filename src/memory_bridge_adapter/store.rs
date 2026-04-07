@@ -380,11 +380,7 @@ impl MemoryStore for CognitiveBridgeMemoryStore {
             })?;
         Ok(records
             .values()
-            .filter(|r| {
-                r.created_at
-                    .map(|t| t >= start && t < end)
-                    .unwrap_or(false)
-            })
+            .filter(|r| r.created_at.map(|t| t >= start && t < end).unwrap_or(false))
             .cloned()
             .collect())
     }

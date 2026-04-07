@@ -142,11 +142,7 @@ impl MemoryStore for FileBackedMemoryStore {
                 store: MEMORY_STORE_NAME.to_string(),
             })?
             .iter()
-            .filter(|r| {
-                r.created_at
-                    .map(|t| t >= start && t < end)
-                    .unwrap_or(false)
-            })
+            .filter(|r| r.created_at.map(|t| t >= start && t < end).unwrap_or(false))
             .cloned()
             .collect())
     }
