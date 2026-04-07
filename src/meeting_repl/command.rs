@@ -161,28 +161,37 @@ pub fn parse_meeting_command(line: &str) -> MeetingCommand {
         return MeetingCommand::Unknown(trimmed.to_string());
     }
 
-    // Any non-command input is natural language — route to the agent.
+    // Any line starting with `/` that didn't match above is an unknown command.
+    if trimmed.starts_with('/') {
+        return MeetingCommand::Unknown(trimmed.to_string());
+    }
+
+    // Non-command input is natural language — route to the agent.
     MeetingCommand::Conversation(trimmed.to_string())
 }
 
-pub(super) const HELP_TEXT: &str = "\
+/// Dynamically generated help text — stays in sync with the parser.
+pub fn help_text() -> String {
+    "\
 Simard meeting — speak naturally and Simard will respond.
 
 Commands (optional):
-  /decision <description> | <rationale>   Record a formal decision
+  /decision <description> | <rationale>        Record a formal decision
   /action <description> | <owner> [| <priority>]  Record an action item
-  /note <text>                            Add an explicit note
-  /list                                   Show numbered list of all items
-  /edit <type> <number> <new text>        Edit an item (type: decision, action, note)
-  /delete <type> <number>                 Delete an item (type: decision, action, note)
-  /status                                 Show meeting status summary
-  /participants                           List current participants
-  /participants add <name>                Add a participant
-  /close or /done                         Close the meeting and persist summary
-  /help                                   Show this help
+  /note <text>                                  Add an explicit note
+  /list                                         Show numbered list of all items
+  /edit <type> <number> <new text>              Edit an item (type: decision, action, note)
+  /delete <type> <number>                       Delete an item (type: decision, action, note)
+  /status                                       Show meeting status summary
+  /participants                                 List current participants
+  /participants add <name>                      Add a participant
+  /close or /done                               Close the meeting and persist summary
+  /help                                         Show this help
 
 Anything else you type is a conversation with Simard.
-";
+"
+    .to_string()
+}
 
 #[cfg(test)]
 mod tests {
@@ -286,6 +295,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_unknown_slash_command() {
+        assert_eq!(
+            parse_meeting_command("/foobar"),
+            MeetingCommand::Unknown("/foobar".to_string())
+        );
+        assert_eq!(
+            parse_meeting_command("/status check"),
+            MeetingCommand::Unknown("/status check".to_string())
+        );
+    }
+
+    #[test]
     fn parse_edit_action() {
         assert_eq!(
             parse_meeting_command("/edit action 3 New description here"),
@@ -369,5 +390,13 @@ mod tests {
             parse_meeting_command("/delete action 0"),
             MeetingCommand::Unknown(_)
         ));
+    }
+
+    #[test]
+    fn help_text_contains_all_commands() {
+        let text = help_text();
+        for cmd in &["/decision", "/action", "/note", "/list", "/edit", "/delete", "/close", "/done", "/help", "/status", "/participants"] {
+            assert!(text.contains(cmd), "help_text() should mention {cmd}");
+        }
     }
 }
