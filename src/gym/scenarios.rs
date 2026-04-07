@@ -4,7 +4,7 @@ use crate::runtime::RuntimeTopology;
 
 use super::types::{BenchmarkCheckResult, BenchmarkClass, BenchmarkScenario};
 
-const BENCHMARK_SCENARIOS: [BenchmarkScenario; 9] = [
+const BENCHMARK_SCENARIOS: [BenchmarkScenario; 15] = [
     BenchmarkScenario {
         id: "repo-exploration-local",
         title: "Repo exploration on local harness",
@@ -104,6 +104,73 @@ const BENCHMARK_SCENARIOS: [BenchmarkScenario; 9] = [
         topology: RuntimeTopology::SingleProcess,
         objective: "Write a unit test for the function `pub fn goal_slug(title: &str) -> String` defined in src/goals.rs. The test should: (1) call goal_slug with a representative input string containing uppercase letters, spaces, and special characters, (2) assert the output matches expected slug format (lowercase, hyphen-separated, no leading/trailing hyphens), (3) be a valid #[test] function that compiles and runs.",
         expected_min_runtime_evidence: 3,
+    },
+    // --- Additional scenarios for broader coverage ---
+    BenchmarkScenario {
+        id: "test-writing-edge-cases",
+        title: "Write edge-case tests for boundary conditions",
+        description: "Exercise writing tests that cover boundary conditions and edge cases for a function with numeric or string inputs. Scored on whether tests cover empty input, maximum values, and off-by-one conditions.",
+        class: BenchmarkClass::TestWriting,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Write edge-case unit tests for the function `pub fn render_benchmark_count(count: usize, label: &str) -> String` in src/gym/reporting.rs. Tests should cover: (1) count of zero, (2) count of 1 (singular vs plural handling), (3) a large count value, (4) an empty label string. Each test should be a valid #[test] function with clear assertions.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "bug-fix-error-propagation",
+        title: "Identify and describe an error propagation fix",
+        description: "Exercise identifying code that uses .expect() or .unwrap() where Result propagation with ? would be safer. Scored on whether the defect is correctly identified, the fix is described precisely, and safety implications are noted.",
+        class: BenchmarkClass::BugFix,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Scan the Simard codebase for a production (non-test) function that uses .expect() or .unwrap() on a Result or Option where the calling function already returns Result. Identify: (1) the exact file and line, (2) why the panic is unsafe in that context, (3) the precise replacement using ? or .ok_or_else(), (4) any signature changes needed. Produce a structured fix description.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "bug-fix-off-by-one",
+        title: "Identify potential off-by-one or boundary bug",
+        description: "Exercise identifying code with potential off-by-one errors, incorrect boundary checks, or fence-post problems. Scored on whether the analysis is specific, the risk is correctly assessed, and a concrete fix is proposed.",
+        class: BenchmarkClass::BugFix,
+        identity: "simard-gym",
+        base_type: "copilot-sdk",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze the Simard codebase for a function that performs index arithmetic, slice operations, or loop bounds checking. Identify: (1) a specific location where boundary handling could be incorrect, (2) the exact inputs that would trigger the issue, (3) a concrete fix with before/after code. If no real bug exists, describe the defensive check that would guard against one.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "refactor-extract-function",
+        title: "Identify and plan a function extraction refactor",
+        description: "Exercise identifying a code block that should be extracted into a named function for clarity and reuse. Scored on whether the extracted function has a clear responsibility, appropriate parameters, and preserves existing behavior.",
+        class: BenchmarkClass::Refactoring,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Find a function in the Simard codebase longer than 30 lines that contains a logically distinct block of code suitable for extraction. Describe: (1) the source file and function name, (2) the lines to extract, (3) the new function signature (name, parameters, return type), (4) how the original function would call the extracted function. Verify the refactor preserves behavior.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "refactor-simplify-match",
+        title: "Simplify a complex match expression",
+        description: "Exercise simplifying a match expression by combining arms, using wildcard patterns, or converting to if-let chains. Scored on whether the simplification is correct, reduces line count, and preserves all behavior.",
+        class: BenchmarkClass::Refactoring,
+        identity: "simard-engineer",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Find a match expression in the Simard codebase with 4 or more arms where some arms share identical or nearly identical bodies. Describe: (1) the exact location, (2) which arms can be combined, (3) the simplified match expression, (4) any edge cases that must be preserved. Show both the original and simplified code.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "repo-exploration-multi-process",
+        title: "Repository exploration under multi-process topology",
+        description: "Exercise the same repo-exploration task as the local variant but under the multi-process topology, validating that the loopback mesh transport and coordinated supervisor correctly propagate exploration results.",
+        class: BenchmarkClass::RepoExploration,
+        identity: "simard-gym",
+        base_type: "rusty-clawd",
+        topology: RuntimeTopology::MultiProcess,
+        objective: "Analyze the repository at /home/azureuser/src/Simard under multi-process topology. Identify: (1) the top-level project structure and key directories, (2) all Cargo.toml dependencies and their purposes, (3) the main entry point(s), (4) at least five public modules and their responsibilities. Produce a structured summary covering all four areas.",
+        expected_min_runtime_evidence: 4,
     },
 ];
 
@@ -316,36 +383,107 @@ pub(super) fn class_specific_checks(
             }]
         }
         BenchmarkClass::BugFix => {
-            let fix_mentioned = combined.contains("fix")
-                || combined.contains("bug")
-                || combined.contains("patch")
-                || combined.contains("resolve");
-            vec![BenchmarkCheckResult {
-                id: "bug-fix-attempted".to_string(),
-                passed: fix_mentioned,
-                detail: format!(
-                    "execution output {} bug-fix references",
-                    if fix_mentioned { "contains" } else { "lacks" }
-                ),
-            }]
+            let defect_identified = combined.contains("bug")
+                || combined.contains("defect")
+                || combined.contains("issue")
+                || combined.contains("unwrap")
+                || combined.contains("expect")
+                || combined.contains("panic");
+            let fix_described = combined.contains("fix")
+                || combined.contains("replac")
+                || combined.contains("propagat")
+                || combined.contains("convert")
+                || combined.contains("refactor");
+            let safety_analysis = combined.contains("safe")
+                || combined.contains("error handling")
+                || combined.contains("result")
+                || combined.contains("graceful")
+                || combined.contains("recover");
+            vec![
+                BenchmarkCheckResult {
+                    id: "bug-defect-identified".to_string(),
+                    passed: defect_identified,
+                    detail: format!(
+                        "execution output {} defect identification",
+                        if defect_identified {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "bug-fix-described".to_string(),
+                    passed: fix_described,
+                    detail: format!(
+                        "execution output {} fix description",
+                        if fix_described { "includes" } else { "lacks" }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "bug-safety-analyzed".to_string(),
+                    passed: safety_analysis,
+                    detail: format!(
+                        "execution output {} safety analysis",
+                        if safety_analysis {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
         }
         BenchmarkClass::Refactoring => {
-            let refactor_mentioned = combined.contains("refactor")
-                || combined.contains("restructur")
-                || combined.contains("clean")
-                || combined.contains("simplif");
-            vec![BenchmarkCheckResult {
-                id: "refactoring-attempted".to_string(),
-                passed: refactor_mentioned,
-                detail: format!(
-                    "execution output {} refactoring references",
-                    if refactor_mentioned {
-                        "contains"
-                    } else {
-                        "lacks"
-                    }
-                ),
-            }]
+            let change_identified = combined.contains("extract")
+                || combined.contains("simplif")
+                || combined.contains("refactor")
+                || combined.contains("renam")
+                || combined.contains("restructur");
+            let behavior_preserved = combined.contains("preserv")
+                || combined.contains("behavior")
+                || combined.contains("equivalent")
+                || combined.contains("same result")
+                || combined.contains("no change in");
+            let code_shown = combined.contains("fn ")
+                || combined.contains("before")
+                || combined.contains("after")
+                || combined.contains("original")
+                || combined.contains("simplified");
+            vec![
+                BenchmarkCheckResult {
+                    id: "refactor-change-identified".to_string(),
+                    passed: change_identified,
+                    detail: format!(
+                        "execution output {} refactoring identification",
+                        if change_identified {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "refactor-behavior-preserved".to_string(),
+                    passed: behavior_preserved,
+                    detail: format!(
+                        "execution output {} behavior preservation evidence",
+                        if behavior_preserved {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "refactor-code-shown".to_string(),
+                    passed: code_shown,
+                    detail: format!(
+                        "execution output {} code examples",
+                        if code_shown { "includes" } else { "lacks" }
+                    ),
+                },
+            ]
         }
     }
 }

@@ -16,6 +16,8 @@ fn benchmark_class_display_all_variants() {
         "session-quality"
     );
     assert_eq!(BenchmarkClass::TestWriting.to_string(), "test-writing");
+    assert_eq!(BenchmarkClass::BugFix.to_string(), "bug-fix");
+    assert_eq!(BenchmarkClass::Refactoring.to_string(), "refactoring");
 }
 
 #[test]
@@ -39,6 +41,10 @@ fn benchmark_class_serializes_to_kebab_case() {
     assert!(json.contains("safe-code-change"));
     let json = serde_json::to_string(&BenchmarkClass::TestWriting).unwrap();
     assert!(json.contains("test-writing"));
+    let json = serde_json::to_string(&BenchmarkClass::BugFix).unwrap();
+    assert!(json.contains("bug-fix"));
+    let json = serde_json::to_string(&BenchmarkClass::Refactoring).unwrap();
+    assert!(json.contains("refactoring"));
 }
 
 #[test]

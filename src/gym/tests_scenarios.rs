@@ -15,7 +15,7 @@ use crate::session::{SessionId, SessionPhase, SessionRecord};
 
 #[test]
 fn benchmark_scenarios_returns_nine_scenarios() {
-    assert_eq!(benchmark_scenarios().len(), 9);
+    assert_eq!(benchmark_scenarios().len(), 15);
 }
 
 #[test]
@@ -60,6 +60,8 @@ fn benchmark_scenarios_covers_all_classes() {
     assert!(has_class(BenchmarkClass::SafeCodeChange));
     assert!(has_class(BenchmarkClass::SessionQuality));
     assert!(has_class(BenchmarkClass::TestWriting));
+    assert!(has_class(BenchmarkClass::BugFix));
+    assert!(has_class(BenchmarkClass::Refactoring));
 }
 
 // --- resolve_benchmark_scenario ---
@@ -507,4 +509,203 @@ fn class_checks_test_writing_detects_expect_for_assertions() {
         .find(|c| c.id == "test-has-assertions")
         .unwrap();
     assert!(check.passed);
+}
+
+// -- BugFix checks --
+
+#[test]
+fn class_checks_bug_fix_passes_with_keywords() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::BugFix,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome(
+        "found unwrap bug in error handling path",
+        "fix: replace expect with Result propagation for safety",
+        "the panic was unsafe, now uses graceful error recovery",
+    );
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 3);
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "bug-defect-identified" && c.passed)
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "bug-fix-described" && c.passed)
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "bug-safety-analyzed" && c.passed)
+    );
+}
+
+#[test]
+fn class_checks_bug_fix_fails_without_keywords() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::BugFix,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome("nothing", "bland text", "empty");
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 3);
+    for check in &checks {
+        assert!(!check.passed, "check '{}' should have failed", check.id);
+    }
+}
+
+#[test]
+fn class_checks_bug_fix_detects_panic_keyword() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::BugFix,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome("found a panic in production code", "bland", "bland");
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    let check = checks
+        .iter()
+        .find(|c| c.id == "bug-defect-identified")
+        .unwrap();
+    assert!(check.passed);
+}
+
+#[test]
+fn class_checks_bug_fix_detects_convert_for_fix() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::BugFix,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome("bland", "convert the call to use ? operator", "bland");
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    let check = checks
+        .iter()
+        .find(|c| c.id == "bug-fix-described")
+        .unwrap();
+    assert!(check.passed);
+}
+
+// -- Refactoring checks --
+
+#[test]
+fn class_checks_refactoring_passes_with_keywords() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::Refactoring,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome(
+        "extract helper fn from long function",
+        "refactored code preserves original behavior",
+        "before and after code shown, equivalent output",
+    );
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 3);
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "refactor-change-identified" && c.passed)
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "refactor-behavior-preserved" && c.passed)
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "refactor-code-shown" && c.passed)
+    );
+}
+
+#[test]
+fn class_checks_refactoring_fails_without_keywords() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::Refactoring,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome("nothing", "bland text", "empty");
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 3);
+    for check in &checks {
+        assert!(!check.passed, "check '{}' should have failed", check.id);
+    }
+}
+
+#[test]
+fn class_checks_refactoring_detects_simplify_keyword() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::Refactoring,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome("simplified the match expression", "bland", "bland");
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    let check = checks
+        .iter()
+        .find(|c| c.id == "refactor-change-identified")
+        .unwrap();
+    assert!(check.passed);
+}
+
+#[test]
+fn class_checks_refactoring_detects_preserve_keyword() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::Refactoring,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome("bland", "bland", "behavior is preserved after change");
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    let check = checks
+        .iter()
+        .find(|c| c.id == "refactor-behavior-preserved")
+        .unwrap();
+    assert!(check.passed);
+}
+
+// -- Coverage distribution checks --
+
+#[test]
+fn benchmark_scenarios_each_class_has_at_least_two() {
+    let scenarios = benchmark_scenarios();
+    let count = |class: BenchmarkClass| scenarios.iter().filter(|s| s.class == class).count();
+    assert!(count(BenchmarkClass::RepoExploration) >= 2);
+    assert!(count(BenchmarkClass::Documentation) >= 2);
+    assert!(count(BenchmarkClass::SafeCodeChange) >= 2);
+    assert!(count(BenchmarkClass::SessionQuality) >= 2);
+    assert!(count(BenchmarkClass::TestWriting) >= 2);
+    assert!(count(BenchmarkClass::BugFix) >= 2);
+    assert!(count(BenchmarkClass::Refactoring) >= 2);
+}
+
+#[test]
+fn benchmark_scenarios_multi_process_coverage() {
+    let multi = benchmark_scenarios()
+        .iter()
+        .filter(|s| s.topology == RuntimeTopology::MultiProcess)
+        .count();
+    assert!(
+        multi >= 2,
+        "need at least 2 MultiProcess scenarios, got {multi}"
+    );
+}
+
+#[test]
+fn benchmark_scenarios_copilot_sdk_coverage() {
+    let copilot = benchmark_scenarios()
+        .iter()
+        .filter(|s| s.base_type == "copilot-sdk")
+        .count();
+    assert!(
+        copilot >= 2,
+        "need at least 2 copilot-sdk scenarios, got {copilot}"
+    );
 }
