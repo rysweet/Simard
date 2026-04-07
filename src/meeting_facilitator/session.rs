@@ -58,6 +58,7 @@ pub fn start_meeting(topic: &str, bridge: &CognitiveMemoryBridge) -> SimardResul
         status: MeetingSessionStatus::Open,
         started_at: chrono::Utc::now().to_rfc3339(),
         participants: Vec::new(),
+        explicit_questions: Vec::new(),
     })
 }
 
@@ -100,6 +101,19 @@ pub fn add_note(session: &mut MeetingSession, note: &str) -> SimardResult<()> {
     }
     required_field("note", note)?;
     session.notes.push(note.to_string());
+    Ok(())
+}
+
+/// Add an explicit open question to an open meeting session.
+pub fn add_question(session: &mut MeetingSession, question: &str) -> SimardResult<()> {
+    if session.status != MeetingSessionStatus::Open {
+        return Err(SimardError::InvalidMeetingRecord {
+            field: "session.status".to_string(),
+            reason: "cannot add a question to a closed meeting".to_string(),
+        });
+    }
+    required_field("question", question)?;
+    session.explicit_questions.push(question.to_string());
     Ok(())
 }
 
@@ -159,10 +173,25 @@ pub fn edit_item(
             }
             session.notes[index] = new_text.to_string();
         }
+        "question" => {
+            if index >= session.explicit_questions.len() {
+                return Err(SimardError::InvalidMeetingRecord {
+                    field: "index".to_string(),
+                    reason: format!(
+                        "question index {idx} out of range (have {n})",
+                        idx = index + 1,
+                        n = session.explicit_questions.len()
+                    ),
+                });
+            }
+            session.explicit_questions[index] = new_text.to_string();
+        }
         _ => {
             return Err(SimardError::InvalidMeetingRecord {
                 field: "item_type".to_string(),
-                reason: format!("unknown item type '{item_type}'; use decision, action, or note"),
+                reason: format!(
+                    "unknown item type '{item_type}'; use decision, action, note, or question"
+                ),
             });
         }
     }
@@ -222,10 +251,25 @@ pub fn remove_item(
             }
             session.notes.remove(index);
         }
+        "question" => {
+            if index >= session.explicit_questions.len() {
+                return Err(SimardError::InvalidMeetingRecord {
+                    field: "index".to_string(),
+                    reason: format!(
+                        "question index {idx} out of range (have {n})",
+                        idx = index + 1,
+                        n = session.explicit_questions.len()
+                    ),
+                });
+            }
+            session.explicit_questions.remove(index);
+        }
         _ => {
             return Err(SimardError::InvalidMeetingRecord {
                 field: "item_type".to_string(),
-                reason: format!("unknown item type '{item_type}'; use decision, action, or note"),
+                reason: format!(
+                    "unknown item type '{item_type}'; use decision, action, note, or question"
+                ),
             });
         }
     }
@@ -512,5 +556,53 @@ mod tests {
         let mut session = start_meeting("Delete test", &bridge).unwrap();
         let err = remove_item(&mut session, "bogus", 0).unwrap_err();
         assert!(err.to_string().contains("unknown item type"));
+    }
+
+    #[test]
+    fn add_question_to_session() {
+        let bridge = mock_bridge();
+        let mut session = start_meeting("Question test", &bridge).unwrap();
+        add_question(&mut session, "What is the release timeline?").unwrap();
+        assert_eq!(session.explicit_questions.len(), 1);
+        assert_eq!(
+            session.explicit_questions[0],
+            "What is the release timeline?"
+        );
+    }
+
+    #[test]
+    fn add_question_rejects_empty() {
+        let bridge = mock_bridge();
+        let mut session = start_meeting("Question test", &bridge).unwrap();
+        let err = add_question(&mut session, "").unwrap_err();
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn add_question_rejects_closed_meeting() {
+        let bridge = mock_bridge();
+        let session = start_meeting("Q", &bridge).unwrap();
+        let mut closed = close_meeting(session, &bridge).unwrap();
+        let err = add_question(&mut closed, "Late question").unwrap_err();
+        assert!(err.to_string().contains("closed meeting"));
+    }
+
+    #[test]
+    fn edit_question() {
+        let bridge = mock_bridge();
+        let mut session = start_meeting("Edit Q", &bridge).unwrap();
+        add_question(&mut session, "Original question").unwrap();
+        edit_item(&mut session, "question", 0, "Updated question").unwrap();
+        assert_eq!(session.explicit_questions[0], "Updated question");
+    }
+
+    #[test]
+    fn remove_question() {
+        let bridge = mock_bridge();
+        let mut session = start_meeting("Delete Q", &bridge).unwrap();
+        add_question(&mut session, "Q1").unwrap();
+        add_question(&mut session, "Q2").unwrap();
+        remove_item(&mut session, "question", 0).unwrap();
+        assert_eq!(session.explicit_questions, vec!["Q2"]);
     }
 }

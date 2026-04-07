@@ -21,6 +21,15 @@ pub struct ActionItem {
     pub due_description: Option<String>,
 }
 
+/// An open question recorded during or inferred from a meeting.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct OpenQuestion {
+    pub text: String,
+    /// `true` when the user explicitly typed `/question`, `false` when inferred
+    /// from notes heuristics (contains `?`, starts with `OPEN:`, etc.).
+    pub explicit: bool,
+}
+
 /// Status of an in-progress meeting.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum MeetingSessionStatus {
@@ -47,6 +56,9 @@ pub struct MeetingSession {
     pub status: MeetingSessionStatus,
     pub started_at: String,
     pub participants: Vec<String>,
+    /// Questions explicitly added via `/question`.
+    #[serde(default)]
+    pub explicit_questions: Vec<String>,
 }
 
 impl MeetingSession {

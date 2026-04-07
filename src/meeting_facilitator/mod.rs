@@ -14,7 +14,7 @@ pub use handoff::{
     mark_handoff_processed_in_place, mark_meeting_handoff_processed, write_meeting_handoff,
 };
 pub use session::{
-    add_note, close_meeting, edit_item, record_action_item, record_decision, remove_item,
-    start_meeting,
+    add_note, add_question, close_meeting, edit_item, record_action_item, record_decision,
+    remove_item, start_meeting,
 };
-pub use types::{ActionItem, MeetingDecision, MeetingSession, MeetingSessionStatus};
+pub use types::{ActionItem, MeetingDecision, MeetingSession, MeetingSessionStatus, OpenQuestion};
