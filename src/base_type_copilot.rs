@@ -276,13 +276,19 @@ fn build_copilot_terminal_objective(
 /// Extract the actual copilot LLM response from the terminal transcript
 /// embedded in the evidence vector.
 ///
-/// The transcript (available as `terminal-transcript-preview`) contains the
-/// command input, the copilot's response, and shell bookkeeping.  We strip
-/// the command echo and shell noise to isolate the copilot output.
+/// Prefers the full transcript (`terminal-transcript-full`) over the
+/// truncated preview.  The full transcript is newline-delimited; the
+/// preview is pipe-delimited.
 fn extract_copilot_response_from_evidence(evidence: &[String]) -> String {
+    // Prefer full transcript; fall back to the preview.
     let transcript = evidence
         .iter()
-        .find_map(|e| e.strip_prefix("terminal-transcript-preview="))
+        .find_map(|e| e.strip_prefix("terminal-transcript-full="))
+        .or_else(|| {
+            evidence
+                .iter()
+                .find_map(|e| e.strip_prefix("terminal-transcript-preview="))
+        })
         .unwrap_or("");
 
     extract_response_from_transcript(transcript)
@@ -290,34 +296,81 @@ fn extract_copilot_response_from_evidence(evidence: &[String]) -> String {
 
 /// Parse the raw transcript text to isolate the copilot's response.
 ///
-/// The transcript (pipe-delimited from `transcript_preview`) typically looks
-/// like:
-///   <shell prompt> <command>
-///   <copilot output lines...>
-///   <shell prompt> exit
+/// The transcript from `script` contains (in order):
+///   Script started on ...
+///   <bash prompt> <command echo>
+///   <copilot bootstrap lines — hooks, XPIA defender, etc.>
+///   <actual LLM response>
+///   Total usage est: ...
+///   API time spent: ...
+///   bash-5.2$ exit
+///   Script done on ...
 ///
-/// We find the command line, skip it, and take everything up to the `exit`
-/// line, stripping shell prompts and empty lines.
+/// We find the end of bootstrap noise and the start of usage stats to
+/// isolate the actual LLM response in between.
 fn extract_response_from_transcript(transcript: &str) -> String {
-    let lines: Vec<&str> = transcript.split(" | ").collect();
+    let lines: Vec<&str> = transcript.lines().collect();
+    // Also try pipe-delimited (preview format) if no newlines found.
+    let lines = if lines.len() <= 1 && transcript.contains(" | ") {
+        transcript.split(" | ").collect::<Vec<_>>()
+    } else {
+        lines
+    };
 
-    // Find the command line (contains "amplihack copilot" or SIMARD_PROMPT_FILE)
-    let command_pos = lines
+    let mut response_start = 0;
+    let mut response_end = lines.len();
+
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        // Bootstrap output: hook staging, XPIA defender, prompt file creation
+        if trimmed.contains("Staged") && trimmed.contains("hook")
+            || trimmed.contains("XPIA")
+            || trimmed.contains("SIMARD_PROMPT_FILE")
+            || trimmed.contains("amplihack copilot")
+            || trimmed.starts_with("Script started on")
+            || trimmed.starts_with("bash-") && trimmed.contains("$") && trimmed.contains("cat ")
+        {
+            response_start = i + 1;
+        }
+        // Usage stats / session footer
+        if (trimmed.starts_with("Total usage est:")
+            || trimmed.starts_with("API time spent:")
+            || trimmed.starts_with("Total session time:"))
+            && response_end == lines.len()
+        {
+            response_end = i;
+        }
+        // Shell exit / script done
+        if (trimmed == "exit"
+            || trimmed.ends_with("$ exit")
+            || trimmed.starts_with("Script done on"))
+            && response_end == lines.len()
+        {
+            response_end = i;
+        }
+    }
+
+    if response_start >= response_end {
+        // Fallback: strip known noise lines
+        return lines
+            .iter()
+            .filter(|l| {
+                let t = l.trim();
+                !(t.is_empty()
+                    || t.starts_with("Script ")
+                    || t.contains("amplihack copilot")
+                    || t.contains("SIMARD_PROMPT_FILE")
+                    || t == "exit"
+                    || t.ends_with("$ exit"))
+            })
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+
+    lines[response_start..response_end]
         .iter()
-        .position(|line| line.contains("amplihack copilot") || line.contains("SIMARD_PROMPT_FILE"));
-
-    let start = command_pos.map_or(0, |p| p + 1);
-
-    lines[start..]
-        .iter()
-        .filter(|l| {
-            let trimmed = l.trim();
-            !(trimmed.is_empty()
-                || trimmed == "exit"
-                || trimmed.ends_with("$ exit")
-                || trimmed.ends_with("# exit")
-                || trimmed.starts_with("bash-") && trimmed.ends_with('$'))
-        })
+        .filter(|l| !l.trim().is_empty())
         .copied()
         .collect::<Vec<_>>()
         .join("\n")
@@ -486,7 +539,14 @@ mod tests {
 
     #[test]
     fn extract_response_from_transcript_isolates_copilot_output() {
-        let transcript = "bash-5.2$ SIMARD_PROMPT_FILE=$(mktemp) && printf '%s' 'Hello' > \"$SIMARD_PROMPT_FILE\" && amplihack copilot -p \"$(cat \"$SIMARD_PROMPT_FILE\")\" ; rm -f \"$SIMARD_PROMPT_FILE\" | I'm Simard, your engineering agent. How can I help? | bash-5.2$ exit";
+        // Full transcript format: newline-delimited lines from `script`
+        let transcript = "\
+Script started on 2025-04-07 02:55:00+00:00
+bash-5.2$ SIMARD_PROMPT_FILE=$(mktemp) && printf '%s' 'Hello' > \"$SIMARD_PROMPT_FILE\" && amplihack copilot -p \"$(cat \"$SIMARD_PROMPT_FILE\")\" ; rm -f \"$SIMARD_PROMPT_FILE\" ; exit
+I'm Simard, your engineering agent. How can I help?
+Total usage est: 0.012
+bash-5.2$ exit
+Script done on 2025-04-07 02:56:00+00:00";
         let response = extract_response_from_transcript(transcript);
         assert!(
             response.contains("I'm Simard"),
@@ -496,11 +556,26 @@ mod tests {
             !response.contains("exit"),
             "exit command should be stripped"
         );
+        assert!(
+            !response.contains("Total usage"),
+            "usage stats should be stripped"
+        );
+    }
+
+    #[test]
+    fn extract_response_from_transcript_pipe_delimited_fallback() {
+        // Preview format: pipe-delimited
+        let transcript = "SIMARD_PROMPT_FILE=x && amplihack copilot -p test | Hello from Simard | bash-5.2$ exit";
+        let response = extract_response_from_transcript(transcript);
+        assert!(
+            response.contains("Hello from Simard"),
+            "should handle pipe-delimited: got '{response}'"
+        );
     }
 
     #[test]
     fn extract_response_from_transcript_handles_no_command_marker() {
-        let transcript = "some output | actual response text | more text";
+        let transcript = "some output\nactual response text\nmore text";
         let response = extract_response_from_transcript(transcript);
         assert!(!response.is_empty(), "should return all content lines");
     }
@@ -512,7 +587,25 @@ mod tests {
     }
 
     #[test]
-    fn extract_copilot_response_from_evidence_finds_transcript() {
+    fn extract_copilot_response_from_evidence_prefers_full_transcript() {
+        let evidence = vec![
+            "selected-base-type=copilot-test".to_string(),
+            "terminal-transcript-preview=SIMARD_PROMPT_FILE=x && amplihack copilot -p test | Preview only | bash-5.2$ exit".to_string(),
+            "terminal-transcript-full=Script started on 2025-04-07\nbash-5.2$ amplihack copilot -p test\nFull response from Simard\nTotal usage est: 0.01\nbash-5.2$ exit\nScript done on 2025-04-07".to_string(),
+        ];
+        let response = extract_copilot_response_from_evidence(&evidence);
+        assert!(
+            response.contains("Full response from Simard"),
+            "should prefer full transcript: got '{response}'"
+        );
+        assert!(
+            !response.contains("Preview only"),
+            "should not use preview when full is available"
+        );
+    }
+
+    #[test]
+    fn extract_copilot_response_from_evidence_falls_back_to_preview() {
         let evidence = vec![
             "selected-base-type=copilot-test".to_string(),
             "terminal-transcript-preview=SIMARD_PROMPT_FILE=x && amplihack copilot -p test | Hello from Simard | bash-5.2$ exit".to_string(),
@@ -520,7 +613,7 @@ mod tests {
         let response = extract_copilot_response_from_evidence(&evidence);
         assert!(
             response.contains("Hello from Simard"),
-            "should extract response: got '{response}'"
+            "should fall back to preview: got '{response}'"
         );
     }
 

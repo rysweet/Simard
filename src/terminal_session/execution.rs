@@ -51,6 +51,9 @@ pub fn execute_terminal_turn(
     if let Some(last_output_line) = last_output_line {
         evidence.push(format!("terminal-last-output-line={last_output_line}"));
     }
+    // Include the full transcript so adapters (e.g. copilot) can extract
+    // the actual LLM response instead of relying on the truncated preview.
+    evidence.push(format!("terminal-transcript-full={transcript}"));
 
     Ok(BaseTypeOutcome {
         plan: format!(
