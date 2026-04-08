@@ -264,11 +264,10 @@ pub(crate) fn persist_engineer_loop_artifacts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
     use crate::engineer_loop::types::{
         EngineerActionKind, ExecutedEngineerAction, SelectedEngineerAction,
     };
+    use std::path::PathBuf;
 
     fn make_inspection() -> RepoInspection {
         RepoInspection {
@@ -344,18 +343,130 @@ mod tests {
     }
 
     #[test]
+    fn compute_diff_for_review_git_commit_uses_head_diff() {
+        let kind = EngineerActionKind::GitCommit(crate::engineer_loop::types::GitCommitRequest {
+            message: "test".into(),
+        });
+        // This will invoke git in the repo root; even if there's no HEAD~1 it
+        // should return empty string rather than panic.
+        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let diff = compute_diff_for_review(&repo_root, &kind);
+        // Just verify it doesn't panic and returns a string
+        let _ = diff.len();
+    }
+
+    #[test]
+    fn compute_diff_for_review_other_uses_git_diff() {
+        let kind = EngineerActionKind::ReadOnlyScan;
+        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let diff = compute_diff_for_review(&repo_root, &kind);
+        let _ = diff.len();
+    }
+
+    #[test]
+    fn compute_diff_for_review_nonexistent_dir_returns_empty() {
+        let kind = EngineerActionKind::ReadOnlyScan;
+        let diff = compute_diff_for_review(Path::new("/nonexistent/path"), &kind);
+        assert!(diff.is_empty());
+    }
+
+    #[test]
+    fn run_optional_review_skips_read_only() {
+        let inspection = RepoInspection {
+            workspace_root: PathBuf::from("."),
+            repo_root: PathBuf::from("."),
+            branch: "main".into(),
+            head: "abc123".into(),
+            worktree_dirty: false,
+            changed_files: vec![],
+            active_goals: vec![],
+            carried_meeting_decisions: vec![],
+            architecture_gap_summary: "none".into(),
+        };
+        let action = ExecutedEngineerAction {
+            selected: crate::engineer_loop::types::SelectedEngineerAction {
+                label: "scan".into(),
+                rationale: "check".into(),
+                argv: vec!["git".into(), "status".into()],
+                plan_summary: "plan".into(),
+                verification_steps: vec![],
+                expected_changed_files: vec![],
+                kind: EngineerActionKind::ReadOnlyScan,
+            },
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            changed_files: vec![],
+        };
+        // ReadOnlyScan is not mutating, so review should be skipped
+        run_optional_review(&inspection, &action).unwrap();
+    }
+
+    #[test]
     fn run_optional_review_skips_cargo_test() {
-        let inspection = make_inspection();
-        let action = make_executed(EngineerActionKind::CargoTest);
-        let result = run_optional_review(&inspection, &action);
-        assert!(result.is_ok(), "cargo test actions should be skipped");
+        let inspection = RepoInspection {
+            workspace_root: PathBuf::from("."),
+            repo_root: PathBuf::from("."),
+            branch: "main".into(),
+            head: "abc123".into(),
+            worktree_dirty: false,
+            changed_files: vec![],
+            active_goals: vec![],
+            carried_meeting_decisions: vec![],
+            architecture_gap_summary: "none".into(),
+        };
+        let action = ExecutedEngineerAction {
+            selected: crate::engineer_loop::types::SelectedEngineerAction {
+                label: "test".into(),
+                rationale: "verify".into(),
+                argv: vec!["cargo".into(), "test".into()],
+                plan_summary: "plan".into(),
+                verification_steps: vec![],
+                expected_changed_files: vec![],
+                kind: EngineerActionKind::CargoTest,
+            },
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            changed_files: vec![],
+        };
+        run_optional_review(&inspection, &action).unwrap();
     }
 
     #[test]
     fn run_optional_review_skips_cargo_check() {
-        let inspection = make_inspection();
-        let action = make_executed(EngineerActionKind::CargoCheck);
-        let result = run_optional_review(&inspection, &action);
-        assert!(result.is_ok(), "cargo check actions should be skipped");
+        let inspection = RepoInspection {
+            workspace_root: PathBuf::from("."),
+            repo_root: PathBuf::from("."),
+            branch: "main".into(),
+            head: "abc123".into(),
+            worktree_dirty: false,
+            changed_files: vec![],
+            active_goals: vec![],
+            carried_meeting_decisions: vec![],
+            architecture_gap_summary: "none".into(),
+        };
+        let action = ExecutedEngineerAction {
+            selected: crate::engineer_loop::types::SelectedEngineerAction {
+                label: "check".into(),
+                rationale: "verify".into(),
+                argv: vec!["cargo".into(), "check".into()],
+                plan_summary: "plan".into(),
+                verification_steps: vec![],
+                expected_changed_files: vec![],
+                kind: EngineerActionKind::CargoCheck,
+            },
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            changed_files: vec![],
+        };
+        run_optional_review(&inspection, &action).unwrap();
+    }
+
+    #[test]
+    fn philosophy_review_is_non_empty() {
+        assert!(!PHILOSOPHY_REVIEW.is_empty());
+        assert!(PHILOSOPHY_REVIEW.contains("simplicity"));
     }
 }

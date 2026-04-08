@@ -231,3 +231,226 @@ pub fn apply_improvements(
 ) -> Vec<ApplyResult> {
     crate::self_improve_executor::run_autonomous_improvement(proposals, workspace, inspection)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gym_bridge::ScoreDimensions;
+
+    fn make_score(overall: f64) -> GymSuiteScore {
+        GymSuiteScore {
+            suite_id: "test".into(),
+            overall,
+            dimensions: ScoreDimensions {
+                factual_accuracy: overall,
+                specificity: overall * 0.9,
+                temporal_awareness: overall * 0.8,
+                source_attribution: overall * 0.7,
+                confidence_calibration: overall * 0.85,
+            },
+            scenario_count: 4,
+            scenarios_passed: 4,
+            pass_rate: 1.0,
+            recorded_at_unix_ms: None,
+        }
+    }
+
+    fn make_config() -> ImprovementConfig {
+        ImprovementConfig::default()
+    }
+
+    // ---- decide ----
+
+    #[test]
+    fn decide_commit_when_net_improvement_above_threshold() {
+        let config = make_config();
+        let baseline = make_score(0.5);
+        let post = make_score(0.6);
+        let decision = decide(&config, &baseline, &post, &[]);
+        assert!(matches!(decision, ImprovementDecision::Commit { .. }));
+        if let ImprovementDecision::Commit { net_improvement } = decision {
+            assert!((net_improvement - 0.1).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn decide_revert_when_net_below_threshold() {
+        let config = make_config();
+        let baseline = make_score(0.5);
+        let post = make_score(0.51);
+        let decision = decide(&config, &baseline, &post, &[]);
+        assert!(matches!(decision, ImprovementDecision::Revert { .. }));
+    }
+
+    #[test]
+    fn decide_revert_on_severe_regression() {
+        let config = make_config();
+        let baseline = make_score(0.5);
+        let post = make_score(0.6);
+        let regressions = vec![Regression {
+            dimension: "specificity".into(),
+            baseline_score: 0.5,
+            current_score: 0.3,
+            delta: -0.2,
+            severity: RegressionSeverity::Severe,
+        }];
+        let decision = decide(&config, &baseline, &post, &regressions);
+        assert!(matches!(decision, ImprovementDecision::Revert { .. }));
+    }
+
+    #[test]
+    fn decide_commit_with_minor_regression() {
+        let config = make_config();
+        let baseline = make_score(0.5);
+        let post = make_score(0.6);
+        let regressions = vec![Regression {
+            dimension: "specificity".into(),
+            baseline_score: 0.5,
+            current_score: 0.48,
+            delta: -0.02,
+            severity: RegressionSeverity::Minor,
+        }];
+        let decision = decide(&config, &baseline, &post, &regressions);
+        assert!(matches!(decision, ImprovementDecision::Commit { .. }));
+    }
+
+    // ---- find_weak_dimensions ----
+
+    #[test]
+    fn find_weak_dimensions_all_above_threshold() {
+        let score = make_score(0.8);
+        let weak = find_weak_dimensions(&score, 0.5, None);
+        assert!(weak.is_empty());
+    }
+
+    #[test]
+    fn find_weak_dimensions_some_below() {
+        let score = make_score(0.5);
+        let weak = find_weak_dimensions(&score, 0.45, None);
+        // source_attribution = 0.5 * 0.7 = 0.35, below 0.45
+        assert!(weak.contains(&"source_attribution".to_string()));
+    }
+
+    #[test]
+    fn find_weak_dimensions_with_target() {
+        let score = make_score(0.5);
+        let weak = find_weak_dimensions(&score, 0.6, Some("factual_accuracy"));
+        // factual_accuracy = 0.5, below 0.6
+        assert_eq!(weak.len(), 1);
+        assert_eq!(weak[0], "factual_accuracy");
+    }
+
+    #[test]
+    fn find_weak_dimensions_target_above_threshold() {
+        let score = make_score(0.8);
+        let weak = find_weak_dimensions(&score, 0.5, Some("factual_accuracy"));
+        assert!(weak.is_empty());
+    }
+
+    // ---- summarize_cycle ----
+
+    #[test]
+    fn summarize_cycle_incomplete() {
+        let cycle = ImprovementCycle {
+            baseline: make_score(0.5),
+            proposed_changes: Vec::new(),
+            post_score: None,
+            regressions: Vec::new(),
+            decision: None,
+            final_phase: ImprovementPhase::Analyze,
+            weak_dimensions: Vec::new(),
+            target_dimension: None,
+        };
+        let summary = summarize_cycle(&cycle);
+        assert!(summary.contains("Baseline"));
+        assert!(summary.contains("INCOMPLETE"));
+        assert!(summary.contains("analyze"));
+    }
+
+    #[test]
+    fn summarize_cycle_commit() {
+        let cycle = ImprovementCycle {
+            baseline: make_score(0.5),
+            proposed_changes: Vec::new(),
+            post_score: Some(make_score(0.6)),
+            regressions: Vec::new(),
+            decision: Some(ImprovementDecision::Commit {
+                net_improvement: 0.1,
+            }),
+            final_phase: ImprovementPhase::Decide,
+            weak_dimensions: Vec::new(),
+            target_dimension: None,
+        };
+        let summary = summarize_cycle(&cycle);
+        assert!(summary.contains("COMMIT"));
+        assert!(summary.contains("Post-change"));
+    }
+
+    #[test]
+    fn summarize_cycle_revert() {
+        let cycle = ImprovementCycle {
+            baseline: make_score(0.5),
+            proposed_changes: Vec::new(),
+            post_score: Some(make_score(0.51)),
+            regressions: Vec::new(),
+            decision: Some(ImprovementDecision::Revert {
+                reason: "too small".into(),
+            }),
+            final_phase: ImprovementPhase::Decide,
+            weak_dimensions: Vec::new(),
+            target_dimension: None,
+        };
+        let summary = summarize_cycle(&cycle);
+        assert!(summary.contains("REVERT"));
+        assert!(summary.contains("too small"));
+    }
+
+    #[test]
+    fn summarize_cycle_with_target_dimension() {
+        let cycle = ImprovementCycle {
+            baseline: make_score(0.5),
+            proposed_changes: Vec::new(),
+            post_score: None,
+            regressions: Vec::new(),
+            decision: None,
+            final_phase: ImprovementPhase::Eval,
+            weak_dimensions: Vec::new(),
+            target_dimension: Some("specificity".into()),
+        };
+        let summary = summarize_cycle(&cycle);
+        assert!(summary.contains("Target dimension: specificity"));
+    }
+
+    #[test]
+    fn summarize_cycle_with_regressions() {
+        let cycle = ImprovementCycle {
+            baseline: make_score(0.5),
+            proposed_changes: Vec::new(),
+            post_score: Some(make_score(0.6)),
+            regressions: vec![
+                Regression {
+                    dimension: "x".into(),
+                    baseline_score: 0.5,
+                    current_score: 0.4,
+                    delta: -0.1,
+                    severity: RegressionSeverity::Severe,
+                },
+                Regression {
+                    dimension: "y".into(),
+                    baseline_score: 0.5,
+                    current_score: 0.48,
+                    delta: -0.02,
+                    severity: RegressionSeverity::Minor,
+                },
+            ],
+            decision: Some(ImprovementDecision::Revert {
+                reason: "regression".into(),
+            }),
+            final_phase: ImprovementPhase::Decide,
+            weak_dimensions: Vec::new(),
+            target_dimension: None,
+        };
+        let summary = summarize_cycle(&cycle);
+        assert!(summary.contains("Regressions: 2 total (1 severe)"));
+    }
+}

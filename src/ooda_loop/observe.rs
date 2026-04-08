@@ -230,3 +230,165 @@ pub(super) fn scan_unprocessed_handoffs_in(dir: &std::path::Path) -> SimardResul
         Err(e) => Err(e),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gym_bridge::ScoreDimensions;
+    use serial_test::serial;
+
+    fn make_score(overall: f64) -> GymSuiteScore {
+        GymSuiteScore {
+            suite_id: "test".into(),
+            overall,
+            dimensions: ScoreDimensions {
+                factual_accuracy: overall,
+                specificity: overall * 0.9,
+                temporal_awareness: overall * 0.8,
+                source_attribution: overall * 0.7,
+                confidence_calibration: overall * 0.85,
+            },
+            scenario_count: 4,
+            scenarios_passed: 4,
+            pass_rate: 1.0,
+            recorded_at_unix_ms: None,
+        }
+    }
+
+    // ---- scan_unprocessed_handoffs_in ----
+
+    #[test]
+    fn scan_unprocessed_handoffs_in_nonexistent_dir() {
+        // Non-existent directory should return false or an error depending
+        // on load_meeting_handoff behavior — either is acceptable.
+        let result = scan_unprocessed_handoffs_in(std::path::Path::new("/nonexistent/handoff/dir"));
+        match result {
+            Ok(false) => {} // no handoff found
+            Ok(true) => panic!("should not find handoff in nonexistent dir"),
+            Err(_) => {} // error is also acceptable
+        }
+    }
+
+    // ---- gather_environment ----
+
+    #[test]
+    fn gather_environment_returns_snapshot() {
+        let snap = gather_environment();
+        // git status should succeed in this repo
+        // Just verify the snapshot is constructed without panic
+        let _ = snap.git_status.len();
+        let _ = snap.recent_commits.len();
+    }
+
+    // ---- collect_pending_improvements ----
+
+    #[test]
+    #[serial]
+    fn collect_pending_improvements_no_signals() {
+        // Point handoff dir to a nonexistent path so scan_unprocessed_handoffs
+        // doesn't pick up stale files from other tests or CI artifacts.
+        unsafe {
+            std::env::set_var("SIMARD_HANDOFF_DIR", "/tmp/nonexistent-handoff-dir-test");
+        }
+        let mut state = OodaState::new(crate::goal_curation::GoalBoard::new());
+        let improvements = collect_pending_improvements(&mut state, &None);
+        unsafe {
+            std::env::remove_var("SIMARD_HANDOFF_DIR");
+        }
+        assert!(improvements.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn collect_pending_improvements_drains_review_improvements() {
+        unsafe {
+            std::env::set_var("SIMARD_HANDOFF_DIR", "/tmp/nonexistent-handoff-dir-test");
+        }
+        let baseline = make_score(0.5);
+        let cycle = ImprovementCycle {
+            baseline: baseline.clone(),
+            proposed_changes: Vec::new(),
+            post_score: None,
+            regressions: Vec::new(),
+            decision: None,
+            final_phase: ImprovementPhase::Eval,
+            weak_dimensions: Vec::new(),
+            target_dimension: None,
+        };
+        let mut state = OodaState::new(crate::goal_curation::GoalBoard::new());
+        state.review_improvements = vec![cycle];
+        let improvements = collect_pending_improvements(&mut state, &None);
+        unsafe {
+            std::env::remove_var("SIMARD_HANDOFF_DIR");
+        }
+        assert_eq!(improvements.len(), 1);
+        assert!(state.review_improvements.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn collect_pending_improvements_regression_signal() {
+        unsafe {
+            std::env::set_var("SIMARD_HANDOFF_DIR", "/tmp/nonexistent-handoff-dir-test");
+        }
+        let baseline = make_score(0.8);
+        let current = make_score(0.5);
+
+        let prev_observation = Observation {
+            goal_statuses: Vec::new(),
+            gym_health: Some(baseline),
+            memory_stats: CognitiveStatistics::default(),
+            pending_improvements: Vec::new(),
+            environment: EnvironmentSnapshot {
+                git_status: String::new(),
+                open_issues: Vec::new(),
+                recent_commits: Vec::new(),
+            },
+        };
+
+        let mut state = OodaState::new(crate::goal_curation::GoalBoard::new());
+        state.last_observation = Some(prev_observation);
+        let improvements = collect_pending_improvements(&mut state, &Some(current));
+        unsafe {
+            std::env::remove_var("SIMARD_HANDOFF_DIR");
+        }
+        // Should detect regression since 0.5 < 0.8
+        assert!(!improvements.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn collect_pending_improvements_no_regression_when_scores_match() {
+        unsafe {
+            std::env::set_var("SIMARD_HANDOFF_DIR", "/tmp/nonexistent-handoff-dir-test");
+        }
+        let score = make_score(0.8);
+
+        let prev_observation = Observation {
+            goal_statuses: Vec::new(),
+            gym_health: Some(score.clone()),
+            memory_stats: CognitiveStatistics::default(),
+            pending_improvements: Vec::new(),
+            environment: EnvironmentSnapshot {
+                git_status: String::new(),
+                open_issues: Vec::new(),
+                recent_commits: Vec::new(),
+            },
+        };
+
+        let mut state = OodaState::new(crate::goal_curation::GoalBoard::new());
+        state.last_observation = Some(prev_observation);
+        let improvements = collect_pending_improvements(&mut state, &Some(score));
+        unsafe {
+            std::env::remove_var("SIMARD_HANDOFF_DIR");
+        }
+        // No regression when scores are the same
+        assert_eq!(
+            improvements
+                .iter()
+                .filter(|c| !c.regressions.is_empty())
+                .count(),
+            0
+        );
+    }
+}
