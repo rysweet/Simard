@@ -322,15 +322,18 @@ defer: Promote this pattern into a repeatable benchmark | rationale=wait for the
     );
 
     let memory_path = state_root.path().join("memory_records.json");
-    let memory_envelope = load_json(&memory_path);
-    // The memory store now uses a checksummed envelope (`{"crc32":…,"records":[…]}`).
-    // Extract the records array, corrupt the target, and write back as a legacy
-    // plain JSON array so the store's fallback loader accepts it without a CRC gate.
-    let mut records = memory_envelope
-        .get("records")
-        .and_then(|v| v.as_array())
-        .expect("memory store should contain a records array")
-        .clone();
+    let memory_data = load_json(&memory_path);
+    // The memory store may write a plain JSON array or a checksummed envelope
+    // (`{"crc32":…,"records":[…]}`). Handle both formats.
+    let mut records = if let Some(arr) = memory_data.as_array() {
+        arr.clone()
+    } else {
+        memory_data
+            .get("records")
+            .and_then(|v| v.as_array())
+            .expect("memory store should contain a records array")
+            .clone()
+    };
     let latest_improvement_record = records
         .iter_mut()
         .find(|record| {
