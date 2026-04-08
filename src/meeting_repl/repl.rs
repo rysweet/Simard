@@ -548,6 +548,7 @@ mod tests {
     use super::super::test_support::{MockAgentSession, mock_bridge};
     use super::*;
     use crate::meeting_facilitator::MeetingSessionStatus;
+    use serial_test::serial;
 
     #[test]
     fn repl_records_decision_and_closes() {
@@ -916,6 +917,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    #[serial]
     fn repl_saves_wip_on_command_and_cleans_up_on_close() {
         let dir = tempfile::tempdir().unwrap();
         // SAFETY: test-only, run with --test-threads=1 to avoid races.
@@ -945,6 +947,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn repl_resumes_from_wip_on_y() {
         let dir = tempfile::tempdir().unwrap();
         // SAFETY: test-only, run with --test-threads=1 to avoid races.
@@ -999,6 +1002,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn repl_declines_resume_starts_fresh() {
         let dir = tempfile::tempdir().unwrap();
         // SAFETY: test-only, run with --test-threads=1 to avoid races.
