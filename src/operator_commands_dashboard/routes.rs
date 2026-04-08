@@ -8,6 +8,7 @@ pub fn build_router() -> Router {
         .route("/api/status", get(status))
         .route("/api/issues", get(issues))
         .route("/api/metrics", get(metrics))
+        .route("/api/costs", get(costs))
         .route("/api/login", post(login))
         .route("/login", get(login_page))
         .route("/", get(index))
@@ -116,6 +117,19 @@ async fn metrics() -> Json<Value> {
     Json(json!({
         "recent": entries,
         "daily_report": report,
+    }))
+}
+
+async fn costs() -> Json<Value> {
+    let daily = crate::cost_tracking::daily_summary()
+        .map(|s| serde_json::to_value(s).unwrap_or_default())
+        .unwrap_or_else(|e| json!({"error": format!("daily: {e}")}));
+    let weekly = crate::cost_tracking::weekly_summary()
+        .map(|s| serde_json::to_value(s).unwrap_or_default())
+        .unwrap_or_else(|e| json!({"error": format!("weekly: {e}")}));
+    Json(json!({
+        "daily": daily,
+        "weekly": weekly,
     }))
 }
 
