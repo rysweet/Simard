@@ -171,3 +171,74 @@ pub fn signal_ready(ready_dir: &Path, my_pid: u32) -> SimardResult<()> {
     })?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn signal_ready_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        signal_ready(dir.path(), 1234).unwrap();
+
+        let expected = dir.path().join("ready-1234.json");
+        assert!(expected.exists());
+        let content = fs::read_to_string(&expected).unwrap();
+        assert!(content.contains("\"pid\":1234"));
+        assert!(content.contains("\"status\":\"ready\""));
+    }
+
+    #[test]
+    fn wait_for_ready_succeeds_when_file_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let ready = dir.path().join("ready-42.json");
+        fs::write(&ready, b"{}").unwrap();
+
+        let result = wait_for_ready(&ready, Duration::from_secs(1));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn wait_for_ready_times_out_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let ready = dir.path().join("ready-99.json");
+
+        let result = wait_for_ready(&ready, Duration::from_millis(50));
+        assert!(result.is_err());
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(err_msg.contains("did not signal readiness"));
+    }
+
+    #[test]
+    fn ready_signal_path_format() {
+        let dir = Path::new("/tmp/sem");
+        let path = ready_signal_path(dir, 5678);
+        assert_eq!(path, PathBuf::from("/tmp/sem/ready-5678.json"));
+    }
+
+    #[test]
+    fn handoff_config_uses_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let sem = LeaderSemaphore::new(dir.path().join("leader.json"));
+        let relaunch = RelaunchConfig::default();
+        let cfg = HandoffConfig::new(sem.clone(), relaunch);
+
+        assert_eq!(cfg.child_ready_timeout, DEFAULT_CHILD_READY_TIMEOUT);
+        assert!(!cfg.gates.is_empty()); // default_gates produces at least one gate
+    }
+
+    #[test]
+    fn handoff_result_fields() {
+        let result = HandoffResult {
+            old_pid: 1,
+            new_pid: 2,
+            old_generation: 3,
+            new_generation: 4,
+            child_binary: PathBuf::from("/usr/bin/test"),
+        };
+        assert_eq!(result.old_pid, 1);
+        assert_eq!(result.new_pid, 2);
+        assert_eq!(result.new_generation, 4);
+    }
+}
