@@ -235,6 +235,7 @@ pub(super) fn scan_unprocessed_handoffs_in(dir: &std::path::Path) -> SimardResul
 mod tests {
     use super::*;
     use crate::gym_bridge::ScoreDimensions;
+    use serial_test::serial;
 
     fn make_score(overall: f64) -> GymSuiteScore {
         GymSuiteScore {
@@ -282,6 +283,7 @@ mod tests {
     // ---- collect_pending_improvements ----
 
     #[test]
+    #[serial]
     fn collect_pending_improvements_no_signals() {
         let mut state = OodaState::new(crate::goal_curation::GoalBoard::new());
         let improvements = collect_pending_improvements(&mut state, &None);
@@ -289,6 +291,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn collect_pending_improvements_drains_review_improvements() {
         let baseline = make_score(0.5);
         let cycle = ImprovementCycle {
@@ -309,6 +312,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn collect_pending_improvements_regression_signal() {
         let baseline = make_score(0.8);
         let current = make_score(0.5);
@@ -333,6 +337,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn collect_pending_improvements_no_regression_when_scores_match() {
         let score = make_score(0.8);
 
