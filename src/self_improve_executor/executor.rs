@@ -186,3 +186,78 @@ fn run_review(diff_text: &str) -> SimardResult<Vec<ReviewFinding>> {
     let _ = session.close();
     Ok(findings)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_philosophy_review_not_empty() {
+        assert!(!PHILOSOPHY_REVIEW.is_empty());
+        assert!(PHILOSOPHY_REVIEW.contains("simplicity"));
+    }
+
+    #[test]
+    fn test_apply_result_plan_failed_pattern() {
+        let result = ApplyResult::PlanFailed {
+            reason: "no steps".to_string(),
+        };
+        assert!(matches!(result, ApplyResult::PlanFailed { .. }));
+    }
+
+    #[test]
+    fn test_apply_result_applied_empty_findings() {
+        let result = ApplyResult::Applied {
+            findings: Vec::new(),
+        };
+        assert!(matches!(result, ApplyResult::Applied { .. }));
+        assert!(!result.has_critical());
+    }
+
+    #[test]
+    fn test_apply_result_review_blocked() {
+        let result = ApplyResult::ReviewBlocked {
+            findings: Vec::new(),
+        };
+        assert!(matches!(result, ApplyResult::ReviewBlocked { .. }));
+        assert!(!result.has_critical());
+    }
+
+    #[test]
+    fn test_apply_result_commit_failed() {
+        let result = ApplyResult::CommitFailed {
+            reason: "git error".to_string(),
+            findings: Vec::new(),
+        };
+        assert!(matches!(result, ApplyResult::CommitFailed { .. }));
+        assert!(!result.has_critical());
+    }
+
+    #[test]
+    fn test_apply_result_has_critical_with_critical_finding() {
+        use crate::review_pipeline::{FindingCategory, ReviewFinding, Severity};
+        let findings = vec![ReviewFinding {
+            category: FindingCategory::Bug,
+            severity: Severity::Critical,
+            description: "serious bug".to_string(),
+            file_path: "src/main.rs".into(),
+            line_range: None,
+        }];
+        let result = ApplyResult::ReviewBlocked { findings };
+        assert!(result.has_critical());
+    }
+
+    #[test]
+    fn test_apply_result_has_critical_without_critical_finding() {
+        use crate::review_pipeline::{FindingCategory, ReviewFinding, Severity};
+        let findings = vec![ReviewFinding {
+            category: FindingCategory::Bug,
+            severity: Severity::Low,
+            description: "minor issue".to_string(),
+            file_path: "src/main.rs".into(),
+            line_range: None,
+        }];
+        let result = ApplyResult::ReviewBlocked { findings };
+        assert!(!result.has_critical());
+    }
+}

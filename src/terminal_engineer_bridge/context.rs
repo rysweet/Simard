@@ -189,3 +189,153 @@ fn optional_evidence_value<'a>(
         .rev()
         .find_map(|record| record.detail.strip_prefix(prefix))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::evidence::EvidenceSource;
+    use crate::session::{SessionId, SessionPhase};
+
+    fn make_evidence(detail: &str) -> EvidenceRecord {
+        EvidenceRecord {
+            id: "ev-1".to_string(),
+            session_id: SessionId::parse("session-00000000-0000-0000-0000-000000000001").unwrap(),
+            phase: SessionPhase::Intake,
+            detail: detail.to_string(),
+            source: EvidenceSource::Runtime,
+        }
+    }
+
+    #[test]
+    fn test_optional_evidence_value_found() {
+        let records = vec![make_evidence("terminal-working-directory=/home/user")];
+        let val = optional_evidence_value(&records, "terminal-working-directory=");
+        assert_eq!(val, Some("/home/user"));
+    }
+
+    #[test]
+    fn test_optional_evidence_value_not_found() {
+        let records = vec![make_evidence("other-key=value")];
+        let val = optional_evidence_value(&records, "terminal-working-directory=");
+        assert_eq!(val, None);
+    }
+
+    #[test]
+    fn test_optional_evidence_value_empty_records() {
+        let records: Vec<EvidenceRecord> = vec![];
+        let val = optional_evidence_value(&records, "anything=");
+        assert_eq!(val, None);
+    }
+
+    #[test]
+    fn test_optional_evidence_value_returns_last_match() {
+        let records = vec![
+            make_evidence("terminal-working-directory=/first"),
+            make_evidence("terminal-working-directory=/second"),
+        ];
+        let val = optional_evidence_value(&records, "terminal-working-directory=");
+        assert_eq!(val, Some("/second"));
+    }
+
+    #[test]
+    fn test_required_evidence_value_found() {
+        let records = vec![make_evidence("terminal-command-count=5")];
+        let val = required_evidence_value(&records, "terminal-command-count=", "test");
+        assert_eq!(val.unwrap(), "5");
+    }
+
+    #[test]
+    fn test_required_evidence_value_missing() {
+        let records = vec![make_evidence("other=val")];
+        let val = required_evidence_value(&records, "terminal-command-count=", "test");
+        assert!(val.is_err());
+    }
+
+    #[test]
+    fn test_contains_terminal_evidence_true() {
+        let records = vec![make_evidence("terminal-working-directory=/foo")];
+        assert!(contains_terminal_evidence(&records));
+    }
+
+    #[test]
+    fn test_contains_terminal_evidence_false() {
+        let records = vec![make_evidence("something-else=bar")];
+        assert!(!contains_terminal_evidence(&records));
+    }
+
+    #[test]
+    fn test_contains_terminal_evidence_empty() {
+        assert!(!contains_terminal_evidence(&[]));
+    }
+
+    #[test]
+    fn test_engineer_evidence_details_basic() {
+        let ctx = TerminalBridgeContext {
+            continuity_source: "shared explicit state-root".to_string(),
+            handoff_file_name: "latest_terminal_handoff.json".to_string(),
+            working_directory: "/home/user/project".to_string(),
+            command_count: "5".to_string(),
+            wait_count: "2".to_string(),
+            last_output_line: None,
+        };
+        let details = ctx.engineer_evidence_details();
+        assert_eq!(details.len(), 5);
+        assert!(details[0].starts_with("terminal-continuity-source="));
+        assert!(details[1].starts_with("terminal-continuity-handoff="));
+        assert!(details[2].starts_with("terminal-continuity-working-directory="));
+        assert!(details[3].starts_with("terminal-continuity-command-count="));
+        assert!(details[4].starts_with("terminal-continuity-wait-count="));
+    }
+
+    #[test]
+    fn test_engineer_evidence_details_with_last_output() {
+        let ctx = TerminalBridgeContext {
+            continuity_source: "shared explicit state-root".to_string(),
+            handoff_file_name: "latest_terminal_handoff.json".to_string(),
+            working_directory: "/home/user".to_string(),
+            command_count: "3".to_string(),
+            wait_count: "0".to_string(),
+            last_output_line: Some("$ cargo test".to_string()),
+        };
+        let details = ctx.engineer_evidence_details();
+        assert_eq!(details.len(), 6);
+        assert!(details[5].starts_with("terminal-continuity-last-output-line="));
+    }
+
+    #[test]
+    fn test_from_engineer_evidence_returns_none_when_no_source() {
+        let records = vec![make_evidence("unrelated=value")];
+        let result = TerminalBridgeContext::from_engineer_evidence(&records).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_from_engineer_evidence_rejects_invalid_source() {
+        let records = vec![
+            make_evidence("terminal-continuity-source=invalid-source"),
+            make_evidence("terminal-continuity-handoff=latest_terminal_handoff.json"),
+            make_evidence("terminal-continuity-working-directory=/home/user"),
+            make_evidence("terminal-continuity-command-count=1"),
+        ];
+        let result = TerminalBridgeContext::from_engineer_evidence(&records);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_engineer_evidence_valid() {
+        let records = vec![
+            make_evidence("terminal-continuity-source=shared explicit state-root"),
+            make_evidence("terminal-continuity-handoff=latest_terminal_handoff.json"),
+            make_evidence("terminal-continuity-working-directory=/home/user"),
+            make_evidence("terminal-continuity-command-count=3"),
+            make_evidence("terminal-continuity-wait-count=1"),
+        ];
+        let ctx = TerminalBridgeContext::from_engineer_evidence(&records)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ctx.working_directory, "/home/user");
+        assert_eq!(ctx.command_count, "3");
+        assert_eq!(ctx.wait_count, "1");
+        assert!(ctx.last_output_line.is_none());
+    }
+}

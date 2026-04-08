@@ -200,3 +200,125 @@ impl PromptAssetStore for InMemoryPromptAssetStore {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_prompt_asset_id_new_and_as_str() {
+        let id = PromptAssetId::new("test-asset");
+        assert_eq!(id.as_str(), "test-asset");
+    }
+
+    #[test]
+    fn test_prompt_asset_id_from_str() {
+        let id: PromptAssetId = "my-id".into();
+        assert_eq!(id.as_str(), "my-id");
+    }
+
+    #[test]
+    fn test_prompt_asset_id_display() {
+        let id = PromptAssetId::new("display-test");
+        assert_eq!(format!("{id}"), "display-test");
+    }
+
+    #[test]
+    fn test_prompt_asset_id_eq() {
+        let a = PromptAssetId::new("same");
+        let b = PromptAssetId::new("same");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_prompt_asset_id_ne() {
+        let a = PromptAssetId::new("one");
+        let b = PromptAssetId::new("two");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_prompt_asset_ref_new() {
+        let r = PromptAssetRef::new("ref-id", "path/to/file.md");
+        assert_eq!(r.id.as_str(), "ref-id");
+        assert_eq!(r.relative_path, PathBuf::from("path/to/file.md"));
+    }
+
+    #[test]
+    fn test_prompt_asset_new() {
+        let asset = PromptAsset::new("a1", "file.md", "hello");
+        assert_eq!(asset.id.as_str(), "a1");
+        assert_eq!(asset.relative_path, PathBuf::from("file.md"));
+        assert_eq!(asset.contents, "hello");
+    }
+
+    #[test]
+    fn test_validate_prompt_asset_path_absolute_rejected() {
+        let r = PromptAssetRef::new("abs", "/etc/passwd");
+        let result = validate_prompt_asset_path(&r);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_prompt_asset_path_traversal_rejected() {
+        let r = PromptAssetRef::new("trav", "../secret.txt");
+        let result = validate_prompt_asset_path(&r);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_prompt_asset_path_valid() {
+        let r = PromptAssetRef::new("ok", "prompts/system.md");
+        let result = validate_prompt_asset_path(&r);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_in_memory_store_load_missing() {
+        let store = InMemoryPromptAssetStore::default();
+        let r = PromptAssetRef::new("missing", "file.md");
+        let result = store.load(&r);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_in_memory_store_insert_and_load() {
+        let store = InMemoryPromptAssetStore::default();
+        let asset = PromptAsset::new("a1", "file.md", "content");
+        store.insert(asset.clone()).unwrap();
+
+        let r = PromptAssetRef::new("a1", "file.md");
+        let loaded = store.load(&r).unwrap();
+        assert_eq!(loaded.contents, "content");
+    }
+
+    #[test]
+    fn test_in_memory_store_new_with_assets() {
+        let assets = vec![
+            PromptAsset::new("a", "a.md", "aaa"),
+            PromptAsset::new("b", "b.md", "bbb"),
+        ];
+        let store = InMemoryPromptAssetStore::new(assets);
+
+        let r = PromptAssetRef::new("a", "a.md");
+        assert_eq!(store.load(&r).unwrap().contents, "aaa");
+
+        let r = PromptAssetRef::new("b", "b.md");
+        assert_eq!(store.load(&r).unwrap().contents, "bbb");
+    }
+
+    #[test]
+    fn test_file_store_load_missing_root() {
+        let store = FilePromptAssetStore::new("/nonexistent/root/path");
+        let r = PromptAssetRef::new("x", "file.md");
+        let result = store.load(&r);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_prompt_asset_id_ordering() {
+        let a = PromptAssetId::new("alpha");
+        let b = PromptAssetId::new("beta");
+        assert!(a < b);
+    }
+}

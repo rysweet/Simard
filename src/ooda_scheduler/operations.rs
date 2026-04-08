@@ -189,3 +189,189 @@ pub fn scheduler_summary(scheduler: &Scheduler) -> String {
         scheduler.max_concurrent
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ooda_loop::{ActionKind, ActionOutcome, PlannedAction};
+
+    fn make_action(goal_id: Option<&str>) -> PlannedAction {
+        PlannedAction {
+            kind: ActionKind::AdvanceGoal,
+            goal_id: goal_id.map(|s| s.to_string()),
+            description: "test action".to_string(),
+        }
+    }
+
+    fn make_outcome(action: PlannedAction) -> ActionOutcome {
+        ActionOutcome {
+            action,
+            success: true,
+            detail: "done".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_schedule_actions_basic() {
+        let mut sched = Scheduler::new(5);
+        let actions = vec![make_action(Some("g1")), make_action(Some("g2"))];
+        let scheduled = schedule_actions(&mut sched, actions).unwrap();
+        assert_eq!(scheduled.len(), 2);
+        assert_eq!(scheduled[0].slot_id, 0);
+        assert_eq!(scheduled[1].slot_id, 1);
+        assert_eq!(sched.slots.len(), 2);
+    }
+
+    #[test]
+    fn test_schedule_actions_empty() {
+        let mut sched = Scheduler::new(5);
+        let scheduled = schedule_actions(&mut sched, vec![]).unwrap();
+        assert!(scheduled.is_empty());
+    }
+
+    #[test]
+    fn test_schedule_actions_respects_capacity() {
+        let mut sched = Scheduler::new(1);
+        // Fill capacity with a pending slot
+        let actions = vec![make_action(Some("g1")), make_action(Some("g2"))];
+        let scheduled = schedule_actions(&mut sched, actions).unwrap();
+        // max_concurrent = 1, active_count counts pending+running
+        // With has_capacity checking active_count < max_concurrent, only 1 should be scheduled
+        assert_eq!(scheduled.len(), 1);
+    }
+
+    #[test]
+    fn test_start_slot_transitions_pending_to_running() {
+        let mut sched = Scheduler::new(5);
+        schedule_actions(&mut sched, vec![make_action(None)]).unwrap();
+        start_slot(&mut sched, 0).unwrap();
+        assert!(matches!(sched.slots[0].status, SlotStatus::Running { .. }));
+    }
+
+    #[test]
+    fn test_start_slot_not_found() {
+        let mut sched = Scheduler::new(5);
+        let result = start_slot(&mut sched, 999);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_start_slot_not_pending() {
+        let mut sched = Scheduler::new(5);
+        schedule_actions(&mut sched, vec![make_action(None)]).unwrap();
+        start_slot(&mut sched, 0).unwrap();
+        // Starting an already running slot should fail
+        let result = start_slot(&mut sched, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_complete_slot_success() {
+        let mut sched = Scheduler::new(5);
+        let actions = vec![make_action(Some("g"))];
+        schedule_actions(&mut sched, actions).unwrap();
+        start_slot(&mut sched, 0).unwrap();
+
+        let outcome = make_outcome(make_action(Some("g")));
+        complete_slot(&mut sched, 0, outcome).unwrap();
+        assert!(matches!(sched.slots[0].status, SlotStatus::Completed(_)));
+    }
+
+    #[test]
+    fn test_complete_slot_not_running() {
+        let mut sched = Scheduler::new(5);
+        schedule_actions(&mut sched, vec![make_action(None)]).unwrap();
+        // Slot is pending, not running
+        let outcome = make_outcome(make_action(None));
+        let result = complete_slot(&mut sched, 0, outcome);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_fail_slot_success() {
+        let mut sched = Scheduler::new(5);
+        schedule_actions(&mut sched, vec![make_action(None)]).unwrap();
+        start_slot(&mut sched, 0).unwrap();
+
+        fail_slot(&mut sched, 0, "something broke".to_string()).unwrap();
+        assert!(matches!(sched.slots[0].status, SlotStatus::Failed(_)));
+    }
+
+    #[test]
+    fn test_fail_slot_not_running() {
+        let mut sched = Scheduler::new(5);
+        schedule_actions(&mut sched, vec![make_action(None)]).unwrap();
+        let result = fail_slot(&mut sched, 0, "err".to_string());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_poll_slots_returns_completed_and_failed() {
+        let mut sched = Scheduler::new(5);
+        schedule_actions(
+            &mut sched,
+            vec![make_action(Some("a")), make_action(Some("b"))],
+        )
+        .unwrap();
+
+        start_slot(&mut sched, 0).unwrap();
+        start_slot(&mut sched, 1).unwrap();
+
+        let outcome = make_outcome(make_action(Some("a")));
+        complete_slot(&mut sched, 0, outcome).unwrap();
+        fail_slot(&mut sched, 1, "timeout".to_string()).unwrap();
+
+        let polled = poll_slots(&mut sched);
+        assert_eq!(polled.len(), 2);
+        assert!(polled[0].outcome.is_ok());
+        assert!(polled[1].outcome.is_err());
+    }
+
+    #[test]
+    fn test_poll_slots_ignores_pending_and_running() {
+        let mut sched = Scheduler::new(5);
+        schedule_actions(&mut sched, vec![make_action(None), make_action(None)]).unwrap();
+        start_slot(&mut sched, 1).unwrap();
+
+        let polled = poll_slots(&mut sched);
+        assert!(polled.is_empty());
+    }
+
+    #[test]
+    fn test_drain_finished_removes_completed() {
+        let mut sched = Scheduler::new(5);
+        schedule_actions(
+            &mut sched,
+            vec![make_action(Some("a")), make_action(Some("b"))],
+        )
+        .unwrap();
+
+        start_slot(&mut sched, 0).unwrap();
+        let outcome = make_outcome(make_action(Some("a")));
+        complete_slot(&mut sched, 0, outcome).unwrap();
+
+        let finished = drain_finished(&mut sched);
+        assert_eq!(finished.len(), 1);
+        // Only the pending slot remains
+        assert_eq!(sched.slots.len(), 1);
+        assert!(matches!(sched.slots[0].status, SlotStatus::Pending));
+    }
+
+    #[test]
+    fn test_scheduler_summary_format() {
+        let mut sched = Scheduler::new(3);
+        schedule_actions(&mut sched, vec![make_action(None)]).unwrap();
+        let summary = scheduler_summary(&sched);
+        assert!(summary.contains("1 pending"));
+        assert!(summary.contains("0 running"));
+        assert!(summary.contains("max=3"));
+    }
+
+    #[test]
+    fn test_schedule_actions_goal_id_defaults_to_empty() {
+        let mut sched = Scheduler::new(5);
+        let actions = vec![make_action(None)];
+        let scheduled = schedule_actions(&mut sched, actions).unwrap();
+        assert_eq!(scheduled[0].goal_id, "");
+    }
+}
