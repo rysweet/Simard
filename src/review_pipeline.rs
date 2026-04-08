@@ -90,17 +90,13 @@ impl ReviewSession {
     }
 }
 
+const REVIEW_INSTRUCTIONS: &str = include_str!("../prompt_assets/simard/review_pipeline.md");
+
 fn build_review_prompt(diff_text: &str, philosophy_guidelines: &str) -> String {
     format!(
-        "You are a strict code reviewer. Review the following diff against the project philosophy.\n\
-         Output a JSON array of findings. Each finding:\n\
-         {{\"category\": \"bug|style|architecture|security\", \
-         \"severity\": \"low|medium|high|critical\", \
-         \"description\": \"<text>\", \"file_path\": \"<path>\", \
-         \"line_range\": [start, end] or null}}\n\
-         Return ONLY the JSON array. If no issues, return [].\n\n\
-         Philosophy guidelines:\n{philosophy_guidelines}\n\n\
-         Diff to review:\n{diff_text}"
+        "{}\n\nPhilosophy guidelines:\n{philosophy_guidelines}\n\n\
+         Diff to review:\n{diff_text}",
+        REVIEW_INSTRUCTIONS.trim(),
     )
 }
 
