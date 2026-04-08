@@ -14,6 +14,9 @@ use super::types::{ActionItem, MeetingDecision, MeetingSession, OpenQuestion};
 /// Well-known filename for meeting handoff artifacts.
 pub const MEETING_HANDOFF_FILENAME: &str = "meeting_handoff.json";
 
+/// Well-known filename for the work-in-progress session snapshot.
+pub const MEETING_SESSION_WIP_FILENAME: &str = "meeting_session_wip.json";
+
 /// Default directory for meeting handoff artifacts.
 ///
 /// Respects `SIMARD_HANDOFF_DIR` when set, otherwise falls back to
@@ -281,6 +284,67 @@ pub fn mark_handoff_processed_in_place(
         path: path.clone(),
         reason: format!("writing handoff: {e}"),
     })?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Work-in-progress session persistence (auto-save / crash resume)
+// ---------------------------------------------------------------------------
+
+/// Save the current meeting session to a WIP file in the handoff directory.
+///
+/// This is called periodically (every 60 s) and after every slash command so
+/// that a crash loses at most the last few seconds of work.
+pub fn save_session_wip(dir: &Path, session: &MeetingSession) -> SimardResult<()> {
+    fs::create_dir_all(dir).map_err(|e| SimardError::ArtifactIo {
+        path: dir.to_path_buf(),
+        reason: format!("creating handoff dir: {e}"),
+    })?;
+    let path = dir.join(MEETING_SESSION_WIP_FILENAME);
+    let json = serde_json::to_string_pretty(session).map_err(|e| SimardError::ArtifactIo {
+        path: path.clone(),
+        reason: format!("serializing WIP session: {e}"),
+    })?;
+    fs::write(&path, &json).map_err(|e| SimardError::ArtifactIo {
+        path: path.clone(),
+        reason: format!("writing WIP session: {e}"),
+    })?;
+    Ok(())
+}
+
+/// Load a previously saved WIP session from the handoff directory.
+///
+/// Returns `None` if no WIP file exists. The caller should prompt the user
+/// for resume vs. fresh start.
+pub fn load_session_wip(dir: &Path) -> SimardResult<Option<MeetingSession>> {
+    let path = dir.join(MEETING_SESSION_WIP_FILENAME);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&path).map_err(|e| SimardError::ArtifactIo {
+        path: path.clone(),
+        reason: format!("reading WIP session: {e}"),
+    })?;
+    let session: MeetingSession =
+        serde_json::from_str(&raw).map_err(|e| SimardError::ArtifactIo {
+            path: path.clone(),
+            reason: format!("parsing WIP session JSON: {e}"),
+        })?;
+    Ok(Some(session))
+}
+
+/// Remove the WIP file from the handoff directory.
+///
+/// Called on clean `/close` (after writing the final handoff artifact) and
+/// when the user declines to resume a stale WIP session.
+pub fn remove_session_wip(dir: &Path) -> SimardResult<()> {
+    let path = dir.join(MEETING_SESSION_WIP_FILENAME);
+    if path.is_file() {
+        fs::remove_file(&path).map_err(|e| SimardError::ArtifactIo {
+            path: path.clone(),
+            reason: format!("removing WIP session: {e}"),
+        })?;
+    }
     Ok(())
 }
 
@@ -705,5 +769,74 @@ mod tests {
             name == MEETING_HANDOFF_FILENAME || name.contains("2099"),
             "expected either legacy or timestamped file, got {name}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // WIP session persistence tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn save_and_load_wip_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = make_session(
+            "WIP test",
+            vec!["note one"],
+            vec![sample_decision()],
+            vec![sample_action()],
+            vec!["alice"],
+        );
+        save_session_wip(dir.path(), &session).unwrap();
+
+        let loaded = load_session_wip(dir.path()).unwrap().unwrap();
+        assert_eq!(loaded.topic, "WIP test");
+        assert_eq!(loaded.decisions.len(), 1);
+        assert_eq!(loaded.action_items.len(), 1);
+        assert_eq!(loaded.notes, vec!["note one"]);
+        assert_eq!(loaded.participants, vec!["alice"]);
+    }
+
+    #[test]
+    fn load_wip_returns_none_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = load_session_wip(dir.path()).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn remove_wip_deletes_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = make_session("Remove me", vec![], vec![], vec![], vec![]);
+        save_session_wip(dir.path(), &session).unwrap();
+
+        // File should exist.
+        assert!(dir.path().join(MEETING_SESSION_WIP_FILENAME).is_file());
+
+        remove_session_wip(dir.path()).unwrap();
+
+        // File should be gone.
+        assert!(!dir.path().join(MEETING_SESSION_WIP_FILENAME).is_file());
+        // Loading should return None.
+        assert!(load_session_wip(dir.path()).unwrap().is_none());
+    }
+
+    #[test]
+    fn remove_wip_noop_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        // Should not error when there's nothing to remove.
+        remove_session_wip(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn save_wip_overwrites_previous() {
+        let dir = tempfile::tempdir().unwrap();
+        let s1 = make_session("First", vec![], vec![], vec![], vec![]);
+        save_session_wip(dir.path(), &s1).unwrap();
+
+        let s2 = make_session("Second", vec!["updated"], vec![], vec![], vec![]);
+        save_session_wip(dir.path(), &s2).unwrap();
+
+        let loaded = load_session_wip(dir.path()).unwrap().unwrap();
+        assert_eq!(loaded.topic, "Second");
+        assert_eq!(loaded.notes, vec!["updated"]);
     }
 }

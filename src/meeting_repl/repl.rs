@@ -6,7 +6,8 @@ use crate::base_types::{BaseTypeSession, BaseTypeTurnInput};
 use crate::error::{SimardError, SimardResult};
 use crate::meeting_facilitator::{
     ActionItem, MeetingDecision, MeetingHandoff, MeetingSession, add_note, add_question,
-    close_meeting, edit_item, record_action_item, record_decision, remove_item, start_meeting,
+    close_meeting, default_handoff_dir, edit_item, load_session_wip, record_action_item,
+    record_decision, remove_item, remove_session_wip, save_session_wip, start_meeting,
 };
 use crate::memory_bridge::CognitiveMemoryBridge;
 
@@ -15,6 +16,16 @@ use super::command::{MeetingCommand, help_text, parse_meeting_command};
 use super::persist::{persist_meeting_to_memory, write_meeting_handoff_artifact};
 
 const PROMPT: &str = "simard:meeting> ";
+
+/// Auto-save interval for periodic WIP snapshots.
+const AUTO_SAVE_INTERVAL_SECS: u64 = 60;
+
+/// Save session WIP, logging warnings on failure without aborting.
+fn try_save_wip<W: Write>(session: &MeetingSession, handoff_dir: &std::path::Path, output: &mut W) {
+    if let Err(e) = save_session_wip(handoff_dir, session) {
+        writeln!(output, "[warn] Auto-save failed: {e}").ok();
+    }
+}
 
 /// Run the interactive meeting REPL.
 ///
@@ -30,11 +41,46 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
     input: &mut R,
     output: &mut W,
 ) -> SimardResult<MeetingSession> {
-    let mut session = start_meeting(topic, bridge)?;
+    let handoff_dir = default_handoff_dir();
+
+    // --- Resume logic: check for a WIP session on disk ---
+    let mut session = match load_session_wip(&handoff_dir) {
+        Ok(Some(wip)) => {
+            writeln!(
+                output,
+                "Found a previous session (topic: \"{}\"). Resume previous session? (y/n)",
+                wip.topic
+            )
+            .ok();
+            write!(output, "> ").ok();
+            output.flush().ok();
+
+            let mut answer = String::new();
+            let resumed = match input.read_line(&mut answer) {
+                Ok(n) if n > 0 => answer.trim().eq_ignore_ascii_case("y"),
+                _ => false,
+            };
+
+            if resumed {
+                writeln!(output, "Resuming session: \"{}\"", wip.topic).ok();
+                wip
+            } else {
+                writeln!(output, "Starting fresh session.").ok();
+                remove_session_wip(&handoff_dir).ok();
+                start_meeting(topic, bridge)?
+            }
+        }
+        _ => start_meeting(topic, bridge)?,
+    };
+
     let mut agent = agent;
 
-    print_banner(topic, agent.is_some(), output);
+    print_banner(&session.topic, agent.is_some(), output);
 
+    // Initial WIP save so even a very early crash is recoverable.
+    try_save_wip(&session, &handoff_dir, output);
+
+    let mut last_save = std::time::Instant::now();
     let mut line = String::new();
     loop {
         write!(output, "{PROMPT}").ok();
@@ -67,14 +113,39 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
             writeln!(output, "Closing meeting.").ok();
             break;
         }
+
+        let is_state_changing = !matches!(
+            cmd,
+            MeetingCommand::Empty
+                | MeetingCommand::Help
+                | MeetingCommand::Status
+                | MeetingCommand::Recap
+                | MeetingCommand::List
+                | MeetingCommand::ListParticipants
+                | MeetingCommand::Preview
+        );
+
+        let current_topic = session.topic.clone();
         dispatch_command(
             cmd,
             &mut session,
             &mut agent,
-            topic,
+            &current_topic,
             meeting_system_prompt,
             output,
         );
+
+        // Save WIP after state-changing commands.
+        if is_state_changing {
+            try_save_wip(&session, &handoff_dir, output);
+            last_save = std::time::Instant::now();
+        }
+
+        // Periodic auto-save (60 s).
+        if last_save.elapsed().as_secs() >= AUTO_SAVE_INTERVAL_SECS {
+            try_save_wip(&session, &handoff_dir, output);
+            last_save = std::time::Instant::now();
+        }
     }
 
     let closed = close_meeting(session, bridge)?;
@@ -83,6 +154,9 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
 
     write_meeting_handoff_artifact(&closed, output);
     persist_meeting_to_memory(&closed, bridge, output);
+
+    // Clean up WIP file after successful close.
+    remove_session_wip(&handoff_dir).ok();
 
     Ok(closed)
 }
@@ -835,5 +909,135 @@ mod tests {
             output_str.contains("[due: 2026-05-01]"),
             "preview should show due date: {output_str}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // WIP persistence integration tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn repl_saves_wip_on_command_and_cleans_up_on_close() {
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: test-only, run with --test-threads=1 to avoid races.
+        unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", dir.path()) };
+
+        let bridge = mock_bridge();
+        let input = b"/decision Ship it | Ready\n/close\n";
+        let mut reader = &input[..];
+        let mut output = Vec::new();
+
+        let session =
+            run_meeting_repl("WIP test", &bridge, None, "", &mut reader, &mut output).unwrap();
+
+        assert_eq!(session.status, MeetingSessionStatus::Closed);
+        assert_eq!(session.decisions.len(), 1);
+
+        // WIP file should be cleaned up after /close.
+        let wip_path = dir
+            .path()
+            .join(crate::meeting_facilitator::MEETING_SESSION_WIP_FILENAME);
+        assert!(
+            !wip_path.exists(),
+            "WIP file should be removed after /close"
+        );
+
+        unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR") };
+    }
+
+    #[test]
+    fn repl_resumes_from_wip_on_y() {
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: test-only, run with --test-threads=1 to avoid races.
+        unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", dir.path()) };
+
+        // Pre-populate a WIP session.
+        use crate::meeting_facilitator::{
+            MeetingSession as MS, MeetingSessionStatus as MSS, save_session_wip,
+        };
+        let wip = MS {
+            topic: "Resumed topic".to_string(),
+            decisions: vec![MeetingDecision {
+                description: "Old decision".to_string(),
+                rationale: "From before crash".to_string(),
+                participants: vec![],
+            }],
+            action_items: vec![],
+            notes: vec!["old note".to_string()],
+            status: MSS::Open,
+            started_at: chrono::Utc::now().to_rfc3339(),
+            participants: vec!["alice".to_string()],
+            explicit_questions: vec![],
+        };
+        save_session_wip(dir.path(), &wip).unwrap();
+
+        let bridge = mock_bridge();
+        // Answer "y" to resume, then close immediately.
+        let input = b"y\n/close\n";
+        let mut reader = &input[..];
+        let mut output = Vec::new();
+
+        let session =
+            run_meeting_repl("Ignored topic", &bridge, None, "", &mut reader, &mut output).unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(
+            output_str.contains("Resume previous session?"),
+            "should prompt for resume: {output_str}"
+        );
+        assert!(
+            output_str.contains("Resuming session"),
+            "should confirm resume: {output_str}"
+        );
+        // Session should carry over the old decision and topic.
+        assert_eq!(session.topic, "Resumed topic");
+        assert_eq!(session.decisions.len(), 1);
+        assert_eq!(session.decisions[0].description, "Old decision");
+        assert!(session.notes.contains(&"old note".to_string()));
+        assert!(session.participants.contains(&"alice".to_string()));
+
+        unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR") };
+    }
+
+    #[test]
+    fn repl_declines_resume_starts_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: test-only, run with --test-threads=1 to avoid races.
+        unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", dir.path()) };
+
+        // Pre-populate a stale WIP session.
+        use crate::meeting_facilitator::{
+            MeetingSession as MS, MeetingSessionStatus as MSS, save_session_wip,
+        };
+        let wip = MS {
+            topic: "Stale topic".to_string(),
+            decisions: vec![],
+            action_items: vec![],
+            notes: vec!["stale note".to_string()],
+            status: MSS::Open,
+            started_at: chrono::Utc::now().to_rfc3339(),
+            participants: vec![],
+            explicit_questions: vec![],
+        };
+        save_session_wip(dir.path(), &wip).unwrap();
+
+        let bridge = mock_bridge();
+        // Answer "n" to decline resume, then close.
+        let input = b"n\n/close\n";
+        let mut reader = &input[..];
+        let mut output = Vec::new();
+
+        let session =
+            run_meeting_repl("Fresh topic", &bridge, None, "", &mut reader, &mut output).unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(
+            output_str.contains("Starting fresh session"),
+            "should start fresh: {output_str}"
+        );
+        // Should use the new topic, not the stale one.
+        assert_eq!(session.topic, "Fresh topic");
+        assert!(session.notes.is_empty());
+
+        unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR") };
     }
 }
