@@ -74,6 +74,28 @@ pub(super) fn advance_goal_with_session(
         }
     }
 
+    // Append recalled memory context (facts, prospectives, procedures) when available.
+    if let Some(ref ctx) = state.prepared_context {
+        if !ctx.relevant_facts.is_empty() {
+            objective.push_str("\n\nRelevant facts from memory:");
+            for fact in &ctx.relevant_facts {
+                let _ = write!(objective, "\n- [{}] {}", fact.concept, fact.content);
+            }
+        }
+        if !ctx.triggered_prospectives.is_empty() {
+            objective.push_str("\n\nTriggered reminders:");
+            for p in &ctx.triggered_prospectives {
+                let _ = write!(objective, "\n- {}: {}", p.description, p.action_on_trigger);
+            }
+        }
+        if !ctx.recalled_procedures.is_empty() {
+            objective.push_str("\n\nRecalled procedures:");
+            for proc in &ctx.recalled_procedures {
+                let _ = write!(objective, "\n- {}: {}", proc.name, proc.steps.join(" → "));
+            }
+        }
+    }
+
     const GOAL_SESSION_IDENTITY: &str =
         include_str!("../../prompt_assets/simard/goal_session_identity.md");
     let identity_context = GOAL_SESSION_IDENTITY.trim().to_string();

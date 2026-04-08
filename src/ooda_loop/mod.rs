@@ -34,7 +34,9 @@ use crate::goal_curation::load_goal_board;
 use crate::gym_bridge::ScoreDimensions;
 use crate::gym_scoring::GymSuiteScore;
 use crate::memory_consolidation;
+use crate::memory_consolidation::preparation_memory_operations;
 use crate::self_improve::{ImprovementCycle, ImprovementPhase};
+use crate::session::SessionId;
 
 /// Act: dispatch actions. Failures are per-action, not cycle-wide (Pillar 11).
 ///
@@ -111,6 +113,32 @@ pub fn run_ooda_cycle(
     eprintln!("[simard] OODA cycle: entering Observe phase");
     let observation = observe(state, bridges)?;
     eprintln!("[simard] OODA cycle: Observe complete");
+
+    // --- Prepare: gather relevant context from cognitive memory ---
+    // Build an objective summary from active goals so memory retrieval is targeted.
+    let objective_summary: String = state
+        .active_goals
+        .active
+        .iter()
+        .map(|g| g.description.as_str())
+        .collect::<Vec<_>>()
+        .join("; ");
+    let cycle_session_id = SessionId::from_uuid(uuid::Uuid::now_v7());
+    match preparation_memory_operations(&objective_summary, &cycle_session_id, &bridges.memory) {
+        Ok(ctx) => {
+            eprintln!(
+                "[simard] OODA cycle: prepared context ({} facts, {} triggers, {} procedures)",
+                ctx.relevant_facts.len(),
+                ctx.triggered_prospectives.len(),
+                ctx.recalled_procedures.len(),
+            );
+            state.prepared_context = Some(ctx);
+        }
+        Err(e) => {
+            eprintln!("[simard] OODA cycle: preparation failed (degraded): {e}");
+            state.prepared_context = None;
+        }
+    }
 
     // --- Orient ---
     state.current_phase = OodaPhase::Orient;
