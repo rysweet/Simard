@@ -207,3 +207,97 @@ pub(super) fn reject_extra_args(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- gym_usage ----
+
+    #[test]
+    fn gym_usage_is_non_empty() {
+        let usage = gym_usage();
+        assert!(!usage.is_empty());
+        assert!(usage.contains("simard-gym"));
+    }
+
+    // ---- next_required ----
+
+    #[test]
+    fn next_required_returns_value() {
+        let mut args = vec!["hello".to_string()].into_iter();
+        let val = next_required(&mut args, "word").unwrap();
+        assert_eq!(val, "hello");
+    }
+
+    #[test]
+    fn next_required_empty_iterator_errors() {
+        let mut args = Vec::<String>::new().into_iter();
+        let result = next_required(&mut args, "something");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("expected something"));
+    }
+
+    // ---- next_optional_path ----
+
+    #[test]
+    fn next_optional_path_with_value() {
+        let mut args = vec!["/some/path".to_string()].into_iter();
+        let path = next_optional_path(&mut args);
+        assert_eq!(path, Some(PathBuf::from("/some/path")));
+    }
+
+    #[test]
+    fn next_optional_path_empty() {
+        let mut args = Vec::<String>::new().into_iter();
+        let path = next_optional_path(&mut args);
+        assert!(path.is_none());
+    }
+
+    // ---- reject_extra_args ----
+
+    #[test]
+    fn reject_extra_args_no_extra() {
+        let args = Vec::<String>::new().into_iter();
+        reject_extra_args(args).unwrap();
+    }
+
+    #[test]
+    fn reject_extra_args_with_extras() {
+        let args = vec!["extra1".to_string(), "extra2".to_string()].into_iter();
+        let result = reject_extra_args(args);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("extra1"));
+        assert!(err.contains("extra2"));
+    }
+
+    // ---- dispatch_operator_probe ----
+
+    #[test]
+    fn dispatch_operator_probe_no_args_errors() {
+        let result = dispatch_operator_probe(Vec::<String>::new());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn dispatch_operator_probe_unknown_mode_errors() {
+        let result = dispatch_operator_probe(vec!["unknown-mode".to_string()]);
+        assert!(result.is_err());
+    }
+
+    // ---- dispatch_legacy_gym_cli ----
+
+    #[test]
+    fn dispatch_legacy_gym_cli_no_args_errors() {
+        let result = dispatch_legacy_gym_cli(Vec::<String>::new());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn dispatch_legacy_gym_cli_unknown_command_errors() {
+        let result = dispatch_legacy_gym_cli(vec!["bogus".to_string()]);
+        assert!(result.is_err());
+    }
+}

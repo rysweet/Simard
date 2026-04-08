@@ -287,31 +287,8 @@ pub(crate) fn verify_cargo_metadata(
 mod tests {
     use super::super::types::SelectedEngineerAction;
     use super::*;
-
-    fn make_action(
-        kind: EngineerActionKind,
-        exit_code: i32,
-        stdout: &str,
-        stderr: &str,
-    ) -> ExecutedEngineerAction {
-        ExecutedEngineerAction {
-            selected: SelectedEngineerAction {
-                label: "test-action".to_string(),
-                rationale: "test".to_string(),
-                argv: vec![],
-                plan_summary: "test plan".to_string(),
-                verification_steps: vec![],
-                expected_changed_files: vec![],
-                kind,
-            },
-            exit_code,
-            stdout: stdout.to_string(),
-            stderr: stderr.to_string(),
-            changed_files: vec![],
-        }
-    }
-
-    // -- verify_cargo_test --
+    use crate::engineer_loop::types::{
+    use std::path::PathBuf;
 
     #[test]
     fn verify_cargo_test_passing() {
@@ -356,8 +333,6 @@ mod tests {
         assert!(checks.iter().any(|c| c.contains("exit 0")));
     }
 
-    // -- verify_cargo_check --
-
     #[test]
     fn verify_cargo_check_success() {
         let action = make_action(EngineerActionKind::CargoCheck, 0, "", "");
@@ -382,8 +357,6 @@ mod tests {
                 .any(|c| c.contains("cargo-check-passed=false") && c.contains("errors=2"))
         );
     }
-
-    // -- verify_create_file --
 
     #[test]
     fn verify_create_file_success() {
@@ -442,8 +415,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // -- verify_append_to_file --
-
     #[test]
     fn verify_append_to_file_success() {
         let dir = std::env::temp_dir().join("simard_test_append");
@@ -472,19 +443,17 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // -- verify_open_issue --
-
     #[test]
     fn verify_open_issue_with_url() {
-        let action = make_action(
+        let action = dummy_executed(
             EngineerActionKind::ReadOnlyScan,
             0,
-            "Created issue https://github.com/org/repo/issues/42",
+            "https://github.com/org/repo/issues/42",
             "",
         );
-        let mut checks = vec![];
+        let mut checks = Vec::new();
         verify_open_issue(&action, &mut checks).unwrap();
-        assert!(checks.iter().any(|c| c == "issue-url-present=true"));
+        assert!(checks.iter().any(|c| c.contains("issue-url-present=true")));
     }
 
     #[test]
@@ -494,8 +463,6 @@ mod tests {
         let result = verify_open_issue(&action, &mut checks);
         assert!(result.is_err());
     }
-
-    // -- build_verification_summary --
 
     #[test]
     fn build_verification_summary_cargo_test() {
@@ -519,8 +486,6 @@ mod tests {
         let summary = build_verification_summary(&action);
         assert!(summary.contains("local-only engineer action"));
     }
-
-    // -- verify_cargo_metadata --
 
     #[test]
     fn verify_cargo_metadata_invalid_json() {
@@ -549,5 +514,203 @@ mod tests {
         let mut checks = vec![];
         let result = verify_cargo_metadata(&canonical, &json, &mut checks);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn verify_cargo_test_passed() {
+        let action = dummy_executed(
+            EngineerActionKind::CargoTest,
+            0,
+            "test result: ok. 5 passed",
+            "",
+        );
+        let mut checks = Vec::new();
+        verify_cargo_test(&action, &mut checks).unwrap();
+        assert!(checks.iter().any(|c| c.contains("cargo-test-passed=true")));
+    }
+
+    #[test]
+    fn verify_cargo_test_failed() {
+        let action = dummy_executed(
+            EngineerActionKind::CargoTest,
+            1,
+            "test result: FAILED. 1 passed",
+            "",
+        );
+        let mut checks = Vec::new();
+        verify_cargo_test(&action, &mut checks).unwrap();
+        assert!(checks.iter().any(|c| c.contains("cargo-test-passed=false")));
+    }
+
+    #[test]
+    fn verify_cargo_test_no_output_exit_zero() {
+        let action = dummy_executed(EngineerActionKind::CargoTest, 0, "", "");
+        let mut checks = Vec::new();
+        verify_cargo_test(&action, &mut checks).unwrap();
+        assert!(checks.iter().any(|c| c.contains("cargo-test-passed=true (exit 0)")));
+    }
+
+    #[test]
+    fn verify_cargo_test_no_output_nonzero_errors() {
+        let action = dummy_executed(EngineerActionKind::CargoTest, 1, "", "");
+        let mut checks = Vec::new();
+        assert!(verify_cargo_test(&action, &mut checks).is_err());
+    }
+
+    #[test]
+    fn verify_cargo_check_passed() {
+        let action = dummy_executed(EngineerActionKind::CargoCheck, 0, "", "");
+        let mut checks = Vec::new();
+        verify_cargo_check(&action, &mut checks);
+        assert!(checks.iter().any(|c| c.contains("cargo-check-passed=true")));
+    }
+
+    #[test]
+    fn verify_cargo_check_failed_counts_errors() {
+        let action = dummy_executed(
+            EngineerActionKind::CargoCheck,
+            1,
+            "",
+            "error[E0001]: something\nerror[E0002]: another\nwarning: foo",
+        );
+        let mut checks = Vec::new();
+        verify_cargo_check(&action, &mut checks);
+        assert!(checks.iter().any(|c| c.contains("errors=2")));
+    }
+
+    #[test]
+    fn verify_open_issue_without_url_errors() {
+        let action = dummy_executed(EngineerActionKind::ReadOnlyScan, 0, "no url here", "");
+        let mut checks = Vec::new();
+        assert!(verify_open_issue(&action, &mut checks).is_err());
+    }
+
+    #[test]
+    fn build_summary_read_only() {
+        let action = dummy_executed(EngineerActionKind::ReadOnlyScan, 0, "", "");
+        let summary = build_verification_summary(&action);
+        assert!(summary.contains("test-action"));
+        assert!(summary.contains("repo grounding"));
+    }
+
+    #[test]
+    fn build_summary_cargo_test() {
+        let action = dummy_executed(EngineerActionKind::CargoTest, 0, "", "");
+        let summary = build_verification_summary(&action);
+        assert!(summary.contains("cargo test"));
+        assert!(summary.contains("passed"));
+    }
+
+    #[test]
+    fn build_summary_cargo_check_failed() {
+        let action = dummy_executed(EngineerActionKind::CargoCheck, 1, "", "");
+        let summary = build_verification_summary(&action);
+        assert!(summary.contains("failed"));
+    }
+
+    #[test]
+    fn build_summary_create_file() {
+        let kind = EngineerActionKind::CreateFile(CreateFileRequest {
+            relative_path: "new.rs".into(),
+            content: "fn main() {}".into(),
+        });
+        let action = dummy_executed(kind, 0, "", "");
+        let summary = build_verification_summary(&action);
+        assert!(summary.contains("new.rs"));
+    }
+
+    #[test]
+    fn build_summary_append_to_file() {
+        let kind = EngineerActionKind::AppendToFile(AppendToFileRequest {
+            relative_path: "log.txt".into(),
+            content: "entry".into(),
+        });
+        let action = dummy_executed(kind, 0, "", "");
+        let summary = build_verification_summary(&action);
+        assert!(summary.contains("log.txt"));
+    }
+
+    #[test]
+    fn build_summary_git_commit() {
+        let kind = EngineerActionKind::GitCommit(GitCommitRequest {
+            message: "fix bug".into(),
+        });
+        let action = dummy_executed(kind, 0, "", "");
+        let summary = build_verification_summary(&action);
+        assert!(summary.contains("GitCommit"));
+    }
+
+    #[test]
+    fn build_summary_open_issue() {
+        let kind = EngineerActionKind::OpenIssue(crate::engineer_loop::types::OpenIssueRequest {
+            title: "bug".into(),
+            body: "desc".into(),
+            labels: vec![],
+        });
+        let action = dummy_executed(kind, 0, "", "");
+        let summary = build_verification_summary(&action);
+        assert!(summary.contains("OpenIssue"));
+    }
+
+    #[test]
+    fn build_summary_structured_text_replace() {
+        let kind = EngineerActionKind::StructuredTextReplace(StructuredEditRequest {
+            relative_path: "src/main.rs".into(),
+            search: "old".into(),
+            replacement: "new".into(),
+            verify_contains: "new".into(),
+        });
+        let action = dummy_executed(kind, 0, "", "");
+        let summary = build_verification_summary(&action);
+        assert!(summary.contains("src/main.rs"));
+    }
+
+    #[test]
+    fn build_summary_shell_command() {
+        let kind = EngineerActionKind::RunShellCommand(ShellCommandRequest {
+            argv: vec!["ls".into()],
+        });
+        let action = dummy_executed(kind, 0, "", "");
+        let summary = build_verification_summary(&action);
+        assert!(summary.contains("RunShellCommand"));
+    }
+
+    #[test]
+    fn verify_cargo_metadata_valid_json() {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let canonical_root = std::fs::canonicalize(&repo_root).unwrap();
+        let json = serde_json::json!({
+            "workspace_root": canonical_root.to_string_lossy(),
+            "packages": [{"name": "simard"}]
+        });
+        let mut checks = Vec::new();
+        verify_cargo_metadata(&canonical_root, &json.to_string(), &mut checks).unwrap();
+        assert!(checks.iter().any(|c| c.starts_with("metadata-workspace-root=")));
+        assert!(checks.iter().any(|c| c.starts_with("metadata-packages=")));
+    }
+
+    #[test]
+    fn verify_cargo_metadata_invalid_json_errors() {
+        let mut checks = Vec::new();
+        assert!(verify_cargo_metadata(Path::new("/tmp"), "not json", &mut checks).is_err());
+    }
+
+    #[test]
+    fn verify_cargo_metadata_missing_workspace_root_errors() {
+        let mut checks = Vec::new();
+        let json = r#"{"packages": []}"#;
+        assert!(verify_cargo_metadata(Path::new("/tmp"), json, &mut checks).is_err());
+    }
+
+    #[test]
+    fn verify_cargo_metadata_empty_packages_errors() {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let canonical_root = std::fs::canonicalize(&repo_root).unwrap();
+        let json = serde_json::json!({
+            "workspace_root": canonical_root.to_string_lossy(),
+            "packages": []
+        });
+        let mut checks = Vec::new();
+        assert!(verify_cargo_metadata(&canonical_root, &json.to_string(), &mut checks).is_err());
     }
 }

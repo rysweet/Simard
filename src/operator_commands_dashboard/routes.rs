@@ -801,4 +801,24 @@ mod tests {
         assert!(INDEX_HTML.contains("setInterval(fetchStatus,30000)"));
         assert!(INDEX_HTML.contains("setInterval(fetchIssues,60000)"));
     }
+
+    #[test]
+    fn build_router_creates_router() {
+        let router = build_router();
+        // Just verify the router is constructed without panic
+        let _ = format!("{:?}", "router created");
+        drop(router);
+    }
+
+    #[test]
+    fn login_html_contains_form() {
+        assert!(LOGIN_HTML.contains("<form"));
+        assert!(LOGIN_HTML.contains("login"));
+    }
+
+    #[test]
+    fn index_html_contains_dashboard() {
+        assert!(INDEX_HTML.contains("Simard Dashboard"));
+        assert!(INDEX_HTML.contains("fetchStatus"));
+    }
 }
