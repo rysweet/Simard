@@ -253,6 +253,14 @@ impl RuntimeKernel {
         self.cognitive_bridge = Some(bridge);
     }
 
+    /// Flush any pending memory bridge writes (retries failed writes).
+    pub fn flush_pending_memory(&self) {
+        let synced = self.ports.memory_store.flush_pending();
+        if synced > 0 {
+            eprintln!("[simard] runtime: flushed {synced} pending memory writes");
+        }
+    }
+
     pub fn export_handoff(&self) -> SimardResult<RuntimeHandoffSnapshot> {
         let memory_records = match self.last_session.as_ref() {
             Some(session) => self.ports.memory_store.list_for_session(&session.id)?,

@@ -20,6 +20,7 @@ use crate::identity::{
     OperatingMode,
 };
 use crate::memory::{FileBackedMemoryStore, MemoryStore};
+use crate::memory_bridge::CognitiveMemoryBridge;
 use crate::memory_bridge_adapter::CognitiveBridgeMemoryStore;
 use crate::metadata::{Freshness, Provenance};
 use crate::prompt_assets::{FilePromptAssetStore, PromptAssetStore};
@@ -44,29 +45,50 @@ pub struct LocalSessionExecution {
     pub stopped_snapshot: ReflectionSnapshot,
 }
 
-/// Build the memory store — cognitive bridge is mandatory in production.
+/// Build the memory store and an optional second cognitive bridge for
+/// session lifecycle consolidation hooks.
 ///
 /// In `BuiltinDefaults` mode (tests/dev), falls back to file-backed store
 /// when the Python bridge is unavailable. In `ExplicitConfig` mode (production),
 /// the cognitive bridge MUST succeed or startup fails.
-fn build_memory_store(config: &BootstrapConfig) -> SimardResult<Arc<dyn MemoryStore>> {
-    let bridge = find_python_dir().ok().and_then(|python_dir| {
-        let db_path = cognitive_memory_db_path(&config.state_root.value);
-        launch_memory_bridge(&config.identity, &db_path, &python_dir).ok()
-    });
+///
+/// When the bridge is available, a second bridge instance is launched for
+/// `RuntimeKernel::set_cognitive_bridge()` so that consolidation hooks
+/// (`intake_memory_operations`, `persistence_memory_operations`) are active.
+fn build_memory_store(
+    config: &BootstrapConfig,
+) -> SimardResult<(Arc<dyn MemoryStore>, Option<CognitiveMemoryBridge>)> {
+    let python_dir = find_python_dir().ok();
+    let db_path = cognitive_memory_db_path(&config.state_root.value);
+
+    let bridge = python_dir
+        .as_ref()
+        .and_then(|pd| launch_memory_bridge(&config.identity, &db_path, pd).ok());
 
     if let Some(bridge) = bridge {
         eprintln!("[simard] cognitive memory bridge active — using LadybugDB backend");
         let store = CognitiveBridgeMemoryStore::new(bridge, config.memory_store_path())?;
         store.hydrate_from_bridge();
-        Ok(Arc::new(store))
+
+        // Launch a second bridge for RuntimeKernel consolidation hooks.
+        let consolidation_bridge = python_dir
+            .as_ref()
+            .and_then(|pd| launch_memory_bridge(&config.identity, &db_path, pd).ok());
+        if consolidation_bridge.is_some() {
+            eprintln!("[simard] consolidation bridge active — session lifecycle hooks enabled");
+        } else {
+            eprintln!("[simard] consolidation bridge unavailable — lifecycle hooks will no-op");
+        }
+
+        Ok((Arc::new(store), consolidation_bridge))
     } else if config.mode == crate::bootstrap::BootstrapMode::BuiltinDefaults {
         eprintln!(
             "[simard] cognitive memory bridge unavailable (builtin-defaults mode) — using file backend for testing"
         );
-        Ok(Arc::new(FileBackedMemoryStore::try_new(
-            config.memory_store_path(),
-        )?))
+        Ok((
+            Arc::new(FileBackedMemoryStore::try_new(config.memory_store_path())?),
+            None,
+        ))
     } else {
         Err(SimardError::BridgeSpawnFailed {
             bridge: "cognitive-memory".into(),
@@ -82,12 +104,14 @@ fn build_memory_store(config: &BootstrapConfig) -> SimardResult<Arc<dyn MemorySt
 struct AssembledParts {
     ports: RuntimePorts,
     request: RuntimeRequest,
+    /// Second bridge instance for `RuntimeKernel::set_cognitive_bridge()`.
+    consolidation_bridge: Option<CognitiveMemoryBridge>,
 }
 
 /// Build all runtime components from a bootstrap config.
 fn assemble_parts(config: &BootstrapConfig) -> SimardResult<AssembledParts> {
     let prompt_store = Arc::new(FilePromptAssetStore::new(config.prompt_root.value.clone()));
-    let memory_store = build_memory_store(config)?;
+    let (memory_store, consolidation_bridge) = build_memory_store(config)?;
     let evidence_store = Arc::new(FileBackedEvidenceStore::try_new(
         config.evidence_store_path(),
     )?);
@@ -131,12 +155,20 @@ fn assemble_parts(config: &BootstrapConfig) -> SimardResult<AssembledParts> {
         agent_program,
     )?;
 
-    Ok(AssembledParts { ports, request })
+    Ok(AssembledParts {
+        ports,
+        request,
+        consolidation_bridge,
+    })
 }
 
 pub fn assemble_local_runtime(config: &BootstrapConfig) -> SimardResult<LocalRuntime> {
     let parts = assemble_parts(config)?;
-    LocalRuntime::compose(parts.ports, parts.request)
+    let mut runtime = LocalRuntime::compose(parts.ports, parts.request)?;
+    if let Some(bridge) = parts.consolidation_bridge {
+        runtime.set_cognitive_bridge(bridge);
+    }
+    Ok(runtime)
 }
 
 pub fn assemble_local_runtime_from_handoff(
@@ -144,7 +176,11 @@ pub fn assemble_local_runtime_from_handoff(
     snapshot: RuntimeHandoffSnapshot,
 ) -> SimardResult<LocalRuntime> {
     let parts = assemble_parts(config)?;
-    LocalRuntime::compose_from_handoff(parts.ports, parts.request, snapshot)
+    let mut runtime = LocalRuntime::compose_from_handoff(parts.ports, parts.request, snapshot)?;
+    if let Some(bridge) = parts.consolidation_bridge {
+        runtime.set_cognitive_bridge(bridge);
+    }
+    Ok(runtime)
 }
 
 pub fn run_local_session(config: &BootstrapConfig) -> SimardResult<LocalSessionExecution> {
@@ -153,6 +189,10 @@ pub fn run_local_session(config: &BootstrapConfig) -> SimardResult<LocalSessionE
 
     let outcome = runtime.run(config.objective.value.clone())?;
     let _ = runtime.export_handoff()?;
+
+    // Flush any pending bridge writes before shutdown.
+    runtime.flush_pending_memory();
+
     let snapshot = runtime.snapshot()?;
     runtime.stop()?;
     let stopped_snapshot = runtime.snapshot()?;
