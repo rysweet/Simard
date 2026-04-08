@@ -54,18 +54,47 @@ fn make_outcome(action: &PlannedAction, success: bool, detail: String) -> Action
 
 /// Dispatch a batch of planned actions against live bridges and state.
 ///
-/// Each action is dispatched independently; a failure in one does not
-/// abort the others. Returns one [`ActionOutcome`] per input action.
+/// Actions are dispatched concurrently using [`std::thread::scope`].
+/// `LaunchSession` actions run fully in parallel (they spawn independent
+/// PTY subprocesses with no shared state). All other actions serialise
+/// through a [`Mutex`] on `bridges` and `state` — they are typically fast
+/// bridge calls, so the lock is held briefly.
+///
+/// Each action is independent; a failure in one does not abort the others.
+/// Returns one [`ActionOutcome`] per input action, in the same order.
 pub fn dispatch_actions(
     actions: &[PlannedAction],
     bridges: &mut OodaBridges,
     state: &mut OodaState,
 ) -> SimardResult<Vec<ActionOutcome>> {
-    let mut outcomes = Vec::with_capacity(actions.len());
-    for action in actions {
-        let outcome = dispatch_one(action, bridges, state);
-        outcomes.push(outcome);
-    }
+    use std::sync::Mutex;
+
+    let bridges = Mutex::new(bridges);
+    let state = Mutex::new(state);
+
+    let outcomes = std::thread::scope(|s| {
+        let handles: Vec<_> = actions
+            .iter()
+            .map(|action| {
+                s.spawn(|| match action.kind {
+                    // LaunchSession is fully independent — no shared state.
+                    ActionKind::LaunchSession => session::dispatch_launch_session(action),
+                    // All other actions need bridges and/or state.
+                    _ => {
+                        let mut bg = bridges.lock().expect("bridges lock poisoned");
+                        let mut sg = state.lock().expect("state lock poisoned");
+                        dispatch_one(action, &mut bg, &mut sg)
+                    }
+                })
+            })
+            .collect();
+
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("action thread panicked"))
+            .collect::<Vec<_>>()
+    });
+
     Ok(outcomes)
 }
 
