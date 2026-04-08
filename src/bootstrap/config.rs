@@ -173,3 +173,166 @@ impl BootstrapConfig {
         &self.state_root.value
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn builtin_defaults_inputs() -> BootstrapInputs {
+        BootstrapInputs {
+            mode: Some("builtin-defaults".to_string()),
+            prompt_root: None,
+            objective: None,
+            state_root: None,
+            identity: None,
+            base_type: None,
+            topology: None,
+        }
+    }
+
+    #[test]
+    fn test_resolve_builtin_defaults() {
+        let config = BootstrapConfig::resolve(builtin_defaults_inputs()).unwrap();
+        assert_eq!(config.mode, BootstrapMode::BuiltinDefaults);
+        assert_eq!(config.identity, DEFAULT_IDENTITY);
+        assert_eq!(config.objective.value, DEFAULT_OBJECTIVE);
+        assert_eq!(
+            config.selected_base_type.value,
+            BaseTypeId::new(LOCAL_BASE_TYPE)
+        );
+        assert_eq!(config.topology.value, RuntimeTopology::SingleProcess);
+    }
+
+    #[test]
+    fn test_resolve_explicit_config_missing_prompt_root() {
+        let inputs = BootstrapInputs {
+            mode: Some("explicit-config".to_string()),
+            prompt_root: None,
+            objective: Some("obj".to_string()),
+            state_root: None,
+            identity: Some("id".to_string()),
+            base_type: Some("bt".to_string()),
+            topology: Some("single-process".to_string()),
+        };
+        let result = BootstrapConfig::resolve(inputs);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_explicit_config_missing_objective() {
+        let inputs = BootstrapInputs {
+            mode: Some("explicit-config".to_string()),
+            prompt_root: Some(PathBuf::from("/some/root")),
+            objective: None,
+            state_root: None,
+            identity: Some("id".to_string()),
+            base_type: Some("bt".to_string()),
+            topology: Some("single-process".to_string()),
+        };
+        let result = BootstrapConfig::resolve(inputs);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_explicit_config_missing_identity() {
+        let inputs = BootstrapInputs {
+            mode: Some("explicit-config".to_string()),
+            prompt_root: Some(PathBuf::from("/some/root")),
+            objective: Some("obj".to_string()),
+            state_root: None,
+            identity: None,
+            base_type: Some("bt".to_string()),
+            topology: Some("single-process".to_string()),
+        };
+        let result = BootstrapConfig::resolve(inputs);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_invalid_mode() {
+        let inputs = BootstrapInputs {
+            mode: Some("invalid-mode".to_string()),
+            prompt_root: None,
+            objective: None,
+            state_root: None,
+            identity: None,
+            base_type: None,
+            topology: None,
+        };
+        let result = BootstrapConfig::resolve(inputs);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_manifest_precedence_contains_expected_keys() {
+        let config = BootstrapConfig::resolve(builtin_defaults_inputs()).unwrap();
+        let precedence = config.manifest_precedence();
+        assert!(precedence.iter().any(|s| s.starts_with("mode:")));
+        assert!(precedence.iter().any(|s| s.starts_with("identity:")));
+        assert!(precedence.iter().any(|s| s.starts_with("base-type:")));
+        assert!(precedence.iter().any(|s| s.starts_with("topology:")));
+        assert!(precedence.iter().any(|s| s.starts_with("prompt-root:")));
+        assert!(precedence.iter().any(|s| s.starts_with("state-root:")));
+        assert!(precedence.iter().any(|s| s.starts_with("objective:")));
+    }
+
+    #[test]
+    fn test_memory_store_path() {
+        let config = BootstrapConfig::resolve(builtin_defaults_inputs()).unwrap();
+        let path = config.memory_store_path();
+        assert!(path.ends_with("memory_records.json"));
+    }
+
+    #[test]
+    fn test_evidence_store_path() {
+        let config = BootstrapConfig::resolve(builtin_defaults_inputs()).unwrap();
+        let path = config.evidence_store_path();
+        assert!(path.ends_with("evidence_records.json"));
+    }
+
+    #[test]
+    fn test_goal_store_path() {
+        let config = BootstrapConfig::resolve(builtin_defaults_inputs()).unwrap();
+        let path = config.goal_store_path();
+        assert!(path.ends_with("goal_records.json"));
+    }
+
+    #[test]
+    fn test_handoff_store_path() {
+        let config = BootstrapConfig::resolve(builtin_defaults_inputs()).unwrap();
+        let path = config.handoff_store_path();
+        assert!(path.ends_with("latest_handoff.json"));
+    }
+
+    #[test]
+    fn test_state_root_path_returns_ref() {
+        let config = BootstrapConfig::resolve(builtin_defaults_inputs()).unwrap();
+        let state_root = config.state_root_path();
+        assert_eq!(state_root, config.state_root.value.as_path());
+    }
+
+    #[test]
+    fn test_resolve_with_explicit_topology_single_process() {
+        let inputs = BootstrapInputs {
+            mode: Some("builtin-defaults".to_string()),
+            topology: Some("single-process".to_string()),
+            ..builtin_defaults_inputs()
+        };
+        let config = BootstrapConfig::resolve(inputs).unwrap();
+        assert_eq!(config.topology.value, RuntimeTopology::SingleProcess);
+        assert_eq!(
+            config.topology.source,
+            ConfigValueSource::Environment("SIMARD_RUNTIME_TOPOLOGY")
+        );
+    }
+
+    #[test]
+    fn test_resolve_with_invalid_topology() {
+        let inputs = BootstrapInputs {
+            mode: Some("builtin-defaults".to_string()),
+            topology: Some("invalid-topology".to_string()),
+            ..builtin_defaults_inputs()
+        };
+        let result = BootstrapConfig::resolve(inputs);
+        assert!(result.is_err());
+    }
+}
