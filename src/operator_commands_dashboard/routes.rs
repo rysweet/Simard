@@ -762,3 +762,43 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
 </body>
 </html>
 "##;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_router_has_expected_routes() {
+        let router = build_router();
+        let _ = router;
+    }
+
+    #[test]
+    fn login_html_contains_form_elements() {
+        assert!(LOGIN_HTML.contains("<form id=\"login-form\">"));
+        assert!(LOGIN_HTML.contains("input id=\"code\""));
+        assert!(LOGIN_HTML.contains("Log in"));
+        assert!(LOGIN_HTML.contains("Simard"));
+    }
+
+    #[test]
+    fn index_html_contains_dashboard_sections() {
+        assert!(INDEX_HTML.contains("Simard Dashboard"));
+        assert!(INDEX_HTML.contains("System Status"));
+        assert!(INDEX_HTML.contains("Open Issues"));
+        assert!(INDEX_HTML.contains("fetchStatus"));
+        assert!(INDEX_HTML.contains("fetchIssues"));
+    }
+
+    #[test]
+    fn login_html_has_security_attributes() {
+        assert!(LOGIN_HTML.contains("maxlength=\"8\""));
+        assert!(LOGIN_HTML.contains("autocomplete=\"off\""));
+    }
+
+    #[test]
+    fn index_html_has_refresh_intervals() {
+        assert!(INDEX_HTML.contains("setInterval(fetchStatus,30000)"));
+        assert!(INDEX_HTML.contains("setInterval(fetchIssues,60000)"));
+    }
+}

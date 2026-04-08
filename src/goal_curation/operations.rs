@@ -266,3 +266,210 @@ pub fn seed_default_board(board: &mut GoalBoard) -> usize {
 
     DEFAULT_SEED_GOALS.len()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_goal(id: &str, priority: u32) -> ActiveGoal {
+        ActiveGoal {
+            id: id.to_string(),
+            description: "A test goal".to_string(),
+            priority,
+            status: GoalProgress::NotStarted,
+            assigned_to: None,
+        }
+    }
+
+    fn make_backlog(id: &str) -> BacklogItem {
+        BacklogItem {
+            id: id.to_string(),
+            description: "A backlog item".to_string(),
+            source: "test".to_string(),
+            score: 0.5,
+        }
+    }
+
+    // -- Validation helpers --
+
+    #[test]
+    fn required_field_rejects_empty() {
+        assert!(required_field("name", "").is_err());
+        assert!(required_field("name", "   ").is_err());
+        assert!(required_field("name", "ok").is_ok());
+    }
+
+    #[test]
+    fn validate_priority_rejects_zero() {
+        assert!(validate_priority("p", 0).is_err());
+        assert!(validate_priority("p", 1).is_ok());
+        assert!(validate_priority("p", 100).is_ok());
+    }
+
+    #[test]
+    fn validate_active_goal_rejects_invalid() {
+        let mut goal = make_goal("g1", 1);
+        assert!(validate_active_goal(&goal).is_ok());
+
+        goal.id = String::new();
+        assert!(validate_active_goal(&goal).is_err());
+
+        let mut goal2 = make_goal("g2", 0);
+        assert!(validate_active_goal(&goal2).is_err());
+
+        goal2.priority = 1;
+        goal2.status = GoalProgress::InProgress { percent: 150 };
+        assert!(validate_active_goal(&goal2).is_err());
+    }
+
+    #[test]
+    fn validate_backlog_item_rejects_empty_fields() {
+        let item = make_backlog("b1");
+        assert!(validate_backlog_item(&item).is_ok());
+
+        let bad = BacklogItem {
+            id: "".to_string(),
+            ..item.clone()
+        };
+        assert!(validate_backlog_item(&bad).is_err());
+
+        let bad2 = BacklogItem {
+            source: "".to_string(),
+            ..make_backlog("b2")
+        };
+        assert!(validate_backlog_item(&bad2).is_err());
+    }
+
+    // -- Board mutations --
+
+    #[test]
+    fn add_active_goal_success() {
+        let mut board = GoalBoard::new();
+        add_active_goal(&mut board, make_goal("g1", 1)).unwrap();
+        assert_eq!(board.active.len(), 1);
+        assert_eq!(board.active[0].id, "g1");
+    }
+
+    #[test]
+    fn add_active_goal_rejects_duplicate() {
+        let mut board = GoalBoard::new();
+        add_active_goal(&mut board, make_goal("g1", 1)).unwrap();
+        let result = add_active_goal(&mut board, make_goal("g1", 2));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_active_goal_rejects_over_capacity() {
+        let mut board = GoalBoard::new();
+        for i in 0..MAX_ACTIVE_GOALS {
+            add_active_goal(&mut board, make_goal(&format!("g{i}"), 1)).unwrap();
+        }
+        let result = add_active_goal(&mut board, make_goal("overflow", 1));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_backlog_item_success() {
+        let mut board = GoalBoard::new();
+        add_backlog_item(&mut board, make_backlog("b1")).unwrap();
+        assert_eq!(board.backlog.len(), 1);
+    }
+
+    #[test]
+    fn add_backlog_item_rejects_duplicate() {
+        let mut board = GoalBoard::new();
+        add_backlog_item(&mut board, make_backlog("b1")).unwrap();
+        assert!(add_backlog_item(&mut board, make_backlog("b1")).is_err());
+    }
+
+    // -- promote_to_active --
+
+    #[test]
+    fn promote_to_active_moves_item() {
+        let mut board = GoalBoard::new();
+        add_backlog_item(&mut board, make_backlog("b1")).unwrap();
+        promote_to_active(&mut board, "b1", 1, Some("owner".into())).unwrap();
+        assert!(board.backlog.is_empty());
+        assert_eq!(board.active.len(), 1);
+        assert_eq!(board.active[0].assigned_to.as_deref(), Some("owner"));
+    }
+
+    #[test]
+    fn promote_to_active_fails_for_missing_item() {
+        let mut board = GoalBoard::new();
+        assert!(promote_to_active(&mut board, "ghost", 1, None).is_err());
+    }
+
+    #[test]
+    fn promote_to_active_fails_at_capacity() {
+        let mut board = GoalBoard::new();
+        for i in 0..MAX_ACTIVE_GOALS {
+            add_active_goal(&mut board, make_goal(&format!("g{i}"), 1)).unwrap();
+        }
+        add_backlog_item(&mut board, make_backlog("b1")).unwrap();
+        assert!(promote_to_active(&mut board, "b1", 1, None).is_err());
+    }
+
+    // -- update_goal_progress --
+
+    #[test]
+    fn update_goal_progress_success() {
+        let mut board = GoalBoard::new();
+        add_active_goal(&mut board, make_goal("g1", 1)).unwrap();
+        update_goal_progress(&mut board, "g1", GoalProgress::InProgress { percent: 50 }).unwrap();
+        assert_eq!(
+            board.active[0].status,
+            GoalProgress::InProgress { percent: 50 }
+        );
+    }
+
+    #[test]
+    fn update_goal_progress_rejects_over_100() {
+        let mut board = GoalBoard::new();
+        add_active_goal(&mut board, make_goal("g1", 1)).unwrap();
+        let result =
+            update_goal_progress(&mut board, "g1", GoalProgress::InProgress { percent: 200 });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn update_goal_progress_fails_for_missing_goal() {
+        let mut board = GoalBoard::new();
+        assert!(update_goal_progress(&mut board, "ghost", GoalProgress::Completed).is_err());
+    }
+
+    // -- archive_completed --
+
+    #[test]
+    fn archive_completed_removes_completed_goals() {
+        let mut board = GoalBoard::new();
+        add_active_goal(&mut board, make_goal("g1", 1)).unwrap();
+        add_active_goal(&mut board, make_goal("g2", 2)).unwrap();
+        update_goal_progress(&mut board, "g1", GoalProgress::Completed).unwrap();
+
+        let archived = archive_completed(&mut board);
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].id, "g1");
+        assert_eq!(board.active.len(), 1);
+        assert_eq!(board.active[0].id, "g2");
+    }
+
+    // -- seed_default_board --
+
+    #[test]
+    fn seed_default_board_populates_empty_board() {
+        let mut board = GoalBoard::new();
+        let count = seed_default_board(&mut board);
+        assert_eq!(count, DEFAULT_SEED_GOALS.len());
+        assert_eq!(board.active.len(), DEFAULT_SEED_GOALS.len());
+    }
+
+    #[test]
+    fn seed_default_board_noop_when_goals_exist() {
+        let mut board = GoalBoard::new();
+        add_active_goal(&mut board, make_goal("existing", 1)).unwrap();
+        let count = seed_default_board(&mut board);
+        assert_eq!(count, 0);
+        assert_eq!(board.active.len(), 1);
+    }
+}

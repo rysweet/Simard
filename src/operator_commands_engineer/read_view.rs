@@ -219,3 +219,142 @@ impl EngineerReadView {
         println!("Evidence records: {}", self.evidence_record_count);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::evidence::EvidenceSource;
+    use crate::session::{SessionId, SessionPhase};
+    use crate::{
+        BaseTypeId, EvidenceRecord, OperatingMode, RuntimeAddress, RuntimeHandoffSnapshot,
+        RuntimeNodeId, RuntimeState, RuntimeTopology,
+    };
+
+    fn make_evidence(detail: &str) -> EvidenceRecord {
+        EvidenceRecord {
+            id: "ev-test".to_string(),
+            session_id: SessionId::parse("00000000-0000-0000-0000-000000000001").unwrap(),
+            phase: SessionPhase::Execution,
+            detail: detail.to_string(),
+            source: EvidenceSource::Runtime,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn make_session() -> crate::session::SessionRecord {
+        crate::session::SessionRecord {
+            id: SessionId::parse("00000000-0000-0000-0000-000000000001").unwrap(),
+            mode: OperatingMode::Engineer,
+            objective: "objective-metadata(chars=42, words=8, lines=2)".to_string(),
+            phase: SessionPhase::Complete,
+            selected_base_type: BaseTypeId::from("terminal-shell"),
+            evidence_ids: vec![],
+            memory_keys: vec![],
+        }
+    }
+
+    fn engineer_evidence() -> Vec<EvidenceRecord> {
+        vec![
+            make_evidence("repo-root=/home/user/project"),
+            make_evidence("repo-branch=main"),
+            make_evidence("repo-head=abc123"),
+            make_evidence("worktree-dirty=false"),
+            make_evidence("changed-files=<none>"),
+            make_evidence("active-goals=<none>"),
+            make_evidence("carried-meeting-decisions=<none>"),
+            make_evidence("selected-action=cargo-check"),
+            make_evidence("action-plan=run cargo check"),
+            make_evidence("action-verification-steps=verify clean build"),
+            make_evidence("action-status=success"),
+            make_evidence("changed-files-after-action=<none>"),
+            make_evidence("verification-status=passed"),
+            make_evidence("verification-summary=all checks passed"),
+        ]
+    }
+
+    #[allow(dead_code)]
+    fn make_handoff(
+        session: Option<crate::session::SessionRecord>,
+        evidence: Vec<EvidenceRecord>,
+    ) -> RuntimeHandoffSnapshot {
+        RuntimeHandoffSnapshot {
+            exported_state: RuntimeState::Ready,
+            identity_name: "simard-engineer".to_string(),
+            selected_base_type: BaseTypeId::from("terminal-shell"),
+            topology: RuntimeTopology::SingleProcess,
+            source_runtime_node: RuntimeNodeId::new("test-node"),
+            source_mailbox_address: RuntimeAddress::new("test-addr"),
+            session,
+            memory_records: vec![],
+            evidence_records: evidence,
+            copilot_submit_audit: None,
+        }
+    }
+
+    #[test]
+    fn engineer_read_view_struct_captures_all_fields() {
+        let view = EngineerReadView {
+            state_root: PathBuf::from("/test/state"),
+            handoff_source: "test-source.json".to_string(),
+            identity: "simard-engineer".to_string(),
+            selected_base_type: "terminal-shell".to_string(),
+            topology: "single-process".to_string(),
+            session_phase: "Complete".to_string(),
+            objective_metadata: "objective-metadata(chars=42, words=8, lines=2)".to_string(),
+            repo_root: PathBuf::from("/home/user/project"),
+            repo_branch: "main".to_string(),
+            repo_head: "abc123".to_string(),
+            worktree_dirty: "false".to_string(),
+            changed_files: "<none>".to_string(),
+            active_goals: vec![],
+            carried_meeting_decisions: vec![],
+            selected_action: "cargo-check".to_string(),
+            action_plan: "run cargo check".to_string(),
+            verification_steps: "verify clean build".to_string(),
+            action_status: "success".to_string(),
+            changed_files_after_action: "<none>".to_string(),
+            verification_status: "passed".to_string(),
+            verification_summary: "all checks passed".to_string(),
+            terminal_bridge_context: None,
+            memory_record_count: 0,
+            evidence_record_count: 0,
+        };
+        assert_eq!(view.identity, "simard-engineer");
+        assert_eq!(view.repo_branch, "main");
+        assert_eq!(view.verification_status, "passed");
+    }
+
+    #[test]
+    fn parse_engineer_summary_list_empty_for_none() {
+        let result = parse_engineer_summary_list("<none>", ", ");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_engineer_summary_list_splits_items() {
+        let result = parse_engineer_summary_list("goal-a, goal-b", ", ");
+        assert_eq!(result, vec!["goal-a", "goal-b"]);
+    }
+
+    #[test]
+    fn parse_carried_meeting_decisions_returns_empty_for_none() {
+        let result = parse_carried_meeting_decisions("<none>").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn required_evidence_value_finds_matching_prefix() {
+        let records = engineer_evidence();
+        let result =
+            required_engineer_evidence_value(&records, "repo-branch=", "test-source").unwrap();
+        assert_eq!(result, "main");
+    }
+
+    #[test]
+    fn required_evidence_value_errors_on_missing() {
+        let records = engineer_evidence();
+        let result =
+            required_engineer_evidence_value(&records, "nonexistent-field=", "test-source");
+        assert!(result.is_err());
+    }
+}

@@ -260,3 +260,102 @@ pub(crate) fn persist_engineer_loop_artifacts(
     persist_handoff_artifacts(state_root, ScopedHandoffMode::Engineer, &handoff)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    use crate::engineer_loop::types::{
+        EngineerActionKind, ExecutedEngineerAction, SelectedEngineerAction,
+    };
+
+    fn make_inspection() -> RepoInspection {
+        RepoInspection {
+            workspace_root: PathBuf::from("/fake/workspace"),
+            repo_root: PathBuf::from("/fake/repo"),
+            branch: "main".to_string(),
+            head: "abc123".to_string(),
+            worktree_dirty: false,
+            changed_files: Vec::new(),
+            active_goals: Vec::new(),
+            carried_meeting_decisions: Vec::new(),
+            architecture_gap_summary: String::new(),
+        }
+    }
+
+    fn make_executed(kind: EngineerActionKind) -> ExecutedEngineerAction {
+        ExecutedEngineerAction {
+            selected: SelectedEngineerAction {
+                label: "test-action".into(),
+                rationale: "test".into(),
+                argv: vec!["test".into()],
+                plan_summary: "test plan".into(),
+                verification_steps: Vec::new(),
+                expected_changed_files: Vec::new(),
+                kind,
+            },
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            changed_files: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn philosophy_review_contains_required_keywords() {
+        assert!(PHILOSOPHY_REVIEW.contains("simplicity"));
+        assert!(PHILOSOPHY_REVIEW.contains("Clippy"));
+        assert!(PHILOSOPHY_REVIEW.contains("400 lines"));
+        assert!(!PHILOSOPHY_REVIEW.is_empty());
+    }
+
+    #[test]
+    fn compute_diff_for_review_returns_empty_on_nonexistent_repo() {
+        let result = compute_diff_for_review(
+            Path::new("/nonexistent/path"),
+            &EngineerActionKind::ReadOnlyScan,
+        );
+        assert!(
+            result.is_empty(),
+            "expected empty diff for nonexistent repo"
+        );
+    }
+
+    #[test]
+    fn compute_diff_uses_head_diff_for_git_commit() {
+        // GitCommit variant should trigger `git diff HEAD~1 HEAD`
+        // On a nonexistent path this still returns empty, but exercises the branch
+        let result = compute_diff_for_review(
+            Path::new("/nonexistent/path"),
+            &EngineerActionKind::GitCommit(crate::engineer_loop::types::GitCommitRequest {
+                message: "test commit".to_string(),
+            }),
+        );
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn run_optional_review_skips_read_only_scan() {
+        let inspection = make_inspection();
+        let action = make_executed(EngineerActionKind::ReadOnlyScan);
+        let result = run_optional_review(&inspection, &action);
+        assert!(result.is_ok(), "read-only actions should be skipped");
+    }
+
+    #[test]
+    fn run_optional_review_skips_cargo_test() {
+        let inspection = make_inspection();
+        let action = make_executed(EngineerActionKind::CargoTest);
+        let result = run_optional_review(&inspection, &action);
+        assert!(result.is_ok(), "cargo test actions should be skipped");
+    }
+
+    #[test]
+    fn run_optional_review_skips_cargo_check() {
+        let inspection = make_inspection();
+        let action = make_executed(EngineerActionKind::CargoCheck);
+        let result = run_optional_review(&inspection, &action);
+        assert!(result.is_ok(), "cargo check actions should be skipped");
+    }
+}
