@@ -251,6 +251,13 @@ impl Display for SimardError {
                     "runtime component '{component}' failed to initialize: {reason}"
                 )
             }
+            Self::MemoryIntegrityError { path, reason } => {
+                write!(
+                    f,
+                    "memory integrity check failed for '{}': {reason}",
+                    path.display()
+                )
+            }
         }
     }
 }

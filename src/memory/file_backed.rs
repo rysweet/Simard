@@ -2,14 +2,82 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 use crate::error::{SimardError, SimardResult};
 use crate::metadata::{BackendDescriptor, Freshness};
-use crate::persistence::{load_json_or_default, persist_json};
+use crate::persistence::persist_json;
 use crate::session::SessionId;
 
 use super::store::MemoryStore;
 use super::types::{MEMORY_STORE_NAME, MemoryRecord, MemoryScope};
+
+/// On-disk envelope that pairs memory records with a CRC32 checksum.
+#[derive(Serialize, Deserialize)]
+struct ChecksummedPayload {
+    crc32: u32,
+    records: Vec<MemoryRecord>,
+}
+
+fn compute_crc32(records: &[MemoryRecord]) -> SimardResult<u32> {
+    let bytes = serde_json::to_vec(records).map_err(|e| SimardError::PersistentStoreIo {
+        store: MEMORY_STORE_NAME.to_string(),
+        action: "checksum-serialize".to_string(),
+        path: PathBuf::new(),
+        reason: e.to_string(),
+    })?;
+    Ok(crc32fast::hash(&bytes))
+}
+
+/// Load memory records from a file, validating the CRC32 checksum.
+/// Supports both the new checksummed format and legacy plain-array format.
+fn load_checksummed(path: &Path) -> SimardResult<Vec<MemoryRecord>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let contents = std::fs::read(path).map_err(|e| SimardError::PersistentStoreIo {
+        store: MEMORY_STORE_NAME.to_string(),
+        action: "read".to_string(),
+        path: path.to_path_buf(),
+        reason: e.to_string(),
+    })?;
+
+    // Try checksummed format first.
+    if let Ok(payload) = serde_json::from_slice::<ChecksummedPayload>(&contents) {
+        let expected = compute_crc32(&payload.records)?;
+        if payload.crc32 != expected {
+            return Err(SimardError::MemoryIntegrityError {
+                path: path.to_path_buf(),
+                reason: format!(
+                    "CRC32 mismatch: stored={:#010x}, computed={:#010x}",
+                    payload.crc32, expected
+                ),
+            });
+        }
+        return Ok(payload.records);
+    }
+
+    // Fall back to legacy plain-array format.
+    serde_json::from_slice::<Vec<MemoryRecord>>(&contents).map_err(|e| {
+        SimardError::PersistentStoreIo {
+            store: MEMORY_STORE_NAME.to_string(),
+            action: "deserialize".to_string(),
+            path: path.to_path_buf(),
+            reason: e.to_string(),
+        }
+    })
+}
+
+/// Persist memory records with a CRC32 checksum envelope.
+fn persist_checksummed(path: &Path, records: &[MemoryRecord]) -> SimardResult<()> {
+    let crc32 = compute_crc32(records)?;
+    let payload = ChecksummedPayload {
+        crc32,
+        records: records.to_vec(),
+    };
+    persist_json(MEMORY_STORE_NAME, path, &payload)
+}
 
 #[derive(Debug)]
 pub struct FileBackedMemoryStore {
@@ -22,7 +90,7 @@ impl FileBackedMemoryStore {
     pub fn new(path: impl Into<PathBuf>, descriptor: BackendDescriptor) -> SimardResult<Self> {
         let path = path.into();
         Ok(Self {
-            records: Mutex::new(load_json_or_default(MEMORY_STORE_NAME, &path)?),
+            records: Mutex::new(load_checksummed(&path)?),
             path,
             descriptor,
         })
@@ -45,7 +113,7 @@ impl FileBackedMemoryStore {
     }
 
     fn persist(&self, records: &[MemoryRecord]) -> SimardResult<()> {
-        persist_json(MEMORY_STORE_NAME, &self.path, &records)
+        persist_checksummed(&self.path, records)
     }
 }
 

@@ -216,6 +216,10 @@ pub enum SimardError {
         component: String,
         reason: String,
     },
+    MemoryIntegrityError {
+        path: PathBuf,
+        reason: String,
+    },
 }
 
 pub type SimardResult<T> = Result<T, SimardError>;

@@ -132,7 +132,11 @@ async fn health() -> Json<Value> {
     // Probe remote hosts if SIMARD_REMOTE_HOSTS is set.
     let mut remote_hosts: Vec<Value> = Vec::new();
     if let Ok(hosts_env) = std::env::var("SIMARD_REMOTE_HOSTS") {
-        for host in hosts_env.split(',').map(str::trim).filter(|h| !h.is_empty()) {
+        for host in hosts_env
+            .split(',')
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+        {
             let url = if host.starts_with("http") {
                 format!("{host}/api/health")
             } else {
@@ -145,9 +149,9 @@ async fn health() -> Json<Value> {
             let remote = match result {
                 Ok(o) if o.status.success() => {
                     let body = String::from_utf8_lossy(&o.stdout);
-                    serde_json::from_str::<Value>(&body).unwrap_or_else(|_| {
-                        json!({"host": host, "status": "error", "detail": "invalid json"})
-                    })
+                    serde_json::from_str::<Value>(&body).unwrap_or_else(
+                        |_| json!({"host": host, "status": "error", "detail": "invalid json"}),
+                    )
                 }
                 _ => json!({"host": host, "status": "unreachable"}),
             };
@@ -168,12 +172,7 @@ async fn health() -> Json<Value> {
 
 async fn latest_build() -> Json<Value> {
     let output = tokio::process::Command::new("gh")
-        .args([
-            "release",
-            "view",
-            "--json",
-            "tagName,name,url,publishedAt",
-        ])
+        .args(["release", "view", "--json", "tagName,name,url,publishedAt"])
         .output()
         .await;
 
