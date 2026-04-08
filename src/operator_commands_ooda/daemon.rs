@@ -73,7 +73,10 @@ fn write_health_file(
         "timestamp": chrono::Utc::now().to_rfc3339(),
     });
     let path = state_root.join("daemon_health.json");
-    let _ = std::fs::write(&path, serde_json::to_string_pretty(&health).unwrap_or_default());
+    let _ = std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&health).unwrap_or_default(),
+    );
 }
 
 /// Read resident set size from /proc/self/status (Linux only).
