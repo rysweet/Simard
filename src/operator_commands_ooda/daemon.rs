@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, Instant};
 
 use crate::bridge_launcher::{
     cognitive_memory_db_path, find_python_dir, launch_gym_bridge, launch_knowledge_bridge,
@@ -52,6 +52,39 @@ fn exec_self_reload() -> Result<(), Box<dyn std::error::Error>> {
     let err = std::process::Command::new(&exe).args(&args).exec();
     // exec() only returns on failure
     Err(format!("exec failed: {err}").into())
+}
+
+/// Write a `daemon_health.json` file the dashboard can read instead of pgrep.
+fn write_health_file(
+    state_root: &std::path::Path,
+    start_time: &Instant,
+    cycles_run: u32,
+    last_action: Option<&str>,
+) {
+    let uptime_secs = start_time.elapsed().as_secs();
+    let rss_kb = read_rss_kb().unwrap_or(0);
+    let health = serde_json::json!({
+        "status": "running",
+        "uptime_secs": uptime_secs,
+        "cycle_count": cycles_run,
+        "last_action_time": last_action.unwrap_or("none"),
+        "memory_rss_kb": rss_kb,
+        "pid": std::process::id(),
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    });
+    let path = state_root.join("daemon_health.json");
+    let _ = std::fs::write(&path, serde_json::to_string_pretty(&health).unwrap_or_default());
+}
+
+/// Read resident set size from /proc/self/status (Linux only).
+fn read_rss_kb() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            return rest.trim().trim_end_matches(" kB").trim().parse().ok();
+        }
+    }
+    None
 }
 
 /// Sleep that wakes early when the shutdown flag is set.
@@ -152,7 +185,12 @@ pub fn run_ooda_daemon(
         eprintln!("[simard] OODA daemon: auto-reload enabled");
     }
 
+    let daemon_start = Instant::now();
     let mut cycles_run = 0u32;
+    let mut last_action_time: Option<String> = None;
+
+    // Write initial health file so the dashboard can detect the daemon immediately.
+    write_health_file(&state_root, &daemon_start, 0, None);
 
     loop {
         // Check for shutdown signal at the top of each iteration.
@@ -181,10 +219,9 @@ pub fn run_ooda_daemon(
             Ok(report) => {
                 let summary = summarize_cycle_report(&report);
                 eprintln!("[simard] {summary}");
-                // Persist the cycle report to filesystem for auditability.
                 persist_cycle_report(&state_root, &report);
-                // Persist the cycle summary to cognitive memory as an episode.
                 persist_cycle_to_memory(&bridges, &report);
+                last_action_time = Some(chrono::Utc::now().to_rfc3339());
             }
             Err(e) => {
                 eprintln!("[simard] OODA cycle error: {e}");
@@ -192,6 +229,14 @@ pub fn run_ooda_daemon(
         }
 
         cycles_run += 1;
+
+        // Update health file after each cycle.
+        write_health_file(
+            &state_root,
+            &daemon_start,
+            cycles_run,
+            last_action_time.as_deref(),
+        );
 
         // Skip the inter-cycle sleep if this was the last requested cycle.
         if max_cycles > 0 && cycles_run >= max_cycles {

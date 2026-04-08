@@ -12,6 +12,8 @@ use super::auth::{require_auth, try_login};
 pub fn build_router() -> Router {
     Router::new()
         .route("/api/status", get(status))
+        .route("/api/health", get(health))
+        .route("/api/latest-build", get(latest_build))
         .route("/api/issues", get(issues))
         .route("/api/logs", get(logs))
         .route("/api/processes", get(processes))
@@ -60,11 +62,36 @@ async fn status() -> Json<Value> {
         env!("SIMARD_BUILD_NUMBER")
     );
 
-    let ooda_running = std::process::Command::new("pgrep")
-        .args(["-f", "simard.*ooda run"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let git_hash = env!("SIMARD_GIT_HASH");
+    let commit_url = format!("https://github.com/rysweet/Simard/commit/{git_hash}");
+
+    // Read daemon health from file instead of pgrep.
+    let state_root = resolve_state_root();
+    let health_path = state_root.join("daemon_health.json");
+    let daemon_health = std::fs::read_to_string(&health_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+
+    let (ooda_status, cycle_count, daemon_uptime) = match &daemon_health {
+        Some(h) => {
+            // Consider daemon stale if health file is older than 10 minutes.
+            let is_stale = std::fs::metadata(&health_path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(|t| t.elapsed().unwrap_or_default().as_secs() > 600)
+                .unwrap_or(true);
+            if is_stale {
+                ("stale".to_string(), 0u64, 0u64)
+            } else {
+                (
+                    h["status"].as_str().unwrap_or("unknown").to_string(),
+                    h["cycle_count"].as_u64().unwrap_or(0),
+                    h["uptime_secs"].as_u64().unwrap_or(0),
+                )
+            }
+        }
+        None => ("stopped".to_string(), 0, 0),
+    };
 
     let disk = disk_usage_pct().await;
 
@@ -78,11 +105,101 @@ async fn status() -> Json<Value> {
 
     Json(json!({
         "version": version,
-        "ooda_daemon": if ooda_running { "running" } else { "stopped" },
+        "git_hash": git_hash,
+        "commit_url": commit_url,
+        "ooda_daemon": ooda_status,
+        "cycle_count": cycle_count,
+        "daemon_uptime_secs": daemon_uptime,
         "active_processes": child_count,
         "disk_usage_pct": disk,
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Health endpoint — returns daemon health + remote host health
+// ---------------------------------------------------------------------------
+
+async fn health() -> Json<Value> {
+    let state_root = resolve_state_root();
+    let health_path = state_root.join("daemon_health.json");
+
+    let local_health = std::fs::read_to_string(&health_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .unwrap_or_else(|| json!({"status": "unavailable"}));
+
+    // Probe remote hosts if SIMARD_REMOTE_HOSTS is set.
+    let mut remote_hosts: Vec<Value> = Vec::new();
+    if let Ok(hosts_env) = std::env::var("SIMARD_REMOTE_HOSTS") {
+        for host in hosts_env.split(',').map(str::trim).filter(|h| !h.is_empty()) {
+            let url = if host.starts_with("http") {
+                format!("{host}/api/health")
+            } else {
+                format!("http://{host}/api/health")
+            };
+            let result = tokio::process::Command::new("curl")
+                .args(["-s", "--connect-timeout", "3", "--max-time", "5", &url])
+                .output()
+                .await;
+            let remote = match result {
+                Ok(o) if o.status.success() => {
+                    let body = String::from_utf8_lossy(&o.stdout);
+                    serde_json::from_str::<Value>(&body).unwrap_or_else(|_| {
+                        json!({"host": host, "status": "error", "detail": "invalid json"})
+                    })
+                }
+                _ => json!({"host": host, "status": "unreachable"}),
+            };
+            remote_hosts.push(json!({"host": host, "health": remote}));
+        }
+    }
+
+    Json(json!({
+        "local": local_health,
+        "remote_hosts": remote_hosts,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Latest build endpoint — returns GitHub release/artifact URL
+// ---------------------------------------------------------------------------
+
+async fn latest_build() -> Json<Value> {
+    let output = tokio::process::Command::new("gh")
+        .args([
+            "release",
+            "view",
+            "--json",
+            "tagName,name,url,publishedAt",
+        ])
+        .output()
+        .await;
+
+    match output {
+        Ok(o) if o.status.success() => {
+            let raw = String::from_utf8_lossy(&o.stdout);
+            match serde_json::from_str::<Value>(&raw) {
+                Ok(v) => Json(json!({
+                    "source": "github_release",
+                    "tag": v["tagName"],
+                    "name": v["name"],
+                    "url": v["url"],
+                    "published_at": v["publishedAt"],
+                })),
+                Err(_) => Json(json!({"error": "failed to parse release info"})),
+            }
+        }
+        _ => {
+            // Fallback: link to releases page.
+            Json(json!({
+                "source": "fallback",
+                "url": "https://github.com/rysweet/Simard/releases",
+                "detail": "no release found or gh CLI unavailable",
+            }))
+        }
+    }
 }
 
 async fn issues() -> Json<Value> {
@@ -565,14 +682,25 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
       try{
         const r=await fetch('/api/status'); const d=await r.json();
         const dc=d.disk_usage_pct>90?'err':d.disk_usage_pct>70?'warn':'ok';
-        const oc=d.ooda_daemon==='running'?'ok':'err';
+        const oc=d.ooda_daemon==='running'?'ok':d.ooda_daemon==='stale'?'warn':'err';
+        const versionLink=d.commit_url?`<a href="${d.commit_url}" target="_blank" rel="noopener" style="color:var(--fg);text-decoration:underline">v${d.version} (${d.git_hash})</a>`:`v${d.version}`;
         document.getElementById('status').innerHTML=`
-          <div class="stat"><span class="label">Version</span><span class="value">v${d.version}</span></div>
-          <div class="stat"><span class="label">OODA Daemon</span><span class="value ${oc}">${d.ooda_daemon}</span></div>
+          <div class="stat"><span class="label">Version</span><span class="value">${versionLink}</span></div>
+          <div class="stat"><span class="label">OODA Daemon</span><span class="value ${oc}">${d.ooda_daemon}${d.cycle_count?' ('+d.cycle_count+' cycles)':''}</span></div>
           <div class="stat"><span class="label">Active Processes</span><span class="value">${d.active_processes??0}</span></div>
           <div class="stat"><span class="label">Disk Usage</span><span class="value ${dc}">${d.disk_usage_pct??'?'}%</span></div>
-          <div class="stat"><span class="label">Updated</span><span class="value">${new Date(d.timestamp).toLocaleTimeString()}</span></div>`;
+          <div class="stat"><span class="label">Updated</span><span class="value">${new Date(d.timestamp).toLocaleTimeString()}</span></div>
+          <div class="stat"><span class="label">Download</span><span class="value"><a href="#" id="download-link" style="color:var(--accent)" onclick="fetchDownload(event)">Latest Build ↓</a></span></div>`;
       }catch(e){document.getElementById('status').innerHTML='<span class="err">Failed to load</span>';}
+    }
+
+    async function fetchDownload(e){
+      if(e)e.preventDefault();
+      try{
+        const r=await fetch('/api/latest-build'); const d=await r.json();
+        if(d.url) window.open(d.url,'_blank');
+        else alert('No build available: '+(d.detail||d.error||'unknown'));
+      }catch(err){alert('Failed to fetch build info');}
     }
 
     /* --- Issues --- */
