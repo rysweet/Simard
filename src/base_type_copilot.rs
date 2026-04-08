@@ -313,9 +313,7 @@ fn build_copilot_terminal_objective(
         let chars: Vec<char> = formatted_prompt.chars().collect();
         for (i, chunk) in chars.chunks(PROMPT_CHUNK_SIZE).enumerate() {
             let chunk_str: String = chunk.iter().collect();
-            let escaped_chunk = chunk_str
-                .replace('\\', "\\\\")
-                .replace('\'', "'\\''");
+            let escaped_chunk = chunk_str.replace('\\', "\\\\").replace('\'', "'\\''");
             let redirect = if i == 0 { ">" } else { ">>" };
             objective.push_str(&format!(
                 "input: printf '%s' '{escaped_chunk}' {redirect} \"$SIMARD_PROMPT_FILE\"\n",
