@@ -66,10 +66,10 @@ pub async fn require_auth(request: Request, next: Next) -> Result<Response, Stat
         .unwrap_or_default();
     for part in cookie_header.split(';') {
         let part = part.trim();
-        if let Some(token) = part.strip_prefix("simard_session=") {
-            if is_valid_session(token) {
-                return Ok(next.run(request).await);
-            }
+        if let Some(token) = part.strip_prefix("simard_session=")
+            && is_valid_session(token)
+        {
+            return Ok(next.run(request).await);
         }
     }
 
