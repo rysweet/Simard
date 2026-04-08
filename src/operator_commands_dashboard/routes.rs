@@ -798,7 +798,7 @@ mod tests {
 
     #[test]
     fn index_html_has_refresh_intervals() {
-        assert!(INDEX_HTML.contains("setInterval(fetchStatus, 30000)"));
-        assert!(INDEX_HTML.contains("setInterval(fetchIssues, 60000)"));
+        assert!(INDEX_HTML.contains("setInterval(fetchStatus,30000)"));
+        assert!(INDEX_HTML.contains("setInterval(fetchIssues,60000)"));
     }
 }
