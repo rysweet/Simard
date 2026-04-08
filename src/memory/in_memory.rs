@@ -160,9 +160,15 @@ mod tests {
     fn list_filters_by_scope() {
         let store = InMemoryMemoryStore::try_default().unwrap();
         let sid = test_session_id();
-        store.put(make_record("a", MemoryScope::Project, &sid)).unwrap();
-        store.put(make_record("b", MemoryScope::Decision, &sid)).unwrap();
-        store.put(make_record("c", MemoryScope::Project, &sid)).unwrap();
+        store
+            .put(make_record("a", MemoryScope::Project, &sid))
+            .unwrap();
+        store
+            .put(make_record("b", MemoryScope::Decision, &sid))
+            .unwrap();
+        store
+            .put(make_record("c", MemoryScope::Project, &sid))
+            .unwrap();
 
         assert_eq!(store.list(MemoryScope::Project).unwrap().len(), 2);
         assert_eq!(store.list(MemoryScope::Decision).unwrap().len(), 1);
@@ -174,8 +180,12 @@ mod tests {
         let store = InMemoryMemoryStore::try_default().unwrap();
         let s1 = test_session_id();
         let s2 = other_session_id();
-        store.put(make_record("a", MemoryScope::Project, &s1)).unwrap();
-        store.put(make_record("b", MemoryScope::Project, &s2)).unwrap();
+        store
+            .put(make_record("a", MemoryScope::Project, &s1))
+            .unwrap();
+        store
+            .put(make_record("b", MemoryScope::Project, &s2))
+            .unwrap();
 
         assert_eq!(store.list_for_session(&s1).unwrap().len(), 1);
         assert_eq!(store.count_for_session(&s1).unwrap(), 1);
@@ -186,8 +196,12 @@ mod tests {
     fn list_all_returns_everything() {
         let store = InMemoryMemoryStore::try_default().unwrap();
         let sid = test_session_id();
-        store.put(make_record("a", MemoryScope::Project, &sid)).unwrap();
-        store.put(make_record("b", MemoryScope::Decision, &sid)).unwrap();
+        store
+            .put(make_record("a", MemoryScope::Project, &sid))
+            .unwrap();
+        store
+            .put(make_record("b", MemoryScope::Decision, &sid))
+            .unwrap();
         assert_eq!(store.list_all().unwrap().len(), 2);
     }
 
@@ -195,7 +209,9 @@ mod tests {
     fn list_by_time_range_filters_correctly() {
         let store = InMemoryMemoryStore::try_default().unwrap();
         let sid = test_session_id();
-        store.put(make_record("a", MemoryScope::Project, &sid)).unwrap();
+        store
+            .put(make_record("a", MemoryScope::Project, &sid))
+            .unwrap();
 
         let now = Utc::now();
         let start = now - Duration::seconds(5);
@@ -205,7 +221,10 @@ mod tests {
         // Range entirely in the past should return nothing
         let old_start = now - Duration::seconds(100);
         let old_end = now - Duration::seconds(50);
-        assert_eq!(store.list_by_time_range(old_start, old_end).unwrap().len(), 0);
+        assert_eq!(
+            store.list_by_time_range(old_start, old_end).unwrap().len(),
+            0
+        );
     }
 
     #[test]

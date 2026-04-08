@@ -182,8 +182,12 @@ mod tests {
 
         {
             let store = FileBackedMemoryStore::try_new(&path).unwrap();
-            store.put(make_record("k1", MemoryScope::Project, &sid)).unwrap();
-            store.put(make_record("k2", MemoryScope::Decision, &sid)).unwrap();
+            store
+                .put(make_record("k1", MemoryScope::Project, &sid))
+                .unwrap();
+            store
+                .put(make_record("k2", MemoryScope::Decision, &sid))
+                .unwrap();
             assert_eq!(store.list_all().unwrap().len(), 2);
         }
 
@@ -199,7 +203,9 @@ mod tests {
         let sid = test_session_id();
         let store = FileBackedMemoryStore::try_new(&path).unwrap();
 
-        store.put(make_record("dup", MemoryScope::Project, &sid)).unwrap();
+        store
+            .put(make_record("dup", MemoryScope::Project, &sid))
+            .unwrap();
         let mut updated = make_record("dup", MemoryScope::Project, &sid);
         updated.value = "new-value".to_string();
         store.put(updated).unwrap();
@@ -229,8 +235,12 @@ mod tests {
         let sid = test_session_id();
         let store = FileBackedMemoryStore::try_new(&path).unwrap();
 
-        store.put(make_record("a", MemoryScope::Project, &sid)).unwrap();
-        store.put(make_record("b", MemoryScope::Decision, &sid)).unwrap();
+        store
+            .put(make_record("a", MemoryScope::Project, &sid))
+            .unwrap();
+        store
+            .put(make_record("b", MemoryScope::Decision, &sid))
+            .unwrap();
 
         assert_eq!(store.list(MemoryScope::Project).unwrap().len(), 1);
         assert_eq!(store.list(MemoryScope::Decision).unwrap().len(), 1);
@@ -245,8 +255,12 @@ mod tests {
         let s2 = other_session_id();
         let store = FileBackedMemoryStore::try_new(&path).unwrap();
 
-        store.put(make_record("a", MemoryScope::Project, &s1)).unwrap();
-        store.put(make_record("b", MemoryScope::Project, &s2)).unwrap();
+        store
+            .put(make_record("a", MemoryScope::Project, &s1))
+            .unwrap();
+        store
+            .put(make_record("b", MemoryScope::Project, &s2))
+            .unwrap();
 
         assert_eq!(store.list_for_session(&s1).unwrap().len(), 1);
         assert_eq!(store.count_for_session(&s2).unwrap(), 1);
@@ -259,7 +273,9 @@ mod tests {
         let sid = test_session_id();
         let store = FileBackedMemoryStore::try_new(&path).unwrap();
 
-        store.put(make_record("a", MemoryScope::Project, &sid)).unwrap();
+        store
+            .put(make_record("a", MemoryScope::Project, &sid))
+            .unwrap();
 
         let now = Utc::now();
         let start = now - Duration::seconds(5);
@@ -267,7 +283,13 @@ mod tests {
         assert_eq!(store.list_by_time_range(start, end).unwrap().len(), 1);
 
         let old_end = now - Duration::seconds(50);
-        assert_eq!(store.list_by_time_range(old_end - Duration::seconds(50), old_end).unwrap().len(), 0);
+        assert_eq!(
+            store
+                .list_by_time_range(old_end - Duration::seconds(50), old_end)
+                .unwrap()
+                .len(),
+            0
+        );
     }
 
     #[test]

@@ -327,8 +327,7 @@ mod tests {
     #[test]
     fn acquire_seizes_from_stale_leader() {
         let dir = tempfile::tempdir().unwrap();
-        let sem = LeaderSemaphore::new(dir.path().join("leader.json"))
-            .with_stale_threshold(0);
+        let sem = LeaderSemaphore::new(dir.path().join("leader.json")).with_stale_threshold(0);
 
         // Write a state with PID 1 (alive but will be stale due to threshold=0)
         sem.try_acquire(1).unwrap();

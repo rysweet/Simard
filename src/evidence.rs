@@ -223,8 +223,14 @@ mod tests {
         let base = EvidenceSource::BaseType(BaseTypeId::new("bt-1"));
         let rt_json = serde_json::to_string(&runtime).unwrap();
         let bt_json = serde_json::to_string(&base).unwrap();
-        assert_eq!(serde_json::from_str::<EvidenceSource>(&rt_json).unwrap(), runtime);
-        assert_eq!(serde_json::from_str::<EvidenceSource>(&bt_json).unwrap(), base);
+        assert_eq!(
+            serde_json::from_str::<EvidenceSource>(&rt_json).unwrap(),
+            runtime
+        );
+        assert_eq!(
+            serde_json::from_str::<EvidenceSource>(&bt_json).unwrap(),
+            base
+        );
     }
 
     // ── InMemoryEvidenceStore ───────────────────────────────────────
@@ -310,7 +316,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nonexistent.json");
         let store = FileBackedEvidenceStore::try_new(&path).unwrap();
-        assert!(store.list_for_session(&test_session_id()).unwrap().is_empty());
+        assert!(
+            store
+                .list_for_session(&test_session_id())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
