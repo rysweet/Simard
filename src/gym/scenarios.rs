@@ -4,7 +4,7 @@ use crate::runtime::RuntimeTopology;
 
 use super::types::{BenchmarkCheckResult, BenchmarkClass, BenchmarkScenario};
 
-const BENCHMARK_SCENARIOS: [BenchmarkScenario; 21] = [
+const BENCHMARK_SCENARIOS: [BenchmarkScenario; 35] = [
     BenchmarkScenario {
         id: "repo-exploration-local",
         title: "Repo exploration on local harness",
@@ -236,6 +236,166 @@ const BENCHMARK_SCENARIOS: [BenchmarkScenario; 21] = [
         base_type: "local-harness",
         topology: RuntimeTopology::SingleProcess,
         objective: "Analyze the SimardError enum in src/error.rs. Trace how errors propagate from: (1) runtime failures through to CLI output, (2) benchmark execution through to gym reports. For each path, assess whether the error message preserved enough context for an operator to diagnose the issue without reading source code. Report any error variants that lose context during propagation.",
+        expected_min_runtime_evidence: 3,
+    },
+    // --- Wave 3: PerformanceAnalysis scenarios ---
+    BenchmarkScenario {
+        id: "perf-quadratic-detection",
+        title: "Identify quadratic or worse algorithms",
+        description: "Identify O(n²) or worse algorithms in string/collection processing code. Scored on whether the analysis correctly identifies the complexity class and suggests an efficient alternative.",
+        class: BenchmarkClass::PerformanceAnalysis,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Scan the Simard codebase for functions that process collections or strings using nested iteration (e.g., nested loops over vectors, repeated string concatenation in a loop, or repeated contains/find calls inside a loop). For each finding: (1) identify the file and function, (2) state the current complexity class (e.g., O(n²), O(n·m)), (3) explain why it is suboptimal, (4) propose an efficient alternative with its complexity class. Produce a prioritized list of at least two findings.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "perf-caching-opportunity",
+        title: "Identify caching opportunities for repeated computations",
+        description: "Analyze code with repeated expensive computations and suggest appropriate caching strategies. Scored on identifying cache-worthy call sites and proposing a reasonable cache invalidation approach.",
+        class: BenchmarkClass::PerformanceAnalysis,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze the Simard codebase for functions that perform repeated expensive computations (e.g., repeated file I/O, repeated serialization, repeated regex compilation, or functions called in a loop with identical arguments). For each opportunity: (1) identify the call site, (2) estimate the cost of repeated execution, (3) propose a caching strategy (e.g., lazy_static, HashMap memoization, once_cell), (4) describe the cache invalidation approach. Produce a structured report.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "perf-allocation-audit",
+        title: "Audit unnecessary heap allocations",
+        description: "Review code for unnecessary heap allocations (e.g., String where &str suffices, Vec clones). Scored on identifying allocation hot spots and suggesting zero-copy alternatives.",
+        class: BenchmarkClass::PerformanceAnalysis,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Review the Simard codebase for functions that perform unnecessary heap allocations. Look for: (1) String parameters where &str would suffice, (2) Vec::clone() where a slice reference would work, (3) .to_string() or .to_owned() in hot paths where borrowing is possible, (4) format!() for simple concatenation that could use push_str. For each finding, describe the allocation, explain why it is unnecessary, and propose a zero-copy or reduced-allocation alternative. Report at least three findings.",
+        expected_min_runtime_evidence: 3,
+    },
+    // --- Wave 3: SecurityAudit scenarios ---
+    BenchmarkScenario {
+        id: "security-unsafe-block-audit",
+        title: "Audit unsafe blocks for justification and alternatives",
+        description: "Systematically identify and classify `unsafe` blocks, assessing whether each is justified and whether safe alternatives exist. Scored on classification accuracy and risk assessment quality.",
+        class: BenchmarkClass::SecurityAudit,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Scan the Simard src/ directory for all `unsafe` blocks and `unsafe fn` declarations. For each occurrence: (1) identify the file and line, (2) classify the reason for unsafety (FFI, raw pointer dereference, union access, mutable static, unchecked invariant), (3) assess whether a safe alternative exists (e.g., safe wrapper, standard library API), (4) rate the risk as low/medium/high based on potential for undefined behavior. If no unsafe blocks exist, report that finding and suggest where unsafe might be needed (e.g., FFI boundaries) if the project ever grows to require it.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "security-credential-patterns",
+        title: "Review code for credential leakage patterns",
+        description: "Review code for hardcoded secrets, credential leakage in logs, or insecure storage patterns. Scored on detection completeness and remediation suggestions.",
+        class: BenchmarkClass::SecurityAudit,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Scan the Simard codebase for credential-related security patterns. Check for: (1) hardcoded strings resembling API keys, tokens, or passwords, (2) log statements that might print sensitive data (look for variables named key, token, secret, password near println!, log::, tracing::), (3) environment variable reads for secrets without validation, (4) file paths that suggest credential storage. For each finding, describe the risk and propose a remediation (e.g., use environment variables, redact in logs, use a secrets manager). Produce a structured security audit report.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "security-input-validation",
+        title: "Analyze public API entry points for input validation",
+        description: "Analyze public API entry points for missing input validation, buffer overflows, or injection vulnerabilities. Scored on coverage of attack surfaces and quality of suggested mitigations.",
+        class: BenchmarkClass::SecurityAudit,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Identify public functions in the Simard codebase that accept string or numeric inputs from external sources (CLI arguments, file paths, configuration values). For each entry point: (1) describe what inputs it accepts, (2) assess whether inputs are validated before use (length checks, character validation, range checks), (3) identify potential injection risks (path traversal, command injection if inputs reach shell commands), (4) propose specific validation or sanitization to add. Produce a prioritized list of at least three entry points.",
+        expected_min_runtime_evidence: 3,
+    },
+    // --- Wave 3: ApiDesign scenarios ---
+    BenchmarkScenario {
+        id: "api-builder-pattern-review",
+        title: "Evaluate builder pattern implementations",
+        description: "Evaluate builder pattern implementations for ergonomics, type safety, and completeness. Scored on identifying missing validations, suggesting improvements, and assessing the builder's discoverability.",
+        class: BenchmarkClass::ApiDesign,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Search the Simard codebase for builder pattern implementations (structs with methods returning &mut Self or Self, or structs named *Builder). For each builder found: (1) assess whether required fields are enforced at compile time vs runtime, (2) check if the build() method validates all invariants, (3) evaluate method naming consistency and discoverability, (4) suggest improvements such as typestate pattern for compile-time safety. If no builders exist, identify a struct that would benefit from a builder pattern and sketch the design.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "api-breaking-change-detection",
+        title: "Identify breaking changes between API versions",
+        description: "Given two versions of a public API, identify breaking changes in function signatures, trait bounds, or type definitions. Scored on completeness and accuracy of identified breaking changes.",
+        class: BenchmarkClass::ApiDesign,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze the public API surface of the Simard crate (all `pub fn`, `pub struct`, `pub enum`, `pub trait` items). Identify: (1) functions whose signatures would break callers if modified (parameter types, return types, generic bounds), (2) enums that are non-exhaustive vs exhaustive and the implications of adding variants, (3) trait definitions where adding a method would break existing implementors, (4) type aliases or re-exports that downstream code might depend on. Produce a breaking-change risk assessment for the top 5 most sensitive API items.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "api-trait-vs-generics",
+        title: "Analyze trait object vs generic parameter usage",
+        description: "Analyze trait object usage (dyn Trait) vs generic parameters to recommend the appropriate approach based on use case. Scored on correctness of trade-off analysis.",
+        class: BenchmarkClass::ApiDesign,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Search the Simard codebase for uses of `dyn` trait objects and generic type parameters (`<T: Trait>`). For each usage: (1) identify whether dynamic dispatch (dyn) or static dispatch (generics) is used, (2) assess whether the choice is appropriate for the use case (consider: number of implementors, performance sensitivity, binary size impact, need for heterogeneous collections), (3) recommend switching if the alternative would be more appropriate, with justification. Produce a summary of dispatch strategy patterns across the codebase.",
+        expected_min_runtime_evidence: 3,
+    },
+    // --- Wave 3: TestWriting additional scenarios ---
+    BenchmarkScenario {
+        id: "test-integration-scaffold",
+        title: "Design integration test for multi-module workflow",
+        description: "Design an integration test that exercises a multi-module workflow end-to-end. Scored on whether the test covers the critical path, uses appropriate fixtures, and validates observable side effects.",
+        class: BenchmarkClass::TestWriting,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Design an integration test for the Simard gym benchmark execution pipeline (scenario resolution → executor → reporting). The test should: (1) select a specific scenario by ID, (2) mock or stub the runtime execution layer, (3) verify that the executor produces a BenchmarkRunReport with correct fields, (4) verify that the reporting module can serialize the report to JSON. Write the complete test function with appropriate setup, execution, and assertions.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "test-property-based-design",
+        title: "Design property-based test specifications",
+        description: "Given a function with numeric or string inputs, design property-based test specifications. Scored on whether properties are meaningful invariants (not just restating the implementation).",
+        class: BenchmarkClass::TestWriting,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Choose a pure function in the Simard codebase that transforms strings or numbers (e.g., slug generation, ID formatting, score calculation). Design at least three property-based test specifications: (1) an idempotency or roundtrip property, (2) a structural invariant (e.g., output length bounds, character set constraints), (3) a relationship property between related inputs (e.g., ordering preservation). For each property, describe it precisely enough that a proptest or quickcheck harness could implement it.",
+        expected_min_runtime_evidence: 3,
+    },
+    // --- Wave 3: Refactoring additional scenarios ---
+    BenchmarkScenario {
+        id: "refactor-inline-abstraction",
+        title: "Identify and inline unnecessary abstraction",
+        description: "Identify an unnecessary abstraction layer (e.g., a trait with a single implementation, a wrapper adding no value) and propose inlining. Scored on whether the simplification reduces indirection without losing extensibility.",
+        class: BenchmarkClass::Refactoring,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Search the Simard codebase for abstraction layers that may be unnecessary: (1) traits with exactly one implementation, (2) wrapper structs that simply delegate all methods to an inner type, (3) intermediate modules that re-export without adding logic. For each candidate: describe the abstraction, assess whether the indirection provides current or future value, and if not, propose a concrete inlining plan with before/after code sketches. Justify whether extensibility would be lost.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "refactor-consolidate-duplicates",
+        title: "Consolidate duplicated logic across modules",
+        description: "Identify duplicated logic across modules and propose a shared utility. Scored on whether the identified duplication is genuine, the proposed consolidation is correct, and the shared code is appropriately placed.",
+        class: BenchmarkClass::Refactoring,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Scan the Simard src/ directory for duplicated code patterns across different modules. Look for: (1) identical or near-identical function bodies in different files, (2) repeated error-handling boilerplate, (3) duplicated string formatting or serialization logic. For each finding: identify the duplicated locations, describe the shared logic, propose a shared utility function or module, and specify where the shared code should live (e.g., a utils module or existing common module). Show the consolidated code and how call sites would change.",
+        expected_min_runtime_evidence: 3,
+    },
+    // --- Wave 3: SafeCodeChange additional scenario ---
+    BenchmarkScenario {
+        id: "safe-change-add-enum-variant",
+        title: "Safely add a new enum variant",
+        description: "Safely add a new variant to an existing enum, updating all match arms across the codebase. Scored on whether all match expressions are found and updated, the change compiles, and no fallthrough behavior is introduced.",
+        class: BenchmarkClass::SafeCodeChange,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Plan the addition of a new variant to an existing enum in the Simard codebase (e.g., a new BenchmarkClass or RuntimeTopology variant). Describe: (1) the enum to modify and the new variant name, (2) every match expression across the codebase that handles this enum (list file and line for each), (3) what the new arm should do in each match, (4) any Display, Serialize, or other trait implementations that need updating. Verify the plan would result in a compiling codebase with no unhandled match arms.",
         expected_min_runtime_evidence: 3,
     },
 ];
@@ -644,6 +804,169 @@ pub(super) fn class_specific_checks(
                 },
             ]
         }
+        BenchmarkClass::PerformanceAnalysis => {
+            let complexity_mentioned = combined.contains("o(n")
+                || combined.contains("complexity")
+                || combined.contains("quadratic")
+                || combined.contains("linear")
+                || combined.contains("big-o");
+            let optimization_suggested = combined.contains("optimi")
+                || combined.contains("cache")
+                || combined.contains("memoiz")
+                || combined.contains("allocat")
+                || combined.contains("zero-copy");
+            let bottleneck_identified = combined.contains("bottleneck")
+                || combined.contains("hot path")
+                || combined.contains("hot spot")
+                || combined.contains("expensive")
+                || combined.contains("repeated");
+            vec![
+                BenchmarkCheckResult {
+                    id: "perf-complexity-analyzed".to_string(),
+                    passed: complexity_mentioned,
+                    detail: format!(
+                        "execution output {} complexity analysis",
+                        if complexity_mentioned {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "perf-optimization-suggested".to_string(),
+                    passed: optimization_suggested,
+                    detail: format!(
+                        "execution output {} optimization suggestions",
+                        if optimization_suggested {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "perf-bottleneck-identified".to_string(),
+                    passed: bottleneck_identified,
+                    detail: format!(
+                        "execution output {} bottleneck identification",
+                        if bottleneck_identified {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::SecurityAudit => {
+            let vulnerability_found = combined.contains("unsafe")
+                || combined.contains("vulnerab")
+                || combined.contains("cve")
+                || combined.contains("credential")
+                || combined.contains("secret")
+                || combined.contains("injection");
+            let risk_assessed = combined.contains("risk")
+                || combined.contains("severity")
+                || combined.contains("low")
+                || combined.contains("medium")
+                || combined.contains("high")
+                || combined.contains("critical");
+            let remediation_proposed = combined.contains("remediat")
+                || combined.contains("mitigat")
+                || combined.contains("fix")
+                || combined.contains("sanitiz")
+                || combined.contains("validat");
+            vec![
+                BenchmarkCheckResult {
+                    id: "security-vulnerability-found".to_string(),
+                    passed: vulnerability_found,
+                    detail: format!(
+                        "execution output {} vulnerability identification",
+                        if vulnerability_found {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "security-risk-assessed".to_string(),
+                    passed: risk_assessed,
+                    detail: format!(
+                        "execution output {} risk assessment",
+                        if risk_assessed { "includes" } else { "lacks" }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "security-remediation-proposed".to_string(),
+                    passed: remediation_proposed,
+                    detail: format!(
+                        "execution output {} remediation proposal",
+                        if remediation_proposed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::ApiDesign => {
+            let api_surface_analyzed = combined.contains("pub fn")
+                || combined.contains("pub struct")
+                || combined.contains("pub trait")
+                || combined.contains("public api")
+                || combined.contains("api surface");
+            let design_quality_assessed = combined.contains("ergonomic")
+                || combined.contains("discoverab")
+                || combined.contains("builder")
+                || combined.contains("breaking change")
+                || combined.contains("type safe");
+            let recommendation_present = combined.contains("suggest")
+                || combined.contains("recommend")
+                || combined.contains("improv")
+                || combined.contains("should")
+                || combined.contains("consider");
+            vec![
+                BenchmarkCheckResult {
+                    id: "api-surface-analyzed".to_string(),
+                    passed: api_surface_analyzed,
+                    detail: format!(
+                        "execution output {} API surface analysis",
+                        if api_surface_analyzed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "api-design-quality-assessed".to_string(),
+                    passed: design_quality_assessed,
+                    detail: format!(
+                        "execution output {} design quality assessment",
+                        if design_quality_assessed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "api-recommendation-present".to_string(),
+                    passed: recommendation_present,
+                    detail: format!(
+                        "execution output {} design recommendations",
+                        if recommendation_present {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
     }
 }
 
@@ -722,6 +1045,9 @@ mod tests {
             (BenchmarkClass::Refactoring, "refactoring"),
             (BenchmarkClass::DependencyAnalysis, "dependency-analysis"),
             (BenchmarkClass::ErrorHandling, "error-handling"),
+            (BenchmarkClass::PerformanceAnalysis, "performance-analysis"),
+            (BenchmarkClass::SecurityAudit, "security-audit"),
+            (BenchmarkClass::ApiDesign, "api-design"),
         ];
         for (class, label) in classes {
             assert_eq!(class.to_string(), label);

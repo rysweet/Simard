@@ -16,6 +16,9 @@ pub enum BenchmarkClass {
     Refactoring,
     DependencyAnalysis,
     ErrorHandling,
+    PerformanceAnalysis,
+    SecurityAudit,
+    ApiDesign,
 }
 
 impl Display for BenchmarkClass {
@@ -30,6 +33,9 @@ impl Display for BenchmarkClass {
             Self::Refactoring => "refactoring",
             Self::DependencyAnalysis => "dependency-analysis",
             Self::ErrorHandling => "error-handling",
+            Self::PerformanceAnalysis => "performance-analysis",
+            Self::SecurityAudit => "security-audit",
+            Self::ApiDesign => "api-design",
         };
         f.write_str(label)
     }
