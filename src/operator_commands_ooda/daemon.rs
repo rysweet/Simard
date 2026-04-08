@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::bridge_launcher::{
     cognitive_memory_db_path, find_python_dir, launch_gym_bridge, launch_knowledge_bridge,
@@ -177,14 +177,21 @@ pub fn run_ooda_daemon(
             break;
         }
 
+        let cycle_start = Instant::now();
+
         match run_ooda_cycle(&mut state, &mut bridges, &config) {
             Ok(report) => {
+                let cycle_elapsed = cycle_start.elapsed();
                 let summary = summarize_cycle_report(&report);
                 eprintln!("[simard] {summary}");
                 // Persist the cycle report to filesystem for auditability.
                 persist_cycle_report(&state_root, &report);
                 // Persist the cycle summary to cognitive memory as an episode.
                 persist_cycle_to_memory(&bridges, &report);
+                // Collect self-improvement metrics at end of each cycle.
+                if let Err(e) = crate::self_metrics::collect_and_record_all(cycle_elapsed) {
+                    eprintln!("[simard] OODA metrics: failed to record: {e}");
+                }
             }
             Err(e) => {
                 eprintln!("[simard] OODA cycle error: {e}");

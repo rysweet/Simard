@@ -75,6 +75,7 @@ pub mod runtime_reflection;
 mod sanitization;
 pub mod self_improve;
 pub mod self_improve_executor;
+pub mod self_metrics;
 pub mod self_relaunch;
 pub mod self_relaunch_semaphore;
 pub mod session;
@@ -275,6 +276,10 @@ pub use self_improve::{
 };
 pub use self_improve_executor::{
     ApplyResult, ImprovementPatch, apply_and_review, generate_patch, run_autonomous_improvement,
+};
+pub use self_metrics::{
+    DailyReport, MetricEntry, collect_and_record_all, daily_report, query_metrics, recent_metrics,
+    record_metric,
 };
 pub use self_relaunch::{
     GateResult, RelaunchConfig, RelaunchGate, all_gates_passed, build_canary, coordinated_relaunch,

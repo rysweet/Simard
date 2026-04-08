@@ -7,6 +7,7 @@ pub fn build_router() -> Router {
     Router::new()
         .route("/api/status", get(status))
         .route("/api/issues", get(issues))
+        .route("/api/metrics", get(metrics))
         .route("/api/login", post(login))
         .route("/login", get(login_page))
         .route("/", get(index))
@@ -94,6 +95,28 @@ async fn issues() -> Json<Value> {
         }
         _ => Json(json!({"error": "failed to run gh issue list"})),
     }
+}
+
+async fn metrics() -> Json<Value> {
+    let recent = crate::self_metrics::recent_metrics(100).unwrap_or_default();
+    let report = crate::self_metrics::daily_report().unwrap_or_default();
+
+    let entries: Vec<Value> = recent
+        .iter()
+        .map(|e| {
+            json!({
+                "timestamp": e.timestamp.to_rfc3339(),
+                "metric_name": e.metric_name,
+                "value": e.value,
+                "context": e.context,
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "recent": entries,
+        "daily_report": report,
+    }))
 }
 
 async fn index() -> axum::response::Html<String> {
