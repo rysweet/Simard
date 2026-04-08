@@ -322,10 +322,18 @@ defer: Promote this pattern into a repeatable benchmark | rationale=wait for the
     );
 
     let memory_path = state_root.path().join("memory_records.json");
-    let mut memory_records = load_json(&memory_path);
-    let records = memory_records
-        .as_array_mut()
-        .expect("memory store should remain a JSON array");
+    let memory_data = load_json(&memory_path);
+    // The memory store may write a plain JSON array or a checksummed envelope
+    // (`{"crc32":…,"records":[…]}`). Handle both formats.
+    let mut records = if let Some(arr) = memory_data.as_array() {
+        arr.clone()
+    } else {
+        memory_data
+            .get("records")
+            .and_then(|v| v.as_array())
+            .expect("memory store should contain a records array")
+            .clone()
+    };
     let latest_improvement_record = records
         .iter_mut()
         .find(|record| {
@@ -341,7 +349,7 @@ defer: Promote this pattern into a repeatable benchmark | rationale=wait for the
     );
     fs::write(
         &memory_path,
-        serde_json::to_string_pretty(&memory_records)
+        serde_json::to_string_pretty(&Value::Array(records))
             .expect("corrupted memory store should serialize"),
     )
     .expect("corrupted memory store should be written");
