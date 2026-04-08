@@ -56,14 +56,42 @@ async fn login_page() -> response::Html<String> {
 }
 
 async fn status() -> Json<Value> {
-    let build_number = std::env::var("SIMARD_BUILD_NUMBER").unwrap_or_else(|_| "dev".to_string());
-    let version = format!("{}.{}", env!("CARGO_PKG_VERSION"), build_number);
+    let version = format!(
+        "{}.{}",
+        env!("CARGO_PKG_VERSION"),
+        env!("SIMARD_BUILD_NUMBER")
+    );
+    let git_hash = env!("SIMARD_GIT_HASH");
 
-    let ooda_running = std::process::Command::new("pgrep")
-        .args(["-f", "simard.*ooda run"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    // Real health check: read daemon_health.json
+    let health_path = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/var/tmp"))
+        .join("simard")
+        .join("daemon_health.json");
+
+    let daemon_health: Option<serde_json::Value> = std::fs::read_to_string(&health_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
+
+    let ooda_status = match &daemon_health {
+        Some(h) => {
+            if let Some(ts) = h.get("timestamp").and_then(|t| t.as_str()) {
+                if let Ok(health_time) = chrono::DateTime::parse_from_rfc3339(ts) {
+                    let age = chrono::Utc::now().signed_duration_since(health_time);
+                    if age.num_seconds() < 600 {
+                        "running"
+                    } else {
+                        "stale"
+                    }
+                } else {
+                    "unknown"
+                }
+            } else {
+                "unknown"
+            }
+        }
+        None => "stopped",
+    };
 
     let disk = disk_usage_pct().await;
 
@@ -75,13 +103,20 @@ async fn status() -> Json<Value> {
         .and_then(|s| s.trim().parse::<u32>().ok())
         .unwrap_or(0);
 
-    Json(json!({
+    let mut status_json = json!({
         "version": version,
-        "ooda_daemon": if ooda_running { "running" } else { "stopped" },
+        "git_hash": git_hash,
+        "ooda_daemon": ooda_status,
         "active_processes": child_count,
         "disk_usage_pct": disk,
         "timestamp": chrono::Utc::now().to_rfc3339(),
-    }))
+    });
+
+    if let Some(h) = daemon_health {
+        status_json["daemon_health"] = h;
+    }
+
+    Json(status_json)
 }
 
 async fn issues() -> Json<Value> {
@@ -525,7 +560,10 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
 <body>
   <header>
     <h1>🌲 Simard Dashboard <span style="font-size:.75rem;color:#8b949e">v2</span></h1>
-    <span id="clock" style="color:#8b949e;font-size:.85rem"></span>
+    <div style="display:flex;align-items:center;gap:1rem">
+      <a href="https://github.com/rysweet/Simard/releases/latest" target="_blank" style="color:#3fb950;text-decoration:none;font-size:.85rem;border:1px solid #3fb950;padding:.2rem .6rem;border-radius:4px">📦 Download Latest</a>
+      <span id="clock" style="color:#8b949e;font-size:.85rem"></span>
+    </div>
   </header>
   <div class="tabs">
     <div class="tab active" data-tab="overview">Overview</div>
@@ -599,10 +637,19 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
       try{
         const r=await fetch('/api/status'); const d=await r.json();
         const dc=d.disk_usage_pct>90?'err':d.disk_usage_pct>70?'warn':'ok';
-        const oc=d.ooda_daemon==='running'?'ok':'err';
+        const oc=d.ooda_daemon==='running'?'ok':(d.ooda_daemon==='stale'?'warn':'err');
+        const shortHash=d.git_hash?d.git_hash.substring(0,7):'';
+        const versionLink=d.git_hash?`<a href="https://github.com/rysweet/Simard/commit/${d.git_hash}" target="_blank" style="color:#3fb950;text-decoration:none">v${d.version}</a> (<code>${shortHash}</code>)`:`v${d.version}`;
+        let healthDetail='';
+        if(d.daemon_health){
+          const dh=d.daemon_health;
+          healthDetail=` (cycle #${dh.cycle_number??'?'}`;
+          if(dh.timestamp) healthDetail+=`, last: ${new Date(dh.timestamp).toLocaleTimeString()}`;
+          healthDetail+=')';
+        }
         document.getElementById('status').innerHTML=`
-          <div class="stat"><span class="label">Version</span><span class="value">v${d.version}</span></div>
-          <div class="stat"><span class="label">OODA Daemon</span><span class="value ${oc}">${d.ooda_daemon}</span></div>
+          <div class="stat"><span class="label">Version</span><span class="value">${versionLink}</span></div>
+          <div class="stat"><span class="label">OODA Daemon</span><span class="value ${oc}">${d.ooda_daemon}${healthDetail}</span></div>
           <div class="stat"><span class="label">Active Processes</span><span class="value">${d.active_processes??0}</span></div>
           <div class="stat"><span class="label">Disk Usage</span><span class="value ${dc}">${d.disk_usage_pct??'?'}%</span></div>
           <div class="stat"><span class="label">Updated</span><span class="value">${new Date(d.timestamp).toLocaleTimeString()}</span></div>`;

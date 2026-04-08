@@ -188,6 +188,26 @@ pub fn run_ooda_daemon(
                 persist_cycle_report(&state_root, &report);
                 // Persist the cycle summary to cognitive memory as an episode.
                 persist_cycle_to_memory(&bridges, &report);
+                // Write daemon health file for dashboard
+                {
+                    let health_dir = dirs::data_local_dir()
+                        .unwrap_or_else(|| std::path::PathBuf::from("/var/tmp"))
+                        .join("simard");
+                    let _ = std::fs::create_dir_all(&health_dir);
+                    let health = serde_json::json!({
+                        "timestamp": chrono::Utc::now().to_rfc3339(),
+                        "cycle_number": cycles_run + 1,
+                        "status": "healthy",
+                        "actions_taken": summary.clone(),
+                    });
+                    let health_path = health_dir.join("daemon_health.json");
+                    if let Err(e) = std::fs::write(
+                        &health_path,
+                        serde_json::to_string_pretty(&health).unwrap_or_default(),
+                    ) {
+                        eprintln!("[simard] OODA health: failed to write health file: {e}");
+                    }
+                }
                 // Collect self-improvement metrics at end of each cycle.
                 if let Err(e) = crate::self_metrics::collect_and_record_all(cycle_elapsed) {
                     eprintln!("[simard] OODA metrics: failed to record: {e}");
