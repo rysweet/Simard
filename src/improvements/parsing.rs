@@ -510,8 +510,7 @@ mod tests {
 
     #[test]
     fn parse_persisted_record_pairs_with_prefix() {
-        let pairs =
-            parse_persisted_record_pairs("improvement-curation-record | key=val").unwrap();
+        let pairs = parse_persisted_record_pairs("improvement-curation-record | key=val").unwrap();
         assert_eq!(pairs, vec![("key", "val")]);
     }
 

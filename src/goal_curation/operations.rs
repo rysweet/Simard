@@ -539,9 +539,7 @@ mod tests {
     #[test]
     fn update_goal_progress_not_found_errors() {
         let mut board = GoalBoard::new();
-        assert!(
-            update_goal_progress(&mut board, "missing", GoalProgress::Completed).is_err()
-        );
+        assert!(update_goal_progress(&mut board, "missing", GoalProgress::Completed).is_err());
     }
 
     #[test]

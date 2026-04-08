@@ -510,7 +510,10 @@ mod tests {
         scan.record_checkpoint(PositiveCheckpointKind::StartupBanner, "banner", 0);
         assert!(scan.has_banner());
         assert!(!scan.has_guidance());
-        assert_eq!(scan.checkpoint_index(PositiveCheckpointKind::StartupBanner), Some(0));
+        assert_eq!(
+            scan.checkpoint_index(PositiveCheckpointKind::StartupBanner),
+            Some(0)
+        );
     }
 
     #[test]

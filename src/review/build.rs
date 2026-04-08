@@ -376,9 +376,11 @@ mod tests {
             failed_signals: vec![],
         };
         let proposals = improvement_proposals(&request, &handoff, &evidence);
-        assert!(proposals
-            .iter()
-            .any(|p| p.category == "reflection-calibration"));
+        assert!(
+            proposals
+                .iter()
+                .any(|p| p.category == "reflection-calibration")
+        );
     }
 
     #[test]
@@ -402,9 +404,7 @@ mod tests {
             failed_signals: vec![],
         };
         let proposals = improvement_proposals(&request, &handoff, &evidence);
-        assert!(proposals
-            .iter()
-            .any(|p| p.category == "operator-metrics"));
+        assert!(proposals.iter().any(|p| p.category == "operator-metrics"));
         assert!(proposals.iter().any(|p| p.category == "retry-policy"));
     }
 
