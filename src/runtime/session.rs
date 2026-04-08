@@ -45,6 +45,12 @@ impl RuntimeKernel {
             eprintln!("[simard] session consolidation: persistence failed: {e}");
         }
 
+        // --- Retry any failed bridge writes before teardown ---
+        let synced = self.ports.memory_store.flush_pending();
+        if synced > 0 {
+            eprintln!("[simard] session end: flushed {synced} pending bridge writes");
+        }
+
         self.complete_session(session, outcome, reflection)
     }
 
