@@ -1,4 +1,7 @@
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use crate::bridge_launcher::{
     cognitive_memory_db_path, find_python_dir, launch_gym_bridge, launch_knowledge_bridge,
@@ -13,11 +16,28 @@ use crate::session_builder::SessionBuilder;
 
 use super::persistence::{persist_cycle_report, persist_cycle_to_memory};
 
+/// Sleep that wakes early when the shutdown flag is set.
+fn interruptible_sleep(total: Duration, shutdown: &AtomicBool) {
+    let tick = Duration::from_millis(250);
+    let mut remaining = total;
+    while remaining > Duration::ZERO {
+        if shutdown.load(Ordering::Relaxed) {
+            return;
+        }
+        let chunk = remaining.min(tick);
+        std::thread::sleep(chunk);
+        remaining = remaining.saturating_sub(chunk);
+    }
+}
+
 /// Run one or more OODA cycles as a daemon-style loop.
 ///
 /// Launches all bridges, opens a RustyClawd session via [`SessionBuilder`]
 /// for real autonomous work, loads the goal board from cognitive memory,
 /// and runs OODA cycles until `max_cycles` is reached (0 = infinite).
+///
+/// On SIGTERM/SIGINT the current cycle finishes, the session is closed
+/// cleanly, and the daemon exits without orphaning PTY subprocesses.
 ///
 /// If no `ANTHROPIC_API_KEY` is set, the session will be `None` and the
 /// daemon degrades honestly to bridge-only dispatch (Pillar 11).
@@ -25,6 +45,17 @@ pub fn run_ooda_daemon(
     max_cycles: u32,
     state_root_override: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // --- signal handling ------------------------------------------------
+    let shutdown = Arc::new(AtomicBool::new(false));
+    {
+        let flag = Arc::clone(&shutdown);
+        ctrlc::set_handler(move || {
+            flag.store(true, Ordering::SeqCst);
+        })
+        .expect("failed to install SIGTERM/SIGINT handler");
+    }
+    // --------------------------------------------------------------------
+
     let state_root = state_root_override.unwrap_or_else(|| {
         PathBuf::from(
             std::env::var("SIMARD_STATE_ROOT").unwrap_or_else(|_| "/tmp/simard-ooda".to_string()),
@@ -78,6 +109,12 @@ pub fn run_ooda_daemon(
     let mut cycles_run = 0u32;
 
     loop {
+        // Check for shutdown signal at the top of each iteration.
+        if shutdown.load(Ordering::SeqCst) {
+            eprintln!("[simard] OODA daemon: shutting down gracefully");
+            break;
+        }
+
         if max_cycles > 0 && cycles_run >= max_cycles {
             eprintln!("[simard] OODA daemon: completed {cycles_run} cycle(s), exiting");
             break;
@@ -104,9 +141,9 @@ pub fn run_ooda_daemon(
             continue;
         }
 
-        // Sleep between cycles to avoid busy-looping. Configurable via
-        // SIMARD_OODA_INTERVAL_SECS; default is 300 seconds.
-        std::thread::sleep(std::time::Duration::from_secs(interval_secs));
+        // Interruptible sleep — wakes early on SIGTERM/SIGINT instead of
+        // blocking for the full interval.
+        interruptible_sleep(Duration::from_secs(interval_secs), &shutdown);
     }
 
     // Close the session cleanly if it was opened.
