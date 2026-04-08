@@ -31,7 +31,8 @@ proptest! {
             | MeetingCommand::List
             | MeetingCommand::Edit { .. }
             | MeetingCommand::Delete { .. }
-            | MeetingCommand::Question(_) => {}
+            | MeetingCommand::Question(_)
+            | MeetingCommand::Preview => {}
         }
     }
 
