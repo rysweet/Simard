@@ -168,3 +168,201 @@ impl SessionRecord {
         self.memory_keys.push(memory_key.into());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- SessionId ---
+
+    #[test]
+    fn session_id_from_uuid_produces_prefixed_string() {
+        let uuid = Uuid::nil();
+        let id = SessionId::from_uuid(uuid);
+        assert_eq!(id.as_str(), "session-00000000-0000-0000-0000-000000000000");
+    }
+
+    #[test]
+    fn session_id_parse_accepts_prefixed_uuid() {
+        let id = SessionId::parse("session-00000000-0000-0000-0000-000000000001").unwrap();
+        assert_eq!(id.as_str(), "session-00000000-0000-0000-0000-000000000001");
+    }
+
+    #[test]
+    fn session_id_parse_accepts_bare_uuid() {
+        let id = SessionId::parse("00000000-0000-0000-0000-000000000002").unwrap();
+        assert_eq!(id.as_str(), "session-00000000-0000-0000-0000-000000000002");
+    }
+
+    #[test]
+    fn session_id_parse_trims_whitespace() {
+        let id = SessionId::parse("  00000000-0000-0000-0000-000000000003  ").unwrap();
+        assert_eq!(id.as_str(), "session-00000000-0000-0000-0000-000000000003");
+    }
+
+    #[test]
+    fn session_id_parse_rejects_invalid_input() {
+        let err = SessionId::parse("not-a-uuid").unwrap_err();
+        assert!(matches!(err, SimardError::InvalidSessionId { .. }));
+    }
+
+    #[test]
+    fn session_id_parse_rejects_empty_string() {
+        let err = SessionId::parse("").unwrap_err();
+        assert!(matches!(err, SimardError::InvalidSessionId { .. }));
+    }
+
+    #[test]
+    fn session_id_display_matches_as_str() {
+        let id = SessionId::from_uuid(Uuid::nil());
+        assert_eq!(id.to_string(), id.as_str());
+    }
+
+    #[test]
+    fn session_id_try_from_str_delegates_to_parse() {
+        let id: SessionId = "00000000-0000-0000-0000-000000000004".try_into().unwrap();
+        assert_eq!(id.as_str(), "session-00000000-0000-0000-0000-000000000004");
+    }
+
+    #[test]
+    fn session_id_from_uuid_trait() {
+        let uuid = Uuid::nil();
+        let id: SessionId = uuid.into();
+        assert_eq!(id, SessionId::from_uuid(Uuid::nil()));
+    }
+
+    // --- UuidSessionIdGenerator ---
+
+    #[test]
+    fn uuid_generator_produces_unique_ids() {
+        let generator = UuidSessionIdGenerator;
+        let a = generator.next_id();
+        let b = generator.next_id();
+        assert_ne!(a, b);
+    }
+
+    // --- SessionPhase ---
+
+    #[test]
+    fn session_phase_happy_path_transitions() {
+        assert!(SessionPhase::Intake.can_transition_to(SessionPhase::Preparation));
+        assert!(SessionPhase::Preparation.can_transition_to(SessionPhase::Planning));
+        assert!(SessionPhase::Planning.can_transition_to(SessionPhase::Execution));
+        assert!(SessionPhase::Execution.can_transition_to(SessionPhase::Reflection));
+        assert!(SessionPhase::Reflection.can_transition_to(SessionPhase::Persistence));
+        assert!(SessionPhase::Persistence.can_transition_to(SessionPhase::Complete));
+    }
+
+    #[test]
+    fn any_phase_can_transition_to_failed() {
+        let phases = [
+            SessionPhase::Intake,
+            SessionPhase::Preparation,
+            SessionPhase::Planning,
+            SessionPhase::Execution,
+            SessionPhase::Reflection,
+            SessionPhase::Persistence,
+            SessionPhase::Complete,
+        ];
+        for phase in phases {
+            assert!(
+                phase.can_transition_to(SessionPhase::Failed),
+                "{phase} should be able to transition to Failed"
+            );
+        }
+    }
+
+    #[test]
+    fn backward_transitions_are_rejected() {
+        assert!(!SessionPhase::Preparation.can_transition_to(SessionPhase::Intake));
+        assert!(!SessionPhase::Complete.can_transition_to(SessionPhase::Execution));
+        assert!(!SessionPhase::Planning.can_transition_to(SessionPhase::Preparation));
+    }
+
+    #[test]
+    fn session_phase_display_renders_lowercase() {
+        assert_eq!(SessionPhase::Intake.to_string(), "intake");
+        assert_eq!(SessionPhase::Complete.to_string(), "complete");
+        assert_eq!(SessionPhase::Failed.to_string(), "failed");
+    }
+
+    // --- SessionRecord ---
+
+    struct FixedSessionIdGenerator(SessionId);
+
+    impl SessionIdGenerator for FixedSessionIdGenerator {
+        fn next_id(&self) -> SessionId {
+            self.0.clone()
+        }
+    }
+
+    fn test_session_record() -> SessionRecord {
+        let id_gen = FixedSessionIdGenerator(SessionId::from_uuid(Uuid::nil()));
+        SessionRecord::new(
+            OperatingMode::Engineer,
+            "Test objective",
+            BaseTypeId::new("test-adapter"),
+            &id_gen,
+        )
+    }
+
+    #[test]
+    fn session_record_new_starts_at_intake() {
+        let rec = test_session_record();
+        assert_eq!(rec.phase, SessionPhase::Intake);
+        assert_eq!(rec.objective, "Test objective");
+        assert!(rec.evidence_ids.is_empty());
+        assert!(rec.memory_keys.is_empty());
+    }
+
+    #[test]
+    fn session_record_advance_follows_happy_path() {
+        let mut rec = test_session_record();
+        rec.advance(SessionPhase::Preparation).unwrap();
+        assert_eq!(rec.phase, SessionPhase::Preparation);
+        rec.advance(SessionPhase::Planning).unwrap();
+        assert_eq!(rec.phase, SessionPhase::Planning);
+    }
+
+    #[test]
+    fn session_record_advance_rejects_invalid_transition() {
+        let mut rec = test_session_record();
+        let err = rec.advance(SessionPhase::Complete).unwrap_err();
+        assert!(matches!(err, SimardError::InvalidSessionTransition { .. }));
+        assert_eq!(rec.phase, SessionPhase::Intake);
+    }
+
+    #[test]
+    fn session_record_attach_evidence_accumulates() {
+        let mut rec = test_session_record();
+        rec.attach_evidence("ev-1");
+        rec.attach_evidence("ev-2");
+        assert_eq!(rec.evidence_ids, vec!["ev-1", "ev-2"]);
+    }
+
+    #[test]
+    fn session_record_attach_memory_accumulates() {
+        let mut rec = test_session_record();
+        rec.attach_memory("mem-a");
+        rec.attach_memory("mem-b");
+        assert_eq!(rec.memory_keys, vec!["mem-a", "mem-b"]);
+    }
+
+    #[test]
+    fn session_record_redacted_replaces_objective_with_metadata() {
+        let rec = test_session_record();
+        let redacted = rec.redacted_for_handoff();
+        assert_ne!(redacted.objective, rec.objective);
+        assert!(redacted.objective.contains("objective-metadata("));
+        assert_eq!(redacted.id, rec.id);
+        assert_eq!(redacted.phase, rec.phase);
+    }
+
+    #[test]
+    fn session_record_serde_roundtrip() {
+        let rec = test_session_record();
+        let json = serde_json::to_string(&rec).unwrap();
+        let deserialized: SessionRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, rec);
+    }
+}
