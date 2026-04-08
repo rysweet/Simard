@@ -7,6 +7,7 @@ use crate::meeting_facilitator::{MeetingDecision, MeetingHandoff, write_meeting_
 use crate::memory_cognitive::CognitiveStatistics;
 use crate::ooda_loop::OodaState;
 use crate::self_improve::{ImprovementCycle, ImprovementPhase};
+use serial_test::serial;
 use tempfile::TempDir;
 
 fn make_gym_score(overall: f64, factual_accuracy: f64) -> GymSuiteScore {
@@ -28,6 +29,7 @@ fn make_gym_score(overall: f64, factual_accuracy: f64) -> GymSuiteScore {
 }
 
 #[test]
+#[serial]
 fn collect_pending_improvements_empty_when_no_signals() {
     let dir = TempDir::new().unwrap();
     // Isolate from any leftover handoff files in the default directory.
@@ -44,6 +46,7 @@ fn collect_pending_improvements_empty_when_no_signals() {
 }
 
 #[test]
+#[serial]
 fn collect_pending_improvements_detects_gym_regression() {
     let dir = TempDir::new().unwrap();
     unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", dir.path()) };
@@ -78,6 +81,7 @@ fn collect_pending_improvements_detects_gym_regression() {
 }
 
 #[test]
+#[serial]
 fn collect_pending_improvements_no_regression_when_scores_stable() {
     let dir = TempDir::new().unwrap();
     unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", dir.path()) };
@@ -107,6 +111,7 @@ fn collect_pending_improvements_no_regression_when_scores_stable() {
 }
 
 #[test]
+#[serial]
 fn collect_pending_improvements_no_crash_when_no_gym_health() {
     let dir = TempDir::new().unwrap();
     unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", dir.path()) };
@@ -125,6 +130,7 @@ fn collect_pending_improvements_no_crash_when_no_gym_health() {
 }
 
 #[test]
+#[serial]
 fn collect_pending_improvements_no_crash_when_no_last_observation() {
     let dir = TempDir::new().unwrap();
     unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", dir.path()) };
@@ -204,6 +210,7 @@ fn scan_unprocessed_handoffs_returns_false_when_no_file() {
 }
 
 #[test]
+#[serial]
 fn collect_pending_improvements_drains_review_improvements() {
     let dir = TempDir::new().unwrap();
     unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", dir.path()) };

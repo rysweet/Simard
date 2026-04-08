@@ -521,8 +521,11 @@ fn corrupted_checksum_returns_integrity_error() {
     }
 
     // Tamper with the stored CRC32 value.
-    let mut contents = std::fs::read_to_string(&path).unwrap();
-    contents = contents.replacen("crc32", "crc32", 1); // no-op, ensure field exists
+    let contents = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        contents.contains("crc32"),
+        "stored JSON must contain crc32 field"
+    );
     let mut parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
     parsed["crc32"] = serde_json::Value::from(0xDEADBEEFu64);
     std::fs::write(&path, serde_json::to_string(&parsed).unwrap()).unwrap();

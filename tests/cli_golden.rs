@@ -102,7 +102,7 @@ fn version_string_is_semver() {
             .unwrap_or_else(|_| panic!("non-numeric version component '{part}' in {VERSION}"));
     }
     assert_eq!(
-        VERSION, "0.15.0",
+        VERSION, "0.16.0",
         "bump this assertion when version changes"
     );
 }
