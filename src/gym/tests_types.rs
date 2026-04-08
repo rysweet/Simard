@@ -23,6 +23,12 @@ fn benchmark_class_display_all_variants() {
         "dependency-analysis"
     );
     assert_eq!(BenchmarkClass::ErrorHandling.to_string(), "error-handling");
+    assert_eq!(
+        BenchmarkClass::PerformanceAnalysis.to_string(),
+        "performance-analysis"
+    );
+    assert_eq!(BenchmarkClass::SecurityAudit.to_string(), "security-audit");
+    assert_eq!(BenchmarkClass::ApiDesign.to_string(), "api-design");
 }
 
 #[test]
@@ -54,6 +60,12 @@ fn benchmark_class_serializes_to_kebab_case() {
     assert!(json.contains("dependency-analysis"));
     let json = serde_json::to_string(&BenchmarkClass::ErrorHandling).unwrap();
     assert!(json.contains("error-handling"));
+    let json = serde_json::to_string(&BenchmarkClass::PerformanceAnalysis).unwrap();
+    assert!(json.contains("performance-analysis"));
+    let json = serde_json::to_string(&BenchmarkClass::SecurityAudit).unwrap();
+    assert!(json.contains("security-audit"));
+    let json = serde_json::to_string(&BenchmarkClass::ApiDesign).unwrap();
+    assert!(json.contains("api-design"));
 }
 
 #[test]
