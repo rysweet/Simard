@@ -61,6 +61,8 @@ pub struct PlanExecutionResult {
     pub stopped_early: bool,
 }
 
+const PLANNING_INSTRUCTIONS: &str = include_str!("../prompt_assets/simard/engineer_planning.md");
+
 fn build_planning_prompt(objective: &str, inspection: &RepoInspection) -> String {
     let files = if inspection.changed_files.is_empty() {
         "none".to_string()
@@ -84,14 +86,9 @@ fn build_planning_prompt(objective: &str, inspection: &RepoInspection) -> String
     };
 
     format!(
-        "You are an engineer planning assistant. Produce a JSON array of plan steps.\n\
-         Each step: {{\"action\": \"<snake_case>\", \"target\": \"<path_or_cmd>\", \
-         \"expected_outcome\": \"<text>\", \"verification_command\": \"<shell_cmd>\"}}\n\
-         Valid actions: create_file, append_to_file, run_shell_command, git_commit, \
-         open_issue, structured_text_replace, cargo_test, read_only_scan\n\
-         Return ONLY the JSON array.\n\n\
-         Objective: {objective}\nBranch: {branch}\nWorktree: {dirty}\n\
+        "{}\n\nObjective: {objective}\nBranch: {branch}\nWorktree: {dirty}\n\
          Changed files: {files}\nActive goals: {goals_list}",
+        PLANNING_INSTRUCTIONS.trim(),
         objective = objective,
         branch = inspection.branch,
     )

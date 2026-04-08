@@ -28,29 +28,19 @@ pub(super) fn advance_goal_with_session(
     // Gather fresh environment context so the agent sees current state.
     let env = crate::ooda_loop::gather_environment();
 
+    // Load the objective instructions from the external prompt asset at compile time.
+    const GOAL_SESSION_OBJECTIVE: &str =
+        include_str!("../../prompt_assets/simard/goal_session_objective.md");
+
     // Build the objective in a single pre-sized buffer to avoid intermediate allocations.
     let mut objective = String::with_capacity(1024);
     let _ = write!(
         objective,
-        "Goal '{}' ({}% complete): {}\n\n\
-         Assess this goal's current status by:\n\
-         1. Check the repository state, open issues, and recent commits to understand where things stand.\n\
-         2. Decide whether this goal needs an amplihack coding session to make progress.\n\
-         3. If work is needed: create a GitHub issue describing the specific task, then launch \
-            `simard engineer` or `amplihack copilot` to handle it.\n\
-         4. If the goal is already progressing or blocked, report the status without launching new work.\n\n\
-         End your response with a PROGRESS line indicating your assessed completion percentage \
-         (0-100), e.g.: PROGRESS: 45\n\n\
-         Concrete commands you can use:\n\
-         - Create a GitHub issue: `gh issue create --repo rysweet/Simard --title \"<title>\" --body \"<body>\"`\n\
-         - Create a branch: `git checkout -b feat/<description>`\n\
-         - Launch an amplihack coding session: `amplihack copilot` then type your task\n\
-         - Run tests: `cargo test 2>&1 | tail -20`\n\
-         - Check build: `cargo check 2>&1`\n\
-         - Open a PR: `gh pr create --title \"<title>\" --body \"<body>\"`\n\
-         - Check CI status: `gh run list --limit 5`\n\n\
-         Environment context:\n- Git status: ",
-        goal.id, percent, goal.description,
+        "Goal '{}' ({}% complete): {}\n\n{}\n\nEnvironment context:\n- Git status: ",
+        goal.id,
+        percent,
+        goal.description,
+        GOAL_SESSION_OBJECTIVE.trim(),
     );
     if env.git_status.is_empty() {
         objective.push_str("clean");
@@ -84,13 +74,9 @@ pub(super) fn advance_goal_with_session(
         }
     }
 
-    let identity_context = "You are Simard, a PM architect who manages fleets of amplihack \
-        coding sessions. You do NOT write code yourself. You assess goals, create GitHub \
-        issues for specific work items, and delegate implementation to amplihack coding \
-        agents (via `simard engineer` or `amplihack copilot`). Your job is to evaluate \
-        what needs to happen, break it into actionable work, and orchestrate the right \
-        agent to do it."
-        .to_string();
+    const GOAL_SESSION_IDENTITY: &str =
+        include_str!("../../prompt_assets/simard/goal_session_identity.md");
+    let identity_context = GOAL_SESSION_IDENTITY.trim().to_string();
 
     let input = BaseTypeTurnInput {
         objective,

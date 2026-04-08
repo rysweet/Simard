@@ -27,7 +27,9 @@ pub(super) fn execute_rustyclawd_client(
     conversation_history: &mut Vec<RcMessage>,
 ) -> SimardResult<(String, Vec<String>)> {
     let system_prompt = if input.identity_context.is_empty() && input.prompt_preamble.is_empty() {
-        "You are Simard, an autonomous engineer. Execute the given objective using your available tools.".to_string()
+        include_str!("../../prompt_assets/simard/rustyclawd_default_system.md")
+            .trim()
+            .to_string()
     } else {
         format!("{}\n---\n{}", input.prompt_preamble, input.identity_context)
     };
