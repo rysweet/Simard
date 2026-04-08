@@ -3220,6 +3220,7 @@ dependencies = [
  "assert_cmd",
  "axum",
  "chrono",
+ "crc32fast",
  "ctrlc",
  "dirs 6.0.0",
  "libc",
