@@ -210,6 +210,22 @@ impl BaseTypeSession for CopilotSdkSession {
         // and the sentinel as the meaningful response.
         let response_text = extract_copilot_response_from_evidence(&terminal_outcome.evidence);
 
+        // Record cost estimate based on prompt/response character sizes.
+        let prompt_chars = enriched_input.objective.len();
+        let completion_chars = response_text.len();
+        if let Err(e) = crate::cost_tracking::record_cost(
+            self.request.session_id.as_str(),
+            "copilot",
+            prompt_chars,
+            completion_chars,
+            &format!(
+                "copilot turn {} on {}",
+                self.turn_count, self.request.topology
+            ),
+        ) {
+            eprintln!("[simard] cost tracking write failed: {e}");
+        }
+
         let objective_summary = objective_metadata(&input.objective);
         let mut evidence = terminal_outcome.evidence;
         evidence.push(format!("copilot-adapter-command={}", self.config.command));
