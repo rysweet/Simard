@@ -285,10 +285,62 @@ pub(crate) fn verify_cargo_metadata(
 
 #[cfg(test)]
 mod tests {
-    use super::super::types::SelectedEngineerAction;
     use super::*;
     use crate::engineer_loop::types::{
+        AppendToFileRequest, CreateFileRequest, EngineerActionKind, ExecutedEngineerAction,
+        GitCommitRequest, SelectedEngineerAction, ShellCommandRequest, StructuredEditRequest,
+    };
     use std::path::PathBuf;
+
+    fn make_action(
+        kind: EngineerActionKind,
+        exit_code: i32,
+        stdout: &str,
+        stderr: &str,
+    ) -> ExecutedEngineerAction {
+        ExecutedEngineerAction {
+            selected: SelectedEngineerAction {
+                label: "test-action".to_string(),
+                rationale: "test".to_string(),
+                argv: vec![],
+                plan_summary: "test plan".to_string(),
+                verification_steps: vec![],
+                expected_changed_files: vec![],
+                kind,
+            },
+            exit_code,
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+            changed_files: vec![],
+        }
+    }
+
+    fn dummy_selected(kind: EngineerActionKind) -> SelectedEngineerAction {
+        SelectedEngineerAction {
+            label: "test-action".into(),
+            rationale: "testing".into(),
+            argv: vec!["test".into()],
+            plan_summary: "plan".into(),
+            verification_steps: vec![],
+            expected_changed_files: vec![],
+            kind,
+        }
+    }
+
+    fn dummy_executed(
+        kind: EngineerActionKind,
+        exit_code: i32,
+        stdout: &str,
+        stderr: &str,
+    ) -> ExecutedEngineerAction {
+        ExecutedEngineerAction {
+            selected: dummy_selected(kind),
+            exit_code,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+            changed_files: vec![],
+        }
+    }
 
     #[test]
     fn verify_cargo_test_passing() {
@@ -444,19 +496,6 @@ mod tests {
     }
 
     #[test]
-    fn verify_open_issue_with_url() {
-        let action = dummy_executed(
-            EngineerActionKind::ReadOnlyScan,
-            0,
-            "https://github.com/org/repo/issues/42",
-            "",
-        );
-        let mut checks = Vec::new();
-        verify_open_issue(&action, &mut checks).unwrap();
-        assert!(checks.iter().any(|c| c.contains("issue-url-present=true")));
-    }
-
-    #[test]
     fn verify_open_issue_without_url() {
         let action = make_action(EngineerActionKind::ReadOnlyScan, 0, "no url here", "");
         let mut checks = vec![];
@@ -547,7 +586,11 @@ mod tests {
         let action = dummy_executed(EngineerActionKind::CargoTest, 0, "", "");
         let mut checks = Vec::new();
         verify_cargo_test(&action, &mut checks).unwrap();
-        assert!(checks.iter().any(|c| c.contains("cargo-test-passed=true (exit 0)")));
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.contains("cargo-test-passed=true (exit 0)"))
+        );
     }
 
     #[test]
@@ -576,6 +619,19 @@ mod tests {
         let mut checks = Vec::new();
         verify_cargo_check(&action, &mut checks);
         assert!(checks.iter().any(|c| c.contains("errors=2")));
+    }
+
+    #[test]
+    fn verify_open_issue_with_url() {
+        let action = dummy_executed(
+            EngineerActionKind::ReadOnlyScan,
+            0,
+            "https://github.com/org/repo/issues/42",
+            "",
+        );
+        let mut checks = Vec::new();
+        verify_open_issue(&action, &mut checks).unwrap();
+        assert!(checks.iter().any(|c| c.contains("issue-url-present=true")));
     }
 
     #[test]
@@ -685,7 +741,11 @@ mod tests {
         });
         let mut checks = Vec::new();
         verify_cargo_metadata(&canonical_root, &json.to_string(), &mut checks).unwrap();
-        assert!(checks.iter().any(|c| c.starts_with("metadata-workspace-root=")));
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.starts_with("metadata-workspace-root="))
+        );
         assert!(checks.iter().any(|c| c.starts_with("metadata-packages=")));
     }
 

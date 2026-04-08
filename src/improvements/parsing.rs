@@ -370,25 +370,6 @@ mod tests {
     }
 
     #[test]
-    fn read_bracketed_value_simple() {
-        let (val, cursor) = read_bracketed_value("[abc]", 0).unwrap();
-        assert_eq!(val, "[abc]");
-        assert_eq!(cursor, 5);
-    }
-
-    #[test]
-    fn read_bracketed_value_nested() {
-        let (val, cursor) = read_bracketed_value("[a [b] c]", 0).unwrap();
-        assert_eq!(val, "[a [b] c]");
-        assert_eq!(cursor, 9);
-    }
-
-    #[test]
-    fn read_bracketed_value_unterminated() {
-        assert!(read_bracketed_value("[abc", 0).is_err());
-    }
-
-    #[test]
     fn skip_record_separators_skips_pipes_and_spaces() {
         assert_eq!(skip_record_separators(" | | abc", 0), 5);
     }
@@ -531,6 +512,25 @@ mod tests {
     #[test]
     fn parse_persisted_record_pairs_no_equals_errors() {
         assert!(parse_persisted_record_pairs("just-a-key").is_err());
+    }
+
+    #[test]
+    fn read_bracketed_value_simple() {
+        let (val, cursor) = read_bracketed_value("[abc]", 0).unwrap();
+        assert_eq!(val, "[abc]");
+        assert_eq!(cursor, 5);
+    }
+
+    #[test]
+    fn read_bracketed_value_nested() {
+        let (val, cursor) = read_bracketed_value("[a [b] c]", 0).unwrap();
+        assert_eq!(val, "[a [b] c]");
+        assert_eq!(cursor, 9);
+    }
+
+    #[test]
+    fn read_bracketed_value_unterminated() {
+        assert!(read_bracketed_value("[abc", 0).is_err());
     }
 
     #[test]

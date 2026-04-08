@@ -271,15 +271,42 @@ pub fn seed_default_board(board: &mut GoalBoard) -> usize {
 mod tests {
     use super::*;
 
-    #[test]
-    fn required_field_rejects_empty() {
-        assert!(required_field("name", "").is_err());
-        assert!(required_field("name", "   ").is_err());
+    fn make_goal(id: &str, priority: u32) -> ActiveGoal {
+        ActiveGoal {
+            id: id.to_string(),
+            description: "A test goal".to_string(),
+            priority,
+            status: GoalProgress::NotStarted,
+            assigned_to: None,
+        }
     }
 
-    #[test]
-    fn validate_priority_rejects_zero() {
-        assert!(validate_priority("p", 0).is_err());
+    fn make_backlog(id: &str) -> BacklogItem {
+        BacklogItem {
+            id: id.to_string(),
+            description: "A backlog item".to_string(),
+            source: "test".to_string(),
+            score: 0.5,
+        }
+    }
+
+    fn sample_goal(id: &str, priority: u32) -> ActiveGoal {
+        ActiveGoal {
+            id: id.to_string(),
+            description: format!("Goal {id}"),
+            priority,
+            status: GoalProgress::NotStarted,
+            assigned_to: None,
+        }
+    }
+
+    fn sample_backlog(id: &str) -> BacklogItem {
+        BacklogItem {
+            id: id.to_string(),
+            description: format!("Backlog {id}"),
+            source: "test".to_string(),
+            score: 0.5,
+        }
     }
 
     #[test]
@@ -317,14 +344,6 @@ mod tests {
     }
 
     #[test]
-    fn add_active_goal_success() {
-        let mut board = GoalBoard::new();
-        add_active_goal(&mut board, sample_goal("g1", 1)).unwrap();
-        assert_eq!(board.active.len(), 1);
-        assert_eq!(board.active[0].id, "g1");
-    }
-
-    #[test]
     fn add_active_goal_rejects_duplicate() {
         let mut board = GoalBoard::new();
         add_active_goal(&mut board, make_goal("g1", 1)).unwrap();
@@ -340,13 +359,6 @@ mod tests {
         }
         let result = add_active_goal(&mut board, make_goal("overflow", 1));
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn add_backlog_item_success() {
-        let mut board = GoalBoard::new();
-        add_backlog_item(&mut board, sample_backlog("b1")).unwrap();
-        assert_eq!(board.backlog.len(), 1);
     }
 
     #[test]
@@ -383,17 +395,6 @@ mod tests {
     }
 
     #[test]
-    fn update_goal_progress_success() {
-        let mut board = GoalBoard::new();
-        add_active_goal(&mut board, sample_goal("g1", 1)).unwrap();
-        update_goal_progress(&mut board, "g1", GoalProgress::InProgress { percent: 50 }).unwrap();
-        assert_eq!(
-            board.active[0].status,
-            GoalProgress::InProgress { percent: 50 }
-        );
-    }
-
-    #[test]
     fn update_goal_progress_rejects_over_100() {
         let mut board = GoalBoard::new();
         add_active_goal(&mut board, make_goal("g1", 1)).unwrap();
@@ -406,21 +407,6 @@ mod tests {
     fn update_goal_progress_fails_for_missing_goal() {
         let mut board = GoalBoard::new();
         assert!(update_goal_progress(&mut board, "ghost", GoalProgress::Completed).is_err());
-    }
-
-    #[test]
-    fn archive_completed_removes_completed_goals() {
-        let mut board = GoalBoard::new();
-        let mut g1 = sample_goal("g1", 1);
-        g1.status = GoalProgress::Completed;
-        add_active_goal(&mut board, g1).unwrap();
-        add_active_goal(&mut board, sample_goal("g2", 2)).unwrap();
-
-        let archived = archive_completed(&mut board);
-        assert_eq!(archived.len(), 1);
-        assert_eq!(archived[0].id, "g1");
-        assert_eq!(board.active.len(), 1);
-        assert_eq!(board.active[0].id, "g2");
     }
 
     #[test]
@@ -441,8 +427,19 @@ mod tests {
     }
 
     #[test]
+    fn required_field_rejects_empty() {
+        assert!(required_field("name", "").is_err());
+        assert!(required_field("name", "   ").is_err());
+    }
+
+    #[test]
     fn required_field_accepts_non_empty() {
         assert!(required_field("name", "valid").is_ok());
+    }
+
+    #[test]
+    fn validate_priority_rejects_zero() {
+        assert!(validate_priority("p", 0).is_err());
     }
 
     #[test]
@@ -473,6 +470,14 @@ mod tests {
     }
 
     #[test]
+    fn add_active_goal_success() {
+        let mut board = GoalBoard::new();
+        add_active_goal(&mut board, sample_goal("g1", 1)).unwrap();
+        assert_eq!(board.active.len(), 1);
+        assert_eq!(board.active[0].id, "g1");
+    }
+
+    #[test]
     fn add_active_goal_duplicate_id_errors() {
         let mut board = GoalBoard::new();
         add_active_goal(&mut board, sample_goal("g1", 1)).unwrap();
@@ -486,6 +491,13 @@ mod tests {
             add_active_goal(&mut board, sample_goal(&format!("g{i}"), (i + 1) as u32)).unwrap();
         }
         assert!(add_active_goal(&mut board, sample_goal("overflow", 1)).is_err());
+    }
+
+    #[test]
+    fn add_backlog_item_success() {
+        let mut board = GoalBoard::new();
+        add_backlog_item(&mut board, sample_backlog("b1")).unwrap();
+        assert_eq!(board.backlog.len(), 1);
     }
 
     #[test]
@@ -537,6 +549,17 @@ mod tests {
     }
 
     #[test]
+    fn update_goal_progress_success() {
+        let mut board = GoalBoard::new();
+        add_active_goal(&mut board, sample_goal("g1", 1)).unwrap();
+        update_goal_progress(&mut board, "g1", GoalProgress::InProgress { percent: 50 }).unwrap();
+        assert_eq!(
+            board.active[0].status,
+            GoalProgress::InProgress { percent: 50 }
+        );
+    }
+
+    #[test]
     fn update_goal_progress_not_found_errors() {
         let mut board = GoalBoard::new();
         assert!(update_goal_progress(&mut board, "missing", GoalProgress::Completed).is_err());
@@ -550,6 +573,21 @@ mod tests {
             update_goal_progress(&mut board, "g1", GoalProgress::InProgress { percent: 101 })
                 .is_err()
         );
+    }
+
+    #[test]
+    fn archive_completed_removes_completed_goals() {
+        let mut board = GoalBoard::new();
+        let mut g1 = sample_goal("g1", 1);
+        g1.status = GoalProgress::Completed;
+        add_active_goal(&mut board, g1).unwrap();
+        add_active_goal(&mut board, sample_goal("g2", 2)).unwrap();
+
+        let archived = archive_completed(&mut board);
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].id, "g1");
+        assert_eq!(board.active.len(), 1);
+        assert_eq!(board.active[0].id, "g2");
     }
 
     #[test]

@@ -264,8 +264,42 @@ pub(crate) fn persist_engineer_loop_artifacts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use crate::engineer_loop::types::{
+        EngineerActionKind, ExecutedEngineerAction, SelectedEngineerAction,
+    };
+    use std::path::PathBuf;
+
+    fn make_inspection() -> RepoInspection {
+        RepoInspection {
+            workspace_root: PathBuf::from("/fake/workspace"),
+            repo_root: PathBuf::from("/fake/repo"),
+            branch: "main".to_string(),
+            head: "abc123".to_string(),
+            worktree_dirty: false,
+            changed_files: Vec::new(),
+            active_goals: Vec::new(),
+            carried_meeting_decisions: Vec::new(),
+            architecture_gap_summary: String::new(),
+        }
+    }
+
+    fn make_executed(kind: EngineerActionKind) -> ExecutedEngineerAction {
+        ExecutedEngineerAction {
+            selected: SelectedEngineerAction {
+                label: "test-action".into(),
+                rationale: "test".into(),
+                argv: vec!["test".into()],
+                plan_summary: "test plan".into(),
+                verification_steps: Vec::new(),
+                expected_changed_files: Vec::new(),
+                kind,
+            },
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            changed_files: Vec::new(),
+        }
+    }
 
     #[test]
     fn philosophy_review_contains_required_keywords() {
@@ -306,6 +340,66 @@ mod tests {
         let action = make_executed(EngineerActionKind::ReadOnlyScan);
         let result = run_optional_review(&inspection, &action);
         assert!(result.is_ok(), "read-only actions should be skipped");
+    }
+
+    #[test]
+    fn compute_diff_for_review_git_commit_uses_head_diff() {
+        let kind = EngineerActionKind::GitCommit(crate::engineer_loop::types::GitCommitRequest {
+            message: "test".into(),
+        });
+        // This will invoke git in the repo root; even if there's no HEAD~1 it
+        // should return empty string rather than panic.
+        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let diff = compute_diff_for_review(&repo_root, &kind);
+        // Just verify it doesn't panic and returns a string
+        let _ = diff.len();
+    }
+
+    #[test]
+    fn compute_diff_for_review_other_uses_git_diff() {
+        let kind = EngineerActionKind::ReadOnlyScan;
+        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let diff = compute_diff_for_review(&repo_root, &kind);
+        let _ = diff.len();
+    }
+
+    #[test]
+    fn compute_diff_for_review_nonexistent_dir_returns_empty() {
+        let kind = EngineerActionKind::ReadOnlyScan;
+        let diff = compute_diff_for_review(Path::new("/nonexistent/path"), &kind);
+        assert!(diff.is_empty());
+    }
+
+    #[test]
+    fn run_optional_review_skips_read_only() {
+        let inspection = RepoInspection {
+            workspace_root: PathBuf::from("."),
+            repo_root: PathBuf::from("."),
+            branch: "main".into(),
+            head: "abc123".into(),
+            worktree_dirty: false,
+            changed_files: vec![],
+            active_goals: vec![],
+            carried_meeting_decisions: vec![],
+            architecture_gap_summary: "none".into(),
+        };
+        let action = ExecutedEngineerAction {
+            selected: crate::engineer_loop::types::SelectedEngineerAction {
+                label: "scan".into(),
+                rationale: "check".into(),
+                argv: vec!["git".into(), "status".into()],
+                plan_summary: "plan".into(),
+                verification_steps: vec![],
+                expected_changed_files: vec![],
+                kind: EngineerActionKind::ReadOnlyScan,
+            },
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            changed_files: vec![],
+        };
+        // ReadOnlyScan is not mutating, so review should be skipped
+        run_optional_review(&inspection, &action).unwrap();
     }
 
     #[test]
@@ -367,66 +461,6 @@ mod tests {
             stderr: String::new(),
             changed_files: vec![],
         };
-        run_optional_review(&inspection, &action).unwrap();
-    }
-
-    #[test]
-    fn compute_diff_for_review_git_commit_uses_head_diff() {
-        let kind = EngineerActionKind::GitCommit(crate::engineer_loop::types::GitCommitRequest {
-            message: "test".into(),
-        });
-        // This will invoke git in the repo root; even if there's no HEAD~1 it
-        // should return empty string rather than panic.
-        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let diff = compute_diff_for_review(&repo_root, &kind);
-        // Just verify it doesn't panic and returns a string
-        let _ = diff.len();
-    }
-
-    #[test]
-    fn compute_diff_for_review_other_uses_git_diff() {
-        let kind = EngineerActionKind::ReadOnlyScan;
-        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let diff = compute_diff_for_review(&repo_root, &kind);
-        let _ = diff.len();
-    }
-
-    #[test]
-    fn compute_diff_for_review_nonexistent_dir_returns_empty() {
-        let kind = EngineerActionKind::ReadOnlyScan;
-        let diff = compute_diff_for_review(Path::new("/nonexistent/path"), &kind);
-        assert!(diff.is_empty());
-    }
-
-    #[test]
-    fn run_optional_review_skips_read_only() {
-        let inspection = RepoInspection {
-            workspace_root: PathBuf::from("."),
-            repo_root: PathBuf::from("."),
-            branch: "main".into(),
-            head: "abc123".into(),
-            worktree_dirty: false,
-            changed_files: vec![],
-            active_goals: vec![],
-            carried_meeting_decisions: vec![],
-            architecture_gap_summary: "none".into(),
-        };
-        let action = ExecutedEngineerAction {
-            selected: crate::engineer_loop::types::SelectedEngineerAction {
-                label: "scan".into(),
-                rationale: "check".into(),
-                argv: vec!["git".into(), "status".into()],
-                plan_summary: "plan".into(),
-                verification_steps: vec![],
-                expected_changed_files: vec![],
-                kind: EngineerActionKind::ReadOnlyScan,
-            },
-            exit_code: 0,
-            stdout: String::new(),
-            stderr: String::new(),
-            changed_files: vec![],
-        };
-        // ReadOnlyScan is not mutating, so review should be skipped
         run_optional_review(&inspection, &action).unwrap();
     }
 

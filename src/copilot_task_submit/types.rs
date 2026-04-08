@@ -281,6 +281,23 @@ fn prompt_root() -> PathBuf {
 mod tests {
     use super::*;
 
+    fn test_flow() -> CopilotSubmitFlowAsset {
+        CopilotSubmitFlowAsset {
+            launch_command: "copilot".into(),
+            working_directory: PathBuf::from("/test"),
+            wait_timeout_seconds: 60,
+            startup_banner: "Welcome".into(),
+            guidance_checkpoint: "Ready".into(),
+            submit_hint: "Submit now".into(),
+            post_submit_checkpoint: Some("Done".into()),
+            trust_prompt: None,
+            wrapper_error_signal: None,
+            workflow_noise_signals: vec![],
+            payload_id: "p1".into(),
+            payload: "task".into(),
+        }
+    }
+
     #[test]
     fn outcome_as_str() {
         assert_eq!(CopilotSubmitOutcome::Success.as_str(), "success");

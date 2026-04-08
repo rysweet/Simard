@@ -285,14 +285,25 @@ mod tests {
     #[test]
     #[serial]
     fn collect_pending_improvements_no_signals() {
+        // Point handoff dir to a nonexistent path so scan_unprocessed_handoffs
+        // doesn't pick up stale files from other tests or CI artifacts.
+        unsafe {
+            std::env::set_var("SIMARD_HANDOFF_DIR", "/tmp/nonexistent-handoff-dir-test");
+        }
         let mut state = OodaState::new(crate::goal_curation::GoalBoard::new());
         let improvements = collect_pending_improvements(&mut state, &None);
+        unsafe {
+            std::env::remove_var("SIMARD_HANDOFF_DIR");
+        }
         assert!(improvements.is_empty());
     }
 
     #[test]
     #[serial]
     fn collect_pending_improvements_drains_review_improvements() {
+        unsafe {
+            std::env::set_var("SIMARD_HANDOFF_DIR", "/tmp/nonexistent-handoff-dir-test");
+        }
         let baseline = make_score(0.5);
         let cycle = ImprovementCycle {
             baseline: baseline.clone(),
@@ -307,6 +318,9 @@ mod tests {
         let mut state = OodaState::new(crate::goal_curation::GoalBoard::new());
         state.review_improvements = vec![cycle];
         let improvements = collect_pending_improvements(&mut state, &None);
+        unsafe {
+            std::env::remove_var("SIMARD_HANDOFF_DIR");
+        }
         assert_eq!(improvements.len(), 1);
         assert!(state.review_improvements.is_empty());
     }
@@ -314,6 +328,9 @@ mod tests {
     #[test]
     #[serial]
     fn collect_pending_improvements_regression_signal() {
+        unsafe {
+            std::env::set_var("SIMARD_HANDOFF_DIR", "/tmp/nonexistent-handoff-dir-test");
+        }
         let baseline = make_score(0.8);
         let current = make_score(0.5);
 
@@ -332,6 +349,9 @@ mod tests {
         let mut state = OodaState::new(crate::goal_curation::GoalBoard::new());
         state.last_observation = Some(prev_observation);
         let improvements = collect_pending_improvements(&mut state, &Some(current));
+        unsafe {
+            std::env::remove_var("SIMARD_HANDOFF_DIR");
+        }
         // Should detect regression since 0.5 < 0.8
         assert!(!improvements.is_empty());
     }
@@ -339,6 +359,9 @@ mod tests {
     #[test]
     #[serial]
     fn collect_pending_improvements_no_regression_when_scores_match() {
+        unsafe {
+            std::env::set_var("SIMARD_HANDOFF_DIR", "/tmp/nonexistent-handoff-dir-test");
+        }
         let score = make_score(0.8);
 
         let prev_observation = Observation {
@@ -356,6 +379,9 @@ mod tests {
         let mut state = OodaState::new(crate::goal_curation::GoalBoard::new());
         state.last_observation = Some(prev_observation);
         let improvements = collect_pending_improvements(&mut state, &Some(score));
+        unsafe {
+            std::env::remove_var("SIMARD_HANDOFF_DIR");
+        }
         // No regression when scores are the same
         assert_eq!(
             improvements
