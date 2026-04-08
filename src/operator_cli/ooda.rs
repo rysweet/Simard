@@ -12,12 +12,15 @@ pub(super) fn dispatch_ooda_command(
         "run" => {
             let mut max_cycles: u32 = 0; // 0 = infinite
             let mut state_root: Option<PathBuf> = None;
+            let mut auto_reload = true;
 
             for arg in args {
                 if let Some(n) = arg.strip_prefix("--cycles=") {
                     max_cycles = n
                         .parse()
                         .map_err(|_| format!("invalid --cycles value: {n}"))?;
+                } else if arg == "--no-auto-reload" {
+                    auto_reload = false;
                 } else if state_root.is_none() {
                     state_root = Some(PathBuf::from(arg));
                 } else {
@@ -25,7 +28,7 @@ pub(super) fn dispatch_ooda_command(
                 }
             }
 
-            run_ooda_daemon(max_cycles, state_root)
+            run_ooda_daemon(max_cycles, state_root, auto_reload)
         }
         other => Err(format!("unsupported command 'ooda {other}'").into()),
     }
