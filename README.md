@@ -123,26 +123,118 @@ Simard delegates work to agent runtimes through base types:
 
 ## Architecture
 
+```mermaid
+graph TB
+    subgraph CLI["Operator CLI"]
+        cmd_eng[engineer]
+        cmd_meet[meeting]
+        cmd_ooda[ooda run]
+        cmd_dash[dashboard serve]
+        cmd_gym[gym]
+        cmd_review[review]
+        cmd_goal[goal-curation]
+        cmd_imp[improvement-curation]
+    end
+
+    subgraph Daemon["OODA Daemon (autonomous loop)"]
+        observe["Observe<br/>issues · gym scores · handoffs · memory"]
+        orient["Orient<br/>rank priorities"]
+        decide["Decide<br/>select actions"]
+        act["Act<br/>dispatch work"]
+        review_step["Review & Curate"]
+        observe --> orient --> decide --> act --> review_step --> observe
+    end
+
+    subgraph Actions["Action Dispatch"]
+        adv_goal["Advance Goal<br/>(subordinate LLM turn)"]
+        run_eng["Launch Session<br/>(PTY engineer)"]
+        run_imp["Run Improvement<br/>(self-improve cycle)"]
+        run_gym["Run Gym Eval<br/>(benchmark suite)"]
+        consol["Consolidate Memory"]
+        research["Research Query"]
+        build_skill["Build Skill"]
+    end
+
+    subgraph WorkLoops["Work Loops"]
+        eng_loop["Engineer Loop<br/>inspect → select → execute → verify"]
+        meet_repl["Meeting REPL<br/>decisions · action items · handoff"]
+        self_imp["Self-Improve Cycle<br/>eval → analyze → improve → reeval"]
+    end
+
+    subgraph Runtime["Agent Runtime"]
+        bootstrap["Bootstrap<br/>config · identity · assembly"]
+        session["Session Builder<br/>ports · lifecycle"]
+        identity["Identity Manifests<br/>roles · capabilities · precedence"]
+    end
+
+    subgraph BaseTypes["Agent Base Types"]
+        rustyclawd["RustyClawd"]
+        copilot["Copilot"]
+        claude["Claude SDK"]
+        ms_agent["MS Agent"]
+        harness["Test Harness"]
+    end
+
+    subgraph Bridges["Python Bridges (subprocess)"]
+        mem_bridge["Memory Bridge<br/>cognitive memory"]
+        know_bridge["Knowledge Bridge<br/>RAG · packs"]
+        gym_bridge["Gym Bridge<br/>scenario eval"]
+    end
+
+    subgraph Memory["Cognitive Memory"]
+        sensory["Sensory"]
+        working["Working"]
+        episodic["Episodic"]
+        semantic["Semantic"]
+        procedural["Procedural"]
+        prospective["Prospective"]
+    end
+
+    subgraph Storage["Persistent State"]
+        goals_store["Goal Board<br/>active · backlog"]
+        improvements_store["Improvement Log"]
+        metrics_store["Self-Metrics<br/>JSONL"]
+        cost_store["Cost Tracking<br/>JSONL"]
+        handoff_files["Handoff Files"]
+    end
+
+    subgraph Dashboard["Web Dashboard :8080"]
+        dash_ui["Status · Issues · Metrics<br/>Costs · Processes · Logs"]
+    end
+
+    cmd_ooda --> Daemon
+    cmd_eng --> eng_loop
+    cmd_meet --> meet_repl
+    cmd_dash --> Dashboard
+    cmd_gym --> gym_bridge
+
+    act --> Actions
+    adv_goal --> session
+    run_eng --> eng_loop
+    run_imp --> self_imp
+    run_gym --> gym_bridge
+    consol --> mem_bridge
+    research --> know_bridge
+
+    eng_loop --> session
+    meet_repl --> session
+    self_imp --> gym_bridge
+
+    session --> bootstrap --> identity
+    session --> BaseTypes
+
+    mem_bridge --> Memory
+    meet_repl -.->|handoff| handoff_files
+    eng_loop -.->|reads| handoff_files
+    Daemon -.->|reads/writes| goals_store
+    Daemon -.->|writes| metrics_store
+
+    style Daemon fill:#2d4a3e,stroke:#4a8,color:#fff
+    style CLI fill:#1a3a5c,stroke:#48a,color:#fff
+    style Memory fill:#3a2d4a,stroke:#84a,color:#fff
+    style Dashboard fill:#4a3a1a,stroke:#a84,color:#fff
 ```
-┌─────────────────────────────────────────────┐
-│                  Operator CLI                │
-├─────────────────────────────────────────────┤
-│  Engineer │ Meeting │ Goal │ Gym │ Review   │
-├─────────────────────────────────────────────┤
-│              Agent Runtime                   │
-│  ┌──────────┐ ┌──────────┐ ┌─────────────┐ │
-│  │ Identity │ │ Session  │ │ Reflection  │ │
-│  │ Manifest │ │ Lifecycle│ │ Interface   │ │
-│  └──────────┘ └──────────┘ └─────────────┘ │
-├─────────────────────────────────────────────┤
-│           Agent Base Types                   │
-│  RustyClawd │ Copilot │ Claude │ MS Agent   │
-├─────────────────────────────────────────────┤
-│           Cognitive Memory                   │
-│  Sensory│Working│Episodic│Semantic│Procedural│
-│                 Prospective                  │
-└─────────────────────────────────────────────┘
-```
+
 
 ## Configuration
 
