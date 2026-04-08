@@ -263,9 +263,7 @@ impl PtyTerminalSession {
 
 fn unique_transcript_path(label: &str) -> PathBuf {
     let id = uuid::Uuid::now_v7();
-    std::env::temp_dir().join(format!(
-        "simard-terminal-shell-{label}-{id}.log",
-    ))
+    std::env::temp_dir().join(format!("simard-terminal-shell-{label}-{id}.log",))
 }
 
 fn open_exclusive_temp_file(path: &Path, base_type: &str) -> SimardResult<File> {
@@ -293,7 +291,9 @@ mod tests {
 
     #[test]
     fn transcript_path_is_unique_per_call() {
-        let paths: Vec<PathBuf> = (0..50).map(|_| unique_transcript_path("transcript")).collect();
+        let paths: Vec<PathBuf> = (0..50)
+            .map(|_| unique_transcript_path("transcript"))
+            .collect();
         let unique: std::collections::HashSet<_> = paths.iter().collect();
         assert_eq!(
             paths.len(),
