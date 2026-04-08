@@ -384,4 +384,8 @@ impl MemoryStore for CognitiveBridgeMemoryStore {
             .cloned()
             .collect())
     }
+
+    fn flush_pending(&self) -> usize {
+        self.sync_pending()
+    }
 }
