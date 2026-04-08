@@ -45,7 +45,7 @@ Product modes:
   gym run <scenario-id>
   gym compare <scenario-id>
   gym run-suite <suite-id>
-  ooda run [--cycles=N] [state-root]
+  ooda run [--cycles=N] [--no-auto-reload] [state-root]
   dashboard serve [--port=8080]
   spawn <agent-name> <goal> <worktree-path> [--depth=N]
   handover [--canary-dir=PATH] [--manifest-dir=PATH]

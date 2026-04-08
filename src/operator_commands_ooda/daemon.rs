@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crate::bridge_launcher::{
     cognitive_memory_db_path, find_python_dir, launch_gym_bridge, launch_knowledge_bridge,
@@ -15,6 +15,44 @@ use crate::ooda_loop::{
 use crate::session_builder::SessionBuilder;
 
 use super::persistence::{persist_cycle_report, persist_cycle_to_memory};
+
+/// Return the mtime of the currently-running executable, or `None` if it
+/// cannot be determined (e.g. the binary was deleted after launch).
+fn exe_mtime() -> Option<SystemTime> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok())
+}
+
+/// Check whether the on-disk binary is newer than `start_time`.
+pub(crate) fn binary_changed(start_time: SystemTime) -> bool {
+    exe_mtime().is_some_and(|mtime| mtime > start_time)
+}
+
+/// Replace the current process with a fresh copy of itself.
+///
+/// On success this function never returns — the process image is replaced
+/// via `exec()`.  On failure the error is returned so the caller can
+/// degrade gracefully and continue running.
+#[cfg(unix)]
+fn exec_self_reload() -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::process::CommandExt;
+
+    let exe = std::env::current_exe()?;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    eprintln!("[simard] New binary detected, restarting...");
+
+    // Flush stderr/stdout so the log line above is not lost.
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+
+    let err = std::process::Command::new(&exe).args(&args).exec();
+    // exec() only returns on failure
+    Err(format!("exec failed: {err}").into())
+}
 
 /// Sleep that wakes early when the shutdown flag is set.
 fn interruptible_sleep(total: Duration, shutdown: &AtomicBool) {
@@ -44,6 +82,7 @@ fn interruptible_sleep(total: Duration, shutdown: &AtomicBool) {
 pub fn run_ooda_daemon(
     max_cycles: u32,
     state_root_override: Option<PathBuf>,
+    auto_reload: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // --- signal handling ------------------------------------------------
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -106,6 +145,13 @@ pub fn run_ooda_daemon(
 
     eprintln!("[simard] OODA daemon: cycle interval = {interval_secs}s");
 
+    // Capture the binary mtime at startup so we can detect in-place upgrades.
+    let start_time = exe_mtime().unwrap_or_else(SystemTime::now);
+
+    if auto_reload {
+        eprintln!("[simard] OODA daemon: auto-reload enabled");
+    }
+
     let mut cycles_run = 0u32;
 
     loop {
@@ -113,6 +159,17 @@ pub fn run_ooda_daemon(
         if shutdown.load(Ordering::SeqCst) {
             eprintln!("[simard] OODA daemon: shutting down gracefully");
             break;
+        }
+
+        // Auto-reload: if the on-disk binary is newer, exec into it.
+        #[cfg(unix)]
+        if auto_reload && binary_changed(start_time) {
+            // Close the LLM session before exec so we don't leak resources.
+            if let Some(ref mut session) = bridges.session {
+                let _ = session.close();
+            }
+            exec_self_reload()?;
+            // exec_self_reload only returns on error — continue running.
         }
 
         if max_cycles > 0 && cycles_run >= max_cycles {
