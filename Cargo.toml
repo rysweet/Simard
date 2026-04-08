@@ -32,6 +32,7 @@ libc = "0.2"
 assert_cmd = "2"
 tempfile = "3"
 proptest = "1"
+serial_test = "3.4.0"
 
 [profile.release]
 lto = "thin"
