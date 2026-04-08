@@ -381,3 +381,15 @@ fn display_runtime_init_failed() {
     assert!(msg.contains("memory-bridge"), "{msg}");
     assert!(msg.contains("port in use"), "{msg}");
 }
+
+#[test]
+fn display_memory_integrity_error() {
+    let err = SimardError::MemoryIntegrityError {
+        path: PathBuf::from("/store/memory.json"),
+        reason: "checksum mismatch".to_string(),
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("memory integrity check failed"), "{msg}");
+    assert!(msg.contains("/store/memory.json"), "{msg}");
+    assert!(msg.contains("checksum mismatch"), "{msg}");
+}

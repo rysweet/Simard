@@ -477,3 +477,250 @@ fn file_backed_put_auto_stamps_created_at() {
 
 // Session lifecycle hooks would go here once on_session_start/on_session_end
 // are added to the MemoryStore trait.
+
+// ============================================================================
+// 9. Memory integrity verification — checksums
+// ============================================================================
+
+#[test]
+fn checksummed_file_survives_close_and_reopen() {
+    let path = unique_path("checksum-reopen");
+    let sid = SessionId::from_uuid(Uuid::nil());
+
+    {
+        let store = FileBackedMemoryStore::try_new(&path).unwrap();
+        store
+            .put(make_record("ck1", MemoryScope::Decision, &sid))
+            .unwrap();
+        store
+            .put(make_record("ck2", MemoryScope::Project, &sid))
+            .unwrap();
+    }
+
+    let store2 = FileBackedMemoryStore::try_new(&path).unwrap();
+    let all = store2.list_all().unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].key, "ck1");
+    assert_eq!(all[1].key, "ck2");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn corrupted_checksum_returns_integrity_error() {
+    use crate::error::SimardError;
+
+    let path = unique_path("corrupt-cksum");
+    let sid = SessionId::from_uuid(Uuid::nil());
+
+    {
+        let store = FileBackedMemoryStore::try_new(&path).unwrap();
+        store
+            .put(make_record("c1", MemoryScope::Decision, &sid))
+            .unwrap();
+    }
+
+    // Tamper with the stored CRC32 value.
+    let contents = std::fs::read_to_string(&path).unwrap();
+    let mut parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
+    parsed["crc32"] = serde_json::Value::from(0xDEADBEEFu64);
+    std::fs::write(&path, serde_json::to_string(&parsed).unwrap()).unwrap();
+
+    let result = FileBackedMemoryStore::try_new(&path);
+    assert!(result.is_err(), "should fail with corrupted checksum");
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, SimardError::MemoryIntegrityError { .. }),
+        "expected MemoryIntegrityError, got: {err:?}"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn corrupted_record_data_returns_integrity_error() {
+    use crate::error::SimardError;
+
+    let path = unique_path("corrupt-data");
+    let sid = SessionId::from_uuid(Uuid::nil());
+
+    {
+        let store = FileBackedMemoryStore::try_new(&path).unwrap();
+        store
+            .put(make_record("d1", MemoryScope::Decision, &sid))
+            .unwrap();
+    }
+
+    // Tamper with the record value while leaving the CRC32 unchanged.
+    let mut parsed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    parsed["records"][0]["value"] = serde_json::Value::from("TAMPERED");
+    std::fs::write(&path, serde_json::to_string(&parsed).unwrap()).unwrap();
+
+    let result = FileBackedMemoryStore::try_new(&path);
+    assert!(result.is_err(), "should fail with corrupted record data");
+    assert!(
+        matches!(
+            result.unwrap_err(),
+            SimardError::MemoryIntegrityError { .. }
+        ),
+        "expected MemoryIntegrityError"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn truncated_file_returns_error() {
+    let path = unique_path("truncated");
+    let sid = SessionId::from_uuid(Uuid::nil());
+
+    {
+        let store = FileBackedMemoryStore::try_new(&path).unwrap();
+        store
+            .put(make_record("t1", MemoryScope::Decision, &sid))
+            .unwrap();
+    }
+
+    // Truncate the file mid-way.
+    let contents = std::fs::read_to_string(&path).unwrap();
+    let truncated = &contents[..contents.len() / 2];
+    std::fs::write(&path, truncated).unwrap();
+
+    let result = FileBackedMemoryStore::try_new(&path);
+    assert!(
+        result.is_err(),
+        "should fail on truncated (unparseable) file"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+// ============================================================================
+// 10. Recall validation after consolidation cycle
+// ============================================================================
+
+#[test]
+fn consolidated_memories_survive_reopen_and_are_recallable() {
+    let path = unique_path("consolidation-recall");
+    let session_a = SessionId::from_uuid(Uuid::from_u128(100));
+    let session_b = SessionId::from_uuid(Uuid::from_u128(200));
+
+    // Phase 1: Write memories from two sessions.
+    {
+        let store = FileBackedMemoryStore::try_new(&path).unwrap();
+        store
+            .put(make_record("insight-a", MemoryScope::Decision, &session_a))
+            .unwrap();
+        store
+            .put(make_record("insight-b", MemoryScope::Project, &session_b))
+            .unwrap();
+    }
+
+    // Phase 2: Simulate consolidation — reopen, add a summary record.
+    {
+        let store = FileBackedMemoryStore::try_new(&path).unwrap();
+        assert_eq!(store.list_all().unwrap().len(), 2);
+        store
+            .put(make_record(
+                "consolidated-summary",
+                MemoryScope::SessionSummary,
+                &session_a,
+            ))
+            .unwrap();
+    }
+
+    // Phase 3: Drop and reopen — all records should be recallable.
+    let store = FileBackedMemoryStore::try_new(&path).unwrap();
+    let all = store.list_all().unwrap();
+    assert_eq!(all.len(), 3);
+
+    // Verify recall by scope.
+    assert_eq!(store.list(MemoryScope::Decision).unwrap().len(), 1);
+    assert_eq!(store.list(MemoryScope::Project).unwrap().len(), 1);
+    assert_eq!(store.list(MemoryScope::SessionSummary).unwrap().len(), 1);
+
+    // Verify recall by session.
+    assert_eq!(store.list_for_session(&session_a).unwrap().len(), 2);
+    assert_eq!(store.list_for_session(&session_b).unwrap().len(), 1);
+
+    // Verify time-range recall.
+    let now = Utc::now();
+    let results = store
+        .list_by_time_range(now - Duration::minutes(1), now + Duration::minutes(1))
+        .unwrap();
+    assert_eq!(results.len(), 3);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+// ============================================================================
+// 11. Durability — full lifecycle
+// ============================================================================
+
+#[test]
+fn full_lifecycle_write_close_reopen_verify() {
+    let path = unique_path("lifecycle");
+    let sid = SessionId::from_uuid(Uuid::nil());
+
+    // Write.
+    {
+        let store = FileBackedMemoryStore::try_new(&path).unwrap();
+        for i in 0..10 {
+            store
+                .put(make_record(
+                    &format!("item-{i}"),
+                    MemoryScope::Project,
+                    &sid,
+                ))
+                .unwrap();
+        }
+    }
+
+    // Close + reopen.
+    let store = FileBackedMemoryStore::try_new(&path).unwrap();
+    let all = store.list_all().unwrap();
+    assert_eq!(all.len(), 10);
+
+    for (i, record) in all.iter().enumerate() {
+        assert_eq!(record.key, format!("item-{i}"));
+        assert_eq!(record.value, format!("value-for-item-{i}"));
+        assert!(record.created_at.is_some());
+    }
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn legacy_plain_json_file_loads_without_error() {
+    let path = unique_path("legacy-compat");
+    let sid = SessionId::from_uuid(Uuid::nil());
+
+    // Write a legacy plain-array JSON file (no checksum envelope).
+    let records = vec![MemoryRecord {
+        key: "legacy-key".to_string(),
+        scope: MemoryScope::Project,
+        value: "legacy-value".to_string(),
+        session_id: sid.clone(),
+        recorded_in: SessionPhase::Execution,
+        created_at: Some(Utc::now()),
+    }];
+    std::fs::write(&path, serde_json::to_string(&records).unwrap()).unwrap();
+
+    // Should load fine via legacy fallback.
+    let store = FileBackedMemoryStore::try_new(&path).unwrap();
+    let all = store.list_all().unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].key, "legacy-key");
+
+    // Writing should upgrade to checksummed format.
+    store
+        .put(make_record("new-key", MemoryScope::Decision, &sid))
+        .unwrap();
+
+    // Reopen should validate the checksum.
+    let store2 = FileBackedMemoryStore::try_new(&path).unwrap();
+    assert_eq!(store2.list_all().unwrap().len(), 2);
+
+    let _ = std::fs::remove_file(&path);
+}
