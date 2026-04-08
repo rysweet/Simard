@@ -1,5 +1,0 @@
-working-directory: .
-wait-timeout-seconds: 30
-command: amplihack copilot -- --version
-wait-for: GitHub Copilot CLI
-input: exit

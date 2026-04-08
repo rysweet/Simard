@@ -1,9 +1,0 @@
-/target
-/target-shared
-/.claude/runtime/
-.cargo/config.toml
-__pycache__/
-*.pyc
-logs/
-.amplihack/
-worktrees/
