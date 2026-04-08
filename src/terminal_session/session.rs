@@ -2,6 +2,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -89,24 +90,54 @@ impl PtyTerminalSession {
         })
     }
 
+    /// Timeout for PTY stdin write operations.  If a write does not complete
+    /// within this duration we assume the PTY buffer is blocked and return an
+    /// error instead of hanging the session indefinitely.
+    const SEND_INPUT_TIMEOUT: Duration = Duration::from_secs(30);
+
     pub(crate) fn send_input(&mut self, command: &str) -> SimardResult<()> {
         let stdin = self
             .stdin
-            .as_mut()
+            .take()
             .ok_or_else(|| SimardError::AdapterInvocationFailed {
                 base_type: self.base_type.clone(),
                 reason: "terminal-shell session stdin is already closed".to_string(),
             })?;
-        writeln!(stdin, "{command}").map_err(|error| SimardError::AdapterInvocationFailed {
-            base_type: self.base_type.clone(),
-            reason: format!("failed to write terminal command input: {error}"),
-        })?;
-        stdin
-            .flush()
-            .map_err(|error| SimardError::AdapterInvocationFailed {
-                base_type: self.base_type.clone(),
-                reason: format!("failed to flush terminal command input: {error}"),
-            })
+
+        let base_type = self.base_type.clone();
+        let owned_command = command.to_string();
+        let (tx, rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            let mut writer = stdin;
+            let result = writeln!(writer, "{owned_command}").and_then(|_| writer.flush());
+            // Send back the writer and result; ignore error if the receiver
+            // has already dropped (timeout path).
+            let _ = tx.send((writer, result));
+        });
+
+        match rx.recv_timeout(Self::SEND_INPUT_TIMEOUT) {
+            Ok((stdin_back, write_result)) => {
+                self.stdin = Some(stdin_back);
+                write_result.map_err(|error| SimardError::AdapterInvocationFailed {
+                    base_type,
+                    reason: format!("failed to write terminal command input: {error}"),
+                })
+            }
+            Err(_) => {
+                // Write timed out — stdin is lost (the spawned thread still
+                // holds it), but we can still read the transcript and
+                // terminate the session.
+                Err(SimardError::AdapterInvocationFailed {
+                    base_type,
+                    reason: format!(
+                        "terminal command input write timed out after {}s \
+                         (prompt may be too large for PTY buffer)",
+                        Self::SEND_INPUT_TIMEOUT.as_secs(),
+                    ),
+                })
+            }
+        }
     }
 
     pub(crate) fn wait_for_output(

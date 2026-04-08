@@ -253,6 +253,15 @@ impl BaseTypeSession for CopilotSdkSession {
     }
 }
 
+/// Maximum prompt length (in chars) to embed inline in a single shell
+/// command.  Prompts exceeding this threshold are written to a temp file in
+/// smaller chunks to avoid PTY buffer overflow and shell command-line limits.
+const PROMPT_INLINE_THRESHOLD: usize = 400;
+
+/// Maximum number of *original* (pre-escape) characters per chunk when
+/// writing long prompts to a temp file via multiple shell commands.
+const PROMPT_CHUNK_SIZE: usize = 300;
+
 /// Build a terminal-session-compatible objective string that launches the
 /// copilot command with the enriched prompt.
 ///
@@ -261,6 +270,10 @@ impl BaseTypeSession for CopilotSdkSession {
 /// waits for the process to exit naturally — no artificial timeouts.  The
 /// copilot runs to completion however long it takes, and we read the full
 /// transcript afterward.
+///
+/// For prompts longer than [`PROMPT_INLINE_THRESHOLD`] characters the prompt
+/// content is written in multiple small `input:` steps so that no single
+/// shell command line exceeds a safe length for the PTY buffer.
 fn build_copilot_terminal_objective(
     config: &CopilotAdapterConfig,
     formatted_prompt: &str,
@@ -271,20 +284,50 @@ fn build_copilot_terminal_objective(
         objective.push_str(&format!("working-directory: {cwd}\n"));
     }
 
-    // Write the prompt to a temp file to avoid shell quoting issues with
-    // large multi-line prompts containing arbitrary characters.
-    // Chain the copilot command with `exit` so the shell exits naturally
-    // after the copilot finishes — no separate input step needed.
-    let escaped = formatted_prompt
-        .replace('\\', "\\\\")
-        .replace('\'', "'\\''");
-    objective.push_str(&format!(
-        "command: SIMARD_PROMPT_FILE=$(mktemp /tmp/simard-copilot-prompt.XXXXXX) && \
-         printf '%s' '{}' > \"$SIMARD_PROMPT_FILE\" && \
-         {} -p \"$(cat \"$SIMARD_PROMPT_FILE\")\" ; \
-         rm -f \"$SIMARD_PROMPT_FILE\" ; exit\n",
-        escaped, config.command,
-    ));
+    if formatted_prompt.len() <= PROMPT_INLINE_THRESHOLD {
+        // Short prompt: inline in a single command (original fast path).
+        let escaped = formatted_prompt
+            .replace('\\', "\\\\")
+            .replace('\'', "'\\''");
+        objective.push_str(&format!(
+            "command: SIMARD_PROMPT_FILE=$(mktemp /tmp/simard-copilot-prompt.XXXXXX) && \
+             printf '%s' '{}' > \"$SIMARD_PROMPT_FILE\" && \
+             {} -p \"$(cat \"$SIMARD_PROMPT_FILE\")\" ; \
+             rm -f \"$SIMARD_PROMPT_FILE\" ; exit\n",
+            escaped, config.command,
+        ));
+    } else {
+        // Long prompt: write in chunks to avoid shell command-line overflow.
+        eprintln!(
+            "[simard] prompt length ({} chars) exceeds inline threshold ({}), \
+             using chunked file write",
+            formatted_prompt.len(),
+            PROMPT_INLINE_THRESHOLD,
+        );
+
+        objective
+            .push_str("input: SIMARD_PROMPT_FILE=$(mktemp /tmp/simard-copilot-prompt.XXXXXX)\n");
+
+        // Chunk by chars (not bytes) so we never split a multi-byte UTF-8
+        // codepoint or an escape sequence across chunks.
+        let chars: Vec<char> = formatted_prompt.chars().collect();
+        for (i, chunk) in chars.chunks(PROMPT_CHUNK_SIZE).enumerate() {
+            let chunk_str: String = chunk.iter().collect();
+            let escaped_chunk = chunk_str
+                .replace('\\', "\\\\")
+                .replace('\'', "'\\''");
+            let redirect = if i == 0 { ">" } else { ">>" };
+            objective.push_str(&format!(
+                "input: printf '%s' '{escaped_chunk}' {redirect} \"$SIMARD_PROMPT_FILE\"\n",
+            ));
+        }
+
+        objective.push_str(&format!(
+            "command: {} -p \"$(cat \"$SIMARD_PROMPT_FILE\")\" ; \
+             rm -f \"$SIMARD_PROMPT_FILE\" ; exit\n",
+            config.command,
+        ));
+    }
 
     objective
 }
@@ -638,5 +681,108 @@ Script done on 2025-04-07 02:56:00+00:00";
         let evidence = vec!["selected-base-type=copilot-test".to_string()];
         let response = extract_copilot_response_from_evidence(&evidence);
         assert!(response.is_empty());
+    }
+
+    // --- Long-prompt / chunked-write tests ---
+
+    #[test]
+    fn build_copilot_objective_uses_chunked_write_for_long_prompts() {
+        let config = CopilotAdapterConfig::default();
+        let prompt = "x".repeat(600);
+        let objective = build_copilot_terminal_objective(&config, &prompt);
+
+        let input_count = objective
+            .lines()
+            .filter(|l| l.starts_with("input:"))
+            .count();
+        assert!(
+            input_count >= 2,
+            "long prompts should produce multiple input steps, got {input_count}"
+        );
+        assert!(
+            objective.contains("amplihack copilot"),
+            "copilot command must still appear"
+        );
+        assert!(
+            objective.contains("; exit"),
+            "objective must chain exit to end the shell"
+        );
+        assert!(
+            objective.contains("mktemp"),
+            "should create a temp file for the prompt"
+        );
+    }
+
+    #[test]
+    fn build_copilot_objective_short_prompts_stay_inline() {
+        let config = CopilotAdapterConfig::default();
+        let prompt = "Hello world";
+        let objective = build_copilot_terminal_objective(&config, prompt);
+
+        let command_count = objective
+            .lines()
+            .filter(|l| l.starts_with("command:"))
+            .count();
+        assert_eq!(command_count, 1, "short prompts should use single command");
+        let input_count = objective
+            .lines()
+            .filter(|l| l.starts_with("input:"))
+            .count();
+        assert_eq!(
+            input_count, 0,
+            "short prompts should not produce separate input lines"
+        );
+    }
+
+    #[test]
+    fn build_copilot_objective_chunked_preserves_full_prompt_content() {
+        let config = CopilotAdapterConfig::default();
+        let prompt = "a".repeat(800);
+        let objective = build_copilot_terminal_objective(&config, &prompt);
+
+        // Every original 'a' must appear somewhere in the printf chunks.
+        let a_count: usize = objective
+            .lines()
+            .filter(|l| l.starts_with("input:") && l.contains("printf"))
+            .map(|l| l.chars().filter(|&c| c == 'a').count())
+            .sum();
+        assert!(
+            a_count >= 800,
+            "all prompt characters should appear in chunks, found {a_count}"
+        );
+    }
+
+    #[test]
+    fn build_copilot_objective_very_long_prompt_produces_many_chunks() {
+        let config = CopilotAdapterConfig::default();
+        let prompt = "test phrase ".repeat(200); // ~2 400 chars
+        let objective = build_copilot_terminal_objective(&config, &prompt);
+
+        let input_count = objective
+            .lines()
+            .filter(|l| l.starts_with("input:"))
+            .count();
+        assert!(
+            input_count > 5,
+            "very long prompts need many chunks, got {input_count}"
+        );
+        assert!(objective.contains("command:"));
+        assert!(objective.contains("; exit"));
+    }
+
+    #[test]
+    fn build_copilot_objective_chunked_escapes_quotes_per_chunk() {
+        let config = CopilotAdapterConfig::default();
+        // Build a prompt that exceeds the threshold and contains quotes.
+        let prompt = format!("it's a {}long prompt with 'quotes'", "x".repeat(500));
+        let objective = build_copilot_terminal_objective(&config, &prompt);
+
+        // No unescaped single-quotes should appear inside printf arguments.
+        for line in objective.lines().filter(|l| l.contains("printf")) {
+            assert!(
+                !line.contains("it's"),
+                "single quotes must be escaped even in chunked mode: {line}"
+            );
+        }
     }
 }
