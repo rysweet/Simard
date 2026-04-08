@@ -234,12 +234,7 @@ fn print_handoff_preview<W: Write>(session: &MeetingSession, output: &mut W) {
     }
     writeln!(output).ok();
 
-    writeln!(
-        output,
-        "Open Questions ({}):",
-        handoff.open_questions.len()
-    )
-    .ok();
+    writeln!(output, "Open Questions ({}):", handoff.open_questions.len()).ok();
     if handoff.open_questions.is_empty() {
         writeln!(output, "  (none)").ok();
     } else {
@@ -795,8 +790,8 @@ mod tests {
         let mut reader = &input[..];
         let mut output = Vec::new();
 
-        let session = run_meeting_repl("Due date", &bridge, None, "", &mut reader, &mut output)
-            .unwrap();
+        let session =
+            run_meeting_repl("Due date", &bridge, None, "", &mut reader, &mut output).unwrap();
 
         assert_eq!(session.action_items.len(), 1);
         assert_eq!(
