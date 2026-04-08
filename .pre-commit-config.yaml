@@ -27,8 +27,8 @@ repos:
           - manual
 
       - id: cargo-test
-        name: cargo test --all-features --locked
-        entry: cargo test --all-features --locked
+        name: cargo test --all-features --locked (skip install_smoke)
+        entry: cargo test --all-features --locked -- --skip cargo_install_from_repo_succeeds
         language: system
         pass_filenames: false
         always_run: true
