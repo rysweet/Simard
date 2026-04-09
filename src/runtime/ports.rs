@@ -158,3 +158,100 @@ impl RuntimePorts {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::evidence::InMemoryEvidenceStore;
+    use crate::memory::InMemoryMemoryStore;
+    use crate::prompt_assets::InMemoryPromptAssetStore;
+    use crate::session::UuidSessionIdGenerator;
+
+    // -- with_runtime_services_and_program --
+
+    #[test]
+    fn with_runtime_services_and_program_constructs_all_ports() {
+        let prompt_store: Arc<dyn PromptAssetStore> =
+            Arc::new(InMemoryPromptAssetStore::new(vec![]));
+        let memory_store: Arc<dyn MemoryStore> =
+            Arc::new(InMemoryMemoryStore::try_default().unwrap());
+        let evidence_store: Arc<dyn EvidenceStore> =
+            Arc::new(InMemoryEvidenceStore::try_default().unwrap());
+        let goal_store: Arc<dyn GoalStore> = Arc::new(InMemoryGoalStore::try_default().unwrap());
+        let base_types = BaseTypeRegistry::default();
+        let topology_driver: Arc<dyn RuntimeTopologyDriver> =
+            Arc::new(InProcessTopologyDriver::try_default().unwrap());
+        let transport: Arc<dyn RuntimeMailboxTransport> =
+            Arc::new(InMemoryMailboxTransport::try_default().unwrap());
+        let supervisor: Arc<dyn RuntimeSupervisor> =
+            Arc::new(InProcessSupervisor::try_default().unwrap());
+        let agent_program: Arc<dyn AgentProgram> =
+            Arc::new(ObjectiveRelayProgram::try_default().unwrap());
+        let handoff_store: Arc<dyn RuntimeHandoffStore> =
+            Arc::new(InMemoryHandoffStore::try_default().unwrap());
+        let session_ids: Arc<dyn SessionIdGenerator> = Arc::new(UuidSessionIdGenerator);
+
+        let ports = RuntimePorts::with_runtime_services_and_program(
+            prompt_store,
+            memory_store,
+            evidence_store,
+            goal_store,
+            base_types,
+            topology_driver,
+            transport,
+            supervisor,
+            agent_program,
+            handoff_store,
+            session_ids,
+        );
+
+        // Verify ports are accessible (the struct has fields we can read).
+        assert!(ports.base_types.registered_ids().is_empty());
+    }
+
+    // -- new constructor --
+
+    #[test]
+    fn new_constructor_creates_runtime_with_defaults() {
+        let prompt_store: Arc<dyn PromptAssetStore> =
+            Arc::new(InMemoryPromptAssetStore::new(vec![]));
+        let memory_store: Arc<dyn MemoryStore> =
+            Arc::new(InMemoryMemoryStore::try_default().unwrap());
+        let evidence_store: Arc<dyn EvidenceStore> =
+            Arc::new(InMemoryEvidenceStore::try_default().unwrap());
+        let base_types = BaseTypeRegistry::default();
+        let session_ids: Arc<dyn SessionIdGenerator> = Arc::new(UuidSessionIdGenerator);
+
+        let result = RuntimePorts::new(
+            prompt_store,
+            memory_store,
+            evidence_store,
+            base_types,
+            session_ids,
+        );
+        assert!(result.is_ok());
+    }
+
+    // -- with_session_ids --
+
+    #[test]
+    fn with_session_ids_delegates_to_new() {
+        let prompt_store: Arc<dyn PromptAssetStore> =
+            Arc::new(InMemoryPromptAssetStore::new(vec![]));
+        let memory_store: Arc<dyn MemoryStore> =
+            Arc::new(InMemoryMemoryStore::try_default().unwrap());
+        let evidence_store: Arc<dyn EvidenceStore> =
+            Arc::new(InMemoryEvidenceStore::try_default().unwrap());
+        let base_types = BaseTypeRegistry::default();
+        let session_ids: Arc<dyn SessionIdGenerator> = Arc::new(UuidSessionIdGenerator);
+
+        let result = RuntimePorts::with_session_ids(
+            prompt_store,
+            memory_store,
+            evidence_store,
+            base_types,
+            session_ids,
+        );
+        assert!(result.is_ok());
+    }
+}

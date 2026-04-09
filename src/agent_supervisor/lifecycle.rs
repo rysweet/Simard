@@ -149,3 +149,81 @@ pub(super) fn current_epoch_seconds() -> SimardResult<u64> {
     })?;
     Ok(duration.as_secs())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- current_epoch_seconds --
+
+    #[test]
+    fn current_epoch_seconds_returns_reasonable_value() {
+        let now = current_epoch_seconds().unwrap();
+        // Should be after 2020-01-01 (epoch 1577836800).
+        assert!(now > 1_577_836_800, "epoch {now} seems too small");
+    }
+
+    // -- is_goal_complete --
+
+    #[test]
+    fn is_goal_complete_true_when_outcome_present() {
+        let progress = SubordinateProgress {
+            sub_id: "test".to_string(),
+            phase: "done".to_string(),
+            steps_completed: 1,
+            steps_total: 1,
+            last_action: "finished".to_string(),
+            heartbeat_epoch: 0,
+            outcome: Some("success".to_string()),
+        };
+        assert!(is_goal_complete(&progress));
+    }
+
+    #[test]
+    fn is_goal_complete_false_when_no_outcome() {
+        let progress = SubordinateProgress {
+            sub_id: "test".to_string(),
+            phase: "working".to_string(),
+            steps_completed: 0,
+            steps_total: 5,
+            last_action: "coding".to_string(),
+            heartbeat_epoch: 0,
+            outcome: None,
+        };
+        assert!(!is_goal_complete(&progress));
+    }
+
+    // -- kill_subordinate --
+
+    #[test]
+    fn kill_subordinate_marks_handle_killed() {
+        let mut handle = SubordinateHandle {
+            pid: 0,
+            agent_name: "test-agent".to_string(),
+            goal: "test".to_string(),
+            worktree_path: std::path::PathBuf::from("/fake"),
+            spawn_time: 0,
+            retry_count: 0,
+            killed: false,
+        };
+        // pid=0 means we won't actually send a signal to a real process.
+        let result = kill_subordinate(&mut handle);
+        assert!(result.is_ok());
+        assert!(handle.killed);
+    }
+
+    #[test]
+    fn kill_subordinate_errors_when_already_killed() {
+        let mut handle = SubordinateHandle {
+            pid: 0,
+            agent_name: "test-agent".to_string(),
+            goal: "test".to_string(),
+            worktree_path: std::path::PathBuf::from("/fake"),
+            spawn_time: 0,
+            retry_count: 0,
+            killed: true,
+        };
+        let result = kill_subordinate(&mut handle);
+        assert!(result.is_err());
+    }
+}

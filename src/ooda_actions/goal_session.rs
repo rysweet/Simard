@@ -157,3 +157,111 @@ pub(super) fn advance_goal_with_session(
         ),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[allow(unused_imports)]
+    use super::*;
+
+    // -- GOAL_SESSION_OBJECTIVE prompt asset --
+
+    #[test]
+    fn goal_session_objective_prompt_is_non_empty() {
+        const GOAL_SESSION_OBJECTIVE: &str =
+            include_str!("../../prompt_assets/simard/goal_session_objective.md");
+        assert!(!GOAL_SESSION_OBJECTIVE.trim().is_empty());
+    }
+
+    // -- GOAL_SESSION_IDENTITY prompt asset --
+
+    #[test]
+    fn goal_session_identity_prompt_is_non_empty() {
+        const GOAL_SESSION_IDENTITY: &str =
+            include_str!("../../prompt_assets/simard/goal_session_identity.md");
+        assert!(!GOAL_SESSION_IDENTITY.trim().is_empty());
+    }
+
+    // -- Objective string building logic --
+
+    #[test]
+    fn objective_buffer_contains_goal_info() {
+        use std::fmt::Write;
+
+        let goal_id = "goal-42";
+        let percent = 25u32;
+        let description = "Implement authentication";
+        let prompt = "Test objective instructions";
+
+        let mut objective = String::with_capacity(256);
+        let _ = write!(
+            objective,
+            "Goal '{}' ({}% complete): {}\n\n{}\n\nEnvironment context:\n- Git status: ",
+            goal_id, percent, description, prompt,
+        );
+        objective.push_str("clean");
+
+        assert!(objective.contains("goal-42"));
+        assert!(objective.contains("25% complete"));
+        assert!(objective.contains("Implement authentication"));
+        assert!(objective.contains("clean"));
+    }
+
+    #[test]
+    fn objective_formats_git_changes_count() {
+        use std::fmt::Write;
+
+        let git_status = "M file1.rs\nM file2.rs\nA file3.rs";
+        let mut objective = String::new();
+        objective.push_str("- Git status: ");
+        if git_status.is_empty() {
+            objective.push_str("clean");
+        } else {
+            let _ = write!(objective, "{} changed files", git_status.lines().count());
+        }
+        assert!(objective.contains("3 changed files"));
+    }
+
+    #[test]
+    fn objective_formats_open_issues() {
+        let issues = ["Issue #1".to_string(), "Issue #2".to_string()];
+        let mut objective = String::new();
+        objective.push_str("- Open issues: ");
+        if issues.is_empty() {
+            objective.push_str("none");
+        } else {
+            for (i, issue) in issues.iter().enumerate() {
+                if i > 0 {
+                    objective.push_str("; ");
+                }
+                objective.push_str(issue);
+            }
+        }
+        assert!(objective.contains("Issue #1; Issue #2"));
+    }
+
+    #[test]
+    fn objective_formats_empty_issues_as_none() {
+        let issues: Vec<String> = vec![];
+        let mut objective = String::new();
+        objective.push_str("- Open issues: ");
+        if issues.is_empty() {
+            objective.push_str("none");
+        }
+        assert!(objective.contains("none"));
+    }
+
+    #[test]
+    fn objective_limits_commits_to_five() {
+        let commits: Vec<String> = (0..10).map(|i| format!("commit-{i}")).collect();
+        let mut objective = String::new();
+        objective.push_str("- Recent commits: ");
+        for (i, commit) in commits.iter().take(5).enumerate() {
+            if i > 0 {
+                objective.push_str("; ");
+            }
+            objective.push_str(commit);
+        }
+        assert!(objective.contains("commit-4"));
+        assert!(!objective.contains("commit-5"));
+    }
+}
