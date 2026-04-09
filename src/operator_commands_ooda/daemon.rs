@@ -95,6 +95,11 @@ pub fn run_ooda_daemon(
     }
     // --------------------------------------------------------------------
 
+    // Auto-ensure runtime dependencies before launching bridges
+    if let Err(e) = crate::cmd_ensure_deps::handle_ensure_deps() {
+        eprintln!("Warning: some dependencies could not be verified: {e}");
+    }
+
     let state_root = state_root_override.unwrap_or_else(|| {
         PathBuf::from(
             std::env::var("SIMARD_STATE_ROOT").unwrap_or_else(|_| "/tmp/simard-ooda".to_string()),

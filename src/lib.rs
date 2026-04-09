@@ -15,6 +15,7 @@ pub mod bridge;
 pub mod bridge_circuit;
 pub mod bridge_launcher;
 pub mod bridge_subprocess;
+pub mod cmd_ensure_deps;
 pub mod cmd_install;
 pub mod cmd_self_update;
 mod copilot_status_probe;
