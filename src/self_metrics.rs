@@ -269,6 +269,7 @@ pub fn recent_metrics(limit: usize) -> Result<Vec<MetricEntry>, Box<dyn std::err
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::env;
 
     /// Helper: set HOME to a temp dir so tests don't pollute the real home.
@@ -308,6 +309,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn record_and_query_metric() {
         with_temp_home(|| {
             record_metric("bugs_fixed", 3.0, "test context").unwrap();
@@ -324,9 +326,11 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn query_metrics_with_since_filter() {
         with_temp_home(|| {
             record_metric("test_count", 10.0, "old").unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(10));
             let cutoff = Utc::now();
             record_metric("test_count", 20.0, "new").unwrap();
 
@@ -340,6 +344,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn query_metrics_empty_file() {
         with_temp_home(|| {
             let result = query_metrics("nonexistent", None).unwrap();
@@ -348,6 +353,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn daily_report_empty() {
         with_temp_home(|| {
             let report = daily_report().unwrap();
@@ -357,6 +363,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn daily_report_with_data() {
         with_temp_home(|| {
             record_metric("bugs_fixed", 2.0, "ctx").unwrap();
@@ -375,6 +382,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn recent_metrics_limit() {
         with_temp_home(|| {
             for i in 0..10 {
@@ -388,6 +396,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn collect_and_record_all_records_four_metrics() {
         with_temp_home(|| {
             // collect_and_record_all may fail on gh commands, but it should
@@ -402,6 +411,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn malformed_lines_skipped() {
         with_temp_home(|| {
             let dir = metrics_dir();
