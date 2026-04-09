@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 use crate::agent_roles::AgentRole;
 use crate::agent_supervisor::{SubordinateConfig, spawn_subordinate};
+use crate::cmd_cleanup::handle_cleanup;
 use crate::cmd_ensure_deps::handle_ensure_deps;
 use crate::cmd_install::handle_install;
 use crate::cmd_self_update::{handle_self_test, handle_self_update};
@@ -53,6 +54,7 @@ Product modes:
   update
   self-test
   ensure-deps
+  cleanup
   act-on-decisions
   install
 
@@ -106,6 +108,10 @@ where
         "ensure-deps" => {
             reject_extra_args(args)?;
             handle_ensure_deps()
+        }
+        "cleanup" => {
+            reject_extra_args(args)?;
+            handle_cleanup()
         }
         "install" => {
             reject_extra_args(args)?;
