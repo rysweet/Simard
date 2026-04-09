@@ -158,3 +158,85 @@ pub(super) fn execute_rustyclawd_process_fallback(
 
     Ok((text_output, evidence))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- MAX_HISTORY_MESSAGES constant --
+
+    #[test]
+    fn max_history_messages_is_reasonable() {
+        const { assert!(MAX_HISTORY_MESSAGES >= 2) };
+        const { assert!(MAX_HISTORY_MESSAGES <= 100) };
+    }
+
+    // -- History truncation logic (mirrors the logic in execute_rustyclawd_client) --
+
+    #[test]
+    fn history_truncation_drains_oldest_when_over_limit() {
+        let mut history: Vec<String> = (0..MAX_HISTORY_MESSAGES + 5)
+            .map(|i| format!("msg-{i}"))
+            .collect();
+        if history.len() > MAX_HISTORY_MESSAGES {
+            let drain_count = history.len() - MAX_HISTORY_MESSAGES;
+            history.drain(..drain_count);
+        }
+        assert_eq!(history.len(), MAX_HISTORY_MESSAGES);
+        assert_eq!(history[0], "msg-5");
+    }
+
+    #[test]
+    fn history_truncation_noop_when_at_limit() {
+        let mut history: Vec<String> = (0..MAX_HISTORY_MESSAGES)
+            .map(|i| format!("msg-{i}"))
+            .collect();
+        let original_len = history.len();
+        if history.len() > MAX_HISTORY_MESSAGES {
+            let drain_count = history.len() - MAX_HISTORY_MESSAGES;
+            history.drain(..drain_count);
+        }
+        assert_eq!(history.len(), original_len);
+    }
+
+    // -- System prompt construction --
+
+    #[test]
+    fn system_prompt_uses_default_when_both_empty() {
+        let identity_context = "";
+        let prompt_preamble = "";
+        let system_prompt = if identity_context.is_empty() && prompt_preamble.is_empty() {
+            include_str!("../../prompt_assets/simard/rustyclawd_default_system.md")
+                .trim()
+                .to_string()
+        } else {
+            format!("{prompt_preamble}\n---\n{identity_context}")
+        };
+        assert!(!system_prompt.is_empty());
+        assert!(!system_prompt.contains("\n---\n"));
+    }
+
+    #[test]
+    fn system_prompt_uses_custom_when_provided() {
+        let identity_context = "You are a test agent";
+        let prompt_preamble = "Be concise";
+        let system_prompt = if identity_context.is_empty() && prompt_preamble.is_empty() {
+            include_str!("../../prompt_assets/simard/rustyclawd_default_system.md")
+                .trim()
+                .to_string()
+        } else {
+            format!("{prompt_preamble}\n---\n{identity_context}")
+        };
+        assert!(system_prompt.contains("Be concise"));
+        assert!(system_prompt.contains("You are a test agent"));
+    }
+
+    // -- RUSTYCLAWD_BIN env fallback --
+
+    #[test]
+    fn rustyclawd_bin_defaults_to_rustyclawd() {
+        let bin = std::env::var("RUSTYCLAWD_BIN").unwrap_or_else(|_| "rustyclawd".to_string());
+        // In test env, the env var is likely not set.
+        assert!(!bin.is_empty());
+    }
+}

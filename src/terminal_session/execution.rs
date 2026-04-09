@@ -163,3 +163,49 @@ pub(crate) fn resolve_working_directory(
 
     Ok(cwd)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- resolve_working_directory --
+
+    #[test]
+    fn resolve_working_directory_uses_cwd_when_none() {
+        let result = resolve_working_directory(None, "test-bt").unwrap();
+        assert!(result.is_dir());
+        assert!(result.is_absolute());
+    }
+
+    #[test]
+    fn resolve_working_directory_returns_absolute_path_as_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = resolve_working_directory(Some(dir.path()), "test-bt").unwrap();
+        assert_eq!(result, dir.path().to_path_buf());
+    }
+
+    #[test]
+    fn resolve_working_directory_resolves_relative_against_cwd() {
+        let result = resolve_working_directory(Some(Path::new(".")), "test-bt").unwrap();
+        assert!(result.is_absolute());
+        assert!(result.is_dir());
+    }
+
+    #[test]
+    fn resolve_working_directory_errors_on_nonexistent_path() {
+        let result =
+            resolve_working_directory(Some(Path::new("/nonexistent_path_12345")), "test-bt");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("does not exist"), "{msg}");
+    }
+
+    #[test]
+    fn resolve_working_directory_errors_on_file_not_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a_file.txt");
+        std::fs::write(&file, "").unwrap();
+        let result = resolve_working_directory(Some(file.as_path()), "test-bt");
+        assert!(result.is_err());
+    }
+}

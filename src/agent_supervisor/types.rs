@@ -145,3 +145,135 @@ pub const fn stale_threshold_seconds() -> u64 {
 pub const fn max_retries_per_goal() -> u32 {
     MAX_RETRIES_PER_GOAL
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_config(name: &str, goal: &str, depth: u32) -> SubordinateConfig {
+        SubordinateConfig {
+            agent_name: name.to_string(),
+            goal: goal.to_string(),
+            role: AgentRole::Engineer,
+            worktree_path: PathBuf::from("/fake/worktree"),
+            current_depth: depth,
+        }
+    }
+
+    fn make_handle(name: &str) -> SubordinateHandle {
+        SubordinateHandle {
+            pid: 42,
+            agent_name: name.to_string(),
+            goal: "test goal".to_string(),
+            worktree_path: PathBuf::from("/fake"),
+            spawn_time: 1000,
+            retry_count: 0,
+            killed: false,
+        }
+    }
+
+    // -- SubordinateConfig::validate --
+
+    #[test]
+    fn validate_accepts_valid_config() {
+        let config = make_config("agent-1", "build feature", 0);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_empty_agent_name() {
+        let config = make_config("", "build feature", 0);
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_empty_goal() {
+        let config = make_config("agent-1", "", 0);
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_depth_at_limit() {
+        let limit = max_subordinate_depth();
+        let config = make_config("agent-1", "goal", limit);
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("depth"), "{err}");
+    }
+
+    #[test]
+    fn validate_accepts_depth_below_limit() {
+        let config = make_config("agent-1", "goal", 0);
+        assert!(config.validate().is_ok());
+    }
+
+    // -- SubordinateHandle --
+
+    #[test]
+    fn can_retry_returns_true_when_below_limit() {
+        let handle = make_handle("agent-1");
+        assert!(handle.can_retry());
+    }
+
+    #[test]
+    fn can_retry_returns_false_at_limit() {
+        let mut handle = make_handle("agent-1");
+        handle.retry_count = MAX_RETRIES_PER_GOAL;
+        assert!(!handle.can_retry());
+    }
+
+    #[test]
+    fn record_retry_increments_and_returns_count() {
+        let mut handle = make_handle("agent-1");
+        assert_eq!(handle.record_retry(), 1);
+        assert_eq!(handle.record_retry(), 2);
+        assert_eq!(handle.retry_count, 2);
+    }
+
+    #[test]
+    fn handle_display_contains_key_fields() {
+        let handle = make_handle("test-agent");
+        let display = format!("{handle}");
+        assert!(display.contains("test-agent"), "{display}");
+        assert!(display.contains("pid=42"), "{display}");
+    }
+
+    // -- HeartbeatStatus --
+
+    #[test]
+    fn heartbeat_alive_display() {
+        let status = HeartbeatStatus::Alive {
+            last_epoch: 999,
+            phase: "observing".to_string(),
+        };
+        let s = format!("{status}");
+        assert!(s.contains("alive"));
+        assert!(s.contains("999"));
+        assert!(s.contains("observing"));
+    }
+
+    #[test]
+    fn heartbeat_stale_display() {
+        let status = HeartbeatStatus::Stale { seconds_since: 300 };
+        let s = format!("{status}");
+        assert!(s.contains("stale"));
+        assert!(s.contains("300"));
+    }
+
+    #[test]
+    fn heartbeat_dead_display() {
+        let status = HeartbeatStatus::Dead;
+        assert_eq!(format!("{status}"), "dead");
+    }
+
+    // -- constants --
+
+    #[test]
+    fn stale_threshold_is_positive() {
+        assert!(stale_threshold_seconds() > 0);
+    }
+
+    #[test]
+    fn max_retries_is_positive() {
+        assert!(max_retries_per_goal() > 0);
+    }
+}

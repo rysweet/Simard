@@ -143,3 +143,69 @@ pub(crate) fn find_binary_in_dir(dir: &Path) -> Result<PathBuf, Box<dyn std::err
     }
     search(dir, 0).ok_or_else(|| "Binary 'simard' not found in downloaded archive".into())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- find_binary_in_dir --
+
+    #[test]
+    fn find_binary_in_dir_finds_at_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin_path = dir.path().join("simard");
+        fs::write(&bin_path, "fake-binary").unwrap();
+        let found = find_binary_in_dir(dir.path()).unwrap();
+        assert_eq!(found, bin_path);
+    }
+
+    #[test]
+    fn find_binary_in_dir_finds_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("subdir");
+        fs::create_dir(&sub).unwrap();
+        let bin_path = sub.join("simard");
+        fs::write(&bin_path, "fake-binary").unwrap();
+        let found = find_binary_in_dir(dir.path()).unwrap();
+        assert_eq!(found, bin_path);
+    }
+
+    #[test]
+    fn find_binary_in_dir_finds_deeply_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        let deep = dir.path().join("a").join("b").join("c");
+        fs::create_dir_all(&deep).unwrap();
+        let bin_path = deep.join("simard");
+        fs::write(&bin_path, "fake-binary").unwrap();
+        let found = find_binary_in_dir(dir.path()).unwrap();
+        assert_eq!(found, bin_path);
+    }
+
+    #[test]
+    fn find_binary_in_dir_errors_when_too_deep() {
+        let dir = tempfile::tempdir().unwrap();
+        let deep = dir.path().join("a").join("b").join("c").join("d");
+        fs::create_dir_all(&deep).unwrap();
+        let bin_path = deep.join("simard");
+        fs::write(&bin_path, "fake-binary").unwrap();
+        let result = find_binary_in_dir(dir.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn find_binary_in_dir_errors_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("not_simard"), "nope").unwrap();
+        let result = find_binary_in_dir(dir.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn find_binary_in_dir_ignores_directories_named_simard() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake_dir = dir.path().join("simard");
+        fs::create_dir(&fake_dir).unwrap();
+        let result = find_binary_in_dir(dir.path());
+        assert!(result.is_err());
+    }
+}
