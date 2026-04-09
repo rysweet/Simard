@@ -188,10 +188,10 @@ mod tests {
     #[test]
     fn is_valid_session_after_login() {
         init_login_code();
-        if let Some(stored) = LOGIN_CODE.get() {
-            if let Some(token) = try_login(stored) {
-                assert!(is_valid_session(&token));
-            }
+        if let Some(stored) = LOGIN_CODE.get()
+            && let Some(token) = try_login(stored)
+        {
+            assert!(is_valid_session(&token));
         }
     }
 
