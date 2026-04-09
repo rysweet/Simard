@@ -551,6 +551,7 @@ mod tests {
     use serial_test::serial;
 
     #[test]
+    #[serial]
     fn repl_records_decision_and_closes() {
         let bridge = mock_bridge();
         let input = b"/decision Ship it | Ready for production\n/close\n";
@@ -573,6 +574,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn repl_records_action_item_and_closes() {
         let bridge = mock_bridge();
         let input = b"/action Write tests | bob | 2\n/close\n";
@@ -588,6 +590,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn repl_shows_help() {
         let bridge = mock_bridge();
         let input = b"/help\n/close\n";
@@ -602,6 +605,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn repl_natural_language_without_agent_falls_back_to_note() {
         let bridge = mock_bridge();
         let input = b"Hello tell me about projects\n/close\n";
@@ -617,6 +621,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn repl_sends_natural_language_to_agent() {
         let bridge = mock_bridge();
         let mut agent = MockAgentSession::new("Hello! I'm Simard, ready to discuss your project.");
@@ -655,6 +660,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn repl_slash_commands_bypass_agent() {
         let bridge = mock_bridge();
         let mut agent = MockAgentSession::new("Agent response");
@@ -679,6 +685,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn repl_list_shows_items_grouped() {
         let bridge = mock_bridge();
         let input =
@@ -698,6 +705,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn repl_list_empty() {
         let bridge = mock_bridge();
         let input = b"/list\n/close\n";
@@ -711,6 +719,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn repl_edit_decision() {
         let bridge = mock_bridge();
         let input = b"/decision Old text | reason\n/edit decision 1 New text\n/close\n";
@@ -726,6 +735,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn repl_delete_action() {
         let bridge = mock_bridge();
         let input = b"/action Task one | alice\n/action Task two | bob\n/delete action 1\n/close\n";
@@ -742,6 +752,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn repl_edit_out_of_bounds_shows_error() {
         let bridge = mock_bridge();
         let input = b"/edit decision 1 text\n/close\n";
@@ -756,6 +767,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn repl_delete_out_of_bounds_shows_error() {
         let bridge = mock_bridge();
         let input = b"/delete note 5\n/close\n";
@@ -770,6 +782,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn repl_help_includes_new_commands() {
         let bridge = mock_bridge();
         let input = b"/help\n/close\n";
@@ -786,6 +799,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn repl_question_command_adds_explicit_question() {
         let bridge = mock_bridge();
         let input = b"/question What is the release timeline?\n/close\n";
@@ -805,6 +819,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn repl_question_appears_in_list() {
         let bridge = mock_bridge();
         let input = b"/question Who owns rollback?\n/list\n/close\n";
@@ -819,6 +834,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn repl_preview_shows_handoff_without_closing() {
         let bridge = mock_bridge();
         let input = b"/decision Ship it | Ready\n/action Write tests | bob | 2\n/question ETA?\n/preview\n/close\n";
@@ -844,6 +860,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn repl_preview_empty_session() {
         let bridge = mock_bridge();
         let input = b"/preview\n/close\n";
@@ -859,6 +876,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn repl_action_with_due_date() {
         let bridge = mock_bridge();
         let input = b"/action Write tests | bob | 2 due:2026-04-15\n/close\n";
@@ -881,6 +899,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn repl_action_due_date_shows_in_list() {
         let bridge = mock_bridge();
         let input = b"/action Write tests | bob due:next Friday\n/list\n/close\n";
@@ -897,6 +916,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn repl_action_due_date_shows_in_preview() {
         let bridge = mock_bridge();
         let input = b"/action Deploy | alice | 1 due:2026-05-01\n/preview\n/close\n";
