@@ -31,7 +31,7 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
     let child = Command::new(&exe)
         .arg("engineer")
         .arg("run")
-        .arg("local")
+        .arg("single-process")
         .arg(&config.worktree_path)
         .arg(&config.goal)
         .env("SIMARD_AGENT_NAME", &config.agent_name)

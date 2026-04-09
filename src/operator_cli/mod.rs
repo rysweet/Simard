@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 use crate::agent_roles::AgentRole;
 use crate::agent_supervisor::{SubordinateConfig, spawn_subordinate};
+use crate::cmd_ensure_deps::handle_ensure_deps;
 use crate::cmd_install::handle_install;
 use crate::cmd_self_update::{handle_self_test, handle_self_update};
 use crate::operator_commands::run_bootstrap_probe;
@@ -51,6 +52,7 @@ Product modes:
   handover [--canary-dir=PATH] [--manifest-dir=PATH]
   update
   self-test
+  ensure-deps
   act-on-decisions
   install
 
@@ -100,6 +102,10 @@ where
         "self-test" => {
             reject_extra_args(args)?;
             handle_self_test()
+        }
+        "ensure-deps" => {
+            reject_extra_args(args)?;
+            handle_ensure_deps()
         }
         "install" => {
             reject_extra_args(args)?;

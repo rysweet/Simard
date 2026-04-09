@@ -47,6 +47,12 @@ pub fn handle_install() -> Result<(), Box<dyn std::error::Error>> {
     println!("Add to your PATH if not already present:");
     println!("  export PATH=\"$HOME/.simard/bin:$PATH\"");
 
+    // Auto-ensure runtime dependencies after install
+    println!();
+    if let Err(e) = crate::cmd_ensure_deps::handle_ensure_deps() {
+        eprintln!("Warning: some dependencies could not be verified: {e}");
+    }
+
     Ok(())
 }
 
