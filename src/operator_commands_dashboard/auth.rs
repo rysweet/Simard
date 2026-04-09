@@ -109,3 +109,103 @@ pub async fn require_auth(request: Request, next: Next) -> Result<Response, Stat
             .unwrap())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── init_login_code ─────────────────────────────────────────────
+
+    #[test]
+    fn init_login_code_returns_8_char_string() {
+        let code = init_login_code();
+        assert_eq!(
+            code.len(),
+            8,
+            "Login code should be 8 characters, got: {code}"
+        );
+    }
+
+    #[test]
+    fn init_login_code_is_nonempty() {
+        let code = init_login_code();
+        assert!(!code.is_empty());
+    }
+
+    // ── try_login ───────────────────────────────────────────────────
+
+    #[test]
+    fn try_login_wrong_code_returns_none() {
+        // Ensure some login code is set
+        init_login_code();
+        let result = try_login("definitely-wrong-code");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn try_login_correct_code_returns_token() {
+        let code = init_login_code();
+        // LOGIN_CODE is a OnceLock, so it may already be set from a prior test;
+        // we test with whatever code was stored
+        if let Some(stored) = LOGIN_CODE.get() {
+            let result = try_login(stored);
+            assert!(
+                result.is_some(),
+                "Correct code should yield a session token"
+            );
+            let token = result.unwrap();
+            assert!(!token.is_empty());
+        } else {
+            // If init_login_code set it, use code
+            let result = try_login(&code);
+            assert!(result.is_some());
+        }
+    }
+
+    #[test]
+    fn try_login_trims_whitespace() {
+        if let Some(stored) = LOGIN_CODE.get() {
+            let padded = format!("  {}  ", stored);
+            let result = try_login(&padded);
+            assert!(result.is_some(), "try_login should trim whitespace");
+        }
+    }
+
+    #[test]
+    fn try_login_empty_string_returns_none() {
+        init_login_code();
+        let result = try_login("");
+        assert!(result.is_none());
+    }
+
+    // ── is_valid_session ────────────────────────────────────────────
+
+    #[test]
+    fn is_valid_session_unknown_token() {
+        assert!(!is_valid_session("nonexistent-token"));
+    }
+
+    #[test]
+    fn is_valid_session_after_login() {
+        init_login_code();
+        if let Some(stored) = LOGIN_CODE.get() {
+            if let Some(token) = try_login(stored) {
+                assert!(is_valid_session(&token));
+            }
+        }
+    }
+
+    #[test]
+    fn is_valid_session_empty_token() {
+        assert!(!is_valid_session(""));
+    }
+
+    // ── sessions() helper ───────────────────────────────────────────
+
+    #[test]
+    fn sessions_mutex_is_accessible() {
+        let guard = sessions().lock().unwrap();
+        // Just verify we can acquire the lock
+        drop(guard);
+    }
+}

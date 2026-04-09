@@ -130,3 +130,77 @@ pub fn run_gym_suite(suite_id: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("Suite artifact report: {}", report.artifact_path);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── benchmark_scenarios ─────────────────────────────────────────
+
+    #[test]
+    fn benchmark_scenarios_is_not_empty() {
+        let scenarios = benchmark_scenarios();
+        assert!(
+            !scenarios.is_empty(),
+            "benchmark_scenarios should return at least one scenario"
+        );
+    }
+
+    #[test]
+    fn benchmark_scenarios_have_non_empty_ids() {
+        for scenario in benchmark_scenarios() {
+            assert!(!scenario.id.is_empty(), "Scenario id should not be empty");
+        }
+    }
+
+    #[test]
+    fn benchmark_scenarios_have_non_empty_titles() {
+        for scenario in benchmark_scenarios() {
+            assert!(
+                !scenario.title.is_empty(),
+                "Scenario {} should have a title",
+                scenario.id
+            );
+        }
+    }
+
+    #[test]
+    fn benchmark_scenarios_ids_are_unique() {
+        let scenarios = benchmark_scenarios();
+        let mut ids: Vec<&str> = scenarios.iter().map(|s| s.id).collect();
+        let len_before = ids.len();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), len_before, "Scenario IDs should be unique");
+    }
+
+    #[test]
+    fn benchmark_scenarios_have_required_fields() {
+        for scenario in benchmark_scenarios() {
+            assert!(
+                !scenario.identity.is_empty(),
+                "identity empty for {}",
+                scenario.id
+            );
+            assert!(
+                !scenario.base_type.is_empty(),
+                "base_type empty for {}",
+                scenario.id
+            );
+            assert!(
+                !scenario.objective.is_empty(),
+                "objective empty for {}",
+                scenario.id
+            );
+        }
+    }
+
+    // ── run_gym_list ────────────────────────────────────────────────
+
+    #[test]
+    fn run_gym_list_succeeds() {
+        // This function just prints to stdout, so we verify it does not error
+        let result = run_gym_list();
+        assert!(result.is_ok());
+    }
+}
