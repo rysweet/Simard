@@ -64,3 +64,20 @@ pub(crate) fn find_latest_release() -> Result<(String, String), Box<dyn std::err
 
     Err(format!("No release asset found for platform '{suffix}'").into())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn github_repo_constant_is_set() {
+        assert!(!GITHUB_REPO.is_empty());
+        assert!(GITHUB_REPO.contains('/'));
+    }
+
+    #[test]
+    fn platform_suffix_returns_some_on_known_platform() {
+        let suffix = platform_suffix();
+        assert!(suffix.is_some(), "expected a platform suffix on this host");
+    }
+}

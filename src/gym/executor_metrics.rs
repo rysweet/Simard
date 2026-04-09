@@ -91,3 +91,103 @@ pub(super) fn derive_benchmark_metrics(facts: &BenchmarkMetricFacts) -> DerivedB
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn benchmark_metric_facts_default_is_empty() {
+        let facts = BenchmarkMetricFacts::default();
+        assert!(facts.attempts.is_empty());
+        assert!(facts.actions.is_empty());
+    }
+
+    #[test]
+    fn record_primary_attempt() {
+        let mut facts = BenchmarkMetricFacts::default();
+        facts.record_primary_attempt();
+        assert_eq!(facts.attempts.len(), 1);
+        assert_eq!(
+            facts.attempts[0].classification,
+            Some(BenchmarkAttemptClassification::Primary)
+        );
+    }
+
+    #[test]
+    fn record_retry_attempt() {
+        let mut facts = BenchmarkMetricFacts::default();
+        facts.record_retry_attempt();
+        assert_eq!(
+            facts.attempts[0].classification,
+            Some(BenchmarkAttemptClassification::Retry)
+        );
+    }
+
+    #[test]
+    fn record_unmeasured_attempt() {
+        let mut facts = BenchmarkMetricFacts::default();
+        facts.record_unmeasured_attempt();
+        assert_eq!(facts.attempts[0].classification, None);
+    }
+
+    #[test]
+    fn record_required_action() {
+        let mut facts = BenchmarkMetricFacts::default();
+        facts.record_required_action();
+        assert_eq!(
+            facts.actions[0].classification,
+            Some(BenchmarkActionClassification::Required)
+        );
+    }
+
+    #[test]
+    fn record_unnecessary_action() {
+        let mut facts = BenchmarkMetricFacts::default();
+        facts.record_unnecessary_action();
+        assert_eq!(
+            facts.actions[0].classification,
+            Some(BenchmarkActionClassification::Unnecessary)
+        );
+    }
+
+    #[test]
+    fn record_unmeasured_action() {
+        let mut facts = BenchmarkMetricFacts::default();
+        facts.record_unmeasured_action();
+        assert_eq!(facts.actions[0].classification, None);
+    }
+
+    #[test]
+    fn derive_metrics_empty_facts() {
+        let facts = BenchmarkMetricFacts::default();
+        let metrics = derive_benchmark_metrics(&facts);
+        assert_eq!(metrics.unnecessary_action_count, Some(0));
+        assert_eq!(metrics.retry_count, Some(0));
+    }
+
+    #[test]
+    fn derive_metrics_counts_correctly() {
+        let mut facts = BenchmarkMetricFacts::default();
+        facts.record_primary_attempt();
+        facts.record_retry_attempt();
+        facts.record_retry_attempt();
+        facts.record_required_action();
+        facts.record_unnecessary_action();
+        let metrics = derive_benchmark_metrics(&facts);
+        assert_eq!(metrics.retry_count, Some(2));
+        assert_eq!(metrics.unnecessary_action_count, Some(1));
+    }
+
+    #[test]
+    fn derive_metrics_unmeasured_yields_none() {
+        let mut facts = BenchmarkMetricFacts::default();
+        facts.record_primary_attempt();
+        facts.record_unmeasured_attempt();
+        facts.record_required_action();
+        facts.record_unmeasured_action();
+        let metrics = derive_benchmark_metrics(&facts);
+        assert_eq!(metrics.retry_count, None);
+        assert_eq!(metrics.unnecessary_action_count, None);
+    }
+}

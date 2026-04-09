@@ -90,3 +90,65 @@ pub(super) fn persist_meeting_to_memory<W: Write>(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::meeting_facilitator::{
+        ActionItem, MeetingDecision, MeetingSession, MeetingSessionStatus,
+    };
+
+    fn sample_empty_session() -> MeetingSession {
+        MeetingSession {
+            topic: "test topic".to_string(),
+            decisions: vec![],
+            action_items: vec![],
+            notes: vec![],
+            status: MeetingSessionStatus::Closed,
+            started_at: "2024-01-01T00:00:00Z".to_string(),
+            participants: vec!["alice".to_string()],
+            explicit_questions: vec![],
+        }
+    }
+
+    fn sample_session_with_data() -> MeetingSession {
+        MeetingSession {
+            topic: "architecture review".to_string(),
+            decisions: vec![MeetingDecision {
+                description: "use microservices".to_string(),
+                rationale: "scalability".to_string(),
+                participants: vec!["alice".to_string()],
+            }],
+            action_items: vec![ActionItem {
+                description: "create RFC".to_string(),
+                owner: "bob".to_string(),
+                priority: 1,
+                due_description: None,
+            }],
+            notes: vec!["discussed trade-offs".to_string()],
+            status: MeetingSessionStatus::Closed,
+            started_at: "2024-01-01T00:00:00Z".to_string(),
+            participants: vec!["alice".to_string(), "bob".to_string()],
+            explicit_questions: vec![],
+        }
+    }
+
+    #[test]
+    fn write_meeting_handoff_artifact_empty_session() {
+        let session = sample_empty_session();
+        let mut output = Vec::new();
+        write_meeting_handoff_artifact(&session, &mut output);
+        let text = String::from_utf8(output).unwrap();
+        // Should produce output (success or warn message)
+        assert!(!text.is_empty());
+    }
+
+    #[test]
+    fn write_meeting_handoff_artifact_with_data() {
+        let session = sample_session_with_data();
+        let mut output = Vec::new();
+        write_meeting_handoff_artifact(&session, &mut output);
+        let text = String::from_utf8(output).unwrap();
+        assert!(!text.is_empty());
+    }
+}

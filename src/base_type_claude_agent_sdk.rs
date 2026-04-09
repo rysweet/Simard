@@ -20,3 +20,26 @@ pub fn claude_agent_sdk_adapter(id: impl Into<String>) -> SimardResult<PendingSd
         "Claude Agent SDK runtime is not yet implemented",
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_agent_sdk_adapter_creates_successfully() {
+        let adapter = claude_agent_sdk_adapter("claude-sdk").unwrap();
+        assert_eq!(adapter.descriptor.id.as_str(), "claude-sdk");
+    }
+
+    #[test]
+    fn claude_agent_sdk_adapter_has_correct_reason() {
+        let adapter = claude_agent_sdk_adapter("claude-sdk").unwrap();
+        assert!(adapter.not_implemented_reason.contains("Claude Agent SDK"));
+    }
+
+    #[test]
+    fn claude_agent_sdk_adapter_type_alias() {
+        let adapter: ClaudeAgentSdkAdapter = claude_agent_sdk_adapter("claude-test").unwrap();
+        assert_eq!(adapter.descriptor.id.as_str(), "claude-test");
+    }
+}

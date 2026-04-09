@@ -63,3 +63,115 @@ impl BaseTypeSession for PendingSdkSession {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::base_type_pending_sdk::PendingSdkAdapter;
+    use crate::base_types::BaseTypeFactory;
+    use crate::identity::OperatingMode;
+    use uuid::Uuid;
+
+    fn make_session() -> PendingSdkSession {
+        let adapter = PendingSdkAdapter::registered(
+            "test-sdk",
+            "backend",
+            "registered:test-sdk",
+            "SDK not ready",
+        )
+        .unwrap();
+        let request = BaseTypeSessionRequest {
+            session_id: crate::session::SessionId::from_uuid(Uuid::nil()),
+            mode: OperatingMode::Engineer,
+            topology: crate::runtime::RuntimeTopology::SingleProcess,
+            prompt_assets: vec![],
+            runtime_node: crate::runtime::RuntimeNodeId::new("n"),
+            mailbox_address: crate::runtime::RuntimeAddress::new("a"),
+        };
+        // We know open_session returns PendingSdkSession boxed — downcast
+        let boxed = adapter.open_session(request).unwrap();
+        // Instead of downcasting, create directly
+        drop(boxed);
+        PendingSdkSession {
+            descriptor: adapter.descriptor.clone(),
+            request: BaseTypeSessionRequest {
+                session_id: crate::session::SessionId::from_uuid(Uuid::nil()),
+                mode: OperatingMode::Engineer,
+                topology: crate::runtime::RuntimeTopology::SingleProcess,
+                prompt_assets: vec![],
+                runtime_node: crate::runtime::RuntimeNodeId::new("n"),
+                mailbox_address: crate::runtime::RuntimeAddress::new("a"),
+            },
+            not_implemented_reason: adapter.not_implemented_reason.clone(),
+            is_open: false,
+            is_closed: false,
+        }
+    }
+
+    #[test]
+    fn session_open_succeeds() {
+        let mut session = make_session();
+        assert!(session.open().is_ok());
+        assert!(session.is_open);
+    }
+
+    #[test]
+    fn session_double_open_fails() {
+        let mut session = make_session();
+        session.open().unwrap();
+        assert!(session.open().is_err());
+    }
+
+    #[test]
+    fn session_run_turn_before_open_fails() {
+        let mut session = make_session();
+        let input = BaseTypeTurnInput::objective_only("test");
+        assert!(session.run_turn(input).is_err());
+    }
+
+    #[test]
+    fn session_run_turn_returns_adapter_error() {
+        let mut session = make_session();
+        session.open().unwrap();
+        let input = BaseTypeTurnInput::objective_only("do something");
+        let result = session.run_turn(input);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("SDK not ready"));
+    }
+
+    #[test]
+    fn session_close_after_open_succeeds() {
+        let mut session = make_session();
+        session.open().unwrap();
+        assert!(session.close().is_ok());
+        assert!(session.is_closed);
+    }
+
+    #[test]
+    fn session_close_before_open_fails() {
+        let mut session = make_session();
+        assert!(session.close().is_err());
+    }
+
+    #[test]
+    fn session_double_close_fails() {
+        let mut session = make_session();
+        session.open().unwrap();
+        session.close().unwrap();
+        assert!(session.close().is_err());
+    }
+
+    #[test]
+    fn session_debug_format() {
+        let session = make_session();
+        let debug = format!("{session:?}");
+        assert!(debug.contains("PendingSdkSession"));
+    }
+
+    #[test]
+    fn session_descriptor_matches() {
+        let session = make_session();
+        assert_eq!(session.descriptor().id.as_str(), "test-sdk");
+    }
+}
