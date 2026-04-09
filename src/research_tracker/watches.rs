@@ -61,3 +61,45 @@ pub fn seed_developer_watches(bridge: &CognitiveMemoryBridge) -> usize {
     }
     seeded
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_developer_watches_count() {
+        let watches = default_developer_watches();
+        assert_eq!(watches.len(), DEFAULT_DEVELOPER_WATCHES.len());
+    }
+
+    #[test]
+    fn default_developer_watches_have_nonempty_fields() {
+        for watch in default_developer_watches() {
+            assert!(!watch.github_id.is_empty());
+            assert!(!watch.focus_areas.is_empty());
+            assert!(watch.last_checked.is_none());
+        }
+    }
+
+    #[test]
+    fn default_developer_watches_contains_known_ids() {
+        let watches = default_developer_watches();
+        let ids: Vec<_> = watches.iter().map(|w| w.github_id.as_str()).collect();
+        assert!(ids.contains(&"ramparte"));
+        assert!(ids.contains(&"simonw"));
+    }
+
+    #[test]
+    fn default_developer_watches_constant_length() {
+        assert_eq!(DEFAULT_DEVELOPER_WATCHES.len(), 5);
+    }
+
+    #[test]
+    fn default_watches_focus_areas_are_nonempty_strings() {
+        for (_, areas) in &DEFAULT_DEVELOPER_WATCHES {
+            for area in *areas {
+                assert!(!area.is_empty());
+            }
+        }
+    }
+}

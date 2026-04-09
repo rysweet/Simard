@@ -43,3 +43,85 @@ pub(super) fn persist_cycle_to_memory(
         eprintln!("[simard] OODA persist: failed to store episode: {e}");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::goal_curation::GoalProgress;
+    use crate::memory_cognitive::CognitiveStatistics;
+    use crate::ooda_loop::{
+        ActionKind, ActionOutcome, CycleReport, EnvironmentSnapshot, GoalSnapshot, Observation,
+        PlannedAction, Priority,
+    };
+
+    fn minimal_report(cycle: u32) -> CycleReport {
+        CycleReport {
+            cycle_number: cycle,
+            observation: Observation {
+                goal_statuses: vec![GoalSnapshot {
+                    id: "g1".to_string(),
+                    description: "test goal".to_string(),
+                    progress: GoalProgress::NotStarted,
+                }],
+                gym_health: None,
+                memory_stats: CognitiveStatistics {
+                    sensory_count: 0,
+                    working_count: 0,
+                    episodic_count: 0,
+                    semantic_count: 0,
+                    procedural_count: 0,
+                    prospective_count: 0,
+                },
+                pending_improvements: vec![],
+                environment: EnvironmentSnapshot::default(),
+            },
+            priorities: vec![Priority {
+                goal_id: "g1".to_string(),
+                urgency: 0.8,
+                reason: "important".to_string(),
+            }],
+            planned_actions: vec![PlannedAction {
+                kind: ActionKind::AdvanceGoal,
+                goal_id: Some("g1".to_string()),
+                description: "advance".to_string(),
+            }],
+            outcomes: vec![ActionOutcome {
+                action: PlannedAction {
+                    kind: ActionKind::AdvanceGoal,
+                    goal_id: Some("g1".to_string()),
+                    description: "advance".to_string(),
+                },
+                success: true,
+                detail: "done".to_string(),
+            }],
+        }
+    }
+
+    #[test]
+    fn persist_cycle_report_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = minimal_report(42);
+        persist_cycle_report(dir.path(), &report);
+        let path = dir.path().join("cycle_reports").join("cycle_42.json");
+        assert!(path.exists());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(!content.is_empty());
+    }
+
+    #[test]
+    fn persist_cycle_report_creates_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = minimal_report(1);
+        persist_cycle_report(dir.path(), &report);
+        assert!(dir.path().join("cycle_reports").is_dir());
+    }
+
+    #[test]
+    fn persist_cycle_report_multiple_cycles() {
+        let dir = tempfile::tempdir().unwrap();
+        persist_cycle_report(dir.path(), &minimal_report(1));
+        persist_cycle_report(dir.path(), &minimal_report(2));
+        assert!(dir.path().join("cycle_reports/cycle_1.json").exists());
+        assert!(dir.path().join("cycle_reports/cycle_2.json").exists());
+    }
+}

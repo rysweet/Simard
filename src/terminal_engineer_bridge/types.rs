@@ -38,3 +38,53 @@ pub struct TerminalBridgeContext {
     pub wait_count: String,
     pub last_output_line: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scoped_handoff_mode_terminal_file_name() {
+        assert_eq!(
+            ScopedHandoffMode::Terminal.scoped_file_name(),
+            TERMINAL_HANDOFF_FILE_NAME
+        );
+    }
+
+    #[test]
+    fn scoped_handoff_mode_engineer_file_name() {
+        assert_eq!(
+            ScopedHandoffMode::Engineer.scoped_file_name(),
+            ENGINEER_HANDOFF_FILE_NAME
+        );
+    }
+
+    #[test]
+    fn constants_are_distinct() {
+        assert_ne!(TERMINAL_HANDOFF_FILE_NAME, ENGINEER_HANDOFF_FILE_NAME);
+        assert_ne!(TERMINAL_MODE_BOUNDARY, ENGINEER_MODE_BOUNDARY);
+    }
+
+    #[test]
+    fn selected_handoff_artifact_construction() {
+        let a = SelectedHandoffArtifact {
+            path: PathBuf::from("/state/handoff.json"),
+            file_name: COMPATIBILITY_HANDOFF_FILE_NAME,
+        };
+        assert_eq!(a.file_name, "latest_handoff.json");
+    }
+
+    #[test]
+    fn terminal_bridge_context_construction() {
+        let ctx = TerminalBridgeContext {
+            continuity_source: "src".to_string(),
+            handoff_file_name: "f.json".to_string(),
+            working_directory: "/home".to_string(),
+            command_count: "5".to_string(),
+            wait_count: "2".to_string(),
+            last_output_line: Some("done".to_string()),
+        };
+        assert_eq!(ctx.command_count, "5");
+        assert_eq!(ctx.last_output_line, Some("done".to_string()));
+    }
+}

@@ -91,3 +91,29 @@ pub fn handle_self_update() -> Result<(), Box<dyn std::error::Error>> {
     // handover does not return on success (exec replaces process)
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_version_is_set() {
+        // CURRENT_VERSION comes from Cargo.toml via env!("CARGO_PKG_VERSION")
+        assert!(!CURRENT_VERSION.is_empty());
+    }
+
+    #[test]
+    fn run_self_test_on_nonexistent_binary_returns_error() {
+        let result = run_self_test_on_binary(Path::new("/nonexistent/binary"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn run_self_test_on_binary_with_failing_command() {
+        // /usr/bin/false always exits with 1
+        let result = run_self_test_on_binary(Path::new("/usr/bin/false"));
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Self-test failed"));
+    }
+}

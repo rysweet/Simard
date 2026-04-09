@@ -66,3 +66,85 @@ impl SubordinateProgress {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subordinate_progress_display() {
+        let p = SubordinateProgress {
+            sub_id: "agent-1".to_string(),
+            phase: "execution".to_string(),
+            steps_completed: 3,
+            steps_total: 10,
+            last_action: "run tests".to_string(),
+            heartbeat_epoch: 1700000000,
+            outcome: None,
+        };
+        let display = format!("{p}");
+        assert!(display.contains("agent-1"));
+        assert!(display.contains("execution"));
+        assert!(display.contains("3/10"));
+        assert!(display.contains("run tests"));
+    }
+
+    #[test]
+    fn subordinate_progress_serde_roundtrip() {
+        let p = SubordinateProgress {
+            sub_id: "agent-2".to_string(),
+            phase: "planning".to_string(),
+            steps_completed: 0,
+            steps_total: 5,
+            last_action: "init".to_string(),
+            heartbeat_epoch: 1700000000,
+            outcome: Some("success".to_string()),
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        let back: SubordinateProgress = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn subordinate_progress_with_outcome() {
+        let p = SubordinateProgress {
+            sub_id: "a".to_string(),
+            phase: "complete".to_string(),
+            steps_completed: 5,
+            steps_total: 5,
+            last_action: "done".to_string(),
+            heartbeat_epoch: 100,
+            outcome: None,
+        };
+        let p2 = p.with_outcome("completed successfully");
+        assert_eq!(p2.outcome, Some("completed successfully".to_string()));
+        assert_eq!(p2.sub_id, "a");
+    }
+
+    #[test]
+    fn subordinate_progress_new() {
+        let p =
+            SubordinateProgress::new("sub-1", SessionPhase::Execution, 2, 10, "compiling").unwrap();
+        assert_eq!(p.sub_id, "sub-1");
+        assert_eq!(p.phase, "execution");
+        assert_eq!(p.steps_completed, 2);
+        assert_eq!(p.steps_total, 10);
+        assert!(p.heartbeat_epoch > 0);
+        assert!(p.outcome.is_none());
+    }
+
+    #[test]
+    fn subordinate_progress_outcome_none_by_default() {
+        let p = SubordinateProgress {
+            sub_id: "x".to_string(),
+            phase: "intake".to_string(),
+            steps_completed: 0,
+            steps_total: 0,
+            last_action: "".to_string(),
+            heartbeat_epoch: 0,
+            outcome: None,
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains("\"outcome\":null"));
+    }
+}

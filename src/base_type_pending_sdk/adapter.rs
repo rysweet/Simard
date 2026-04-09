@@ -79,3 +79,75 @@ impl BaseTypeFactory for PendingSdkAdapter {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::OperatingMode;
+    use uuid::Uuid;
+
+    fn test_request(topology: RuntimeTopology) -> BaseTypeSessionRequest {
+        BaseTypeSessionRequest {
+            session_id: crate::session::SessionId::from_uuid(Uuid::nil()),
+            mode: OperatingMode::Engineer,
+            topology,
+            prompt_assets: vec![],
+            runtime_node: crate::runtime::RuntimeNodeId::new("node"),
+            mailbox_address: crate::runtime::RuntimeAddress::new("addr"),
+        }
+    }
+
+    #[test]
+    fn registered_creates_adapter() {
+        let adapter = PendingSdkAdapter::registered(
+            "test-sdk",
+            "test-backend",
+            "registered-base-type:test",
+            "SDK not yet implemented",
+        )
+        .unwrap();
+        assert_eq!(adapter.descriptor.id.as_str(), "test-sdk");
+        assert_eq!(adapter.not_implemented_reason, "SDK not yet implemented");
+    }
+
+    #[test]
+    fn descriptor_returns_correct_id() {
+        let adapter =
+            PendingSdkAdapter::registered("my-sdk", "backend-id", "registered:my-sdk", "not ready")
+                .unwrap();
+        assert_eq!(adapter.descriptor().id.as_str(), "my-sdk");
+    }
+
+    #[test]
+    fn supports_single_process_topology() {
+        let adapter =
+            PendingSdkAdapter::registered("sdk-1", "backend", "registered:sdk-1", "pending")
+                .unwrap();
+        assert!(
+            adapter
+                .descriptor
+                .supported_topologies
+                .contains(&RuntimeTopology::SingleProcess)
+        );
+    }
+
+    #[test]
+    fn open_session_returns_pending_session() {
+        let adapter =
+            PendingSdkAdapter::registered("sdk-2", "backend", "registered:sdk-2", "not yet")
+                .unwrap();
+        let request = test_request(RuntimeTopology::SingleProcess);
+        let session = adapter.open_session(request);
+        assert!(session.is_ok());
+    }
+
+    #[test]
+    fn open_session_unsupported_topology_returns_error() {
+        let adapter =
+            PendingSdkAdapter::registered("sdk-3", "backend", "registered:sdk-3", "not yet")
+                .unwrap();
+        let request = test_request(RuntimeTopology::Distributed);
+        let result = adapter.open_session(request);
+        assert!(result.is_err());
+    }
+}
