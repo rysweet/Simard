@@ -95,6 +95,7 @@ fn meeting_repl_shows_greeting() {
 /// Skipped in CI when amplihack-memory-lib is unavailable.
 #[test]
 fn ooda_daemon_seeds_five_goals() {
+    let state_root = tempfile::tempdir().expect("temp dir for ooda test");
     let output = Command::new("timeout")
         .args([
             "15",
@@ -103,7 +104,7 @@ fn ooda_daemon_seeds_five_goals() {
             "run",
             "--cycles=1",
         ])
-        .env("SIMARD_STATE_ROOT", "/tmp/simard-e2e-ooda")
+        .env("SIMARD_STATE_ROOT", state_root.path())
         .output()
         .expect("failed to run ooda daemon");
 
