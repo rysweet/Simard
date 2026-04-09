@@ -112,7 +112,7 @@
 
 ## References
 
-- [Product Architecture](../Specs/ProductArchitecture.md)
-- [Implementation Plan](../Specs/IMPLEMENTATION_PLAN.md)
+- [Product Architecture](https://github.com/rysweet/Simard/blob/main/Specs/ProductArchitecture.md)
+- [Implementation Plan](https://github.com/rysweet/Simard/blob/main/Specs/IMPLEMENTATION_PLAN.md)
 - [Dashboard PR #379](https://github.com/rysweet/Simard/pull/379)
 - [Roadmap Issue #380](https://github.com/rysweet/Simard/issues/380)
