@@ -118,3 +118,113 @@ pub(super) fn build_live_meeting_context(bridge: &CognitiveMemoryBridge) -> Stri
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bridge::BridgeErrorPayload;
+    use crate::bridge_subprocess::InMemoryBridgeTransport;
+
+    // ── resolve_operator_name ───────────────────────────────────────
+
+    #[test]
+    fn resolve_operator_name_default_fallback() {
+        unsafe { std::env::remove_var("SIMARD_OPERATOR_NAME") };
+        let name = resolve_operator_name();
+        assert_eq!(name, "operator");
+    }
+
+    #[test]
+    fn resolve_operator_name_from_env() {
+        unsafe { std::env::set_var("SIMARD_OPERATOR_NAME", "alice") };
+        let name = resolve_operator_name();
+        assert_eq!(name, "alice");
+        unsafe { std::env::remove_var("SIMARD_OPERATOR_NAME") };
+    }
+
+    #[test]
+    fn resolve_operator_name_empty_env_falls_back() {
+        unsafe { std::env::set_var("SIMARD_OPERATOR_NAME", "") };
+        let name = resolve_operator_name();
+        assert_eq!(name, "operator");
+        unsafe { std::env::remove_var("SIMARD_OPERATOR_NAME") };
+    }
+
+    // ── search_or_warn ──────────────────────────────────────────────
+
+    fn empty_bridge() -> CognitiveMemoryBridge {
+        let transport = InMemoryBridgeTransport::new("test-ctx", |method, _params| match method {
+            "memory.search_facts" => Ok(serde_json::json!({"facts": []})),
+            _ => Err(BridgeErrorPayload {
+                code: -32601,
+                message: format!("unknown: {method}"),
+            }),
+        });
+        CognitiveMemoryBridge::new(Box::new(transport))
+    }
+
+    fn failing_bridge() -> CognitiveMemoryBridge {
+        let transport = InMemoryBridgeTransport::new("test-fail", |_method, _params| {
+            Err(BridgeErrorPayload {
+                code: -1,
+                message: "forced error".to_string(),
+            })
+        });
+        CognitiveMemoryBridge::new(Box::new(transport))
+    }
+
+    #[test]
+    fn search_or_warn_empty_result() {
+        let bridge = empty_bridge();
+        let facts = search_or_warn(&bridge, "anything", 5);
+        assert!(facts.is_empty());
+    }
+
+    #[test]
+    fn search_or_warn_bridge_failure_returns_empty() {
+        let bridge = failing_bridge();
+        let facts = search_or_warn(&bridge, "query", 5);
+        assert!(facts.is_empty());
+    }
+
+    // ── build_live_meeting_context ──────────────────────────────────
+
+    #[test]
+    fn build_context_empty_memory() {
+        let bridge = empty_bridge();
+        unsafe { std::env::remove_var("SIMARD_OPERATOR_NAME") };
+        let ctx = build_live_meeting_context(&bridge);
+        assert!(ctx.contains("Operator Context"));
+        assert!(ctx.contains("operator"));
+    }
+
+    #[test]
+    fn build_context_failing_bridge_shows_operator_fallback() {
+        let bridge = failing_bridge();
+        unsafe { std::env::remove_var("SIMARD_OPERATOR_NAME") };
+        let ctx = build_live_meeting_context(&bridge);
+        assert!(ctx.contains("Operator Context"));
+    }
+
+    #[test]
+    fn build_context_always_has_operator_section() {
+        let bridge = empty_bridge();
+        let ctx = build_live_meeting_context(&bridge);
+        assert!(ctx.contains("Operator Context"));
+    }
+
+    #[test]
+    fn build_context_result_is_not_empty() {
+        let bridge = empty_bridge();
+        let ctx = build_live_meeting_context(&bridge);
+        assert!(!ctx.is_empty());
+    }
+
+    #[test]
+    fn build_context_contains_live_state_header() {
+        let bridge = empty_bridge();
+        let ctx = build_live_meeting_context(&bridge);
+        // Either shows "Live State" or "Live State (from cognitive memory)"
+        assert!(ctx.contains("Live State"));
+    }
+}

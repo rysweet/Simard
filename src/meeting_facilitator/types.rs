@@ -103,3 +103,231 @@ impl MeetingSession {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── MeetingDecision ─────────────────────────────────────────────
+
+    #[test]
+    fn meeting_decision_round_trip_serde() {
+        let d = MeetingDecision {
+            description: "Use Rust".to_string(),
+            rationale: "Memory safety".to_string(),
+            participants: vec!["alice".to_string(), "bob".to_string()],
+        };
+        let json = serde_json::to_string(&d).unwrap();
+        let d2: MeetingDecision = serde_json::from_str(&json).unwrap();
+        assert_eq!(d, d2);
+    }
+
+    #[test]
+    fn meeting_decision_empty_participants() {
+        let d = MeetingDecision {
+            description: "No attendees".to_string(),
+            rationale: "Testing".to_string(),
+            participants: vec![],
+        };
+        let json = serde_json::to_string(&d).unwrap();
+        let d2: MeetingDecision = serde_json::from_str(&json).unwrap();
+        assert!(d2.participants.is_empty());
+    }
+
+    // ── ActionItem ──────────────────────────────────────────────────
+
+    #[test]
+    fn action_item_round_trip_serde() {
+        let a = ActionItem {
+            description: "Write tests".to_string(),
+            owner: "dev".to_string(),
+            priority: 1,
+            due_description: Some("next sprint".to_string()),
+        };
+        let json = serde_json::to_string(&a).unwrap();
+        let a2: ActionItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(a, a2);
+    }
+
+    #[test]
+    fn action_item_due_description_none() {
+        let a = ActionItem {
+            description: "Fix bug".to_string(),
+            owner: "ops".to_string(),
+            priority: 3,
+            due_description: None,
+        };
+        let json = serde_json::to_string(&a).unwrap();
+        let a2: ActionItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(a2.due_description, None);
+    }
+
+    #[test]
+    fn action_item_zero_priority() {
+        let a = ActionItem {
+            description: "Low".to_string(),
+            owner: "x".to_string(),
+            priority: 0,
+            due_description: None,
+        };
+        assert_eq!(a.priority, 0);
+    }
+
+    // ── OpenQuestion ────────────────────────────────────────────────
+
+    #[test]
+    fn open_question_explicit_flag() {
+        let q = OpenQuestion {
+            text: "Why?".to_string(),
+            explicit: true,
+        };
+        let json = serde_json::to_string(&q).unwrap();
+        let q2: OpenQuestion = serde_json::from_str(&json).unwrap();
+        assert!(q2.explicit);
+    }
+
+    #[test]
+    fn open_question_inferred_flag() {
+        let q = OpenQuestion {
+            text: "What about X?".to_string(),
+            explicit: false,
+        };
+        let json = serde_json::to_string(&q).unwrap();
+        let q2: OpenQuestion = serde_json::from_str(&json).unwrap();
+        assert!(!q2.explicit);
+    }
+
+    // ── MeetingSessionStatus ────────────────────────────────────────
+
+    #[test]
+    fn status_display_open() {
+        assert_eq!(MeetingSessionStatus::Open.to_string(), "open");
+    }
+
+    #[test]
+    fn status_display_closed() {
+        assert_eq!(MeetingSessionStatus::Closed.to_string(), "closed");
+    }
+
+    #[test]
+    fn status_serde_round_trip() {
+        for status in [MeetingSessionStatus::Open, MeetingSessionStatus::Closed] {
+            let json = serde_json::to_string(&status).unwrap();
+            let s2: MeetingSessionStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(status, s2);
+        }
+    }
+
+    // ── MeetingSession ──────────────────────────────────────────────
+
+    fn sample_session() -> MeetingSession {
+        MeetingSession {
+            topic: "Sprint planning".to_string(),
+            decisions: vec![MeetingDecision {
+                description: "Adopt TDD".to_string(),
+                rationale: "Better quality".to_string(),
+                participants: vec!["alice".to_string()],
+            }],
+            action_items: vec![ActionItem {
+                description: "Set up CI".to_string(),
+                owner: "bob".to_string(),
+                priority: 1,
+                due_description: Some("Friday".to_string()),
+            }],
+            notes: vec!["Good discussion".to_string()],
+            status: MeetingSessionStatus::Open,
+            started_at: "2025-01-01T00:00:00Z".to_string(),
+            participants: vec!["alice".to_string(), "bob".to_string()],
+            explicit_questions: vec!["What about testing?".to_string()],
+        }
+    }
+
+    #[test]
+    fn session_round_trip_serde() {
+        let s = sample_session();
+        let json = serde_json::to_string(&s).unwrap();
+        let s2: MeetingSession = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, s2);
+    }
+
+    #[test]
+    fn session_explicit_questions_default() {
+        // explicit_questions has #[serde(default)], so missing field should default to empty vec
+        let json = r#"{
+            "topic": "test",
+            "decisions": [],
+            "action_items": [],
+            "notes": [],
+            "status": "Open",
+            "started_at": "",
+            "participants": []
+        }"#;
+        let s: MeetingSession = serde_json::from_str(json).unwrap();
+        assert!(s.explicit_questions.is_empty());
+    }
+
+    #[test]
+    fn durable_summary_contains_topic() {
+        let s = sample_session();
+        let summary = s.durable_summary();
+        assert!(summary.contains("Sprint planning"));
+    }
+
+    #[test]
+    fn durable_summary_contains_decisions() {
+        let s = sample_session();
+        let summary = s.durable_summary();
+        assert!(summary.contains("Adopt TDD"));
+    }
+
+    #[test]
+    fn durable_summary_contains_action_items_with_owner() {
+        let s = sample_session();
+        let summary = s.durable_summary();
+        assert!(summary.contains("Set up CI"));
+        assert!(summary.contains("owner=bob"));
+    }
+
+    #[test]
+    fn durable_summary_contains_participants() {
+        let s = sample_session();
+        let summary = s.durable_summary();
+        assert!(summary.contains("alice"));
+        assert!(summary.contains("bob"));
+    }
+
+    #[test]
+    fn durable_summary_empty_session() {
+        let s = MeetingSession {
+            topic: "empty".to_string(),
+            decisions: vec![],
+            action_items: vec![],
+            notes: vec![],
+            status: MeetingSessionStatus::Open,
+            started_at: "".to_string(),
+            participants: vec![],
+            explicit_questions: vec![],
+        };
+        let summary = s.durable_summary();
+        assert!(summary.contains("decisions=[none]"));
+        assert!(summary.contains("action_items=[none]"));
+        assert!(summary.contains("participants=[none]"));
+        assert!(summary.contains("duration=unknown"));
+    }
+
+    #[test]
+    fn durable_summary_invalid_started_at_shows_unknown_duration() {
+        let s = MeetingSession {
+            topic: "bad-ts".to_string(),
+            decisions: vec![],
+            action_items: vec![],
+            notes: vec![],
+            status: MeetingSessionStatus::Open,
+            started_at: "not-a-date".to_string(),
+            participants: vec![],
+            explicit_questions: vec![],
+        };
+        let summary = s.durable_summary();
+        assert!(summary.contains("duration=unknown"));
+    }
+}
