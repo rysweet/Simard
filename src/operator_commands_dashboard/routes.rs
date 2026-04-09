@@ -15,6 +15,8 @@ pub fn build_router() -> Router {
         .route("/api/issues", get(issues))
         .route("/api/metrics", get(metrics))
         .route("/api/costs", get(costs))
+        .route("/api/goals", get(goals))
+        .route("/api/distributed", get(distributed))
         .route("/api/logs", get(logs))
         .route("/api/processes", get(processes))
         .route("/api/memory", get(memory_metrics))
@@ -176,6 +178,119 @@ async fn costs() -> Json<Value> {
     Json(json!({
         "daily": daily,
         "weekly": weekly,
+    }))
+}
+
+async fn goals() -> Json<Value> {
+    let state_root = resolve_state_root();
+    let goal_path = state_root.join("goal_records.json");
+    let content = std::fs::read_to_string(&goal_path).unwrap_or_default();
+    match serde_json::from_str::<Value>(&content) {
+        Ok(val) => {
+            // goal_records.json may be a GoalBoard or an array of goals
+            if val.is_object() {
+                let active = val.get("active").cloned().unwrap_or(json!([]));
+                let backlog = val.get("backlog").cloned().unwrap_or(json!([]));
+                Json(json!({
+                    "active": active,
+                    "backlog": backlog,
+                    "active_count": active.as_array().map(|a| a.len()).unwrap_or(0),
+                    "backlog_count": backlog.as_array().map(|a| a.len()).unwrap_or(0),
+                }))
+            } else if val.is_array() {
+                Json(json!({
+                    "active": val,
+                    "backlog": [],
+                    "active_count": val.as_array().map(|a| a.len()).unwrap_or(0),
+                    "backlog_count": 0,
+                }))
+            } else {
+                Json(json!({"active": [], "backlog": [], "active_count": 0, "backlog_count": 0}))
+            }
+        }
+        Err(_) => Json(json!({"active": [], "backlog": [], "active_count": 0, "backlog_count": 0})),
+    }
+}
+
+async fn distributed() -> Json<Value> {
+    // Query the Simard VM status via azlin connect
+    let vm_status = tokio::process::Command::new("azlin")
+        .args([
+            "connect",
+            "Simard",
+            "--resource-group",
+            "rysweet-linux-vm-pool",
+            "--no-tmux",
+            "--",
+            "export PATH=\"$HOME/.cargo/bin:$HOME/.simard/bin:$PATH\" && \
+             echo HOSTNAME=$(hostname) && \
+             echo UPTIME=$(uptime -p) && \
+             echo DISK_ROOT=$(df / --output=pcent | tail -1 | tr -d ' %') && \
+             echo DISK_DATA=$(df /mnt/home-data --output=pcent 2>/dev/null | tail -1 | tr -d ' %' || echo N/A) && \
+             echo DISK_TMP=$(df /mnt/tmp-data --output=pcent 2>/dev/null | tail -1 | tr -d ' %' || echo N/A) && \
+             echo SIMARD_PROCS=$(pgrep -f simard -c 2>/dev/null || echo 0) && \
+             echo CARGO_PROCS=$(pgrep -f cargo -c 2>/dev/null || echo 0) && \
+             echo LOAD=$(cat /proc/loadavg | cut -d' ' -f1-3) && \
+             echo MEM_USED=$(free -m | awk '/Mem/{printf \"%d/%d\", $3, $2}')",
+        ])
+        .output()
+        .await;
+
+    let mut vm_info = json!({
+        "vm_name": "Simard",
+        "resource_group": "rysweet-linux-vm-pool",
+        "status": "unknown",
+    });
+
+    if let Ok(output) = vm_status {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stdout.contains("HOSTNAME=") {
+            vm_info["status"] = json!("reachable");
+            for line in stdout.lines() {
+                if let Some((key, val)) = line.split_once('=') {
+                    let key = key.trim().to_lowercase();
+                    let val = val.trim();
+                    match key.as_str() {
+                        "hostname" => vm_info["hostname"] = json!(val),
+                        "uptime" => vm_info["uptime"] = json!(val),
+                        "disk_root" => vm_info["disk_root_pct"] = json!(val.parse::<u32>().ok()),
+                        "disk_data" => vm_info["disk_data_pct"] = json!(val.parse::<u32>().ok()),
+                        "disk_tmp" => vm_info["disk_tmp_pct"] = json!(val.parse::<u32>().ok()),
+                        "simard_procs" => {
+                            vm_info["simard_processes"] = json!(val.parse::<u32>().ok())
+                        }
+                        "cargo_procs" => {
+                            vm_info["cargo_processes"] = json!(val.parse::<u32>().ok())
+                        }
+                        "load" => vm_info["load_avg"] = json!(val),
+                        "mem_used" => vm_info["memory_mb"] = json!(val),
+                        _ => {}
+                    }
+                }
+            }
+        } else {
+            vm_info["status"] = json!("unreachable");
+        }
+    } else {
+        vm_info["status"] = json!("error");
+        vm_info["error"] = json!("azlin connect failed");
+    }
+
+    // Local host info for comparison
+    let local_host = std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    Json(json!({
+        "local": {
+            "hostname": local_host,
+            "type": "dev-machine",
+        },
+        "remote_vms": [vm_info],
+        "topology": "distributed",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
 }
 
@@ -567,9 +682,12 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
   </header>
   <div class="tabs">
     <div class="tab active" data-tab="overview">Overview</div>
+    <div class="tab" data-tab="distributed">Distributed</div>
+    <div class="tab" data-tab="goals">Goals</div>
     <div class="tab" data-tab="logs">Logs</div>
     <div class="tab" data-tab="processes">Processes</div>
     <div class="tab" data-tab="memory">Memory</div>
+    <div class="tab" data-tab="costs">Costs</div>
     <div class="tab" data-tab="chat">Chat</div>
   </div>
 
@@ -577,6 +695,30 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
     <div class="grid">
       <div class="card"><h2>System Status</h2><div id="status"><span class="loading">Loading…</span></div></div>
       <div class="card"><h2>Open Issues</h2><ul id="issues-list"><li class="loading">Loading…</li></ul></div>
+    </div>
+  </div>
+
+  <div class="tab-content" id="tab-distributed">
+    <div class="grid">
+      <div class="card">
+        <h2>Cluster Topology <button class="btn" onclick="fetchDistributed()">Refresh</button></h2>
+        <div id="cluster-topology"><span class="loading">Loading…</span></div>
+      </div>
+      <div class="card">
+        <h2>Remote VMs</h2>
+        <div id="remote-vms"><span class="loading">Loading…</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="tab-content" id="tab-goals">
+    <div class="card" style="margin-bottom:1rem">
+      <h2>Active Goals <button class="btn" onclick="fetchGoals()">Refresh</button></h2>
+      <div id="goals-active"><span class="loading">Loading…</span></div>
+    </div>
+    <div class="card">
+      <h2>Backlog</h2>
+      <div id="goals-backlog"><span class="loading">Loading…</span></div>
     </div>
   </div>
 
@@ -604,6 +746,13 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
     </div>
   </div>
 
+  <div class="tab-content" id="tab-costs">
+    <div class="grid">
+      <div class="card"><h2>Daily Costs <button class="btn" onclick="fetchCosts()">Refresh</button></h2><div id="costs-daily"><span class="loading">Loading…</span></div></div>
+      <div class="card"><h2>Weekly Costs</h2><div id="costs-weekly"><span class="loading">Loading…</span></div></div>
+    </div>
+  </div>
+
   <div class="tab-content" id="tab-chat">
     <div class="card" style="max-width:720px">
       <h2>Meeting Chat</h2>
@@ -627,6 +776,9 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
         if(tab.dataset.tab==='logs') fetchLogs();
         if(tab.dataset.tab==='processes') fetchProcesses();
         if(tab.dataset.tab==='memory') fetchMemory();
+        if(tab.dataset.tab==='distributed') fetchDistributed();
+        if(tab.dataset.tab==='goals') fetchGoals();
+        if(tab.dataset.tab==='costs') fetchCosts();
         if(tab.dataset.tab==='chat') initChat();
       });
     });
@@ -721,6 +873,76 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
             <div class="stat"><span class="label">Modified</span><span class="value">${info.modified?new Date(info.modified).toLocaleString():'N/A'}</span></div>
           </div>`;}).join('');
       }catch(e){document.getElementById('mem-overview').innerHTML='<span class="err">Failed to load</span>';}
+    }
+
+    /* --- Distributed --- */
+    async function fetchDistributed(){
+      try{
+        const r=await fetch('/api/distributed'); const d=await r.json();
+        document.getElementById('cluster-topology').innerHTML=`
+          <div class="stat"><span class="label">Topology</span><span class="value">${d.topology}</span></div>
+          <div class="stat"><span class="label">Local Host</span><span class="value">${esc(d.local?.hostname||'?')}</span></div>
+          <div class="stat"><span class="label">Updated</span><span class="value">${d.timestamp?new Date(d.timestamp).toLocaleTimeString():'?'}</span></div>`;
+        if(d.remote_vms?.length){
+          document.getElementById('remote-vms').innerHTML=d.remote_vms.map(vm=>{
+            const sc=vm.status==='reachable'?'ok':(vm.status==='unreachable'?'err':'warn');
+            return`<div style="border:1px solid #30363d;border-radius:6px;padding:1rem;margin-bottom:.75rem">
+              <h3 style="margin:0 0 .5rem 0;color:var(--accent)">${esc(vm.vm_name)} <span class="${sc}" style="font-size:.85rem">${vm.status}</span></h3>
+              ${vm.hostname?`<div class="stat"><span class="label">Hostname</span><span class="value">${esc(vm.hostname)}</span></div>`:''}
+              ${vm.uptime?`<div class="stat"><span class="label">Uptime</span><span class="value">${esc(vm.uptime)}</span></div>`:''}
+              ${vm.load_avg?`<div class="stat"><span class="label">Load</span><span class="value">${esc(vm.load_avg)}</span></div>`:''}
+              ${vm.memory_mb?`<div class="stat"><span class="label">Memory</span><span class="value">${esc(vm.memory_mb)} MB</span></div>`:''}
+              ${vm.disk_root_pct!==null&&vm.disk_root_pct!==undefined?`<div class="stat"><span class="label">Root Disk</span><span class="value ${vm.disk_root_pct>90?'err':vm.disk_root_pct>70?'warn':'ok'}">${vm.disk_root_pct}%</span></div>`:''}
+              ${vm.disk_data_pct!==null&&vm.disk_data_pct!==undefined?`<div class="stat"><span class="label">Data Disk</span><span class="value">${vm.disk_data_pct}%</span></div>`:''}
+              ${vm.disk_tmp_pct!==null&&vm.disk_tmp_pct!==undefined?`<div class="stat"><span class="label">Tmp Disk</span><span class="value">${vm.disk_tmp_pct}%</span></div>`:''}
+              ${vm.simard_processes!==null&&vm.simard_processes!==undefined?`<div class="stat"><span class="label">Simard Processes</span><span class="value">${vm.simard_processes}</span></div>`:''}
+              ${vm.cargo_processes!==null&&vm.cargo_processes!==undefined?`<div class="stat"><span class="label">Cargo Processes</span><span class="value">${vm.cargo_processes}</span></div>`:''}
+            </div>`;}).join('');
+        }else{document.getElementById('remote-vms').innerHTML='<span class="loading">No remote VMs configured</span>';}
+      }catch(e){document.getElementById('cluster-topology').innerHTML='<span class="err">Failed to load</span>';}
+    }
+
+    /* --- Goals --- */
+    async function fetchGoals(){
+      try{
+        const r=await fetch('/api/goals'); const d=await r.json();
+        if(d.active?.length){
+          document.getElementById('goals-active').innerHTML=`<table class="proc-table">
+            <tr><th>Priority</th><th>ID</th><th>Description</th><th>Status</th><th>Assigned</th></tr>
+            ${d.active.map(g=>`<tr>
+              <td style="text-align:center">${g.priority}</td>
+              <td><code>${esc(g.id)}</code></td>
+              <td>${esc(g.description)}</td>
+              <td>${esc(g.status)}</td>
+              <td>${g.assigned_to?esc(g.assigned_to):'—'}</td>
+            </tr>`).join('')}
+          </table>`;
+        }else{document.getElementById('goals-active').innerHTML='<span class="loading">No active goals</span>';}
+        if(d.backlog?.length){
+          document.getElementById('goals-backlog').innerHTML=`<table class="proc-table">
+            <tr><th>ID</th><th>Description</th><th>Source</th><th>Score</th></tr>
+            ${d.backlog.map(b=>`<tr>
+              <td><code>${esc(b.id)}</code></td>
+              <td>${esc(b.description)}</td>
+              <td>${esc(b.source||'')}</td>
+              <td>${b.score??'—'}</td>
+            </tr>`).join('')}
+          </table>`;
+        }else{document.getElementById('goals-backlog').innerHTML='<span class="loading">No backlog items</span>';}
+      }catch(e){document.getElementById('goals-active').innerHTML='<span class="err">Failed to load</span>';}
+    }
+
+    /* --- Costs --- */
+    async function fetchCosts(){
+      try{
+        const r=await fetch('/api/costs'); const d=await r.json();
+        function renderSummary(s){
+          if(!s||s.error) return `<span class="err">${esc(s?.error||'No data')}</span>`;
+          return Object.entries(s).map(([k,v])=>`<div class="stat"><span class="label">${esc(k)}</span><span class="value">${typeof v==='number'?'$'+v.toFixed(2):esc(String(v))}</span></div>`).join('');
+        }
+        document.getElementById('costs-daily').innerHTML=renderSummary(d.daily);
+        document.getElementById('costs-weekly').innerHTML=renderSummary(d.weekly);
+      }catch(e){document.getElementById('costs-daily').innerHTML='<span class="err">Failed to load</span>';}
     }
 
     /* --- Chat --- */
@@ -820,5 +1042,32 @@ mod tests {
     fn index_html_contains_dashboard() {
         assert!(INDEX_HTML.contains("Simard Dashboard"));
         assert!(INDEX_HTML.contains("fetchStatus"));
+    }
+
+    #[test]
+    fn index_html_contains_distributed_tab() {
+        assert!(INDEX_HTML.contains("data-tab=\"distributed\""));
+        assert!(INDEX_HTML.contains("Distributed"));
+        assert!(INDEX_HTML.contains("fetchDistributed"));
+        assert!(INDEX_HTML.contains("Cluster Topology"));
+        assert!(INDEX_HTML.contains("Remote VMs"));
+    }
+
+    #[test]
+    fn index_html_contains_goals_tab() {
+        assert!(INDEX_HTML.contains("data-tab=\"goals\""));
+        assert!(INDEX_HTML.contains("Goals"));
+        assert!(INDEX_HTML.contains("fetchGoals"));
+        assert!(INDEX_HTML.contains("Active Goals"));
+        assert!(INDEX_HTML.contains("Backlog"));
+    }
+
+    #[test]
+    fn index_html_contains_costs_tab() {
+        assert!(INDEX_HTML.contains("data-tab=\"costs\""));
+        assert!(INDEX_HTML.contains("Costs"));
+        assert!(INDEX_HTML.contains("fetchCosts"));
+        assert!(INDEX_HTML.contains("Daily Costs"));
+        assert!(INDEX_HTML.contains("Weekly Costs"));
     }
 }
