@@ -31,6 +31,7 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [Base type adapters reference](./reference/base-type-adapters.md) - Look up the pluggable agent execution substrates, their capabilities, and topology support.
 - [Bridge wire protocol reference](./reference/bridge-wire-protocol.md) - Look up the JSON-line protocol for Rust-Python bridge communication.
 - [Concept: truthful runtime metadata](./concepts/truthful-runtime-metadata.md) - Read the design rationale behind the stricter runtime contract.
+- [Concept: same-path copy guard](./concepts/same-path-copy-guard.md) - Read the design rationale for the canonicalize()-based guard that prevents self-copy crashes.
 
 ## Canonical executable surface
 
