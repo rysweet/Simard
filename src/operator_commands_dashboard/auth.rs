@@ -23,13 +23,13 @@ fn dashkey_path() -> Option<PathBuf> {
 /// Returns `(code, loaded_from_file)`.
 pub fn init_login_code() -> (String, bool) {
     // Try to load an existing dashkey
-    if let Some(path) = dashkey_path() {
-        if let Ok(contents) = std::fs::read_to_string(&path) {
-            let existing = contents.trim().to_string();
-            if !existing.is_empty() {
-                LOGIN_CODE.set(existing.clone()).ok();
-                return (existing, true);
-            }
+    if let Some(path) = dashkey_path()
+        && let Ok(contents) = std::fs::read_to_string(&path)
+    {
+        let existing = contents.trim().to_string();
+        if !existing.is_empty() {
+            LOGIN_CODE.set(existing.clone()).ok();
+            return (existing, true);
         }
     }
 
