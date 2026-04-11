@@ -26,6 +26,7 @@ pub mod engineer_loop;
 pub mod engineer_plan;
 pub mod error;
 pub mod evidence;
+pub mod git_guardrails;
 pub mod goal_curation;
 pub mod goals;
 pub mod greeting_banner;

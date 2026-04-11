@@ -60,6 +60,7 @@ pub fn act(
 ///
 /// Takes `&mut OodaBridges` so that the optional session can be used for
 /// `run_turn` calls during `AdvanceGoal` dispatch.
+#[tracing::instrument(skip_all, fields(cycle = state.cycle_count))]
 pub fn run_ooda_cycle(
     state: &mut OodaState,
     bridges: &mut OodaBridges,
