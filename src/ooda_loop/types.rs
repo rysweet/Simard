@@ -164,6 +164,10 @@ pub struct OodaConfig {
     pub max_concurrent_actions: u32,
     pub improvement_threshold: f64,
     pub gym_suite_id: String,
+    /// Daily budget in USD (from SIMARD_DAILY_BUDGET_USD env or dashboard).
+    pub daily_budget_usd: f64,
+    /// Weekly budget in USD (from SIMARD_WEEKLY_BUDGET_USD env or dashboard).
+    pub weekly_budget_usd: f64,
 }
 
 impl Default for OodaConfig {
@@ -172,8 +176,17 @@ impl Default for OodaConfig {
             max_concurrent_actions: 3,
             improvement_threshold: 0.02,
             gym_suite_id: "progressive".to_string(),
+            daily_budget_usd: env_f64("SIMARD_DAILY_BUDGET_USD", 500.0),
+            weekly_budget_usd: env_f64("SIMARD_WEEKLY_BUDGET_USD", 2500.0),
         }
     }
+}
+
+fn env_f64(key: &str, default: f64) -> f64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// All bridges needed by the OODA loop.

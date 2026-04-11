@@ -198,6 +198,11 @@ pub enum SimardError {
     PlanningUnavailable {
         reason: String,
     },
+    BudgetExceeded {
+        period: String,
+        spent: String,
+        limit: String,
+    },
     ReviewUnavailable {
         reason: String,
     },
