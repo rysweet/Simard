@@ -18,6 +18,7 @@ pub fn build_router() -> Router {
         .route("/api/budget", get(get_budget).post(set_budget))
         .route("/api/goals", get(goals))
         .route("/api/distributed", get(distributed))
+        .route("/api/hosts", get(get_hosts).post(add_host).delete(remove_host))
         .route("/api/logs", get(logs))
         .route("/api/processes", get(processes))
         .route("/api/memory", get(memory_metrics))
@@ -324,6 +325,65 @@ async fn distributed() -> Json<Value> {
         "topology": "distributed",
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
+}
+
+/// Hosts config file path.
+fn hosts_config_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
+    std::path::PathBuf::from(home).join(".simard").join("hosts.json")
+}
+
+fn load_hosts() -> Vec<Value> {
+    let path = hosts_config_path();
+    let content = std::fs::read_to_string(&path).unwrap_or_else(|_| "[]".to_string());
+    serde_json::from_str(&content).unwrap_or_default()
+}
+
+fn save_hosts(hosts: &[Value]) -> std::io::Result<()> {
+    let path = hosts_config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(hosts).unwrap_or_default())
+}
+
+async fn get_hosts() -> Json<Value> {
+    Json(json!({ "hosts": load_hosts() }))
+}
+
+async fn add_host(Json(body): Json<Value>) -> Json<Value> {
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let rg = body.get("resource_group").and_then(|v| v.as_str()).unwrap_or("rysweet-linux-vm-pool");
+    if name.is_empty() {
+        return Json(json!({"error": "name is required"}));
+    }
+    let mut hosts = load_hosts();
+    if hosts.iter().any(|h| h.get("name").and_then(|v| v.as_str()) == Some(name)) {
+        return Json(json!({"error": format!("host '{name}' already exists")}));
+    }
+    hosts.push(json!({
+        "name": name,
+        "resource_group": rg,
+        "added_at": chrono::Utc::now().to_rfc3339(),
+    }));
+    match save_hosts(&hosts) {
+        Ok(_) => Json(json!({"status": "ok", "hosts": hosts})),
+        Err(e) => Json(json!({"error": format!("{e}")})),
+    }
+}
+
+async fn remove_host(Json(body): Json<Value>) -> Json<Value> {
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let mut hosts = load_hosts();
+    let before = hosts.len();
+    hosts.retain(|h| h.get("name").and_then(|v| v.as_str()) != Some(name));
+    if hosts.len() == before {
+        return Json(json!({"error": format!("host '{name}' not found")}));
+    }
+    match save_hosts(&hosts) {
+        Ok(_) => Json(json!({"status": "ok", "hosts": hosts})),
+        Err(e) => Json(json!({"error": format!("{e}")})),
+    }
 }
 
 async fn index() -> axum::response::Html<String> {
@@ -1022,6 +1082,16 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
         <h2>Remote VMs</h2>
         <div id="remote-vms"><span class="loading">Loading…</span></div>
       </div>
+      <div class="card">
+        <h2>Azlin Hosts</h2>
+        <div id="hosts-list"><span class="loading">Loading…</span></div>
+        <div style="margin-top:1rem;display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+          <input id="host-name" placeholder="VM name" style="padding:4px;background:#1a1a2e;border:1px solid #333;color:#e0e0e0;border-radius:4px;width:12rem">
+          <input id="host-rg" placeholder="Resource group" value="rysweet-linux-vm-pool" style="padding:4px;background:#1a1a2e;border:1px solid #333;color:#e0e0e0;border-radius:4px;width:16rem">
+          <button class="btn" onclick="addHost()">Add Host</button>
+          <span id="host-status"></span>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -1223,6 +1293,33 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
         }else{document.getElementById('remote-vms').innerHTML='<span class="loading">No remote VMs configured</span>';}
       }catch(e){document.getElementById('cluster-topology').innerHTML='<span class="err">Failed to load</span>';}
     }
+    async function fetchHosts(){
+      try{
+        const r=await fetch('/api/hosts');const d=await r.json();
+        const el=document.getElementById('hosts-list');
+        if(!d.hosts?.length){el.innerHTML='<span class="loading">No hosts configured</span>';return;}
+        el.innerHTML=d.hosts.map(h=>`<div style="display:flex;align-items:center;gap:0.5rem;padding:4px 0;border-bottom:1px solid #222">
+          <span style="flex:1"><strong>${esc(h.name)}</strong> <span style="color:#888">(${esc(h.resource_group||'default')})</span></span>
+          <button class="btn" style="padding:2px 8px;font-size:.8rem" onclick="removeHost('${esc(h.name)}')">Remove</button>
+        </div>`).join('');
+      }catch(e){}
+    }
+    async function addHost(){
+      const name=document.getElementById('host-name').value.trim();
+      const rg=document.getElementById('host-rg').value.trim();
+      if(!name){document.getElementById('host-status').textContent='Name required';return;}
+      const r=await fetch('/api/hosts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,resource_group:rg})});
+      const d=await r.json();
+      document.getElementById('host-status').textContent=d.status==='ok'?'Added':'Error: '+(d.error||'');
+      document.getElementById('host-name').value='';
+      fetchHosts();
+      setTimeout(()=>document.getElementById('host-status').textContent='',3000);
+    }
+    async function removeHost(name){
+      const r=await fetch('/api/hosts',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+      fetchHosts();
+    }
+    fetchHosts();
 
     /* --- Goals --- */
     async function fetchGoals(){
