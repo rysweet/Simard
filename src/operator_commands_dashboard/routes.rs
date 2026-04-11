@@ -15,6 +15,7 @@ pub fn build_router() -> Router {
         .route("/api/issues", get(issues))
         .route("/api/metrics", get(metrics))
         .route("/api/costs", get(costs))
+        .route("/api/budget", get(get_budget).post(set_budget))
         .route("/api/goals", get(goals))
         .route("/api/distributed", get(distributed))
         .route("/api/logs", get(logs))
@@ -179,6 +180,37 @@ async fn costs() -> Json<Value> {
         "daily": daily,
         "weekly": weekly,
     }))
+}
+
+/// Budget config file path.
+fn budget_config_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
+    std::path::PathBuf::from(home).join(".simard").join("budget.json")
+}
+
+async fn get_budget() -> Json<Value> {
+    let path = budget_config_path();
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    match serde_json::from_str::<Value>(&content) {
+        Ok(v) => Json(v),
+        Err(_) => Json(json!({
+            "daily_budget_usd": std::env::var("SIMARD_DAILY_BUDGET_USD")
+                .ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(500.0),
+            "weekly_budget_usd": std::env::var("SIMARD_WEEKLY_BUDGET_USD")
+                .ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(2500.0),
+        })),
+    }
+}
+
+async fn set_budget(Json(body): Json<Value>) -> Json<Value> {
+    let path = budget_config_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::write(&path, serde_json::to_string_pretty(&body).unwrap_or_default()) {
+        Ok(_) => Json(json!({"status": "ok"})),
+        Err(e) => Json(json!({"error": format!("{e}")})),
+    }
 }
 
 async fn goals() -> Json<Value> {
@@ -1025,6 +1057,14 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
     <div class="grid">
       <div class="card"><h2>Daily Costs <button class="btn" onclick="fetchCosts()">Refresh</button></h2><div id="costs-daily"><span class="loading">Loading…</span></div></div>
       <div class="card"><h2>Weekly Costs</h2><div id="costs-weekly"><span class="loading">Loading…</span></div></div>
+      <div class="card"><h2>Budget Settings</h2>
+        <div style="display:flex;gap:1rem;align-items:center;flex-wrap:wrap">
+          <label>Daily $<input id="budget-daily" type="number" step="0.01" style="width:8rem;padding:4px;background:#1a1a2e;border:1px solid #333;color:#e0e0e0;border-radius:4px"></label>
+          <label>Weekly $<input id="budget-weekly" type="number" step="0.01" style="width:8rem;padding:4px;background:#1a1a2e;border:1px solid #333;color:#e0e0e0;border-radius:4px"></label>
+          <button class="btn" onclick="saveBudget()">Save</button>
+          <span id="budget-status"></span>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -1213,12 +1253,33 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
         const r=await fetch('/api/costs'); const d=await r.json();
         function renderSummary(s){
           if(!s||s.error) return `<span class="err">${esc(s?.error||'No data')}</span>`;
-          return Object.entries(s).map(([k,v])=>`<div class="stat"><span class="label">${esc(k)}</span><span class="value">${typeof v==='number'?'$'+v.toFixed(2):esc(String(v))}</span></div>`).join('');
+          return Object.entries(s).map(([k,v])=>{
+            if(typeof v!=='number') return `<div class="stat"><span class="label">${esc(k)}</span><span class="value">${esc(String(v))}</span></div>`;
+            const isCost=k.toLowerCase().includes('cost')||k.toLowerCase().includes('usd');
+            const fmt=isCost?'$'+v.toFixed(4):v.toLocaleString();
+            return `<div class="stat"><span class="label">${esc(k)}</span><span class="value">${fmt}</span></div>`;
+          }).join('');
         }
         document.getElementById('costs-daily').innerHTML=renderSummary(d.daily);
         document.getElementById('costs-weekly').innerHTML=renderSummary(d.weekly);
       }catch(e){document.getElementById('costs-daily').innerHTML='<span class="err">Failed to load</span>';}
     }
+    async function fetchBudget(){
+      try{
+        const r=await fetch('/api/budget');const d=await r.json();
+        document.getElementById('budget-daily').value=d.daily_budget_usd||500;
+        document.getElementById('budget-weekly').value=d.weekly_budget_usd||2500;
+      }catch(e){}
+    }
+    async function saveBudget(){
+      const daily=parseFloat(document.getElementById('budget-daily').value)||500;
+      const weekly=parseFloat(document.getElementById('budget-weekly').value)||2500;
+      const r=await fetch('/api/budget',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({daily_budget_usd:daily,weekly_budget_usd:weekly})});
+      const d=await r.json();
+      document.getElementById('budget-status').textContent=d.status==='ok'?'Saved':'Error: '+d.error;
+      setTimeout(()=>document.getElementById('budget-status').textContent='',3000);
+    }
+    fetchBudget();
 
     /* --- Chat --- */
     let ws=null,chatInit=false;

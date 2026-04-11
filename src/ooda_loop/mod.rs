@@ -29,7 +29,7 @@ pub use types::{
 
 use std::time::Instant;
 
-use crate::error::SimardResult;
+use crate::error::{SimardError, SimardResult};
 use crate::goal_curation::load_goal_board;
 use crate::gym_bridge::ScoreDimensions;
 use crate::gym_scoring::GymSuiteScore;
@@ -65,6 +65,26 @@ pub fn run_ooda_cycle(
     bridges: &mut OodaBridges,
     config: &OodaConfig,
 ) -> SimardResult<CycleReport> {
+    // Budget enforcement: refuse to run if daily or weekly spend is exceeded.
+    if let Ok(daily) = crate::cost_tracking::daily_summary() {
+        if daily.total_cost_usd >= config.daily_budget_usd {
+            return Err(SimardError::BudgetExceeded {
+                period: "daily".to_string(),
+                spent: format!("${:.4}", daily.total_cost_usd),
+                limit: format!("${:.2}", config.daily_budget_usd),
+            });
+        }
+    }
+    if let Ok(weekly) = crate::cost_tracking::weekly_summary() {
+        if weekly.total_cost_usd >= config.weekly_budget_usd {
+            return Err(SimardError::BudgetExceeded {
+                period: "weekly".to_string(),
+                spent: format!("${:.4}", weekly.total_cost_usd),
+                limit: format!("${:.2}", config.weekly_budget_usd),
+            });
+        }
+    }
+
     // Only replace board if loaded one is non-empty (cold memory = keep local).
     if let Ok(board) = load_goal_board(&bridges.memory)
         && !board.active.is_empty()

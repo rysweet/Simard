@@ -1,0 +1,40 @@
+[Unit]
+Description=Simard OODA Daemon — autonomous observe-orient-decide-act loop
+After=network.target
+Documentation=https://github.com/rysweet/Simard
+
+[Service]
+Type=simple
+ExecStart=/home/azureuser/src/Simard/worktrees/main/target/release/simard ooda run
+WorkingDirectory=/home/azureuser/src/Simard/worktrees/main
+Restart=on-failure
+RestartSec=10
+
+# Budget and autonomy configuration (override via dashboard or drop-in)
+Environment=SIMARD_DAILY_BUDGET_USD=500
+Environment=SIMARD_WEEKLY_BUDGET_USD=2500
+Environment=SIMARD_AUTONOMY_LEVEL=unlimited
+Environment=SIMARD_LLM_PROVIDER=copilot
+Environment=HOME=/home/azureuser
+
+# Prevent destructive git actions
+Environment=SIMARD_GIT_GUARDRAILS=enabled
+Environment=SIMARD_GIT_PROTECTED_REPOS=/home/azureuser/src
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=4G
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/azureuser/.simard /home/azureuser/src /tmp
+ProtectHome=false
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=simard-ooda
+
+[Install]
+WantedBy=default.target
