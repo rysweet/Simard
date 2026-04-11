@@ -124,12 +124,16 @@ mod tests {
     use super::*;
     use crate::bridge::BridgeErrorPayload;
     use crate::bridge_subprocess::InMemoryBridgeTransport;
-    use serial_test::serial;
+
+    /// Mutex to serialize tests that mutate the `SIMARD_OPERATOR_NAME` env var.
+    /// `set_var`/`remove_var` are process-global so concurrent tests would race.
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     // ── resolve_operator_name ───────────────────────────────────────
 
     #[test]
     fn resolve_operator_name_default_fallback() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         unsafe { std::env::remove_var("SIMARD_OPERATOR_NAME") };
         let name = resolve_operator_name();
         assert_eq!(name, "operator");
@@ -137,6 +141,7 @@ mod tests {
 
     #[test]
     fn resolve_operator_name_from_env() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         unsafe { std::env::set_var("SIMARD_OPERATOR_NAME", "alice") };
         let name = resolve_operator_name();
         assert_eq!(name, "alice");
@@ -145,6 +150,7 @@ mod tests {
 
     #[test]
     fn resolve_operator_name_empty_env_falls_back() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         unsafe { std::env::set_var("SIMARD_OPERATOR_NAME", "") };
         let name = resolve_operator_name();
         assert_eq!(name, "operator");
@@ -192,6 +198,7 @@ mod tests {
 
     #[test]
     fn build_context_empty_memory() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         let bridge = empty_bridge();
         unsafe { std::env::remove_var("SIMARD_OPERATOR_NAME") };
         let ctx = build_live_meeting_context(&bridge);
@@ -201,6 +208,7 @@ mod tests {
 
     #[test]
     fn build_context_failing_bridge_shows_operator_fallback() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         let bridge = failing_bridge();
         unsafe { std::env::remove_var("SIMARD_OPERATOR_NAME") };
         let ctx = build_live_meeting_context(&bridge);
