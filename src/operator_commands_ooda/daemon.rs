@@ -120,17 +120,21 @@ pub fn run_ooda_daemon(
 
     // Try to open an LLM session for real autonomous work.
     // The provider is selected by SIMARD_LLM_PROVIDER (default: Copilot).
-    let session = SessionBuilder::new(OperatingMode::Orchestrator)
+    let session = match SessionBuilder::new(OperatingMode::Orchestrator)
         .node_id("ooda-daemon")
         .address("ooda-daemon://local")
         .adapter_tag("ooda")
-        .open();
-
-    if session.is_some() {
-        eprintln!("[simard] OODA daemon: LLM session opened for autonomous work");
-    } else {
-        eprintln!("[simard] OODA daemon: no LLM session available — running in bridge-only mode");
-    }
+        .open()
+    {
+        Ok(s) => {
+            eprintln!("[simard] OODA daemon: LLM session opened for autonomous work");
+            Some(s)
+        }
+        Err(e) => {
+            eprintln!("[simard] OODA daemon: LLM session failed: {e}");
+            None
+        }
+    };
 
     let mut bridges = OodaBridges {
         memory,

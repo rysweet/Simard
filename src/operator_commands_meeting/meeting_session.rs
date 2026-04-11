@@ -35,11 +35,18 @@ fn launch_real_meeting_bridge() -> Result<CognitiveMemoryBridge, Box<dyn std::er
 /// Open an agent session for the meeting REPL using the standard base type
 /// infrastructure. Same agent identity, same platform — just meeting mode.
 fn open_meeting_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeSession>> {
-    crate::session_builder::SessionBuilder::new(OperatingMode::Meeting)
+    match crate::session_builder::SessionBuilder::new(OperatingMode::Meeting)
         .node_id("meeting-repl")
         .address("meeting-repl://local")
         .adapter_tag("meeting-rustyclawd")
         .open()
+    {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!("[simard] meeting agent session failed: {e}");
+            None
+        }
+    }
 }
 
 /// Open an agent session for the meeting using the configured LLM provider.

@@ -122,10 +122,7 @@ pub fn plan_objective(objective: &str, inspection: &RepoInspection) -> SimardRes
         .address("engineer-planner://local")
         .adapter_tag("engineer-planner-rustyclawd")
         .open()
-        .ok_or_else(|| SimardError::PlanningUnavailable {
-            reason: "no LLM session available (check SIMARD_LLM_PROVIDER and auth config)"
-                .to_string(),
-        })?;
+        .map_err(|reason| SimardError::PlanningUnavailable { reason })?;
 
     let prompt = build_planning_prompt(objective, inspection);
     let outcome = session

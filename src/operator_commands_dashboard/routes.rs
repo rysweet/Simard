@@ -310,13 +310,20 @@ fn load_dashboard_meeting_prompt() -> String {
 }
 
 /// Open an agent session for the dashboard chat, using the same infrastructure
-/// as the meeting REPL.  Returns `None` when no LLM provider is configured.
+/// as the meeting REPL.  Returns the session or logs the error and returns `None`.
 fn open_dashboard_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeSession>> {
-    crate::session_builder::SessionBuilder::new(crate::identity::OperatingMode::Meeting)
+    match crate::session_builder::SessionBuilder::new(crate::identity::OperatingMode::Meeting)
         .node_id("dashboard-chat")
         .address("dashboard-chat://local")
         .adapter_tag("meeting-dashboard")
         .open()
+    {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!("[simard] dashboard chat session failed: {e}");
+            None
+        }
+    }
 }
 
 async fn ws_chat_handler(ws: WebSocketUpgrade) -> response::Response {
