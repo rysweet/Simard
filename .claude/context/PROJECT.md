@@ -10,7 +10,7 @@ Replace the sections below with information about your project.
 
 ---
 
-## Project: test-round-8
+## Project: main
 
 ## Overview
 
@@ -29,7 +29,6 @@ An autonomous engineer who drives and curates agentic coding systems. Named afte
 - **Language**: Python
 - **Language**: JavaScript/TypeScript
 - **Language**: Rust
-- **Language**: Go
 - **Framework**: [Main framework if applicable]
 - **Database**: [Database system if applicable]
 

@@ -297,6 +297,28 @@ pub fn run_ooda_cycle(
         eprintln!("[simard] OODA curate: failed to persist goal board: {e}");
     }
 
+    // Also write the board to disk so the dashboard can read it.
+    {
+        let state_root = std::env::var("SIMARD_STATE_ROOT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".into());
+                std::path::PathBuf::from(home).join(".simard")
+            });
+        let goal_path = state_root.join("goal_records.json");
+        if let Err(e) = std::fs::create_dir_all(&state_root) {
+            eprintln!("[simard] OODA curate: failed to create state dir: {e}");
+        }
+        match serde_json::to_string_pretty(&state.active_goals) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&goal_path, json) {
+                    eprintln!("[simard] OODA curate: failed to write goal_records.json: {e}");
+                }
+            }
+            Err(e) => eprintln!("[simard] OODA curate: failed to serialize goal board: {e}"),
+        }
+    }
+
     // --- Memory consolidation: persistence at cycle end ---
     if let Err(e) =
         memory_consolidation::persistence_memory_operations(&cycle_session_id, &bridges.memory)

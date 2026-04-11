@@ -64,9 +64,22 @@ pub fn check_git_safety(workspace: &Path, args: &[&str]) -> Result<(), String> {
     if is_protected {
         let first_arg = args.first().copied().unwrap_or("");
         let safe_commands = [
-            "add", "commit", "checkout", "branch", "push", "pull", "fetch",
-            "stash", "status", "log", "diff", "show", "tag", "remote",
-            "config", "rev-parse",
+            "add",
+            "commit",
+            "checkout",
+            "branch",
+            "push",
+            "pull",
+            "fetch",
+            "stash",
+            "status",
+            "log",
+            "diff",
+            "show",
+            "tag",
+            "remote",
+            "config",
+            "rev-parse",
         ];
         if !safe_commands.contains(&first_arg) {
             return Err(format!(
@@ -96,10 +109,7 @@ mod tests {
 
     #[test]
     fn blocks_reset_hard() {
-        let result = check_git_safety(
-            &PathBuf::from("/tmp/repo"),
-            &["reset", "--hard", "HEAD~1"],
-        );
+        let result = check_git_safety(&PathBuf::from("/tmp/repo"), &["reset", "--hard", "HEAD~1"]);
         assert!(result.is_err());
     }
 
@@ -116,10 +126,7 @@ mod tests {
 
     #[test]
     fn allows_commit() {
-        let result = check_git_safety(
-            &PathBuf::from("/tmp/repo"),
-            &["commit", "-m", "fix: stuff"],
-        );
+        let result = check_git_safety(&PathBuf::from("/tmp/repo"), &["commit", "-m", "fix: stuff"]);
         assert!(result.is_ok());
     }
 
@@ -136,10 +143,7 @@ mod tests {
 
     #[test]
     fn blocks_delete_main_branch() {
-        let result = check_git_safety(
-            &PathBuf::from("/tmp/repo"),
-            &["branch", "-D", "main"],
-        );
+        let result = check_git_safety(&PathBuf::from("/tmp/repo"), &["branch", "-D", "main"]);
         assert!(result.is_err());
     }
 }
