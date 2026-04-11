@@ -80,7 +80,9 @@ impl ReviewSession {
             .node_id("review-pipeline")
             .address("review-pipeline://local")
             .adapter_tag("review-pipeline-rustyclawd")
-            .open()?;
+            .open()
+            .map_err(|e| eprintln!("[simard] review-pipeline session failed: {e}"))
+            .ok()?;
         Some(Self { session })
     }
 

@@ -138,24 +138,34 @@ impl SessionBuilder {
 
     /// Open a session using the configured LLM provider.
     ///
-    /// Returns `Some(session)` on success, `None` if the provider cannot open.
-    pub fn open(self) -> Option<Box<dyn BaseTypeSession>> {
+    /// Returns `Ok(session)` on success, `Err` with a diagnostic message
+    /// describing exactly which step failed.
+    pub fn open(self) -> Result<Box<dyn BaseTypeSession>, String> {
         let request = self.build_request();
         match self.provider {
             LlmProvider::Copilot => {
                 let tag = format!("{}-copilot", self.adapter_tag);
-                let mut session = CopilotSdkAdapter::registered(&tag)
-                    .and_then(|f| f.open_session(request))
-                    .ok()?;
-                session.open().ok()?;
-                Some(session)
+                let factory = CopilotSdkAdapter::registered(&tag)
+                    .map_err(|e| format!("CopilotSdkAdapter::registered({}): {}", tag, e))?;
+                let mut session = factory
+                    .open_session(request)
+                    .map_err(|e| format!("CopilotSdkAdapter::open_session({}): {}", tag, e))?;
+                session
+                    .open()
+                    .map_err(|e| format!("CopilotSdkAdapter::session.open({}): {}", tag, e))?;
+                Ok(session)
             }
             LlmProvider::RustyClawd => {
                 let tag = format!("{}-rustyclawd", self.adapter_tag);
-                let factory = RustyClawdAdapter::registered(&tag).ok()?;
-                let mut session = factory.open_session(request).ok()?;
-                session.open().ok()?;
-                Some(session)
+                let factory = RustyClawdAdapter::registered(&tag)
+                    .map_err(|e| format!("RustyClawdAdapter::registered({}): {}", tag, e))?;
+                let mut session = factory
+                    .open_session(request)
+                    .map_err(|e| format!("RustyClawdAdapter::open_session({}): {}", tag, e))?;
+                session
+                    .open()
+                    .map_err(|e| format!("RustyClawdAdapter::session.open({}): {}", tag, e))?;
+                Ok(session)
             }
         }
     }

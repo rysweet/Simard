@@ -124,6 +124,7 @@ mod tests {
     use super::*;
     use crate::bridge::BridgeErrorPayload;
     use crate::bridge_subprocess::InMemoryBridgeTransport;
+    use serial_test::serial;
 
     // ── resolve_operator_name ───────────────────────────────────────
 
