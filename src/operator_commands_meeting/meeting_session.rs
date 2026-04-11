@@ -16,11 +16,11 @@ fn load_meeting_system_prompt() -> String {
     std::fs::read_to_string(&path).unwrap_or_default()
 }
 
-/// Launch the Python memory bridge for meeting mode (mandatory).
+/// Launch the Python memory server for meeting mode (mandatory).
 ///
 /// Uses the same `BridgeLauncher` infrastructure as engineer mode: locates the
-/// `python/` directory, starts `simard_memory_bridge.py`, and connects to LadybugDB.
-/// Fails if the bridge cannot start — cognitive memory is required.
+/// `python/` directory, starts `simard_memory_server.py`, and connects to LadybugDB.
+/// Fails if the server cannot start — cognitive memory is required.
 fn launch_real_meeting_bridge() -> Result<CognitiveMemoryBridge, Box<dyn std::error::Error>> {
     let python_dir =
         find_python_dir().map_err(|e| format!("cognitive memory requires Python bridge: {e}"))?;

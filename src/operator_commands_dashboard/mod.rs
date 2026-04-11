@@ -4,9 +4,13 @@ mod routes;
 use std::net::SocketAddr;
 
 pub fn serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
-    let code = auth::init_login_code();
+    let (code, loaded) = auth::init_login_code();
     eprintln!("\n  🌲 Simard Dashboard");
-    eprintln!("  Login code: {code}");
+    if loaded {
+        eprintln!("  Login code: {code} (loaded from ~/.simard/.dashkey)");
+    } else {
+        eprintln!("  Login code: {code} (saved to ~/.simard/.dashkey)");
+    }
     eprintln!("  Open http://localhost:{port} and enter the code\n");
 
     let rt = tokio::runtime::Builder::new_multi_thread()

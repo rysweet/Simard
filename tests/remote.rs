@@ -3,6 +3,7 @@
 //! All tests use a mock azlin executor — no real VMs are created.
 //! Tests verify the full session lifecycle: create, deploy, PTY, transfer,
 //! memory snapshot round-trip, and destroy.
+#![allow(deprecated)]
 
 use std::path::PathBuf;
 use std::sync::Mutex;

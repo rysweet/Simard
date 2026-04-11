@@ -1,5 +1,18 @@
 //! Memory snapshot replication for remote agent sessions.
 //!
+//! # Deprecated
+//!
+//! This module's JSON-snapshot replication approach is superseded by the
+//! amplihack hive-mind DHT+bloom gossip protocol. The memory bridge now
+//! uses `Memory('simard', topology='distributed')` which handles cross-agent
+//! replication automatically via the `DistributedHiveGraph`.
+//!
+//! Prefer the hive-mind approach for new code. This module is retained for
+//! backward compatibility with existing snapshot files and one-shot migration
+//! scenarios where the hive network is unavailable.
+//!
+//! ## Original design
+//!
 //! When an agent migrates to a remote VM, it needs to carry its cognitive
 //! memory state. This module exports facts and procedures from a local
 //! `CognitiveMemoryBridge`, serializes them into a `MemorySnapshot`, and
@@ -68,9 +81,13 @@ impl MemorySnapshot {
 
 /// Export a memory snapshot from a cognitive memory bridge.
 ///
-/// Queries the bridge for facts (using a broad wildcard query) and all
-/// recallable procedures. The snapshot is written to the given path as
-/// JSON if a path is provided, and always returned in memory.
+/// # Deprecated
+/// Use the hive-mind distributed topology instead. The memory bridge now
+/// replicates facts automatically via DHT+bloom gossip.
+#[deprecated(
+    since = "0.13.0",
+    note = "Use Memory('simard', topology='distributed') hive-mind replication instead of JSON snapshots"
+)]
 pub fn export_memory_snapshot(
     bridge: &CognitiveMemoryBridge,
     agent_name: &str,
@@ -119,11 +136,12 @@ pub fn export_memory_snapshot(
 
 /// Import a memory snapshot into a cognitive memory bridge.
 ///
-/// Each fact and procedure from the snapshot is stored into the target
-/// bridge. Existing items with the same content are overwritten (the
-/// bridge server handles deduplication by concept/name).
-///
-/// Returns the count of items imported (facts + procedures).
+/// # Deprecated
+/// Use the hive-mind distributed topology instead.
+#[deprecated(
+    since = "0.13.0",
+    note = "Use Memory('simard', topology='distributed') hive-mind replication instead of JSON snapshots"
+)]
 pub fn import_memory_snapshot(
     bridge: &CognitiveMemoryBridge,
     snapshot: &MemorySnapshot,
@@ -150,6 +168,13 @@ pub fn import_memory_snapshot(
 }
 
 /// Load a memory snapshot from a JSON file on disk.
+///
+/// # Deprecated
+/// Use the hive-mind distributed topology instead.
+#[deprecated(
+    since = "0.13.0",
+    note = "Use Memory('simard', topology='distributed') hive-mind replication instead of JSON snapshots"
+)]
 pub fn load_snapshot_from_file(path: &Path) -> SimardResult<MemorySnapshot> {
     let content = std::fs::read_to_string(path).map_err(|e| SimardError::PersistentStoreIo {
         store: "memory-snapshot".to_string(),
@@ -176,6 +201,7 @@ fn current_epoch_seconds() -> SimardResult<u64> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::bridge_subprocess::InMemoryBridgeTransport;

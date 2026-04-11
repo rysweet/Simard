@@ -18,5 +18,6 @@ mod repl;
 mod test_support;
 
 // Re-export all public items so `crate::meeting_repl::X` still works.
+pub use auto_capture::auto_capture_structured_items;
 pub use command::{MeetingCommand, parse_meeting_command};
 pub use repl::run_meeting_repl;

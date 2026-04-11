@@ -1,16 +1,16 @@
-"""Cognitive memory bridge server for Simard.
+"""Cognitive memory server for Simard.
 
 Extends the base BridgeServer to expose all six cognitive memory types
-via the ``memory.*`` method namespace. Each handler maps JSON parameters
-to CognitiveMemory method calls and returns JSON-serializable results
-matching the Rust types in ``memory_cognitive.rs``.
+via the ``memory.*`` method namespace. Uses ``Memory('simard', topology=...)``
+from the amplihack facade for automatic hive-mind DHT+bloom gossip
+replication between distributed agents.
 
 Usage:
-    python3 simard_memory_bridge.py --agent-name simard --db-path /tmp/simard_mem
+    python3 simard_memory_server.py --agent-name simard --db-path /tmp/simard_mem
+    python3 simard_memory_server.py --agent-name simard --topology distributed
 
 The server reads newline-delimited JSON requests from stdin and writes
-responses to stdout, following the bridge protocol defined in
-``bridge_server.py``.
+responses to stdout, following the protocol defined in ``bridge_server.py``.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 from bridge_server import BridgeServer  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# Locate amplihack-memory-lib
+# Locate amplihack-memory-lib and amplihack facade on sys.path
 # ---------------------------------------------------------------------------
 
 _MEMORY_LIB_CANDIDATES = [
@@ -39,6 +39,11 @@ _MEMORY_LIB_CANDIDATES = [
     / "amplihack-memory-lib"
     / "src",
     Path.home() / "src" / "amplirusty" / "amplihack-memory-lib" / "src",
+]
+
+_AMPLIHACK_CANDIDATES = [
+    Path.home() / ".amplihack" / "src",
+    Path.home() / "src" / "amplihack" / "src",
 ]
 
 
@@ -63,22 +68,92 @@ def _ensure_memory_lib_on_path() -> None:
     )
 
 
-_ensure_memory_lib_on_path()
+def _ensure_amplihack_on_path() -> None:
+    """Add amplihack to sys.path. Raises ImportError if not found."""
+    try:
+        from amplihack.memory.facade import Memory  # noqa: F401
 
+        return
+    except ImportError:
+        pass
+
+    for candidate in _AMPLIHACK_CANDIDATES:
+        if (candidate / "amplihack" / "memory" / "facade.py").exists():
+            sys.path.insert(0, str(candidate))
+            try:
+                from amplihack.memory.facade import Memory  # noqa: F401
+
+                return
+            except ImportError:
+                continue
+
+    raise ImportError(
+        "Cannot find amplihack Memory facade. "
+        "Expected at one of: "
+        + ", ".join(str(c / "amplihack" / "memory" / "facade.py") for c in _AMPLIHACK_CANDIDATES)
+    )
+
+
+_ensure_memory_lib_on_path()
+_ensure_amplihack_on_path()
+
+from amplihack.memory.facade import Memory  # noqa: E402
 from amplihack_memory.cognitive_memory import CognitiveMemory  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# Bridge server
+# Memory server
 # ---------------------------------------------------------------------------
 
 
-class CognitiveMemoryBridgeServer(BridgeServer):
-    """Bridge server exposing CognitiveMemory over the stdio JSON protocol."""
+def _create_memory_backend(
+    agent_name: str, db_path: str, topology: str
+) -> CognitiveMemory:
+    """Create the memory backend via the amplihack Memory facade.
 
-    def __init__(self, agent_name: str, db_path: str) -> None:
+    The facade handles topology routing: 'single' for local-only,
+    'distributed' for hive-mind DHT+bloom gossip replication.
+    The underlying CognitiveMemory is extracted from the facade's adapter
+    so the server can expose all six cognitive memory types.
+    """
+    facade = Memory(
+        agent_name,
+        topology=topology,
+        storage_path=db_path,
+    )
+
+    adapter = getattr(facade, "_adapter", None)
+    cognitive_mem = getattr(adapter, "memory", None) if adapter else None
+
+    if not isinstance(cognitive_mem, CognitiveMemory):
+        raise RuntimeError(
+            f"Memory facade (topology={topology}) did not produce a CognitiveMemory. "
+            f"Got adapter={type(adapter).__name__}, "
+            f"memory={type(cognitive_mem).__name__ if cognitive_mem else 'None'}. "
+            f"Check amplihack Memory facade configuration."
+        )
+
+    # Keep facade alive for hive-mind gossip/replication
+    cognitive_mem._hive_facade = facade  # type: ignore[attr-defined]
+    print(
+        f"[simard-memory] Memory facade active (topology={topology}) "
+        f"for agent '{agent_name}'",
+        file=sys.stderr,
+    )
+    return cognitive_mem
+
+
+class CognitiveMemoryServer(BridgeServer):
+    """Server exposing CognitiveMemory over the stdio JSON protocol.
+
+    Memory is backed by the amplihack ``Memory(topology=...)`` facade
+    which provides automatic hive-mind replication via DHT+bloom gossip
+    when topology='distributed'.
+    """
+
+    def __init__(self, agent_name: str, db_path: str, topology: str = "single") -> None:
         super().__init__("cognitive-memory")
-        self._mem = CognitiveMemory(agent_name=agent_name, db_path=db_path)
+        self._mem = _create_memory_backend(agent_name, db_path, topology)
 
         # Sensory
         self.register("memory.record_sensory", self._handle_record_sensory)
@@ -313,7 +388,7 @@ class CognitiveMemoryBridgeServer(BridgeServer):
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Simard cognitive memory bridge server"
+        description="Simard cognitive memory server"
     )
     parser.add_argument(
         "--agent-name",
@@ -325,15 +400,23 @@ def main() -> None:
         default=None,
         help="Path for the LadybugDB database directory (default: temp dir)",
     )
+    parser.add_argument(
+        "--topology",
+        choices=["single", "distributed"],
+        default="distributed",
+        help="Memory topology: 'single' for local-only, 'distributed' for "
+        "hive-mind DHT+bloom gossip replication (default: distributed)",
+    )
     args = parser.parse_args()
 
     db_path = args.db_path
     if db_path is None:
         db_path = str(Path(tempfile.gettempdir()) / "simard_cognitive_memory")
 
-    server = CognitiveMemoryBridgeServer(
+    server = CognitiveMemoryServer(
         agent_name=args.agent_name,
         db_path=db_path,
+        topology=args.topology,
     )
     server.run()
 

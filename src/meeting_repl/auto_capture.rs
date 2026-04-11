@@ -116,7 +116,7 @@ pub(super) fn auto_detect_structured_items(user_text: &str, agent_text: &str) ->
 }
 
 /// Record auto-captured items into the meeting session and print notifications.
-pub(super) fn auto_capture_structured_items<W: Write>(
+pub fn auto_capture_structured_items<W: Write>(
     session: &mut MeetingSession,
     user_text: &str,
     agent_text: &str,

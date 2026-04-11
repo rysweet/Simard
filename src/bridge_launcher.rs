@@ -54,6 +54,7 @@ fn build_python_path() -> String {
         "/home/azureuser/src/amplirusty/amplihack-memory-lib/src",
         "/home/azureuser/src/agent-kgpacks",
         "/home/azureuser/src/amplihack/src",
+        "/home/azureuser/.amplihack/src",
     ];
     let mut paths: Vec<String> = candidates
         .iter()
@@ -108,7 +109,7 @@ pub fn launch_memory_bridge(
     python_dir: &Path,
 ) -> SimardResult<CognitiveMemoryBridge> {
     set_python_path();
-    let script = python_dir.join("simard_memory_bridge.py");
+    let script = python_dir.join("simard_memory_server.py");
     let transport = make_transport(
         "cognitive-memory",
         &script,
@@ -117,6 +118,8 @@ pub fn launch_memory_bridge(
             agent_name.to_string(),
             "--db-path".to_string(),
             db_path.to_string_lossy().to_string(),
+            "--topology".to_string(),
+            "distributed".to_string(),
         ],
     );
     if !check_health("memory", transport.as_ref()) {

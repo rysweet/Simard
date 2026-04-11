@@ -1,4 +1,5 @@
 use axum::{extract::Request, http::StatusCode, middleware::Next, response::Response};
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 /// The login code generated at startup, printed to stderr for the operator.
@@ -10,11 +11,41 @@ fn sessions() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     SESSIONS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
 }
 
-/// Generate and print the one-time login code. Call once at startup.
-pub fn init_login_code() -> String {
+/// Path to the persisted dashboard login code: `~/.simard/.dashkey`.
+fn dashkey_path() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".simard").join(".dashkey"))
+}
+
+/// Initialize the login code, persisting it to `~/.simard/.dashkey`.
+///
+/// If the file exists and contains a non-empty code, reuse it.
+/// Otherwise generate a fresh code, write it to disk, and return it.
+/// Returns `(code, loaded_from_file)`.
+pub fn init_login_code() -> (String, bool) {
+    // Try to load an existing dashkey
+    if let Some(path) = dashkey_path()
+        && let Ok(contents) = std::fs::read_to_string(&path)
+    {
+        let existing = contents.trim().to_string();
+        if !existing.is_empty() {
+            LOGIN_CODE.set(existing.clone()).ok();
+            return (existing, true);
+        }
+    }
+
+    // Generate a fresh code
     let code: String = uuid::Uuid::now_v7().to_string()[..8].to_string();
     LOGIN_CODE.set(code.clone()).ok();
-    code
+
+    // Persist to ~/.simard/.dashkey
+    if let Some(path) = dashkey_path() {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, &code);
+    }
+
+    (code, false)
 }
 
 /// Validate the login code, return a session token if correct.
@@ -118,7 +149,7 @@ mod tests {
 
     #[test]
     fn init_login_code_returns_8_char_string() {
-        let code = init_login_code();
+        let (code, _) = init_login_code();
         assert_eq!(
             code.len(),
             8,
@@ -128,7 +159,7 @@ mod tests {
 
     #[test]
     fn init_login_code_is_nonempty() {
-        let code = init_login_code();
+        let (code, _) = init_login_code();
         assert!(!code.is_empty());
     }
 
@@ -144,7 +175,7 @@ mod tests {
 
     #[test]
     fn try_login_correct_code_returns_token() {
-        let code = init_login_code();
+        let (code, _) = init_login_code();
         // LOGIN_CODE is a OnceLock, so it may already be set from a prior test;
         // we test with whatever code was stored
         if let Some(stored) = LOGIN_CODE.get() {
