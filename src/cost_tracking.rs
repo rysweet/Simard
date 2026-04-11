@@ -74,6 +74,15 @@ pub fn record_cost(
     let completion_tokens_est = estimate_tokens(completion_chars);
     let cost_usd_est = estimate_cost(prompt_tokens_est, completion_tokens_est);
 
+    tracing::debug!(
+        session_id,
+        model,
+        prompt_tokens_est,
+        completion_tokens_est,
+        cost_usd_est,
+        "recording LLM cost"
+    );
+
     let entry = CostEntry {
         timestamp: Utc::now(),
         session_id: session_id.to_string(),

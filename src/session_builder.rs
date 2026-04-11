@@ -140,6 +140,7 @@ impl SessionBuilder {
     ///
     /// Returns `Ok(session)` on success, `Err` with a diagnostic message
     /// describing exactly which step failed.
+    #[tracing::instrument(skip(self), fields(provider = ?self.provider, tag = %self.adapter_tag))]
     pub fn open(self) -> Result<Box<dyn BaseTypeSession>, String> {
         let request = self.build_request();
         match self.provider {

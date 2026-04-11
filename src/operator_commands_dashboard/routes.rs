@@ -727,9 +727,16 @@ async fn logs() -> Json<Value> {
         }
     }
 
+    let cost_log = {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
+        let ledger = std::path::PathBuf::from(home).join(".simard/costs/ledger.jsonl");
+        read_tail(&ledger.to_string_lossy(), 50).unwrap_or_default()
+    };
+
     Json(json!({
         "daemon_log_lines": daemon_log,
         "ooda_transcripts": transcripts,
+        "cost_log_lines": cost_log,
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
 }
