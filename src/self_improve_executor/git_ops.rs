@@ -7,8 +7,12 @@ use crate::error::{SimardError, SimardResult};
 use crate::git_guardrails;
 
 pub(crate) fn git_diff(workspace: &Path) -> SimardResult<String> {
-    git_guardrails::check_git_safety(workspace, &["diff", "HEAD"])
-        .map_err(|e| SimardError::GitCommandFailed { command: "git diff HEAD".into(), reason: e })?;
+    git_guardrails::check_git_safety(workspace, &["diff", "HEAD"]).map_err(|e| {
+        SimardError::GitCommandFailed {
+            command: "git diff HEAD".into(),
+            reason: e,
+        }
+    })?;
     let output = Command::new("git")
         .args(["diff", "HEAD"])
         .current_dir(workspace)
@@ -29,10 +33,18 @@ pub(crate) fn git_diff(workspace: &Path) -> SimardResult<String> {
 }
 
 pub(crate) fn git_commit(workspace: &Path, message: &str) -> SimardResult<()> {
-    git_guardrails::check_git_safety(workspace, &["add", "-A"])
-        .map_err(|e| SimardError::GitCommandFailed { command: "git add -A".into(), reason: e })?;
-    git_guardrails::check_git_safety(workspace, &["commit", "-m", message])
-        .map_err(|e| SimardError::GitCommandFailed { command: "git commit".into(), reason: e })?;
+    git_guardrails::check_git_safety(workspace, &["add", "-A"]).map_err(|e| {
+        SimardError::GitCommandFailed {
+            command: "git add -A".into(),
+            reason: e,
+        }
+    })?;
+    git_guardrails::check_git_safety(workspace, &["commit", "-m", message]).map_err(|e| {
+        SimardError::GitCommandFailed {
+            command: "git commit".into(),
+            reason: e,
+        }
+    })?;
     let add_output = Command::new("git")
         .args(["add", "-A"])
         .current_dir(workspace)
@@ -69,10 +81,18 @@ pub(crate) fn git_commit(workspace: &Path, message: &str) -> SimardResult<()> {
 }
 
 pub(crate) fn rollback(workspace: &Path) -> SimardResult<()> {
-    git_guardrails::check_git_safety(workspace, &["checkout", "--", "."])
-        .map_err(|e| SimardError::GitCommandFailed { command: "git checkout -- .".into(), reason: e })?;
-    git_guardrails::check_git_safety(workspace, &["clean", "-fd"])
-        .map_err(|e| SimardError::GitCommandFailed { command: "git clean -fd".into(), reason: e })?;
+    git_guardrails::check_git_safety(workspace, &["checkout", "--", "."]).map_err(|e| {
+        SimardError::GitCommandFailed {
+            command: "git checkout -- .".into(),
+            reason: e,
+        }
+    })?;
+    git_guardrails::check_git_safety(workspace, &["clean", "-fd"]).map_err(|e| {
+        SimardError::GitCommandFailed {
+            command: "git clean -fd".into(),
+            reason: e,
+        }
+    })?;
     // Restore modified tracked files.
     let checkout = Command::new("git")
         .args(["checkout", "--", "."])

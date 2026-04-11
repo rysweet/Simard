@@ -16,6 +16,11 @@ Environment=SIMARD_WEEKLY_BUDGET_USD=2500
 Environment=SIMARD_AUTONOMY_LEVEL=unlimited
 Environment=SIMARD_LLM_PROVIDER=copilot
 Environment=HOME=/home/azureuser
+Environment=SIMARD_STATE_ROOT=/home/azureuser/.simard
+
+# Structured tracing — set OTEL_EXPORTER_OTLP_ENDPOINT to enable OTLP export
+# Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+Environment=RUST_LOG=info
 
 # Prevent destructive git actions
 Environment=SIMARD_GIT_GUARDRAILS=enabled

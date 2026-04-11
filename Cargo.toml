@@ -27,6 +27,10 @@ crc32fast = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 ctrlc = "3.4"
+opentelemetry = "0.27"
+opentelemetry-otlp = "0.27"
+tracing-opentelemetry = "0.28"
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -230,8 +230,15 @@ impl Display for SimardError {
             Self::BridgeError(msg) => {
                 write!(f, "bridge error: {msg}")
             }
-            Self::BudgetExceeded { period, spent, limit } => {
-                write!(f, "{period} budget exceeded: {spent} spent of {limit} limit")
+            Self::BudgetExceeded {
+                period,
+                spent,
+                limit,
+            } => {
+                write!(
+                    f,
+                    "{period} budget exceeded: {spent} spent of {limit} limit"
+                )
             }
             Self::PlanningUnavailable { reason } => {
                 write!(f, "LLM-based planning is unavailable: {reason}")

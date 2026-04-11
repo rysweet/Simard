@@ -17,11 +17,17 @@ pub fn build_router() -> Router {
         .route("/api/costs", get(costs))
         .route("/api/budget", get(get_budget).post(set_budget))
         .route("/api/goals", get(goals))
+        .route("/api/goals/seed", post(seed_goals))
         .route("/api/distributed", get(distributed))
-        .route("/api/hosts", get(get_hosts).post(add_host).delete(remove_host))
+        .route(
+            "/api/hosts",
+            get(get_hosts).post(add_host).delete(remove_host),
+        )
         .route("/api/logs", get(logs))
         .route("/api/processes", get(processes))
         .route("/api/memory", get(memory_metrics))
+        .route("/api/memory/search", post(memory_search))
+        .route("/api/traces", get(traces))
         .route("/ws/chat", get(ws_chat_handler))
         .route("/api/login", post(login))
         .route("/login", get(login_page))
@@ -186,7 +192,9 @@ async fn costs() -> Json<Value> {
 /// Budget config file path.
 fn budget_config_path() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
-    std::path::PathBuf::from(home).join(".simard").join("budget.json")
+    std::path::PathBuf::from(home)
+        .join(".simard")
+        .join("budget.json")
 }
 
 async fn get_budget() -> Json<Value> {
@@ -208,7 +216,10 @@ async fn set_budget(Json(body): Json<Value>) -> Json<Value> {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    match std::fs::write(&path, serde_json::to_string_pretty(&body).unwrap_or_default()) {
+    match std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&body).unwrap_or_default(),
+    ) {
         Ok(_) => Json(json!({"status": "ok"})),
         Err(e) => Json(json!({"error": format!("{e}")})),
     }
@@ -243,6 +254,202 @@ async fn goals() -> Json<Value> {
         }
         Err(_) => Json(json!({"active": [], "backlog": [], "active_count": 0, "backlog_count": 0})),
     }
+}
+
+async fn seed_goals() -> Json<Value> {
+    let state_root = resolve_state_root();
+    let goal_path = state_root.join("goal_records.json");
+
+    // Only seed if no goals exist yet
+    if goal_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&goal_path) {
+            if let Ok(val) = serde_json::from_str::<Value>(&content) {
+                let has_goals = val
+                    .get("active")
+                    .and_then(|a| a.as_array())
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false);
+                if has_goals {
+                    return Json(
+                        json!({"status": "already_seeded", "message": "Goals already exist"}),
+                    );
+                }
+            }
+        }
+    }
+
+    let seed_board = json!({
+        "active": [
+            {
+                "id": "self-improvement",
+                "description": "Continuously improve own capabilities through gym scenarios and self-evaluation",
+                "priority": 1,
+                "status": "in_progress",
+                "assigned_to": "simard",
+                "progress": [{"timestamp": chrono::Utc::now().to_rfc3339(), "note": "Goal seeded via dashboard"}]
+            },
+            {
+                "id": "knowledge-growth",
+                "description": "Expand knowledge base through meetings, research, and cognitive memory consolidation",
+                "priority": 2,
+                "status": "in_progress",
+                "assigned_to": "simard",
+                "progress": [{"timestamp": chrono::Utc::now().to_rfc3339(), "note": "Goal seeded via dashboard"}]
+            },
+            {
+                "id": "operational-health",
+                "description": "Maintain system health: budget compliance, resource usage, and error rates within thresholds",
+                "priority": 3,
+                "status": "in_progress",
+                "assigned_to": "simard",
+                "progress": [{"timestamp": chrono::Utc::now().to_rfc3339(), "note": "Goal seeded via dashboard"}]
+            }
+        ],
+        "backlog": [
+            {
+                "id": "distributed-sync",
+                "description": "Establish hive mind sync with remote Simard instances for cross-agent knowledge sharing",
+                "source": "dashboard-seed",
+                "score": 0.7
+            },
+            {
+                "id": "meeting-quality",
+                "description": "Improve meeting facilitation quality and actionable outcome generation",
+                "source": "dashboard-seed",
+                "score": 0.6
+            }
+        ]
+    });
+
+    if let Err(e) = std::fs::create_dir_all(&state_root) {
+        return Json(
+            json!({"status": "error", "error": format!("failed to create state dir: {e}")}),
+        );
+    }
+    match std::fs::write(
+        &goal_path,
+        serde_json::to_string_pretty(&seed_board).unwrap(),
+    ) {
+        Ok(()) => {
+            Json(json!({"status": "ok", "message": "Seeded 3 active goals and 2 backlog items"}))
+        }
+        Err(e) => Json(json!({"status": "error", "error": format!("write failed: {e}")})),
+    }
+}
+
+async fn memory_search(Json(body): Json<Value>) -> Json<Value> {
+    let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
+    if query.is_empty() {
+        return Json(json!({"status": "error", "error": "query is required"}));
+    }
+
+    // Search through memory_records.json, evidence_records.json for matching content
+    let state_root = resolve_state_root();
+    let mut results: Vec<Value> = Vec::new();
+
+    for (file, label) in [
+        ("memory_records.json", "memory"),
+        ("evidence_records.json", "evidence"),
+        ("goal_records.json", "goal"),
+    ] {
+        let path = state_root.join(file);
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(val) = serde_json::from_str::<Value>(&content) {
+                let search_in = |v: &Value| -> bool {
+                    let s = serde_json::to_string(v).unwrap_or_default().to_lowercase();
+                    s.contains(&query.to_lowercase())
+                };
+
+                match val {
+                    Value::Array(arr) => {
+                        for item in arr.iter().filter(|i| search_in(i)).take(10) {
+                            results.push(json!({"source": label, "data": item}));
+                        }
+                    }
+                    Value::Object(ref map) => {
+                        // For goal board format: search in active and backlog
+                        if let Some(Value::Array(active)) = map.get("active") {
+                            for item in active.iter().filter(|i| search_in(i)).take(5) {
+                                results.push(json!({"source": "active_goal", "data": item}));
+                            }
+                        }
+                        if let Some(Value::Array(backlog)) = map.get("backlog") {
+                            for item in backlog.iter().filter(|i| search_in(i)).take(5) {
+                                results.push(json!({"source": "backlog_goal", "data": item}));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    Json(json!({
+        "query": query,
+        "result_count": results.len(),
+        "results": results,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    }))
+}
+
+async fn traces() -> Json<Value> {
+    // Read recent spans from the trace log file
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
+    let trace_sources = vec![(
+        std::path::PathBuf::from(&home).join(".simard/costs/ledger.jsonl"),
+        "cost",
+    )];
+
+    let mut spans: Vec<Value> = Vec::new();
+
+    for (path, source) in &trace_sources {
+        if let Some(lines) = read_tail(&path.to_string_lossy(), 100) {
+            for line in lines.iter().rev().take(50) {
+                if let Ok(val) = serde_json::from_str::<Value>(line) {
+                    spans.push(json!({
+                        "source": source,
+                        "data": val,
+                    }));
+                }
+            }
+        }
+    }
+
+    // Also read from journalctl if available (last 100 simard-ooda entries)
+    if let Ok(output) = tokio::process::Command::new("journalctl")
+        .args([
+            "--user",
+            "-u",
+            "simard-ooda",
+            "--no-pager",
+            "-n",
+            "50",
+            "-o",
+            "json",
+        ])
+        .output()
+        .await
+    {
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines().take(50) {
+                if let Ok(val) = serde_json::from_str::<Value>(line) {
+                    spans.push(json!({"source": "journald", "data": val}));
+                }
+            }
+        }
+    }
+
+    let otel_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
+
+    Json(json!({
+        "span_count": spans.len(),
+        "spans": spans,
+        "otel_enabled": otel_endpoint.is_some(),
+        "otel_endpoint": otel_endpoint,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    }))
 }
 
 async fn distributed() -> Json<Value> {
@@ -330,7 +537,9 @@ async fn distributed() -> Json<Value> {
 /// Hosts config file path.
 fn hosts_config_path() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
-    std::path::PathBuf::from(home).join(".simard").join("hosts.json")
+    std::path::PathBuf::from(home)
+        .join(".simard")
+        .join("hosts.json")
 }
 
 fn load_hosts() -> Vec<Value> {
@@ -344,7 +553,10 @@ fn save_hosts(hosts: &[Value]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, serde_json::to_string_pretty(hosts).unwrap_or_default())
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(hosts).unwrap_or_default(),
+    )
 }
 
 async fn get_hosts() -> Json<Value> {
@@ -353,12 +565,18 @@ async fn get_hosts() -> Json<Value> {
 
 async fn add_host(Json(body): Json<Value>) -> Json<Value> {
     let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("");
-    let rg = body.get("resource_group").and_then(|v| v.as_str()).unwrap_or("rysweet-linux-vm-pool");
+    let rg = body
+        .get("resource_group")
+        .and_then(|v| v.as_str())
+        .unwrap_or("rysweet-linux-vm-pool");
     if name.is_empty() {
         return Json(json!({"error": "name is required"}));
     }
     let mut hosts = load_hosts();
-    if hosts.iter().any(|h| h.get("name").and_then(|v| v.as_str()) == Some(name)) {
+    if hosts
+        .iter()
+        .any(|h| h.get("name").and_then(|v| v.as_str()) == Some(name))
+    {
         return Json(json!({"error": format!("host '{name}' already exists")}));
     }
     hosts.push(json!({
@@ -1058,6 +1276,7 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
     <div class="tab active" data-tab="overview">Overview</div>
     <div class="tab" data-tab="distributed">Distributed</div>
     <div class="tab" data-tab="goals">Goals</div>
+    <div class="tab" data-tab="traces">Traces</div>
     <div class="tab" data-tab="logs">Logs</div>
     <div class="tab" data-tab="processes">Processes</div>
     <div class="tab" data-tab="memory">Memory</div>
@@ -1097,12 +1316,28 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
 
   <div class="tab-content" id="tab-goals">
     <div class="card" style="margin-bottom:1rem">
-      <h2>Active Goals <button class="btn" onclick="fetchGoals()">Refresh</button></h2>
+      <h2>Active Goals
+        <button class="btn" onclick="fetchGoals()">Refresh</button>
+        <button class="btn" onclick="seedGoals()" style="margin-left:.5rem">Seed Default Goals</button>
+      </h2>
       <div id="goals-active"><span class="loading">Loading…</span></div>
     </div>
     <div class="card">
       <h2>Backlog</h2>
       <div id="goals-backlog"><span class="loading">Loading…</span></div>
+    </div>
+  </div>
+
+  <div class="tab-content" id="tab-traces">
+    <div class="card" style="margin-bottom:1rem">
+      <h2>OTEL Traces <button class="btn" onclick="fetchTraces()">Refresh</button></h2>
+      <div id="otel-status" style="margin-bottom:.75rem"><span class="loading">Loading…</span></div>
+      <div id="trace-list" class="log-box" style="max-height:600px;overflow-y:auto"><span class="loading">Loading…</span></div>
+    </div>
+    <div class="card">
+      <h2>Setup</h2>
+      <p style="color:#8b949e;font-size:.85rem">To enable full OTEL tracing, set <code>OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317</code> and run an OTEL collector (e.g. Jaeger, Grafana Tempo).</p>
+      <p style="color:#8b949e;font-size:.85rem;margin-top:.5rem">For systemd: <code>systemctl --user edit simard-ooda</code> and add the env var in an [Service] override.</p>
     </div>
   </div>
 
@@ -1128,6 +1363,14 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
       <div class="card"><h2>Memory Overview</h2><div id="mem-overview"><span class="loading">Loading…</span></div></div>
       <div class="card"><h2>Memory Files</h2><div id="mem-files"><span class="loading">Loading…</span></div></div>
     </div>
+    <div class="card" style="margin-top:1rem">
+      <h2>Memory Search</h2>
+      <div style="display:flex;gap:.5rem;align-items:center;margin-bottom:1rem">
+        <input id="mem-search-input" placeholder="Search memories…" style="flex:1;padding:6px;background:#1a1a2e;border:1px solid #333;color:#e0e0e0;border-radius:4px">
+        <button class="btn" onclick="searchMemory()">Search</button>
+      </div>
+      <div id="mem-search-results"></div>
+    </div>
   </div>
 
   <div class="tab-content" id="tab-costs">
@@ -1148,6 +1391,12 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
   <div class="tab-content" id="tab-chat">
     <div class="card" style="max-width:720px">
       <h2>Meeting Chat</h2>
+      <div style="background:#1a1a2e;border:1px solid #333;border-radius:6px;padding:.75rem;margin-bottom:1rem;font-size:.85rem;color:#8b949e">
+        <strong style="color:var(--accent)">💡 Meeting Help:</strong>
+        Use this chat or run <code>simard meeting &lt;topic&gt;</code> from the terminal.
+        Commands: <code>/close</code> end session, <code>/goals</code> review goals, <code>/status</code> system status.
+        Meetings generate handoff documents that the OODA daemon ingests as new goals.
+      </div>
       <div class="ws-status disconnected" id="ws-status">● Disconnected</div>
       <div id="chat-messages"></div>
       <div id="chat-input-row">
@@ -1171,6 +1420,7 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
         if(tab.dataset.tab==='distributed') fetchDistributed();
         if(tab.dataset.tab==='goals') fetchGoals();
         if(tab.dataset.tab==='costs') fetchCosts();
+        if(tab.dataset.tab==='traces') fetchTraces();
         if(tab.dataset.tab==='chat') initChat();
       });
     });
@@ -1350,6 +1600,64 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
         }else{document.getElementById('goals-backlog').innerHTML='<span class="loading">No backlog items</span>';}
       }catch(e){document.getElementById('goals-active').innerHTML='<span class="err">Failed to load</span>';}
     }
+
+    async function seedGoals(){
+      try{
+        const r=await fetch('/api/goals/seed',{method:'POST'});
+        const d=await r.json();
+        if(d.status==='ok'||d.status==='already_seeded'){
+          fetchGoals();
+        }else{
+          alert('Seed failed: '+(d.error||'unknown'));
+        }
+      }catch(e){alert('Seed failed: '+e);}
+    }
+
+    /* --- Traces --- */
+    async function fetchTraces(){
+      try{
+        const r=await fetch('/api/traces'); const d=await r.json();
+        const status=d.otel_enabled
+          ?`<span class="ok">OTEL enabled</span> → <code>${esc(d.otel_endpoint||'')}</code>`
+          :'<span class="warn">OTEL not configured</span> — set OTEL_EXPORTER_OTLP_ENDPOINT to enable';
+        document.getElementById('otel-status').innerHTML=`
+          <div class="stat"><span class="label">OTEL Status</span><span class="value">${status}</span></div>
+          <div class="stat"><span class="label">Collected Entries</span><span class="value">${d.span_count}</span></div>`;
+        if(d.spans?.length){
+          document.getElementById('trace-list').innerHTML=d.spans.map(s=>{
+            const data=s.data;
+            const ts=data.timestamp||data.__REALTIME_TIMESTAMP||data._SOURCE_REALTIME_TIMESTAMP||'';
+            const msg=data.MESSAGE||data.message||data.description||data.model||JSON.stringify(data).substring(0,200);
+            return`<div style="border-bottom:1px solid #222;padding:4px 0;font-size:.82rem">
+              <span style="color:#8b949e">[${esc(s.source)}]</span>
+              ${ts?'<span style="color:#58a6ff;margin:0 .5rem">'+esc(String(ts).substring(0,19))+'</span>':''}
+              <span>${esc(String(msg))}</span>
+            </div>`;
+          }).join('');
+        }else{document.getElementById('trace-list').innerHTML='<span class="loading">No trace data yet. Run the OODA daemon or make API calls to generate traces.</span>';}
+      }catch(e){document.getElementById('trace-list').innerHTML='<span class="err">Failed to load</span>';}
+    }
+
+    /* --- Memory Search --- */
+    async function searchMemory(){
+      const q=document.getElementById('mem-search-input').value.trim();
+      if(!q){document.getElementById('mem-search-results').innerHTML='<span class="warn">Enter a search term</span>';return;}
+      try{
+        const r=await fetch('/api/memory/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q})});
+        const d=await r.json();
+        if(d.results?.length){
+          document.getElementById('mem-search-results').innerHTML=`
+            <p style="color:#8b949e;font-size:.85rem">${d.result_count} result(s) for "${esc(d.query)}"</p>
+            ${d.results.map(r=>`<div style="border:1px solid #30363d;border-radius:6px;padding:.75rem;margin-bottom:.5rem">
+              <span class="badge">${esc(r.source)}</span>
+              <pre style="margin:.5rem 0 0;white-space:pre-wrap;font-size:.8rem;color:#c9d1d9">${esc(JSON.stringify(r.data,null,2).substring(0,500))}</pre>
+            </div>`).join('')}`;
+        }else{
+          document.getElementById('mem-search-results').innerHTML='<span class="loading">No results found</span>';
+        }
+      }catch(e){document.getElementById('mem-search-results').innerHTML='<span class="err">Search failed</span>';}
+    }
+    document.getElementById('mem-search-input')?.addEventListener('keypress',e=>{if(e.key==='Enter')searchMemory();});
 
     /* --- Costs --- */
     async function fetchCosts(){
