@@ -614,9 +614,32 @@ async fn index() -> axum::response::Html<String> {
 
 /// Load the meeting system prompt from disk.
 fn load_dashboard_meeting_prompt() -> String {
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("prompt_assets/simard/meeting_system.md");
-    std::fs::read_to_string(path).unwrap_or_default()
+    // Try known locations: binary-relative, then source tree via CARGO_MANIFEST_DIR (dev only)
+    let candidates = [
+        // Runtime: next to the binary
+        std::env::current_exe().ok().and_then(|p| {
+            p.parent()
+                .map(|d| d.join("prompt_assets/simard/meeting_system.md"))
+        }),
+        // Runtime: repo checkout (common on the Simard VM)
+        Some(
+            std::path::PathBuf::from(
+                std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string()),
+            )
+            .join("src/Simard/prompt_assets/simard/meeting_system.md"),
+        ),
+        // Build-time fallback for cargo run during development
+        Some(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("prompt_assets/simard/meeting_system.md"),
+        ),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        if let Ok(content) = std::fs::read_to_string(&candidate) {
+            return content;
+        }
+    }
+    String::new()
 }
 
 /// Open an agent session for the dashboard chat, using the same infrastructure
@@ -1131,7 +1154,8 @@ fn resolve_state_root() -> std::path::PathBuf {
     std::env::var("SIMARD_STATE_ROOT")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/simard-state")
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
+            std::path::PathBuf::from(home).join(".simard")
         })
 }
 
@@ -1266,9 +1290,10 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
 </head>
 <body>
   <header>
-    <h1>🌲 Simard Dashboard <span style="font-size:.75rem;color:#8b949e">v2</span></h1>
+    <h1>🌲 Simard Dashboard</h1>
     <div style="display:flex;align-items:center;gap:1rem">
-      <a href="https://github.com/rysweet/Simard/releases/latest" target="_blank" style="color:#3fb950;text-decoration:none;font-size:.85rem;border:1px solid #3fb950;padding:.2rem .6rem;border-radius:4px">📦 Download Latest</a>
+      <span id="header-version" style="font-size:.75rem;color:#8b949e"></span>
+      <a href="https://github.com/rysweet/Simard/releases/latest" target="_blank" style="color:#3fb950;text-decoration:none;font-size:.85rem;border:1px solid #3fb950;padding:.2rem .6rem;border-radius:4px">📦 Releases</a>
       <span id="clock" style="color:#8b949e;font-size:.85rem"></span>
     </div>
   </header>
@@ -1343,8 +1368,22 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
 
   <div class="tab-content" id="tab-logs">
     <div class="card" style="margin-bottom:1rem">
-      <h2>Daemon Log <button class="btn" onclick="fetchLogs()">Refresh</button></h2>
+      <h2>Daemon Log <button class="btn" onclick="fetchLogs()">Refresh</button> <button class="btn" onclick="copyLogContent('daemon-log')" style="margin-left:.3rem">📋 Copy</button></h2>
+      <div style="margin-bottom:.5rem;display:flex;gap:.5rem;align-items:center">
+        <input id="log-filter" placeholder="Filter logs…" style="flex:1;padding:4px 8px;background:var(--bg);border:1px solid var(--border);color:var(--fg);border-radius:4px;font-size:.85rem">
+        <select id="log-level-filter" style="padding:4px;background:var(--bg);border:1px solid var(--border);color:var(--fg);border-radius:4px;font-size:.85rem">
+          <option value="">All levels</option>
+          <option value="error">Errors</option>
+          <option value="warn">Warnings</option>
+          <option value="info">Info</option>
+        </select>
+        <span id="log-line-count" style="color:#8b949e;font-size:.8rem"></span>
+      </div>
       <div id="daemon-log" class="log-box"><span class="loading">Loading…</span></div>
+    </div>
+    <div class="card" style="margin-bottom:1rem">
+      <h2>Cost Ledger <button class="btn" onclick="copyLogContent('cost-log-box')">📋 Copy</button></h2>
+      <div id="cost-log-box" class="log-box" style="max-height:200px"><span class="loading">Loading…</span></div>
     </div>
     <h2 style="color:var(--accent);font-size:1rem;margin-bottom:.5rem">OODA Transcripts</h2>
     <div id="ooda-transcripts"><span class="loading">Loading…</span></div>
@@ -1352,7 +1391,7 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
 
   <div class="tab-content" id="tab-processes">
     <div class="card">
-      <h2>Active Simard Processes <button class="btn" onclick="fetchProcesses()">Refresh</button></h2>
+      <h2>Active Simard Processes <button class="btn" onclick="fetchProcesses()">Refresh</button> <span id="proc-auto-refresh" style="font-size:.75rem;color:#8b949e;font-weight:normal;margin-left:.5rem">⟳ auto-refreshing</span></h2>
       <div id="proc-count" style="margin-bottom:.5rem;color:#8b949e;font-size:.85rem"></div>
       <div id="proc-table"><span class="loading">Loading…</span></div>
     </div>
@@ -1397,7 +1436,7 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
         Commands: <code>/close</code> end session, <code>/goals</code> review goals, <code>/status</code> system status.
         Meetings generate handoff documents that the OODA daemon ingests as new goals.
       </div>
-      <div class="ws-status disconnected" id="ws-status">● Disconnected</div>
+      <div class="ws-status disconnected" id="ws-status">● Disconnected <button class="btn" onclick="initChat()" style="font-size:.75rem;padding:.1rem .4rem;margin-left:.5rem">Reconnect</button></div>
       <div id="chat-messages"></div>
       <div id="chat-input-row">
         <textarea id="chat-input" placeholder="Type a message… (/close to end session)"></textarea>
@@ -1407,6 +1446,32 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
   </div>
 
   <script>
+    /* --- Helpers --- */
+    function fmtB(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';return(b/1048576).toFixed(1)+' MB';}
+    function esc(s){if(s==null)return'';const d=document.createElement('div');d.textContent=String(s);return d.innerHTML;}
+    function timeAgo(ts){
+      if(!ts)return'—';
+      const d=new Date(ts);if(isNaN(d))return ts;
+      const s=Math.floor((Date.now()-d.getTime())/1000);
+      if(s<5)return'just now';if(s<60)return s+'s ago';
+      const m=Math.floor(s/60);if(m<60)return m+'m ago';
+      const h=Math.floor(m/60);if(h<24)return h+'h ago';
+      const days=Math.floor(h/24);return days+'d ago';
+    }
+    function copyLogContent(id){
+      const el=document.getElementById(id);if(!el)return;
+      navigator.clipboard.writeText(el.textContent||'').then(
+        ()=>{const prev=el.style.borderColor;el.style.borderColor='var(--green)';setTimeout(()=>el.style.borderColor=prev,800);},
+        ()=>{}
+      );
+    }
+
+    /* --- Active tab tracking for auto-refresh --- */
+    let activeTab='overview';
+    let tabRefreshTimers={};
+
+    function clearTabTimers(){Object.values(tabRefreshTimers).forEach(clearInterval);tabRefreshTimers={};}
+
     /* --- Tabs --- */
     document.querySelectorAll('.tab').forEach(tab=>{
       tab.addEventListener('click',()=>{
@@ -1414,8 +1479,10 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
         document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
         tab.classList.add('active');
         document.getElementById('tab-'+tab.dataset.tab).classList.add('active');
-        if(tab.dataset.tab==='logs') fetchLogs();
-        if(tab.dataset.tab==='processes') fetchProcesses();
+        activeTab=tab.dataset.tab;
+        clearTabTimers();
+        if(tab.dataset.tab==='logs') {fetchLogs();tabRefreshTimers.logs=setInterval(fetchLogs,15000);}
+        if(tab.dataset.tab==='processes') {fetchProcesses();tabRefreshTimers.proc=setInterval(fetchProcesses,10000);}
         if(tab.dataset.tab==='memory') fetchMemory();
         if(tab.dataset.tab==='distributed') fetchDistributed();
         if(tab.dataset.tab==='goals') fetchGoals();
@@ -1424,7 +1491,7 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
         if(tab.dataset.tab==='chat') initChat();
       });
     });
-    setInterval(()=>{document.getElementById('clock').textContent=new Date().toLocaleTimeString()},1000);
+    setInterval(()=>{document.getElementById('clock').textContent=new Date().toLocaleString()},1000);
 
     /* --- Status --- */
     async function fetchStatus(){
@@ -1433,42 +1500,47 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
         const dc=d.disk_usage_pct>90?'err':d.disk_usage_pct>70?'warn':'ok';
         const oc=d.ooda_daemon==='running'?'ok':(d.ooda_daemon==='stale'?'warn':'err');
         const shortHash=d.git_hash?d.git_hash.substring(0,7):'';
-        const versionLink=d.git_hash?`<a href="https://github.com/rysweet/Simard/commit/${d.git_hash}" target="_blank" style="color:#3fb950;text-decoration:none">v${d.version}</a> (<code>${shortHash}</code>)`:`v${d.version}`;
+        const versionLink=d.git_hash?`<a href="https://github.com/rysweet/Simard/commit/${d.git_hash}" target="_blank" style="color:#3fb950;text-decoration:none">v${esc(d.version)}</a> (<code>${shortHash}</code>)`:`v${esc(d.version)}`;
         let healthDetail='';
         if(d.daemon_health){
           const dh=d.daemon_health;
           healthDetail=` (cycle #${dh.cycle_number??'?'}`;
-          if(dh.timestamp) healthDetail+=`, last: ${new Date(dh.timestamp).toLocaleTimeString()}`;
+          if(dh.timestamp) healthDetail+=`, ${timeAgo(dh.timestamp)}`;
           healthDetail+=')';
         }
         document.getElementById('status').innerHTML=`
           <div class="stat"><span class="label">Version</span><span class="value">${versionLink}</span></div>
-          <div class="stat"><span class="label">OODA Daemon</span><span class="value ${oc}">${d.ooda_daemon}${healthDetail}</span></div>
+          <div class="stat"><span class="label">OODA Daemon</span><span class="value ${oc}">${esc(d.ooda_daemon)}${healthDetail}</span></div>
           <div class="stat"><span class="label">Active Processes</span><span class="value">${d.active_processes??0}</span></div>
           <div class="stat"><span class="label">Disk Usage</span><span class="value ${dc}">${d.disk_usage_pct??'?'}%</span></div>
-          <div class="stat"><span class="label">Updated</span><span class="value">${new Date(d.timestamp).toLocaleTimeString()}</span></div>`;
-      }catch(e){document.getElementById('status').innerHTML='<span class="err">Failed to load</span>';}
+          <div class="stat"><span class="label">Updated</span><span class="value">${timeAgo(d.timestamp)}</span></div>`;
+        document.getElementById('header-version').textContent='v'+d.version+' ('+shortHash+')';
+      }catch(e){document.getElementById('status').innerHTML='<span class="err">Failed to reach /api/status — is the dashboard server running?</span>';}
     }
 
     /* --- Issues --- */
     async function fetchIssues(){
       try{
-        const r=await fetch('/api/issues'); const issues=await r.json();
-        if(Array.isArray(issues)){
-          document.getElementById('issues-list').innerHTML=issues.map(i=>
-            `<li><span class="issue-num">#${i.number}</span>${i.title}</li>`
-          ).join('');
+        const r=await fetch('/api/issues'); const data=await r.json();
+        if(Array.isArray(data)){
+          if(!data.length){document.getElementById('issues-list').innerHTML='<li style="color:#8b949e">No open issues 🎉</li>';return;}
+          document.getElementById('issues-list').innerHTML=data.map(i=>{
+            const labels=(i.labels||[]).map(l=>`<span class="badge" style="margin-left:.3rem">${esc(l.name||l)}</span>`).join('');
+            return`<li><span class="issue-num">#${i.number}</span>${esc(i.title)}${labels}</li>`;
+          }).join('');
+        }else if(data.error){
+          document.getElementById('issues-list').innerHTML=`<li class="warn">${esc(data.error)} — is <code>gh</code> authenticated?</li>`;
         }
-      }catch(e){document.getElementById('issues-list').innerHTML='<li class="err">Failed to load</li>';}
+      }catch(e){document.getElementById('issues-list').innerHTML='<li class="err">Failed to load issues — check network</li>';}
     }
 
     /* --- Logs --- */
+    let allLogLines=[];
     async function fetchLogs(){
       try{
         const r=await fetch('/api/logs'); const d=await r.json();
-        const el=document.getElementById('daemon-log');
-        el.textContent=d.daemon_log_lines?.length?d.daemon_log_lines.join('\n'):'(no daemon log found)';
-        el.scrollTop=el.scrollHeight;
+        allLogLines=d.daemon_log_lines||[];
+        applyLogFilter();
         const tEl=document.getElementById('ooda-transcripts');
         if(d.ooda_transcripts?.length){
           tEl.innerHTML=d.ooda_transcripts.map(t=>`
@@ -1476,23 +1548,42 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
               <h3>${esc(t.name)} <span class="badge">${fmtB(t.size_bytes)}</span></h3>
               <div class="log-box" style="max-height:200px">${esc((t.preview_lines||[]).join('\n'))||'(empty)'}</div>
             </div>`).join('');
-        }else{tEl.innerHTML='<span class="loading">No OODA transcripts found</span>';}
-      }catch(e){document.getElementById('daemon-log').textContent='Failed to load logs';}
+        }else{tEl.innerHTML='<span style="color:#8b949e">No OODA transcripts found in state root. Run the OODA daemon to generate transcripts.</span>';}
+        const costEl=document.getElementById('cost-log-box');
+        if(d.cost_log_lines?.length){
+          costEl.textContent=d.cost_log_lines.join('\n');
+          costEl.scrollTop=costEl.scrollHeight;
+        }else{costEl.innerHTML='<span style="color:#8b949e">No cost ledger entries</span>';}
+      }catch(e){document.getElementById('daemon-log').textContent='Failed to load logs — check /api/logs endpoint';}
     }
+    function applyLogFilter(){
+      const filter=(document.getElementById('log-filter')?.value||'').toLowerCase();
+      const level=(document.getElementById('log-level-filter')?.value||'').toLowerCase();
+      let lines=allLogLines;
+      if(filter) lines=lines.filter(l=>l.toLowerCase().includes(filter));
+      if(level) lines=lines.filter(l=>l.toLowerCase().includes(level));
+      const el=document.getElementById('daemon-log');
+      el.textContent=lines.length?lines.join('\n'):'(no matching log lines)';
+      el.scrollTop=el.scrollHeight;
+      const countEl=document.getElementById('log-line-count');
+      if(countEl) countEl.textContent=`${lines.length}/${allLogLines.length} lines`;
+    }
+    document.getElementById('log-filter')?.addEventListener('input',applyLogFilter);
+    document.getElementById('log-level-filter')?.addEventListener('change',applyLogFilter);
 
     /* --- Processes --- */
     async function fetchProcesses(){
       try{
         const r=await fetch('/api/processes'); const d=await r.json();
-        document.getElementById('proc-count').textContent=`${d.count} process(es) detected`;
+        document.getElementById('proc-count').textContent=`${d.count} process(es) detected — updated ${timeAgo(d.timestamp)}`;
         if(d.processes?.length){
           document.getElementById('proc-table').innerHTML=`
             <table class="proc-table">
               <tr><th>PID</th><th>Uptime</th><th>Command</th><th>Arguments</th></tr>
-              ${d.processes.map(p=>`<tr><td>${esc(p.pid)}</td><td>${esc(p.uptime)}</td><td>${esc(p.command)}</td><td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.full_args)}</td></tr>`).join('')}
+              ${d.processes.map(p=>`<tr><td>${esc(p.pid)}</td><td>${esc(p.uptime)}</td><td>${esc(p.command)}</td><td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(p.full_args)}">${esc(p.full_args)}</td></tr>`).join('')}
             </table>`;
-        }else{document.getElementById('proc-table').innerHTML='<span class="loading">No Simard processes found</span>';}
-      }catch(e){document.getElementById('proc-table').innerHTML='<span class="err">Failed to load</span>';}
+        }else{document.getElementById('proc-table').innerHTML='<span style="color:#8b949e">No Simard/OODA/Copilot processes found. Is the daemon running?</span>';}
+      }catch(e){document.getElementById('proc-table').innerHTML='<span class="err">Failed to load — check /api/processes</span>';}
     }
 
     /* --- Memory --- */
@@ -1501,7 +1592,7 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
         const r=await fetch('/api/memory'); const d=await r.json();
         document.getElementById('mem-overview').innerHTML=`
           <div class="stat"><span class="label">Total Facts</span><span class="value">${d.total_facts}</span></div>
-          <div class="stat"><span class="label">Last Consolidation</span><span class="value">${d.last_consolidation?new Date(d.last_consolidation).toLocaleString():'N/A'}</span></div>
+          <div class="stat"><span class="label">Last Consolidation</span><span class="value">${d.last_consolidation?timeAgo(d.last_consolidation)+' ('+new Date(d.last_consolidation).toLocaleString()+')':'Never'}</span></div>
           <div class="stat"><span class="label">State Root</span><span class="value" style="font-size:.8rem;word-break:break-all">${esc(d.state_root)}</span></div>`;
         const files=[
           {key:'memory_records',label:'Memory Records'},
@@ -1510,63 +1601,75 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
           {key:'handoff',label:'Latest Handoff'}];
         document.getElementById('mem-files').innerHTML=files.map(f=>{
           const info=d[f.key]||{};
+          const modStr=info.modified?timeAgo(info.modified):'N/A';
           return`<div class="mem-file">
             <h3>${f.label} ${info.count!==undefined?'<span class="badge">'+info.count+' records</span>':''} <span class="badge">${fmtB(info.size_bytes||0)}</span></h3>
-            <div class="stat"><span class="label">Modified</span><span class="value">${info.modified?new Date(info.modified).toLocaleString():'N/A'}</span></div>
+            <div class="stat"><span class="label">Modified</span><span class="value">${modStr}</span></div>
           </div>`;}).join('');
-      }catch(e){document.getElementById('mem-overview').innerHTML='<span class="err">Failed to load</span>';}
+      }catch(e){document.getElementById('mem-overview').innerHTML='<span class="err">Failed to load memory data — check state root path</span>';}
     }
 
     /* --- Distributed --- */
     async function fetchDistributed(){
+      document.getElementById('cluster-topology').innerHTML='<span class="loading">Querying remote VMs… (this may take 10-30s)</span>';
       try{
         const r=await fetch('/api/distributed'); const d=await r.json();
         document.getElementById('cluster-topology').innerHTML=`
-          <div class="stat"><span class="label">Topology</span><span class="value">${d.topology}</span></div>
+          <div class="stat"><span class="label">Topology</span><span class="value">${esc(d.topology)}</span></div>
           <div class="stat"><span class="label">Local Host</span><span class="value">${esc(d.local?.hostname||'?')}</span></div>
-          <div class="stat"><span class="label">Updated</span><span class="value">${d.timestamp?new Date(d.timestamp).toLocaleTimeString():'?'}</span></div>`;
+          <div class="stat"><span class="label">Updated</span><span class="value">${timeAgo(d.timestamp)}</span></div>`;
         if(d.remote_vms?.length){
           document.getElementById('remote-vms').innerHTML=d.remote_vms.map(vm=>{
             const sc=vm.status==='reachable'?'ok':(vm.status==='unreachable'?'err':'warn');
-            return`<div style="border:1px solid #30363d;border-radius:6px;padding:1rem;margin-bottom:.75rem">
-              <h3 style="margin:0 0 .5rem 0;color:var(--accent)">${esc(vm.vm_name)} <span class="${sc}" style="font-size:.85rem">${vm.status}</span></h3>
+            return`<div style="border:1px solid var(--border);border-radius:6px;padding:1rem;margin-bottom:.75rem">
+              <h3 style="margin:0 0 .5rem 0;color:var(--accent)">${esc(vm.vm_name)} <span class="${sc}" style="font-size:.85rem">${esc(vm.status)}</span></h3>
               ${vm.hostname?`<div class="stat"><span class="label">Hostname</span><span class="value">${esc(vm.hostname)}</span></div>`:''}
               ${vm.uptime?`<div class="stat"><span class="label">Uptime</span><span class="value">${esc(vm.uptime)}</span></div>`:''}
               ${vm.load_avg?`<div class="stat"><span class="label">Load</span><span class="value">${esc(vm.load_avg)}</span></div>`:''}
               ${vm.memory_mb?`<div class="stat"><span class="label">Memory</span><span class="value">${esc(vm.memory_mb)} MB</span></div>`:''}
-              ${vm.disk_root_pct!==null&&vm.disk_root_pct!==undefined?`<div class="stat"><span class="label">Root Disk</span><span class="value ${vm.disk_root_pct>90?'err':vm.disk_root_pct>70?'warn':'ok'}">${vm.disk_root_pct}%</span></div>`:''}
-              ${vm.disk_data_pct!==null&&vm.disk_data_pct!==undefined?`<div class="stat"><span class="label">Data Disk</span><span class="value">${vm.disk_data_pct}%</span></div>`:''}
-              ${vm.disk_tmp_pct!==null&&vm.disk_tmp_pct!==undefined?`<div class="stat"><span class="label">Tmp Disk</span><span class="value">${vm.disk_tmp_pct}%</span></div>`:''}
-              ${vm.simard_processes!==null&&vm.simard_processes!==undefined?`<div class="stat"><span class="label">Simard Processes</span><span class="value">${vm.simard_processes}</span></div>`:''}
-              ${vm.cargo_processes!==null&&vm.cargo_processes!==undefined?`<div class="stat"><span class="label">Cargo Processes</span><span class="value">${vm.cargo_processes}</span></div>`:''}
+              ${vm.disk_root_pct!=null?`<div class="stat"><span class="label">Root Disk</span><span class="value ${vm.disk_root_pct>90?'err':vm.disk_root_pct>70?'warn':'ok'}">${vm.disk_root_pct}%</span></div>`:''}
+              ${vm.disk_data_pct!=null?`<div class="stat"><span class="label">Data Disk</span><span class="value">${vm.disk_data_pct}%</span></div>`:''}
+              ${vm.disk_tmp_pct!=null?`<div class="stat"><span class="label">Tmp Disk</span><span class="value">${vm.disk_tmp_pct}%</span></div>`:''}
+              ${vm.simard_processes!=null?`<div class="stat"><span class="label">Simard Processes</span><span class="value">${vm.simard_processes}</span></div>`:''}
+              ${vm.cargo_processes!=null?`<div class="stat"><span class="label">Cargo Processes</span><span class="value">${vm.cargo_processes}</span></div>`:''}
+              ${vm.error?`<div class="stat"><span class="label">Error</span><span class="value err">${esc(vm.error)}</span></div>`:''}
             </div>`;}).join('');
-        }else{document.getElementById('remote-vms').innerHTML='<span class="loading">No remote VMs configured</span>';}
-      }catch(e){document.getElementById('cluster-topology').innerHTML='<span class="err">Failed to load</span>';}
+        }else{document.getElementById('remote-vms').innerHTML='<span style="color:#8b949e">No remote VMs configured. Add hosts below.</span>';}
+      }catch(e){document.getElementById('cluster-topology').innerHTML='<span class="err">Failed to query distributed status — check network and azlin</span>';}
     }
     async function fetchHosts(){
       try{
         const r=await fetch('/api/hosts');const d=await r.json();
         const el=document.getElementById('hosts-list');
-        if(!d.hosts?.length){el.innerHTML='<span class="loading">No hosts configured</span>';return;}
-        el.innerHTML=d.hosts.map(h=>`<div style="display:flex;align-items:center;gap:0.5rem;padding:4px 0;border-bottom:1px solid #222">
-          <span style="flex:1"><strong>${esc(h.name)}</strong> <span style="color:#888">(${esc(h.resource_group||'default')})</span></span>
-          <button class="btn" style="padding:2px 8px;font-size:.8rem" onclick="removeHost('${esc(h.name)}')">Remove</button>
-        </div>`).join('');
+        if(!d.hosts?.length){el.innerHTML='<span style="color:#8b949e">No hosts configured. Add a VM name below.</span>';return;}
+        el.innerHTML=d.hosts.map(h=>{
+          const name=esc(h.name||'');
+          return`<div style="display:flex;align-items:center;gap:0.5rem;padding:4px 0;border-bottom:1px solid var(--border)">
+            <span style="flex:1"><strong>${name}</strong> <span style="color:#8b949e">(${esc(h.resource_group||'default')})</span> <span style="color:#8b949e;font-size:.75rem">${timeAgo(h.added_at)}</span></span>
+            <button class="btn" style="padding:2px 8px;font-size:.8rem" data-host="${name}">Remove</button>
+          </div>`;
+        }).join('');
+        el.querySelectorAll('button[data-host]').forEach(btn=>{
+          btn.addEventListener('click',()=>removeHost(btn.dataset.host));
+        });
       }catch(e){}
     }
     async function addHost(){
       const name=document.getElementById('host-name').value.trim();
       const rg=document.getElementById('host-rg').value.trim();
       if(!name){document.getElementById('host-status').textContent='Name required';return;}
-      const r=await fetch('/api/hosts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,resource_group:rg})});
-      const d=await r.json();
-      document.getElementById('host-status').textContent=d.status==='ok'?'Added':'Error: '+(d.error||'');
-      document.getElementById('host-name').value='';
-      fetchHosts();
-      setTimeout(()=>document.getElementById('host-status').textContent='',3000);
+      try{
+        const r=await fetch('/api/hosts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,resource_group:rg})});
+        const d=await r.json();
+        document.getElementById('host-status').textContent=d.status==='ok'?'Added ✓':'Error: '+(d.error||'');
+        document.getElementById('host-name').value='';
+        fetchHosts();
+        setTimeout(()=>document.getElementById('host-status').textContent='',3000);
+      }catch(e){document.getElementById('host-status').textContent='Network error';}
     }
     async function removeHost(name){
-      const r=await fetch('/api/hosts',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+      if(!confirm('Remove host "'+name+'"?'))return;
+      await fetch('/api/hosts',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
       fetchHosts();
     }
     fetchHosts();
@@ -1579,14 +1682,15 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
           document.getElementById('goals-active').innerHTML=`<table class="proc-table">
             <tr><th>Priority</th><th>ID</th><th>Description</th><th>Status</th><th>Assigned</th></tr>
             ${d.active.map(g=>`<tr>
-              <td style="text-align:center">${g.priority}</td>
+              <td style="text-align:center">${g.priority??'—'}</td>
               <td><code>${esc(g.id)}</code></td>
               <td>${esc(g.description)}</td>
               <td>${esc(g.status)}</td>
               <td>${g.assigned_to?esc(g.assigned_to):'—'}</td>
             </tr>`).join('')}
-          </table>`;
-        }else{document.getElementById('goals-active').innerHTML='<span class="loading">No active goals</span>';}
+          </table>
+          <div style="margin-top:.5rem;color:#8b949e;font-size:.8rem">${d.active_count} active goal(s)</div>`;
+        }else{document.getElementById('goals-active').innerHTML='<span style="color:#8b949e">No active goals. Use "Seed Default Goals" or run the OODA daemon to generate goals from meetings.</span>';}
         if(d.backlog?.length){
           document.getElementById('goals-backlog').innerHTML=`<table class="proc-table">
             <tr><th>ID</th><th>Description</th><th>Source</th><th>Score</th></tr>
@@ -1597,11 +1701,12 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
               <td>${b.score??'—'}</td>
             </tr>`).join('')}
           </table>`;
-        }else{document.getElementById('goals-backlog').innerHTML='<span class="loading">No backlog items</span>';}
-      }catch(e){document.getElementById('goals-active').innerHTML='<span class="err">Failed to load</span>';}
+        }else{document.getElementById('goals-backlog').innerHTML='<span style="color:#8b949e">No backlog items</span>';}
+      }catch(e){document.getElementById('goals-active').innerHTML='<span class="err">Failed to load goals — check state root</span>';}
     }
 
     async function seedGoals(){
+      if(!confirm('Seed default goals? This only works if no active goals exist.'))return;
       try{
         const r=await fetch('/api/goals/seed',{method:'POST'});
         const d=await r.json();
@@ -1628,34 +1733,35 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
             const data=s.data;
             const ts=data.timestamp||data.__REALTIME_TIMESTAMP||data._SOURCE_REALTIME_TIMESTAMP||'';
             const msg=data.MESSAGE||data.message||data.description||data.model||JSON.stringify(data).substring(0,200);
-            return`<div style="border-bottom:1px solid #222;padding:4px 0;font-size:.82rem">
+            return`<div style="border-bottom:1px solid var(--border);padding:4px 0;font-size:.82rem">
               <span style="color:#8b949e">[${esc(s.source)}]</span>
-              ${ts?'<span style="color:#58a6ff;margin:0 .5rem">'+esc(String(ts).substring(0,19))+'</span>':''}
+              ${ts?'<span style="color:var(--accent);margin:0 .5rem">'+esc(String(ts).substring(0,19))+'</span>':''}
               <span>${esc(String(msg))}</span>
             </div>`;
           }).join('');
-        }else{document.getElementById('trace-list').innerHTML='<span class="loading">No trace data yet. Run the OODA daemon or make API calls to generate traces.</span>';}
-      }catch(e){document.getElementById('trace-list').innerHTML='<span class="err">Failed to load</span>';}
+        }else{document.getElementById('trace-list').innerHTML='<span style="color:#8b949e">No trace data yet. Run the OODA daemon or make API calls to generate traces.</span>';}
+      }catch(e){document.getElementById('trace-list').innerHTML='<span class="err">Failed to load traces — check /api/traces</span>';}
     }
 
     /* --- Memory Search --- */
     async function searchMemory(){
       const q=document.getElementById('mem-search-input').value.trim();
       if(!q){document.getElementById('mem-search-results').innerHTML='<span class="warn">Enter a search term</span>';return;}
+      document.getElementById('mem-search-results').innerHTML='<span class="loading">Searching…</span>';
       try{
         const r=await fetch('/api/memory/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q})});
         const d=await r.json();
         if(d.results?.length){
           document.getElementById('mem-search-results').innerHTML=`
             <p style="color:#8b949e;font-size:.85rem">${d.result_count} result(s) for "${esc(d.query)}"</p>
-            ${d.results.map(r=>`<div style="border:1px solid #30363d;border-radius:6px;padding:.75rem;margin-bottom:.5rem">
-              <span class="badge">${esc(r.source)}</span>
-              <pre style="margin:.5rem 0 0;white-space:pre-wrap;font-size:.8rem;color:#c9d1d9">${esc(JSON.stringify(r.data,null,2).substring(0,500))}</pre>
+            ${d.results.map(sr=>`<div style="border:1px solid var(--border);border-radius:6px;padding:.75rem;margin-bottom:.5rem">
+              <span class="badge">${esc(sr.source)}</span>
+              <pre style="margin:.5rem 0 0;white-space:pre-wrap;font-size:.8rem;color:var(--fg)">${esc(JSON.stringify(sr.data,null,2).substring(0,500))}</pre>
             </div>`).join('')}`;
         }else{
-          document.getElementById('mem-search-results').innerHTML='<span class="loading">No results found</span>';
+          document.getElementById('mem-search-results').innerHTML=`<span style="color:#8b949e">No results for "${esc(q)}" — try broader terms</span>`;
         }
-      }catch(e){document.getElementById('mem-search-results').innerHTML='<span class="err">Search failed</span>';}
+      }catch(e){document.getElementById('mem-search-results').innerHTML='<span class="err">Search failed — check /api/memory/search</span>';}
     }
     document.getElementById('mem-search-input')?.addEventListener('keypress',e=>{if(e.key==='Enter')searchMemory();});
 
@@ -1664,17 +1770,18 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
       try{
         const r=await fetch('/api/costs'); const d=await r.json();
         function renderSummary(s){
-          if(!s||s.error) return `<span class="err">${esc(s?.error||'No data')}</span>`;
+          if(!s||s.error) return `<span class="err">${esc(s?.error||'No cost data — is cost tracking configured?')}</span>`;
           return Object.entries(s).map(([k,v])=>{
-            if(typeof v!=='number') return `<div class="stat"><span class="label">${esc(k)}</span><span class="value">${esc(String(v))}</span></div>`;
+            if(v==null)return'';
+            if(typeof v==='object')return`<div class="stat"><span class="label">${esc(k)}</span><span class="value" style="font-size:.8rem">${esc(JSON.stringify(v))}</span></div>`;
             const isCost=k.toLowerCase().includes('cost')||k.toLowerCase().includes('usd');
-            const fmt=isCost?'$'+v.toFixed(4):v.toLocaleString();
+            const fmt=typeof v==='number'?(isCost?'$'+v.toFixed(4):v.toLocaleString()):String(v);
             return `<div class="stat"><span class="label">${esc(k)}</span><span class="value">${fmt}</span></div>`;
           }).join('');
         }
         document.getElementById('costs-daily').innerHTML=renderSummary(d.daily);
         document.getElementById('costs-weekly').innerHTML=renderSummary(d.weekly);
-      }catch(e){document.getElementById('costs-daily').innerHTML='<span class="err">Failed to load</span>';}
+      }catch(e){document.getElementById('costs-daily').innerHTML='<span class="err">Failed to load cost data</span>';}
     }
     async function fetchBudget(){
       try{
@@ -1686,48 +1793,65 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
     async function saveBudget(){
       const daily=parseFloat(document.getElementById('budget-daily').value)||500;
       const weekly=parseFloat(document.getElementById('budget-weekly').value)||2500;
-      const r=await fetch('/api/budget',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({daily_budget_usd:daily,weekly_budget_usd:weekly})});
-      const d=await r.json();
-      document.getElementById('budget-status').textContent=d.status==='ok'?'Saved':'Error: '+d.error;
-      setTimeout(()=>document.getElementById('budget-status').textContent='',3000);
+      try{
+        const r=await fetch('/api/budget',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({daily_budget_usd:daily,weekly_budget_usd:weekly})});
+        const d=await r.json();
+        const el=document.getElementById('budget-status');
+        el.textContent=d.status==='ok'?'✓ Saved':'Error: '+(d.error||'unknown');
+        el.style.color=d.status==='ok'?'var(--green)':'var(--red)';
+        setTimeout(()=>{el.textContent='';el.style.color='';},3000);
+      }catch(e){document.getElementById('budget-status').textContent='Network error';}
     }
     fetchBudget();
 
     /* --- Chat --- */
     let ws=null,chatInit=false;
     function initChat(){
-      if(chatInit&&ws&&ws.readyState===WebSocket.OPEN) return;
+      if(ws){try{ws.close();}catch(e){}}
       chatInit=true;
       const proto=location.protocol==='https:'?'wss:':'ws:';
       ws=new WebSocket(`${proto}//${location.host}/ws/chat`);
       const st=document.getElementById('ws-status');
-      ws.onopen=()=>{st.textContent='● Connected';st.className='ws-status connected';};
-      ws.onclose=()=>{st.textContent='● Disconnected';st.className='ws-status disconnected';chatInit=false;};
-      ws.onerror=()=>{st.textContent='● Error';st.className='ws-status disconnected';};
-      ws.onmessage=ev=>{try{const m=JSON.parse(ev.data);appendMsg(m.role||'system',m.content||ev.data);}catch{appendMsg('system',ev.data);}};
+      st.innerHTML='<span style="color:var(--yellow)">● Connecting…</span>';
+      ws.onopen=()=>{st.innerHTML='<span style="color:var(--green)">● Connected</span>';};
+      ws.onclose=()=>{
+        st.innerHTML='<span style="color:var(--red)">● Disconnected</span> <button class="btn" onclick="initChat()" style="font-size:.75rem;padding:.1rem .4rem;margin-left:.5rem">Reconnect</button>';
+        chatInit=false;
+      };
+      ws.onerror=()=>{
+        st.innerHTML='<span style="color:var(--red)">● Error</span> <button class="btn" onclick="initChat()" style="font-size:.75rem;padding:.1rem .4rem;margin-left:.5rem">Retry</button>';
+      };
+      ws.onmessage=ev=>{try{const m=JSON.parse(ev.data);appendMsg(m.role||'system',m.content||ev.data);}catch(ex){appendMsg('system',ev.data);}};
     }
     function sendChat(){
       const inp=document.getElementById('chat-input'); const txt=inp.value.trim();
-      if(!txt||!ws||ws.readyState!==WebSocket.OPEN) return;
+      if(!txt) return;
+      if(!ws||ws.readyState!==WebSocket.OPEN){
+        appendMsg('system','Not connected. Click Reconnect to establish a session.');
+        return;
+      }
       appendMsg('user',txt); ws.send(txt); inp.value='';
     }
     function appendMsg(role,content){
       const el=document.getElementById('chat-messages');
-      el.innerHTML+=`<div class="chat-msg"><span class="role ${role}">${role}:</span> ${esc(content)}</div>`;
+      const div=document.createElement('div');
+      div.className='chat-msg';
+      const roleSpan=document.createElement('span');
+      roleSpan.className='role '+role;
+      roleSpan.textContent=role+':';
+      div.appendChild(roleSpan);
+      div.appendChild(document.createTextNode(' '+content));
+      el.appendChild(div);
       el.scrollTop=el.scrollHeight;
     }
     document.getElementById('chat-input').addEventListener('keydown',e=>{
       if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChat();}
     });
 
-    /* --- Helpers --- */
-    function fmtB(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';return(b/1048576).toFixed(1)+' MB';}
-    function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
-
     /* --- Init --- */
     fetchStatus(); fetchIssues();
     setInterval(fetchStatus,30000);
-    setInterval(fetchIssues,60000);
+    setInterval(fetchIssues,120000);
   </script>
 </body>
 </html>
@@ -1769,7 +1893,7 @@ mod tests {
     #[test]
     fn index_html_has_refresh_intervals() {
         assert!(INDEX_HTML.contains("setInterval(fetchStatus,30000)"));
-        assert!(INDEX_HTML.contains("setInterval(fetchIssues,60000)"));
+        assert!(INDEX_HTML.contains("setInterval(fetchIssues,120000)"));
     }
 
     #[test]
