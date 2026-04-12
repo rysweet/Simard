@@ -56,6 +56,7 @@ impl BaseTypeSession for RustyClawdSession {
                 reason: format!("failed to create tokio runtime: {e}"),
             })?;
 
+        tracing::info!("RustyClawd: attempting client initialization from default config…");
         let client_result = rt.block_on(async {
             let config = RcConfig::from_default_location().await?;
             RcClient::new(config)
@@ -63,10 +64,13 @@ impl BaseTypeSession for RustyClawdSession {
 
         match client_result {
             Ok(client) => {
+                tracing::info!("RustyClawd: API client initialized successfully");
                 self.client = Some(client);
             }
             Err(ClientError::ApiKeyNotFound) => {
-                // No API key available — session will use process fallback on run_turn.
+                tracing::warn!(
+                    "RustyClawd: no API key found, will use process fallback on run_turn"
+                );
                 self.client = None;
             }
             Err(e) => {
@@ -94,20 +98,23 @@ impl BaseTypeSession for RustyClawdSession {
             self.descriptor.backend.identity, self.request.mode, self.request.topology, prompt_ids,
         );
 
-        let (execution_summary, process_evidence) =
-            if let (Some(client), Some(rt)) = (self.client.as_ref(), self.rt.as_ref()) {
-                execute_rustyclawd_client(
-                    client,
-                    rt,
-                    &input,
-                    &self.descriptor,
-                    &self.request,
-                    &mut self.conversation_history,
-                )?
-            } else {
-                // Fallback: no API key available, run via process spawn.
-                execute_rustyclawd_process_fallback(&input, &self.descriptor, &self.request)?
-            };
+        let (execution_summary, process_evidence) = if let (Some(client), Some(rt)) =
+            (self.client.as_ref(), self.rt.as_ref())
+        {
+            tracing::info!(backend = %self.descriptor.backend.identity, "RustyClawd: executing via direct API client");
+            execute_rustyclawd_client(
+                client,
+                rt,
+                &input,
+                &self.descriptor,
+                &self.request,
+                &mut self.conversation_history,
+            )?
+        } else {
+            // Fallback: no API key available, run via process spawn.
+            tracing::warn!(backend = %self.descriptor.backend.identity, "RustyClawd: no API client, falling back to process spawn");
+            execute_rustyclawd_process_fallback(&input, &self.descriptor, &self.request)?
+        };
 
         let mut evidence = vec![
             format!("selected-base-type={}", self.descriptor.id),

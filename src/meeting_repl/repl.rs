@@ -88,13 +88,16 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                 if text.is_empty() {
                     continue;
                 }
+                eprint!("  ⏳ Thinking...");
                 match backend.send_message(&text) {
                     Ok(resp) => {
+                        eprintln!("\r                "); // clear the thinking indicator
                         if !resp.content.is_empty() {
                             writeln!(output, "\n{}\n", resp.content).ok();
                         }
                     }
                     Err(e) => {
+                        eprintln!("\r                "); // clear the thinking indicator
                         writeln!(output, "[agent error: {e}]").ok();
                     }
                 }

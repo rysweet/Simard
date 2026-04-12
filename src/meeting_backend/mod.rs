@@ -100,7 +100,28 @@ impl MeetingBackend {
             prompt_preamble: preamble,
         };
 
-        let outcome = self.agent.run_turn(turn_input)?;
+        info!(
+            topic = self.topic,
+            messages = self.history.len(),
+            input_len = trimmed.len(),
+            "Sending message to LLM agent…"
+        );
+        let start = std::time::Instant::now();
+
+        let outcome = match self.agent.run_turn(turn_input) {
+            Ok(o) => {
+                info!(
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    response_len = o.execution_summary.len(),
+                    "LLM agent returned response"
+                );
+                o
+            }
+            Err(e) => {
+                warn!(elapsed_ms = start.elapsed().as_millis() as u64, error = %e, "LLM agent returned error");
+                return Err(e);
+            }
+        };
         let response_text = extract_response(&outcome);
 
         // Append assistant response

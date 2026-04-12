@@ -196,6 +196,7 @@ impl BaseTypeSession for CopilotSdkSession {
         let enriched_objective = self.build_enriched_objective(&input);
         let enriched_input = BaseTypeTurnInput::objective_only(enriched_objective);
 
+        tracing::info!(mode = %self.request.mode, turn = self.turn_count, "Copilot adapter: sending turn to Copilot SDK (this may take 30-90s)…");
         let terminal_outcome =
             execute_terminal_turn(&self.descriptor, &self.request, &enriched_input).map_err(
                 |err| SimardError::AdapterInvocationFailed {
@@ -209,6 +210,11 @@ impl BaseTypeSession for CopilotSdkSession {
         // our sentinel marker.  We extract everything between the command echo
         // and the sentinel as the meaningful response.
         let response_text = extract_copilot_response_from_evidence(&terminal_outcome.evidence);
+        tracing::info!(
+            response_len = response_text.len(),
+            turn = self.turn_count,
+            "Copilot adapter: received response"
+        );
 
         // Record cost estimate based on prompt/response character sizes.
         let prompt_chars = enriched_input.objective.len();
