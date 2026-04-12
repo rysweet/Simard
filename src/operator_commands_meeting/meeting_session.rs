@@ -17,10 +17,6 @@ fn load_meeting_system_prompt() -> String {
 }
 
 /// Launch the Python memory server for meeting mode (mandatory).
-///
-/// Uses the same `BridgeLauncher` infrastructure as engineer mode: locates the
-/// `python/` directory, starts `simard_memory_server.py`, and connects to LadybugDB.
-/// Fails if the server cannot start — cognitive memory is required.
 fn launch_real_meeting_bridge() -> Result<CognitiveMemoryBridge, Box<dyn std::error::Error>> {
     let python_dir =
         find_python_dir().map_err(|e| format!("cognitive memory requires Python bridge: {e}"))?;
@@ -33,7 +29,7 @@ fn launch_real_meeting_bridge() -> Result<CognitiveMemoryBridge, Box<dyn std::er
 }
 
 /// Open an agent session for the meeting REPL using the standard base type
-/// infrastructure. Same agent identity, same platform — just meeting mode.
+/// infrastructure.
 fn open_meeting_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeSession>> {
     match crate::session_builder::SessionBuilder::new(OperatingMode::Meeting)
         .node_id("meeting-repl")
@@ -49,21 +45,14 @@ fn open_meeting_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeSes
     }
 }
 
-/// Open an agent session for the meeting using the configured LLM provider.
-///
-/// Returns `None` if the provider cannot be initialised — the REPL will then
-/// run in note-taking mode.
+/// Entry point for the `simard meeting` CLI command.
 pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::Error>> {
-    // Launch the cognitive memory bridge (mandatory).
     let bridge = launch_real_meeting_bridge()?;
     eprintln!("  Memory: cognitive bridge active (LadybugDB backend)");
 
-    // Display greeting banner with memory bridge context
     print_greeting_banner(Some(&bridge));
 
-    // Open an agent session for conversational meeting mode.
-    // Uses the same base type infrastructure as engineer mode.
-    let mut agent_session = open_meeting_agent_session();
+    let agent_session = open_meeting_agent_session();
     let base_prompt = load_meeting_system_prompt();
     let live_context = build_live_meeting_context(&bridge);
     let meeting_system_prompt = format!("{base_prompt}\n\n{live_context}");
@@ -82,11 +71,11 @@ pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::E
     let stdout = io::stdout();
     let mut writer = stdout.lock();
 
-    let session = match agent_session {
-        Some(ref mut boxed_agent) => run_meeting_repl(
+    let _session = match agent_session {
+        Some(boxed_agent) => run_meeting_repl(
             topic,
             &bridge,
-            Some(&mut **boxed_agent),
+            Some(boxed_agent),
             &meeting_system_prompt,
             &mut reader,
             &mut writer,
@@ -102,9 +91,6 @@ pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::E
     };
 
     println!("Meeting closed.");
-    println!("Decisions: {}", session.decisions.len());
-    println!("Action items: {}", session.action_items.len());
-    println!("Notes: {}", session.notes.len());
     Ok(())
 }
 

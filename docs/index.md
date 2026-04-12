@@ -21,6 +21,7 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [Tutorial: Run your first benchmark gym suite](./tutorials/run-your-first-benchmark-gym.md) - Run the shipped starter benchmark suite.
 - [How to configure bootstrap and inspect reflection](./howto/configure-bootstrap-and-inspect-reflection.md) - Bootstrap an explicit runtime selection and inspect the truthful runtime snapshot.
 - [How to reclaim disk space and run low-space Rust builds](./howto/reclaim-disk-space-and-run-low-space-rust-builds.md) - Reclaim stale build artifacts and run Cargo through one shared low-space target dir across worktrees.
+- [How to start a meeting with Simard](./howto/start-a-meeting.md) - Have a natural conversation with Simard from CLI or dashboard, with full history and memory.
 - [How to carry meeting decisions into engineer sessions](./howto/carry-meeting-decisions-into-engineer-sessions.md) - Persist meeting records under a shared state root and confirm later engineer runs carry them forward.
 - [How to inspect meeting records](./howto/inspect-meeting-records.md) - Read back the latest durable meeting record without mutating stored state.
 - [How to inspect improvement-curation state](./howto/inspect-improvement-curation-state.md) - Read back the latest approved, deferred, and promoted improvement state without mutation.
@@ -30,6 +31,7 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [Runtime contracts reference](./reference/runtime-contracts.md) - Look up executable contracts, state-root guarantees, and the shipped engineer audit readback semantics.
 - [Base type adapters reference](./reference/base-type-adapters.md) - Look up the pluggable agent execution substrates, their capabilities, and topology support.
 - [Bridge wire protocol reference](./reference/bridge-wire-protocol.md) - Look up the JSON-line protocol for Rust-Python bridge communication.
+- [Meeting backend API reference](./reference/meeting-backend-api.md) - Rust API for the unified MeetingBackend.
 - [Concept: truthful runtime metadata](./concepts/truthful-runtime-metadata.md) - Read the design rationale behind the stricter runtime contract.
 
 ## Canonical executable surface
@@ -97,3 +99,4 @@ If you are changing architecture, start with the [architecture overview](./archi
 - [Cognitive memory](./architecture/cognitive-memory.md) - Six-type memory model, session lifecycle mapping, and hive mind integration.
 - [Implementation plan](./architecture/implementation-plan.md) - Phased roadmap with current status and quality gates.
 - [OODA meeting handoff integration](./architecture/ooda-meeting-handoff-integration.md) - Wire meeting handoffs into the OODA daemon and seed default goals (Issues #157, #158).
+- [Unified meeting backend](./architecture/unified-meeting-backend.md) - One conversational engine behind CLI REPL and dashboard WebSocket chat (Issue #462).

@@ -42,6 +42,7 @@ pub mod identity_precedence;
 pub mod improvements;
 pub mod knowledge_bridge;
 pub mod knowledge_context;
+pub mod meeting_backend;
 pub mod meeting_facilitator;
 pub mod meeting_repl;
 pub mod meetings;
@@ -194,6 +195,10 @@ pub use knowledge_bridge::{
     KnowledgeBridge, KnowledgePackInfo, KnowledgeQueryResult, KnowledgeSource,
 };
 pub use knowledge_context::{PlanningContext, enrich_planning_context};
+pub use meeting_backend::{
+    ConversationMessage, MeetingBackend, MeetingResponse, MeetingSummary, MeetingTranscript, Role,
+    SessionStatus,
+};
 pub use meeting_facilitator::{
     ActionItem, MEETING_HANDOFF_FILENAME, MeetingDecision, MeetingHandoff, MeetingSession,
     MeetingSessionStatus, add_note, close_meeting, default_handoff_dir, load_meeting_handoff,

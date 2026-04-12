@@ -664,45 +664,32 @@ async fn ws_chat_handler(ws: WebSocketUpgrade) -> response::Response {
 }
 
 async fn handle_ws_chat(mut socket: WebSocket) {
-    use crate::base_types::BaseTypeTurnInput;
-    use crate::meeting_facilitator::{
-        ActionItem, MeetingDecision, MeetingSession, MeetingSessionStatus, add_note, add_question,
-        edit_item, record_action_item, record_decision, remove_item,
-    };
-    use crate::meeting_repl::{
-        MeetingCommand, auto_capture_structured_items, parse_meeting_command,
-    };
+    use crate::meeting_backend::{MeetingBackend, MeetingCommand, parse_command};
 
     // Open agent session in a blocking context (session builder does synchronous I/O).
-    let mut agent_session: Option<Box<dyn crate::base_types::BaseTypeSession>> =
+    let agent_session: Option<Box<dyn crate::base_types::BaseTypeSession>> =
         tokio::task::spawn_blocking(open_dashboard_agent_session)
             .await
             .ok()
             .flatten();
 
-    let meeting_system_prompt = load_dashboard_meeting_prompt();
-    let has_agent = agent_session.is_some();
-
-    let topic = "Dashboard Chat";
-    let mut session = MeetingSession {
-        topic: topic.to_string(),
-        decisions: Vec::new(),
-        action_items: Vec::new(),
-        notes: Vec::new(),
-        status: MeetingSessionStatus::Open,
-        started_at: chrono::Utc::now().to_rfc3339(),
-        participants: vec!["operator".to_string()],
-        explicit_questions: Vec::new(),
+    let Some(agent) = agent_session else {
+        let _ = socket
+            .send(Message::Text(
+                json!({"role":"system","content":"No agent backend available. Check SIMARD_LLM_PROVIDER and auth config."})
+                    .to_string()
+                    .into(),
+            ))
+            .await;
+        return;
     };
 
-    let greeting = if has_agent {
-        "Connected to Simard. Speak naturally — I'll respond conversationally. Use /help for commands, /close to end."
-    } else {
-        "Connected in note-taking mode (no agent backend). Use /help for commands, /close to end."
-    };
+    let system_prompt = load_dashboard_meeting_prompt();
+    let mut backend = MeetingBackend::new_session("Dashboard Chat", agent, None, system_prompt);
+
     let _ = socket
         .send(Message::Text(
-            json!({"role":"system","content": greeting})
+            json!({"role":"system","content":"Connected to Simard. Speak naturally — /help for commands, /close to end."})
                 .to_string()
                 .into(),
         ))
@@ -717,18 +704,19 @@ async fn handle_ws_chat(mut socket: WebSocket) {
                     continue;
                 }
 
-                let cmd = parse_meeting_command(trimmed);
-                let is_conversation = matches!(&cmd, MeetingCommand::Conversation(_));
-
-                let reply_content = match cmd {
+                let cmd = parse_command(trimmed);
+                match cmd {
                     MeetingCommand::Close => {
-                        session.status = MeetingSessionStatus::Closed;
-                        let recap = format!(
-                            "Meeting closed. {} decision(s), {} action item(s), {} note(s).",
-                            session.decisions.len(),
-                            session.action_items.len(),
-                            session.notes.len(),
-                        );
+                        // Close runs synchronous LLM call — use spawn_blocking
+                        let summary = tokio::task::spawn_blocking(move || backend.close()).await;
+                        let recap = match summary {
+                            Ok(Ok(s)) => format!(
+                                "Meeting closed. {} messages. Summary: {}",
+                                s.message_count, s.summary_text
+                            ),
+                            Ok(Err(e)) => format!("Meeting closed with error: {e}"),
+                            Err(e) => format!("Meeting close failed: {e}"),
+                        };
                         let _ = socket
                             .send(Message::Text(
                                 json!({"role":"system","content": recap}).to_string().into(),
@@ -737,255 +725,72 @@ async fn handle_ws_chat(mut socket: WebSocket) {
                         break;
                     }
                     MeetingCommand::Help => {
-                        "Commands: /decision <desc> | <rationale>, /action <desc> | <owner>, \
-                         /note <text>, /question <text>, /status, /recap, /list, \
-                         /edit <type> <n> <text>, /delete <type> <n>, /close. \
-                         Or just type naturally to talk with Simard."
-                            .to_string()
-                    }
-                    MeetingCommand::Decision {
-                        description,
-                        rationale,
-                    } => {
-                        let decision = MeetingDecision {
-                            description: description.clone(),
-                            rationale,
-                            participants: Vec::new(),
-                        };
-                        match record_decision(&mut session, decision) {
-                            Ok(()) => format!("Recorded decision: {description}"),
-                            Err(e) => format!("Error: {e}"),
-                        }
-                    }
-                    MeetingCommand::Action {
-                        description,
-                        owner,
-                        priority,
-                        due_description,
-                    } => {
-                        let item = ActionItem {
-                            description: description.clone(),
-                            owner: owner.clone(),
-                            priority,
-                            due_description: due_description.clone(),
-                        };
-                        match record_action_item(&mut session, item) {
-                            Ok(()) => {
-                                let due_suffix = due_description
-                                    .as_deref()
-                                    .map(|d| format!(", due: {d}"))
-                                    .unwrap_or_default();
-                                format!(
-                                    "Recorded action: {description} (owner={owner}{due_suffix})"
-                                )
-                            }
-                            Err(e) => format!("Error: {e}"),
-                        }
-                    }
-                    MeetingCommand::Note(ref note_text) => {
-                        match add_note(&mut session, note_text) {
-                            Ok(()) => "Note added.".to_string(),
-                            Err(e) => format!("Error: {e}"),
-                        }
-                    }
-                    MeetingCommand::Question(ref q_text) => {
-                        match add_question(&mut session, q_text) {
-                            Ok(()) => format!("Question added: {q_text}"),
-                            Err(e) => format!("Error: {e}"),
-                        }
+                        let help = "Commands: /status, /close, /help. Everything else is natural conversation with Simard.";
+                        let _ = socket
+                            .send(Message::Text(
+                                json!({"role":"system","content": help}).to_string().into(),
+                            ))
+                            .await;
                     }
                     MeetingCommand::Status => {
-                        format!(
-                            "Meeting: {}\n  Decisions: {}\n  Actions: {}\n  Notes: {}\n  Questions: {}\n  Participants: {}",
-                            session.topic,
-                            session.decisions.len(),
-                            session.action_items.len(),
-                            session.notes.len(),
-                            session.explicit_questions.len(),
-                            session.participants.len(),
-                        )
+                        let status = backend.status();
+                        let info = format!(
+                            "Topic: {}\nMessages: {}\nStarted: {}\nOpen: {}",
+                            status.topic, status.message_count, status.started_at, status.is_open
+                        );
+                        let _ = socket
+                            .send(Message::Text(
+                                json!({"role":"system","content": info}).to_string().into(),
+                            ))
+                            .await;
                     }
-                    MeetingCommand::Recap => {
-                        let mut buf = String::new();
-                        buf.push_str(&format!(
-                            "── Meeting Recap ──\nTopic: {}\n\n",
-                            session.topic
-                        ));
-                        buf.push_str(&format!("Decisions ({}):\n", session.decisions.len()));
-                        if session.decisions.is_empty() {
-                            buf.push_str("  (none)\n");
-                        } else {
-                            for (i, d) in session.decisions.iter().enumerate() {
-                                buf.push_str(&format!(
-                                    "  {}. {} — {}\n",
-                                    i + 1,
-                                    d.description,
-                                    d.rationale
-                                ));
+                    MeetingCommand::Conversation(user_text) => {
+                        // send_message is synchronous — use spawn_blocking
+                        let result = tokio::task::spawn_blocking(move || {
+                            let resp = backend.send_message(&user_text);
+                            (backend, resp)
+                        })
+                        .await;
+                        match result {
+                            Ok((returned_backend, Ok(resp))) => {
+                                backend = returned_backend;
+                                let _ = socket
+                                    .send(Message::Text(
+                                        json!({"role":"assistant","content": resp.content})
+                                            .to_string()
+                                            .into(),
+                                    ))
+                                    .await;
+                            }
+                            Ok((returned_backend, Err(e))) => {
+                                backend = returned_backend;
+                                let _ = socket
+                                    .send(Message::Text(
+                                        json!({"role":"system","content": format!("[error: {e}]")})
+                                            .to_string()
+                                            .into(),
+                                    ))
+                                    .await;
+                            }
+                            Err(e) => {
+                                let _ = socket
+                                    .send(Message::Text(
+                                        json!({"role":"system","content": format!("[internal error: {e}]")})
+                                            .to_string()
+                                            .into(),
+                                    ))
+                                    .await;
+                                break;
                             }
                         }
-                        buf.push_str(&format!(
-                            "\nAction Items ({}):\n",
-                            session.action_items.len()
-                        ));
-                        if session.action_items.is_empty() {
-                            buf.push_str("  (none)\n");
-                        } else {
-                            for (i, a) in session.action_items.iter().enumerate() {
-                                buf.push_str(&format!(
-                                    "  {}. [P{}] {} (owner: {})\n",
-                                    i + 1,
-                                    a.priority,
-                                    a.description,
-                                    a.owner
-                                ));
-                            }
-                        }
-                        buf.push_str(&format!("\nNotes ({}):\n", session.notes.len()));
-                        if session.notes.is_empty() {
-                            buf.push_str("  (none)\n");
-                        } else {
-                            for n in &session.notes {
-                                buf.push_str(&format!("  - {n}\n"));
-                            }
-                        }
-                        buf
                     }
-                    MeetingCommand::List => {
-                        let has_items = !session.decisions.is_empty()
-                            || !session.action_items.is_empty()
-                            || !session.notes.is_empty()
-                            || !session.explicit_questions.is_empty();
-                        if !has_items {
-                            "No items recorded yet.".to_string()
-                        } else {
-                            let mut buf = String::new();
-                            if !session.decisions.is_empty() {
-                                buf.push_str("Decisions:\n");
-                                for (i, d) in session.decisions.iter().enumerate() {
-                                    buf.push_str(&format!("  {}. {}\n", i + 1, d.description));
-                                }
-                            }
-                            if !session.action_items.is_empty() {
-                                buf.push_str("Action items:\n");
-                                for (i, a) in session.action_items.iter().enumerate() {
-                                    buf.push_str(&format!(
-                                        "  {}. {} (owner={})\n",
-                                        i + 1,
-                                        a.description,
-                                        a.owner
-                                    ));
-                                }
-                            }
-                            if !session.notes.is_empty() {
-                                buf.push_str("Notes:\n");
-                                for (i, n) in session.notes.iter().enumerate() {
-                                    buf.push_str(&format!("  {}. {}\n", i + 1, n));
-                                }
-                            }
-                            if !session.explicit_questions.is_empty() {
-                                buf.push_str("Questions:\n");
-                                for (i, q) in session.explicit_questions.iter().enumerate() {
-                                    buf.push_str(&format!("  {}. {}\n", i + 1, q));
-                                }
-                            }
-                            buf
-                        }
-                    }
-                    MeetingCommand::Edit {
-                        item_type,
-                        index,
-                        new_text,
-                    } => match edit_item(&mut session, &item_type, index, &new_text) {
-                        Ok(()) => format!("Updated {item_type} {}.", index + 1),
-                        Err(e) => format!("Error: {e}"),
-                    },
-                    MeetingCommand::Delete { item_type, index } => {
-                        match remove_item(&mut session, &item_type, index) {
-                            Ok(()) => format!("Deleted {item_type} {}.", index + 1),
-                            Err(e) => format!("Error: {e}"),
-                        }
-                    }
-                    MeetingCommand::AddParticipant(name) => {
-                        if !session.participants.contains(&name) {
-                            session.participants.push(name.clone());
-                        }
-                        format!("Participant added: {name}")
-                    }
-                    MeetingCommand::ListParticipants => {
-                        if session.participants.is_empty() {
-                            "No participants recorded yet.".to_string()
-                        } else {
-                            let mut buf = String::from("Participants:\n");
-                            for p in &session.participants {
-                                buf.push_str(&format!("  - {p}\n"));
-                            }
-                            buf
-                        }
-                    }
-                    MeetingCommand::Preview => {
-                        format!(
-                            "Handoff Preview — {} decision(s), {} action(s), {} note(s), {} question(s).",
-                            session.decisions.len(),
-                            session.action_items.len(),
-                            session.notes.len(),
-                            session.explicit_questions.len(),
-                        )
-                    }
-                    MeetingCommand::Conversation(ref user_text) => {
-                        if let Some(ref mut agent) = agent_session {
-                            let turn_input = BaseTypeTurnInput {
-                                objective: user_text.clone(),
-                                identity_context: meeting_system_prompt.clone(),
-                                prompt_preamble: format!("Meeting topic: {topic}"),
-                            };
-                            // run_turn is synchronous (blocks on LLM call)
-                            match agent.run_turn(turn_input) {
-                                Ok(outcome) => {
-                                    let response = outcome.execution_summary.trim().to_string();
-                                    add_note(&mut session, &format!("operator: {user_text}")).ok();
-                                    add_note(&mut session, &format!("simard: {response}")).ok();
-                                    // Auto-capture decisions/actions from conversation
-                                    let mut capture_buf: Vec<u8> = Vec::new();
-                                    auto_capture_structured_items(
-                                        &mut session,
-                                        user_text,
-                                        &response,
-                                        &mut capture_buf,
-                                    );
-                                    response
-                                }
-                                Err(e) => {
-                                    add_note(&mut session, user_text).ok();
-                                    format!("[agent error: {e}]")
-                                }
-                            }
-                        } else {
-                            add_note(&mut session, user_text).ok();
-                            "Note added. (No agent backend — running in note-taking mode. Check SIMARD_LLM_PROVIDER and auth config.)".to_string()
-                        }
-                    }
-                    MeetingCommand::Empty => continue,
-                    MeetingCommand::Unknown(ref input) => {
-                        format!("Unknown command: {input}. Type /help for available commands.")
-                    }
-                };
-
-                let role = if is_conversation {
-                    "assistant"
-                } else {
-                    "system"
-                };
-                let reply = json!({"role": role, "content": reply_content});
-                if socket
-                    .send(Message::Text(reply.to_string().into()))
-                    .await
-                    .is_err()
-                {
-                    break;
                 }
             }
-            Message::Close(_) => break,
+            Message::Close(_) => {
+                // Clean up on disconnect
+                let _ = tokio::task::spawn_blocking(move || backend.close()).await;
+                break;
+            }
             _ => {}
         }
     }
