@@ -48,6 +48,7 @@ pub mod meeting_facilitator;
 pub mod meeting_repl;
 pub mod meetings;
 pub mod memory;
+pub mod memory_backup;
 pub mod memory_bridge;
 pub mod memory_bridge_adapter;
 pub mod memory_cognitive;
