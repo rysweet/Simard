@@ -21,9 +21,6 @@ pub struct PlanningContext {
     pub relevant_knowledge: Vec<KnowledgeQueryResult>,
     /// Names of packs that contributed knowledge.
     pub pack_sources: Vec<String>,
-    /// True when the knowledge bridge was unavailable or returned an error.
-    /// Distinguishes "no relevant packs" from "bridge was down."
-    pub degraded: bool,
 }
 
 impl PlanningContext {
@@ -42,27 +39,17 @@ impl PlanningContext {
 /// 4. Returns the aggregated results as a [`PlanningContext`].
 ///
 /// If the bridge is unavailable or no packs match, an empty context is returned
-/// rather than propagating errors -- knowledge enrichment is best-effort.
+/// rather than hiding errors — knowledge enrichment failures propagate per PHILOSOPHY.md.
 pub fn enrich_planning_context(
     objective: &str,
     bridge: &KnowledgeBridge,
 ) -> SimardResult<PlanningContext> {
-    let packs = match bridge.list_packs() {
-        Ok(p) => p,
-        Err(_) => {
-            return Ok(PlanningContext {
-                relevant_knowledge: vec![],
-                pack_sources: vec![],
-                degraded: true,
-            });
-        }
-    };
+    let packs = bridge.list_packs()?;
 
     if packs.is_empty() {
         return Ok(PlanningContext {
             relevant_knowledge: vec![],
             pack_sources: vec![],
-            degraded: false,
         });
     }
 
@@ -97,7 +84,6 @@ pub fn enrich_planning_context(
     Ok(PlanningContext {
         relevant_knowledge,
         pack_sources,
-        degraded: false,
     })
 }
 
@@ -193,14 +179,12 @@ mod tests {
     }
 
     #[test]
-    fn enrich_returns_empty_when_bridge_unavailable() {
+    fn enrich_returns_error_when_bridge_unavailable() {
         let bridge = KnowledgeBridge::new(Box::new(failing_transport()));
-        let ctx = enrich_planning_context("anything", &bridge).unwrap();
-        assert!(ctx.is_empty());
-        assert!(ctx.pack_sources.is_empty());
+        let result = enrich_planning_context("anything", &bridge);
         assert!(
-            ctx.degraded,
-            "context should be marked degraded when bridge is unavailable"
+            result.is_err(),
+            "should propagate bridge error, not silently degrade"
         );
     }
 
@@ -209,7 +193,6 @@ mod tests {
         let bridge = KnowledgeBridge::new(Box::new(mock_transport()));
         let ctx = enrich_planning_context("xyzzy plugh", &bridge).unwrap();
         assert!(ctx.is_empty());
-        assert!(!ctx.degraded, "no packs matched but bridge was healthy");
     }
 
     #[test]
@@ -241,10 +224,8 @@ mod tests {
         let ctx = PlanningContext {
             relevant_knowledge: vec![],
             pack_sources: vec![],
-            degraded: false,
         };
         assert!(ctx.is_empty());
-        assert!(!ctx.degraded);
     }
 
     #[test]

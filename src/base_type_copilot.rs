@@ -154,7 +154,7 @@ impl CopilotSdkSession {
     /// When `identity_context` or `prompt_preamble` are provided (e.g. in
     /// meeting mode), they are prepended to the objective so the agent
     /// receives the full conversational context.
-    fn build_enriched_objective(&self, input: &BaseTypeTurnInput) -> String {
+    fn build_enriched_objective(&self, input: &BaseTypeTurnInput) -> SimardResult<String> {
         let mut parts = Vec::new();
         if !input.prompt_preamble.is_empty() {
             parts.push(input.prompt_preamble.as_str());
@@ -169,9 +169,9 @@ impl CopilotSdkSession {
             &combined_objective,
             self.memory_bridge.as_ref(),
             self.knowledge_bridge.as_ref(),
-        );
+        )?;
         let formatted = format_turn_input(&context);
-        build_copilot_terminal_objective(&self.config, &formatted)
+        Ok(build_copilot_terminal_objective(&self.config, &formatted))
     }
 }
 
@@ -193,7 +193,7 @@ impl BaseTypeSession for CopilotSdkSession {
 
         self.turn_count += 1;
 
-        let enriched_objective = self.build_enriched_objective(&input);
+        let enriched_objective = self.build_enriched_objective(&input)?;
         let enriched_input = BaseTypeTurnInput::objective_only(enriched_objective);
 
         tracing::info!(mode = %self.request.mode, turn = self.turn_count, "Copilot adapter: sending turn to Copilot SDK (this may take 30-90s)…");
