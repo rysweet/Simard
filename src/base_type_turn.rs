@@ -11,10 +11,10 @@
 
 use std::fmt::Write;
 
+use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 use crate::knowledge_bridge::{KnowledgeBridge, KnowledgeQueryResult};
 use crate::knowledge_context::enrich_planning_context;
-use crate::memory_bridge::CognitiveMemoryBridge;
 use crate::memory_cognitive::{CognitiveFact, CognitiveProcedure};
 
 /// Maximum number of memory facts to inject per turn.
@@ -58,7 +58,7 @@ pub struct TurnOutput {
 /// silent degradation per PHILOSOPHY.md.
 pub fn prepare_turn_context(
     objective: &str,
-    memory_bridge: Option<&CognitiveMemoryBridge>,
+    memory_bridge: Option<&dyn CognitiveMemoryOps>,
     knowledge_bridge: Option<&KnowledgeBridge>,
 ) -> SimardResult<TurnContext> {
     let memory_facts = match memory_bridge {

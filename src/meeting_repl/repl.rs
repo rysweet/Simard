@@ -6,10 +6,10 @@
 use std::io::{BufRead, Write};
 
 use crate::base_types::BaseTypeSession;
+use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 use crate::meeting_backend::{MeetingBackend, MeetingCommand, parse_command};
 use crate::meeting_facilitator::MeetingSession;
-use crate::memory_bridge::CognitiveMemoryBridge;
 
 const PROMPT: &str = "simard:meeting> ";
 
@@ -19,7 +19,7 @@ const PROMPT: &str = "simard:meeting> ";
 /// for backward compatibility with callers that inspect the closed session.
 pub fn run_meeting_repl<R: BufRead, W: Write>(
     topic: &str,
-    _bridge: &CognitiveMemoryBridge,
+    _bridge: &dyn CognitiveMemoryOps,
     agent: Option<Box<dyn BaseTypeSession>>,
     meeting_system_prompt: &str,
     input: &mut R,

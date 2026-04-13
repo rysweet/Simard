@@ -100,7 +100,7 @@ fn advance_goal_with_subordinate(
         killed: false,
     };
 
-    match check_heartbeat(&handle, &bridges.memory) {
+    match check_heartbeat(&handle, &*bridges.memory) {
         Ok(HeartbeatStatus::Alive { phase, .. }) => {
             // Subordinate is alive; update goal to in-progress if not already.
             let new_progress = GoalProgress::InProgress { percent: 50 };

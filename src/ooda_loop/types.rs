@@ -2,11 +2,11 @@
 
 use std::fmt::{self, Display, Formatter};
 
+use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress};
 use crate::gym_bridge::GymBridge;
 use crate::gym_scoring::GymSuiteScore;
 use crate::knowledge_bridge::KnowledgeBridge;
-use crate::memory_bridge::CognitiveMemoryBridge;
 use crate::memory_cognitive::CognitiveStatistics;
 use crate::memory_consolidation::PreparedContext;
 use crate::self_improve::ImprovementCycle;
@@ -191,7 +191,7 @@ fn env_f64(key: &str, default: f64) -> f64 {
 
 /// All bridges needed by the OODA loop.
 pub struct OodaBridges {
-    pub memory: CognitiveMemoryBridge,
+    pub memory: Box<dyn CognitiveMemoryOps>,
     pub knowledge: KnowledgeBridge,
     pub gym: GymBridge,
     /// Optional base-type session for real autonomous work (e.g. RustyClawd).

@@ -10,8 +10,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
-use crate::memory_bridge::CognitiveMemoryBridge;
 use crate::memory_cognitive::CognitiveProcedure;
 
 // ---------------------------------------------------------------------------
@@ -43,7 +43,7 @@ pub struct SkillTemplate {
 ///
 /// Returns templates sorted by usage count (highest first).
 pub fn extract_skill_candidates(
-    bridge: &CognitiveMemoryBridge,
+    bridge: &dyn CognitiveMemoryOps,
     min_usage: u32,
 ) -> SimardResult<Vec<SkillTemplate>> {
     // Recall all procedures with a broad query.

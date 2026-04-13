@@ -2,8 +2,8 @@
 
 use serde_json::json;
 
+use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
-use crate::memory_bridge::CognitiveMemoryBridge;
 
 use super::types::{ActionItem, MeetingDecision, MeetingSession, MeetingSessionStatus};
 
@@ -45,7 +45,7 @@ fn validate_action_item(item: &ActionItem) -> SimardResult<()> {
 
 /// Start a new meeting session. Records a sensory observation in cognitive
 /// memory so the meeting start is captured for recall.
-pub fn start_meeting(topic: &str, bridge: &CognitiveMemoryBridge) -> SimardResult<MeetingSession> {
+pub fn start_meeting(topic: &str, bridge: &dyn CognitiveMemoryOps) -> SimardResult<MeetingSession> {
     required_field("topic", topic)?;
 
     bridge.record_sensory("meeting-start", &format!("Meeting started: {topic}"), 3600)?;
@@ -280,7 +280,7 @@ pub fn remove_item(
 /// and a semantic fact in cognitive memory.
 pub fn close_meeting(
     mut session: MeetingSession,
-    bridge: &CognitiveMemoryBridge,
+    bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<MeetingSession> {
     if session.status != MeetingSessionStatus::Open {
         return Err(SimardError::InvalidMeetingRecord {
@@ -333,6 +333,7 @@ pub fn close_meeting(
 mod tests {
     use super::*;
     use crate::bridge_subprocess::InMemoryBridgeTransport;
+    use crate::memory_bridge::CognitiveMemoryBridge;
     use serde_json::json;
 
     fn mock_bridge() -> CognitiveMemoryBridge {

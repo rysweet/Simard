@@ -1,27 +1,20 @@
-//! Live integration tests that launch real Python bridge subprocesses.
+//! Live integration tests for cognitive memory.
 //!
-//! These tests require the Python ecosystem to be available:
-//! - python3 on PATH
-//! - amplihack-memory-lib (LadybugDB) importable
-//!
-//! They exercise the full path: Rust → subprocess → Python → LadybugDB → response.
+//! These tests exercise the native LadybugDB backend directly.
 
 use std::path::PathBuf;
 
-use simard::bridge_launcher::{find_python_dir, launch_memory_bridge};
+use simard::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 
-fn test_db_path() -> PathBuf {
-    // LadybugDB expects a path it can create as a database — not a pre-existing directory.
+fn test_state_root() -> PathBuf {
     std::env::temp_dir().join(format!("simard-live-test-{}", uuid::Uuid::now_v7()))
 }
 
 #[test]
-#[ignore] // Requires Python + LadybugDB — run with: cargo test -- --ignored
+#[ignore] // Requires LadybugDB — run with: cargo test -- --ignored
 fn live_memory_bridge_stores_and_retrieves_fact() {
-    let python_dir = find_python_dir().expect("python dir should exist");
-    let db_path = test_db_path();
-    let bridge =
-        launch_memory_bridge("live-test", &db_path, &python_dir).expect("bridge should launch");
+    let state_root = test_state_root();
+    let bridge = NativeCognitiveMemory::open(&state_root).expect("native memory should open");
 
     // Store a fact
     let fact_id = bridge
@@ -53,15 +46,14 @@ fn live_memory_bridge_stores_and_retrieves_fact() {
     );
 
     // Cleanup
-    let _ = std::fs::remove_dir_all(&db_path);
+    let _ = std::fs::remove_dir_all(&state_root);
 }
 
 #[test]
-#[ignore] // Requires Python + LadybugDB — run with: cargo test -- --ignored
+#[ignore] // Requires LadybugDB — run with: cargo test -- --ignored
 fn live_memory_bridge_working_memory_lifecycle() {
-    let python_dir = find_python_dir().expect("python dir");
-    let db_path = test_db_path();
-    let bridge = launch_memory_bridge("live-wm-test", &db_path, &python_dir).expect("launch");
+    let state_root = test_state_root();
+    let bridge = NativeCognitiveMemory::open(&state_root).expect("native memory should open");
 
     // Push a working memory slot
     let slot_id = bridge
@@ -85,15 +77,14 @@ fn live_memory_bridge_working_memory_lifecycle() {
         .expect("get_working after clear");
     assert!(after.is_empty());
 
-    let _ = std::fs::remove_dir_all(&db_path);
+    let _ = std::fs::remove_dir_all(&state_root);
 }
 
 #[test]
-#[ignore] // Requires Python + LadybugDB — run with: cargo test -- --ignored
+#[ignore] // Requires LadybugDB — run with: cargo test -- --ignored
 fn live_memory_bridge_episode_and_consolidation() {
-    let python_dir = find_python_dir().expect("python dir");
-    let db_path = test_db_path();
-    let bridge = launch_memory_bridge("live-ep-test", &db_path, &python_dir).expect("launch");
+    let state_root = test_state_root();
+    let bridge = NativeCognitiveMemory::open(&state_root).expect("native memory should open");
 
     // Store several episodes
     for i in 0..3 {
@@ -116,15 +107,14 @@ fn live_memory_bridge_episode_and_consolidation() {
         "not enough episodes to consolidate with batch_size=10"
     );
 
-    let _ = std::fs::remove_dir_all(&db_path);
+    let _ = std::fs::remove_dir_all(&state_root);
 }
 
 #[test]
-#[ignore] // Requires Python + LadybugDB — run with: cargo test -- --ignored
+#[ignore] // Requires LadybugDB — run with: cargo test -- --ignored
 fn live_memory_bridge_procedure_store_and_recall() {
-    let python_dir = find_python_dir().expect("python dir");
-    let db_path = test_db_path();
-    let bridge = launch_memory_bridge("live-proc-test", &db_path, &python_dir).expect("launch");
+    let state_root = test_state_root();
+    let bridge = NativeCognitiveMemory::open(&state_root).expect("native memory should open");
 
     bridge
         .store_procedure(
@@ -145,5 +135,5 @@ fn live_memory_bridge_procedure_store_and_recall() {
     assert!(!procs.is_empty(), "should recall the procedure");
     assert_eq!(procs[0].name, "fix-and-verify");
 
-    let _ = std::fs::remove_dir_all(&db_path);
+    let _ = std::fs::remove_dir_all(&state_root);
 }

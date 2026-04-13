@@ -3,10 +3,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::bridge_launcher::{
-    cognitive_memory_db_path, find_python_dir, launch_gym_bridge, launch_knowledge_bridge,
-    launch_memory_bridge,
-};
+use crate::bridge_launcher::{find_python_dir, launch_gym_bridge, launch_knowledge_bridge};
+use crate::cognitive_memory::NativeCognitiveMemory;
 use crate::goal_curation::load_goal_board;
 use crate::identity::OperatingMode;
 use crate::ooda_loop::{
@@ -108,13 +106,9 @@ pub fn run_ooda_daemon(
 
     std::fs::create_dir_all(&state_root)?;
 
-    let agent_name =
-        std::env::var("SIMARD_AGENT_NAME").unwrap_or_else(|_| "simard-ooda".to_string());
-
     let python_dir = find_python_dir()?;
-    let db_path = cognitive_memory_db_path(&state_root);
 
-    let memory = launch_memory_bridge(&agent_name, &db_path, &python_dir)?;
+    let memory = Box::new(NativeCognitiveMemory::open(&state_root)?);
     let knowledge = launch_knowledge_bridge(&python_dir)?;
     let gym = launch_gym_bridge(&python_dir)?;
 
@@ -134,7 +128,7 @@ pub fn run_ooda_daemon(
         session: Some(session),
     };
 
-    let board = load_goal_board(&bridges.memory).unwrap_or_default();
+    let board = load_goal_board(&*bridges.memory).unwrap_or_default();
     let mut state = OodaState::new(board);
     let config = OodaConfig::default();
 

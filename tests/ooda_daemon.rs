@@ -88,7 +88,7 @@ fn mock_knowledge() -> KnowledgeBridge {
 
 fn test_bridges() -> OodaBridges {
     OodaBridges {
-        memory: mock_memory(),
+        memory: Box::new(mock_memory()),
         knowledge: mock_knowledge(),
         gym: mock_gym(),
         session: None,

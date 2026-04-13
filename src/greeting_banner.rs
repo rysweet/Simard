@@ -6,14 +6,14 @@
 use std::io::Write;
 use std::process::Command;
 
+use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::goal_curation::load_goal_board;
-use crate::memory_bridge::CognitiveMemoryBridge;
 
 /// Maximum number of known projects to display in the banner.
 const MAX_PROJECTS_SHOWN: usize = 5;
 
 /// Build the greeting banner text. Returns lines to print to stderr.
-pub fn build_greeting_banner(bridge: Option<&CognitiveMemoryBridge>) -> Vec<String> {
+pub fn build_greeting_banner(bridge: Option<&dyn CognitiveMemoryOps>) -> Vec<String> {
     let mut lines = Vec::new();
 
     // Section 1: Name and version
@@ -72,7 +72,7 @@ pub fn build_greeting_banner(bridge: Option<&CognitiveMemoryBridge>) -> Vec<Stri
 }
 
 /// Print the greeting banner to stderr.
-pub fn print_greeting_banner(bridge: Option<&CognitiveMemoryBridge>) {
+pub fn print_greeting_banner(bridge: Option<&dyn CognitiveMemoryOps>) {
     let lines = build_greeting_banner(bridge);
     let mut stderr = std::io::stderr().lock();
     for line in &lines {
@@ -159,7 +159,7 @@ fn fetch_gh_count(args: &[&str]) -> String {
 }
 
 /// Extract known project names from semantic facts.
-fn known_projects(bridge: &CognitiveMemoryBridge) -> Vec<(String, f64)> {
+fn known_projects(bridge: &dyn CognitiveMemoryOps) -> Vec<(String, f64)> {
     match bridge.search_facts("project", 20, 0.0) {
         Ok(facts) => {
             let mut projects: Vec<(String, f64)> = facts
@@ -189,7 +189,7 @@ fn known_projects(bridge: &CognitiveMemoryBridge) -> Vec<(String, f64)> {
 }
 
 /// Show memory statistics when no active goals exist.
-fn append_memory_stats(bridge: &CognitiveMemoryBridge, lines: &mut Vec<String>) {
+fn append_memory_stats(bridge: &dyn CognitiveMemoryOps, lines: &mut Vec<String>) {
     match bridge.get_statistics() {
         Ok(stats) => {
             lines.push(format!(

@@ -14,8 +14,8 @@ use chrono::Utc;
 use tracing::{debug, info, warn};
 
 use crate::base_types::{BaseTypeOutcome, BaseTypeSession, BaseTypeTurnInput};
+use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
-use crate::memory_bridge::CognitiveMemoryBridge;
 
 pub use command::{MeetingCommand, parse_command};
 pub use types::{
@@ -37,7 +37,7 @@ pub struct MeetingBackend {
     history: Vec<ConversationMessage>,
     system_prompt: String,
     agent: Box<dyn BaseTypeSession>,
-    bridge: Option<CognitiveMemoryBridge>,
+    bridge: Option<Box<dyn CognitiveMemoryOps>>,
     started_at: String,
     is_open: bool,
 }
@@ -52,7 +52,7 @@ impl MeetingBackend {
     pub fn new_session(
         topic: &str,
         agent: Box<dyn BaseTypeSession>,
-        bridge: Option<CognitiveMemoryBridge>,
+        bridge: Option<Box<dyn CognitiveMemoryOps>>,
         system_prompt: String,
     ) -> Self {
         let started_at = Utc::now().to_rfc3339();
@@ -176,7 +176,7 @@ impl MeetingBackend {
 
         // Store to cognitive memory via bridge
         if let Some(ref bridge) = self.bridge {
-            persist::store_cognitive_memory(bridge, &self.topic, &summary_text, &self.history);
+            persist::store_cognitive_memory(&**bridge, &self.topic, &summary_text, &self.history);
         }
 
         // Close the agent session

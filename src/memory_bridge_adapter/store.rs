@@ -6,9 +6,9 @@ use chrono::{DateTime, Utc};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 use crate::memory::{FileBackedMemoryStore, MemoryRecord, MemoryScope, MemoryStore};
-use crate::memory_bridge::CognitiveMemoryBridge;
 use crate::memory_cognitive::CognitiveFact;
 use crate::metadata::{BackendDescriptor, Freshness};
 use crate::session::SessionId;
@@ -27,7 +27,7 @@ use super::{BRIDGE_READ_MAX_RETRIES, BRIDGE_RETRY_BACKOFF_MS, STORE_NAME};
 ///
 /// Falls back to `FileBackedMemoryStore` if the bridge fails.
 pub struct CognitiveBridgeMemoryStore {
-    bridge: CognitiveMemoryBridge,
+    bridge: Box<dyn CognitiveMemoryOps>,
     fallback: FileBackedMemoryStore,
     /// Track records locally for list/count operations since cognitive memory
     /// search is keyword-based and cannot filter by exact scope/session.
@@ -40,12 +40,12 @@ pub struct CognitiveBridgeMemoryStore {
 
 impl CognitiveBridgeMemoryStore {
     pub fn new(
-        bridge: CognitiveMemoryBridge,
+        bridge: impl CognitiveMemoryOps + 'static,
         fallback_path: impl Into<PathBuf>,
     ) -> SimardResult<Self> {
         let fallback = FileBackedMemoryStore::try_new(fallback_path)?;
         let mut store = Self {
-            bridge,
+            bridge: Box::new(bridge),
             records: Mutex::new(HashMap::new()),
             pending_bridge_keys: Mutex::new(Vec::new()),
             descriptor: BackendDescriptor::for_runtime_type::<Self>(
@@ -371,6 +371,7 @@ mod tests {
     use super::*;
     use crate::bridge::{BridgeRequest, BridgeResponse};
     use crate::memory::{MemoryRecord, MemoryScope, MemoryStore};
+    use crate::memory_bridge::CognitiveMemoryBridge;
     use crate::metadata::{BackendDescriptor, Freshness};
     use crate::session::{SessionId, SessionPhase};
 

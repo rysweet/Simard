@@ -1,11 +1,10 @@
 use std::io::{self, BufReader};
 use std::path::PathBuf;
 
-use crate::bridge_launcher::{cognitive_memory_db_path, find_python_dir, launch_memory_bridge};
+use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::greeting_banner::print_greeting_banner;
 use crate::identity::OperatingMode;
 use crate::meeting_repl::run_meeting_repl;
-use crate::memory_bridge::CognitiveMemoryBridge;
 use crate::operator_commands::prompt_root;
 
 use super::live_context::build_live_meeting_context;
@@ -16,16 +15,13 @@ fn load_meeting_system_prompt() -> String {
     std::fs::read_to_string(&path).unwrap_or_default()
 }
 
-/// Launch the Python memory server for meeting mode (mandatory).
-fn launch_real_meeting_bridge() -> Result<CognitiveMemoryBridge, Box<dyn std::error::Error>> {
-    let python_dir =
-        find_python_dir().map_err(|e| format!("cognitive memory requires Python bridge: {e}"))?;
+/// Launch the native cognitive memory backend for meeting mode (mandatory).
+fn launch_real_meeting_bridge() -> Result<Box<dyn CognitiveMemoryOps>, Box<dyn std::error::Error>> {
     let state_root = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/target/simard-state"));
     let _ = std::fs::create_dir_all(&state_root);
-    let db_path = cognitive_memory_db_path(&state_root);
-    let bridge = launch_memory_bridge("simard-meeting", &db_path, &python_dir)
-        .map_err(|e| format!("cognitive memory bridge failed to start: {e}"))?;
-    Ok(bridge)
+    let native_mem = NativeCognitiveMemory::open(&state_root)
+        .map_err(|e| format!("cognitive memory failed to open: {e}"))?;
+    Ok(Box::new(native_mem))
 }
 
 /// Open an agent session for the meeting REPL using the standard base type
@@ -50,11 +46,11 @@ pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::E
     let bridge = launch_real_meeting_bridge()?;
     eprintln!("  Memory: cognitive bridge active (LadybugDB backend)");
 
-    print_greeting_banner(Some(&bridge));
+    print_greeting_banner(Some(&*bridge));
 
     let agent_session = open_meeting_agent_session();
     let base_prompt = load_meeting_system_prompt();
-    let live_context = build_live_meeting_context(&bridge);
+    let live_context = build_live_meeting_context(&*bridge);
     let meeting_system_prompt = format!("{base_prompt}\n\n{live_context}");
 
     if agent_session.is_some() {
@@ -70,7 +66,7 @@ pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::E
 
     let _session = run_meeting_repl(
         topic,
-        &bridge,
+        &*bridge,
         agent_session,
         &meeting_system_prompt,
         &mut reader,

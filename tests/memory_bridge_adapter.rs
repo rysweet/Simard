@@ -1,12 +1,12 @@
 //! Outside-in integration tests for CognitiveBridgeMemoryStore.
 //!
 //! These tests verify the adapter implements MemoryStore correctly when backed
-//! by a real cognitive memory bridge (Python subprocess + LadybugDB), and that
-//! bootstrap correctly selects the cognitive backend when bridges are available.
+//! by native cognitive memory (LadybugDB), and that bootstrap correctly selects
+//! the cognitive backend when bridges are available.
 
 use std::path::PathBuf;
 
-use simard::bridge_launcher::{find_python_dir, launch_memory_bridge};
+use simard::cognitive_memory::NativeCognitiveMemory;
 use simard::memory::{MemoryRecord, MemoryScope, MemoryStore};
 use simard::memory_bridge_adapter::CognitiveBridgeMemoryStore;
 use simard::session::SessionPhase;
@@ -14,21 +14,22 @@ use simard::session::SessionPhase;
 /// RAII guard that cleans up test artifacts on drop.
 struct TestFixture {
     store: CognitiveBridgeMemoryStore,
-    db_path: PathBuf,
+    state_root: PathBuf,
     fallback: PathBuf,
 }
 
 impl TestFixture {
-    fn new(label: &str) -> Self {
-        let python_dir = find_python_dir().expect("python dir");
-        let db_path = std::env::temp_dir().join(format!("adapter-live-{}", uuid::Uuid::now_v7()));
-        let bridge = launch_memory_bridge(label, &db_path, &python_dir).expect("bridge");
+    fn new(_label: &str) -> Self {
+        let state_root =
+            std::env::temp_dir().join(format!("adapter-live-{}", uuid::Uuid::now_v7()));
+        let native_mem =
+            NativeCognitiveMemory::open(&state_root).expect("native memory should open");
         let fallback =
             std::env::temp_dir().join(format!("adapter-fb-{}.json", uuid::Uuid::now_v7()));
-        let store = CognitiveBridgeMemoryStore::new(bridge, &fallback).expect("adapter");
+        let store = CognitiveBridgeMemoryStore::new(native_mem, &fallback).expect("adapter");
         Self {
             store,
-            db_path,
+            state_root,
             fallback,
         }
     }
@@ -36,7 +37,7 @@ impl TestFixture {
 
 impl Drop for TestFixture {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.db_path);
+        let _ = std::fs::remove_dir_all(&self.state_root);
         let _ = std::fs::remove_file(&self.fallback);
     }
 }

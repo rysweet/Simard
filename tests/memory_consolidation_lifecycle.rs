@@ -141,7 +141,9 @@ fn full_mock_memory_transport() -> InMemoryBridgeTransport {
 #[test]
 fn ooda_cycle_runs_with_consolidation_wired_in() {
     let bridges = OodaBridges {
-        memory: CognitiveMemoryBridge::new(Box::new(full_mock_memory_transport())),
+        memory: Box::new(CognitiveMemoryBridge::new(Box::new(
+            full_mock_memory_transport(),
+        ))),
         knowledge: KnowledgeBridge::new(Box::new(InMemoryBridgeTransport::new(
             "test-knowledge",
             |method, _params| match method {
@@ -279,7 +281,7 @@ fn multiple_ooda_cycles_accumulate_consolidation() {
     });
 
     let mut bridges = OodaBridges {
-        memory: CognitiveMemoryBridge::new(Box::new(transport)),
+        memory: Box::new(CognitiveMemoryBridge::new(Box::new(transport))),
         knowledge: KnowledgeBridge::new(Box::new(InMemoryBridgeTransport::new(
             "k",
             |method, _params| match method {

@@ -13,9 +13,9 @@ use crate::base_types::{
     BaseTypeSession, BaseTypeSessionRequest, BaseTypeTurnInput, capability_set,
     ensure_session_not_already_open, ensure_session_not_closed, ensure_session_open,
 };
+use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 use crate::knowledge_bridge::KnowledgeBridge;
-use crate::memory_bridge::CognitiveMemoryBridge;
 use crate::metadata::{BackendDescriptor, Freshness};
 use crate::runtime::RuntimeTopology;
 use crate::sanitization::objective_metadata;
@@ -126,7 +126,7 @@ struct CopilotSdkSession {
     descriptor: BaseTypeDescriptor,
     config: CopilotAdapterConfig,
     request: BaseTypeSessionRequest,
-    memory_bridge: Option<CognitiveMemoryBridge>,
+    memory_bridge: Option<Box<dyn CognitiveMemoryOps>>,
     knowledge_bridge: Option<KnowledgeBridge>,
     is_open: bool,
     is_closed: bool,
@@ -167,7 +167,7 @@ impl CopilotSdkSession {
         let combined_objective = parts.join("\n\n");
         let context = prepare_turn_context(
             &combined_objective,
-            self.memory_bridge.as_ref(),
+            self.memory_bridge.as_deref(),
             self.knowledge_bridge.as_ref(),
         )?;
         let formatted = format_turn_input(&context);

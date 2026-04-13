@@ -19,6 +19,7 @@ pub mod cmd_cleanup;
 pub mod cmd_ensure_deps;
 pub mod cmd_install;
 pub mod cmd_self_update;
+pub mod cognitive_memory;
 mod copilot_status_probe;
 mod copilot_task_submit;
 pub mod cost_tracking;
@@ -131,6 +132,7 @@ pub use bridge::{
 };
 pub use bridge_circuit::{CircuitBreakerConfig, CircuitBreakerTransport, CircuitState};
 pub use bridge_subprocess::{InMemoryBridgeTransport, SubprocessBridgeTransport};
+pub use cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 pub use cost_tracking::{
     CostEntry, CostSummary, daily_summary, estimate_tokens, record_cost, weekly_summary,
 };
