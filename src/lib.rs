@@ -1,5 +1,6 @@
 pub mod agent_goal_assignment;
 pub mod agent_program;
+pub mod agent_registry;
 pub mod agent_roles;
 pub mod agent_supervisor;
 pub mod base_type_claude_agent_sdk;
@@ -15,6 +16,7 @@ pub mod bridge;
 pub mod bridge_circuit;
 pub mod bridge_launcher;
 pub mod bridge_subprocess;
+pub mod build_lock;
 pub mod cmd_cleanup;
 pub mod cmd_ensure_deps;
 pub mod cmd_install;
@@ -100,6 +102,10 @@ pub use agent_program::{
     AgentProgram, AgentProgramContext, AgentProgramMemoryRecord, ImprovementCuratorProgram,
     MeetingFacilitatorProgram, ObjectiveRelayProgram,
 };
+pub use agent_registry::{
+    AgentEntry, AgentRegistry, AgentState, FileBackedAgentRegistry, ResourceUsage, hostname,
+    self_entry, self_resource_usage,
+};
 pub use agent_roles::{AgentRole, identity_for_role, role_for_objective};
 pub use agent_supervisor::{
     HeartbeatStatus, SubordinateConfig, SubordinateHandle, check_heartbeat, kill_subordinate,
@@ -133,6 +139,7 @@ pub use bridge::{
 };
 pub use bridge_circuit::{CircuitBreakerConfig, CircuitBreakerTransport, CircuitState};
 pub use bridge_subprocess::{InMemoryBridgeTransport, SubprocessBridgeTransport};
+pub use build_lock::{BuildLock, BuildLockGuard};
 pub use cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 pub use cost_tracking::{
     CostEntry, CostSummary, daily_summary, estimate_tokens, record_cost, weekly_summary,
