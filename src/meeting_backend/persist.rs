@@ -91,6 +91,46 @@ pub fn write_transcript(transcript: &MeetingTranscript) -> SimardResult<PathBuf>
     Ok(path)
 }
 
+/// Write an auto-save transcript to `~/.simard/meetings/_autosave_{topic}.json`.
+///
+/// Overwrites the same file each turn. The final `write_transcript()` on
+/// `/close` writes the canonical timestamped file.
+pub fn write_auto_save(transcript: &MeetingTranscript) -> SimardResult<PathBuf> {
+    let dir = meetings_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| SimardError::ActionExecutionFailed {
+        action: "create-meetings-dir".to_string(),
+        reason: e.to_string(),
+    })?;
+
+    let safe_topic = sanitize_filename(&transcript.topic);
+    let filename = format!("_autosave_{safe_topic}.json");
+    let path = dir.join(&filename);
+
+    let json = serde_json::to_string_pretty(transcript).map_err(|e| {
+        SimardError::ActionExecutionFailed {
+            action: "serialize-autosave".to_string(),
+            reason: e.to_string(),
+        }
+    })?;
+
+    std::fs::write(&path, &json).map_err(|e| SimardError::ActionExecutionFailed {
+        action: "write-autosave".to_string(),
+        reason: e.to_string(),
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        if let Err(e) = std::fs::set_permissions(&path, perms) {
+            warn!("Failed to set autosave permissions: {e}");
+        }
+    }
+
+    debug!(path = %path.display(), "Auto-save transcript written");
+    Ok(path)
+}
+
 /// Write a `MeetingHandoff` artifact for OODA integration.
 ///
 /// The handoff uses empty decisions/action_items vectors (per the arch spec —
