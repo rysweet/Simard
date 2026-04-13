@@ -128,6 +128,16 @@ pub fn run_ooda_cycle(
     ) {
         eprintln!("[simard] OODA consolidation: intake failed: {e}");
     }
+    // Hydrate prior-session facts into working memory for cross-cycle recall.
+    match memory_consolidation::consolidation_intake(&cycle_session_id, &*bridges.memory) {
+        Ok(n) if n > 0 => {
+            eprintln!("[simard] OODA consolidation: hydrated {n} prior-session facts");
+        }
+        Err(e) => {
+            eprintln!("[simard] OODA consolidation: cross-session hydration failed: {e}");
+        }
+        _ => {}
+    }
 
     // --- Observe ---
     state.current_phase = OodaPhase::Observe;
@@ -314,6 +324,12 @@ pub fn run_ooda_cycle(
     }
 
     // --- Memory consolidation: persistence at cycle end ---
+    // Flush working memory to episodes before final persistence.
+    if let Err(e) =
+        memory_consolidation::consolidation_persistence(&cycle_session_id, &*bridges.memory)
+    {
+        eprintln!("[simard] OODA consolidation: flush failed: {e}");
+    }
     if let Err(e) =
         memory_consolidation::persistence_memory_operations(&cycle_session_id, &*bridges.memory)
     {
