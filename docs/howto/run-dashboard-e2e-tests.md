@@ -110,4 +110,5 @@ npx playwright test --config tests/e2e-dashboard/playwright.config.ts \
 | `SIMARD_DASHBOARD_PORT` | `18787` | Dashboard listen port |
 | `SIMARD_BIN` | *(cargo run)* | Path to pre-built binary |
 | `SIMARD_DASHKEY` | `~/.simard/.dashkey` | Auth code override |
+| `SIMARD_DASHBOARD_TOKEN` | unset | Token-based auth via `?token=` query param (alternative to cookie) |
 | `CI` | unset | Enables CI reporter and stricter settings |

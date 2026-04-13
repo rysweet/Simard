@@ -207,12 +207,13 @@ The tests depend on these selectors from `src/operator_commands_dashboard/routes
 ### Authentication
 
 1. `POST /api/login` with `{"code":"<dashkey>"}` → sets `simard_session` cookie
-2. All `/api/*` routes return 401 without a valid cookie
+2. All `/api/*` routes return 401 without a valid session cookie or token
 3. Non-API routes (including `/ws/chat`) return 303 redirect to `/login`
+4. Token-based auth: append `?token=<value>` to any route when `SIMARD_DASHBOARD_TOKEN` is set — bypasses cookie check
 
 ### WebSocket messages
 
-- **Client → Server**: Plain text (the typed message)
+- **Client → Server**: UTF-8 text frames (the typed message string)
 - **Server → Client**: JSON `{"role":"system"|"assistant"|"error","content":"..."}`
 - **Commands**: `/help`, `/status`, `/close` — handled server-side before reaching the LLM
 - **Greeting**: `"Connected to Simard. Speak naturally — /help for commands, /close to end."` sent on connection
