@@ -64,7 +64,9 @@ nav:
     - Inspect Improvements: howto/inspect-improvement-curation-state.md
     - Reclaim Disk Space: howto/reclaim-disk-space-and-run-low-space-rust-builds.md
     - Inspect Goal Register: howto/inspect-durable-goal-register.md
+    - Dashboard E2E Tests: howto/run-dashboard-e2e-tests.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
     - Runtime Contracts: reference/runtime-contracts.md
     - Bridge Wire Protocol: reference/bridge-wire-protocol.md
+    - Dashboard E2E Tests: reference/dashboard-e2e-tests.md
