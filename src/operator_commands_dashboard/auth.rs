@@ -81,12 +81,10 @@ pub async fn require_auth(request: Request, next: Next) -> Result<Response, Stat
         return Ok(next.run(request).await);
     }
 
-    // If no login code was configured (SIMARD_DASHBOARD_TOKEN unset + no init), allow all
+    // If no login code was configured, deny all — never silently allow traffic
     if LOGIN_CODE.get().is_none() {
-        let expected = std::env::var("SIMARD_DASHBOARD_TOKEN").unwrap_or_default();
-        if expected.is_empty() {
-            return Ok(next.run(request).await);
-        }
+        tracing::warn!("dashboard auth: no login code configured — denying request to {path}");
+        return Err(StatusCode::UNAUTHORIZED);
     }
 
     // Check session cookie
@@ -239,4 +237,9 @@ mod tests {
         // Just verify we can acquire the lock
         drop(guard);
     }
+}
+
+/// Check whether the login code has been initialized.
+pub fn is_auth_initialized() -> bool {
+    LOGIN_CODE.get().is_some()
 }

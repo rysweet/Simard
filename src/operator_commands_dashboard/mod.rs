@@ -5,6 +5,12 @@ use std::net::SocketAddr;
 
 pub fn serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let (code, loaded) = auth::init_login_code();
+
+    // Double-check: auth must be initialized before serving traffic
+    assert!(
+        auth::is_auth_initialized(),
+        "BUG: dashboard auth not initialized after init_login_code()"
+    );
     eprintln!("\n  🌲 Simard Dashboard");
     if loaded {
         eprintln!("  Login code: {code} (loaded from ~/.simard/.dashkey)");
