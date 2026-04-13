@@ -261,20 +261,17 @@ async fn seed_goals() -> Json<Value> {
     let goal_path = state_root.join("goal_records.json");
 
     // Only seed if no goals exist yet
-    if goal_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&goal_path) {
-            if let Ok(val) = serde_json::from_str::<Value>(&content) {
-                let has_goals = val
-                    .get("active")
-                    .and_then(|a| a.as_array())
-                    .map(|a| !a.is_empty())
-                    .unwrap_or(false);
-                if has_goals {
-                    return Json(
-                        json!({"status": "already_seeded", "message": "Goals already exist"}),
-                    );
-                }
-            }
+    if goal_path.exists()
+        && let Ok(content) = std::fs::read_to_string(&goal_path)
+        && let Ok(val) = serde_json::from_str::<Value>(&content)
+    {
+        let has_goals = val
+            .get("active")
+            .and_then(|a| a.as_array())
+            .map(|a| !a.is_empty())
+            .unwrap_or(false);
+        if has_goals {
+            return Json(json!({"status": "already_seeded", "message": "Goals already exist"}));
         }
     }
 
@@ -353,34 +350,34 @@ async fn memory_search(Json(body): Json<Value>) -> Json<Value> {
         ("goal_records.json", "goal"),
     ] {
         let path = state_root.join(file);
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(val) = serde_json::from_str::<Value>(&content) {
-                let search_in = |v: &Value| -> bool {
-                    let s = serde_json::to_string(v).unwrap_or_default().to_lowercase();
-                    s.contains(&query.to_lowercase())
-                };
+        if let Ok(content) = std::fs::read_to_string(&path)
+            && let Ok(val) = serde_json::from_str::<Value>(&content)
+        {
+            let search_in = |v: &Value| -> bool {
+                let s = serde_json::to_string(v).unwrap_or_default().to_lowercase();
+                s.contains(&query.to_lowercase())
+            };
 
-                match val {
-                    Value::Array(arr) => {
-                        for item in arr.iter().filter(|i| search_in(i)).take(10) {
-                            results.push(json!({"source": label, "data": item}));
-                        }
+            match val {
+                Value::Array(arr) => {
+                    for item in arr.iter().filter(|i| search_in(i)).take(10) {
+                        results.push(json!({"source": label, "data": item}));
                     }
-                    Value::Object(ref map) => {
-                        // For goal board format: search in active and backlog
-                        if let Some(Value::Array(active)) = map.get("active") {
-                            for item in active.iter().filter(|i| search_in(i)).take(5) {
-                                results.push(json!({"source": "active_goal", "data": item}));
-                            }
-                        }
-                        if let Some(Value::Array(backlog)) = map.get("backlog") {
-                            for item in backlog.iter().filter(|i| search_in(i)).take(5) {
-                                results.push(json!({"source": "backlog_goal", "data": item}));
-                            }
-                        }
-                    }
-                    _ => {}
                 }
+                Value::Object(ref map) => {
+                    // For goal board format: search in active and backlog
+                    if let Some(Value::Array(active)) = map.get("active") {
+                        for item in active.iter().filter(|i| search_in(i)).take(5) {
+                            results.push(json!({"source": "active_goal", "data": item}));
+                        }
+                    }
+                    if let Some(Value::Array(backlog)) = map.get("backlog") {
+                        for item in backlog.iter().filter(|i| search_in(i)).take(5) {
+                            results.push(json!({"source": "backlog_goal", "data": item}));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -430,13 +427,12 @@ async fn traces() -> Json<Value> {
         ])
         .output()
         .await
+        && output.status.success()
     {
-        if output.status.success() {
-            let text = String::from_utf8_lossy(&output.stdout);
-            for line in text.lines().take(50) {
-                if let Ok(val) = serde_json::from_str::<Value>(line) {
-                    spans.push(json!({"source": "journald", "data": val}));
-                }
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines().take(50) {
+            if let Ok(val) = serde_json::from_str::<Value>(line) {
+                spans.push(json!({"source": "journald", "data": val}));
             }
         }
     }

@@ -60,10 +60,7 @@ pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::E
     if agent_session.is_some() {
         eprintln!("  Agent: ready");
     } else {
-        eprintln!("  ⚠ No agent backend available — meeting will be note-taking only.");
-        eprintln!(
-            "    Check SIMARD_LLM_PROVIDER and auth config (gh auth status / ANTHROPIC_API_KEY)."
-        );
+        return Err("No agent backend available. Check SIMARD_LLM_PROVIDER and auth config (gh auth status / ANTHROPIC_API_KEY).".into());
     }
 
     let stdin = io::stdin();
@@ -71,24 +68,14 @@ pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::E
     let stdout = io::stdout();
     let mut writer = stdout.lock();
 
-    let _session = match agent_session {
-        Some(boxed_agent) => run_meeting_repl(
-            topic,
-            &bridge,
-            Some(boxed_agent),
-            &meeting_system_prompt,
-            &mut reader,
-            &mut writer,
-        )?,
-        None => run_meeting_repl(
-            topic,
-            &bridge,
-            None,
-            &meeting_system_prompt,
-            &mut reader,
-            &mut writer,
-        )?,
-    };
+    let _session = run_meeting_repl(
+        topic,
+        &bridge,
+        agent_session,
+        &meeting_system_prompt,
+        &mut reader,
+        &mut writer,
+    )?;
 
     println!("Meeting closed.");
     Ok(())

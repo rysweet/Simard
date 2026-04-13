@@ -1,12 +1,8 @@
-use std::process::{Command, Stdio};
-
 use rustyclawd_core::client::{
     Client as RcClient, ContentBlock as RcContentBlock, CreateMessageRequest, Message as RcMessage,
 };
 
-use crate::base_types::{
-    BaseTypeDescriptor, BaseTypeSessionRequest, BaseTypeTurnInput, process_output_evidence,
-};
+use crate::base_types::{BaseTypeDescriptor, BaseTypeSessionRequest, BaseTypeTurnInput};
 use crate::error::{SimardError, SimardResult};
 
 use super::MAX_HISTORY_MESSAGES;
@@ -96,67 +92,6 @@ pub(super) fn execute_rustyclawd_client(
             reason: format!("RustyClawd client execution failed: {e}"),
         }),
     }
-}
-
-/// Fallback execution via external process when no API key is available.
-pub(super) fn execute_rustyclawd_process_fallback(
-    input: &BaseTypeTurnInput,
-    descriptor: &BaseTypeDescriptor,
-    request: &BaseTypeSessionRequest,
-) -> SimardResult<(String, Vec<String>)> {
-    let rustyclawd_bin =
-        std::env::var("RUSTYCLAWD_BIN").unwrap_or_else(|_| "rustyclawd".to_string());
-    let prompt_input = format!(
-        "{}\n---\n{}\n---\n{}",
-        input.prompt_preamble, input.identity_context, input.objective,
-    );
-
-    let child_result = Command::new(&rustyclawd_bin)
-        .arg("--non-interactive")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-
-    let mut child = match child_result {
-        Ok(child) => child,
-        Err(error) => {
-            return Err(SimardError::AdapterInvocationFailed {
-                base_type: descriptor.id.to_string(),
-                reason: format!(
-                    "failed to spawn RustyClawd process '{}': {error}",
-                    rustyclawd_bin,
-                ),
-            });
-        }
-    };
-
-    if let Some(ref mut stdin) = child.stdin {
-        use std::io::Write;
-        let _ = stdin.write_all(prompt_input.as_bytes());
-    }
-    drop(child.stdin.take());
-
-    let output =
-        child
-            .wait_with_output()
-            .map_err(|error| SimardError::AdapterInvocationFailed {
-                base_type: descriptor.id.to_string(),
-                reason: format!("failed to collect RustyClawd output: {error}"),
-            })?;
-
-    // Return the process stdout as the execution summary (the LLM's text response).
-    let text_output = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-    let mut evidence = process_output_evidence("rustyclawd", &output);
-    evidence.push(format!(
-        "rustyclawd-process-session=node={} addr={} exit={}",
-        request.runtime_node,
-        request.mailbox_address,
-        output.status.code().unwrap_or(-1),
-    ));
-
-    Ok((text_output, evidence))
 }
 
 #[cfg(test)]

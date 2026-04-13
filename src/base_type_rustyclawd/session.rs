@@ -12,7 +12,7 @@ use crate::base_types::{
 use crate::error::{SimardError, SimardResult};
 use crate::sanitization::objective_metadata;
 
-use super::execution::{execute_rustyclawd_client, execute_rustyclawd_process_fallback};
+use super::execution::execute_rustyclawd_client;
 
 pub(super) struct RustyClawdSession {
     pub(super) descriptor: BaseTypeDescriptor,
@@ -68,10 +68,10 @@ impl BaseTypeSession for RustyClawdSession {
                 self.client = Some(client);
             }
             Err(ClientError::ApiKeyNotFound) => {
-                tracing::warn!(
-                    "RustyClawd: no API key found, will use process fallback on run_turn"
-                );
-                self.client = None;
+                return Err(SimardError::AdapterInvocationFailed {
+                    base_type: self.descriptor.id.to_string(),
+                    reason: "No API key found. Set ANTHROPIC_API_KEY or configure gh auth for Copilot SDK.".to_string(),
+                });
             }
             Err(e) => {
                 return Err(SimardError::AdapterInvocationFailed {
@@ -111,9 +111,11 @@ impl BaseTypeSession for RustyClawdSession {
                 &mut self.conversation_history,
             )?
         } else {
-            // Fallback: no API key available, run via process spawn.
-            tracing::warn!(backend = %self.descriptor.backend.identity, "RustyClawd: no API client, falling back to process spawn");
-            execute_rustyclawd_process_fallback(&input, &self.descriptor, &self.request)?
+            return Err(SimardError::AdapterInvocationFailed {
+                base_type: self.descriptor.id.to_string(),
+                reason: "RustyClawd API client not initialized — open() should have caught this"
+                    .to_string(),
+            });
         };
 
         let mut evidence = vec![

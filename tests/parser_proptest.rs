@@ -16,23 +16,10 @@ proptest! {
         // Returns MeetingCommand (infallible), just must not panic.
         let cmd = parse_meeting_command(&s);
         match cmd {
-            MeetingCommand::Empty
+            MeetingCommand::Help
             | MeetingCommand::Close
-            | MeetingCommand::Help
-            | MeetingCommand::Note(_)
-            | MeetingCommand::Conversation(_)
-            | MeetingCommand::Unknown(_)
-            | MeetingCommand::Decision { .. }
-            | MeetingCommand::Action { .. }
             | MeetingCommand::Status
-            | MeetingCommand::Recap
-            | MeetingCommand::AddParticipant(_)
-            | MeetingCommand::ListParticipants
-            | MeetingCommand::List
-            | MeetingCommand::Edit { .. }
-            | MeetingCommand::Delete { .. }
-            | MeetingCommand::Question(_)
-            | MeetingCommand::Preview => {}
+            | MeetingCommand::Conversation(_) => {}
         }
     }
 

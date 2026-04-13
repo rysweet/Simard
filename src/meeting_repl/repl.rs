@@ -19,15 +19,18 @@ const PROMPT: &str = "simard:meeting> ";
 /// for backward compatibility with callers that inspect the closed session.
 pub fn run_meeting_repl<R: BufRead, W: Write>(
     topic: &str,
-    bridge: &CognitiveMemoryBridge,
+    _bridge: &CognitiveMemoryBridge,
     agent: Option<Box<dyn BaseTypeSession>>,
     meeting_system_prompt: &str,
     input: &mut R,
     output: &mut W,
 ) -> SimardResult<MeetingSession> {
-    // If no agent is available, run a minimal note-taking fallback
+    // Agent is required. No silent degradation to note-taking mode.
     let Some(boxed_agent) = agent else {
-        return run_noteonly_fallback(topic, bridge, input, output);
+        return Err(SimardError::ActionExecutionFailed {
+            action: "meeting-repl".to_string(),
+            reason: "No LLM agent backend available. Check SIMARD_LLM_PROVIDER and auth config (gh auth status / ANTHROPIC_API_KEY).".to_string(),
+        });
     };
 
     let mut backend =
@@ -127,68 +130,6 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
 
     // Return a compatible MeetingSession for callers that need it.
     Ok(empty_closed_session(topic))
-}
-
-/// Minimal fallback when no agent is available — just records notes.
-fn run_noteonly_fallback<R: BufRead, W: Write>(
-    topic: &str,
-    _bridge: &CognitiveMemoryBridge,
-    input: &mut R,
-    output: &mut W,
-) -> SimardResult<MeetingSession> {
-    use crate::meeting_facilitator::{add_note, close_meeting, start_meeting};
-
-    let mut session = start_meeting(topic, _bridge)?;
-
-    writeln!(
-        output,
-        "Simard v{} — meeting mode (note-taking only, no agent backend)",
-        env!("CARGO_PKG_VERSION")
-    )
-    .ok();
-    writeln!(output, "Topic: {topic}\n").ok();
-
-    let mut line = String::new();
-    loop {
-        write!(output, "{PROMPT}").ok();
-        output.flush().ok();
-
-        line.clear();
-        match input.read_line(&mut line) {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(e) => {
-                return Err(SimardError::ActionExecutionFailed {
-                    action: "meeting-repl-read".to_string(),
-                    reason: e.to_string(),
-                });
-            }
-        }
-
-        let trimmed = line.trim();
-        match trimmed.to_ascii_lowercase().as_str() {
-            "/close" | "/done" => break,
-            "/help" => {
-                writeln!(
-                    output,
-                    "Note-taking mode: type anything to add notes, /close to end."
-                )
-                .ok();
-            }
-            "/status" => {
-                writeln!(output, "Meeting: {} — {} notes", topic, session.notes.len()).ok();
-            }
-            _ => {
-                if !trimmed.is_empty() {
-                    add_note(&mut session, trimmed).ok();
-                    writeln!(output, "Note added.").ok();
-                }
-            }
-        }
-    }
-
-    let closed = close_meeting(session, _bridge)?;
-    Ok(closed)
 }
 
 /// Produce an empty closed `MeetingSession` for backward compatibility.
@@ -320,20 +261,17 @@ mod tests {
 
     #[test]
     #[serial]
-    fn repl_no_agent_fallback() {
+    fn repl_no_agent_returns_error() {
         let bridge = mock_bridge();
         let input = b"some note\n/close\n";
         let mut reader = &input[..];
         let mut output = Vec::new();
 
-        let session =
-            run_meeting_repl("No-agent test", &bridge, None, "", &mut reader, &mut output).unwrap();
+        let result = run_meeting_repl("No-agent test", &bridge, None, "", &mut reader, &mut output);
 
-        assert_eq!(session.status, MeetingSessionStatus::Closed);
-        let output_str = String::from_utf8(output).unwrap();
         assert!(
-            output_str.contains("note-taking only"),
-            "should indicate note-taking mode: {output_str}"
+            result.is_err(),
+            "should fail without agent, not silently degrade"
         );
     }
 }
