@@ -55,15 +55,14 @@ impl CognitiveBridgeMemoryStore {
             ),
             fallback,
         };
-        store.hydrate_from_fallback();
+        store.hydrate_from_file_store()?;
         Ok(store)
     }
 
-    /// Populate the in-memory index from the file-backed fallback store so that
-    /// records persisted in prior sessions are visible after restart. Each scope
-    /// is loaded independently — failures in one scope do not prevent others
-    /// from hydrating (Pillar 11).
-    fn hydrate_from_fallback(&mut self) {
+    /// Populate the in-memory index from the file-backed store so that
+    /// records persisted in prior sessions are visible after restart.
+    /// Scope load failures propagate per PHILOSOPHY.md.
+    fn hydrate_from_file_store(&mut self) -> SimardResult<()> {
         use crate::memory::MemoryScope;
 
         const ALL_SCOPES: [MemoryScope; 6] = [
@@ -77,54 +76,35 @@ impl CognitiveBridgeMemoryStore {
 
         let mut hydrated = 0usize;
         for scope in ALL_SCOPES {
-            match self.fallback.list(scope) {
-                Ok(records) => {
-                    // Lock is safe here — called only during construction, no
-                    // contention possible.
-                    if let Ok(mut map) = self.records.lock() {
-                        for record in records {
-                            map.insert(record.key.clone(), record);
-                            hydrated += 1;
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!(
-                        "[simard] cognitive-bridge hydration: \
-                         failed to load scope {scope:?}: {e}"
-                    );
+            let records = self.fallback.list(scope)?;
+            if let Ok(mut map) = self.records.lock() {
+                for record in records {
+                    map.insert(record.key.clone(), record);
+                    hydrated += 1;
                 }
             }
         }
         if hydrated > 0 {
-            eprintln!("[simard] cognitive-bridge: hydrated {hydrated} records from fallback");
+            eprintln!("[simard] cognitive-bridge: hydrated {hydrated} records from file store");
         }
+        Ok(())
     }
 
     /// Pull facts from the cognitive bridge (Python subprocess) and merge into
-    /// the local in-memory index. This supplements fallback hydration by
+    /// the local in-memory index. This supplements file-store hydration by
     /// recovering records that were persisted to the graph but not yet in the
     /// local JSON file (e.g., written by another Simard process).
     ///
-    /// Uses retry logic: if the bridge returns an error, retry once with
-    /// backoff before giving up (Pillar 11: honest degradation).
-    pub fn hydrate_from_bridge(&self) {
-        let facts = self.search_facts_with_retry("memory-store-adapter", 500, 0.0);
-        let facts = match facts {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("[simard] cognitive-bridge: bridge hydration failed: {e}");
-                return;
-            }
-        };
+    /// Bridge errors propagate via `?` per PHILOSOPHY.md.
+    pub fn hydrate_from_bridge(&self) -> SimardResult<()> {
+        let facts = self.search_facts_with_retry("memory-store-adapter", 500, 0.0)?;
         if facts.is_empty() {
-            return;
+            return Ok(());
         }
         let mut hydrated = 0usize;
         if let Ok(mut map) = self.records.lock() {
             for fact in &facts {
                 let record = fact_to_record(fact);
-                // Only insert if not already present — local data is fresher.
                 if !map.contains_key(&record.key) {
                     map.insert(record.key.clone(), record);
                     hydrated += 1;
@@ -134,6 +114,7 @@ impl CognitiveBridgeMemoryStore {
         if hydrated > 0 {
             eprintln!("[simard] cognitive-bridge: hydrated {hydrated} records from bridge");
         }
+        Ok(())
     }
 
     /// Search facts via the cognitive bridge with retry logic.
@@ -191,8 +172,8 @@ impl CognitiveBridgeMemoryStore {
         Ok(records)
     }
 
-    /// Retry bridge writes for records that were persisted to the file fallback
-    /// but failed to reach the cognitive bridge. Returns the number of
+    /// Retry bridge writes for records that were persisted to the local file
+    /// store but failed to reach the cognitive bridge. Returns the number of
     /// successfully synced records.
     pub fn sync_pending(&self) -> usize {
         let keys: Vec<String> = {

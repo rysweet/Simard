@@ -138,7 +138,7 @@ fn hydrate_from_bridge_merges_new_records() {
     assert!(store.records.lock().unwrap().is_empty());
 
     // Hydrate from bridge.
-    store.hydrate_from_bridge();
+    store.hydrate_from_bridge().unwrap();
 
     // Bridge record should now be in local index.
     let records = store.records.lock().unwrap();
@@ -182,7 +182,7 @@ fn hydrate_from_bridge_does_not_overwrite_local() {
         .unwrap();
 
     // Hydrate — should NOT overwrite the local version.
-    store.hydrate_from_bridge();
+    store.hydrate_from_bridge().unwrap();
 
     let records = store.records.lock().unwrap();
     let rec = records.get("shared-key").unwrap();

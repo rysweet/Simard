@@ -268,6 +268,9 @@ impl Display for SimardError {
                     path.display()
                 )
             }
+            Self::PromptNotFound { name } => {
+                write!(f, "required prompt asset not found: {name}")
+            }
         }
     }
 }

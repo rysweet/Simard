@@ -59,7 +59,7 @@ fn build_memory_store(
             let native_for_store = NativeCognitiveMemory::open(&config.state_root.value)?;
             let store =
                 CognitiveBridgeMemoryStore::new(native_for_store, config.memory_store_path())?;
-            store.hydrate_from_bridge();
+            store.hydrate_from_bridge()?;
 
             eprintln!("[simard] consolidation hooks active — session lifecycle hooks enabled");
 
