@@ -3572,6 +3572,7 @@ dependencies = [
  "serial_test",
  "tempfile",
  "tokio",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-opentelemetry",
