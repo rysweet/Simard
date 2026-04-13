@@ -1,14 +1,16 @@
 ---
 title: Cognitive Memory Architecture
-description: How Simard uses the 6-type cognitive psychology memory model from amplihack-memory-lib, including the hive mind for multi-agent knowledge sharing.
-last_updated: 2026-03-31
+description: How Simard uses the 6-type cognitive psychology memory model implemented natively in Rust with LadybugDB, including the hive mind for multi-agent knowledge sharing.
+last_updated: 2026-04-13
 owner: simard
 doc_type: concept
 ---
 
 # Cognitive Memory Architecture
 
-Simard's memory is not a flat key-value store. It uses six distinct memory types modeled after cognitive psychology, provided by `amplihack-memory-lib` and accessed through the [bridge pattern](bridge-pattern.md).
+Simard's memory is not a flat key-value store. It uses six distinct memory types modeled after cognitive psychology, implemented natively in Rust via `NativeCognitiveMemory` backed by LadybugDB (the `lbug` crate).
+
+> **History**: Prior to issue #512, memory operations were proxied through a Python subprocess bridge to `amplihack-memory-lib`. The native Rust implementation replaces that bridge, eliminating the Python dependency for memory and providing direct LadybugDB access.
 
 ## The Six Memory Types
 
@@ -49,7 +51,7 @@ Autobiographical events — what happened during each session.
 - **Duration**: Long-term (persists across restarts)
 - **Content**: Session transcripts, action logs, outcomes
 - **Temporal ordering**: Monotonically increasing index
-- **Consolidation**: Old episodes can be summarized into `ConsolidatedEpisode` nodes
+- **Consolidation**: Old episodes can be summarized into consolidated summary nodes
 
 ```
 Reflection → store_episode("Session: fixed auth.rs null check, tests pass", "session")
@@ -146,9 +148,11 @@ flowchart LR
 | **Reflection** | `store_episode(transcript)`, `store_fact(extracted)`, `store_procedure(successful_sequence)`, `store_prospective(future_intention)` |
 | **Persistence** | `consolidate_episodes(10)`, `clear_working(task_id)`, `prune_expired_sensory()` |
 
-## Hive Mind Integration
+## Hive Mind Integration (Planned — Not Yet Implemented)
 
-When multiple Simard processes run concurrently (parent + subordinates), they share knowledge through the hive mind:
+> **Status**: The hive mind is a planned feature. The current `NativeCognitiveMemory` implementation is single-agent with no cross-agent knowledge sharing. The architecture below describes the intended design.
+
+When multiple Simard processes run concurrently (parent + subordinates), they will share knowledge through the hive mind:
 
 ```mermaid
 graph TB
@@ -194,44 +198,51 @@ This creates a natural recency bias without deleting old knowledge. A fact with 
 
 ## LadybugDB Graph Schema
 
-The Python `CognitiveMemory` class manages seven node tables and five relationship tables in LadybugDB:
+The Rust `NativeCognitiveMemory` struct manages eight node tables in LadybugDB (see `src/cognitive_memory/schema.rs`):
 
 ### Node Tables
 
 | Table | Key Fields |
 |-------|-----------|
-| `SensoryMemory` | node_id, agent_id, modality, raw_data, observation_order, expires_at |
-| `WorkingMemory` | node_id, agent_id, slot_type, content, relevance, task_id |
-| `EpisodicMemory` | node_id, agent_id, content, source_label, temporal_index, compressed |
-| `SemanticMemory` | node_id, agent_id, concept, content, confidence, source_id, tags |
-| `ProceduralMemory` | node_id, agent_id, name, steps, prerequisites, usage_count |
-| `ProspectiveMemory` | node_id, agent_id, desc_text, trigger_condition, action_on_trigger, status, priority |
-| `ConsolidatedEpisode` | node_id, agent_id, summary, original_count |
+| `Sensory` | id, modality, raw_data, observation_order, expires_at |
+| `WorkingMemory` | id, slot_type, content, task_id, relevance |
+| `Episode` | id, content, source_label, temporal_index, compressed |
+| `Fact` | id, concept, content, confidence, source_id, tags |
+| `Procedure` | id, name, steps, prerequisites, usage_count |
+| `Prospective` | id, description, trigger_condition, action_on_trigger, status, priority |
+| `Decision` | id, description, rationale, outcome, session_id |
+| `Goal` | id, description, priority, status |
 
-### Relationship Tables
+### Relationship Tables (Deferred)
+
+The following relationship types are part of the intended design but are **not yet created** in the current schema. They will be added when cross-referencing and provenance tracking are implemented:
 
 | Relationship | From → To | Purpose |
 |-------------|-----------|---------|
-| `SIMILAR_TO` | SemanticMemory → SemanticMemory | Fact similarity edges |
-| `DERIVES_FROM` | SemanticMemory → EpisodicMemory | Provenance tracking |
-| `PROCEDURE_DERIVES_FROM` | ProceduralMemory → EpisodicMemory | Procedure provenance |
-| `CONSOLIDATES` | ConsolidatedEpisode → EpisodicMemory | Consolidation links |
-| `ATTENDED_TO` | SensoryMemory → EpisodicMemory | Sensory promotion |
+| `SIMILAR_TO` | Fact → Fact | Fact similarity edges |
+| `DERIVES_FROM` | Fact → Episode | Provenance tracking |
+| `PROCEDURE_DERIVES_FROM` | Procedure → Episode | Procedure provenance |
+| `ATTENDED_TO` | Sensory → Episode | Sensory promotion |
 
-## Wire Protocol Summary
+## API Reference
 
-All memory operations go through the bridge as JSON-RPC-style calls. See [Bridge Wire Protocol](../reference/bridge-wire-protocol.md) for the complete specification.
+`NativeCognitiveMemory` implements the `CognitiveMemoryOps` trait. All operations are direct Cypher queries against LadybugDB — no bridge, no wire protocol, no Python subprocess.
 
 Key methods:
 
 | Method | Purpose |
 |--------|---------|
-| `memory.record_sensory` | Buffer a raw observation |
-| `memory.push_working` | Add a slot to working memory |
-| `memory.store_episode` | Record a session transcript |
-| `memory.store_fact` | Store a semantic fact with confidence |
-| `memory.search_facts` | Search by keywords with confidence filter |
-| `memory.store_procedure` | Store a reusable action sequence |
-| `memory.store_prospective` | Store a future trigger-action pair |
-| `memory.consolidate_episodes` | Summarize old episodes |
-| `memory.check_triggers` | Check if any prospective memories match |
+| `record_sensory` | Buffer a raw observation with TTL |
+| `prune_expired_sensory` | Remove expired sensory items |
+| `push_working` | Add a slot to working memory |
+| `get_working` | Retrieve working memory slots for a task |
+| `clear_working` | Clear working memory slots for a task |
+| `store_episode` | Record a session transcript |
+| `consolidate_episodes` | Summarize old episodes |
+| `store_fact` | Store a semantic fact with confidence |
+| `search_facts` | Search by keywords with confidence filter |
+| `store_procedure` | Store a reusable action sequence |
+| `recall_procedure` | Recall procedures matching a query |
+| `store_prospective` | Store a future trigger-action pair |
+| `check_triggers` | Check if any prospective memories match |
+| `get_statistics` | Get counts for all memory types |

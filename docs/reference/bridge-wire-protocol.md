@@ -1,7 +1,7 @@
 ---
 title: Bridge Wire Protocol Reference
 description: Complete JSON-RPC-style wire protocol specification for all Simard bridge methods.
-last_updated: 2026-03-31
+last_updated: 2026-04-13
 owner: simard
 doc_type: reference
 ---
@@ -54,7 +54,9 @@ All Simard bridges communicate via newline-delimited JSON on stdin (requests) an
 
 ---
 
-## Memory Bridge Methods
+## Memory Bridge Methods (Legacy — Removed)
+
+> **These methods are no longer available via the bridge.** Memory operations are now handled natively in Rust by `NativeCognitiveMemory`, which talks directly to LadybugDB. See [Cognitive Memory Architecture](../architecture/cognitive-memory.md) for the current API. The method signatures below are preserved for historical reference only.
 
 ### `memory.record_sensory`
 

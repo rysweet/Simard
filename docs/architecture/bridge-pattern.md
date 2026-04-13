@@ -1,7 +1,7 @@
 ---
 title: Bridge Pattern
 description: How Simard communicates with the Python ecosystem through subprocess bridges with JSON-line protocol and circuit breaker fault tolerance.
-last_updated: 2026-03-31
+last_updated: 2026-04-13
 owner: simard
 doc_type: concept
 ---
@@ -20,9 +20,10 @@ Simard is Rust. The amplihack ecosystem (memory-lib, kg-packs, agent-eval) is Py
 
 Bridges win because:
 - The Python ecosystem already works — we don't want to port 3,000+ LOC of production Python code
-- LadybugDB has Python bindings but no Rust bindings
 - Process isolation means a Python crash can't take down Simard
 - The circuit breaker pattern handles intermittent failures gracefully
+
+> **Note**: The memory bridge has been replaced by a native Rust implementation (`NativeCognitiveMemory`) that talks directly to LadybugDB via the `lbug` crate. See [Cognitive Memory Architecture](cognitive-memory.md). The bridge pattern remains in use for knowledge and gym bridges.
 
 ## Wire Protocol
 
