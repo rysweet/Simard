@@ -214,10 +214,20 @@ pub fn verify_backup(backup_dir: &Path) -> SimardResult<BackupVerification> {
     }
 
     // Verify record counts.
-    let snapshot: MemorySnapshot = serde_json::from_slice(&snapshot_bytes)
-        .map_err(|e| store_error("deserialize-snapshot", &manifest.cognitive_snapshot_path, e.to_string()))?;
-    let records: Vec<MemoryRecord> = serde_json::from_slice(&records_bytes)
-        .map_err(|e| store_error("deserialize-records", &manifest.memory_records_path, e.to_string()))?;
+    let snapshot: MemorySnapshot = serde_json::from_slice(&snapshot_bytes).map_err(|e| {
+        store_error(
+            "deserialize-snapshot",
+            &manifest.cognitive_snapshot_path,
+            e.to_string(),
+        )
+    })?;
+    let records: Vec<MemoryRecord> = serde_json::from_slice(&records_bytes).map_err(|e| {
+        store_error(
+            "deserialize-records",
+            &manifest.memory_records_path,
+            e.to_string(),
+        )
+    })?;
 
     if snapshot.facts.len() != manifest.cognitive_facts_count
         || snapshot.procedures.len() != manifest.cognitive_procedures_count
@@ -260,7 +270,10 @@ pub fn restore_from_backup(
         BackupStatus::Incomplete { missing } => {
             return Err(SimardError::MemoryIntegrityError {
                 path: backup_dir.to_path_buf(),
-                reason: format!("cannot restore from incomplete backup, missing: {}", missing.join(", ")),
+                reason: format!(
+                    "cannot restore from incomplete backup, missing: {}",
+                    missing.join(", ")
+                ),
             });
         }
     }
@@ -269,14 +282,24 @@ pub fn restore_from_backup(
 
     // Restore cognitive memory.
     let snapshot_bytes = read_bytes(&manifest.cognitive_snapshot_path)?;
-    let snapshot: MemorySnapshot = serde_json::from_slice(&snapshot_bytes)
-        .map_err(|e| store_error("deserialize-snapshot", &manifest.cognitive_snapshot_path, e.to_string()))?;
+    let snapshot: MemorySnapshot = serde_json::from_slice(&snapshot_bytes).map_err(|e| {
+        store_error(
+            "deserialize-snapshot",
+            &manifest.cognitive_snapshot_path,
+            e.to_string(),
+        )
+    })?;
     let cognitive_count = crate::remote_transfer::import_memory_snapshot(bridge, &snapshot)?;
 
     // Restore file-backed memory records.
     let records_bytes = read_bytes(&manifest.memory_records_path)?;
-    let records: Vec<MemoryRecord> = serde_json::from_slice(&records_bytes)
-        .map_err(|e| store_error("deserialize-records", &manifest.memory_records_path, e.to_string()))?;
+    let records: Vec<MemoryRecord> = serde_json::from_slice(&records_bytes).map_err(|e| {
+        store_error(
+            "deserialize-records",
+            &manifest.memory_records_path,
+            e.to_string(),
+        )
+    })?;
     let mut record_count = 0;
     for record in records {
         store.put(record)?;
@@ -344,10 +367,8 @@ pub fn prune_old_backups(config: &BackupConfig) -> SimardResult<usize> {
             true
         };
 
-        if should_prune {
-            if fs::remove_dir_all(entry).is_ok() {
-                pruned += 1;
-            }
+        if should_prune && fs::remove_dir_all(entry).is_ok() {
+            pruned += 1;
         }
     }
 
@@ -493,8 +514,12 @@ mod tests {
         let config = test_config(&backup_root);
 
         let bridge = mock_bridge();
-        bridge.store_fact("rust", "fast lang", 0.9, &[], "ep1").unwrap();
-        bridge.store_procedure("build", &["compile".into()], &[]).unwrap();
+        bridge
+            .store_fact("rust", "fast lang", 0.9, &[], "ep1")
+            .unwrap();
+        bridge
+            .store_procedure("build", &["compile".into()], &[])
+            .unwrap();
 
         let file_store = FileBackedMemoryStore::try_new(&store_path).unwrap();
         file_store.put(make_record("rec1")).unwrap();
@@ -578,7 +603,8 @@ mod tests {
         let target_store_path = tmp.path().join("restored.json");
         let target_store = FileBackedMemoryStore::try_new(&target_store_path).unwrap();
 
-        let count = restore_from_backup(&target_bridge, &target_store, &manifest.backup_dir).unwrap();
+        let count =
+            restore_from_backup(&target_bridge, &target_store, &manifest.backup_dir).unwrap();
         assert_eq!(count, 2); // 1 fact + 1 record
         assert_eq!(target_store.list_all().unwrap().len(), 1);
     }

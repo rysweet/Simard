@@ -12,6 +12,7 @@ pub(crate) mod schema;
 
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -146,14 +147,7 @@ impl NativeCognitiveMemory {
             })?;
         }
 
-        let db = Self::with_open_lock(&db_path, || {
-            lbug::Database::new(&db_path, lbug::SystemConfig::default()).map_err(|e| {
-                SimardError::RuntimeInitFailed {
-                    component: "cognitive-memory".into(),
-                    reason: format!("Failed to open LadybugDB at {}: {e}", db_path.display()),
-                }
-            })
-        })?;
+        let db = Self::open_db_with_recovery(&db_path)?;
         let mem = Self {
             db: Arc::new(db),
             path: db_path,
@@ -192,6 +186,74 @@ impl NativeCognitiveMemory {
         };
         mem.ensure_schema()?;
         Ok(mem)
+    }
+
+    /// Open LadybugDB with WAL corruption recovery.
+    ///
+    /// Wraps the `Database::new()` call in `catch_unwind` to survive the
+    /// UNREACHABLE_CODE assertion that LadybugDB fires on WAL corruption.
+    /// On panic: backs up the corrupt DB, removes the WAL, and retries once.
+    #[cfg(unix)]
+    fn open_db_with_recovery(db_path: &Path) -> SimardResult<lbug::Database> {
+        let try_open = |p: &Path| -> SimardResult<lbug::Database> {
+            Self::with_open_lock(p, || {
+                lbug::Database::new(p, lbug::SystemConfig::default()).map_err(|e| {
+                    SimardError::RuntimeInitFailed {
+                        component: "cognitive-memory".into(),
+                        reason: format!("Failed to open LadybugDB at {}: {e}", p.display()),
+                    }
+                })
+            })
+        };
+
+        // First attempt — catch panics from WAL corruption assertions.
+        let db_path_owned = db_path.to_path_buf();
+        let first = catch_unwind(AssertUnwindSafe(|| try_open(&db_path_owned)));
+        match first {
+            Ok(result) => return result,
+            Err(panic_info) => {
+                let msg = panic_info
+                    .downcast_ref::<String>()
+                    .map(|s| s.as_str())
+                    .or_else(|| panic_info.downcast_ref::<&str>().copied())
+                    .unwrap_or("unknown panic");
+                eprintln!("[simard] LadybugDB panicked on open (likely WAL corruption): {msg}");
+
+                // Back up the corrupt DB file.
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let backup = db_path.with_extension(format!("corrupt-{ts}"));
+                if db_path.exists() {
+                    if let Err(e) = std::fs::rename(db_path, &backup) {
+                        eprintln!("[simard] failed to back up corrupt DB: {e}");
+                    } else {
+                        eprintln!("[simard] backed up corrupt DB to {}", backup.display());
+                    }
+                }
+
+                // Remove the WAL file if present.
+                let wal_path = db_path.with_extension("ladybug.wal");
+                if wal_path.exists() {
+                    let _ = std::fs::remove_file(&wal_path);
+                }
+                // Also try <db_path>.wal (adjacent naming convention).
+                let wal_path2 = {
+                    let mut p = db_path.as_os_str().to_owned();
+                    p.push(".wal");
+                    PathBuf::from(p)
+                };
+                if wal_path2.exists() {
+                    let _ = std::fs::remove_file(&wal_path2);
+                }
+
+                eprintln!("[simard] retrying LadybugDB open after recovery...");
+            }
+        }
+
+        // Second attempt — propagate any error normally.
+        try_open(db_path)
     }
 
     #[cfg(unix)]
