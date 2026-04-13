@@ -129,6 +129,23 @@ impl NativeCognitiveMemory {
             reason: e.to_string(),
         })?;
         let db_path = state_root.join("cognitive_memory.ladybug");
+
+        // Migrate from old KuzuDB directory layout to native LadybugDB file.
+        // The Python bridge stored KuzuDB data as a directory; lbug expects a file.
+        if db_path.is_dir() {
+            let backup = state_root.join("cognitive_memory.ladybug.kuzu-backup");
+            eprintln!(
+                "[simard] migrating old KuzuDB directory → {}",
+                backup.display()
+            );
+            std::fs::rename(&db_path, &backup).map_err(|e| SimardError::PersistentStoreIo {
+                store: "cognitive-memory".into(),
+                action: "migrate-kuzu-backup".into(),
+                path: db_path.clone(),
+                reason: e.to_string(),
+            })?;
+        }
+
         let db = Self::with_open_lock(&db_path, || {
             lbug::Database::new(&db_path, lbug::SystemConfig::default()).map_err(|e| {
                 SimardError::RuntimeInitFailed {
