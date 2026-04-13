@@ -8,6 +8,7 @@ use axum::{
 use serde_json::{Value, json};
 
 use super::auth::{require_auth, try_login};
+use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::error::{SimardError, SimardResult};
 
 pub fn build_router() -> Router {
@@ -230,31 +231,48 @@ async fn goals() -> Json<Value> {
     let state_root = resolve_state_root();
     let goal_path = state_root.join("goal_records.json");
     let content = std::fs::read_to_string(&goal_path).unwrap_or_default();
-    match serde_json::from_str::<Value>(&content) {
-        Ok(val) => {
-            // goal_records.json may be a GoalBoard or an array of goals
-            if val.is_object() {
-                let active = val.get("active").cloned().unwrap_or(json!([]));
-                let backlog = val.get("backlog").cloned().unwrap_or(json!([]));
-                Json(json!({
-                    "active": active,
-                    "backlog": backlog,
-                    "active_count": active.as_array().map(|a| a.len()).unwrap_or(0),
-                    "backlog_count": backlog.as_array().map(|a| a.len()).unwrap_or(0),
-                }))
-            } else if val.is_array() {
-                Json(json!({
-                    "active": val,
-                    "backlog": [],
-                    "active_count": val.as_array().map(|a| a.len()).unwrap_or(0),
-                    "backlog_count": 0,
-                }))
-            } else {
-                Json(json!({"active": [], "backlog": [], "active_count": 0, "backlog_count": 0}))
+
+    let (active, mut backlog) = match serde_json::from_str::<Value>(&content) {
+        Ok(val) if val.is_object() => {
+            let a = val.get("active").cloned().unwrap_or(json!([]));
+            let b = val.get("backlog").cloned().unwrap_or(json!([]));
+            (
+                a.as_array().cloned().unwrap_or_default(),
+                b.as_array().cloned().unwrap_or_default(),
+            )
+        }
+        Ok(val) if val.is_array() => (val.as_array().cloned().unwrap_or_default(), vec![]),
+        _ => (vec![], vec![]),
+    };
+
+    // Pull meeting-captured actions and decisions from cognitive memory (#415)
+    if let Ok(mem) = NativeCognitiveMemory::open(&state_root) {
+        for tag in &["goal", "action", "decision"] {
+            if let Ok(facts) = mem.search_facts(tag, 20, 0.0) {
+                for fact in facts {
+                    let already_listed = active
+                        .iter()
+                        .chain(backlog.iter())
+                        .any(|g| g.get("id").and_then(|v| v.as_str()) == Some(&fact.node_id));
+                    if !already_listed {
+                        backlog.push(json!({
+                            "id": fact.node_id,
+                            "description": fact.content,
+                            "source": format!("cognitive-memory/{}", fact.concept),
+                            "score": fact.confidence,
+                        }));
+                    }
+                }
             }
         }
-        Err(_) => Json(json!({"active": [], "backlog": [], "active_count": 0, "backlog_count": 0})),
     }
+
+    Json(json!({
+        "active": active,
+        "backlog": backlog,
+        "active_count": active.len(),
+        "backlog_count": backlog.len(),
+    }))
 }
 
 async fn seed_goals() -> Json<Value> {
@@ -814,12 +832,28 @@ async fn handle_ws_chat(mut socket: WebSocket) {
 async fn logs() -> Json<Value> {
     let state_root = resolve_state_root();
 
+    // Try multiple log sources for daemon output (#414)
     let daemon_log = read_tail("/var/log/simard-daemon.log", 200)
         .or_else(|| {
             let alt_path = state_root.join("simard-daemon.log");
             read_tail(&alt_path.to_string_lossy(), 200)
         })
+        .or_else(|| {
+            let alt_path = state_root.join("ooda.log");
+            read_tail(&alt_path.to_string_lossy(), 200)
+        })
+        .or_else(|| {
+            let alt_path = state_root.join("simard.log");
+            read_tail(&alt_path.to_string_lossy(), 200)
+        })
         .unwrap_or_default();
+
+    // Fall back to journalctl if no file-based logs found
+    let combined_log = if daemon_log.is_empty() {
+        read_journal_logs().await
+    } else {
+        daemon_log
+    };
 
     let ooda_dir = state_root.join("ooda_transcripts");
 
@@ -851,7 +885,7 @@ async fn logs() -> Json<Value> {
     };
 
     Json(json!({
-        "daemon_log_lines": daemon_log,
+        "daemon_log_lines": combined_log,
         "ooda_transcripts": transcripts,
         "cost_log_lines": cost_log,
         "timestamp": chrono::Utc::now().to_rfc3339(),
@@ -863,6 +897,59 @@ fn read_tail(path: &str, max_lines: usize) -> Option<Vec<String>> {
     let lines: Vec<String> = content.lines().map(String::from).collect();
     let start = lines.len().saturating_sub(max_lines);
     Some(lines[start..].to_vec())
+}
+
+/// Read recent log entries from systemd journal for simard-related units (#414).
+async fn read_journal_logs() -> Vec<String> {
+    // Try user-level journal first
+    let output = tokio::process::Command::new("journalctl")
+        .args([
+            "--user",
+            "--unit=simard*",
+            "--no-pager",
+            "-n",
+            "200",
+            "--output=short-iso",
+        ])
+        .output()
+        .await;
+
+    if let Ok(o) = output {
+        if o.status.success() {
+            let text = String::from_utf8_lossy(&o.stdout);
+            let lines: Vec<String> = text
+                .lines()
+                .filter(|l| !l.contains("No entries"))
+                .map(String::from)
+                .collect();
+            if !lines.is_empty() {
+                return lines;
+            }
+        }
+    }
+
+    // Fall back to system-level journal
+    let output = tokio::process::Command::new("journalctl")
+        .args([
+            "--unit=simard*",
+            "--no-pager",
+            "-n",
+            "200",
+            "--output=short-iso",
+        ])
+        .output()
+        .await;
+
+    match output {
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            text.lines()
+                .filter(|l| !l.contains("No entries"))
+                .map(String::from)
+                .collect()
+        }
+        _ => vec![],
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -925,6 +1012,11 @@ async fn memory_metrics() -> Json<Value> {
     let evidence_count = count_json_records(&evidence_path);
     let goal_count = count_json_records(&goal_path);
 
+    // Query NativeCognitiveMemory (LadybugDB) for live statistics (#419)
+    let native_stats = NativeCognitiveMemory::open(&state_root)
+        .and_then(|mem| mem.get_statistics())
+        .ok();
+
     let last_consolidation = [&memory_path, &evidence_path, &goal_path]
         .iter()
         .filter_map(|p| std::fs::metadata(p).ok())
@@ -934,6 +1026,12 @@ async fn memory_metrics() -> Json<Value> {
             let dt: chrono::DateTime<chrono::Utc> = t.into();
             dt.to_rfc3339()
         });
+
+    // Prefer LadybugDB counts when available, fall back to JSON file counts
+    let total = native_stats
+        .as_ref()
+        .map(|s| s.total())
+        .unwrap_or(fact_count + evidence_count + goal_count);
 
     Json(json!({
         "state_root": state_root.to_string_lossy(),
@@ -960,7 +1058,16 @@ async fn memory_metrics() -> Json<Value> {
             "size_bytes": handoff_info.0,
             "modified": handoff_info.1,
         },
-        "total_facts": fact_count + evidence_count + goal_count,
+        "native_memory": native_stats.as_ref().map(|s| json!({
+            "sensory": s.sensory_count,
+            "working": s.working_count,
+            "episodic": s.episodic_count,
+            "semantic": s.semantic_count,
+            "procedural": s.procedural_count,
+            "prospective": s.prospective_count,
+            "total": s.total(),
+        })),
+        "total_facts": total,
         "last_consolidation": last_consolidation,
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
@@ -1406,10 +1513,23 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
     async function fetchMemory(){
       try{
         const r=await fetch('/api/memory'); const d=await r.json();
-        document.getElementById('mem-overview').innerHTML=`
+        let overviewHtml=`
           <div class="stat"><span class="label">Total Facts</span><span class="value">${d.total_facts}</span></div>
           <div class="stat"><span class="label">Last Consolidation</span><span class="value">${d.last_consolidation?timeAgo(d.last_consolidation)+' ('+new Date(d.last_consolidation).toLocaleString()+')':'Never'}</span></div>
           <div class="stat"><span class="label">State Root</span><span class="value" style="font-size:.8rem;word-break:break-all">${esc(d.state_root)}</span></div>`;
+        if(d.native_memory){
+          const nm=d.native_memory;
+          overviewHtml+=`
+          <h3 style="color:var(--accent);font-size:.9rem;margin-top:.75rem;border-top:1px solid var(--border);padding-top:.5rem">LadybugDB (Native Memory)</h3>
+          <div class="stat"><span class="label">Sensory</span><span class="value">${nm.sensory}</span></div>
+          <div class="stat"><span class="label">Working</span><span class="value">${nm.working}</span></div>
+          <div class="stat"><span class="label">Episodic</span><span class="value">${nm.episodic}</span></div>
+          <div class="stat"><span class="label">Semantic (Facts)</span><span class="value">${nm.semantic}</span></div>
+          <div class="stat"><span class="label">Procedural</span><span class="value">${nm.procedural}</span></div>
+          <div class="stat"><span class="label">Prospective</span><span class="value">${nm.prospective}</span></div>
+          <div class="stat"><span class="label"><strong>Total Native</strong></span><span class="value"><strong>${nm.total}</strong></span></div>`;
+        }
+        document.getElementById('mem-overview').innerHTML=overviewHtml;
         const files=[
           {key:'memory_records',label:'Memory Records'},
           {key:'evidence_records',label:'Evidence Records'},
@@ -1582,6 +1702,13 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
     document.getElementById('mem-search-input')?.addEventListener('keypress',e=>{if(e.key==='Enter')searchMemory();});
 
     /* --- Costs --- */
+    function fmtLabel(k){
+      const map={
+        'period':'Period','entry_count':'API Calls',
+        'total_prompt_tokens':'Prompt Tokens','total_completion_tokens':'Completion Tokens',
+        'total_cost_usd':'Estimated Cost'};
+      return map[k]||k.replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
+    }
     async function fetchCosts(){
       try{
         const r=await fetch('/api/costs'); const d=await r.json();
@@ -1589,10 +1716,16 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
           if(!s||s.error) return `<span class="err">${esc(s?.error||'No cost data — is cost tracking configured?')}</span>`;
           return Object.entries(s).map(([k,v])=>{
             if(v==null)return'';
-            if(typeof v==='object')return`<div class="stat"><span class="label">${esc(k)}</span><span class="value" style="font-size:.8rem">${esc(JSON.stringify(v))}</span></div>`;
-            const isCost=k.toLowerCase().includes('cost')||k.toLowerCase().includes('usd');
-            const fmt=typeof v==='number'?(isCost?'$'+v.toFixed(4):v.toLocaleString()):String(v);
-            return `<div class="stat"><span class="label">${esc(k)}</span><span class="value">${fmt}</span></div>`;
+            if(typeof v==='object')return`<div class="stat"><span class="label">${esc(fmtLabel(k))}</span><span class="value" style="font-size:.8rem">${esc(JSON.stringify(v))}</span></div>`;
+            const isCost=k.toLowerCase().includes('cost_usd');
+            const isTokens=k.toLowerCase().includes('token');
+            let fmt;
+            if(typeof v==='number'){
+              if(isCost) fmt='$'+v.toFixed(4);
+              else if(isTokens) fmt=v.toLocaleString()+' tokens';
+              else fmt=v.toLocaleString();
+            }else{fmt=String(v);}
+            return `<div class="stat"><span class="label">${esc(fmtLabel(k))}</span><span class="value">${fmt}</span></div>`;
           }).join('');
         }
         document.getElementById('costs-daily').innerHTML=renderSummary(d.daily);

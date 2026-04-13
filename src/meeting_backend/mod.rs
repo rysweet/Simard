@@ -9,6 +9,8 @@ pub mod persist;
 pub mod types;
 
 use std::fmt::Write as _;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use chrono::Utc;
 use tracing::{debug, info, warn};
@@ -27,6 +29,9 @@ const MAX_HISTORY: usize = 500;
 
 /// Number of recent messages included verbatim in the LLM prompt.
 const RECENT_WINDOW: usize = 30;
+
+/// Maximum time to wait for LLM summary generation before falling back.
+const SUMMARY_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// The unified meeting backend.
 ///
@@ -126,6 +131,9 @@ impl MeetingBackend {
 
         // Append assistant response
         self.push_message(Role::Assistant, response_text.clone());
+
+        // Auto-save transcript after every turn so killed meetings don't lose data
+        self.auto_save_transcript();
 
         debug!(messages = self.history.len(), "Meeting turn completed");
 
@@ -272,7 +280,7 @@ impl MeetingBackend {
         preamble
     }
 
-    /// Ask the LLM for a summary of the conversation.
+    /// Ask the LLM for a summary with a timeout to prevent `/close` from hanging.
     fn generate_summary(&mut self) -> String {
         if self.history.is_empty() {
             return "Empty meeting — no messages exchanged.".to_string();
@@ -292,8 +300,32 @@ impl MeetingBackend {
             prompt_preamble: preamble,
         };
 
-        match self.agent.run_turn(turn_input) {
-            Ok(outcome) => {
+        info!(
+            timeout_secs = SUMMARY_TIMEOUT.as_secs(),
+            "Starting summary generation"
+        );
+        let start = std::time::Instant::now();
+
+        // Run the LLM call in a scoped thread with a timeout so /close never hangs.
+        let result = {
+            let (tx, rx) = mpsc::channel();
+            let agent = &mut *self.agent;
+
+            std::thread::scope(|s| {
+                s.spawn(move || {
+                    let r = agent.run_turn(turn_input);
+                    let _ = tx.send(r);
+                });
+                rx.recv_timeout(SUMMARY_TIMEOUT)
+            })
+        };
+
+        match result {
+            Ok(Ok(outcome)) => {
+                info!(
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "Summary generated"
+                );
                 let text = extract_response(&outcome);
                 if text.is_empty() {
                     warn!("LLM returned empty summary — using metadata summary");
@@ -302,8 +334,16 @@ impl MeetingBackend {
                     text
                 }
             }
-            Err(e) => {
-                warn!("LLM summarization failed: {e} — using metadata summary");
+            Ok(Err(e)) => {
+                warn!(elapsed_ms = start.elapsed().as_millis() as u64, error = %e, "LLM summarization failed");
+                self.metadata_summary()
+            }
+            Err(_) => {
+                warn!(
+                    timeout_secs = SUMMARY_TIMEOUT.as_secs(),
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "Summary generation timed out — saving transcript without LLM summary"
+                );
                 self.metadata_summary()
             }
         }
@@ -329,14 +369,114 @@ impl MeetingBackend {
             .map(|start| Utc::now().signed_duration_since(start).num_seconds().max(0) as u64)
             .unwrap_or(0)
     }
+
+    /// Save an in-progress transcript after every turn so killed meetings
+    /// don't lose data. Errors are logged but not propagated.
+    fn auto_save_transcript(&self) {
+        let transcript = MeetingTranscript {
+            topic: self.topic.clone(),
+            started_at: self.started_at.clone(),
+            closed_at: String::new(),
+            duration_secs: self.elapsed_secs(),
+            summary: "[in-progress — meeting still open]".to_string(),
+            messages: self.history.clone(),
+        };
+        match persist::write_auto_save(&transcript) {
+            Ok(p) => debug!(path = %p.display(), "Auto-saved transcript"),
+            Err(e) => warn!("Auto-save failed (meeting continues): {e}"),
+        }
+    }
 }
 
-/// Extract the conversational response text from a `BaseTypeOutcome`.
-///
-/// The `execution_summary` field is used by all adapters to return the LLM's
-/// natural-language response.
+/// Extract the conversational response text from a `BaseTypeOutcome`,
+/// stripping agentic tool-call log noise that garbles terminal display.
 fn extract_response(outcome: &BaseTypeOutcome) -> String {
-    outcome.execution_summary.trim().to_string()
+    sanitize_agent_output(outcome.execution_summary.trim())
+}
+
+/// Remove agentic tool-call log lines and XML-style tool blocks from LLM
+/// output so the terminal displays only the conversational content.
+fn sanitize_agent_output(raw: &str) -> String {
+    let mut result = String::with_capacity(raw.len());
+    let mut in_tool_block = false;
+    let mut consecutive_blank = 0u8;
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+
+        if is_tool_block_open(trimmed) {
+            in_tool_block = true;
+            continue;
+        }
+
+        if in_tool_block {
+            if is_tool_block_close(trimmed) {
+                in_tool_block = false;
+            }
+            continue;
+        }
+
+        if is_tool_call_line(trimmed) {
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            consecutive_blank += 1;
+            if consecutive_blank <= 2 {
+                result.push('\n');
+            }
+            continue;
+        }
+        consecutive_blank = 0;
+
+        result.push_str(line);
+        result.push('\n');
+    }
+
+    result.trim().to_string()
+}
+
+fn is_tool_block_open(trimmed: &str) -> bool {
+    for tag in &[
+        "<tool_call",
+        "<tool_result",
+        "<function_call",
+        "<invoke",
+        "<function",
+    ] {
+        if trimmed.starts_with(tag) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_tool_block_close(trimmed: &str) -> bool {
+    for tag in &[
+        "</tool_call",
+        "</tool_result",
+        "</function_call",
+        "</invoke",
+        "</function",
+    ] {
+        if trimmed.contains(tag) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_tool_call_line(trimmed: &str) -> bool {
+    if trimmed.starts_with("[tool_call:") || trimmed.starts_with("[tool_result:") {
+        return true;
+    }
+    if trimmed.starts_with("[Tool ") && trimmed.contains("executed") {
+        return true;
+    }
+    if trimmed.starts_with("Running tool:") || trimmed.starts_with("Tool output:") {
+        return true;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -502,5 +642,57 @@ mod tests {
             evidence: Vec::new(),
         };
         assert_eq!(extract_response(&outcome), "hello world");
+    }
+
+    #[test]
+    fn sanitize_strips_tool_call_lines() {
+        let input = "Here is the answer.\n[tool_call: search_files]\n[tool_result: found 3 files]\nThe files are ready.";
+        let result = sanitize_agent_output(input);
+        assert!(result.contains("Here is the answer."), "result: {result}");
+        assert!(result.contains("The files are ready."), "result: {result}");
+        assert!(!result.contains("[tool_call:"), "result: {result}");
+        assert!(!result.contains("[tool_result:"), "result: {result}");
+    }
+
+    #[test]
+    fn sanitize_strips_xml_tool_blocks() {
+        let input = "Before block.\n<tool_call>\ninternal stuff\n</tool_call>\nAfter block.";
+        let result = sanitize_agent_output(input);
+        assert!(result.contains("Before block."), "result: {result}");
+        assert!(result.contains("After block."), "result: {result}");
+        assert!(!result.contains("internal stuff"), "result: {result}");
+    }
+
+    #[test]
+    fn sanitize_passes_clean_text() {
+        let input = "Normal response.\nWith multiple lines.\n\nAnd paragraphs.";
+        let result = sanitize_agent_output(input);
+        assert!(result.contains("Normal response."), "result: {result}");
+        assert!(result.contains("With multiple lines."), "result: {result}");
+        assert!(result.contains("And paragraphs."), "result: {result}");
+    }
+
+    #[test]
+    fn sanitize_collapses_excessive_blanks() {
+        let input = "Line 1\n\n\n\n\n\nLine 2";
+        let result = sanitize_agent_output(input);
+        assert!(!result.contains("\n\n\n\n"), "too many blanks: {result}");
+        assert!(result.contains("Line 1"), "result: {result}");
+        assert!(result.contains("Line 2"), "result: {result}");
+    }
+
+    #[test]
+    fn sanitize_handles_empty_input() {
+        assert_eq!(sanitize_agent_output(""), "");
+        assert_eq!(sanitize_agent_output("   "), "");
+    }
+
+    #[test]
+    fn auto_save_does_not_panic() {
+        let agent = MockAgent::new("noted");
+        let mut backend =
+            MeetingBackend::new_session("AutoSave Test", Box::new(agent), None, String::new());
+        backend.send_message("Test message").unwrap();
+        assert_eq!(backend.status().message_count, 2);
     }
 }

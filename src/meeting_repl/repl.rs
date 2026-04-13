@@ -84,7 +84,8 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                 writeln!(output, "  Started:  {}", status.started_at).ok();
             }
             MeetingCommand::Close => {
-                writeln!(output, "Closing meeting.").ok();
+                writeln!(output, "Closing meeting...").ok();
+                eprint!("  Generating summary (timeout: 90s)...");
                 break;
             }
             MeetingCommand::Conversation(text) => {
@@ -94,13 +95,13 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                 eprint!("  ⏳ Thinking...");
                 match backend.send_message(&text) {
                     Ok(resp) => {
-                        eprintln!("\r                "); // clear the thinking indicator
+                        eprint!("\r\x1b[K"); // clear thinking indicator
                         if !resp.content.is_empty() {
                             writeln!(output, "\n{}\n", resp.content).ok();
                         }
                     }
                     Err(e) => {
-                        eprintln!("\r                "); // clear the thinking indicator
+                        eprint!("\r\x1b[K");
                         writeln!(output, "[agent error: {e}]").ok();
                     }
                 }
@@ -111,6 +112,7 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
     // Close the backend (summarize, persist, memory)
     match backend.close() {
         Ok(summary) => {
+            eprint!("\r\x1b[K");
             writeln!(output, "\n── Meeting Summary ──").ok();
             writeln!(output, "{}", summary.summary_text).ok();
             writeln!(
@@ -124,6 +126,7 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
             }
         }
         Err(e) => {
+            eprint!("\r\x1b[K");
             writeln!(output, "[warn] Failed to close meeting cleanly: {e}").ok();
         }
     }
