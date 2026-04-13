@@ -1,11 +1,10 @@
-//! AdvanceGoal dispatch — routing, subordinate heartbeat, and fallback bumping.
+//! AdvanceGoal dispatch — routing, subordinate heartbeat, and session-based advancement.
 
 use crate::agent_supervisor::{HeartbeatStatus, check_heartbeat};
 use crate::goal_curation::{GoalProgress, update_goal_progress};
 use crate::ooda_loop::{ActionOutcome, OodaBridges, OodaState, PlannedAction};
 
 use super::make_outcome;
-use super::next_progress;
 
 /// AdvanceGoal: progress the target goal on the board.
 ///
@@ -72,21 +71,14 @@ pub(super) fn dispatch_advance_goal(
         );
     }
 
-    // Fallback: no session available — advance progress by bumping percentage.
-    let new_progress = next_progress(&goal.status);
-
-    match update_goal_progress(&mut state.active_goals, &goal_id, new_progress.clone()) {
-        Ok(()) => make_outcome(
-            action,
-            true,
-            format!("goal '{goal_id}' advanced to {new_progress}"),
+    // No session = cannot advance. Fail visibly per PHILOSOPHY.md.
+    make_outcome(
+        action,
+        false,
+        format!(
+            "goal '{goal_id}' cannot advance: no LLM session available. Check SIMARD_LLM_PROVIDER and auth config."
         ),
-        Err(e) => make_outcome(
-            action,
-            false,
-            format!("failed to update goal '{goal_id}': {e}"),
-        ),
-    }
+    )
 }
 
 /// Advance a goal that has a subordinate assigned by checking heartbeat.
