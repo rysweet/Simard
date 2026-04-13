@@ -7,6 +7,7 @@ on:
 jobs:
   pre-commit:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Check out repository
@@ -16,6 +17,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -33,6 +37,7 @@ jobs:
 
   install-smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Check out repository
@@ -40,6 +45,9 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
 
       - name: Run install smoke test
         run: cargo test --test install_smoke -- --nocapture
