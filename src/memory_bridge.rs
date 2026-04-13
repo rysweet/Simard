@@ -10,6 +10,7 @@
 use serde_json::json;
 
 use crate::bridge::{BridgeRequest, BridgeTransport, new_request_id, unpack_bridge_response};
+use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::SimardResult;
 use crate::memory_cognitive::{
     CognitiveFact, CognitiveProcedure, CognitiveProspective, CognitiveStatistics,
@@ -235,6 +236,114 @@ impl CognitiveMemoryBridge {
     /// Return aggregate counts across all six cognitive memory types.
     pub fn get_statistics(&self) -> SimardResult<CognitiveStatistics> {
         self.call("memory.get_statistics", json!({}))
+    }
+}
+
+// ── CognitiveMemoryOps trait implementation ──
+//
+// Delegates to the existing typed methods above so that callers can use
+// `&dyn CognitiveMemoryOps` interchangeably with the concrete type.
+
+impl CognitiveMemoryOps for CognitiveMemoryBridge {
+    fn record_sensory(
+        &self,
+        modality: &str,
+        raw_data: &str,
+        ttl_seconds: u64,
+    ) -> SimardResult<String> {
+        CognitiveMemoryBridge::record_sensory(self, modality, raw_data, ttl_seconds)
+    }
+
+    fn prune_expired_sensory(&self) -> SimardResult<usize> {
+        CognitiveMemoryBridge::prune_expired_sensory(self)
+    }
+
+    fn push_working(
+        &self,
+        slot_type: &str,
+        content: &str,
+        task_id: &str,
+        relevance: f64,
+    ) -> SimardResult<String> {
+        CognitiveMemoryBridge::push_working(self, slot_type, content, task_id, relevance)
+    }
+
+    fn get_working(&self, task_id: &str) -> SimardResult<Vec<CognitiveWorkingSlot>> {
+        CognitiveMemoryBridge::get_working(self, task_id)
+    }
+
+    fn clear_working(&self, task_id: &str) -> SimardResult<usize> {
+        CognitiveMemoryBridge::clear_working(self, task_id)
+    }
+
+    fn store_episode(
+        &self,
+        content: &str,
+        source_label: &str,
+        metadata: Option<&serde_json::Value>,
+    ) -> SimardResult<String> {
+        CognitiveMemoryBridge::store_episode(self, content, source_label, metadata)
+    }
+
+    fn consolidate_episodes(&self, batch_size: u32) -> SimardResult<Option<String>> {
+        CognitiveMemoryBridge::consolidate_episodes(self, batch_size)
+    }
+
+    fn store_fact(
+        &self,
+        concept: &str,
+        content: &str,
+        confidence: f64,
+        tags: &[String],
+        source_id: &str,
+    ) -> SimardResult<String> {
+        CognitiveMemoryBridge::store_fact(self, concept, content, confidence, tags, source_id)
+    }
+
+    fn search_facts(
+        &self,
+        query: &str,
+        limit: u32,
+        min_confidence: f64,
+    ) -> SimardResult<Vec<CognitiveFact>> {
+        CognitiveMemoryBridge::search_facts(self, query, limit, min_confidence)
+    }
+
+    fn store_procedure(
+        &self,
+        name: &str,
+        steps: &[String],
+        prerequisites: &[String],
+    ) -> SimardResult<String> {
+        CognitiveMemoryBridge::store_procedure(self, name, steps, prerequisites)
+    }
+
+    fn recall_procedure(&self, query: &str, limit: u32) -> SimardResult<Vec<CognitiveProcedure>> {
+        CognitiveMemoryBridge::recall_procedure(self, query, limit)
+    }
+
+    fn store_prospective(
+        &self,
+        description: &str,
+        trigger_condition: &str,
+        action_on_trigger: &str,
+        priority: i64,
+    ) -> SimardResult<String> {
+        CognitiveMemoryBridge::store_prospective(
+            self,
+            description,
+            trigger_condition,
+            action_on_trigger,
+            priority,
+        )
+    }
+
+    fn check_triggers(&self, content: &str) -> SimardResult<Vec<CognitiveProspective>> {
+        CognitiveMemoryBridge::check_triggers(self, content)
+    }
+
+    fn get_statistics(&self) -> SimardResult<CognitiveStatistics> {
+        CognitiveMemoryBridge::get_statistics(self)
     }
 }
 

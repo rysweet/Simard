@@ -6,8 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::SimardResult;
-use crate::memory_bridge::CognitiveMemoryBridge;
 use crate::memory_cognitive::{CognitiveFact, CognitiveProcedure, CognitiveProspective};
 use crate::session::SessionId;
 
@@ -47,7 +47,7 @@ pub struct FactExtraction {
 pub fn intake_memory_operations(
     objective: &str,
     session_id: &SessionId,
-    bridge: &CognitiveMemoryBridge,
+    bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
     // Record the raw objective as a sensory observation (5 min TTL).
     bridge.record_sensory("objective", objective, 300)?;
@@ -73,7 +73,7 @@ pub fn intake_memory_operations(
 pub fn preparation_memory_operations(
     objective: &str,
     session_id: &SessionId,
-    bridge: &CognitiveMemoryBridge,
+    bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<PreparedContext> {
     // Search for facts related to the objective.
     let relevant_facts = bridge.search_facts(objective, 10, 0.0)?;
@@ -113,7 +113,7 @@ pub fn preparation_memory_operations(
 pub fn execution_memory_operations(
     pty_output: &str,
     session_id: &SessionId,
-    bridge: &CognitiveMemoryBridge,
+    bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
     // Record the output as a sensory observation (short TTL since it is
     // transient terminal output).
@@ -146,7 +146,7 @@ pub fn reflection_memory_operations(
     transcript: &str,
     facts: &[FactExtraction],
     session_id: &SessionId,
-    bridge: &CognitiveMemoryBridge,
+    bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
     // Store the session transcript as an episodic memory.
     bridge.store_episode(
@@ -176,7 +176,7 @@ pub fn reflection_memory_operations(
 /// attempted to keep episodic memory compact.
 pub fn persistence_memory_operations(
     session_id: &SessionId,
-    bridge: &CognitiveMemoryBridge,
+    bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
     // Clear working memory for this session.
     bridge.clear_working(session_id.as_str())?;
@@ -209,7 +209,7 @@ pub fn persistence_memory_operations(
 /// into working memory so the agent can reason over prior session knowledge.
 pub fn consolidation_intake(
     session_id: &SessionId,
-    bridge: &CognitiveMemoryBridge,
+    bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<usize> {
     let prior_facts = bridge.search_facts("memory-store-adapter", 50, 0.0)?;
     let count = prior_facts.len();
@@ -229,7 +229,7 @@ pub fn consolidation_intake(
 /// round-trip and prevents data loss on unexpected shutdown.
 pub fn consolidation_persistence(
     session_id: &SessionId,
-    bridge: &CognitiveMemoryBridge,
+    bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
     // Store an episodic record capturing the consolidation event.
     bridge.store_episode(
@@ -248,6 +248,7 @@ pub fn consolidation_persistence(
 mod tests {
     use super::*;
     use crate::bridge_subprocess::InMemoryBridgeTransport;
+    use crate::memory_bridge::CognitiveMemoryBridge;
     use serde_json::json;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};

@@ -17,6 +17,7 @@ pub mod bridge_launcher;
 pub mod bridge_subprocess;
 pub mod cmd_install;
 pub mod cmd_self_update;
+pub mod cognitive_memory;
 mod copilot_status_probe;
 mod copilot_task_submit;
 pub mod engineer_loop;
@@ -125,6 +126,7 @@ pub use bridge::{
 };
 pub use bridge_circuit::{CircuitBreakerConfig, CircuitBreakerTransport, CircuitState};
 pub use bridge_subprocess::{InMemoryBridgeTransport, SubprocessBridgeTransport};
+pub use cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 pub use engineer_loop::{
     AnalyzedAction, EngineerLoopRun, ExecutedEngineerAction, PhaseOutcome, PhaseTrace,
     RepoInspection, SelectedEngineerAction, VerificationReport, analyze_objective,
