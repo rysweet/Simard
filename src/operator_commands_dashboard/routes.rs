@@ -2,13 +2,14 @@ use axum::{
     Json, Router,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
     middleware, response,
-    routing::get,
-    routing::post,
+    routing::{get, post},
 };
 use serde_json::{Value, json};
 
 use super::auth::{require_auth, try_login};
 use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
+use crate::agent_registry::{AgentRegistry, FileBackedAgentRegistry};
+use crate::build_lock::BuildLock;
 use crate::error::{SimardError, SimardResult};
 
 pub fn build_router() -> Router {
@@ -27,6 +28,15 @@ pub fn build_router() -> Router {
         )
         .route("/api/logs", get(logs))
         .route("/api/processes", get(processes))
+        .route(
+            "/api/registry",
+            get(registry_list)
+                .post(registry_register)
+                .delete(registry_deregister),
+        )
+        .route("/api/registry/reap", post(registry_reap))
+        .route("/api/build-lock", get(build_lock_status))
+        .route("/api/build-lock/release", post(build_lock_force_release))
         .route("/api/memory", get(memory_metrics))
         .route("/api/memory/search", post(memory_search))
         .route("/api/traces", get(traces))
@@ -989,6 +999,84 @@ async fn processes() -> Json<Value> {
         "count": procs.len(),
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Agent Registry API (#296)
+// ---------------------------------------------------------------------------
+
+async fn registry_list() -> Json<Value> {
+    let reg = FileBackedAgentRegistry::new(&resolve_state_root());
+    match reg.list() {
+        Ok(entries) => {
+            let serialized: Vec<Value> = entries
+                .iter()
+                .filter_map(|e| serde_json::to_value(e).ok())
+                .collect();
+            Json(json!({
+                "agents": serialized,
+                "count": serialized.len(),
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+            }))
+        }
+        Err(e) => Json(json!({
+            "error": e.to_string(),
+            "agents": [],
+            "count": 0,
+        })),
+    }
+}
+
+async fn registry_register(Json(body): Json<Value>) -> Json<Value> {
+    let reg = FileBackedAgentRegistry::new(&resolve_state_root());
+    let entry: crate::agent_registry::AgentEntry = match serde_json::from_value(body) {
+        Ok(e) => e,
+        Err(e) => {
+            return Json(json!({"ok": false, "error": format!("invalid entry: {e}")}));
+        }
+    };
+    match reg.register(entry) {
+        Ok(()) => Json(json!({"ok": true})),
+        Err(e) => Json(json!({"ok": false, "error": e.to_string()})),
+    }
+}
+
+async fn registry_deregister(Json(body): Json<Value>) -> Json<Value> {
+    let id = body.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+    let reg = FileBackedAgentRegistry::new(&resolve_state_root());
+    match reg.deregister(id) {
+        Ok(()) => Json(json!({"ok": true})),
+        Err(e) => Json(json!({"ok": false, "error": e.to_string()})),
+    }
+}
+
+async fn registry_reap() -> Json<Value> {
+    let reg = FileBackedAgentRegistry::new(&resolve_state_root());
+    match reg.reap_dead() {
+        Ok(count) => Json(json!({"ok": true, "reaped": count})),
+        Err(e) => Json(json!({"ok": false, "error": e.to_string()})),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Build Lock API (#337)
+// ---------------------------------------------------------------------------
+
+async fn build_lock_status() -> Json<Value> {
+    let bl = BuildLock::new(&resolve_state_root());
+    Json(json!({
+        "locked": bl.is_locked(),
+        "holder": bl.current_holder(),
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    }))
+}
+
+async fn build_lock_force_release() -> Json<Value> {
+    let bl = BuildLock::new(&resolve_state_root());
+    match bl.force_release() {
+        Ok(was_locked) => Json(json!({"ok": true, "was_locked": was_locked})),
+        Err(e) => Json(json!({"ok": false, "error": e.to_string()})),
+    }
 }
 
 // ---------------------------------------------------------------------------
