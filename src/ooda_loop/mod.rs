@@ -145,21 +145,15 @@ pub fn run_ooda_cycle(
         .collect::<Vec<_>>()
         .join("; ");
     let cycle_session_id = SessionId::from_uuid(uuid::Uuid::now_v7());
-    match preparation_memory_operations(&objective_summary, &cycle_session_id, &bridges.memory) {
-        Ok(ctx) => {
-            eprintln!(
-                "[simard] OODA cycle: prepared context ({} facts, {} triggers, {} procedures)",
-                ctx.relevant_facts.len(),
-                ctx.triggered_prospectives.len(),
-                ctx.recalled_procedures.len(),
-            );
-            state.prepared_context = Some(ctx);
-        }
-        Err(e) => {
-            eprintln!("[simard] OODA cycle: preparation failed (degraded): {e}");
-            state.prepared_context = None;
-        }
-    }
+    let ctx =
+        preparation_memory_operations(&objective_summary, &cycle_session_id, &bridges.memory)?;
+    eprintln!(
+        "[simard] OODA cycle: prepared context ({} facts, {} triggers, {} procedures)",
+        ctx.relevant_facts.len(),
+        ctx.triggered_prospectives.len(),
+        ctx.recalled_procedures.len(),
+    );
+    state.prepared_context = Some(ctx);
 
     // --- Orient ---
     state.current_phase = OodaPhase::Orient;

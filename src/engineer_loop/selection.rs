@@ -291,10 +291,19 @@ pub(crate) fn select_engineer_action(
         return select_structured_edit(inspection, edit_request, &note);
     }
 
-    // Try LLM-based planning first; fall back to keyword analysis.
+    // LLM-based planning. If unavailable, use keyword analysis as the
+    // base strategy (not a fallback — keyword analysis is the foundational
+    // implementation, LLM planning is an enhancement).
     let analyzed = match crate::engineer_plan::plan_objective(objective, inspection) {
         Ok(plan) if !plan.steps().is_empty() => plan.steps()[0].action.clone(),
-        _ => super::types::analyze_objective(objective),
+        Ok(_) => {
+            tracing::debug!("LLM plan returned empty steps, using keyword analysis");
+            super::types::analyze_objective(objective)
+        }
+        Err(e) => {
+            tracing::warn!("LLM planning failed: {e} — using keyword analysis");
+            super::types::analyze_objective(objective)
+        }
     };
     match analyzed {
         AnalyzedAction::CreateFile => {
