@@ -1,21 +1,15 @@
 use crate::cognitive_memory::CognitiveMemoryOps;
+use crate::error::SimardResult;
 
-/// Search the bridge for facts matching `query`, logging a warning on failure.
+/// Search the bridge for facts matching `query`.
 ///
-/// Returns the matching facts, or an empty `Vec` when the bridge call fails
-/// (after logging the error so operators can diagnose memory issues).
-fn search_or_warn(
+/// Bridge errors propagate per PHILOSOPHY.md — no silent degradation.
+fn search_bridge(
     bridge: &dyn CognitiveMemoryOps,
     query: &str,
     limit: u32,
-) -> Vec<crate::memory_cognitive::CognitiveFact> {
-    match bridge.search_facts(query, limit, 0.0) {
-        Ok(facts) => facts,
-        Err(e) => {
-            eprintln!("[simard] live_context: memory search failed for \"{query}\": {e}");
-            Vec::new()
-        }
-    }
+) -> SimardResult<Vec<crate::memory_cognitive::CognitiveFact>> {
+    bridge.search_facts(query, limit, 0.0)
 }
 
 /// Resolve the operator display name.
@@ -32,11 +26,11 @@ fn resolve_operator_name() -> String {
 
 /// Build live context from cognitive memory, goals, and project state to
 /// enrich the meeting system prompt so Simard knows her own state.
-pub(super) fn build_live_meeting_context(bridge: &dyn CognitiveMemoryOps) -> String {
+pub(super) fn build_live_meeting_context(bridge: &dyn CognitiveMemoryOps) -> SimardResult<String> {
     let mut sections = Vec::new();
 
     // Recent meeting summaries (decisions from past meetings)
-    let past_meetings = search_or_warn(bridge, "meeting:", 10);
+    let past_meetings = search_bridge(bridge, "meeting:", 10)?;
     if !past_meetings.is_empty() {
         let mut meeting_text = String::from("## Previous Meeting Summaries\n");
         for (i, m) in past_meetings.iter().enumerate().take(5) {
@@ -46,7 +40,7 @@ pub(super) fn build_live_meeting_context(bridge: &dyn CognitiveMemoryOps) -> Str
     }
 
     // Recent decisions from meetings (individually stored by REPL)
-    let past_decisions = search_or_warn(bridge, "decision:", 10);
+    let past_decisions = search_bridge(bridge, "decision:", 10)?;
     if !past_decisions.is_empty() {
         let mut dec_text = String::from("## Past Decisions\n");
         for (i, d) in past_decisions.iter().enumerate().take(10) {
@@ -56,7 +50,7 @@ pub(super) fn build_live_meeting_context(bridge: &dyn CognitiveMemoryOps) -> Str
     }
 
     // Active goals
-    let goals = search_or_warn(bridge, "goal:", 10);
+    let goals = search_bridge(bridge, "goal:", 10)?;
     if !goals.is_empty() {
         let mut goal_text = String::from("## Active Goals\n");
         for (i, g) in goals.iter().enumerate().take(5) {
@@ -66,7 +60,7 @@ pub(super) fn build_live_meeting_context(bridge: &dyn CognitiveMemoryOps) -> Str
     }
 
     // Operator identity — from memory, env var, or resolved name
-    let operator = search_or_warn(bridge, "operator:", 3);
+    let operator = search_bridge(bridge, "operator:", 3)?;
     if !operator.is_empty() {
         let mut op_text = String::from("## Operator Context\n");
         for fact in &operator {
@@ -79,7 +73,7 @@ pub(super) fn build_live_meeting_context(bridge: &dyn CognitiveMemoryOps) -> Str
     }
 
     // Known projects — only shown when memory has project facts
-    let projects = search_or_warn(bridge, "project:", 10);
+    let projects = search_bridge(bridge, "project:", 10)?;
     if !projects.is_empty() {
         let mut proj_text = String::from("## Known Projects\n");
         for p in &projects {
@@ -87,10 +81,9 @@ pub(super) fn build_live_meeting_context(bridge: &dyn CognitiveMemoryOps) -> Str
         }
         sections.push(proj_text);
     }
-    // No hardcoded fallback — if memory has no projects, the section is omitted.
 
     // Research tracker / watched developers
-    let research = search_or_warn(bridge, "research:", 5);
+    let research = search_bridge(bridge, "research:", 5)?;
     if !research.is_empty() {
         let mut res_text = String::from("## Research Topics\n");
         for r in &research {
@@ -100,7 +93,7 @@ pub(super) fn build_live_meeting_context(bridge: &dyn CognitiveMemoryOps) -> Str
     }
 
     // Recent improvements
-    let improvements = search_or_warn(bridge, "improvement:", 5);
+    let improvements = search_bridge(bridge, "improvement:", 5)?;
     if !improvements.is_empty() {
         let mut imp_text = String::from("## Improvement Backlog\n");
         for imp in &improvements {
@@ -110,12 +103,14 @@ pub(super) fn build_live_meeting_context(bridge: &dyn CognitiveMemoryOps) -> Str
     }
 
     if sections.is_empty() {
-        String::from("## Live State\nNo cognitive memory available for this session.\n")
+        Ok(String::from(
+            "## Live State\nNo cognitive memory available for this session.\n",
+        ))
     } else {
-        format!(
+        Ok(format!(
             "## Live State (from cognitive memory)\n\n{}",
             sections.join("\n")
-        )
+        ))
     }
 }
 
@@ -158,7 +153,7 @@ mod tests {
         unsafe { std::env::remove_var("SIMARD_OPERATOR_NAME") };
     }
 
-    // ── search_or_warn ──────────────────────────────────────────────
+    // ── search_bridge ─────────────────────────────────────────────
 
     fn empty_bridge() -> CognitiveMemoryBridge {
         let transport = InMemoryBridgeTransport::new("test-ctx", |method, _params| match method {
@@ -182,17 +177,17 @@ mod tests {
     }
 
     #[test]
-    fn search_or_warn_empty_result() {
+    fn search_bridge_empty_result() {
         let bridge = empty_bridge();
-        let facts = search_or_warn(&bridge, "anything", 5);
+        let facts = search_bridge(&bridge, "anything", 5).unwrap();
         assert!(facts.is_empty());
     }
 
     #[test]
-    fn search_or_warn_bridge_failure_returns_empty() {
+    fn search_bridge_failure_propagates() {
         let bridge = failing_bridge();
-        let facts = search_or_warn(&bridge, "query", 5);
-        assert!(facts.is_empty());
+        let result = search_bridge(&bridge, "query", 5);
+        assert!(result.is_err());
     }
 
     // ── build_live_meeting_context ──────────────────────────────────
@@ -202,39 +197,41 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap();
         let bridge = empty_bridge();
         unsafe { std::env::remove_var("SIMARD_OPERATOR_NAME") };
-        let ctx = build_live_meeting_context(&bridge);
+        let ctx = build_live_meeting_context(&bridge).unwrap();
         assert!(ctx.contains("Operator Context"));
         assert!(ctx.contains("operator"));
     }
 
     #[test]
-    fn build_context_failing_bridge_shows_operator_fallback() {
+    fn build_context_failing_bridge_propagates_error() {
         let _lock = ENV_MUTEX.lock().unwrap();
         let bridge = failing_bridge();
         unsafe { std::env::remove_var("SIMARD_OPERATOR_NAME") };
-        let ctx = build_live_meeting_context(&bridge);
-        assert!(ctx.contains("Operator Context"));
+        let result = build_live_meeting_context(&bridge);
+        assert!(
+            result.is_err(),
+            "bridge failures must propagate, not silently degrade"
+        );
     }
 
     #[test]
     fn build_context_always_has_operator_section() {
         let bridge = empty_bridge();
-        let ctx = build_live_meeting_context(&bridge);
+        let ctx = build_live_meeting_context(&bridge).unwrap();
         assert!(ctx.contains("Operator Context"));
     }
 
     #[test]
     fn build_context_result_is_not_empty() {
         let bridge = empty_bridge();
-        let ctx = build_live_meeting_context(&bridge);
+        let ctx = build_live_meeting_context(&bridge).unwrap();
         assert!(!ctx.is_empty());
     }
 
     #[test]
     fn build_context_contains_live_state_header() {
         let bridge = empty_bridge();
-        let ctx = build_live_meeting_context(&bridge);
-        // Either shows "Live State" or "Live State (from cognitive memory)"
+        let ctx = build_live_meeting_context(&bridge).unwrap();
         assert!(ctx.contains("Live State"));
     }
 }

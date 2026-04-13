@@ -225,6 +225,9 @@ pub enum SimardError {
         path: PathBuf,
         reason: String,
     },
+    PromptNotFound {
+        name: String,
+    },
 }
 
 pub type SimardResult<T> = Result<T, SimardError>;

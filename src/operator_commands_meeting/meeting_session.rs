@@ -50,7 +50,7 @@ pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::E
 
     let agent_session = open_meeting_agent_session();
     let base_prompt = load_meeting_system_prompt();
-    let live_context = build_live_meeting_context(&*bridge);
+    let live_context = build_live_meeting_context(&*bridge)?;
     let meeting_system_prompt = format!("{base_prompt}\n\n{live_context}");
 
     if agent_session.is_some() {

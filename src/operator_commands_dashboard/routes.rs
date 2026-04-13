@@ -8,6 +8,7 @@ use axum::{
 use serde_json::{Value, json};
 
 use super::auth::{require_auth, try_login};
+use crate::error::{SimardError, SimardResult};
 
 pub fn build_router() -> Router {
     Router::new()
@@ -609,8 +610,7 @@ async fn index() -> axum::response::Html<String> {
 // ---------------------------------------------------------------------------
 
 /// Load the meeting system prompt from disk.
-fn load_dashboard_meeting_prompt() -> String {
-    // Try known locations: binary-relative, then source tree via CARGO_MANIFEST_DIR (dev only)
+fn load_dashboard_meeting_prompt() -> SimardResult<String> {
     let candidates = [
         // Runtime: next to the binary
         std::env::current_exe().ok().and_then(|p| {
@@ -624,7 +624,7 @@ fn load_dashboard_meeting_prompt() -> String {
             )
             .join("src/Simard/prompt_assets/simard/meeting_system.md"),
         ),
-        // Build-time fallback for cargo run during development
+        // Build-time: source tree via CARGO_MANIFEST_DIR (dev only)
         Some(
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("prompt_assets/simard/meeting_system.md"),
@@ -632,10 +632,12 @@ fn load_dashboard_meeting_prompt() -> String {
     ];
     for candidate in candidates.into_iter().flatten() {
         if let Ok(content) = std::fs::read_to_string(&candidate) {
-            return content;
+            return Ok(content);
         }
     }
-    String::new()
+    Err(SimardError::PromptNotFound {
+        name: "meeting_system.md".into(),
+    })
 }
 
 /// Open an agent session for the dashboard chat, using the same infrastructure
@@ -680,7 +682,20 @@ async fn handle_ws_chat(mut socket: WebSocket) {
         return;
     };
 
-    let system_prompt = load_dashboard_meeting_prompt();
+    let system_prompt = match load_dashboard_meeting_prompt() {
+        Ok(prompt) => prompt,
+        Err(e) => {
+            eprintln!("[simard] dashboard chat: {e}");
+            let _ = socket
+                .send(Message::Text(
+                    json!({"role":"error","content": e.to_string()})
+                        .to_string()
+                        .into(),
+                ))
+                .await;
+            return;
+        }
+    };
     let mut backend = MeetingBackend::new_session("Dashboard Chat", agent, None, system_prompt);
 
     let _ = socket
