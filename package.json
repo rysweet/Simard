@@ -10,5 +10,13 @@
   },
   "bin": {
     "simard": "bin.js"
+  },
+  "scripts": {
+    "test:e2e": "npx playwright test --config tests/e2e-dashboard/playwright.config.ts",
+    "test:e2e:structural": "npx playwright test --config tests/e2e-dashboard/playwright.config.ts --project structural",
+    "test:e2e:smoke": "npx playwright test --config tests/e2e-dashboard/playwright.config.ts --project smoke"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.1"
   }
 }
