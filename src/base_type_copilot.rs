@@ -373,7 +373,7 @@ fn extract_response_from_transcript(transcript: &str) -> String {
     }
 
     if response_start >= response_end {
-        // Fallback: strip known noise lines
+        // Delimiters not found — strip known noise lines from PTY output
         return lines
             .iter()
             .filter(|l| {

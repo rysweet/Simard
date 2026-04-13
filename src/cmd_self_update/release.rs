@@ -7,7 +7,7 @@ use super::platform::{GITHUB_REPO, platform_suffix};
 pub(crate) fn find_latest_release() -> Result<(String, String), Box<dyn std::error::Error>> {
     let suffix = platform_suffix().ok_or("Unsupported platform for self-update")?;
 
-    // Try gh CLI first (authenticated, no rate limits), fall back to curl
+    // Try gh CLI first (authenticated, no rate limits), then curl (unauthenticated)
     let output = std::process::Command::new("gh")
         .args([
             "api",

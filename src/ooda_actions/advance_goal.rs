@@ -148,8 +148,8 @@ mod tests {
     use crate::ooda_loop::{ActionKind, OodaState, PlannedAction};
 
     #[test]
-    fn dispatch_advance_goal_not_started_becomes_in_progress() {
-        let mut bridges = test_bridges();
+    fn dispatch_advance_goal_without_session_fails() {
+        let mut bridges = test_bridges(); // session: None
         let board = board_with_goal("g1", GoalProgress::NotStarted, None);
         let mut state = OodaState::new(board);
         let action = PlannedAction {
@@ -158,12 +158,11 @@ mod tests {
             description: "advance".into(),
         };
         let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
-        assert!(outcomes[0].success);
-        assert!(outcomes[0].detail.contains("in-progress"));
-        assert!(matches!(
-            state.active_goals.active[0].status,
-            GoalProgress::InProgress { percent: 10 }
-        ));
+        assert!(
+            !outcomes[0].success,
+            "advance without LLM session must fail"
+        );
+        assert!(outcomes[0].detail.contains("no LLM session available"));
     }
 
     #[test]

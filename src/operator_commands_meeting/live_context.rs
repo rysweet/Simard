@@ -65,7 +65,7 @@ pub(super) fn build_live_meeting_context(bridge: &CognitiveMemoryBridge) -> Stri
         sections.push(goal_text);
     }
 
-    // Operator identity — from memory, env var, or generic fallback (never hardcoded name)
+    // Operator identity — from memory, env var, or resolved name
     let operator = search_or_warn(bridge, "operator:", 3);
     if !operator.is_empty() {
         let mut op_text = String::from("## Operator Context\n");

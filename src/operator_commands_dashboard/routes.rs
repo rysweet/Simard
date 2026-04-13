@@ -801,8 +801,8 @@ async fn logs() -> Json<Value> {
 
     let daemon_log = read_tail("/var/log/simard-daemon.log", 200)
         .or_else(|| {
-            let fallback = state_root.join("simard-daemon.log");
-            read_tail(&fallback.to_string_lossy(), 200)
+            let alt_path = state_root.join("simard-daemon.log");
+            read_tail(&alt_path.to_string_lossy(), 200)
         })
         .unwrap_or_default();
 

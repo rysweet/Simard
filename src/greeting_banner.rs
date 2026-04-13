@@ -55,11 +55,11 @@ pub fn build_greeting_banner(bridge: Option<&CognitiveMemoryBridge>) -> Vec<Stri
                 }
             }
             Ok(_) => {
-                // No active goals — show memory stats as fallback
-                append_memory_stats_fallback(bridge, &mut lines);
+                // No active goals — show memory stats instead
+                append_memory_stats(bridge, &mut lines);
             }
             Err(_) => {
-                append_memory_stats_fallback(bridge, &mut lines);
+                append_memory_stats(bridge, &mut lines);
             }
         }
     } else {
@@ -188,8 +188,8 @@ fn known_projects(bridge: &CognitiveMemoryBridge) -> Vec<(String, f64)> {
     }
 }
 
-/// Show memory statistics as a fallback when no active goals exist.
-fn append_memory_stats_fallback(bridge: &CognitiveMemoryBridge, lines: &mut Vec<String>) {
+/// Show memory statistics when no active goals exist.
+fn append_memory_stats(bridge: &CognitiveMemoryBridge, lines: &mut Vec<String>) {
     match bridge.get_statistics() {
         Ok(stats) => {
             lines.push(format!(

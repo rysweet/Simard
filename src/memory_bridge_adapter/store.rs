@@ -166,34 +166,29 @@ impl CognitiveBridgeMemoryStore {
     }
 
     /// Query the bridge for records matching a scope, converting facts back to
-    /// `MemoryRecord`s. Used as fallback when the local index has no results.
-    fn bridge_fallback_list(&self, scope: MemoryScope) -> Vec<MemoryRecord> {
+    /// `MemoryRecord`s. Used when the local index has no results.
+    fn bridge_list(&self, scope: MemoryScope) -> SimardResult<Vec<MemoryRecord>> {
         let query = format!("scope:{scope:?}");
-        match self.search_facts_with_retry(&query, 200, 0.0) {
-            Ok(facts) => {
-                let records: Vec<MemoryRecord> = facts
-                    .iter()
-                    .map(fact_to_record)
-                    .filter(|r| r.scope == scope)
-                    .collect();
-                // Merge into local index for future reads.
-                if !records.is_empty()
-                    && let Ok(mut map) = self.records.lock()
-                {
-                    for record in &records {
-                        map.entry(record.key.clone())
-                            .or_insert_with(|| record.clone());
-                    }
-                }
-                records
-            }
-            Err(e) => {
-                eprintln!(
-                    "[simard] cognitive-bridge: bridge fallback for scope {scope:?} failed: {e}"
-                );
-                Vec::new()
+        let facts = self.search_facts_with_retry(&query, 200, 0.0)?;
+        let records: Vec<MemoryRecord> = facts
+            .iter()
+            .map(fact_to_record)
+            .filter(|r| r.scope == scope)
+            .collect();
+        // Merge into local index for future reads.
+        if !records.is_empty() {
+            let mut map = self
+                .records
+                .lock()
+                .map_err(|_| SimardError::StoragePoisoned {
+                    store: STORE_NAME.to_string(),
+                })?;
+            for record in &records {
+                map.entry(record.key.clone())
+                    .or_insert_with(|| record.clone());
             }
         }
+        Ok(records)
     }
 
     /// Retry bridge writes for records that were persisted to the file fallback
@@ -271,21 +266,10 @@ impl MemoryStore for CognitiveBridgeMemoryStore {
             record.created_at = Some(Utc::now());
         }
 
-        // Try cognitive bridge first — if it fails, log a warning but still
-        // persist to the file fallback so data is not lost.
-        let bridge_ok = match self.store_as_fact(&record) {
-            Ok(_) => true,
-            Err(e) => {
-                eprintln!(
-                    "[simard] cognitive-bridge: bridge write failed for key {:?}, \
-                     falling back to file-only: {e}",
-                    record.key,
-                );
-                false
-            }
-        };
+        // Write to cognitive bridge — failure is an error, not silently swallowed.
+        self.store_as_fact(&record)?;
 
-        // Always persist to file fallback for handoff/recovery.
+        // Also persist to local file store for handoff/recovery.
         self.fallback.put(record.clone())?;
 
         // Maintain local index for list/count — O(1) insert/overwrite via HashMap.
@@ -299,13 +283,6 @@ impl MemoryStore for CognitiveBridgeMemoryStore {
         records.insert(key.clone(), record);
         drop(records);
 
-        // Track the key as pending if bridge write failed.
-        if !bridge_ok
-            && let Ok(mut pending) = self.pending_bridge_keys.lock()
-            && !pending.contains(&key)
-        {
-            pending.push(key);
-        }
         Ok(())
     }
 
@@ -324,10 +301,9 @@ impl MemoryStore for CognitiveBridgeMemoryStore {
         if !local.is_empty() {
             return Ok(local);
         }
-        // Local miss — try bridge fallback to recover cross-session data.
+        // Local miss — query bridge for cross-session data.
         drop(records); // release lock before bridge call
-        let bridged = self.bridge_fallback_list(scope);
-        Ok(bridged)
+        self.bridge_list(scope)
     }
 
     fn list_for_session(&self, session_id: &SessionId) -> SimardResult<Vec<MemoryRecord>> {
@@ -594,13 +570,14 @@ mod tests {
     }
 
     #[test]
-    fn put_with_bridge_failure_still_persists_locally() {
+    fn put_with_bridge_failure_returns_error() {
         let store = make_store(MockTransport::new_failing());
-        // Bridge store will fail, but the put should still succeed (fallback)
-        store.put(make_record("k1", MemoryScope::Decision)).unwrap();
-
-        let all = store.list_all().unwrap();
-        assert_eq!(all.len(), 1);
+        // Bridge store failure propagates — no silent fallback to file-only.
+        let result = store.put(make_record("k1", MemoryScope::Decision));
+        assert!(
+            result.is_err(),
+            "bridge failure must propagate, not silently persist"
+        );
     }
 
     #[test]

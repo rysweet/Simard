@@ -90,7 +90,7 @@ pub(crate) fn download_and_replace(
 
     let new_bin = find_binary_in_dir(&tmp_dir)?;
 
-    // Replace current binary — try atomic rename first, fall back to copy
+    // Replace current binary — atomic rename, with copy for cross-device installs
     println!("Replacing binary...");
     let backup = current_exe.with_extension("old");
     if backup.exists() {
@@ -99,7 +99,7 @@ pub(crate) fn download_and_replace(
     fs::rename(&current_exe, &backup)
         .map_err(|e| format!("Failed to backup current binary (try running with sudo): {e}"))?;
 
-    // rename is O(1) on same filesystem; copy is fallback for cross-device
+    // rename is O(1) on same filesystem; copy handles cross-device moves
     if fs::rename(&new_bin, &current_exe).is_err() {
         fs::copy(&new_bin, &current_exe)
             .map_err(|e| format!("Failed to install new binary: {e}"))?;
