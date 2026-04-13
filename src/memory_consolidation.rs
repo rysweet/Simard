@@ -211,7 +211,7 @@ pub fn consolidation_intake(
     session_id: &SessionId,
     bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<usize> {
-    let prior_facts = bridge.search_facts("memory-store-adapter", 50, 0.0)?;
+    let prior_facts = bridge.search_facts("prior-session", 50, 0.0)?;
     let count = prior_facts.len();
     if count > 0 {
         let summary = format!("Hydrated {count} prior-session facts for cross-session recall");

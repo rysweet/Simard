@@ -19,14 +19,26 @@ impl RuntimeKernel {
         let mut session = self.new_session(objective);
 
         // --- Memory consolidation: intake at session start ---
-        if let Some(bridge) = &self.cognitive_bridge
-            && let Err(e) = crate::memory_consolidation::intake_memory_operations(
+        if let Some(bridge) = &self.cognitive_bridge {
+            if let Err(e) = crate::memory_consolidation::intake_memory_operations(
                 &session.objective,
                 &session.id,
                 &**bridge,
-            )
-        {
-            eprintln!("[simard] session consolidation: intake failed: {e}");
+            ) {
+                eprintln!("[simard] session consolidation: intake failed: {e}");
+            }
+            // Hydrate prior-session facts into working memory for cross-session recall.
+            match crate::memory_consolidation::consolidation_intake(&session.id, &**bridge) {
+                Ok(n) if n > 0 => {
+                    eprintln!("[simard] session consolidation: hydrated {n} prior-session facts");
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[simard] session consolidation: cross-session hydration failed: {e}"
+                    );
+                }
+                _ => {}
+            }
         }
 
         self.persist_session_scratch(&mut session)?;
@@ -38,11 +50,18 @@ impl RuntimeKernel {
         self.persist_session_summary(&mut session, &outcome, &context)?;
 
         // --- Memory consolidation: persistence at session end ---
-        if let Some(bridge) = &self.cognitive_bridge
-            && let Err(e) =
+        if let Some(bridge) = &self.cognitive_bridge {
+            // Flush working memory to episodes before final persistence.
+            if let Err(e) =
+                crate::memory_consolidation::consolidation_persistence(&session.id, &**bridge)
+            {
+                eprintln!("[simard] session consolidation: flush failed: {e}");
+            }
+            if let Err(e) =
                 crate::memory_consolidation::persistence_memory_operations(&session.id, &**bridge)
-        {
-            eprintln!("[simard] session consolidation: persistence failed: {e}");
+            {
+                eprintln!("[simard] session consolidation: persistence failed: {e}");
+            }
         }
 
         self.complete_session(session, outcome, reflection)
