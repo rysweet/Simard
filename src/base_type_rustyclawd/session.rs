@@ -12,7 +12,7 @@ use crate::base_types::{
 use crate::error::{SimardError, SimardResult};
 use crate::sanitization::objective_metadata;
 
-use super::execution::{execute_rustyclawd_client, execute_rustyclawd_process_fallback};
+use super::execution::execute_rustyclawd_client;
 
 pub(super) struct RustyClawdSession {
     pub(super) descriptor: BaseTypeDescriptor,
@@ -56,6 +56,7 @@ impl BaseTypeSession for RustyClawdSession {
                 reason: format!("failed to create tokio runtime: {e}"),
             })?;
 
+        tracing::info!("RustyClawd: attempting client initialization from default config…");
         let client_result = rt.block_on(async {
             let config = RcConfig::from_default_location().await?;
             RcClient::new(config)
@@ -63,11 +64,14 @@ impl BaseTypeSession for RustyClawdSession {
 
         match client_result {
             Ok(client) => {
+                tracing::info!("RustyClawd: API client initialized successfully");
                 self.client = Some(client);
             }
             Err(ClientError::ApiKeyNotFound) => {
-                // No API key available — session will use process fallback on run_turn.
-                self.client = None;
+                return Err(SimardError::AdapterInvocationFailed {
+                    base_type: self.descriptor.id.to_string(),
+                    reason: "No API key found. Set ANTHROPIC_API_KEY or configure gh auth for Copilot SDK.".to_string(),
+                });
             }
             Err(e) => {
                 return Err(SimardError::AdapterInvocationFailed {
@@ -94,20 +98,25 @@ impl BaseTypeSession for RustyClawdSession {
             self.descriptor.backend.identity, self.request.mode, self.request.topology, prompt_ids,
         );
 
-        let (execution_summary, process_evidence) =
-            if let (Some(client), Some(rt)) = (self.client.as_ref(), self.rt.as_ref()) {
-                execute_rustyclawd_client(
-                    client,
-                    rt,
-                    &input,
-                    &self.descriptor,
-                    &self.request,
-                    &mut self.conversation_history,
-                )?
-            } else {
-                // Fallback: no API key available, run via process spawn.
-                execute_rustyclawd_process_fallback(&input, &self.descriptor, &self.request)?
-            };
+        let (execution_summary, process_evidence) = if let (Some(client), Some(rt)) =
+            (self.client.as_ref(), self.rt.as_ref())
+        {
+            tracing::info!(backend = %self.descriptor.backend.identity, "RustyClawd: executing via direct API client");
+            execute_rustyclawd_client(
+                client,
+                rt,
+                &input,
+                &self.descriptor,
+                &self.request,
+                &mut self.conversation_history,
+            )?
+        } else {
+            return Err(SimardError::AdapterInvocationFailed {
+                base_type: self.descriptor.id.to_string(),
+                reason: "RustyClawd API client not initialized — open() should have caught this"
+                    .to_string(),
+            });
+        };
 
         let mut evidence = vec![
             format!("selected-base-type={}", self.descriptor.id),

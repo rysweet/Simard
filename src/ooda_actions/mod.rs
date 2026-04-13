@@ -16,28 +16,10 @@ mod test_helpers;
 mod tests_goal_session;
 
 use crate::error::SimardResult;
-use crate::goal_curation::GoalProgress;
 use crate::ooda_loop::{ActionKind, ActionOutcome, OodaBridges, OodaState, PlannedAction};
 
 /// Minimum procedure usage count required for skill extraction.
 const SKILL_MIN_USAGE: u32 = 3;
-
-/// Advance a goal's progress by one step: `NotStarted → InProgress(10)`,
-/// `InProgress(N) → InProgress(N+10)` or `Completed` at 100.
-fn next_progress(current: &GoalProgress) -> GoalProgress {
-    match current {
-        GoalProgress::NotStarted => GoalProgress::InProgress { percent: 10 },
-        GoalProgress::InProgress { percent } => {
-            let next = (*percent + 10).min(100);
-            if next >= 100 {
-                GoalProgress::Completed
-            } else {
-                GoalProgress::InProgress { percent: next }
-            }
-        }
-        other => other.clone(),
-    }
-}
 
 /// Construct an [`ActionOutcome`] from the shared action reference.
 ///

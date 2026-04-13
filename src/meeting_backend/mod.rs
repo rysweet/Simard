@@ -100,7 +100,28 @@ impl MeetingBackend {
             prompt_preamble: preamble,
         };
 
-        let outcome = self.agent.run_turn(turn_input)?;
+        info!(
+            topic = self.topic,
+            messages = self.history.len(),
+            input_len = trimmed.len(),
+            "Sending message to LLM agent…"
+        );
+        let start = std::time::Instant::now();
+
+        let outcome = match self.agent.run_turn(turn_input) {
+            Ok(o) => {
+                info!(
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    response_len = o.execution_summary.len(),
+                    "LLM agent returned response"
+                );
+                o
+            }
+            Err(e) => {
+                warn!(elapsed_ms = start.elapsed().as_millis() as u64, error = %e, "LLM agent returned error");
+                return Err(e);
+            }
+        };
         let response_text = extract_response(&outcome);
 
         // Append assistant response
@@ -275,23 +296,26 @@ impl MeetingBackend {
             Ok(outcome) => {
                 let text = extract_response(&outcome);
                 if text.is_empty() {
-                    self.fallback_summary()
+                    warn!("LLM returned empty summary — using metadata summary");
+                    self.metadata_summary()
                 } else {
                     text
                 }
             }
             Err(e) => {
-                warn!("LLM summarization failed: {e}");
-                self.fallback_summary()
+                warn!("LLM summarization failed: {e} — using metadata summary");
+                self.metadata_summary()
             }
         }
     }
 
-    /// Fallback summary when LLM is unavailable.
-    fn fallback_summary(&self) -> String {
+    /// Metadata-only summary (no LLM involved). Used when the LLM summary
+    /// call fails or returns empty — this is NOT a silent fallback, it's the
+    /// structural record of what happened.
+    fn metadata_summary(&self) -> String {
         let user_count = self.history.iter().filter(|m| m.role == Role::User).count();
         format!(
-            "Meeting on \"{}\" — {} messages ({} from operator), duration {}s.",
+            "Meeting on \"{}\" — {} messages ({} from operator), duration {}s. [LLM summary unavailable]",
             self.topic,
             self.history.len(),
             user_count,

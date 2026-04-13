@@ -39,10 +39,7 @@ pub(crate) fn run_optional_review(
         return Ok(());
     }
 
-    let mut review_session = match crate::review_pipeline::ReviewSession::open() {
-        Some(s) => s,
-        None => return Ok(()),
-    };
+    let mut review_session = crate::review_pipeline::ReviewSession::open()?;
 
     let diff_text = compute_diff_for_review(&inspection.repo_root, &action.selected.kind);
     if diff_text.is_empty() {

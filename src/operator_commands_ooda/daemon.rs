@@ -77,8 +77,8 @@ fn interruptible_sleep(total: Duration, shutdown: &AtomicBool) {
 /// On SIGTERM/SIGINT the current cycle finishes, the session is closed
 /// cleanly, and the daemon exits without orphaning PTY subprocesses.
 ///
-/// If no `ANTHROPIC_API_KEY` is set, the session will be `None` and the
-/// daemon degrades honestly to bridge-only dispatch (Pillar 11).
+/// If no LLM adapter is available (e.g. no API key, no Copilot SDK),
+/// the daemon exits with an error — no silent degradation to bridge-only mode.
 pub fn run_ooda_daemon(
     max_cycles: u32,
     state_root_override: Option<PathBuf>,
@@ -118,29 +118,20 @@ pub fn run_ooda_daemon(
     let knowledge = launch_knowledge_bridge(&python_dir)?;
     let gym = launch_gym_bridge(&python_dir)?;
 
-    // Try to open an LLM session for real autonomous work.
-    // The provider is selected by SIMARD_LLM_PROVIDER (default: Copilot).
-    let session = match SessionBuilder::new(OperatingMode::Orchestrator)
+    // Open an LLM session for autonomous work. Required — no silent degradation.
+    let session = SessionBuilder::new(OperatingMode::Orchestrator)
         .node_id("ooda-daemon")
         .address("ooda-daemon://local")
         .adapter_tag("ooda")
         .open()
-    {
-        Ok(s) => {
-            eprintln!("[simard] OODA daemon: LLM session opened for autonomous work");
-            Some(s)
-        }
-        Err(e) => {
-            eprintln!("[simard] OODA daemon: LLM session failed: {e}");
-            None
-        }
-    };
+        .map_err(|e| format!("OODA daemon requires LLM session but open() failed: {e}"))?;
+    eprintln!("[simard] OODA daemon: LLM session opened for autonomous work");
 
     let mut bridges = OodaBridges {
         memory,
         knowledge,
         gym,
-        session,
+        session: Some(session),
     };
 
     let board = load_goal_board(&bridges.memory).unwrap_or_default();

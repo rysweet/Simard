@@ -80,9 +80,9 @@ pub(super) fn sanitize_directive_value(value: &str) -> String {
         .to_string()
 }
 
-pub(super) fn fallback_value<'a>(value: &'a str, fallback: &'a str) -> &'a str {
+pub(super) fn default_if_empty<'a>(value: &'a str, default: &'a str) -> &'a str {
     if value.trim().is_empty() {
-        fallback
+        default
     } else {
         value
     }
@@ -149,18 +149,18 @@ mod tests {
     }
 
     #[test]
-    fn fallback_value_uses_value_when_non_empty() {
-        assert_eq!(fallback_value("hello", "default"), "hello");
+    fn default_if_empty_uses_value_when_non_empty() {
+        assert_eq!(default_if_empty("hello", "default"), "hello");
     }
 
     #[test]
-    fn fallback_value_uses_fallback_when_empty() {
-        assert_eq!(fallback_value("", "default"), "default");
+    fn default_if_empty_uses_fallback_when_empty() {
+        assert_eq!(default_if_empty("", "default"), "default");
     }
 
     #[test]
-    fn fallback_value_uses_fallback_when_whitespace() {
-        assert_eq!(fallback_value("   ", "default"), "default");
+    fn default_if_empty_uses_fallback_when_whitespace() {
+        assert_eq!(default_if_empty("   ", "default"), "default");
     }
 
     #[test]

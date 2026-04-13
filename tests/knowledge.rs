@@ -275,7 +275,7 @@ fn enrich_context_caps_at_three_packs() {
 }
 
 #[test]
-fn enrich_context_graceful_on_bridge_failure() {
+fn enrich_context_returns_error_on_bridge_failure() {
     let failing = InMemoryBridgeTransport::new("knowledge-fail", |_method, _params| {
         Err(BridgeErrorPayload {
             code: -32603,
@@ -283,8 +283,11 @@ fn enrich_context_graceful_on_bridge_failure() {
         })
     });
     let bridge = KnowledgeBridge::new(Box::new(failing));
-    let ctx = enrich_planning_context("Fix Rust bug", &bridge).unwrap();
-    assert!(ctx.is_empty());
+    let result = enrich_planning_context("Fix Rust bug", &bridge);
+    assert!(
+        result.is_err(),
+        "should propagate bridge error, not silently degrade"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -310,7 +313,6 @@ fn planning_context_empty_check() {
     let empty = PlanningContext {
         relevant_knowledge: vec![],
         pack_sources: vec![],
-        degraded: false,
     };
     assert!(empty.is_empty());
 }

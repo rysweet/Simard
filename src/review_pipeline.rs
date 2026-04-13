@@ -73,17 +73,17 @@ pub struct ReviewSession {
 }
 
 impl ReviewSession {
-    /// Try to open a review LLM session. Returns `None` if the API key
-    /// is not set or the adapter is unavailable (graceful degradation).
-    pub fn open() -> Option<Self> {
+    /// Open a review LLM session. Returns an error if the adapter is unavailable.
+    pub fn open() -> SimardResult<Self> {
         let session = SessionBuilder::new(OperatingMode::Engineer)
             .node_id("review-pipeline")
             .address("review-pipeline://local")
             .adapter_tag("review-pipeline-rustyclawd")
             .open()
-            .map_err(|e| eprintln!("[simard] review-pipeline session failed: {e}"))
-            .ok()?;
-        Some(Self { session })
+            .map_err(|e| SimardError::ReviewUnavailable {
+                reason: format!("review session open() failed: {e}"),
+            })?;
+        Ok(Self { session })
     }
 
     /// Close the underlying LLM session.

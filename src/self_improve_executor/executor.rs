@@ -174,14 +174,7 @@ pub fn run_autonomous_improvement(
 }
 
 fn run_review(diff_text: &str) -> SimardResult<Vec<ReviewFinding>> {
-    let mut session = match ReviewSession::open() {
-        Some(s) => s,
-        None => {
-            return Err(crate::error::SimardError::ReviewUnavailable {
-                reason: "could not open review session".into(),
-            });
-        }
-    };
+    let mut session = ReviewSession::open()?;
     let findings = review_diff(&mut session, diff_text, PHILOSOPHY_REVIEW)?;
     let _ = session.close();
     Ok(findings)

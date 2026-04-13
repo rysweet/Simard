@@ -6,7 +6,7 @@ use crate::review::{ImprovementProposal, ReviewArtifact};
 
 use super::types::{
     DeferredImprovement, ImprovementDirective, ImprovementPromotionPlan, ImprovementProposalRecord,
-    fallback_value, required_improvement_field, sanitize_directive_value,
+    default_if_empty, required_improvement_field, sanitize_directive_value,
 };
 
 impl ImprovementPromotionPlan {
@@ -119,7 +119,7 @@ impl ImprovementPromotionPlan {
                         "{}; review={} target={} category={} suggested_change={}",
                         directive.rationale,
                         self.review_id,
-                        fallback_value(&self.review_target, "unknown-target"),
+                        default_if_empty(&self.review_target, "unknown-target"),
                         proposal.category,
                         proposal.suggested_change
                     ),

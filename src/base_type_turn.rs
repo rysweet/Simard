@@ -33,8 +33,6 @@ pub struct TurnContext {
     pub memory_facts: Vec<CognitiveFact>,
     pub knowledge: Vec<KnowledgeQueryResult>,
     pub procedures: Vec<CognitiveProcedure>,
-    /// Sources that failed during enrichment, for honest degradation visibility.
-    pub degraded_sources: Vec<String>,
 }
 
 /// An action proposed by the LLM in its response.
@@ -55,50 +53,35 @@ pub struct TurnOutput {
 
 /// Prepare a [`TurnContext`] by querying memory and knowledge bridges.
 ///
-/// Both bridges are optional. If a bridge call fails, the corresponding
-/// section is left empty and the failure is recorded in `degraded_sources`
-/// so callers can see what enrichment was skipped (Pillar 11: honest degradation).
+/// Both bridges are optional (None = not configured, which is fine).
+/// If a bridge IS provided but its call fails, the error propagates — no
+/// silent degradation per PHILOSOPHY.md.
 pub fn prepare_turn_context(
     objective: &str,
     memory_bridge: Option<&CognitiveMemoryBridge>,
     knowledge_bridge: Option<&KnowledgeBridge>,
-) -> TurnContext {
-    let mut degraded_sources = Vec::new();
+) -> SimardResult<TurnContext> {
+    let memory_facts = match memory_bridge {
+        Some(bridge) => bridge.search_facts(objective, MAX_MEMORY_FACTS, MIN_FACT_CONFIDENCE)?,
+        None => Vec::new(),
+    };
 
-    let memory_facts = memory_bridge
-        .and_then(|bridge| {
-            bridge
-                .search_facts(objective, MAX_MEMORY_FACTS, MIN_FACT_CONFIDENCE)
-                .map_err(|e| degraded_sources.push(format!("memory-facts: {e}")))
-                .ok()
-        })
-        .unwrap_or_default();
+    let procedures = match memory_bridge {
+        Some(bridge) => bridge.recall_procedure(objective, MAX_PROCEDURES)?,
+        None => Vec::new(),
+    };
 
-    let procedures = memory_bridge
-        .and_then(|bridge| {
-            bridge
-                .recall_procedure(objective, MAX_PROCEDURES)
-                .map_err(|e| degraded_sources.push(format!("memory-procedures: {e}")))
-                .ok()
-        })
-        .unwrap_or_default();
+    let knowledge = match knowledge_bridge {
+        Some(bridge) => enrich_planning_context(objective, bridge)?.relevant_knowledge,
+        None => Vec::new(),
+    };
 
-    let knowledge = knowledge_bridge
-        .and_then(|bridge| {
-            enrich_planning_context(objective, bridge)
-                .map_err(|e| degraded_sources.push(format!("knowledge: {e}")))
-                .ok()
-        })
-        .map(|ctx| ctx.relevant_knowledge)
-        .unwrap_or_default();
-
-    TurnContext {
+    Ok(TurnContext {
         objective: objective.to_string(),
         memory_facts,
         knowledge,
         procedures,
-        degraded_sources,
-    }
+    })
 }
 
 /// Format a [`TurnContext`] into a prompt string suitable for an LLM.
@@ -275,7 +258,6 @@ mod tests {
             memory_facts: vec![],
             knowledge: vec![],
             procedures: vec![],
-            degraded_sources: vec![],
         };
         let prompt = format_turn_input(&ctx);
         assert!(prompt.contains("implement the widget"));
@@ -297,7 +279,6 @@ mod tests {
             }],
             knowledge: vec![],
             procedures: vec![],
-            degraded_sources: vec![],
         };
         let prompt = format_turn_input(&ctx);
         assert!(prompt.contains("## Relevant Memory Facts"));
