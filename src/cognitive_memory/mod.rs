@@ -296,9 +296,25 @@ fn as_f64(val: &lbug::Value) -> Option<f64> {
     }
 }
 
-/// Escape a string for safe inclusion in a Cypher literal.
+/// Escape a string for safe inclusion in a single-quoted Cypher literal.
+///
+/// Handles backslash, single-quote, newlines, carriage returns, tabs, and
+/// null bytes — the full set of characters that can break or inject into
+/// Cypher string literals.
 fn escape_cypher(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('\'', "\\'")
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\0' => out.push_str("\\0"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 impl CognitiveMemoryOps for NativeCognitiveMemory {
@@ -719,5 +735,24 @@ mod tests {
         let mem = test_mem();
         let result = mem.store_fact("test'DROP", "con'tent", 0.5, &[], "src");
         assert!(result.is_ok(), "single quotes should be escaped");
+    }
+
+    #[test]
+    fn escape_cypher_handles_special_chars() {
+        assert_eq!(escape_cypher("a'b"), "a\\'b");
+        assert_eq!(escape_cypher("a\\b"), "a\\\\b");
+        assert_eq!(escape_cypher("line\nbreak"), "line\\nbreak");
+        assert_eq!(escape_cypher("tab\there"), "tab\\there");
+        assert_eq!(escape_cypher("null\0byte"), "null\\0byte");
+        assert_eq!(escape_cypher("cr\rreturn"), "cr\\rreturn");
+    }
+
+    #[test]
+    fn newline_in_content_does_not_break_query() {
+        let mem = test_mem();
+        let result = mem.store_fact("key", "line1\nline2\ttab", 0.5, &[], "src");
+        assert!(result.is_ok(), "newlines and tabs should be safely escaped");
+        let facts = mem.search_facts("key", 10, 0.0).unwrap();
+        assert_eq!(facts.len(), 1);
     }
 }
