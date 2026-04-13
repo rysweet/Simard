@@ -7,9 +7,9 @@ use axum::{
 use serde_json::{Value, json};
 
 use super::auth::{require_auth, try_login};
-use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::agent_registry::{AgentRegistry, FileBackedAgentRegistry};
 use crate::build_lock::BuildLock;
+use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::error::{SimardError, SimardResult};
 
 pub fn build_router() -> Router {
@@ -924,17 +924,17 @@ async fn read_journal_logs() -> Vec<String> {
         .output()
         .await;
 
-    if let Ok(o) = output {
-        if o.status.success() {
-            let text = String::from_utf8_lossy(&o.stdout);
-            let lines: Vec<String> = text
-                .lines()
-                .filter(|l| !l.contains("No entries"))
-                .map(String::from)
-                .collect();
-            if !lines.is_empty() {
-                return lines;
-            }
+    if let Ok(o) = output
+        && o.status.success()
+    {
+        let text = String::from_utf8_lossy(&o.stdout);
+        let lines: Vec<String> = text
+            .lines()
+            .filter(|l| !l.contains("No entries"))
+            .map(String::from)
+            .collect();
+        if !lines.is_empty() {
+            return lines;
         }
     }
 

@@ -3,14 +3,44 @@ mod routes;
 
 use std::net::SocketAddr;
 
-pub fn serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+/// Initialize dashboard auth and print the login code to stderr.
+/// Must be called before serving traffic (both standalone and embedded modes).
+pub fn init_auth() -> (String, bool) {
     let (code, loaded) = auth::init_login_code();
-
-    // Double-check: auth must be initialized before serving traffic
     assert!(
         auth::is_auth_initialized(),
         "BUG: dashboard auth not initialized after init_login_code()"
     );
+    (code, loaded)
+}
+
+/// Spawn the dashboard as a tokio background task on the given runtime.
+///
+/// Returns a `JoinHandle` so the caller can detect if the server exits
+/// unexpectedly. The dashboard is cancelled automatically when the runtime
+/// shuts down, which is the desired behavior for daemon integration.
+pub fn spawn_dashboard_task(
+    rt: &tokio::runtime::Handle,
+    port: u16,
+) -> tokio::task::JoinHandle<Result<(), String>> {
+    rt.spawn(async move {
+        let app = routes::build_router();
+        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        eprintln!("[simard] Dashboard listening on http://{addr}");
+
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .map_err(|e| format!("dashboard bind failed on port {port}: {e}"))?;
+        axum::serve(listener, app)
+            .await
+            .map_err(|e| format!("dashboard serve error: {e}"))
+    })
+}
+
+/// Serve the dashboard as a standalone process (creates its own tokio runtime).
+pub fn serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    let (code, loaded) = init_auth();
+
     eprintln!("\n  🌲 Simard Dashboard");
     if loaded {
         eprintln!("  Login code: {code} (loaded from ~/.simard/.dashkey)");

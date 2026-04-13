@@ -66,11 +66,37 @@ fn interruptible_sleep(total: Duration, shutdown: &AtomicBool) {
     }
 }
 
+/// Configuration for the embedded dashboard that runs inside the OODA daemon.
+pub struct DaemonDashboardConfig {
+    /// Whether to spawn the dashboard as a background task.
+    pub enabled: bool,
+    /// TCP port for the dashboard (default: 8080, overridable via
+    /// `SIMARD_DASHBOARD_PORT` env var or `--dashboard-port=` CLI flag).
+    pub port: u16,
+}
+
+impl Default for DaemonDashboardConfig {
+    fn default() -> Self {
+        let port = std::env::var("SIMARD_DASHBOARD_PORT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8080);
+        Self {
+            enabled: true,
+            port,
+        }
+    }
+}
+
 /// Run one or more OODA cycles as a daemon-style loop.
 ///
 /// Launches all bridges, opens a RustyClawd session via [`SessionBuilder`]
 /// for real autonomous work, loads the goal board from cognitive memory,
 /// and runs OODA cycles until `max_cycles` is reached (0 = infinite).
+///
+/// When `dashboard.enabled` is true, the dashboard's axum server is spawned
+/// as a background tokio task — sharing the same process and restarting
+/// automatically when the daemon restarts (via auto-reload or systemd).
 ///
 /// On SIGTERM/SIGINT the current cycle finishes, the session is closed
 /// cleanly, and the daemon exits without orphaning PTY subprocesses.
@@ -81,6 +107,7 @@ pub fn run_ooda_daemon(
     max_cycles: u32,
     state_root_override: Option<PathBuf>,
     auto_reload: bool,
+    dashboard: DaemonDashboardConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // --- signal handling ------------------------------------------------
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -138,6 +165,39 @@ pub fn run_ooda_daemon(
         .unwrap_or(300);
 
     eprintln!("[simard] OODA daemon: cycle interval = {interval_secs}s");
+
+    // --- embedded dashboard ------------------------------------------------
+    // Spawn the dashboard as a background tokio task so both OODA loop and
+    // dashboard share a single process. On daemon restart (auto-reload or
+    // systemd), the dashboard restarts automatically.
+    let _dashboard_rt;
+    let _dashboard_handle;
+    if dashboard.enabled {
+        let (code, loaded) = crate::operator_commands_dashboard::init_auth();
+        eprintln!("\n  🌲 Simard Dashboard (embedded in OODA daemon)");
+        if loaded {
+            eprintln!("  Login code: {code} (loaded from ~/.simard/.dashkey)");
+        } else {
+            eprintln!("  Login code: {code} (saved to ~/.simard/.dashkey)");
+        }
+        eprintln!(
+            "  Open http://localhost:{} and enter the code\n",
+            dashboard.port
+        );
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let handle =
+            crate::operator_commands_dashboard::spawn_dashboard_task(rt.handle(), dashboard.port);
+        _dashboard_rt = Some(rt);
+        _dashboard_handle = Some(handle);
+    } else {
+        _dashboard_rt = None;
+        _dashboard_handle = None;
+        eprintln!("[simard] OODA daemon: dashboard disabled (use --no-dashboard to suppress)");
+    }
+    // -----------------------------------------------------------------------
 
     // Capture the binary mtime at startup so we can detect in-place upgrades.
     let start_time = exe_mtime().unwrap_or_else(SystemTime::now);

@@ -139,6 +139,11 @@ pub async fn require_auth(request: Request, next: Next) -> Result<Response, Stat
     }
 }
 
+/// Check whether the login code has been initialized.
+pub fn is_auth_initialized() -> bool {
+    LOGIN_CODE.get().is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,9 +242,4 @@ mod tests {
         // Just verify we can acquire the lock
         drop(guard);
     }
-}
-
-/// Check whether the login code has been initialized.
-pub fn is_auth_initialized() -> bool {
-    LOGIN_CODE.get().is_some()
 }

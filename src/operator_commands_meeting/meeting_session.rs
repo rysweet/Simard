@@ -1,6 +1,6 @@
 use std::io::{self, BufReader};
-use std::path::PathBuf;
 
+use crate::build_lock::BuildLock;
 use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::greeting_banner::print_greeting_banner;
 use crate::identity::OperatingMode;
@@ -17,7 +17,7 @@ fn load_meeting_system_prompt() -> String {
 
 /// Launch the native cognitive memory backend for meeting mode (mandatory).
 fn launch_real_meeting_bridge() -> Result<Box<dyn CognitiveMemoryOps>, Box<dyn std::error::Error>> {
-    let state_root = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/target/simard-state"));
+    let state_root = BuildLock::default_state_root();
     let _ = std::fs::create_dir_all(&state_root);
     let native_mem = NativeCognitiveMemory::open(&state_root)
         .map_err(|e| format!("cognitive memory failed to open: {e}"))?;
