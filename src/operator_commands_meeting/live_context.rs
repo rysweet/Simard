@@ -1,11 +1,11 @@
-use crate::memory_bridge::CognitiveMemoryBridge;
+use crate::cognitive_memory::CognitiveMemoryOps;
 
 /// Search the bridge for facts matching `query`, logging a warning on failure.
 ///
 /// Returns the matching facts, or an empty `Vec` when the bridge call fails
 /// (after logging the error so operators can diagnose memory issues).
 fn search_or_warn(
-    bridge: &CognitiveMemoryBridge,
+    bridge: &dyn CognitiveMemoryOps,
     query: &str,
     limit: u32,
 ) -> Vec<crate::memory_cognitive::CognitiveFact> {
@@ -32,7 +32,7 @@ fn resolve_operator_name() -> String {
 
 /// Build live context from cognitive memory, goals, and project state to
 /// enrich the meeting system prompt so Simard knows her own state.
-pub(super) fn build_live_meeting_context(bridge: &CognitiveMemoryBridge) -> String {
+pub(super) fn build_live_meeting_context(bridge: &dyn CognitiveMemoryOps) -> String {
     let mut sections = Vec::new();
 
     // Recent meeting summaries (decisions from past meetings)
@@ -124,6 +124,7 @@ mod tests {
     use super::*;
     use crate::bridge::BridgeErrorPayload;
     use crate::bridge_subprocess::InMemoryBridgeTransport;
+    use crate::memory_bridge::CognitiveMemoryBridge;
 
     /// Mutex to serialize tests that mutate the `SIMARD_OPERATOR_NAME` env var.
     /// `set_var`/`remove_var` are process-global so concurrent tests would race.

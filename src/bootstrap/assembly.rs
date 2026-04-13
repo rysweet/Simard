@@ -10,7 +10,7 @@ use crate::base_type_claude_agent_sdk::claude_agent_sdk_adapter;
 use crate::base_type_ms_agent::ms_agent_framework_adapter;
 use crate::base_type_rustyclawd::RustyClawdAdapter;
 use crate::base_types::BaseTypeId;
-use crate::bridge_launcher::{cognitive_memory_db_path, find_python_dir, launch_memory_bridge};
+use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::error::{SimardError, SimardResult};
 use crate::evidence::{EvidenceStore, FileBackedEvidenceStore};
 use crate::goals::{FileBackedGoalStore, GoalStore};
@@ -20,7 +20,6 @@ use crate::identity::{
     OperatingMode,
 };
 use crate::memory::{FileBackedMemoryStore, MemoryStore};
-use crate::memory_bridge::CognitiveMemoryBridge;
 use crate::memory_bridge_adapter::CognitiveBridgeMemoryStore;
 use crate::metadata::{Freshness, Provenance};
 use crate::prompt_assets::{FilePromptAssetStore, PromptAssetStore};
@@ -45,58 +44,40 @@ pub struct LocalSessionExecution {
     pub stopped_snapshot: ReflectionSnapshot,
 }
 
-/// Build the memory store and an optional second cognitive bridge for
-/// session lifecycle consolidation hooks.
+/// Build the memory store and an optional native cognitive memory backend
+/// for session lifecycle consolidation hooks.
 ///
 /// In `BuiltinDefaults` mode (tests/dev), falls back to file-backed store
-/// when the Python bridge is unavailable. In `ExplicitConfig` mode (production),
-/// the cognitive bridge MUST succeed or startup fails.
-///
-/// When the bridge is available, a second bridge instance is launched for
-/// `RuntimeKernel::set_cognitive_bridge()` so that consolidation hooks
-/// (`intake_memory_operations`, `persistence_memory_operations`) are active.
+/// when LadybugDB is unavailable. In `ExplicitConfig` mode (production),
+/// the cognitive memory MUST succeed or startup fails.
 fn build_memory_store(
     config: &BootstrapConfig,
-) -> SimardResult<(Arc<dyn MemoryStore>, Option<CognitiveMemoryBridge>)> {
-    let python_dir = find_python_dir().ok();
-    let db_path = cognitive_memory_db_path(&config.state_root.value);
+) -> SimardResult<(Arc<dyn MemoryStore>, Option<Box<dyn CognitiveMemoryOps>>)> {
+    #![allow(clippy::type_complexity)]
+    match NativeCognitiveMemory::open(&config.state_root.value) {
+        Ok(native) => {
+            let native_for_store = NativeCognitiveMemory::open(&config.state_root.value)?;
+            let store =
+                CognitiveBridgeMemoryStore::new(native_for_store, config.memory_store_path())?;
+            store.hydrate_from_bridge();
 
-    let bridge = python_dir
-        .as_ref()
-        .and_then(|pd| launch_memory_bridge(&config.identity, &db_path, pd).ok());
+            eprintln!("[simard] consolidation hooks active — session lifecycle hooks enabled");
 
-    if let Some(bridge) = bridge {
-        eprintln!("[simard] cognitive memory bridge active — using LadybugDB backend");
-        let store = CognitiveBridgeMemoryStore::new(bridge, config.memory_store_path())?;
-        store.hydrate_from_bridge();
-
-        // Launch a second bridge for RuntimeKernel consolidation hooks.
-        let consolidation_bridge = python_dir
-            .as_ref()
-            .and_then(|pd| launch_memory_bridge(&config.identity, &db_path, pd).ok());
-        if consolidation_bridge.is_some() {
-            eprintln!("[simard] consolidation bridge active — session lifecycle hooks enabled");
-        } else {
-            eprintln!("[simard] consolidation bridge unavailable — lifecycle hooks will no-op");
+            Ok((Arc::new(store), Some(Box::new(native))))
         }
-
-        Ok((Arc::new(store), consolidation_bridge))
-    } else if config.mode == crate::bootstrap::BootstrapMode::BuiltinDefaults {
-        eprintln!(
-            "[simard] cognitive memory bridge unavailable (builtin-defaults mode) — using file backend for testing"
-        );
-        Ok((
-            Arc::new(FileBackedMemoryStore::try_new(config.memory_store_path())?),
-            None,
-        ))
-    } else {
-        Err(SimardError::BridgeSpawnFailed {
-            bridge: "cognitive-memory".into(),
-            reason: "cognitive memory bridge is required in production mode. \
-                     Ensure Python and the bridge server are available, or set \
-                     SIMARD_BOOTSTRAP_MODE=builtin-defaults for testing."
-                .into(),
-        })
+        Err(e) if config.mode == crate::bootstrap::BootstrapMode::BuiltinDefaults => {
+            eprintln!(
+                "[simard] native cognitive memory unavailable ({e}) — using file backend for testing"
+            );
+            Ok((
+                Arc::new(FileBackedMemoryStore::try_new(config.memory_store_path())?),
+                None,
+            ))
+        }
+        Err(e) => Err(SimardError::RuntimeInitFailed {
+            component: "cognitive-memory".into(),
+            reason: format!("native cognitive memory is required in production mode: {e}"),
+        }),
     }
 }
 
@@ -104,8 +85,8 @@ fn build_memory_store(
 struct AssembledParts {
     ports: RuntimePorts,
     request: RuntimeRequest,
-    /// Second bridge instance for `RuntimeKernel::set_cognitive_bridge()`.
-    consolidation_bridge: Option<CognitiveMemoryBridge>,
+    /// Cognitive memory backend for `RuntimeKernel::set_cognitive_bridge()`.
+    consolidation_bridge: Option<Box<dyn CognitiveMemoryOps>>,
 }
 
 /// Build all runtime components from a bootstrap config.

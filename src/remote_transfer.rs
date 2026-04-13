@@ -28,8 +28,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
-use crate::memory_bridge::CognitiveMemoryBridge;
 use crate::memory_cognitive::{CognitiveFact, CognitiveProcedure};
 
 /// Maximum number of facts to export in a single snapshot.
@@ -89,7 +89,7 @@ impl MemorySnapshot {
     note = "Use Memory('simard', topology='distributed') hive-mind replication instead of JSON snapshots"
 )]
 pub fn export_memory_snapshot(
-    bridge: &CognitiveMemoryBridge,
+    bridge: &dyn CognitiveMemoryOps,
     agent_name: &str,
     path: Option<&Path>,
 ) -> SimardResult<MemorySnapshot> {
@@ -143,7 +143,7 @@ pub fn export_memory_snapshot(
     note = "Use Memory('simard', topology='distributed') hive-mind replication instead of JSON snapshots"
 )]
 pub fn import_memory_snapshot(
-    bridge: &CognitiveMemoryBridge,
+    bridge: &dyn CognitiveMemoryOps,
     snapshot: &MemorySnapshot,
 ) -> SimardResult<usize> {
     let mut imported = 0;
@@ -205,6 +205,7 @@ fn current_epoch_seconds() -> SimardResult<u64> {
 mod tests {
     use super::*;
     use crate::bridge_subprocess::InMemoryBridgeTransport;
+    use crate::memory_bridge::CognitiveMemoryBridge;
     use serde_json::json;
     use std::sync::Mutex;
 

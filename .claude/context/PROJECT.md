@@ -10,7 +10,7 @@ Replace the sections below with information about your project.
 
 ---
 
-## Project: main
+## Project: issue-512-implementation-only-design-is-complete-skip-to-cod
 
 ## Overview
 
@@ -29,6 +29,7 @@ An autonomous engineer who drives and curates agentic coding systems. Named afte
 - **Language**: Python
 - **Language**: JavaScript/TypeScript
 - **Language**: Rust
+- **Language**: Go
 - **Framework**: [Main framework if applicable]
 - **Database**: [Database system if applicable]
 

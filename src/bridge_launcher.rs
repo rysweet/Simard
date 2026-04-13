@@ -1,8 +1,10 @@
 //! Launch and manage Python bridge subprocesses for live Simard operations.
 //!
 //! This module provides functions to create [`SubprocessBridgeTransport`]
-//! instances for the memory, knowledge, and gym bridges, wrapped in
+//! instances for the knowledge and gym bridges, wrapped in
 //! [`CircuitBreakerTransport`] for fault tolerance.
+//!
+//! Cognitive memory is now handled natively by [`NativeCognitiveMemory`](crate::cognitive_memory::NativeCognitiveMemory).
 
 use std::path::{Path, PathBuf};
 use std::sync::Once;
@@ -14,17 +16,8 @@ use crate::bridge_subprocess::SubprocessBridgeTransport;
 use crate::error::SimardResult;
 use crate::gym_bridge::GymBridge;
 use crate::knowledge_bridge::KnowledgeBridge;
-use crate::memory_bridge::CognitiveMemoryBridge;
 
 const DEFAULT_BRIDGE_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Canonical filename for the LadybugDB cognitive-memory database.
-const COGNITIVE_MEMORY_DB: &str = "cognitive_memory.ladybug";
-
-/// Return the canonical path to the LadybugDB cognitive-memory database.
-pub fn cognitive_memory_db_path(state_root: &Path) -> PathBuf {
-    state_root.join(COGNITIVE_MEMORY_DB)
-}
 
 fn default_circuit_breaker() -> CircuitBreakerConfig {
     CircuitBreakerConfig {
@@ -102,33 +95,32 @@ fn check_health(name: &str, transport: &dyn BridgeTransport) -> bool {
     }
 }
 
-/// Launch a cognitive memory bridge backed by a Python subprocess.
-pub fn launch_memory_bridge(
-    agent_name: &str,
-    db_path: &Path,
-    python_dir: &Path,
-) -> SimardResult<CognitiveMemoryBridge> {
-    set_python_path();
-    let script = python_dir.join("simard_memory_server.py");
-    let transport = make_transport(
-        "cognitive-memory",
-        &script,
-        vec![
-            "--agent-name".to_string(),
-            agent_name.to_string(),
-            "--db-path".to_string(),
-            db_path.to_string_lossy().to_string(),
-            "--topology".to_string(),
-            "distributed".to_string(),
-        ],
-    );
-    if !check_health("memory", transport.as_ref()) {
-        return Err(crate::error::SimardError::BridgeSpawnFailed {
-            bridge: "cognitive-memory".to_string(),
-            reason: "bridge unhealthy after launch".to_string(),
-        });
+/// Launch all bridges, returning None for any that fail (honest degradation).
+///
+/// Cognitive memory is now native — only knowledge and gym bridges are launched.
+pub fn launch_all_bridges(
+    _agent_name: &str,
+    _state_root: &Path,
+) -> (Option<KnowledgeBridge>, Option<GymBridge>) {
+    let python_dir = match find_python_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            eprintln!("[simard] bridge launcher: {e}");
+            return (None, None);
+        }
+    };
+
+    let knowledge = launch_knowledge_bridge(&python_dir).ok();
+    let gym = launch_gym_bridge(&python_dir).ok();
+
+    if knowledge.is_none() {
+        eprintln!("[simard] knowledge bridge unavailable — domain knowledge disabled");
     }
-    Ok(CognitiveMemoryBridge::new(transport))
+    if gym.is_none() {
+        eprintln!("[simard] gym bridge unavailable — benchmarks disabled");
+    }
+
+    (knowledge, gym)
 }
 
 /// Launch a knowledge graph pack bridge.
@@ -159,41 +151,6 @@ pub fn launch_gym_bridge(python_dir: &Path) -> SimardResult<GymBridge> {
     Ok(GymBridge::new(transport))
 }
 
-/// Launch all bridges, returning None for any that fail (honest degradation).
-pub fn launch_all_bridges(
-    agent_name: &str,
-    state_root: &Path,
-) -> (
-    Option<CognitiveMemoryBridge>,
-    Option<KnowledgeBridge>,
-    Option<GymBridge>,
-) {
-    let python_dir = match find_python_dir() {
-        Ok(dir) => dir,
-        Err(e) => {
-            eprintln!("[simard] bridge launcher: {e}");
-            return (None, None, None);
-        }
-    };
-
-    let db_path = cognitive_memory_db_path(state_root);
-    let memory = launch_memory_bridge(agent_name, &db_path, &python_dir).ok();
-    let knowledge = launch_knowledge_bridge(&python_dir).ok();
-    let gym = launch_gym_bridge(&python_dir).ok();
-
-    if memory.is_none() {
-        eprintln!("[simard] memory bridge unavailable — memories will not persist to LadybugDB");
-    }
-    if knowledge.is_none() {
-        eprintln!("[simard] knowledge bridge unavailable — domain knowledge disabled");
-    }
-    if gym.is_none() {
-        eprintln!("[simard] gym bridge unavailable — benchmarks disabled");
-    }
-
-    (memory, knowledge, gym)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,36 +171,11 @@ mod tests {
         let _ = path;
     }
 
-    // ── cognitive_memory_db_path ──
-
-    #[test]
-    fn cognitive_memory_db_path_joins_correctly() {
-        let path = cognitive_memory_db_path(Path::new("/state"));
-        assert_eq!(path, PathBuf::from("/state/cognitive_memory.ladybug"));
-    }
-
-    #[test]
-    fn cognitive_memory_db_path_with_nested_root() {
-        let path = cognitive_memory_db_path(Path::new("/a/b/c"));
-        assert_eq!(path, PathBuf::from("/a/b/c/cognitive_memory.ladybug"));
-    }
-
-    #[test]
-    fn cognitive_memory_db_path_relative() {
-        let path = cognitive_memory_db_path(Path::new("target/state"));
-        assert_eq!(path, PathBuf::from("target/state/cognitive_memory.ladybug"));
-    }
-
     // ── Constants ──
 
     #[test]
     fn default_bridge_timeout_is_30_seconds() {
         assert_eq!(DEFAULT_BRIDGE_TIMEOUT, Duration::from_secs(30));
-    }
-
-    #[test]
-    fn cognitive_memory_db_constant() {
-        assert_eq!(COGNITIVE_MEMORY_DB, "cognitive_memory.ladybug");
     }
 
     // ── default_circuit_breaker ──

@@ -1,7 +1,7 @@
 //! Bridge operations for assigning goals and reporting progress.
 
+use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
-use crate::memory_bridge::CognitiveMemoryBridge;
 
 use super::types::SubordinateProgress;
 use super::{DIRECTIVE_CONFIDENCE, GOAL_CONCEPT, PROGRESS_CONCEPT};
@@ -12,7 +12,7 @@ use super::{goal_source_id, progress_source_id, sub_tag};
 /// The supervisor calls this to tell a subordinate what to work on. The fact
 /// is stored with concept `goal-assignment` and tagged with the subordinate's
 /// ID for retrieval.
-pub fn assign_goal(sub_id: &str, goal: &str, bridge: &CognitiveMemoryBridge) -> SimardResult<()> {
+pub fn assign_goal(sub_id: &str, goal: &str, bridge: &dyn CognitiveMemoryOps) -> SimardResult<()> {
     bridge.store_fact(
         GOAL_CONCEPT,
         goal,
@@ -30,7 +30,7 @@ pub fn assign_goal(sub_id: &str, goal: &str, bridge: &CognitiveMemoryBridge) -> 
 /// (e.g. re-assignment), returns the most recently stored one.
 pub fn read_assigned_goal(
     my_id: &str,
-    bridge: &CognitiveMemoryBridge,
+    bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<Option<String>> {
     let facts = bridge.search_facts(&sub_tag(my_id), 10, 0.0)?;
 
@@ -49,7 +49,7 @@ pub fn read_assigned_goal(
 pub fn report_progress(
     sub_id: &str,
     progress: &SubordinateProgress,
-    bridge: &CognitiveMemoryBridge,
+    bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
     let content = serde_json::to_string(progress).map_err(|e| {
         crate::error::SimardError::BridgeCallFailed {
@@ -75,7 +75,7 @@ pub fn report_progress(
 /// `None` if no progress has been reported yet.
 pub fn poll_progress(
     sub_id: &str,
-    bridge: &CognitiveMemoryBridge,
+    bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<Option<SubordinateProgress>> {
     let facts = bridge.search_facts(&sub_tag(sub_id), 10, 0.0)?;
 
@@ -103,6 +103,7 @@ mod tests {
     use super::*;
     use crate::bridge::BridgeErrorPayload;
     use crate::bridge_subprocess::InMemoryBridgeTransport;
+    use crate::memory_bridge::CognitiveMemoryBridge;
 
     fn mock_bridge_store_ok() -> CognitiveMemoryBridge {
         let transport = InMemoryBridgeTransport::new("test-ops", |method, _params| match method {

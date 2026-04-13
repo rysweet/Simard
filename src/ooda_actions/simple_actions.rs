@@ -86,7 +86,7 @@ pub(super) fn dispatch_run_gym_eval(
 
 /// BuildSkill: extract skill candidates from procedural memory.
 pub(super) fn dispatch_build_skill(action: &PlannedAction, bridges: &OodaBridges) -> ActionOutcome {
-    match extract_skill_candidates(&bridges.memory, SKILL_MIN_USAGE) {
+    match extract_skill_candidates(&*bridges.memory, SKILL_MIN_USAGE) {
         Ok(candidates) => {
             let names: Vec<&str> = candidates.iter().map(|c| c.name.as_str()).collect();
             make_outcome(

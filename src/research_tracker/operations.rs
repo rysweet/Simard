@@ -2,8 +2,8 @@
 
 use serde_json::json;
 
+use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
-use crate::memory_bridge::CognitiveMemoryBridge;
 
 use super::types::{DeveloperWatch, ResearchStatus, ResearchTopic};
 
@@ -55,7 +55,7 @@ pub(super) fn validate_watch(watch: &DeveloperWatch) -> SimardResult<()> {
 /// Add a research topic to the tracker and store it as a semantic fact.
 pub fn add_research_topic(
     topic: ResearchTopic,
-    bridge: &CognitiveMemoryBridge,
+    bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
     validate_topic(&topic)?;
 
@@ -80,7 +80,7 @@ pub fn add_research_topic(
 }
 
 /// Track a developer's public activity and store as a semantic fact.
-pub fn track_developer(watch: DeveloperWatch, bridge: &CognitiveMemoryBridge) -> SimardResult<()> {
+pub fn track_developer(watch: DeveloperWatch, bridge: &dyn CognitiveMemoryOps) -> SimardResult<()> {
     validate_watch(&watch)?;
 
     let areas = watch.focus_areas.join(", ");
@@ -99,7 +99,7 @@ pub fn track_developer(watch: DeveloperWatch, bridge: &CognitiveMemoryBridge) ->
 pub fn update_topic_status(
     topic_id: &str,
     new_status: ResearchStatus,
-    bridge: &CognitiveMemoryBridge,
+    bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
     required_field("topic_id", topic_id)?;
 
@@ -121,7 +121,7 @@ pub fn update_topic_status(
 }
 
 /// Load tracked research topics from cognitive memory.
-pub fn load_research_topics(bridge: &CognitiveMemoryBridge) -> SimardResult<Vec<ResearchTopic>> {
+pub fn load_research_topics(bridge: &dyn CognitiveMemoryOps) -> SimardResult<Vec<ResearchTopic>> {
     let facts = bridge.search_facts("research:", 50, 0.0)?;
     let mut topics = Vec::new();
     for fact in facts {

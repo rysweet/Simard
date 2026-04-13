@@ -1,6 +1,6 @@
 //! Default developer watch list and seeding helpers.
 
-use crate::memory_bridge::CognitiveMemoryBridge;
+use crate::cognitive_memory::CognitiveMemoryOps;
 
 use super::operations::track_developer;
 use super::types::DeveloperWatch;
@@ -52,7 +52,7 @@ pub fn default_developer_watches() -> Vec<DeveloperWatch> {
 
 /// Seed the default developer watches into cognitive memory if not already
 /// tracked. Returns the number of watches stored.
-pub fn seed_developer_watches(bridge: &CognitiveMemoryBridge) -> usize {
+pub fn seed_developer_watches(bridge: &dyn CognitiveMemoryOps) -> usize {
     let mut seeded = 0;
     for watch in default_developer_watches() {
         if track_developer(watch, bridge).is_ok() {

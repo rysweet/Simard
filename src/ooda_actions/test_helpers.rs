@@ -3,6 +3,7 @@
 use crate::base_types::{BaseTypeDescriptor, BaseTypeOutcome, BaseTypeSession, BaseTypeTurnInput};
 use crate::bridge::BridgeErrorPayload;
 use crate::bridge_subprocess::InMemoryBridgeTransport;
+use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::SimardError;
 use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, add_active_goal};
 use crate::gym_bridge::GymBridge;
@@ -77,10 +78,9 @@ impl BaseTypeSession for MockSession {
     }
 }
 
-pub(crate) fn mock_memory() -> CognitiveMemoryBridge {
-    CognitiveMemoryBridge::new(Box::new(InMemoryBridgeTransport::new(
-        "test-mem",
-        |method, _params| match method {
+pub(crate) fn mock_memory() -> Box<dyn CognitiveMemoryOps> {
+    Box::new(CognitiveMemoryBridge::new(Box::new(
+        InMemoryBridgeTransport::new("test-mem", |method, _params| match method {
             "memory.search_facts" => Ok(json!({"facts": []})),
             "memory.store_fact" => Ok(json!({"id": "sem_1"})),
             "memory.store_episode" => Ok(json!({"id": "epi_1"})),
@@ -98,7 +98,7 @@ pub(crate) fn mock_memory() -> CognitiveMemoryBridge {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
-        },
+        }),
     )))
 }
 

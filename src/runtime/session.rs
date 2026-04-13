@@ -23,7 +23,7 @@ impl RuntimeKernel {
             && let Err(e) = crate::memory_consolidation::intake_memory_operations(
                 &session.objective,
                 &session.id,
-                bridge,
+                &**bridge,
             )
         {
             eprintln!("[simard] session consolidation: intake failed: {e}");
@@ -40,7 +40,7 @@ impl RuntimeKernel {
         // --- Memory consolidation: persistence at session end ---
         if let Some(bridge) = &self.cognitive_bridge
             && let Err(e) =
-                crate::memory_consolidation::persistence_memory_operations(&session.id, bridge)
+                crate::memory_consolidation::persistence_memory_operations(&session.id, &**bridge)
         {
             eprintln!("[simard] session consolidation: persistence failed: {e}");
         }

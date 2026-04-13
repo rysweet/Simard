@@ -87,7 +87,7 @@ pub fn run_ooda_cycle(
     }
 
     // Only replace board if loaded one is non-empty (cold memory = keep local).
-    if let Ok(board) = load_goal_board(&bridges.memory)
+    if let Ok(board) = load_goal_board(&*bridges.memory)
         && !board.active.is_empty()
     {
         state.active_goals = board;
@@ -124,7 +124,7 @@ pub fn run_ooda_cycle(
     if let Err(e) = memory_consolidation::intake_memory_operations(
         &cycle_objective,
         &cycle_session_id,
-        &bridges.memory,
+        &*bridges.memory,
     ) {
         eprintln!("[simard] OODA consolidation: intake failed: {e}");
     }
@@ -146,7 +146,7 @@ pub fn run_ooda_cycle(
         .join("; ");
     let cycle_session_id = SessionId::from_uuid(uuid::Uuid::now_v7());
     let ctx =
-        preparation_memory_operations(&objective_summary, &cycle_session_id, &bridges.memory)?;
+        preparation_memory_operations(&objective_summary, &cycle_session_id, &*bridges.memory)?;
     eprintln!(
         "[simard] OODA cycle: prepared context ({} facts, {} triggers, {} procedures)",
         ctx.relevant_facts.len(),
@@ -168,7 +168,7 @@ pub fn run_ooda_cycle(
     if let Err(e) = memory_consolidation::preparation_memory_operations(
         &cycle_objective,
         &cycle_session_id,
-        &bridges.memory,
+        &*bridges.memory,
     ) {
         eprintln!("[simard] OODA consolidation: preparation failed: {e}");
     }
@@ -208,7 +208,7 @@ pub fn run_ooda_cycle(
             &transcript,
             &[],
             &cycle_session_id,
-            &bridges.memory,
+            &*bridges.memory,
         ) {
             eprintln!("[simard] OODA consolidation: reflection failed: {e}");
         }
@@ -287,7 +287,7 @@ pub fn run_ooda_cycle(
     curate::promote_from_backlog(&mut state.active_goals);
 
     // Persist the updated board to cognitive memory (best-effort).
-    if let Err(e) = crate::goal_curation::persist_board(&state.active_goals, &bridges.memory) {
+    if let Err(e) = crate::goal_curation::persist_board(&state.active_goals, &*bridges.memory) {
         eprintln!("[simard] OODA curate: failed to persist goal board: {e}");
     }
 
@@ -315,7 +315,7 @@ pub fn run_ooda_cycle(
 
     // --- Memory consolidation: persistence at cycle end ---
     if let Err(e) =
-        memory_consolidation::persistence_memory_operations(&cycle_session_id, &bridges.memory)
+        memory_consolidation::persistence_memory_operations(&cycle_session_id, &*bridges.memory)
     {
         eprintln!("[simard] OODA consolidation: persistence failed: {e}");
     }

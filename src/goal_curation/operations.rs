@@ -2,8 +2,8 @@
 
 use serde_json::json;
 
+use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
-use crate::memory_bridge::CognitiveMemoryBridge;
 
 use super::types::{ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS};
 
@@ -59,7 +59,7 @@ fn validate_backlog_item(item: &BacklogItem) -> SimardResult<()> {
 
 /// Load a goal board from cognitive memory. Searches for the latest board
 /// snapshot stored as a semantic fact and falls back to an empty board.
-pub fn load_goal_board(bridge: &CognitiveMemoryBridge) -> SimardResult<GoalBoard> {
+pub fn load_goal_board(bridge: &dyn CognitiveMemoryOps) -> SimardResult<GoalBoard> {
     let facts = bridge.search_facts("goal-board:snapshot", 1, 0.0)?;
     if let Some(fact) = facts.first() {
         let board = serde_json::from_str::<GoalBoard>(&fact.content).map_err(|e| {
@@ -74,7 +74,7 @@ pub fn load_goal_board(bridge: &CognitiveMemoryBridge) -> SimardResult<GoalBoard
 }
 
 /// Save the current board state as a semantic fact in cognitive memory.
-pub fn save_goal_board(board: &GoalBoard, bridge: &CognitiveMemoryBridge) -> SimardResult<()> {
+pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> SimardResult<()> {
     let snapshot = serde_json::to_string(board).map_err(|e| SimardError::InvalidGoalRecord {
         field: "board".to_string(),
         reason: format!("failed to serialize goal board: {e}"),
@@ -90,7 +90,7 @@ pub fn save_goal_board(board: &GoalBoard, bridge: &CognitiveMemoryBridge) -> Sim
 }
 
 /// Persist the board state and record an episode for recall.
-pub fn persist_board(board: &GoalBoard, bridge: &CognitiveMemoryBridge) -> SimardResult<()> {
+pub fn persist_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> SimardResult<()> {
     save_goal_board(board, bridge)?;
     bridge.store_episode(
         &board.durable_summary(),

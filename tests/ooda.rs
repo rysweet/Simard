@@ -71,7 +71,9 @@ fn mock_knowledge_transport() -> InMemoryBridgeTransport {
 
 fn test_bridges() -> OodaBridges {
     OodaBridges {
-        memory: CognitiveMemoryBridge::new(Box::new(mock_memory_transport())),
+        memory: Box::new(CognitiveMemoryBridge::new(
+            Box::new(mock_memory_transport()),
+        )),
         knowledge: KnowledgeBridge::new(Box::new(mock_knowledge_transport())),
         gym: GymBridge::new(Box::new(mock_gym_transport())),
         session: None,
@@ -228,7 +230,9 @@ fn feral_gym_bridge_down() {
         })
     });
     let mut bridges = OodaBridges {
-        memory: CognitiveMemoryBridge::new(Box::new(mock_memory_transport())),
+        memory: Box::new(CognitiveMemoryBridge::new(
+            Box::new(mock_memory_transport()),
+        )),
         knowledge: KnowledgeBridge::new(Box::new(mock_knowledge_transport())),
         gym: GymBridge::new(Box::new(failing_gym)),
         session: None,

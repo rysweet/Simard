@@ -4,8 +4,8 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::agent_goal_assignment::{SubordinateProgress, poll_progress};
+use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
-use crate::memory_bridge::CognitiveMemoryBridge;
 
 use super::STALE_THRESHOLD_SECONDS;
 use super::types::{HeartbeatStatus, SubordinateConfig, SubordinateHandle};
@@ -70,7 +70,7 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
 /// no progress has ever been reported.
 pub fn check_heartbeat(
     handle: &SubordinateHandle,
-    bridge: &CognitiveMemoryBridge,
+    bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<HeartbeatStatus> {
     if handle.killed {
         return Ok(HeartbeatStatus::Dead);

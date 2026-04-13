@@ -4,9 +4,9 @@ use std::path::PathBuf;
 
 use tracing::{debug, info, warn};
 
+use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 use crate::meeting_facilitator::{MeetingHandoff, default_handoff_dir, write_meeting_handoff};
-use crate::memory_bridge::CognitiveMemoryBridge;
 
 use super::types::{ConversationMessage, MeetingTranscript};
 
@@ -125,7 +125,7 @@ pub fn write_handoff(
 
 /// Store the meeting as an episodic memory via the cognitive bridge.
 pub fn store_cognitive_memory(
-    bridge: &CognitiveMemoryBridge,
+    bridge: &dyn CognitiveMemoryOps,
     topic: &str,
     summary: &str,
     messages: &[ConversationMessage],
