@@ -795,6 +795,104 @@ async fn handle_ws_chat(mut socket: WebSocket) {
                             }
                         }
                     }
+                    MeetingCommand::Export => {
+                        let msg = match backend.export_markdown() {
+                            Ok(path) => format!("✓ Markdown exported: {}", path.display()),
+                            Err(e) => format!("[export error: {e}]"),
+                        };
+                        let _ = socket
+                            .send(Message::Text(
+                                json!({"role":"system","content": msg}).to_string().into(),
+                            ))
+                            .await;
+                    }
+                    MeetingCommand::Template(name) => {
+                        let msg = if name.is_empty() {
+                            crate::meeting_backend::list_templates()
+                        } else {
+                            match crate::meeting_backend::find_template(&name) {
+                                Some(tmpl) => crate::meeting_backend::format_template(tmpl),
+                                None => format!("Unknown template: '{name}'"),
+                            }
+                        };
+                        let _ = socket
+                            .send(Message::Text(
+                                json!({"role":"system","content": msg}).to_string().into(),
+                            ))
+                            .await;
+                        // If template found, send its opening prompt to the agent
+                        if !name.is_empty()
+                            && let Some(tmpl) = crate::meeting_backend::find_template(&name)
+                        {
+                            let opening = tmpl.opening_prompt.to_string();
+                            let result = tokio::task::spawn_blocking(move || {
+                                let resp = backend.send_message(&opening);
+                                (backend, resp)
+                            })
+                            .await;
+                            match result {
+                                Ok((returned_backend, Ok(resp))) => {
+                                    backend = returned_backend;
+                                    let _ = socket
+                                        .send(Message::Text(
+                                            json!({"role":"assistant","content": resp.content})
+                                                .to_string()
+                                                .into(),
+                                        ))
+                                        .await;
+                                }
+                                Ok((returned_backend, Err(e))) => {
+                                    backend = returned_backend;
+                                    let _ = socket
+                                            .send(Message::Text(
+                                                json!({"role":"system","content": format!("[error: {e}]")})
+                                                    .to_string()
+                                                    .into(),
+                                            ))
+                                            .await;
+                                }
+                                Err(e) => {
+                                    let _ = socket
+                                            .send(Message::Text(
+                                                json!({"role":"system","content": format!("[internal error: {e}]")})
+                                                    .to_string()
+                                                    .into(),
+                                            ))
+                                            .await;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    MeetingCommand::Progress => {
+                        let p = backend.progress();
+                        let msg = format!(
+                            "Duration: {}\nMessages: {} operator, {} agent\nTopics: {}\nAction items: {}\nPending decisions: {}",
+                            p.duration_display,
+                            p.operator_messages,
+                            p.agent_messages,
+                            if p.topics.is_empty() {
+                                "none".to_string()
+                            } else {
+                                p.topics.join(", ")
+                            },
+                            if p.action_items.is_empty() {
+                                "none".to_string()
+                            } else {
+                                p.action_items.join(", ")
+                            },
+                            if p.pending_decisions.is_empty() {
+                                "none".to_string()
+                            } else {
+                                p.pending_decisions.join(", ")
+                            },
+                        );
+                        let _ = socket
+                            .send(Message::Text(
+                                json!({"role":"system","content": msg}).to_string().into(),
+                            ))
+                            .await;
+                    }
                 }
             }
             Message::Close(_) => {

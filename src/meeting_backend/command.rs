@@ -8,6 +8,12 @@ pub enum MeetingCommand {
     Help,
     Close,
     Status,
+    /// Export transcript as formatted markdown.
+    Export,
+    /// Show meeting progress (duration, message counts, topics, action items).
+    Progress,
+    /// Start from a predefined meeting template (standup, retro, planning, 1on1).
+    Template(String),
     /// Natural language — forwarded to the LLM.
     Conversation(String),
 }
@@ -22,10 +28,17 @@ pub fn parse_command(input: &str) -> MeetingCommand {
     if trimmed.is_empty() {
         return MeetingCommand::Conversation(String::new());
     }
-    match trimmed.to_ascii_lowercase().as_str() {
+    let lower = trimmed.to_ascii_lowercase();
+    match lower.as_str() {
         "/help" => MeetingCommand::Help,
         "/close" | "/done" => MeetingCommand::Close,
         "/status" => MeetingCommand::Status,
+        "/export" => MeetingCommand::Export,
+        "/progress" => MeetingCommand::Progress,
+        _ if lower.starts_with("/template") => {
+            let name = trimmed["/template".len()..].trim().to_string();
+            MeetingCommand::Template(name)
+        }
         _ => MeetingCommand::Conversation(trimmed.to_string()),
     }
 }
@@ -65,6 +78,38 @@ mod tests {
         assert_eq!(
             parse_command("/decision Ship it | ready"),
             MeetingCommand::Conversation("/decision Ship it | ready".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_export() {
+        assert_eq!(parse_command("/export"), MeetingCommand::Export);
+        assert_eq!(parse_command("  /EXPORT  "), MeetingCommand::Export);
+    }
+
+    #[test]
+    fn parse_progress() {
+        assert_eq!(parse_command("/progress"), MeetingCommand::Progress);
+        assert_eq!(parse_command("  /PROGRESS  "), MeetingCommand::Progress);
+    }
+
+    #[test]
+    fn parse_template_with_name() {
+        assert_eq!(
+            parse_command("/template standup"),
+            MeetingCommand::Template("standup".to_string()),
+        );
+        assert_eq!(
+            parse_command("  /Template  retro "),
+            MeetingCommand::Template("retro".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_template_no_name() {
+        assert_eq!(
+            parse_command("/template"),
+            MeetingCommand::Template(String::new()),
         );
     }
 

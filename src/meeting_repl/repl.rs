@@ -8,10 +8,23 @@ use std::io::{BufRead, Write};
 use crate::base_types::BaseTypeSession;
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
-use crate::meeting_backend::{MeetingBackend, MeetingCommand, parse_command};
+use crate::meeting_backend::{
+    MeetingBackend, MeetingCommand, find_template, format_template, list_templates, parse_command,
+};
 use crate::meeting_facilitator::MeetingSession;
 
 const PROMPT: &str = "simard:meeting> ";
+
+/// Spinner frames for progress indication during LLM calls.
+const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+fn show_progress(label: &str) {
+    eprint!("  {} {}...", SPINNER[0], label);
+}
+
+fn clear_progress() {
+    eprint!("\r\x1b[K");
+}
 
 /// Run the interactive meeting REPL.
 ///
@@ -73,7 +86,7 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
             MeetingCommand::Help => {
                 writeln!(
                     output,
-                    "Commands:\n  /status  — show session info\n  /close   — end meeting and persist\n  /help    — this message\n\nEverything else is natural conversation with Simard."
+                    "Commands:\n  /status          — show session info\n  /progress        — show meeting progress (duration, topics, action items)\n  /export          — save transcript as markdown\n  /template <name> — load a meeting template (standup, retro, planning, 1on1, bug-triage)\n  /close           — end meeting and persist\n  /help            — this message\n\nEverything else is natural conversation with Simard."
                 )
                 .ok();
             }
@@ -82,25 +95,109 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                 writeln!(output, "Meeting: {}", status.topic).ok();
                 writeln!(output, "  Messages: {}", status.message_count).ok();
                 writeln!(output, "  Started:  {}", status.started_at).ok();
+                if let Some(ref dur) = status.duration_display {
+                    writeln!(output, "  Meeting duration: {dur}").ok();
+                }
+                if let Some(ref tmpl) = status.active_template {
+                    writeln!(output, "  Template: {tmpl}").ok();
+                }
+            }
+            MeetingCommand::Progress => {
+                let p = backend.progress();
+                writeln!(output, "── Meeting Progress ──").ok();
+                writeln!(output, "  Duration:   {}", p.duration_display).ok();
+                writeln!(
+                    output,
+                    "  Messages:   {} operator, {} agent",
+                    p.operator_messages, p.agent_messages
+                )
+                .ok();
+                if !p.topics.is_empty() {
+                    writeln!(output, "  Topics discussed:").ok();
+                    for t in &p.topics {
+                        writeln!(output, "    • {t}").ok();
+                    }
+                }
+                if !p.action_items.is_empty() {
+                    writeln!(output, "  Action items:").ok();
+                    for a in &p.action_items {
+                        writeln!(output, "    ☐ {a}").ok();
+                    }
+                }
+                if !p.pending_decisions.is_empty() {
+                    writeln!(output, "  Pending decisions:").ok();
+                    for d in &p.pending_decisions {
+                        writeln!(output, "    ⚑ {d}").ok();
+                    }
+                }
+                if p.topics.is_empty()
+                    && p.action_items.is_empty()
+                    && p.pending_decisions.is_empty()
+                {
+                    writeln!(
+                        output,
+                        "  No topics, action items, or decisions extracted yet."
+                    )
+                    .ok();
+                }
             }
             MeetingCommand::Close => {
                 writeln!(output, "Closing meeting.").ok();
                 break;
             }
+            MeetingCommand::Export => match backend.export_markdown() {
+                Ok(path) => {
+                    writeln!(output, "✓ Markdown exported: {}", path.display()).ok();
+                }
+                Err(e) => {
+                    writeln!(output, "[export error: {e}]").ok();
+                }
+            },
+            MeetingCommand::Template(name) => {
+                if name.is_empty() {
+                    writeln!(output, "{}", list_templates()).ok();
+                } else if let Some(tmpl) = find_template(&name) {
+                    writeln!(output, "{}", format_template(tmpl)).ok();
+                    show_progress("Loading template");
+                    match backend.send_message(tmpl.opening_prompt) {
+                        Ok(resp) => {
+                            clear_progress();
+                            if !resp.content.is_empty() {
+                                writeln!(output, "\n{}\n", resp.content).ok();
+                            }
+                        }
+                        Err(e) => {
+                            clear_progress();
+                            writeln!(output, "[agent error: {e}]").ok();
+                        }
+                    }
+                } else {
+                    writeln!(output, "Unknown template: '{name}'").ok();
+                    writeln!(output, "{}", list_templates()).ok();
+                }
+            }
             MeetingCommand::Conversation(text) => {
                 if text.is_empty() {
                     continue;
                 }
-                eprint!("  ⏳ Thinking...");
+                show_progress("Thinking");
                 match backend.send_message(&text) {
                     Ok(resp) => {
-                        eprintln!("\r                "); // clear the thinking indicator
+                        clear_progress();
                         if !resp.content.is_empty() {
                             writeln!(output, "\n{}\n", resp.content).ok();
                         }
+                        // Brief inline progress after each turn
+                        writeln!(
+                            output,
+                            "  [{} messages · {}]",
+                            backend.message_count(),
+                            backend.elapsed_display(),
+                        )
+                        .ok();
                     }
                     Err(e) => {
-                        eprintln!("\r                "); // clear the thinking indicator
+                        clear_progress();
                         writeln!(output, "[agent error: {e}]").ok();
                     }
                 }
@@ -109,8 +206,10 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
     }
 
     // Close the backend (summarize, persist, memory)
+    show_progress("Generating summary");
     match backend.close() {
         Ok(summary) => {
+            clear_progress();
             writeln!(output, "\n── Meeting Summary ──").ok();
             writeln!(output, "{}", summary.summary_text).ok();
             writeln!(
@@ -124,6 +223,7 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
             }
         }
         Err(e) => {
+            clear_progress();
             writeln!(output, "[warn] Failed to close meeting cleanly: {e}").ok();
         }
     }

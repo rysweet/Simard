@@ -36,6 +36,38 @@ pub struct MeetingSummary {
     pub transcript_path: Option<String>,
 }
 
+/// Predefined meeting template presets.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MeetingTemplateKind {
+    Standup,
+    Retro,
+    Planning,
+    Custom(String),
+}
+
+impl MeetingTemplateKind {
+    /// Short agenda description for the template.
+    pub fn agenda(&self) -> &str {
+        match self {
+            Self::Standup => "What did you do? What will you do? Any blockers?",
+            Self::Retro => "What went well? What didn't? What to improve?",
+            Self::Planning => "Goals for this sprint? Risks? Dependencies?",
+            Self::Custom(desc) => desc.as_str(),
+        }
+    }
+
+    /// Parse a template name string into a `MeetingTemplateKind`.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "standup" => Some(Self::Standup),
+            "retro" | "retrospective" => Some(Self::Retro),
+            "planning" | "sprint-planning" => Some(Self::Planning),
+            _ => None,
+        }
+    }
+}
+
 /// Current status of a meeting session.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SessionStatus {
@@ -43,6 +75,19 @@ pub struct SessionStatus {
     pub message_count: usize,
     pub started_at: String,
     pub is_open: bool,
+    pub duration_display: Option<String>,
+    pub active_template: Option<String>,
+}
+
+/// Detailed progress snapshot for the `/progress` command.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MeetingProgress {
+    pub duration_display: String,
+    pub operator_messages: usize,
+    pub agent_messages: usize,
+    pub topics: Vec<String>,
+    pub action_items: Vec<String>,
+    pub pending_decisions: Vec<String>,
 }
 
 /// Persisted transcript format written to `~/.simard/meetings/`.
@@ -113,10 +158,27 @@ mod tests {
             message_count: 3,
             started_at: "2025-01-01T00:00:00Z".to_string(),
             is_open: true,
+            duration_display: Some("5m 32s".to_string()),
+            active_template: None,
         };
         let json = serde_json::to_string(&status).unwrap();
         let s2: SessionStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(status, s2);
+    }
+
+    #[test]
+    fn meeting_progress_serde() {
+        let progress = MeetingProgress {
+            duration_display: "5m 32s".to_string(),
+            operator_messages: 3,
+            agent_messages: 3,
+            topics: vec!["API design".to_string()],
+            action_items: vec!["Fix the tests".to_string()],
+            pending_decisions: vec!["Choose a database".to_string()],
+        };
+        let json = serde_json::to_string(&progress).unwrap();
+        let p2: MeetingProgress = serde_json::from_str(&json).unwrap();
+        assert_eq!(progress, p2);
     }
 
     #[test]

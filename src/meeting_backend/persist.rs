@@ -184,6 +184,57 @@ pub fn store_cognitive_memory(
     }
 }
 
+/// Write a markdown-formatted transcript to the current directory.
+///
+/// Filename format: `meeting-YYYY-MM-DD-HHMMSS.md`.
+pub fn write_markdown_export(
+    topic: &str,
+    started_at: &str,
+    duration_secs: u64,
+    messages: &[ConversationMessage],
+) -> SimardResult<PathBuf> {
+    let timestamp = chrono::Utc::now().format("%Y-%m-%d-%H%M%S");
+    let filename = format!("meeting-{timestamp}.md");
+    let path = PathBuf::from(&filename);
+
+    let mut md = String::with_capacity(4096);
+    md.push_str(&format!("# Meeting: {topic}\n\n"));
+    md.push_str(&format!("- **Started**: {started_at}\n"));
+    let dur_min = duration_secs / 60;
+    let dur_sec = duration_secs % 60;
+    md.push_str(&format!("- **Duration**: {dur_min}m {dur_sec}s\n"));
+    md.push_str(&format!("- **Messages**: {}\n\n", messages.len()));
+    md.push_str("---\n\n## Transcript\n\n");
+
+    for msg in messages {
+        let role_label = match msg.role {
+            super::types::Role::User => "**Operator**",
+            super::types::Role::Assistant => "**Simard**",
+            super::types::Role::System => "**System**",
+        };
+        md.push_str(&format!("### {role_label} — {}\n\n", msg.timestamp));
+        md.push_str(&msg.content);
+        md.push_str("\n\n");
+    }
+
+    std::fs::write(&path, &md).map_err(|e| SimardError::ActionExecutionFailed {
+        action: "write-markdown-export".to_string(),
+        reason: e.to_string(),
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        if let Err(e) = std::fs::set_permissions(&path, perms) {
+            warn!("Failed to set markdown export permissions: {e}");
+        }
+    }
+
+    info!(path = %path.display(), "Markdown transcript exported");
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

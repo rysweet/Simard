@@ -6,9 +6,11 @@
 
 pub mod command;
 pub mod persist;
+pub mod templates;
 pub mod types;
 
 use std::fmt::Write as _;
+use std::time::Instant;
 
 use chrono::Utc;
 use tracing::{debug, info, warn};
@@ -18,9 +20,32 @@ use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 
 pub use command::{MeetingCommand, parse_command};
+pub use templates::{find_template, format_template, list_templates};
 pub use types::{
-    ConversationMessage, MeetingResponse, MeetingSummary, MeetingTranscript, Role, SessionStatus,
+    ConversationMessage, MeetingProgress, MeetingResponse, MeetingSummary, MeetingTemplateKind,
+    MeetingTranscript, Role, SessionStatus,
 };
+
+// Free functions for dashboard/external consumers.
+pub use persist::write_markdown_export as export_transcript_markdown_inner;
+
+/// Format the list of available templates as a user-facing string.
+pub fn format_template_list() -> String {
+    list_templates()
+}
+
+/// Export a `MeetingTranscript` as formatted markdown. Convenience wrapper
+/// around `persist::write_markdown_export` for callers that have a transcript.
+pub fn export_transcript_markdown(
+    transcript: &MeetingTranscript,
+) -> SimardResult<std::path::PathBuf> {
+    persist::write_markdown_export(
+        &transcript.topic,
+        &transcript.started_at,
+        transcript.duration_secs,
+        &transcript.messages,
+    )
+}
 
 /// Maximum messages kept in conversation history.
 const MAX_HISTORY: usize = 500;
@@ -39,7 +64,10 @@ pub struct MeetingBackend {
     agent: Box<dyn BaseTypeSession>,
     bridge: Option<Box<dyn CognitiveMemoryOps>>,
     started_at: String,
+    started_instant: Instant,
     is_open: bool,
+    /// Active meeting template, if one was applied via `/template`.
+    template: Option<MeetingTemplateKind>,
 }
 
 impl MeetingBackend {
@@ -64,7 +92,9 @@ impl MeetingBackend {
             agent,
             bridge,
             started_at,
+            started_instant: Instant::now(),
             is_open: true,
+            template: None,
         }
     }
 
@@ -207,6 +237,8 @@ impl MeetingBackend {
             message_count: self.history.len(),
             started_at: self.started_at.clone(),
             is_open: self.is_open,
+            duration_display: Some(self.elapsed_display()),
+            active_template: self.template.as_ref().map(|t| t.agenda().to_string()),
         }
     }
 
@@ -218,6 +250,85 @@ impl MeetingBackend {
     /// Convenience: check if the session is still open.
     pub fn is_open(&self) -> bool {
         self.is_open
+    }
+
+    /// Generate a progress report from the current conversation state.
+    pub fn progress(&self) -> MeetingProgress {
+        let operator_messages = self.history.iter().filter(|m| m.role == Role::User).count();
+        let agent_messages = self
+            .history
+            .iter()
+            .filter(|m| m.role == Role::Assistant)
+            .count();
+
+        let topics = extract_topics(&self.history);
+        let action_items = extract_patterns(&self.history, ACTION_ITEM_MARKERS);
+        let pending_decisions = extract_patterns(&self.history, DECISION_MARKERS);
+
+        MeetingProgress {
+            duration_display: self.elapsed_display(),
+            operator_messages,
+            agent_messages,
+            topics,
+            action_items,
+            pending_decisions,
+        }
+    }
+
+    /// Message count in the conversation history.
+    pub fn message_count(&self) -> usize {
+        self.history.len()
+    }
+
+    /// Elapsed time since meeting start, as a human-readable string (e.g. "5m 32s").
+    pub fn elapsed_display(&self) -> String {
+        let secs = self.elapsed_secs();
+        if secs < 60 {
+            format!("{secs}s")
+        } else {
+            format!("{}m {}s", secs / 60, secs % 60)
+        }
+    }
+
+    /// Export the transcript as formatted markdown to the current directory.
+    ///
+    /// Filename format: `meeting-YYYY-MM-DD-HHMMSS.md`.
+    pub fn export_markdown(&self) -> SimardResult<std::path::PathBuf> {
+        persist::write_markdown_export(
+            &self.topic,
+            &self.started_at,
+            self.elapsed_secs(),
+            &self.history,
+        )
+    }
+
+    /// Apply a meeting template: send its opening prompt to the LLM agent.
+    pub fn apply_template(&mut self, template: &templates::MeetingTemplate) -> SimardResult<()> {
+        self.template = MeetingTemplateKind::from_name(template.name);
+        self.send_message(template.opening_prompt)?;
+        Ok(())
+    }
+
+    /// Set the active template kind directly.
+    pub fn set_template(&mut self, kind: MeetingTemplateKind) {
+        self.template = Some(kind);
+    }
+
+    /// Get the active template, if any.
+    pub fn active_template(&self) -> Option<&MeetingTemplateKind> {
+        self.template.as_ref()
+    }
+
+    /// Build a `MeetingTranscript` snapshot of the current state.
+    pub fn transcript_snapshot(&self, summary: &str) -> MeetingTranscript {
+        MeetingTranscript {
+            topic: self.topic.clone(),
+            started_at: self.started_at.clone(),
+            closed_at: String::new(),
+            duration_secs: self.elapsed_secs(),
+            summary: summary.to_string(),
+            messages: self.history.clone(),
+        }
     }
 
     // --- Private helpers ---
@@ -324,10 +435,7 @@ impl MeetingBackend {
     }
 
     fn elapsed_secs(&self) -> u64 {
-        chrono::DateTime::parse_from_rfc3339(&self.started_at)
-            .ok()
-            .map(|start| Utc::now().signed_duration_since(start).num_seconds().max(0) as u64)
-            .unwrap_or(0)
+        self.started_instant.elapsed().as_secs()
     }
 }
 
@@ -337,6 +445,85 @@ impl MeetingBackend {
 /// natural-language response.
 fn extract_response(outcome: &BaseTypeOutcome) -> String {
     outcome.execution_summary.trim().to_string()
+}
+
+/// Markers that indicate an action item in conversation text.
+const ACTION_ITEM_MARKERS: &[&str] = &[
+    "action item:",
+    "todo:",
+    "TODO:",
+    "[ ]",
+    "will do",
+    "need to",
+    "should do",
+    "assigned to",
+    "take ownership",
+];
+
+/// Markers that indicate a pending decision in conversation text.
+const DECISION_MARKERS: &[&str] = &[
+    "decision:",
+    "decided:",
+    "we need to decide",
+    "open question",
+    "pending decision",
+    "needs decision",
+    "to be determined",
+    "TBD",
+];
+
+/// Extract likely discussion topics from user messages.
+///
+/// Uses a simple heuristic: user messages that look like topic headers
+/// (short, or containing common framing words). Returns up to 10.
+fn extract_topics(messages: &[ConversationMessage]) -> Vec<String> {
+    let topic_starters = ["let's discuss", "about ", "regarding ", "topic:", "next:"];
+    let mut topics = Vec::new();
+
+    for msg in messages.iter().filter(|m| m.role == Role::User) {
+        let lower = msg.content.to_ascii_lowercase();
+        let is_topic = topic_starters.iter().any(|s| lower.starts_with(s))
+            || (msg.content.len() < 80 && !lower.starts_with('/'));
+        if is_topic && !msg.content.trim().is_empty() {
+            // Truncate long content for display
+            let display = if msg.content.len() > 60 {
+                format!("{}…", &msg.content[..60])
+            } else {
+                msg.content.clone()
+            };
+            topics.push(display);
+        }
+        if topics.len() >= 10 {
+            break;
+        }
+    }
+    topics
+}
+
+/// Extract sentences containing any of the given marker phrases.
+fn extract_patterns(messages: &[ConversationMessage], markers: &[&str]) -> Vec<String> {
+    let mut results = Vec::new();
+    for msg in messages {
+        let lower = msg.content.to_ascii_lowercase();
+        for marker in markers {
+            if lower.contains(*marker) {
+                // Find the sentence containing the marker
+                for sentence in msg.content.split(['.', '\n']) {
+                    let s = sentence.trim();
+                    if !s.is_empty()
+                        && s.to_ascii_lowercase().contains(*marker)
+                        && !results.contains(&s.to_string())
+                    {
+                        results.push(s.to_string());
+                    }
+                }
+            }
+        }
+        if results.len() >= 20 {
+            break;
+        }
+    }
+    results
 }
 
 #[cfg(test)]
@@ -502,5 +689,65 @@ mod tests {
             evidence: Vec::new(),
         };
         assert_eq!(extract_response(&outcome), "hello world");
+    }
+
+    #[test]
+    fn progress_empty_session() {
+        let agent = MockAgent::new("ok");
+        let backend = MeetingBackend::new_session("Test", Box::new(agent), None, String::new());
+        let p = backend.progress();
+        assert_eq!(p.operator_messages, 0);
+        assert_eq!(p.agent_messages, 0);
+        assert!(p.topics.is_empty());
+        assert!(p.action_items.is_empty());
+        assert!(p.pending_decisions.is_empty());
+    }
+
+    #[test]
+    fn progress_counts_messages() {
+        let agent = MockAgent::new("Action item: fix the tests");
+        let mut backend = MeetingBackend::new_session("Test", Box::new(agent), None, String::new());
+        backend.send_message("Let's discuss testing").unwrap();
+        backend.send_message("What about coverage?").unwrap();
+        let p = backend.progress();
+        assert_eq!(p.operator_messages, 2);
+        assert_eq!(p.agent_messages, 2);
+    }
+
+    #[test]
+    fn progress_extracts_action_items() {
+        let agent = MockAgent::new("Action item: deploy the fix by Friday");
+        let mut backend = MeetingBackend::new_session("Test", Box::new(agent), None, String::new());
+        backend.send_message("What needs to happen?").unwrap();
+        let p = backend.progress();
+        assert!(
+            !p.action_items.is_empty(),
+            "should extract action items from agent response"
+        );
+    }
+
+    #[test]
+    fn progress_extracts_decisions() {
+        let agent = MockAgent::new("We need to decide on the API format");
+        let mut backend = MeetingBackend::new_session("Test", Box::new(agent), None, String::new());
+        backend.send_message("What's pending?").unwrap();
+        let p = backend.progress();
+        assert!(
+            !p.pending_decisions.is_empty(),
+            "should extract pending decisions"
+        );
+    }
+
+    #[test]
+    fn progress_extracts_topics() {
+        let agent = MockAgent::new("ok");
+        let mut backend = MeetingBackend::new_session("Test", Box::new(agent), None, String::new());
+        backend.send_message("API design").unwrap();
+        backend.send_message("Database schema").unwrap();
+        let p = backend.progress();
+        assert!(
+            p.topics.len() >= 2,
+            "should extract short user messages as topics"
+        );
     }
 }

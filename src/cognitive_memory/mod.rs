@@ -8,6 +8,7 @@
 //! The flock-based multi-writer serialization is copied from the skwaq
 //! reference implementation in `ladybug_db.rs`.
 
+pub mod backup;
 pub(crate) mod schema;
 
 #[cfg(unix)]
@@ -288,6 +289,20 @@ impl NativeCognitiveMemory {
             .map_err(|_| SimardError::ClockBeforeUnixEpoch {
                 reason: "system clock before Unix epoch".into(),
             })
+    }
+
+    /// Create a verified backup of this database.
+    ///
+    /// Copies the DB file to `<backup_dir>/cognitive_memory_<timestamp>.ladybug`
+    /// and verifies the copy can be opened. If `backup_dir` is `None`, uses
+    /// `~/.simard/backups/`.
+    pub fn backup(&self, backup_dir: Option<&Path>) -> SimardResult<backup::BackupResult> {
+        backup::backup_and_verify(&self.path, backup_dir)
+    }
+
+    /// Get the path to this database file.
+    pub fn db_path(&self) -> &Path {
+        &self.path
     }
 }
 

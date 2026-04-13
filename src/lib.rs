@@ -198,8 +198,8 @@ pub use knowledge_bridge::{
 };
 pub use knowledge_context::{PlanningContext, enrich_planning_context};
 pub use meeting_backend::{
-    ConversationMessage, MeetingBackend, MeetingResponse, MeetingSummary, MeetingTranscript, Role,
-    SessionStatus,
+    ConversationMessage, MeetingBackend, MeetingResponse, MeetingSummary, MeetingTemplateKind,
+    MeetingTranscript, Role, SessionStatus,
 };
 pub use meeting_facilitator::{
     ActionItem, MEETING_HANDOFF_FILENAME, MeetingDecision, MeetingHandoff, MeetingSession,
