@@ -70,7 +70,7 @@ Five slash commands are recognized during a meeting:
 | `/status` | Shows topic, duration, and message count |
 | `/template [name]` | Lists available templates, or applies one by name |
 | `/export` | Exports the meeting as a markdown file to `~/.simard/meetings/` |
-| `/close`  | Ends the meeting, persists transcript, and generates a summary |
+| `/close` (or `/done`)  | Ends the meeting, persists transcript, and generates a summary |
 
 Everything else is natural conversation.
 

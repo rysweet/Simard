@@ -101,12 +101,12 @@ pub enum MeetingCommand {
 }
 ```
 
-The 8-variant command enum. `parse_meeting_command()` maps user input to these variants:
+The 8-variant command enum. `parse_command()` maps user input to these variants:
 
 | Input | Variant | Behavior |
 |-------|---------|----------|
 | `/help` | `Help` | Display available commands |
-| `/close` | `Close` | End session, persist, summarize |
+| `/close` or `/done` | `Close` | End session, persist, summarize |
 | `/status` | `Status` | Show session info |
 | `/template` | `Template(None)` | List available templates |
 | `/template standup` | `Template(Some("standup"))` | Apply the named template |
@@ -236,7 +236,7 @@ Writes the current meeting state as a markdown file to `~/.simard/meetings/`.
 **Behavior:**
 
 1. Delegates to `write_markdown_export()` in `persist.rs`.
-2. The file includes YAML frontmatter (topic, date, duration, message count, themes) and the full conversation rendered as markdown.
+2. The file includes YAML frontmatter (topic, date, duration, message count) and the full conversation rendered as markdown. The `themes` field is always an empty array in exports — theme extraction only happens on `/close`.
 3. File permissions are set to `0o600`.
 4. The directory is created if it doesn't exist.
 
@@ -265,7 +265,7 @@ Returns the list of available template names: `["standup", "1on1", "retro", "pla
 ## Command parser
 
 ```rust
-pub fn parse_meeting_command(input: &str) -> MeetingCommand
+pub fn parse_command(input: &str) -> MeetingCommand
 ```
 
 Parses raw user input into a `MeetingCommand` variant.
@@ -274,7 +274,7 @@ Parses raw user input into a `MeetingCommand` variant.
 
 1. Leading and trailing whitespace is trimmed.
 2. Empty input after trimming → `Empty`.
-3. Input starting with `/` is matched case-insensitively against known commands (`/help`, `/close`, `/status`, `/template`, `/export`).
+3. Input starting with `/` is matched case-insensitively against known commands (`/help`, `/close`, `/done`, `/status`, `/template`, `/export`).
 4. `/template` with no argument → `Template(None)`. `/template foo` → `Template(Some("foo"))`.
 5. Unrecognized `/` commands → `Unknown(command_name)`.
 6. Everything else → `Conversation(trimmed_input)`.
@@ -346,13 +346,11 @@ Written by `/export` to `~/.simard/meetings/{timestamp}_{sanitized_topic}.md`:
 
 ```markdown
 ---
-topic: discuss the next Simard milestone
+topic: "discuss the next Simard milestone"
 date: "2026-04-12T14:30:00Z"
 duration_minutes: 45
 message_count: 24
-themes:
-  - memory consolidation
-  - gym benchmarks
+themes: []
 ---
 
 # Meeting: discuss the next Simard milestone
@@ -387,7 +385,7 @@ The markdown file is a point-in-time snapshot — it captures the conversation a
 let backend = MeetingBackend::new_session(topic, agent, bridge, system_prompt);
 loop {
     let input = read_line(stdin)?;
-    match parse_meeting_command(&input) {
+    match parse_command(&input) {
         MeetingCommand::Help => print_help(stdout),
         MeetingCommand::Status => print_status(stdout, backend.status()),
         MeetingCommand::Template(name) => {
@@ -427,7 +425,7 @@ while let Some(msg) = ws_stream.next().await {
     let backend = Arc::clone(&backend);
     let response = tokio::task::spawn_blocking(move || {
         let mut b = backend.lock().unwrap();
-        match parse_meeting_command(text) {
+        match parse_command(text) {
             MeetingCommand::Close => {
                 let summary = b.close()?;
                 Ok(serde_json::to_string(&summary)?)

@@ -40,7 +40,7 @@ The exported file has two sections: YAML frontmatter and the conversation body.
 
 ```markdown
 ---
-topic: discuss memory consolidation
+topic: "discuss memory consolidation"
 date: "2026-04-14T10:30:00Z"
 duration_minutes: 25
 message_count: 18
@@ -74,11 +74,11 @@ pipeline — those have the most reusable patterns...
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `topic` | string | The meeting topic |
+| `topic` | string | The meeting topic (quoted in YAML to prevent injection) |
 | `date` | ISO 8601 string | Session start timestamp |
 | `duration_minutes` | integer | Elapsed time since session start |
 | `message_count` | integer | Total messages (user + assistant) at export time |
-| `themes` | string array | Topic tags from `MeetingHandoff.themes` (may be empty) |
+| `themes` | string array | Always empty (`[]`) during export — theme extraction happens on `/close` |
 
 ### Conversation format
 
@@ -135,7 +135,7 @@ This shouldn't happen — the export writes atomically. If you see a truncated f
 
 ### Themes field is always empty
 
-The `themes` field is populated from `MeetingHandoff.themes`, which is currently set to an empty vec by default. Future versions will extract themes automatically from the conversation content.
+The `themes` field is always an empty array (`[]`) in markdown exports. Theme extraction only happens during `/close`, when the LLM summarizes the conversation and writes themes into the `MeetingHandoff`. This is by design — `/export` is a lightweight snapshot that avoids an LLM call.
 
 ## Related reading
 
