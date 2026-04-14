@@ -21,7 +21,8 @@ use crate::error::{SimardError, SimardResult};
 
 pub use command::{MeetingCommand, parse_command};
 pub use types::{
-    ConversationMessage, MeetingResponse, MeetingSummary, MeetingTranscript, Role, SessionStatus,
+    ConversationMessage, HandoffActionItem, MeetingResponse, MeetingSummary, MeetingTranscript,
+    Role, SessionStatus,
 };
 
 /// Maximum messages kept in conversation history.
@@ -143,9 +144,11 @@ impl MeetingBackend {
         })
     }
 
-    /// Close the meeting session: summarize, persist, and store to memory.
+    /// Close the meeting session: summarize, extract action items, link goals,
+    /// auto-export markdown report, persist, and store to memory.
     ///
-    /// Returns a `MeetingSummary` with the LLM-generated summary text.
+    /// Returns a `MeetingSummary` with the LLM-generated summary text and
+    /// structured action items.
     pub fn close(&mut self) -> SimardResult<MeetingSummary> {
         if !self.is_open {
             return Err(SimardError::ActionExecutionFailed {
@@ -159,6 +162,18 @@ impl MeetingBackend {
 
         // Generate summary via LLM (internal prompt, not visible to operator)
         let summary_text = self.generate_summary();
+
+        // ── Structured action-item extraction ──
+        let mut action_items = persist::extract_action_items(&self.history);
+
+        // ── Goal linkage ──
+        let goal_titles = self.load_active_goal_titles();
+        if !goal_titles.is_empty() {
+            persist::link_action_items_to_goals(&mut action_items, &goal_titles);
+        }
+
+        // ── Decision extraction ──
+        let decisions = persist::extract_decisions(&self.history);
 
         // Write JSON transcript to ~/.simard/meetings/
         let transcript = MeetingTranscript {
@@ -182,9 +197,32 @@ impl MeetingBackend {
             warn!("Failed to write meeting handoff: {e}");
         }
 
-        // Store to cognitive memory via bridge
+        // ── Auto-export markdown report on /end ──
+        let markdown_report_path = match persist::write_handoff_markdown_report(
+            &self.topic,
+            &self.started_at,
+            &summary_text,
+            &self.history,
+            &action_items,
+            &decisions,
+        ) {
+            Ok(p) => Some(p.to_string_lossy().to_string()),
+            Err(e) => {
+                warn!("Failed to write handoff markdown report: {e}");
+                None
+            }
+        };
+
+        // ── Memory consolidation ──
         if let Some(ref bridge) = self.bridge {
-            persist::store_cognitive_memory(&**bridge, &self.topic, &summary_text, &self.history);
+            persist::store_enriched_cognitive_memory(
+                &**bridge,
+                &self.topic,
+                &summary_text,
+                &self.history,
+                &action_items,
+                &decisions,
+            );
         }
 
         // Close the agent session
@@ -195,8 +233,10 @@ impl MeetingBackend {
         info!(
             topic = self.topic,
             messages = self.history.len(),
+            action_items = action_items.len(),
+            decisions = decisions.len(),
             duration_secs,
-            "Meeting session closed"
+            "Meeting session closed with structured handoff"
         );
 
         Ok(MeetingSummary {
@@ -205,6 +245,9 @@ impl MeetingBackend {
             message_count: self.history.len(),
             duration_secs,
             transcript_path,
+            action_items,
+            decisions,
+            markdown_report_path,
         })
     }
 
@@ -239,6 +282,46 @@ impl MeetingBackend {
     }
 
     // --- Private helpers ---
+
+    /// Load active goal (slug, title) pairs from the default file-backed store.
+    ///
+    /// Returns an empty vec if the goals file doesn't exist or can't be read.
+    /// This is best-effort — goal linkage is optional enrichment.
+    fn load_active_goal_titles(&self) -> Vec<(String, String)> {
+        use crate::goals::{FileBackedGoalStore, GoalStore};
+        use crate::metadata::{BackendDescriptor, Freshness};
+
+        let goals_path = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".simard/goals.json");
+
+        if !goals_path.exists() {
+            return Vec::new();
+        }
+
+        let descriptor = match Freshness::now() {
+            Ok(f) => BackendDescriptor::for_runtime_type::<MeetingBackend>(
+                "goals::file-backed",
+                "meeting-goal-linkage",
+                f,
+            ),
+            Err(_) => return Vec::new(),
+        };
+
+        match FileBackedGoalStore::new(&goals_path, descriptor) {
+            Ok(store) => match store.active_top_goals(50) {
+                Ok(goals) => goals.into_iter().map(|g| (g.slug, g.title)).collect(),
+                Err(e) => {
+                    debug!("Could not load active goals for linkage: {e}");
+                    Vec::new()
+                }
+            },
+            Err(e) => {
+                debug!("Could not open goal store for linkage: {e}");
+                Vec::new()
+            }
+        }
+    }
 
     fn push_message(&mut self, role: Role, content: String) {
         if self.history.len() >= MAX_HISTORY {
