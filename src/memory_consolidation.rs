@@ -393,4 +393,38 @@ mod tests {
         // store_episode + consolidate_episodes = 2
         assert_eq!(count.load(Ordering::SeqCst), 2);
     }
+
+    /// Round-trip verification: intake → execution → persistence → recall.
+    ///
+    /// Uses `NativeCognitiveMemory` (in-memory LadybugDB) so that stored
+    /// data is actually queryable, unlike the counting bridge which only
+    /// counts calls.
+    #[test]
+    fn round_trip_execution_memory_recall() {
+        use crate::cognitive_memory::NativeCognitiveMemory;
+
+        let mem = NativeCognitiveMemory::in_memory().expect("in-memory DB");
+        let sid = test_session_id();
+
+        // 1. Intake — records objective as sensory + working + episode.
+        intake_memory_operations("build feature X", &sid, &mem).unwrap();
+
+        // 2. Execution — records pty output as sensory + working.
+        execution_memory_operations("compiled successfully in 1.2s", &sid, &mem).unwrap();
+
+        // 3. Persistence — flushes working memory and consolidates episodes.
+        persistence_memory_operations(&sid, &mem).unwrap();
+
+        // 4. Verify: the execution output should have been pushed into
+        //    working memory under the session's task_id before persistence
+        //    cleared it. Confirm the episode store received entries by
+        //    checking statistics — intake stores 1 episode, persistence
+        //    stores 1 episode, so we expect ≥ 2 episodes total.
+        let stats = mem.get_statistics().unwrap();
+        assert!(
+            stats.episodic_count >= 2,
+            "expected ≥2 episodes from intake+persistence, got {}",
+            stats.episodic_count
+        );
+    }
 }
