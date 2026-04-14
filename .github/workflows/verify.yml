@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+env:
+  CARGO_BUILD_JOBS: 2
+
 jobs:
   pre-commit:
     runs-on: ubuntu-latest
@@ -13,6 +16,14 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Add swap space (4 GB)
+        run: |
+          sudo fallocate -l 4G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "Swap enabled: $(swapon --show)"
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -20,6 +31,9 @@ jobs:
 
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: simard-ci
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -43,11 +57,22 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Add swap space (4 GB)
+        run: |
+          sudo fallocate -l 4G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "Swap enabled: $(swapon --show)"
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: simard-ci
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run install smoke test
         run: cargo test --test install_smoke -- --nocapture
