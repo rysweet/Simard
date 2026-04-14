@@ -204,6 +204,17 @@ pub fn run_ooda_cycle(
         act_elapsed.as_secs_f64()
     );
 
+    // --- Memory consolidation: execution (record per-action output) ---
+    for outcome in &outcomes {
+        if let Err(e) = memory_consolidation::execution_memory_operations(
+            &outcome.detail,
+            &cycle_session_id,
+            &*bridges.memory,
+        ) {
+            eprintln!("[simard] OODA consolidation: execution memory failed: {e}");
+        }
+    }
+
     // --- Review: analyze outcomes and propose improvements ---
     let review_proposals = review::review_outcomes(&outcomes, act_elapsed);
 
