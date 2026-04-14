@@ -163,13 +163,40 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
         }
     }
 
-    // Close the backend (summarize, persist, memory)
+    // Close the backend (summarize, extract action items, persist, memory)
     let spinner = Spinner::after_default_delay("Generating summary...");
     match backend.close() {
         Ok(summary) => {
             spinner.stop();
             writeln!(output, "\n── Meeting Summary ──").ok();
             writeln!(output, "{}", summary.summary_text).ok();
+
+            // Display structured action items
+            if !summary.action_items.is_empty() {
+                writeln!(output, "\n── Action Items ──").ok();
+                for (i, item) in summary.action_items.iter().enumerate() {
+                    let mut line = format!("  {}. {}", i + 1, item.description);
+                    if let Some(ref who) = item.assignee {
+                        line.push_str(&format!(" [→ {who}]"));
+                    }
+                    if let Some(ref when) = item.deadline {
+                        line.push_str(&format!(" ({})", when));
+                    }
+                    if let Some(ref goal) = item.linked_goal {
+                        line.push_str(&format!(" 🎯 {goal}"));
+                    }
+                    writeln!(output, "{line}").ok();
+                }
+            }
+
+            // Display decisions
+            if !summary.decisions.is_empty() {
+                writeln!(output, "\n── Decisions ──").ok();
+                for (i, d) in summary.decisions.iter().enumerate() {
+                    writeln!(output, "  {}. {}", i + 1, d).ok();
+                }
+            }
+
             writeln!(
                 output,
                 "\n{} messages, {}s duration.",
@@ -178,6 +205,9 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
             .ok();
             if let Some(ref path) = summary.transcript_path {
                 writeln!(output, "Transcript: {path}").ok();
+            }
+            if let Some(ref path) = summary.markdown_report_path {
+                writeln!(output, "Report: {path}").ok();
             }
         }
         Err(e) => {

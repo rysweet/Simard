@@ -26,6 +26,18 @@ pub struct MeetingResponse {
     pub message_count: usize,
 }
 
+/// A structured action item extracted from meeting transcript on close.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HandoffActionItem {
+    pub description: String,
+    /// Assignee if mentioned in the transcript (e.g. "Alice will…").
+    pub assignee: Option<String>,
+    /// Deadline if mentioned (e.g. "by Friday", "next sprint").
+    pub deadline: Option<String>,
+    /// Slug of the linked Simard goal, if the action advances a known goal.
+    pub linked_goal: Option<String>,
+}
+
 /// Summary produced when a meeting is closed.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MeetingSummary {
@@ -34,6 +46,15 @@ pub struct MeetingSummary {
     pub message_count: usize,
     pub duration_secs: u64,
     pub transcript_path: Option<String>,
+    /// Structured action items extracted from the meeting.
+    #[serde(default)]
+    pub action_items: Vec<HandoffActionItem>,
+    /// Key decisions recorded during the meeting.
+    #[serde(default)]
+    pub decisions: Vec<String>,
+    /// Path to the auto-generated markdown report (if export succeeded).
+    #[serde(default)]
+    pub markdown_report_path: Option<String>,
 }
 
 /// Current status of a meeting session.
@@ -100,10 +121,47 @@ mod tests {
             message_count: 10,
             duration_secs: 600,
             transcript_path: Some("/home/user/.simard/meetings/test.json".to_string()),
+            action_items: vec![HandoffActionItem {
+                description: "Write tests".to_string(),
+                assignee: Some("Alice".to_string()),
+                deadline: Some("by friday".to_string()),
+                linked_goal: Some("improve-testing".to_string()),
+            }],
+            decisions: vec!["Adopt TDD".to_string()],
+            markdown_report_path: Some("/home/user/.simard/meetings/test_report.md".to_string()),
         };
         let json = serde_json::to_string(&summary).unwrap();
         let s2: MeetingSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(summary, s2);
+    }
+
+    #[test]
+    fn meeting_summary_backwards_compat_deserialize() {
+        // Old JSON without the new fields should deserialize via #[serde(default)]
+        let json = r#"{
+            "topic": "Old",
+            "summary_text": "Summary",
+            "message_count": 5,
+            "duration_secs": 300,
+            "transcript_path": null
+        }"#;
+        let s: MeetingSummary = serde_json::from_str(json).unwrap();
+        assert!(s.action_items.is_empty());
+        assert!(s.decisions.is_empty());
+        assert!(s.markdown_report_path.is_none());
+    }
+
+    #[test]
+    fn handoff_action_item_serde() {
+        let item = HandoffActionItem {
+            description: "Deploy to staging".to_string(),
+            assignee: Some("Bob".to_string()),
+            deadline: None,
+            linked_goal: None,
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        let i2: HandoffActionItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(item, i2);
     }
 
     #[test]

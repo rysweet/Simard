@@ -8,7 +8,7 @@ use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 use crate::meeting_facilitator::{MeetingHandoff, default_handoff_dir, write_meeting_handoff};
 
-use super::types::{ConversationMessage, MeetingTranscript};
+use super::types::{ConversationMessage, HandoffActionItem, MeetingTranscript};
 
 /// Maximum length for a sanitized filename component.
 const MAX_FILENAME_LEN: usize = 128;
@@ -305,6 +305,412 @@ pub fn write_markdown_export(
     Ok(path)
 }
 
+// ── Action-item extraction ──────────────────────────────────────────────
+
+/// Signal phrases that indicate an action item in natural conversation.
+const ACTION_SIGNALS: &[&str] = &[
+    "action item:",
+    "todo:",
+    "to-do:",
+    "task:",
+    "ai:",
+    " will ",
+    " should ",
+    " needs to ",
+    " need to ",
+    " must ",
+    "let's ",
+    "let\u{2019}s ",
+    "follow up",
+    "follow-up",
+];
+
+/// Deadline keywords that suggest a time constraint.
+const DEADLINE_SIGNALS: &[&str] = &[
+    "by friday",
+    "by monday",
+    "by tuesday",
+    "by wednesday",
+    "by thursday",
+    "by saturday",
+    "by sunday",
+    "by tomorrow",
+    "by end of day",
+    "by eod",
+    "by end of week",
+    "by eow",
+    "by next week",
+    "by next sprint",
+    "next sprint",
+    "this week",
+    "this sprint",
+    "asap",
+    "immediately",
+];
+
+/// Extract structured action items from a conversation transcript.
+///
+/// Uses heuristic signal phrases to identify action items from both user and
+/// assistant messages. This is a best-effort extraction — the LLM summary
+/// provides the authoritative narrative.
+pub fn extract_action_items(messages: &[ConversationMessage]) -> Vec<HandoffActionItem> {
+    let mut items = Vec::new();
+    for msg in messages {
+        let lower = msg.content.to_lowercase();
+        let is_action = ACTION_SIGNALS.iter().any(|s| lower.contains(s));
+        if !is_action {
+            continue;
+        }
+
+        for sentence in split_sentences(&msg.content) {
+            let sent_lower = sentence.to_lowercase();
+            let has_signal = ACTION_SIGNALS.iter().any(|s| sent_lower.contains(s));
+            if !has_signal {
+                continue;
+            }
+
+            let description = clean_action_description(&sentence);
+            if description.len() < 5 {
+                continue;
+            }
+
+            let assignee = extract_assignee(&sentence);
+            let deadline = extract_deadline(&sent_lower);
+
+            items.push(HandoffActionItem {
+                description,
+                assignee,
+                deadline,
+                linked_goal: None,
+            });
+        }
+    }
+    items
+}
+
+/// Try to extract an assignee from a sentence.
+fn extract_assignee(sentence: &str) -> Option<String> {
+    let verbs = [" will ", " should ", " needs to ", " need to ", " must "];
+    for verb in &verbs {
+        if let Some(idx) = sentence.to_lowercase().find(verb) {
+            let prefix = sentence[..idx].trim();
+            if let Some(name) = prefix.split_whitespace().last() {
+                let clean = name.trim_matches(|c: char| !c.is_alphanumeric());
+                if !clean.is_empty()
+                    && clean.len() >= 2
+                    && clean.chars().next().is_some_and(|c| c.is_uppercase())
+                {
+                    return Some(clean.to_string());
+                }
+            }
+        }
+    }
+    if let Some(idx) = sentence.to_lowercase().find("assigned to ") {
+        let after = &sentence[idx + "assigned to ".len()..];
+        if let Some(name) = after.split_whitespace().next() {
+            let clean = name.trim_matches(|c: char| !c.is_alphanumeric());
+            if !clean.is_empty() && clean.len() >= 2 {
+                return Some(clean.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Extract a deadline phrase if present.
+fn extract_deadline(lower_sentence: &str) -> Option<String> {
+    for signal in DEADLINE_SIGNALS {
+        if lower_sentence.contains(signal) {
+            return Some(signal.trim().to_string());
+        }
+    }
+    None
+}
+
+/// Clean up an action item description — strip leading signal labels.
+fn clean_action_description(sentence: &str) -> String {
+    let mut s = sentence.trim().to_string();
+    let prefixes = [
+        "action item:",
+        "Action item:",
+        "ACTION ITEM:",
+        "todo:",
+        "TODO:",
+        "To-do:",
+        "to-do:",
+        "task:",
+        "Task:",
+        "TASK:",
+        "ai:",
+        "AI:",
+    ];
+    for prefix in &prefixes {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            s = rest.trim().to_string();
+            break;
+        }
+    }
+    s
+}
+
+/// Split text into sentences (simple heuristic).
+fn split_sentences(text: &str) -> Vec<String> {
+    let mut sentences = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        current.push(ch);
+        if ch == '.' || ch == '!' || ch == '?' || ch == '\n' {
+            let trimmed = current.trim().to_string();
+            if !trimmed.is_empty() {
+                sentences.push(trimmed);
+            }
+            current.clear();
+        }
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        sentences.push(trimmed);
+    }
+    sentences
+}
+
+// ── Goal linkage ────────────────────────────────────────────────────────
+
+/// Match extracted action items against active goals by keyword overlap.
+pub fn link_action_items_to_goals(
+    items: &mut [HandoffActionItem],
+    goal_titles: &[(String, String)],
+) {
+    for item in items.iter_mut() {
+        let item_words: Vec<String> = item
+            .description
+            .to_lowercase()
+            .split_whitespace()
+            .filter(|w| w.len() > 2)
+            .map(|w| w.to_string())
+            .collect();
+
+        let mut best_match: Option<(&str, usize)> = None;
+
+        for (slug, title) in goal_titles {
+            let goal_words: Vec<String> = title
+                .to_lowercase()
+                .split_whitespace()
+                .filter(|w| w.len() > 2)
+                .map(|w| w.to_string())
+                .collect();
+
+            let overlap = item_words.iter().filter(|w| goal_words.contains(w)).count();
+
+            let threshold = if goal_words.len() <= 2 { 1 } else { 2 };
+            if overlap >= threshold && (best_match.is_none() || overlap > best_match.unwrap().1) {
+                best_match = Some((slug.as_str(), overlap));
+            }
+        }
+
+        if let Some((slug, _)) = best_match {
+            item.linked_goal = Some(slug.to_string());
+        }
+    }
+}
+
+/// Extract decision statements from transcript messages.
+pub fn extract_decisions(messages: &[ConversationMessage]) -> Vec<String> {
+    let decision_signals = [
+        "decision:",
+        "decided:",
+        "we decided",
+        "we agreed",
+        "the decision is",
+        "agreed to",
+        "conclusion:",
+    ];
+    let mut decisions = Vec::new();
+    for msg in messages {
+        for sentence in split_sentences(&msg.content) {
+            let lower = sentence.to_lowercase();
+            if decision_signals.iter().any(|s| lower.contains(s)) {
+                let clean = sentence.trim().to_string();
+                if clean.len() >= 5 && !decisions.contains(&clean) {
+                    decisions.push(clean);
+                }
+            }
+        }
+    }
+    decisions
+}
+
+/// Write a rich markdown meeting report including summary, decisions,
+/// action items table, and transcript — triggered automatically on `/end`.
+pub fn write_handoff_markdown_report(
+    topic: &str,
+    started_at: &str,
+    summary: &str,
+    messages: &[ConversationMessage],
+    action_items: &[HandoffActionItem],
+    decisions: &[String],
+) -> SimardResult<PathBuf> {
+    let dir = meetings_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| SimardError::ActionExecutionFailed {
+        action: "create-meetings-dir".to_string(),
+        reason: e.to_string(),
+    })?;
+
+    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+    let safe_topic = sanitize_filename(topic);
+    let filename = format!("{timestamp}_{safe_topic}_report.md");
+    let path = dir.join(&filename);
+
+    let mut md = String::with_capacity(8192);
+
+    // YAML frontmatter
+    md.push_str("---\n");
+    md.push_str(&format!("topic: \"{}\"\n", topic.replace('"', "\\\"")));
+    md.push_str(&format!("date: \"{started_at}\"\n"));
+    md.push_str("type: meeting-report\n");
+    md.push_str("---\n\n");
+
+    md.push_str(&format!("# Meeting Report: {topic}\n\n"));
+    md.push_str(&format!("**Date:** {started_at}\n\n"));
+
+    md.push_str("## Summary\n\n");
+    md.push_str(summary);
+    md.push_str("\n\n");
+
+    md.push_str("## Decisions\n\n");
+    if decisions.is_empty() {
+        md.push_str("_No explicit decisions recorded._\n\n");
+    } else {
+        for (i, d) in decisions.iter().enumerate() {
+            md.push_str(&format!("{}. {}\n", i + 1, d));
+        }
+        md.push('\n');
+    }
+
+    md.push_str("## Action Items\n\n");
+    if action_items.is_empty() {
+        md.push_str("_No action items extracted._\n\n");
+    } else {
+        md.push_str("| # | Description | Assignee | Deadline | Goal |\n");
+        md.push_str("|---|-------------|----------|----------|------|\n");
+        for (i, item) in action_items.iter().enumerate() {
+            let assignee = item.assignee.as_deref().unwrap_or("\u{2014}");
+            let deadline = item.deadline.as_deref().unwrap_or("\u{2014}");
+            let goal = item.linked_goal.as_deref().unwrap_or("\u{2014}");
+            md.push_str(&format!(
+                "| {} | {} | {} | {} | {} |\n",
+                i + 1,
+                item.description,
+                assignee,
+                deadline,
+                goal
+            ));
+        }
+        md.push('\n');
+    }
+
+    if !messages.is_empty() {
+        md.push_str("## Transcript\n\n");
+        for msg in messages {
+            let role_label = match msg.role {
+                super::types::Role::User => "**Operator**",
+                super::types::Role::Assistant => "**Simard**",
+                super::types::Role::System => "**System**",
+            };
+            md.push_str(&format!("{role_label}: {}\n\n", msg.content));
+        }
+    }
+
+    std::fs::write(&path, &md).map_err(|e| SimardError::ActionExecutionFailed {
+        action: "write-handoff-report".to_string(),
+        reason: e.to_string(),
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        if let Err(e) = std::fs::set_permissions(&path, perms) {
+            warn!("Failed to set report file permissions: {e}");
+        }
+    }
+
+    info!(path = %path.display(), "Meeting handoff report written");
+    Ok(path)
+}
+
+/// Store enriched meeting data (with action items) into episodic memory.
+pub fn store_enriched_cognitive_memory(
+    bridge: &dyn CognitiveMemoryOps,
+    topic: &str,
+    summary: &str,
+    messages: &[ConversationMessage],
+    action_items: &[HandoffActionItem],
+    decisions: &[String],
+) {
+    store_cognitive_memory(bridge, topic, summary, messages);
+
+    if !action_items.is_empty() {
+        let action_text: String = action_items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let mut line = format!("{}. {}", i + 1, item.description);
+                if let Some(ref who) = item.assignee {
+                    line.push_str(&format!(" [assignee: {who}]"));
+                }
+                if let Some(ref when) = item.deadline {
+                    line.push_str(&format!(" [deadline: {when}]"));
+                }
+                if let Some(ref goal) = item.linked_goal {
+                    line.push_str(&format!(" [goal: {goal}]"));
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let episode = format!("Action items from meeting \"{topic}\":\n{action_text}");
+        if let Err(e) = bridge.store_episode(
+            &episode,
+            "meeting-action-items",
+            Some(&serde_json::json!({
+                "topic": topic,
+                "type": "action-items",
+                "count": action_items.len(),
+            })),
+        ) {
+            warn!("Failed to persist meeting action-items episode: {e}");
+        } else {
+            debug!("Meeting action-items episode stored");
+        }
+    }
+
+    if !decisions.is_empty() {
+        let decision_text = decisions
+            .iter()
+            .enumerate()
+            .map(|(i, d)| format!("{}. {}", i + 1, d))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let episode = format!("Decisions from meeting \"{topic}\":\n{decision_text}");
+        if let Err(e) = bridge.store_episode(
+            &episode,
+            "meeting-decisions",
+            Some(&serde_json::json!({
+                "topic": topic,
+                "type": "decisions",
+                "count": decisions.len(),
+            })),
+        ) {
+            warn!("Failed to persist meeting decisions episode: {e}");
+        } else {
+            debug!("Meeting decisions episode stored");
+        }
+    }
+}
+
 /// Meeting template content (agenda and prompts) for common meeting types.
 pub struct MeetingTemplate {
     pub name: &'static str,
@@ -377,6 +783,7 @@ pub fn find_template(name: &str) -> Option<&'static MeetingTemplate> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::Role;
     use super::*;
 
     #[test]
@@ -462,5 +869,155 @@ mod tests {
         assert!(md.contains("topic: \"Test Topic\""));
         assert!(md.contains("date: \"2025-01-01T00:00:00Z\""));
         assert!(md.contains("participants:"));
+    }
+
+    // ── Action item extraction tests ────────────────────────────────
+
+    fn make_msg(role: Role, content: &str) -> ConversationMessage {
+        ConversationMessage {
+            role,
+            content: content.to_string(),
+            timestamp: "2025-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn extract_action_items_from_will_verb() {
+        let messages = vec![make_msg(
+            Role::User,
+            "Alice will write the integration tests by Friday.",
+        )];
+        let items = extract_action_items(&messages);
+        assert!(!items.is_empty(), "should extract at least one action item");
+        assert_eq!(items[0].assignee.as_deref(), Some("Alice"));
+        assert_eq!(items[0].deadline.as_deref(), Some("by friday"));
+    }
+
+    #[test]
+    fn extract_action_items_labeled_prefix() {
+        let messages = vec![make_msg(
+            Role::Assistant,
+            "Action item: Deploy the staging environment.",
+        )];
+        let items = extract_action_items(&messages);
+        assert!(!items.is_empty());
+        assert!(items[0].description.contains("Deploy"));
+        assert!(!items[0].description.starts_with("Action item:"));
+    }
+
+    #[test]
+    fn extract_action_items_no_false_positives() {
+        let messages = vec![
+            make_msg(Role::User, "The weather is nice today."),
+            make_msg(Role::Assistant, "I agree, it is nice."),
+        ];
+        let items = extract_action_items(&messages);
+        assert!(items.is_empty(), "no action items in casual chat");
+    }
+
+    #[test]
+    fn extract_action_items_needs_to_pattern() {
+        let messages = vec![make_msg(
+            Role::User,
+            "Bob needs to update the CI pipeline this week.",
+        )];
+        let items = extract_action_items(&messages);
+        assert!(!items.is_empty());
+        assert_eq!(items[0].assignee.as_deref(), Some("Bob"));
+        assert_eq!(items[0].deadline.as_deref(), Some("this week"));
+    }
+
+    #[test]
+    fn extract_assignee_from_assigned_to() {
+        let result = extract_assignee("This task is assigned to Carol for next sprint.");
+        assert_eq!(result.as_deref(), Some("Carol"));
+    }
+
+    #[test]
+    fn extract_deadline_various() {
+        assert_eq!(extract_deadline("do it by eod"), Some("by eod".to_string()));
+        assert_eq!(
+            extract_deadline("finish next sprint"),
+            Some("next sprint".to_string())
+        );
+        assert_eq!(extract_deadline("nothing here"), None);
+    }
+
+    #[test]
+    fn clean_action_description_strips_prefixes() {
+        assert_eq!(
+            clean_action_description("TODO: Fix the tests"),
+            "Fix the tests"
+        );
+        assert_eq!(clean_action_description("task: Review PR"), "Review PR");
+        assert_eq!(clean_action_description("Normal text"), "Normal text");
+    }
+
+    #[test]
+    fn split_sentences_basic() {
+        let sentences = split_sentences("Hello world. How are you? Fine!");
+        assert_eq!(sentences.len(), 3);
+    }
+
+    // ── Goal linkage tests ──────────────────────────────────────────
+
+    #[test]
+    fn link_action_items_exact_overlap() {
+        let mut items = vec![HandoffActionItem {
+            description: "Set up continuous integration pipeline".to_string(),
+            assignee: None,
+            deadline: None,
+            linked_goal: None,
+        }];
+        let goals = vec![(
+            "ci-pipeline".to_string(),
+            "Set up continuous integration".to_string(),
+        )];
+        link_action_items_to_goals(&mut items, &goals);
+        assert_eq!(items[0].linked_goal.as_deref(), Some("ci-pipeline"));
+    }
+
+    #[test]
+    fn link_action_items_no_match() {
+        let mut items = vec![HandoffActionItem {
+            description: "Order new keyboards".to_string(),
+            assignee: None,
+            deadline: None,
+            linked_goal: None,
+        }];
+        let goals = vec![(
+            "improve-testing".to_string(),
+            "Improve testing coverage".to_string(),
+        )];
+        link_action_items_to_goals(&mut items, &goals);
+        assert!(items[0].linked_goal.is_none());
+    }
+
+    // ── Decision extraction tests ───────────────────────────────────
+
+    #[test]
+    fn extract_decisions_from_transcript() {
+        let messages = vec![
+            make_msg(Role::User, "I think we should use Rust."),
+            make_msg(
+                Role::Assistant,
+                "Decision: We will adopt Rust for the backend.",
+            ),
+            make_msg(Role::User, "We agreed to ship by end of month."),
+        ];
+        let decisions = extract_decisions(&messages);
+        assert!(decisions.len() >= 2, "got: {decisions:?}");
+        assert!(decisions.iter().any(|d| d.contains("Rust")));
+        assert!(decisions.iter().any(|d| d.contains("agreed")));
+    }
+
+    #[test]
+    fn extract_decisions_none_found() {
+        let messages = vec![
+            make_msg(Role::User, "Let's discuss options."),
+            make_msg(Role::Assistant, "Here are some possibilities."),
+        ];
+        let decisions = extract_decisions(&messages);
+        assert!(decisions.is_empty());
     }
 }
