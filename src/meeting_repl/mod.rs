@@ -4,6 +4,7 @@
 //! the CLI-specific REPL loop and backward-compatible re-exports.
 
 mod repl;
+mod spinner;
 #[cfg(test)]
 mod test_support;
 
