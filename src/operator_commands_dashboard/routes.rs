@@ -450,28 +450,30 @@ async fn traces() -> Json<Value> {
 }
 
 async fn distributed() -> Json<Value> {
-    // Query the Simard VM status via azlin connect
-    let vm_status = tokio::process::Command::new("azlin")
-        .args([
-            "connect",
-            "Simard",
-            "--resource-group",
-            "rysweet-linux-vm-pool",
-            "--no-tmux",
-            "--",
-            "export PATH=\"$HOME/.cargo/bin:$HOME/.simard/bin:$PATH\" && \
-             echo HOSTNAME=$(hostname) && \
-             echo UPTIME=$(uptime -p) && \
-             echo DISK_ROOT=$(df / --output=pcent | tail -1 | tr -d ' %') && \
-             echo DISK_DATA=$(df /mnt/home-data --output=pcent 2>/dev/null | tail -1 | tr -d ' %' || echo N/A) && \
-             echo DISK_TMP=$(df /mnt/tmp-data --output=pcent 2>/dev/null | tail -1 | tr -d ' %' || echo N/A) && \
-             echo SIMARD_PROCS=$(pgrep -f simard -c 2>/dev/null || echo 0) && \
-             echo CARGO_PROCS=$(pgrep -f cargo -c 2>/dev/null || echo 0) && \
-             echo LOAD=$(cat /proc/loadavg | cut -d' ' -f1-3) && \
-             echo MEM_USED=$(free -m | awk '/Mem/{printf \"%d/%d\", $3, $2}')",
-        ])
-        .output()
-        .await;
+    // Query the Simard VM status via azlin connect with a timeout so the
+    // dashboard doesn't hang if the bastion is slow.
+    //
+    // We use `systemd-run --user --pipe` to run the check script in a fresh
+    // transient scope.  When azlin runs as a direct child of the daemon's
+    // service cgroup, the bastion SSH produces empty stdout (the daemon's
+    // inherited pipe/socket FDs or cgroup restrictions interfere with
+    // azlin's PTY routing).  Running in a separate scope avoids this.
+    let vm_status = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        tokio::task::spawn_blocking(|| {
+            let state_root = std::env::var("SIMARD_STATE_ROOT").unwrap_or_else(|_| {
+                format!(
+                    "{}/.simard",
+                    std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".into())
+                )
+            });
+            let script = format!("{}/bin/check_vm.sh", state_root);
+            std::process::Command::new("systemd-run")
+                .args(["--user", "--pipe", "--quiet", &script])
+                .output()
+        }),
+    )
+    .await;
 
     let mut vm_info = json!({
         "vm_name": "Simard",
@@ -479,38 +481,74 @@ async fn distributed() -> Json<Value> {
         "status": "unknown",
     });
 
-    if let Ok(output) = vm_status {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if stdout.contains("HOSTNAME=") {
-            vm_info["status"] = json!("reachable");
-            for line in stdout.lines() {
-                if let Some((key, val)) = line.split_once('=') {
-                    let key = key.trim().to_lowercase();
-                    let val = val.trim();
-                    match key.as_str() {
-                        "hostname" => vm_info["hostname"] = json!(val),
-                        "uptime" => vm_info["uptime"] = json!(val),
-                        "disk_root" => vm_info["disk_root_pct"] = json!(val.parse::<u32>().ok()),
-                        "disk_data" => vm_info["disk_data_pct"] = json!(val.parse::<u32>().ok()),
-                        "disk_tmp" => vm_info["disk_tmp_pct"] = json!(val.parse::<u32>().ok()),
-                        "simard_procs" => {
-                            vm_info["simard_processes"] = json!(val.parse::<u32>().ok())
+    match vm_status {
+        Ok(Ok(Ok(output))) => {
+            let raw_stdout = String::from_utf8_lossy(&output.stdout);
+            let raw_stderr = String::from_utf8_lossy(&output.stderr);
+            // azlin connect --no-tmux routes remote stdout to local stderr
+            // when spawned without a TTY (rysweet/azlin#980). Strip ANSI
+            // escape codes then search both streams for our KEY=value markers.
+            let stdout = strip_ansi_codes(&raw_stdout);
+            let stderr = strip_ansi_codes(&raw_stderr);
+            let haystack = if stdout.contains("HOSTNAME=") {
+                stdout
+            } else if stderr.contains("HOSTNAME=") {
+                stderr
+            } else {
+                // Last resort: combine both in case markers are split across streams
+                let combined = format!("{}\n{}", stdout, stderr);
+                if combined.contains("HOSTNAME=") {
+                    combined
+                } else {
+                    String::new()
+                }
+            };
+            if !haystack.is_empty() {
+                vm_info["status"] = json!("reachable");
+                for line in haystack.lines() {
+                    if let Some((key, val)) = line.split_once('=') {
+                        let key = key.trim().to_lowercase();
+                        let val = val.trim();
+                        match key.as_str() {
+                            "hostname" => vm_info["hostname"] = json!(val),
+                            "uptime" => vm_info["uptime"] = json!(val),
+                            "disk_root" => {
+                                vm_info["disk_root_pct"] = json!(val.parse::<u32>().ok())
+                            }
+                            "disk_data" => {
+                                vm_info["disk_data_pct"] = json!(val.parse::<u32>().ok())
+                            }
+                            "disk_tmp" => vm_info["disk_tmp_pct"] = json!(val.parse::<u32>().ok()),
+                            "simard_procs" => {
+                                vm_info["simard_processes"] = json!(val.parse::<u32>().ok())
+                            }
+                            "cargo_procs" => {
+                                vm_info["cargo_processes"] = json!(val.parse::<u32>().ok())
+                            }
+                            "load" => vm_info["load_avg"] = json!(val),
+                            "mem_used" => vm_info["memory_mb"] = json!(val),
+                            _ => {}
                         }
-                        "cargo_procs" => {
-                            vm_info["cargo_processes"] = json!(val.parse::<u32>().ok())
-                        }
-                        "load" => vm_info["load_avg"] = json!(val),
-                        "mem_used" => vm_info["memory_mb"] = json!(val),
-                        _ => {}
                     }
                 }
+            } else {
+                vm_info["status"] = json!("unreachable");
+                vm_info["debug_hint"] =
+                    json!("HOSTNAME= not found in stdout or stderr after ANSI stripping");
             }
-        } else {
-            vm_info["status"] = json!("unreachable");
         }
-    } else {
-        vm_info["status"] = json!("error");
-        vm_info["error"] = json!("azlin connect failed");
+        Ok(Ok(Err(e))) => {
+            vm_info["status"] = json!("error");
+            vm_info["error"] = json!(format!("azlin connect failed: {e}"));
+        }
+        Ok(Err(e)) => {
+            vm_info["status"] = json!("error");
+            vm_info["error"] = json!(format!("task join failed: {e}"));
+        }
+        Err(_) => {
+            vm_info["status"] = json!("timeout");
+            vm_info["error"] = json!("azlin connect timed out after 30s");
+        }
     }
 
     // Local host info for comparison
@@ -529,6 +567,55 @@ async fn distributed() -> Json<Value> {
         "topology": "distributed",
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
+}
+
+/// Strip ANSI escape sequences (CSI, OSC, and single-char escapes) so that
+/// output from azlin/SSH can be reliably parsed for KEY=value markers.
+fn strip_ansi_codes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.peek() {
+                Some('[') => {
+                    chars.next(); // consume '['
+                    // CSI sequence: consume until a letter or '@'-'~'
+                    while let Some(&ch) = chars.peek() {
+                        chars.next();
+                        if ch.is_ascii_alphabetic() || ('@'..='~').contains(&ch) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    chars.next(); // consume ']'
+                    // OSC sequence: consume until BEL or ST (\x1b\\)
+                    while let Some(&ch) = chars.peek() {
+                        chars.next();
+                        if ch == '\x07' {
+                            break;
+                        }
+                        if ch == '\x1b' {
+                            if chars.peek() == Some(&'\\') {
+                                chars.next();
+                            }
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    // Single-char escape (e.g. \x1b=, \x1b>)
+                    chars.next();
+                }
+            }
+        } else if c == '\r' {
+            // Strip carriage returns (common in SSH/PTY output)
+            continue;
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Hosts config file path.
