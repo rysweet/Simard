@@ -47,6 +47,9 @@ pub struct MeetingHandoff {
     pub transcript: Vec<String>,
     #[serde(default)]
     pub participants: Vec<String>,
+    /// High-level themes or recurring topics identified during the meeting.
+    #[serde(default)]
+    pub themes: Vec<String>,
 }
 
 /// Check whether a note looks like a rhetorical question (short, common
@@ -163,6 +166,7 @@ impl MeetingHandoff {
             duration_secs,
             transcript,
             participants: all_participants,
+            themes: Vec::new(),
         }
     }
 }

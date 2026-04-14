@@ -168,6 +168,7 @@ fn scan_unprocessed_handoffs_returns_true_for_unprocessed() {
         duration_secs: None,
         transcript: Vec::new(),
         participants: Vec::new(),
+        themes: Vec::new(),
     };
     write_meeting_handoff(dir.path(), &handoff).unwrap();
 
@@ -194,6 +195,7 @@ fn scan_unprocessed_handoffs_returns_false_when_processed() {
         duration_secs: None,
         transcript: Vec::new(),
         participants: Vec::new(),
+        themes: Vec::new(),
     };
     write_meeting_handoff(dir.path(), &handoff).unwrap();
 

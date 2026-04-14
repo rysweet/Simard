@@ -228,6 +228,16 @@ impl MeetingBackend {
         self.is_open
     }
 
+    /// Access the conversation history (for export).
+    pub fn history(&self) -> &[ConversationMessage] {
+        &self.history
+    }
+
+    /// Access the session start time (for export).
+    pub fn started_at(&self) -> &str {
+        &self.started_at
+    }
+
     // --- Private helpers ---
 
     fn push_message(&mut self, role: Role, content: String) {

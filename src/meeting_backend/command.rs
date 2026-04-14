@@ -8,6 +8,11 @@ pub enum MeetingCommand {
     Help,
     Close,
     Status,
+    /// Show or apply a meeting template (standup, 1on1, retro, planning).
+    /// Empty string means "list available templates".
+    Template(String),
+    /// Export the current meeting as markdown to ~/.simard/meetings/.
+    Export,
     /// Natural language — forwarded to the LLM.
     Conversation(String),
 }
@@ -22,10 +27,17 @@ pub fn parse_command(input: &str) -> MeetingCommand {
     if trimmed.is_empty() {
         return MeetingCommand::Conversation(String::new());
     }
-    match trimmed.to_ascii_lowercase().as_str() {
+    let lower = trimmed.to_ascii_lowercase();
+    match lower.as_str() {
         "/help" => MeetingCommand::Help,
         "/close" | "/done" => MeetingCommand::Close,
         "/status" => MeetingCommand::Status,
+        "/export" => MeetingCommand::Export,
+        "/template" => MeetingCommand::Template(String::new()),
+        _ if lower.starts_with("/template ") => {
+            let arg = trimmed["/template ".len()..].trim().to_string();
+            MeetingCommand::Template(arg)
+        }
         _ => MeetingCommand::Conversation(trimmed.to_string()),
     }
 }
@@ -66,6 +78,36 @@ mod tests {
             parse_command("/decision Ship it | ready"),
             MeetingCommand::Conversation("/decision Ship it | ready".to_string()),
         );
+    }
+
+    #[test]
+    fn parse_template_no_arg() {
+        assert_eq!(
+            parse_command("/template"),
+            MeetingCommand::Template(String::new())
+        );
+        assert_eq!(
+            parse_command("  /TEMPLATE  "),
+            MeetingCommand::Template(String::new())
+        );
+    }
+
+    #[test]
+    fn parse_template_with_arg() {
+        assert_eq!(
+            parse_command("/template standup"),
+            MeetingCommand::Template("standup".to_string()),
+        );
+        assert_eq!(
+            parse_command("  /Template  1on1  "),
+            MeetingCommand::Template("1on1".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_export() {
+        assert_eq!(parse_command("/export"), MeetingCommand::Export);
+        assert_eq!(parse_command("  /EXPORT  "), MeetingCommand::Export);
     }
 
     #[test]

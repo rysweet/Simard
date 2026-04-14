@@ -129,6 +129,7 @@ mod tests {
             duration_secs: Some(3600),
             transcript: vec![],
             participants: vec!["alice".to_string(), "bob".to_string()],
+            themes: Vec::new(),
         }
     }
 
@@ -188,6 +189,7 @@ mod tests {
             duration_secs: None,
             transcript: vec![],
             participants: vec![],
+            themes: Vec::new(),
         };
         let json = serde_json::to_string(&h).unwrap();
         let h2: MeetingHandoff = serde_json::from_str(&json).unwrap();
