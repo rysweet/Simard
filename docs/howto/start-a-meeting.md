@@ -11,6 +11,8 @@ related:
   - ../reference/meeting-backend-api.md
   - ../architecture/unified-meeting-backend.md
   - ./carry-meeting-decisions-into-engineer-sessions.md
+  - ./use-meeting-templates.md
+  - ./export-meeting-markdown.md
 ---
 
 # How to start a meeting with Simard
@@ -60,15 +62,34 @@ Open the operator dashboard and click **Chat**. The WebSocket connection creates
 
 ## 3. Available commands
 
-Three slash commands are recognized during a meeting:
+Five slash commands are recognized during a meeting:
 
 | Command   | What it does |
 |-----------|-------------|
 | `/help`   | Lists these commands |
 | `/status` | Shows topic, duration, and message count |
+| `/template [name]` | Lists available templates, or applies one by name |
+| `/export` | Exports the meeting as a markdown file to `~/.simard/meetings/` |
 | `/close`  | Ends the meeting, persists transcript, and generates a summary |
 
 Everything else is natural conversation.
+
+### Meeting templates
+
+Use `/template` to list the 4 built-in templates, or `/template standup` to apply one immediately. The template sets a structured agenda as initial meeting context:
+
+| Template | Purpose |
+|----------|---------|
+| `standup` | Quick daily check-in — blockers, progress, plans |
+| `1on1` | Operator/Simard check-in — goals, concerns, growth |
+| `retro` | Sprint retrospective — went well, improve, actions |
+| `planning` | Sprint/milestone planning — scope, priorities, risks |
+
+See [How to use meeting templates](./use-meeting-templates.md) for full details.
+
+### Markdown export
+
+Type `/export` at any point during a meeting to write a markdown snapshot to `~/.simard/meetings/`. The file includes YAML frontmatter (topic, date, duration, message count) and the full conversation history. See [How to export meeting markdown](./export-meeting-markdown.md).
 
 ## 4. What Simard knows during a meeting
 
