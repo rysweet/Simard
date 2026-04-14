@@ -73,7 +73,7 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
             MeetingCommand::Help => {
                 writeln!(
                     output,
-                    "Commands:\n  /status  — show session info\n  /close   — end meeting and persist\n  /help    — this message\n\nEverything else is natural conversation with Simard."
+                    "Commands:\n  /status    — show session info\n  /template  — list meeting templates\n  /template <name> — apply a template (standup, 1on1, retro, planning)\n  /export    — export meeting as markdown\n  /close     — end meeting and persist\n  /help      — this message\n\nEverything else is natural conversation with Simard."
                 )
                 .ok();
             }
@@ -82,6 +82,58 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                 writeln!(output, "Meeting: {}", status.topic).ok();
                 writeln!(output, "  Messages: {}", status.message_count).ok();
                 writeln!(output, "  Started:  {}", status.started_at).ok();
+            }
+            MeetingCommand::Template(name) => {
+                use crate::meeting_backend::persist::{TEMPLATES, find_template};
+                if name.is_empty() {
+                    writeln!(output, "Available templates:").ok();
+                    for t in TEMPLATES {
+                        writeln!(output, "  {} — {}", t.name, t.description).ok();
+                    }
+                    writeln!(output, "\nUsage: /template <name>").ok();
+                } else if let Some(tmpl) = find_template(&name) {
+                    writeln!(output, "\n{}\n", tmpl.agenda).ok();
+                    // Inject template as context via a message to the backend
+                    let ctx = format!(
+                        "The operator has selected the '{}' meeting template. \
+                         Please follow this agenda:\n{}",
+                        tmpl.name, tmpl.agenda
+                    );
+                    eprint!("  ⏳ Applying template...");
+                    match backend.send_message(&ctx) {
+                        Ok(resp) => {
+                            eprint!("\r\x1b[K");
+                            if !resp.content.is_empty() {
+                                writeln!(output, "{}\n", resp.content).ok();
+                            }
+                        }
+                        Err(e) => {
+                            eprint!("\r\x1b[K");
+                            writeln!(output, "[agent error: {e}]").ok();
+                        }
+                    }
+                } else {
+                    writeln!(output, "Unknown template: {name}").ok();
+                    writeln!(output, "Available: standup, 1on1, retro, planning").ok();
+                }
+            }
+            MeetingCommand::Export => {
+                use crate::meeting_backend::persist::write_markdown_export;
+                eprint!("  ⏳ Exporting...");
+                match write_markdown_export(
+                    backend.topic(),
+                    backend.started_at(),
+                    backend.history(),
+                ) {
+                    Ok(path) => {
+                        eprint!("\r\x1b[K");
+                        writeln!(output, "Meeting exported to: {}", path.display()).ok();
+                    }
+                    Err(e) => {
+                        eprint!("\r\x1b[K");
+                        writeln!(output, "[export error: {e}]").ok();
+                    }
+                }
             }
             MeetingCommand::Close => {
                 writeln!(output, "Closing meeting...").ok();

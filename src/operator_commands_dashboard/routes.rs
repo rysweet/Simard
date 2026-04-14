@@ -764,7 +764,7 @@ async fn handle_ws_chat(mut socket: WebSocket) {
                         break;
                     }
                     MeetingCommand::Help => {
-                        let help = "Commands: /status, /close, /help. Everything else is natural conversation with Simard.";
+                        let help = "Commands: /status, /template [name], /export, /close, /help. Everything else is natural conversation with Simard.";
                         let _ = socket
                             .send(Message::Text(
                                 json!({"role":"system","content": help}).to_string().into(),
@@ -780,6 +780,48 @@ async fn handle_ws_chat(mut socket: WebSocket) {
                         let _ = socket
                             .send(Message::Text(
                                 json!({"role":"system","content": info}).to_string().into(),
+                            ))
+                            .await;
+                    }
+                    MeetingCommand::Template(name) => {
+                        use crate::meeting_backend::persist::{TEMPLATES, find_template};
+                        let content = if name.is_empty() {
+                            let mut listing = "Available templates:\n".to_string();
+                            for t in TEMPLATES {
+                                listing.push_str(&format!("  {} — {}\n", t.name, t.description));
+                            }
+                            listing.push_str("\nUsage: /template <name>");
+                            listing
+                        } else if let Some(tmpl) = find_template(&name) {
+                            tmpl.agenda.to_string()
+                        } else {
+                            format!(
+                                "Unknown template: {name}. Available: standup, 1on1, retro, planning"
+                            )
+                        };
+                        let _ = socket
+                            .send(Message::Text(
+                                json!({"role":"system","content": content})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await;
+                    }
+                    MeetingCommand::Export => {
+                        use crate::meeting_backend::persist::write_markdown_export;
+                        let content = match write_markdown_export(
+                            backend.topic(),
+                            backend.started_at(),
+                            backend.history(),
+                        ) {
+                            Ok(path) => format!("Meeting exported to: {}", path.display()),
+                            Err(e) => format!("[export error: {e}]"),
+                        };
+                        let _ = socket
+                            .send(Message::Text(
+                                json!({"role":"system","content": content})
+                                    .to_string()
+                                    .into(),
                             ))
                             .await;
                     }

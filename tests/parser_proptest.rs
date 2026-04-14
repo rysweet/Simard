@@ -19,6 +19,8 @@ proptest! {
             MeetingCommand::Help
             | MeetingCommand::Close
             | MeetingCommand::Status
+            | MeetingCommand::Template(_)
+            | MeetingCommand::Export
             | MeetingCommand::Conversation(_) => {}
         }
     }

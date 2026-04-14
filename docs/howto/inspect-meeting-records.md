@@ -130,3 +130,4 @@ That is the intended contract for invalid or unreadable operator state. Fix the 
 - For the exact command tree and example syntax, see [Simard CLI reference](../reference/simard-cli.md).
 - For the executable contract behind the read and run paths, see [Runtime contracts reference](../reference/runtime-contracts.md).
 - For the wider learning flow that also exercises engineer, goal-curation, review, and improvement-curation modes, see [Tutorial: Run your first local session](../tutorials/run-your-first-local-session.md).
+- For human-readable markdown exports (as opposed to JSON transcripts), see [How to export meeting markdown](./export-meeting-markdown.md).

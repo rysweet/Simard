@@ -128,6 +128,7 @@ mod tests {
             duration_secs: None,
             transcript: Vec::new(),
             participants: Vec::new(),
+            themes: Vec::new(),
         }
     }
 
@@ -146,6 +147,7 @@ mod tests {
             duration_secs: None,
             transcript: Vec::new(),
             participants: Vec::new(),
+            themes: Vec::new(),
         }
     }
 

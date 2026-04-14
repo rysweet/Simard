@@ -93,19 +93,24 @@ pub enum MeetingCommand {
     Help,
     Close,
     Status,
+    Template(Option<String>),
+    Export,
     Conversation(String),
     Empty,
     Unknown(String),
 }
 ```
 
-The 6-variant command enum. `parse_meeting_command()` maps user input to these variants:
+The 8-variant command enum. `parse_command()` maps user input to these variants:
 
 | Input | Variant | Behavior |
 |-------|---------|----------|
 | `/help` | `Help` | Display available commands |
-| `/close` | `Close` | End session, persist, summarize |
+| `/close` or `/done` | `Close` | End session, persist, summarize |
 | `/status` | `Status` | Show session info |
+| `/template` | `Template(None)` | List available templates |
+| `/template standup` | `Template(Some("standup"))` | Apply the named template |
+| `/export` | `Export` | Write markdown export to `~/.simard/meetings/` |
 | `""` or whitespace | `Empty` | No-op, re-prompt |
 | `/anything-else` | `Unknown(cmd)` | Print "unknown command" hint |
 | anything else | `Conversation(text)` | Send to LLM via `send_message()` |
@@ -202,10 +207,65 @@ Returns a lightweight snapshot of the session state.
 
 **Returns:** `SessionStatus` with the topic, message count, elapsed duration, and whether the session is still open.
 
+### `history`
+
+```rust
+pub fn history(&self) -> &[ConversationMessage]
+```
+
+Returns a reference to the full conversation history. Used by `/export` to write the markdown file.
+
+### `started_at`
+
+```rust
+pub fn started_at(&self) -> chrono::DateTime<chrono::Utc>
+```
+
+Returns the session start timestamp. Used for export frontmatter and duration calculations.
+
+### `export_markdown`
+
+```rust
+pub fn export_markdown(&self) -> SimardResult<PathBuf>
+```
+
+Writes the current meeting state as a markdown file to `~/.simard/meetings/`.
+
+**Returns:** `SimardResult<PathBuf>` — the path to the written file.
+
+**Behavior:**
+
+1. Delegates to `write_markdown_export()` in `persist.rs`.
+2. The file includes YAML frontmatter (topic, date, duration, message count) and the full conversation rendered as markdown. The `themes` field is always an empty array in exports — theme extraction only happens on `/close`.
+3. File permissions are set to `0o600`.
+4. The directory is created if it doesn't exist.
+
+**Errors:** Returns `SimardError` if the file cannot be written (permissions, disk full).
+
+## Template system
+
+### `get_template`
+
+```rust
+pub fn get_template(name: &str) -> Option<&'static str>
+```
+
+Returns the agenda text for a named template, or `None` if the name is unrecognized.
+
+**Available templates:** `standup`, `1on1`, `retro`, `planning`.
+
+### `template_names`
+
+```rust
+pub fn template_names() -> &'static [&'static str]
+```
+
+Returns the list of available template names: `["standup", "1on1", "retro", "planning"]`.
+
 ## Command parser
 
 ```rust
-pub fn parse_meeting_command(input: &str) -> MeetingCommand
+pub fn parse_command(input: &str) -> MeetingCommand
 ```
 
 Parses raw user input into a `MeetingCommand` variant.
@@ -214,9 +274,10 @@ Parses raw user input into a `MeetingCommand` variant.
 
 1. Leading and trailing whitespace is trimmed.
 2. Empty input after trimming → `Empty`.
-3. Input starting with `/` is matched case-insensitively against known commands (`/help`, `/close`, `/status`).
-4. Unrecognized `/` commands → `Unknown(command_name)`.
-5. Everything else → `Conversation(trimmed_input)`.
+3. Input starting with `/` is matched case-insensitively against known commands (`/help`, `/close`, `/done`, `/status`, `/template`, `/export`).
+4. `/template` with no argument → `Template(None)`. `/template foo` → `Template(Some("foo"))`.
+5. Unrecognized `/` commands → `Unknown(command_name)`.
+6. Everything else → `Conversation(trimmed_input)`.
 
 ## Persistence format
 
@@ -272,11 +333,48 @@ Written to `target/meeting_handoffs/meeting_handoff.json`:
   "processed": false,
   "duration_secs": 2700,
   "transcript": ["Discussed memory consolidation priorities..."],
-  "participants": ["operator"]
+  "participants": ["operator"],
+  "themes": ["memory consolidation", "gym benchmarks"]
 }
 ```
 
-This format is consumed by `check_meeting_handoffs()` in the OODA loop and by the `act-on-decisions` CLI command. Empty `decisions`, `action_items`, and `open_questions` vectors are valid — downstream consumers handle them without error. The `transcript` field carries the conversation summary.
+This format is consumed by `check_meeting_handoffs()` in the OODA loop and by the `act-on-decisions` CLI command. Empty `decisions`, `action_items`, and `open_questions` vectors are valid — downstream consumers handle them without error. The `transcript` field carries the conversation summary. The `themes` field is optional (`#[serde(default)]`) and carries high-level topic tags extracted during the meeting; older handoffs without this field deserialize correctly with an empty vec.
+
+### Markdown export
+
+Written by `/export` to `~/.simard/meetings/{timestamp}_{sanitized_topic}.md`:
+
+```markdown
+---
+topic: "discuss the next Simard milestone"
+date: "2026-04-12T14:30:00Z"
+duration_minutes: 45
+message_count: 24
+themes: []
+---
+
+# Meeting: discuss the next Simard milestone
+
+**Date:** 2026-04-12 14:30 UTC
+**Duration:** 45 minutes
+**Messages:** 24
+
+---
+
+## Conversation
+
+**You:** Hey Simard, what's been on your mind since our last meeting?
+
+**Simard:** I've been thinking about the memory consolidation pipeline...
+
+**You:** What about the gym scores?
+
+**Simard:** The SecurityAudit scenarios are still below where I want them...
+```
+
+**File permissions:** `0o600` (owner read/write only).
+
+The markdown file is a point-in-time snapshot — it captures the conversation as of the `/export` call. You can export multiple times during a meeting; each creates a new file with a different timestamp.
 
 ## Integration patterns
 
@@ -287,9 +385,16 @@ This format is consumed by `check_meeting_handoffs()` in the OODA loop and by th
 let backend = MeetingBackend::new_session(topic, agent, bridge, system_prompt);
 loop {
     let input = read_line(stdin)?;
-    match parse_meeting_command(&input) {
+    match parse_command(&input) {
         MeetingCommand::Help => print_help(stdout),
         MeetingCommand::Status => print_status(stdout, backend.status()),
+        MeetingCommand::Template(name) => {
+            // List templates or apply one by name
+        }
+        MeetingCommand::Export => {
+            let path = backend.export_markdown()?;
+            writeln!(stdout, "Exported to {}", path.display())?;
+        }
         MeetingCommand::Close => {
             let summary = backend.close()?;
             print_summary(stdout, &summary);
@@ -320,7 +425,7 @@ while let Some(msg) = ws_stream.next().await {
     let backend = Arc::clone(&backend);
     let response = tokio::task::spawn_blocking(move || {
         let mut b = backend.lock().unwrap();
-        match parse_meeting_command(text) {
+        match parse_command(text) {
             MeetingCommand::Close => {
                 let summary = b.close()?;
                 Ok(serde_json::to_string(&summary)?)
