@@ -15,6 +15,7 @@ pub struct BuildLock {
 }
 
 /// RAII guard — releases the lock file on drop.
+#[derive(Debug)]
 pub struct BuildLockGuard {
     lock_path: PathBuf,
 }
@@ -175,5 +176,158 @@ impl BuildLock {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn temp_lock_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "simard-build-lock-test-{}-{}",
+            label,
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn new_sets_lock_path() {
+        let dir = temp_lock_dir("new");
+        let lock = BuildLock::new(&dir);
+        assert_eq!(lock.lock_path, dir.join(LOCK_FILENAME));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn default_state_root_ends_with_simard() {
+        let root = BuildLock::default_state_root();
+        assert!(
+            root.ends_with(".simard"),
+            "expected path ending in .simard, got: {root:?}"
+        );
+    }
+
+    #[test]
+    fn is_locked_false_when_no_lock_file() {
+        let dir = temp_lock_dir("is-locked-false");
+        let lock = BuildLock::new(&dir);
+        assert!(!lock.is_locked());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn try_acquire_returns_guard_and_is_locked() {
+        let dir = temp_lock_dir("try-acquire");
+        let lock = BuildLock::new(&dir);
+
+        let guard = lock
+            .try_acquire()
+            .expect("should succeed")
+            .expect("should acquire");
+        assert!(lock.is_locked());
+
+        // Verify lock file contains pid info
+        let content = lock.current_holder().expect("should have holder info");
+        assert!(content.contains("pid="), "lock file should contain pid=");
+
+        drop(guard);
+        assert!(!lock.is_locked(), "lock should be released on drop");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn try_acquire_returns_none_when_already_locked() {
+        let dir = temp_lock_dir("try-acquire-held");
+        let lock = BuildLock::new(&dir);
+
+        let _guard = lock
+            .try_acquire()
+            .expect("should succeed")
+            .expect("should acquire");
+        let second = lock.try_acquire().expect("should succeed");
+        assert!(second.is_none(), "should not acquire when already locked");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn acquire_with_timeout_succeeds_when_free() {
+        let dir = temp_lock_dir("acquire-free");
+        let lock = BuildLock::new(&dir);
+
+        let guard = lock
+            .acquire(Duration::from_secs(1))
+            .expect("should acquire");
+        assert!(lock.is_locked());
+        drop(guard);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn acquire_with_timeout_fails_when_held() {
+        let dir = temp_lock_dir("acquire-timeout");
+        let lock = BuildLock::new(&dir);
+
+        let _guard = lock.try_acquire().expect("ok").expect("acquired");
+        let err = lock.acquire(Duration::from_millis(100)).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("timeout") || msg.contains("Timeout") || msg.contains("timed out"),
+            "expected timeout error, got: {msg}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn current_holder_none_when_no_lock() {
+        let dir = temp_lock_dir("holder-none");
+        let lock = BuildLock::new(&dir);
+        assert!(lock.current_holder().is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn force_release_removes_lock_file() {
+        let dir = temp_lock_dir("force-release");
+        let lock = BuildLock::new(&dir);
+
+        // Manually create a lock file to simulate a stale lock
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(lock.lock_path.clone(), "pid=99999\n").unwrap();
+        assert!(lock.is_locked());
+
+        let released = lock.force_release().expect("should succeed");
+        assert!(released);
+        assert!(!lock.is_locked());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn force_release_returns_false_when_not_locked() {
+        let dir = temp_lock_dir("force-release-noop");
+        let lock = BuildLock::new(&dir);
+
+        let released = lock.force_release().expect("should succeed");
+        assert!(!released);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn guard_drop_removes_lock_file() {
+        let dir = temp_lock_dir("guard-drop");
+        let lock = BuildLock::new(&dir);
+
+        let guard = lock.try_acquire().expect("ok").expect("acquired");
+        let lock_path = guard.lock_path.clone();
+        assert!(lock_path.exists());
+
+        drop(guard);
+        assert!(!lock_path.exists(), "lock file should be removed on drop");
+        let _ = fs::remove_dir_all(&dir);
     }
 }
