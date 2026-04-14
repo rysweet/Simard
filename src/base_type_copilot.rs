@@ -277,17 +277,18 @@ fn build_copilot_terminal_objective(
         objective.push_str(&format!("working-directory: {cwd}\n"));
     }
 
-    // Write the prompt to a temp file to avoid shell quoting issues with
-    // large multi-line prompts containing arbitrary characters.
-    // Chain the copilot command with `exit` so the shell exits naturally
-    // after the copilot finishes — no separate input step needed.
+    // Write the prompt to a temp file and pipe it via stdin to the copilot
+    // command. Using stdin avoids `-p` flag incompatibility between the Python
+    // and Rust versions of amplihack. The `--subprocess-safe` flag skips
+    // interactive staging/env updates. Chain with `exit` so the shell exits
+    // after the copilot finishes.
     let escaped = formatted_prompt
         .replace('\\', "\\\\")
         .replace('\'', "'\\''");
     objective.push_str(&format!(
         "command: SIMARD_PROMPT_FILE=$(mktemp /tmp/simard-copilot-prompt.XXXXXX) && \
          printf '%s' '{}' > \"$SIMARD_PROMPT_FILE\" && \
-         {} -p \"$(cat \"$SIMARD_PROMPT_FILE\")\" ; \
+         cat \"$SIMARD_PROMPT_FILE\" | {} --subprocess-safe ; \
          rm -f \"$SIMARD_PROMPT_FILE\" ; exit\n",
         escaped, config.command,
     ));
