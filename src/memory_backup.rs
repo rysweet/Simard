@@ -678,4 +678,53 @@ mod tests {
         assert_eq!(config.retention_days, 30);
         assert_eq!(config.min_backups_to_keep, 3);
     }
+
+    #[test]
+    fn backup_restore_round_trip_searchable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backup_root = tmp.path().join("backups");
+        let store_path = tmp.path().join("memory.json");
+        let config = test_config(&backup_root);
+
+        let bridge = mock_bridge();
+        bridge
+            .store_fact("algorithms", "sorting and searching", 0.85, &[], "ep1")
+            .unwrap();
+        bridge
+            .store_fact("databases", "relational storage", 0.9, &[], "ep2")
+            .unwrap();
+        bridge
+            .store_procedure(
+                "deploy",
+                &["build".into(), "test".into(), "ship".into()],
+                &[],
+            )
+            .unwrap();
+
+        let file_store = FileBackedMemoryStore::try_new(&store_path).unwrap();
+        let manifest = backup_memory(&bridge, &file_store, "test-agent", &config).unwrap();
+        assert_eq!(manifest.cognitive_facts_count, 2);
+        assert_eq!(manifest.cognitive_procedures_count, 1);
+
+        // Restore into a fresh bridge and verify searchability.
+        let target_bridge = mock_bridge();
+        let target_store_path = tmp.path().join("restored.json");
+        let target_store = FileBackedMemoryStore::try_new(&target_store_path).unwrap();
+
+        let count =
+            restore_from_backup(&target_bridge, &target_store, &manifest.backup_dir).unwrap();
+        assert!(count >= 3, "should restore at least 2 facts + 1 procedure");
+
+        // Verify facts are searchable.
+        let facts = target_bridge.search_facts("algorithms", 10, 0.0).unwrap();
+        assert!(!facts.is_empty(), "restored facts should be searchable");
+
+        // Verify procedures are recallable.
+        let procs = target_bridge.recall_procedure("deploy", 5).unwrap();
+        assert!(
+            !procs.is_empty(),
+            "restored procedures should be recallable"
+        );
+        assert_eq!(procs[0].steps, vec!["build", "test", "ship"]);
+    }
 }

@@ -510,10 +510,27 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
             return Ok(None);
         }
         let contents: Vec<&str> = rows.iter().filter_map(|r| as_str(&r[1])).collect();
+        let original_count = contents.len();
+        let mut seen = std::collections::HashSet::new();
+        let unique_contents: Vec<&str> = contents
+            .iter()
+            .filter(|c| seen.insert(c.trim()))
+            .copied()
+            .collect();
+        let unique_count = unique_contents.len();
+        eprintln!(
+            "[simard] episode consolidation: {original_count} → {unique_count} (compression ratio {:.1}%)",
+            if original_count > 0 {
+                (1.0 - unique_count as f64 / original_count as f64) * 100.0
+            } else {
+                0.0
+            }
+        );
         let summary = format!(
-            "[consolidated {} episodes]: {}",
-            contents.len(),
-            contents.join(" | ")
+            "[consolidated {}→{} episodes]: {}",
+            original_count,
+            unique_count,
+            unique_contents.join(" | ")
         );
         let summary_id = Self::new_id("epi");
         self.execute(&format!(
@@ -833,5 +850,106 @@ mod tests {
         assert!(result.is_ok(), "newlines and tabs should be safely escaped");
         let facts = mem.search_facts("key", 10, 0.0).unwrap();
         assert_eq!(facts.len(), 1);
+    }
+
+    #[test]
+    fn disk_persist_facts_survive_reopen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().to_path_buf();
+
+        {
+            let mem = NativeCognitiveMemory::open(&path).unwrap();
+            mem.store_fact("rust", "systems language", 0.95, &[], "test")
+                .unwrap();
+        } // drop closes the DB
+
+        let mem2 = NativeCognitiveMemory::open(&path).unwrap();
+        let facts = mem2.search_facts("rust", 10, 0.0).unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].concept, "rust");
+        assert_eq!(facts[0].content, "systems language");
+        assert!((facts[0].confidence - 0.95).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn disk_persist_procedures_survive_reopen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().to_path_buf();
+
+        {
+            let mem = NativeCognitiveMemory::open(&path).unwrap();
+            let steps = vec![
+                "compile".to_string(),
+                "test".to_string(),
+                "deploy".to_string(),
+            ];
+            mem.store_procedure("release", &steps, &[]).unwrap();
+        }
+
+        let mem2 = NativeCognitiveMemory::open(&path).unwrap();
+        let procs = mem2.recall_procedure("release", 5).unwrap();
+        assert_eq!(procs.len(), 1);
+        assert_eq!(procs[0].name, "release");
+        assert_eq!(
+            procs[0].steps,
+            vec![
+                "compile".to_string(),
+                "test".to_string(),
+                "deploy".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn disk_persist_episodes_and_consolidation_survive_reopen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().to_path_buf();
+
+        {
+            let mem = NativeCognitiveMemory::open(&path).unwrap();
+            for i in 0..5 {
+                mem.store_episode(&format!("event {i}"), "test", None)
+                    .unwrap();
+            }
+            let consolidated = mem.consolidate_episodes(5).unwrap();
+            assert!(consolidated.is_some());
+        }
+
+        let mem2 = NativeCognitiveMemory::open(&path).unwrap();
+        // Query for the consolidated episode (compressed=1 with source_label='consolidation')
+        let rows = mem2
+            .query("MATCH (e:Episode) WHERE e.compressed = 1 AND e.source_label = 'consolidation' RETURN e.content")
+            .unwrap();
+        assert_eq!(rows.len(), 1, "consolidated episode should survive reopen");
+        let content = super::as_str(&rows[0][0]).unwrap();
+        assert!(
+            content.starts_with("[consolidated 5"),
+            "consolidated content should start with marker, got: {content}"
+        );
+    }
+
+    #[test]
+    fn consolidate_episodes_deduplicates() {
+        let mem = test_mem();
+        // Store duplicate episodes
+        mem.store_episode("duplicate event", "test", None).unwrap();
+        mem.store_episode("duplicate event", "test", None).unwrap();
+        mem.store_episode("  duplicate event  ", "test", None)
+            .unwrap();
+        mem.store_episode("unique event", "test", None).unwrap();
+
+        let consolidated = mem.consolidate_episodes(10).unwrap();
+        assert!(consolidated.is_some());
+
+        let rows = mem
+            .query("MATCH (e:Episode) WHERE e.compressed = 1 AND e.source_label = 'consolidation' RETURN e.content")
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        let content = super::as_str(&rows[0][0]).unwrap();
+        // 4 original → 2 unique
+        assert!(
+            content.contains("4→2"),
+            "should show dedup ratio, got: {content}"
+        );
     }
 }
