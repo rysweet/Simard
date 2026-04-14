@@ -100,7 +100,9 @@ async fn status() -> Json<Value> {
             if let Some(ts) = h.get("timestamp").and_then(|t| t.as_str()) {
                 if let Ok(health_time) = chrono::DateTime::parse_from_rfc3339(ts) {
                     let age = chrono::Utc::now().signed_duration_since(health_time);
-                    if age.num_seconds() < 600 {
+                    // Threshold: cycle interval (300s) + max cycle runtime (~600s).
+                    // With the heartbeat at cycle start, age should rarely exceed this.
+                    if age.num_seconds() < 900 {
                         "running"
                     } else {
                         "stale"

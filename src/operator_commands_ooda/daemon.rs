@@ -233,6 +233,25 @@ pub fn run_ooda_daemon(
 
         let cycle_start = Instant::now();
 
+        // Write heartbeat at cycle START so the dashboard never sees "stale"
+        // during a long-running cycle.
+        {
+            let health_dir = dirs::data_local_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("/var/tmp"))
+                .join("simard");
+            let _ = std::fs::create_dir_all(&health_dir);
+            let heartbeat = serde_json::json!({
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "cycle_number": cycles_run + 1,
+                "status": "running",
+                "actions_taken": format!("Starting cycle #{}", cycles_run + 1),
+            });
+            let _ = std::fs::write(
+                health_dir.join("daemon_health.json"),
+                serde_json::to_string_pretty(&heartbeat).unwrap_or_default(),
+            );
+        }
+
         match run_ooda_cycle(&mut state, &mut bridges, &config) {
             Ok(report) => {
                 let cycle_elapsed = cycle_start.elapsed();
