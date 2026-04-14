@@ -11,6 +11,8 @@ use crate::error::{SimardError, SimardResult};
 use crate::meeting_backend::{MeetingBackend, MeetingCommand, parse_command};
 use crate::meeting_facilitator::MeetingSession;
 
+use super::spinner::Spinner;
+
 const PROMPT: &str = "simard:meeting> ";
 
 /// Run the interactive meeting REPL.
@@ -99,16 +101,16 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                          Please follow this agenda:\n{}",
                         tmpl.name, tmpl.agenda
                     );
-                    eprint!("  ⏳ Applying template...");
+                    let spinner = Spinner::after_default_delay("Applying template...");
                     match backend.send_message(&ctx) {
                         Ok(resp) => {
-                            eprint!("\r\x1b[K");
+                            spinner.stop();
                             if !resp.content.is_empty() {
                                 writeln!(output, "{}\n", resp.content).ok();
                             }
                         }
                         Err(e) => {
-                            eprint!("\r\x1b[K");
+                            spinner.stop();
                             writeln!(output, "[agent error: {e}]").ok();
                         }
                     }
@@ -119,41 +121,41 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
             }
             MeetingCommand::Export => {
                 use crate::meeting_backend::persist::write_markdown_export;
-                eprint!("  ⏳ Exporting...");
+                let spinner = Spinner::after_default_delay("Exporting...");
                 match write_markdown_export(
                     backend.topic(),
                     backend.started_at(),
                     backend.history(),
                 ) {
                     Ok(path) => {
-                        eprint!("\r\x1b[K");
+                        spinner.stop();
                         writeln!(output, "Meeting exported to: {}", path.display()).ok();
                     }
                     Err(e) => {
-                        eprint!("\r\x1b[K");
+                        spinner.stop();
                         writeln!(output, "[export error: {e}]").ok();
                     }
                 }
             }
             MeetingCommand::Close => {
                 writeln!(output, "Closing meeting...").ok();
-                eprint!("  Generating summary (timeout: 90s)...");
+                // Spinner for the close/summary will be handled below.
                 break;
             }
             MeetingCommand::Conversation(text) => {
                 if text.is_empty() {
                     continue;
                 }
-                eprint!("  ⏳ Thinking...");
+                let spinner = Spinner::after_default_delay("Thinking...");
                 match backend.send_message(&text) {
                     Ok(resp) => {
-                        eprint!("\r\x1b[K"); // clear thinking indicator
+                        spinner.stop();
                         if !resp.content.is_empty() {
                             writeln!(output, "\n{}\n", resp.content).ok();
                         }
                     }
                     Err(e) => {
-                        eprint!("\r\x1b[K");
+                        spinner.stop();
                         writeln!(output, "[agent error: {e}]").ok();
                     }
                 }
@@ -162,9 +164,10 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
     }
 
     // Close the backend (summarize, persist, memory)
+    let spinner = Spinner::after_default_delay("Generating summary...");
     match backend.close() {
         Ok(summary) => {
-            eprint!("\r\x1b[K");
+            spinner.stop();
             writeln!(output, "\n── Meeting Summary ──").ok();
             writeln!(output, "{}", summary.summary_text).ok();
             writeln!(
@@ -178,7 +181,7 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
             }
         }
         Err(e) => {
-            eprint!("\r\x1b[K");
+            // spinner dropped here, which also cleans up
             writeln!(output, "[warn] Failed to close meeting cleanly: {e}").ok();
         }
     }
