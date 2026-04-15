@@ -1519,7 +1519,6 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
   </header>
   <div class="tabs">
     <div class="tab active" data-tab="overview">Overview</div>
-    <div class="tab" data-tab="distributed">Distributed</div>
     <div class="tab" data-tab="goals">Goals</div>
     <div class="tab" data-tab="traces">Traces</div>
     <div class="tab" data-tab="logs">Logs</div>
@@ -1533,11 +1532,6 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
     <div class="grid">
       <div class="card"><h2>System Status</h2><div id="status"><span class="loading">Loading…</span></div></div>
       <div class="card"><h2>Open Issues</h2><ul id="issues-list"><li class="loading">Loading…</li></ul></div>
-    </div>
-  </div>
-
-  <div class="tab-content" id="tab-distributed">
-    <div class="grid">
       <div class="card">
         <h2>Cluster Topology <button class="btn" onclick="fetchDistributed()">Refresh</button></h2>
         <div id="cluster-topology"><span class="loading">Loading…</span></div>
@@ -1706,7 +1700,7 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
         if(tab.dataset.tab==='logs') {fetchLogs();tabRefreshTimers.logs=setInterval(fetchLogs,15000);}
         if(tab.dataset.tab==='processes') {fetchProcesses();tabRefreshTimers.proc=setInterval(fetchProcesses,10000);}
         if(tab.dataset.tab==='memory') fetchMemory();
-        if(tab.dataset.tab==='distributed') fetchDistributed();
+
         if(tab.dataset.tab==='goals') fetchGoals();
         if(tab.dataset.tab==='costs') fetchCosts();
         if(tab.dataset.tab==='traces') fetchTraces();
@@ -2105,7 +2099,7 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
     });
 
     /* --- Init --- */
-    fetchStatus(); fetchIssues();
+    fetchStatus(); fetchIssues(); fetchDistributed();
     setInterval(fetchStatus,30000);
     setInterval(fetchIssues,120000);
   </script>
@@ -2173,9 +2167,8 @@ mod tests {
     }
 
     #[test]
-    fn index_html_contains_distributed_tab() {
-        assert!(INDEX_HTML.contains("data-tab=\"distributed\""));
-        assert!(INDEX_HTML.contains("Distributed"));
+    fn index_html_contains_cluster_topology_in_overview() {
+        assert!(!INDEX_HTML.contains("data-tab=\"distributed\""));
         assert!(INDEX_HTML.contains("fetchDistributed"));
         assert!(INDEX_HTML.contains("Cluster Topology"));
         assert!(INDEX_HTML.contains("Remote VMs"));
