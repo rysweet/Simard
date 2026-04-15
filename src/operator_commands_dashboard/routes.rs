@@ -11,6 +11,8 @@ use crate::agent_registry::{AgentRegistry, FileBackedAgentRegistry};
 use crate::build_lock::BuildLock;
 use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::error::{SimardError, SimardResult};
+use crate::goal_curation::GoalBoard;
+use crate::goals::GoalRecord;
 
 pub fn build_router() -> Router {
     Router::new()
@@ -244,17 +246,55 @@ async fn goals() -> Json<Value> {
     let goal_path = state_root.join("goal_records.json");
     let content = std::fs::read_to_string(&goal_path).unwrap_or_default();
 
-    let (active, mut backlog) = match serde_json::from_str::<Value>(&content) {
-        Ok(val) if val.is_object() => {
-            let a = val.get("active").cloned().unwrap_or(json!([]));
-            let b = val.get("backlog").cloned().unwrap_or(json!([]));
-            (
-                a.as_array().cloned().unwrap_or_default(),
-                b.as_array().cloned().unwrap_or_default(),
-            )
+    let (active, mut backlog) = match serde_json::from_str::<GoalBoard>(&content) {
+        // GoalBoard from OODA loop — already has the right schema.
+        Ok(board) => {
+            let a: Vec<Value> = board
+                .active
+                .into_iter()
+                .map(|g| {
+                    json!({
+                        "id": g.id,
+                        "description": g.description,
+                        "priority": g.priority,
+                        "status": g.status.to_string(),
+                        "assigned_to": g.assigned_to,
+                    })
+                })
+                .collect();
+            let b: Vec<Value> = board
+                .backlog
+                .into_iter()
+                .map(|g| {
+                    json!({
+                        "id": g.id,
+                        "description": g.description,
+                        "source": g.source,
+                        "score": g.score,
+                    })
+                })
+                .collect();
+            (a, b)
         }
-        Ok(val) if val.is_array() => (val.as_array().cloned().unwrap_or_default(), vec![]),
-        _ => (vec![], vec![]),
+        Err(_) => match serde_json::from_str::<Vec<GoalRecord>>(&content) {
+            // Flat array of GoalRecord from FileBackedGoalStore — map fields.
+            Ok(records) => {
+                let mapped: Vec<Value> = records
+                    .into_iter()
+                    .map(|r| {
+                        json!({
+                            "id": r.slug,
+                            "description": r.title,
+                            "priority": r.priority,
+                            "status": r.status.to_string(),
+                            "assigned_to": r.owner_identity,
+                        })
+                    })
+                    .collect();
+                (mapped, vec![])
+            }
+            Err(_) => (vec![], vec![]),
+        },
     };
 
     // Pull meeting-captured actions and decisions from cognitive memory (#415)
