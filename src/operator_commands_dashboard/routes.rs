@@ -1231,10 +1231,13 @@ async fn memory_metrics() -> Json<Value> {
     let evidence_count = count_json_records(&evidence_path);
     let goal_count = count_json_records(&goal_path);
 
-    // Query NativeCognitiveMemory (LadybugDB) for live statistics (#419)
-    let native_stats = NativeCognitiveMemory::open(&state_root)
-        .and_then(|mem| mem.get_statistics())
-        .ok();
+    // Query NativeCognitiveMemory (LadybugDB) for live statistics (#419).
+    // Capture the error so the dashboard can show *why* data is missing
+    // instead of silently returning zeros.
+    let native_result =
+        NativeCognitiveMemory::open(&state_root).and_then(|mem| mem.get_statistics());
+    let native_error = native_result.as_ref().err().map(|e| e.to_string());
+    let native_stats = native_result.ok();
 
     let last_consolidation = [&memory_path, &evidence_path, &goal_path]
         .iter()
@@ -1251,6 +1254,8 @@ async fn memory_metrics() -> Json<Value> {
         .as_ref()
         .map(|s| s.total())
         .unwrap_or(fact_count + evidence_count + goal_count);
+
+    let db_path = state_root.join("cognitive_memory.ladybug");
 
     Json(json!({
         "state_root": state_root.to_string_lossy(),
@@ -1286,6 +1291,9 @@ async fn memory_metrics() -> Json<Value> {
             "prospective": s.prospective_count,
             "total": s.total(),
         })),
+        "native_memory_error": native_error,
+        "native_memory_db_path": db_path.to_string_lossy(),
+        "native_memory_db_exists": db_path.exists(),
         "total_facts": total,
         "last_consolidation": last_consolidation,
         "timestamp": chrono::Utc::now().to_rfc3339(),
