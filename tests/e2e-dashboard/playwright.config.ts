@@ -34,8 +34,8 @@ export default defineConfig({
   ],
   webServer: {
     command: process.env.SIMARD_BIN
-      ? `${process.env.SIMARD_BIN} dashboard --port ${PORT}`
-      : `cargo run --release -- dashboard --port ${PORT}`,
+      ? `${process.env.SIMARD_BIN} dashboard serve --port=${PORT}`
+      : `cargo run --release -- dashboard serve --port=${PORT}`,
     url: `http://localhost:${PORT}/login`,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
