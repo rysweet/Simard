@@ -14,6 +14,25 @@ use crate::session_builder::SessionBuilder;
 
 use super::persistence::{persist_cycle_report, persist_cycle_to_memory};
 
+/// Append a timestamped log line to `{state_root}/ooda.log` **and** stderr.
+///
+/// The dashboard `/api/logs` endpoint already looks for `ooda.log` inside the
+/// state root, so writing here makes daemon output visible in the Logs tab
+/// without requiring systemd or manual redirection.  Failures to write are
+/// silently ignored — stderr is the primary output channel.
+fn daemon_log(state_root: &std::path::Path, msg: &str) {
+    let line = format!("{} {msg}", chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),);
+    eprintln!("{msg}");
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(state_root.join("ooda.log"))
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 /// Return the mtime of the currently-running executable, or `None` if it
 /// cannot be determined (e.g. the binary was deleted after launch).
 fn exe_mtime() -> Option<SystemTime> {
@@ -146,7 +165,10 @@ pub fn run_ooda_daemon(
         .adapter_tag("ooda")
         .open()
         .map_err(|e| format!("OODA daemon requires LLM session but open() failed: {e}"))?;
-    eprintln!("[simard] OODA daemon: LLM session opened for autonomous work");
+    daemon_log(
+        &state_root,
+        "[simard] OODA daemon: LLM session opened for autonomous work",
+    );
 
     let mut bridges = OodaBridges {
         memory,
@@ -164,7 +186,10 @@ pub fn run_ooda_daemon(
         .and_then(|v| v.parse().ok())
         .unwrap_or(300);
 
-    eprintln!("[simard] OODA daemon: cycle interval = {interval_secs}s");
+    daemon_log(
+        &state_root,
+        &format!("[simard] OODA daemon: cycle interval = {interval_secs}s"),
+    );
 
     // --- embedded dashboard ------------------------------------------------
     // Spawn the dashboard as a background tokio task so both OODA loop and
@@ -195,7 +220,10 @@ pub fn run_ooda_daemon(
     } else {
         _dashboard_rt = None;
         _dashboard_handle = None;
-        eprintln!("[simard] OODA daemon: dashboard disabled (use --no-dashboard to suppress)");
+        daemon_log(
+            &state_root,
+            "[simard] OODA daemon: dashboard disabled (use --no-dashboard to suppress)",
+        );
     }
     // -----------------------------------------------------------------------
 
@@ -203,7 +231,7 @@ pub fn run_ooda_daemon(
     let start_time = exe_mtime().unwrap_or_else(SystemTime::now);
 
     if auto_reload {
-        eprintln!("[simard] OODA daemon: auto-reload enabled");
+        daemon_log(&state_root, "[simard] OODA daemon: auto-reload enabled");
     }
 
     let mut cycles_run = 0u32;
@@ -211,7 +239,10 @@ pub fn run_ooda_daemon(
     loop {
         // Check for shutdown signal at the top of each iteration.
         if shutdown.load(Ordering::SeqCst) {
-            eprintln!("[simard] OODA daemon: shutting down gracefully");
+            daemon_log(
+                &state_root,
+                "[simard] OODA daemon: shutting down gracefully",
+            );
             break;
         }
 
@@ -227,7 +258,10 @@ pub fn run_ooda_daemon(
         }
 
         if max_cycles > 0 && cycles_run >= max_cycles {
-            eprintln!("[simard] OODA daemon: completed {cycles_run} cycle(s), exiting");
+            daemon_log(
+                &state_root,
+                &format!("[simard] OODA daemon: completed {cycles_run} cycle(s), exiting"),
+            );
             break;
         }
 
@@ -256,7 +290,7 @@ pub fn run_ooda_daemon(
             Ok(report) => {
                 let cycle_elapsed = cycle_start.elapsed();
                 let summary = summarize_cycle_report(&report);
-                eprintln!("[simard] {summary}");
+                daemon_log(&state_root, &format!("[simard] {summary}"));
                 // Persist the cycle report to filesystem for auditability.
                 persist_cycle_report(&state_root, &report);
                 // Persist the cycle summary to cognitive memory as an episode.
@@ -287,7 +321,7 @@ pub fn run_ooda_daemon(
                 }
             }
             Err(e) => {
-                eprintln!("[simard] OODA cycle error: {e}");
+                daemon_log(&state_root, &format!("[simard] OODA cycle error: {e}"));
             }
         }
 

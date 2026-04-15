@@ -1025,9 +1025,39 @@ async fn logs() -> Json<Value> {
         read_tail(&ledger.to_string_lossy(), 50).unwrap_or_default()
     };
 
+    // Collect recent terminal session transcripts from /tmp (#414)
+    let mut terminal_transcripts: Vec<Value> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
+        let mut files: Vec<_> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("simard-terminal-shell-")
+            })
+            .collect();
+        files.sort_by_key(|e| std::cmp::Reverse(e.path()));
+        for entry in files.into_iter().take(10) {
+            let path = entry.path();
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let preview = read_tail(&path.to_string_lossy(), 20).unwrap_or_default();
+            terminal_transcripts.push(json!({
+                "name": name,
+                "size_bytes": size,
+                "preview_lines": preview,
+            }));
+        }
+    }
+
     Json(json!({
         "daemon_log_lines": combined_log,
         "ooda_transcripts": transcripts,
+        "terminal_transcripts": terminal_transcripts,
         "cost_log_lines": cost_log,
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
@@ -1529,6 +1559,8 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
     </div>
     <h2 style="color:var(--accent);font-size:1rem;margin-bottom:.5rem">OODA Transcripts</h2>
     <div id="ooda-transcripts"><span class="loading">Loading…</span></div>
+    <h2 style="color:var(--accent);font-size:1rem;margin:.75rem 0 .5rem">Terminal Session Transcripts</h2>
+    <div id="terminal-transcripts"><span class="loading">Loading…</span></div>
   </div>
 
   <div class="tab-content" id="tab-processes">
@@ -1691,6 +1723,14 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
               <div class="log-box" style="max-height:200px">${esc((t.preview_lines||[]).join('\n'))||'(empty)'}</div>
             </div>`).join('');
         }else{tEl.innerHTML='<span style="color:#8b949e">No OODA transcripts found in state root. Run the OODA daemon to generate transcripts.</span>';}
+        const ttEl=document.getElementById('terminal-transcripts');
+        if(d.terminal_transcripts?.length){
+          ttEl.innerHTML=d.terminal_transcripts.map(t=>`
+            <div class="transcript-item">
+              <h3>${esc(t.name)} <span class="badge">${fmtB(t.size_bytes)}</span></h3>
+              <div class="log-box" style="max-height:200px">${esc((t.preview_lines||[]).join('\n'))||'(empty)'}</div>
+            </div>`).join('');
+        }else{ttEl.innerHTML='<span style="color:#8b949e">No terminal session transcripts found.</span>';}
         const costEl=document.getElementById('cost-log-box');
         if(d.cost_log_lines?.length){
           costEl.textContent=d.cost_log_lines.join('\n');
