@@ -5,6 +5,7 @@
 //! REPL and dashboard WebSocket are thin adapters around this struct.
 
 pub mod command;
+pub mod lightweight;
 pub mod persist;
 pub mod types;
 

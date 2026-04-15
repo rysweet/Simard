@@ -797,7 +797,19 @@ fn load_dashboard_meeting_prompt() -> SimardResult<String> {
     })
 }
 
-/// Open an agent session for the dashboard chat, using the same infrastructure
+/// Open a lightweight chat session that bypasses PTY/amplihack overhead (#568).
+/// Falls back to None if the lightweight backend is unavailable.
+fn open_lightweight_chat_session() -> Option<Box<dyn crate::base_types::BaseTypeSession>> {
+    match crate::meeting_backend::lightweight::LightweightChatSession::new() {
+        Ok(s) => Some(Box::new(s)),
+        Err(e) => {
+            eprintln!("[simard] lightweight chat unavailable, will fall back: {e}");
+            None
+        }
+    }
+}
+
+/// Open a full agent session for the dashboard chat, using the same infrastructure
 /// as the meeting REPL.  Returns the session or logs the error and returns `None`.
 fn open_dashboard_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeSession>> {
     match crate::session_builder::SessionBuilder::new(crate::identity::OperatingMode::Meeting)
@@ -821,22 +833,34 @@ async fn ws_chat_handler(ws: WebSocketUpgrade) -> response::Response {
 async fn handle_ws_chat(mut socket: WebSocket) {
     use crate::meeting_backend::{MeetingBackend, MeetingCommand, parse_command};
 
-    // Open agent session in a blocking context (session builder does synchronous I/O).
+    // Prefer the lightweight session for fast chat (~5s vs ~80s per turn).
+    // Falls back to the full agent session for complex operations.
+    let lightweight_session: Option<Box<dyn crate::base_types::BaseTypeSession>> =
+        tokio::task::spawn_blocking(open_lightweight_chat_session)
+            .await
+            .ok()
+            .flatten();
+
     let agent_session: Option<Box<dyn crate::base_types::BaseTypeSession>> =
         tokio::task::spawn_blocking(open_dashboard_agent_session)
             .await
             .ok()
             .flatten();
 
-    let Some(agent) = agent_session else {
-        let _ = socket
-            .send(Message::Text(
-                json!({"role":"system","content":"No agent backend available. Check SIMARD_LLM_PROVIDER and auth config."})
-                    .to_string()
-                    .into(),
-            ))
-            .await;
-        return;
+    // Use lightweight if available, otherwise fall back to full agent.
+    let agent = match (lightweight_session, agent_session) {
+        (Some(light), _) => light,
+        (None, Some(full)) => full,
+        (None, None) => {
+            let _ = socket
+                .send(Message::Text(
+                    json!({"role":"system","content":"No agent backend available. Check SIMARD_LLM_PROVIDER and auth config."})
+                        .to_string()
+                        .into(),
+                ))
+                .await;
+            return;
+        }
     };
 
     let system_prompt = match load_dashboard_meeting_prompt() {
