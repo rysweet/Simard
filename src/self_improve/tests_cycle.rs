@@ -928,3 +928,160 @@ fn serde_round_trip_cycle_history() {
     let vel_diff = (deserialized.overall_velocity() - h.overall_velocity()).abs();
     assert!(vel_diff < 1e-9);
 }
+
+// ---- CycleHistory::last_committed ----
+
+#[test]
+fn last_committed_empty_history_returns_none() {
+    let h = CycleHistory::new();
+    assert!(h.last_committed().is_none());
+}
+
+#[test]
+fn last_committed_returns_most_recent_commit() {
+    let mut h = CycleHistory::new();
+    h.push(make_cycle_with_net(0.50, 0.60, true)); // commit, net +0.10
+    h.push(make_cycle_with_net(0.60, 0.67, true)); // commit, net +0.07
+    h.push(make_cycle_with_net(0.67, 0.68, false)); // revert
+    let last = h.last_committed().expect("should find a committed cycle");
+    // The most recent committed cycle has baseline 0.60 -> post 0.67
+    let net = match &last.decision {
+        Some(ImprovementDecision::Commit { net_improvement }) => *net_improvement,
+        _ => panic!("expected commit"),
+    };
+    assert!((net - 0.07).abs() < 1e-9, "expected net +0.07, got {net}");
+}
+
+#[test]
+fn last_committed_none_when_all_reverted() {
+    let mut h = CycleHistory::new();
+    h.push(make_cycle_with_net(0.60, 0.61, false));
+    h.push(make_cycle_with_net(0.61, 0.62, false));
+    assert!(h.last_committed().is_none());
+}
+
+// ---- CycleHistory::commit_rate ----
+
+#[test]
+fn commit_rate_empty_history_is_zero() {
+    let h = CycleHistory::new();
+    assert!((h.commit_rate() - 0.0).abs() < 1e-9);
+}
+
+#[test]
+fn commit_rate_all_committed() {
+    let mut h = CycleHistory::new();
+    h.push(make_cycle_with_net(0.50, 0.60, true));
+    h.push(make_cycle_with_net(0.60, 0.65, true));
+    assert!((h.commit_rate() - 1.0).abs() < 1e-9);
+}
+
+#[test]
+fn commit_rate_none_committed() {
+    let mut h = CycleHistory::new();
+    h.push(make_cycle_with_net(0.60, 0.61, false));
+    h.push(make_cycle_with_net(0.61, 0.62, false));
+    assert!((h.commit_rate() - 0.0).abs() < 1e-9);
+}
+
+#[test]
+fn commit_rate_partial() {
+    let mut h = CycleHistory::new();
+    h.push(make_cycle_with_net(0.50, 0.60, true)); // commit
+    h.push(make_cycle_with_net(0.60, 0.61, false)); // revert
+    h.push(make_cycle_with_net(0.61, 0.65, true)); // commit
+    h.push(make_cycle_with_net(0.65, 0.66, false)); // revert
+    // 2 of 4 committed
+    assert!((h.commit_rate() - 0.5).abs() < 1e-9);
+}
+
+// ---- CycleHistory::best_cycle ----
+
+#[test]
+fn best_cycle_empty_history_returns_none() {
+    let h = CycleHistory::new();
+    assert!(h.best_cycle().is_none());
+}
+
+#[test]
+fn best_cycle_returns_highest_net_improvement() {
+    let mut h = CycleHistory::new();
+    h.push(make_cycle_with_net(0.50, 0.55, true)); // +0.05
+    h.push(make_cycle_with_net(0.55, 0.65, true)); // +0.10 (best)
+    h.push(make_cycle_with_net(0.65, 0.68, true)); // +0.03
+    let best = h.best_cycle().expect("should have a best cycle");
+    let net = match &best.decision {
+        Some(ImprovementDecision::Commit { net_improvement }) => *net_improvement,
+        _ => panic!("expected commit"),
+    };
+    assert!(
+        (net - 0.10).abs() < 1e-9,
+        "expected best net +0.10, got {net}"
+    );
+}
+
+#[test]
+fn best_cycle_ignores_reverts() {
+    let mut h = CycleHistory::new();
+    h.push(make_cycle_with_net(0.50, 0.80, false)); // large apparent gain but reverted
+    h.push(make_cycle_with_net(0.50, 0.53, true)); // small commit — only committed
+    let best = h.best_cycle().expect("should find committed cycle");
+    let net = match &best.decision {
+        Some(ImprovementDecision::Commit { net_improvement }) => *net_improvement,
+        _ => panic!("expected commit"),
+    };
+    assert!((net - 0.03).abs() < 1e-9);
+}
+
+#[test]
+fn best_cycle_none_when_all_reverted() {
+    let mut h = CycleHistory::new();
+    h.push(make_cycle_with_net(0.60, 0.70, false));
+    assert!(h.best_cycle().is_none());
+}
+
+// ---- ImprovementConfig::validate — upper-bound checks ----
+
+#[test]
+fn validate_min_net_improvement_above_one_rejected() {
+    let cfg = ImprovementConfig {
+        min_net_improvement: 1.01,
+        ..Default::default()
+    };
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        format!("{err:?}").contains("min_net_improvement"),
+        "error should mention field: {err:?}"
+    );
+}
+
+#[test]
+fn validate_max_single_regression_above_one_rejected() {
+    let cfg = ImprovementConfig {
+        max_single_regression: 1.5,
+        ..Default::default()
+    };
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        format!("{err:?}").contains("max_single_regression"),
+        "error should mention field: {err:?}"
+    );
+}
+
+#[test]
+fn validate_min_net_improvement_exactly_one_accepted() {
+    let cfg = ImprovementConfig {
+        min_net_improvement: 1.0,
+        ..Default::default()
+    };
+    assert!(cfg.validate().is_ok(), "1.0 is a valid fraction");
+}
+
+#[test]
+fn validate_max_single_regression_exactly_one_accepted() {
+    let cfg = ImprovementConfig {
+        max_single_regression: 1.0,
+        ..Default::default()
+    };
+    assert!(cfg.validate().is_ok(), "1.0 is a valid fraction");
+}

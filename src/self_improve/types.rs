@@ -129,20 +129,20 @@ impl ImprovementConfig {
                 ),
             });
         }
-        if self.min_net_improvement < 0.0 {
+        if !(0.0..=1.0).contains(&self.min_net_improvement) {
             return Err(crate::error::SimardError::InvalidImprovementRecord {
                 field: "min_net_improvement".into(),
                 reason: format!(
-                    "min_net_improvement must be >= 0.0, got {}",
+                    "min_net_improvement must be in 0.0..=1.0, got {}",
                     self.min_net_improvement
                 ),
             });
         }
-        if self.max_single_regression < 0.0 {
+        if !(0.0..=1.0).contains(&self.max_single_regression) {
             return Err(crate::error::SimardError::InvalidImprovementRecord {
                 field: "max_single_regression".into(),
                 reason: format!(
-                    "max_single_regression must be >= 0.0, got {}",
+                    "max_single_regression must be in 0.0..=1.0, got {}",
                     self.max_single_regression
                 ),
             });
@@ -374,6 +374,47 @@ impl CycleHistory {
         }
         let tail = &gains[gains.len() - window..];
         tail.windows(2).all(|pair| pair[1] < pair[0])
+    }
+
+    /// Returns a reference to the most recently committed cycle, or `None` if
+    /// no cycle has been committed yet.
+    pub fn last_committed(&self) -> Option<&ImprovementCycle> {
+        self.cycles
+            .iter()
+            .rev()
+            .find(|c| matches!(c.decision, Some(ImprovementDecision::Commit { .. })))
+    }
+
+    /// Fraction of cycles that resulted in a commit.
+    ///
+    /// Returns `0.0` when the history is empty.
+    pub fn commit_rate(&self) -> f64 {
+        if self.cycles.is_empty() {
+            return 0.0;
+        }
+        let committed = self
+            .cycles
+            .iter()
+            .filter(|c| matches!(c.decision, Some(ImprovementDecision::Commit { .. })))
+            .count();
+        committed as f64 / self.cycles.len() as f64
+    }
+
+    /// Returns a reference to the committed cycle with the highest `net_improvement`.
+    ///
+    /// Returns `None` when no committed cycles exist.
+    pub fn best_cycle(&self) -> Option<&ImprovementCycle> {
+        self.cycles
+            .iter()
+            .filter_map(|c| {
+                if let Some(ImprovementDecision::Commit { net_improvement }) = &c.decision {
+                    Some((c, *net_improvement))
+                } else {
+                    None
+                }
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(c, _)| c)
     }
 
     /// Evaluate the convergence status of this history.
