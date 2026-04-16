@@ -29,6 +29,12 @@ fn benchmark_class_display_all_variants() {
     );
     assert_eq!(BenchmarkClass::SecurityAudit.to_string(), "security-audit");
     assert_eq!(BenchmarkClass::ApiDesign.to_string(), "api-design");
+    assert_eq!(BenchmarkClass::CodeReview.to_string(), "code-review");
+    assert_eq!(BenchmarkClass::Debugging.to_string(), "debugging");
+    assert_eq!(
+        BenchmarkClass::ConfigManagement.to_string(),
+        "config-management"
+    );
 }
 
 #[test]
@@ -66,6 +72,12 @@ fn benchmark_class_serializes_to_kebab_case() {
     assert!(json.contains("security-audit"));
     let json = serde_json::to_string(&BenchmarkClass::ApiDesign).unwrap();
     assert!(json.contains("api-design"));
+    let json = serde_json::to_string(&BenchmarkClass::CodeReview).unwrap();
+    assert!(json.contains("code-review"));
+    let json = serde_json::to_string(&BenchmarkClass::Debugging).unwrap();
+    assert!(json.contains("debugging"));
+    let json = serde_json::to_string(&BenchmarkClass::ConfigManagement).unwrap();
+    assert!(json.contains("config-management"));
 }
 
 #[test]

@@ -19,6 +19,9 @@ pub enum BenchmarkClass {
     PerformanceAnalysis,
     SecurityAudit,
     ApiDesign,
+    CodeReview,
+    Debugging,
+    ConfigManagement,
 }
 
 impl Display for BenchmarkClass {
@@ -36,6 +39,9 @@ impl Display for BenchmarkClass {
             Self::PerformanceAnalysis => "performance-analysis",
             Self::SecurityAudit => "security-audit",
             Self::ApiDesign => "api-design",
+            Self::CodeReview => "code-review",
+            Self::Debugging => "debugging",
+            Self::ConfigManagement => "config-management",
         };
         f.write_str(label)
     }
@@ -237,6 +243,12 @@ mod tests {
         );
         assert_eq!(BenchmarkClass::SecurityAudit.to_string(), "security-audit");
         assert_eq!(BenchmarkClass::ApiDesign.to_string(), "api-design");
+        assert_eq!(BenchmarkClass::CodeReview.to_string(), "code-review");
+        assert_eq!(BenchmarkClass::Debugging.to_string(), "debugging");
+        assert_eq!(
+            BenchmarkClass::ConfigManagement.to_string(),
+            "config-management"
+        );
     }
 
     #[test]
@@ -258,6 +270,12 @@ mod tests {
         assert_eq!(json, r##""repo-exploration""##);
         let json = serde_json::to_string(&BenchmarkClass::SafeCodeChange).unwrap();
         assert_eq!(json, r##""safe-code-change""##);
+        let json = serde_json::to_string(&BenchmarkClass::CodeReview).unwrap();
+        assert_eq!(json, r##""code-review""##);
+        let json = serde_json::to_string(&BenchmarkClass::Debugging).unwrap();
+        assert_eq!(json, r##""debugging""##);
+        let json = serde_json::to_string(&BenchmarkClass::ConfigManagement).unwrap();
+        assert_eq!(json, r##""config-management""##);
     }
 
     #[test]
