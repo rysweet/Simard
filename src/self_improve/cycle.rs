@@ -185,7 +185,15 @@ pub fn summarize_cycle(cycle: &ImprovementCycle) -> String {
     let mut lines = Vec::new();
 
     if let Some(ref dim) = cycle.target_dimension {
-        lines.push(format!("Target dimension: {dim}"));
+        if let Some(delta) = cycle.target_dimension_delta() {
+            lines.push(format!(
+                "Target dimension: {dim} ({}{:.1}%)",
+                if delta >= 0.0 { "+" } else { "" },
+                delta * 100.0,
+            ));
+        } else {
+            lines.push(format!("Target dimension: {dim}"));
+        }
     }
 
     if !cycle.plateau_dimensions.is_empty() {

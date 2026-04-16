@@ -73,7 +73,7 @@ pub enum ImprovementDecision {
 }
 
 /// Configuration for an improvement cycle.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ImprovementConfig {
     /// The gym suite to evaluate against.
     pub suite_id: String,
@@ -224,6 +224,27 @@ impl ImprovementCycle {
         );
     }
 
+    /// Returns the delta for the targeted dimension, if one was set and a
+    /// post-score exists.
+    ///
+    /// Positive values indicate improvement; negative values indicate regression.
+    pub fn target_dimension_delta(&self) -> Option<f64> {
+        let target = self.target_dimension.as_deref()?;
+        let post = self.post_score.as_ref()?;
+        let baseline_val = super::prioritization::dimension_value(&self.baseline, target);
+        let post_val = super::prioritization::dimension_value(post, target);
+        Some(post_val - baseline_val)
+    }
+
+    /// Returns `true` when the targeted dimension strictly improved.
+    ///
+    /// Returns `false` if no target was set, no post-score exists, or the
+    /// dimension stayed flat / regressed.
+    pub fn target_dimension_improved(&self) -> bool {
+        self.target_dimension_delta()
+            .map_or(false, |delta| delta > 0.0)
+    }
+
     /// Compute per-dimension deltas between baseline and post-change scores.
     ///
     /// Returns a vec of `(dimension_name, delta)` pairs sorted by delta
@@ -249,6 +270,136 @@ impl ImprovementCycle {
 impl std::fmt::Display for ImprovementCycle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&super::cycle::summarize_cycle(self))
+    }
+}
+
+/// The convergence status of a multi-cycle improvement run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ConvergenceStatus {
+    /// Overall scores are still improving meaningfully.
+    Improving,
+    /// Scores are flat — changes produce negligible movement.
+    Plateau,
+    /// Each successive cycle yields a smaller improvement than the last.
+    DiminishingReturns,
+    /// Overall scores are getting worse.
+    Diverging,
+}
+
+impl std::fmt::Display for ConvergenceStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            Self::Improving => "improving",
+            Self::Plateau => "plateau",
+            Self::DiminishingReturns => "diminishing-returns",
+            Self::Diverging => "diverging",
+        };
+        f.write_str(label)
+    }
+}
+
+/// Aggregates a sequence of [`ImprovementCycle`] records for multi-cycle analysis.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CycleHistory {
+    /// Cycles in chronological order (oldest first).
+    pub cycles: Vec<ImprovementCycle>,
+}
+
+impl CycleHistory {
+    /// Create a new empty history.
+    pub fn new() -> Self {
+        Self { cycles: Vec::new() }
+    }
+
+    /// Push a completed cycle.
+    pub fn push(&mut self, cycle: ImprovementCycle) {
+        self.cycles.push(cycle);
+    }
+
+    /// Number of recorded cycles.
+    pub fn len(&self) -> usize {
+        self.cycles.len()
+    }
+
+    /// Returns `true` when no cycles have been recorded.
+    pub fn is_empty(&self) -> bool {
+        self.cycles.is_empty()
+    }
+
+    /// Overall-score velocity: rate of change per cycle.
+    ///
+    /// Computed as `(last_overall - first_overall) / (n - 1)`. Returns `0.0`
+    /// when fewer than 2 cycles exist.
+    pub fn overall_velocity(&self) -> f64 {
+        if self.cycles.len() < 2 {
+            return 0.0;
+        }
+        let first = self.cycles[0].baseline.overall;
+        let last = self.cycles.last().map_or(first, |c| {
+            c.post_score
+                .as_ref()
+                .map_or(c.baseline.overall, |p| p.overall)
+        });
+        let intervals = (self.cycles.len() - 1) as f64;
+        let vel = (last - first) / intervals;
+        if vel.is_finite() { vel } else { 0.0 }
+    }
+
+    /// Returns `true` when overall velocity is positive and exceeds `epsilon`.
+    pub fn is_converging(&self, epsilon: f64) -> bool {
+        self.overall_velocity() > epsilon
+    }
+
+    /// Returns `true` when the last `window` committed improvements each yield
+    /// a smaller net gain than their predecessor.
+    ///
+    /// Requires at least `window` committed cycles. Returns `false` otherwise.
+    pub fn diminishing_returns(&self, window: usize) -> bool {
+        if window < 2 {
+            return false;
+        }
+        let gains: Vec<f64> = self
+            .cycles
+            .iter()
+            .filter_map(|c| {
+                if let Some(ImprovementDecision::Commit { net_improvement }) = &c.decision {
+                    Some(*net_improvement)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if gains.len() < window {
+            return false;
+        }
+        let tail = &gains[gains.len() - window..];
+        tail.windows(2).all(|pair| pair[1] < pair[0])
+    }
+
+    /// Evaluate the convergence status of this history.
+    ///
+    /// - `epsilon`: minimum velocity to count as "improving" (e.g. 0.005).
+    /// - `diminishing_window`: how many recent committed cycles to check for
+    ///   diminishing returns (e.g. 3).
+    pub fn evaluate_convergence(
+        &self,
+        epsilon: f64,
+        diminishing_window: usize,
+    ) -> ConvergenceStatus {
+        if self.cycles.len() < 2 {
+            return ConvergenceStatus::Improving;
+        }
+        let vel = self.overall_velocity();
+        if vel < -epsilon {
+            return ConvergenceStatus::Diverging;
+        }
+        if self.diminishing_returns(diminishing_window) {
+            return ConvergenceStatus::DiminishingReturns;
+        }
+        if vel.abs() <= epsilon {
+            return ConvergenceStatus::Plateau;
+        }
+        ConvergenceStatus::Improving
     }
 }
 
@@ -683,5 +834,97 @@ mod tests {
         };
         let deltas = cycle.dimension_deltas();
         assert_eq!(deltas.len(), 5);
+    }
+
+    #[test]
+    fn target_dimension_delta_returns_none_without_target() {
+        let cycle = ImprovementCycle {
+            baseline: make_score(0.5),
+            proposed_changes: Vec::new(),
+            post_score: Some(make_score(0.6)),
+            regressions: Vec::new(),
+            decision: None,
+            final_phase: ImprovementPhase::Decide,
+            weak_dimensions: Vec::new(),
+            weak_dimension_details: Vec::new(),
+            target_dimension: None,
+            plateau_dimensions: Vec::new(),
+        };
+        assert!(cycle.target_dimension_delta().is_none());
+        assert!(!cycle.target_dimension_improved());
+    }
+
+    #[test]
+    fn target_dimension_delta_returns_none_without_post_score() {
+        let cycle = ImprovementCycle {
+            baseline: make_score(0.5),
+            proposed_changes: Vec::new(),
+            post_score: None,
+            regressions: Vec::new(),
+            decision: None,
+            final_phase: ImprovementPhase::Analyze,
+            weak_dimensions: Vec::new(),
+            weak_dimension_details: Vec::new(),
+            target_dimension: Some("specificity".into()),
+            plateau_dimensions: Vec::new(),
+        };
+        assert!(cycle.target_dimension_delta().is_none());
+        assert!(!cycle.target_dimension_improved());
+    }
+
+    #[test]
+    fn target_dimension_delta_positive_when_improved() {
+        let cycle = ImprovementCycle {
+            baseline: make_score(0.5),
+            proposed_changes: Vec::new(),
+            post_score: Some(make_score(0.7)),
+            regressions: Vec::new(),
+            decision: None,
+            final_phase: ImprovementPhase::Decide,
+            weak_dimensions: Vec::new(),
+            weak_dimension_details: Vec::new(),
+            target_dimension: Some("factual_accuracy".into()),
+            plateau_dimensions: Vec::new(),
+        };
+        let delta = cycle.target_dimension_delta().expect("should have delta");
+        assert!((delta - 0.2).abs() < 1e-9);
+        assert!(cycle.target_dimension_improved());
+    }
+
+    #[test]
+    fn target_dimension_delta_negative_when_regressed() {
+        let cycle = ImprovementCycle {
+            baseline: make_score(0.7),
+            proposed_changes: Vec::new(),
+            post_score: Some(make_score(0.5)),
+            regressions: Vec::new(),
+            decision: None,
+            final_phase: ImprovementPhase::Decide,
+            weak_dimensions: Vec::new(),
+            weak_dimension_details: Vec::new(),
+            target_dimension: Some("specificity".into()),
+            plateau_dimensions: Vec::new(),
+        };
+        let delta = cycle.target_dimension_delta().expect("should have delta");
+        // specificity = overall * 0.9, so 0.5*0.9 - 0.7*0.9 = -0.18
+        assert!(delta < 0.0);
+        assert!(!cycle.target_dimension_improved());
+    }
+
+    #[test]
+    fn target_dimension_improved_false_when_flat() {
+        let cycle = ImprovementCycle {
+            baseline: make_score(0.5),
+            proposed_changes: Vec::new(),
+            post_score: Some(make_score(0.5)),
+            regressions: Vec::new(),
+            decision: None,
+            final_phase: ImprovementPhase::Decide,
+            weak_dimensions: Vec::new(),
+            weak_dimension_details: Vec::new(),
+            target_dimension: Some("factual_accuracy".into()),
+            plateau_dimensions: Vec::new(),
+        };
+        assert!(!cycle.target_dimension_improved());
     }
 }

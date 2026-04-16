@@ -26,6 +26,6 @@ pub use prioritization::{
     suggest_next_target,
 };
 pub use types::{
-    ImprovementConfig, ImprovementCycle, ImprovementDecision, ImprovementPhase, ProposedChange,
-    WeakDimension,
+    ConvergenceStatus, CycleHistory, ImprovementConfig, ImprovementCycle, ImprovementDecision,
+    ImprovementPhase, ProposedChange, WeakDimension,
 };

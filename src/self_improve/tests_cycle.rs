@@ -688,3 +688,243 @@ fn decide_commits_when_target_dimension_improved() {
         "expected commit when target dimension improved"
     );
 }
+
+#[test]
+fn summarize_cycle_target_dimension_shows_delta() {
+    let cycle = ImprovementCycle {
+        baseline: make_score(0.50),
+        proposed_changes: vec![],
+        post_score: Some(make_score(0.60)),
+        regressions: vec![],
+        decision: Some(ImprovementDecision::Commit {
+            net_improvement: 0.1,
+        }),
+        final_phase: ImprovementPhase::Decide,
+        weak_dimensions: Vec::new(),
+        weak_dimension_details: Vec::new(),
+        target_dimension: Some("factual_accuracy".into()),
+        plateau_dimensions: Vec::new(),
+    };
+    let summary = summarize_cycle(&cycle);
+    assert!(
+        summary.contains("Target dimension: factual_accuracy (+"),
+        "summary should show target dimension delta: {summary}"
+    );
+}
+
+#[test]
+fn summarize_cycle_target_dimension_no_post_score() {
+    let cycle = ImprovementCycle {
+        baseline: make_score(0.50),
+        proposed_changes: vec![],
+        post_score: None,
+        regressions: vec![],
+        decision: None,
+        final_phase: ImprovementPhase::Analyze,
+        weak_dimensions: Vec::new(),
+        weak_dimension_details: Vec::new(),
+        target_dimension: Some("specificity".into()),
+        plateau_dimensions: Vec::new(),
+    };
+    let summary = summarize_cycle(&cycle);
+    // Without post_score, should show name only (no delta)
+    assert!(
+        summary.contains("Target dimension: specificity"),
+        "summary should show target dimension name: {summary}"
+    );
+    assert!(
+        !summary.contains("(+") && !summary.contains("(-"),
+        "summary should NOT show delta without post_score: {summary}"
+    );
+}
+
+// ---- CycleHistory / ConvergenceStatus tests ----
+
+use super::types::{ConvergenceStatus, CycleHistory};
+
+fn make_cycle_with_net(baseline_overall: f64, post_overall: f64, commit: bool) -> ImprovementCycle {
+    let net = post_overall - baseline_overall;
+    ImprovementCycle {
+        baseline: make_score(baseline_overall),
+        proposed_changes: Vec::new(),
+        post_score: Some(make_score(post_overall)),
+        regressions: Vec::new(),
+        decision: Some(if commit {
+            ImprovementDecision::Commit {
+                net_improvement: net,
+            }
+        } else {
+            ImprovementDecision::Revert {
+                reason: "test".into(),
+            }
+        }),
+        final_phase: ImprovementPhase::Decide,
+        weak_dimensions: Vec::new(),
+        weak_dimension_details: Vec::new(),
+        target_dimension: None,
+        plateau_dimensions: Vec::new(),
+    }
+}
+
+#[test]
+fn cycle_history_empty_velocity_is_zero() {
+    let h = CycleHistory::new();
+    assert!(h.is_empty());
+    assert_eq!(h.len(), 0);
+    assert!((h.overall_velocity()).abs() < 1e-9);
+}
+
+#[test]
+fn cycle_history_single_cycle_velocity_is_zero() {
+    let mut h = CycleHistory::new();
+    h.push(make_cycle_with_net(0.5, 0.6, true));
+    assert_eq!(h.len(), 1);
+    assert!((h.overall_velocity()).abs() < 1e-9);
+}
+
+#[test]
+fn cycle_history_velocity_positive_when_improving() {
+    let mut h = CycleHistory::new();
+    h.push(make_cycle_with_net(0.50, 0.55, true));
+    h.push(make_cycle_with_net(0.55, 0.60, true));
+    h.push(make_cycle_with_net(0.60, 0.65, true));
+    let vel = h.overall_velocity();
+    assert!(vel > 0.0, "velocity should be positive, got {vel}");
+    assert!(h.is_converging(0.001));
+}
+
+#[test]
+fn cycle_history_velocity_negative_when_diverging() {
+    let mut h = CycleHistory::new();
+    h.push(make_cycle_with_net(0.70, 0.68, false));
+    h.push(make_cycle_with_net(0.68, 0.65, false));
+    let vel = h.overall_velocity();
+    assert!(vel < 0.0, "velocity should be negative, got {vel}");
+    assert!(!h.is_converging(0.001));
+}
+
+#[test]
+fn diminishing_returns_detected() {
+    let mut h = CycleHistory::new();
+    // Each committed improvement is smaller than the last
+    h.push(make_cycle_with_net(0.50, 0.60, true)); // +0.10
+    h.push(make_cycle_with_net(0.60, 0.67, true)); // +0.07
+    h.push(make_cycle_with_net(0.67, 0.70, true)); // +0.03
+    assert!(h.diminishing_returns(3));
+}
+
+#[test]
+fn diminishing_returns_not_detected_when_gains_increase() {
+    let mut h = CycleHistory::new();
+    h.push(make_cycle_with_net(0.50, 0.53, true)); // +0.03
+    h.push(make_cycle_with_net(0.53, 0.58, true)); // +0.05
+    h.push(make_cycle_with_net(0.58, 0.66, true)); // +0.08
+    assert!(!h.diminishing_returns(3));
+}
+
+#[test]
+fn diminishing_returns_requires_minimum_window() {
+    let h = CycleHistory::new();
+    assert!(!h.diminishing_returns(2));
+    assert!(!h.diminishing_returns(1));
+    assert!(!h.diminishing_returns(0));
+}
+
+#[test]
+fn evaluate_convergence_improving() {
+    let mut h = CycleHistory::new();
+    h.push(make_cycle_with_net(0.50, 0.55, true));
+    h.push(make_cycle_with_net(0.55, 0.62, true));
+    h.push(make_cycle_with_net(0.62, 0.70, true));
+    assert_eq!(
+        h.evaluate_convergence(0.005, 3),
+        ConvergenceStatus::Improving
+    );
+}
+
+#[test]
+fn evaluate_convergence_diverging() {
+    let mut h = CycleHistory::new();
+    h.push(make_cycle_with_net(0.70, 0.68, false));
+    h.push(make_cycle_with_net(0.68, 0.64, false));
+    assert_eq!(
+        h.evaluate_convergence(0.005, 3),
+        ConvergenceStatus::Diverging
+    );
+}
+
+#[test]
+fn evaluate_convergence_plateau() {
+    let mut h = CycleHistory::new();
+    h.push(make_cycle_with_net(0.65, 0.651, false));
+    h.push(make_cycle_with_net(0.651, 0.652, false));
+    assert_eq!(h.evaluate_convergence(0.005, 3), ConvergenceStatus::Plateau);
+}
+
+#[test]
+fn evaluate_convergence_diminishing_returns() {
+    let mut h = CycleHistory::new();
+    h.push(make_cycle_with_net(0.50, 0.60, true)); // +0.10
+    h.push(make_cycle_with_net(0.60, 0.67, true)); // +0.07
+    h.push(make_cycle_with_net(0.67, 0.70, true)); // +0.03
+    assert_eq!(
+        h.evaluate_convergence(0.005, 3),
+        ConvergenceStatus::DiminishingReturns
+    );
+}
+
+#[test]
+fn evaluate_convergence_single_cycle_improving() {
+    let mut h = CycleHistory::new();
+    h.push(make_cycle_with_net(0.50, 0.60, true));
+    // Fewer than 2 cycles -> defaults to Improving
+    assert_eq!(
+        h.evaluate_convergence(0.005, 3),
+        ConvergenceStatus::Improving
+    );
+}
+
+#[test]
+fn convergence_status_display() {
+    assert_eq!(ConvergenceStatus::Improving.to_string(), "improving");
+    assert_eq!(ConvergenceStatus::Plateau.to_string(), "plateau");
+    assert_eq!(
+        ConvergenceStatus::DiminishingReturns.to_string(),
+        "diminishing-returns"
+    );
+    assert_eq!(ConvergenceStatus::Diverging.to_string(), "diverging");
+}
+
+#[test]
+fn serde_round_trip_improvement_config() {
+    let config = ImprovementConfig {
+        suite_id: "progressive".into(),
+        min_net_improvement: 0.03,
+        max_single_regression: 0.04,
+        proposed_changes: Vec::new(),
+        auto_apply: true,
+        weak_threshold: 0.55,
+        target_dimension: Some("specificity".into()),
+        max_cycles: Some(5),
+    };
+    let json = serde_json::to_string(&config).expect("serialize config");
+    let deserialized: ImprovementConfig = serde_json::from_str(&json).expect("deserialize config");
+    assert_eq!(deserialized.suite_id, config.suite_id);
+    assert!((deserialized.min_net_improvement - config.min_net_improvement).abs() < 1e-9);
+    assert!((deserialized.weak_threshold - config.weak_threshold).abs() < 1e-9);
+    assert_eq!(deserialized.target_dimension, config.target_dimension);
+    assert_eq!(deserialized.max_cycles, config.max_cycles);
+    assert_eq!(deserialized.auto_apply, config.auto_apply);
+}
+
+#[test]
+fn serde_round_trip_cycle_history() {
+    let mut h = CycleHistory::new();
+    h.push(make_cycle_with_net(0.50, 0.60, true));
+    h.push(make_cycle_with_net(0.60, 0.65, true));
+    let json = serde_json::to_string(&h).expect("serialize history");
+    let deserialized: CycleHistory = serde_json::from_str(&json).expect("deserialize history");
+    assert_eq!(deserialized.len(), 2);
+    let vel_diff = (deserialized.overall_velocity() - h.overall_velocity()).abs();
+    assert!(vel_diff < 1e-9);
+}
