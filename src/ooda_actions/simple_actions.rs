@@ -249,13 +249,7 @@ mod tests {
 
     #[test]
     fn skill_min_usage_is_reasonable() {
-        assert!(
-            super::SKILL_MIN_USAGE >= 2,
-            "skill extraction needs meaningful usage count"
-        );
-        assert!(
-            super::SKILL_MIN_USAGE <= 10,
-            "threshold should not be unreasonably high"
-        );
+        const { assert!(super::SKILL_MIN_USAGE >= 2) };
+        const { assert!(super::SKILL_MIN_USAGE <= 10) };
     }
 }

@@ -33,14 +33,14 @@ pub fn snapshot_dir(override_dir: Option<&Path>) -> Option<PathBuf> {
             home.join(DEFAULT_SNAPSHOT_DIR)
         }
     };
-    if !dir.exists() {
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            eprintln!(
-                "[simard] snapshot: failed to create directory {}: {e}",
-                dir.display()
-            );
-            return None;
-        }
+    if !dir.exists()
+        && let Err(e) = std::fs::create_dir_all(&dir)
+    {
+        eprintln!(
+            "[simard] snapshot: failed to create directory {}: {e}",
+            dir.display()
+        );
+        return None;
     }
     Some(dir)
 }
