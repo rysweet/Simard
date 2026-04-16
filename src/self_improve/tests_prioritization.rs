@@ -222,6 +222,7 @@ fn prioritize_custom_weights() {
         deficit: 0.0,
         chronic: 0.0,
         trend: 1.0,
+        plateau: 0.0,
     };
     let result = prioritize_dimensions(&current, 0.6, &past, &weights);
     // No worsening (all past cycles same), so all trend signals are 0
@@ -279,6 +280,7 @@ fn proportional_trend_velocity_affects_priority() {
         deficit: 0.0,
         chronic: 0.0,
         trend: 1.0,
+        plateau: 0.0,
     };
 
     let steep_result = prioritize_dimensions(&current, 0.6, &steep, &weights);
@@ -317,5 +319,141 @@ fn trend_velocity_zero_when_no_history() {
     let result = prioritize_dimensions_default(&current, 0.6, &[]);
     for dim in &result {
         assert!((dim.trend_velocity - 0.0).abs() < 1e-9);
+    }
+}
+
+#[test]
+fn plateau_detected_when_chronically_weak_with_zero_velocity() {
+    let current = make_score(0.5);
+    let past = vec![
+        make_score(0.5),
+        make_score(0.5),
+        make_score(0.5),
+        make_score(0.5),
+    ];
+    let result = prioritize_dimensions_default(&current, 0.6, &past);
+    let sa = result
+        .iter()
+        .find(|d| d.name == "source_attribution")
+        .unwrap();
+    assert!(
+        sa.plateau_detected,
+        "source_attribution should be plateaued"
+    );
+    assert!(sa.current_deficit > 0.0);
+    let ta = result
+        .iter()
+        .find(|d| d.name == "temporal_awareness")
+        .unwrap();
+    assert!(
+        ta.plateau_detected,
+        "temporal_awareness should be plateaued"
+    );
+}
+
+#[test]
+fn plateau_not_detected_with_insufficient_history() {
+    let current = make_score(0.5);
+    let past = vec![make_score(0.5), make_score(0.5)];
+    let result = prioritize_dimensions_default(&current, 0.6, &past);
+    for dim in &result {
+        assert!(
+            !dim.plateau_detected,
+            "{} should not be plateaued with only 2 cycles",
+            dim.name
+        );
+    }
+}
+
+#[test]
+fn plateau_not_detected_when_velocity_is_significant() {
+    let current = make_score(0.5);
+    let past = vec![make_score(0.3), make_score(0.4), make_score(0.5)];
+    let result = prioritize_dimensions_default(&current, 0.6, &past);
+    let fa = result
+        .iter()
+        .find(|d| d.name == "factual_accuracy")
+        .unwrap();
+    assert!(
+        !fa.plateau_detected,
+        "improving dimension should not be plateaued"
+    );
+}
+
+#[test]
+fn plateau_boosts_priority() {
+    let current = make_score(0.5);
+    let past_plateau = vec![
+        make_score(0.5),
+        make_score(0.5),
+        make_score(0.5),
+        make_score(0.5),
+    ];
+    let result_plateau = prioritize_dimensions_default(&current, 0.6, &past_plateau);
+    let result_no_history = prioritize_dimensions_default(&current, 0.6, &[]);
+
+    let sa_plateau = result_plateau
+        .iter()
+        .find(|d| d.name == "source_attribution")
+        .unwrap();
+    let sa_no_hist = result_no_history
+        .iter()
+        .find(|d| d.name == "source_attribution")
+        .unwrap();
+    assert!(
+        sa_plateau.priority > sa_no_hist.priority,
+        "plateau priority ({}) should exceed no-history priority ({})",
+        sa_plateau.priority,
+        sa_no_hist.priority
+    );
+}
+
+#[test]
+fn decay_weights_recent_cycles_higher() {
+    let past_recent_weak = vec![
+        make_score(0.9),
+        make_score(0.9),
+        make_score(0.4),
+        make_score(0.4),
+        make_score(0.4),
+    ];
+    let past_old_weak = vec![
+        make_score(0.4),
+        make_score(0.4),
+        make_score(0.4),
+        make_score(0.9),
+        make_score(0.9),
+    ];
+    let current = make_score(0.5);
+    let result_recent = prioritize_dimensions_default(&current, 0.6, &past_recent_weak);
+    let result_old = prioritize_dimensions_default(&current, 0.6, &past_old_weak);
+
+    let sa_recent = result_recent
+        .iter()
+        .find(|d| d.name == "source_attribution")
+        .unwrap();
+    let sa_old = result_old
+        .iter()
+        .find(|d| d.name == "source_attribution")
+        .unwrap();
+    assert!(
+        sa_recent.historical_weakness_rate > sa_old.historical_weakness_rate,
+        "recent weakness rate ({}) should exceed old weakness rate ({})",
+        sa_recent.historical_weakness_rate,
+        sa_old.historical_weakness_rate
+    );
+}
+
+#[test]
+fn plateau_not_detected_when_currently_strong() {
+    let current = make_score(0.9);
+    let past = vec![make_score(0.5), make_score(0.5), make_score(0.5)];
+    let result = prioritize_dimensions_default(&current, 0.6, &past);
+    for dim in &result {
+        assert!(
+            !dim.plateau_detected,
+            "{} should not be plateaued when currently strong",
+            dim.name
+        );
     }
 }

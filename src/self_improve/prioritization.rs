@@ -36,9 +36,14 @@ pub struct PrioritizedDimension {
     /// data points exist.
     #[serde(default)]
     pub trend_velocity: f64,
+    /// Whether the dimension appears stuck: currently weak, sufficient history,
+    /// and near-zero velocity.
+    #[serde(default)]
+    pub plateau_detected: bool,
 }
 
-/// Weights for composite scoring. Should sum to 1.0 for a normalized result.
+/// Weights for composite scoring. Should sum to 1.0 for a normalized result
+/// (excluding the plateau bonus which is additive).
 #[derive(Clone, Debug)]
 pub struct PriorityWeights {
     /// Weight for current deficit magnitude.
@@ -47,14 +52,17 @@ pub struct PriorityWeights {
     pub chronic: f64,
     /// Weight for negative trend direction.
     pub trend: f64,
+    /// Additive bonus when a plateau is detected (default 0.1).
+    pub plateau: f64,
 }
 
 impl Default for PriorityWeights {
     fn default() -> Self {
         Self {
             deficit: 0.5,
-            chronic: 0.3,
-            trend: 0.2,
+            chronic: 0.2,
+            trend: 0.3,
+            plateau: 0.1,
         }
     }
 }
@@ -130,15 +138,28 @@ pub fn prioritize_dimensions(
 
             let normalized_deficit = current_deficit / max_deficit;
 
-            // Historical weakness rate: fraction of past cycles where this dim was weak.
+            // Historical weakness rate: decay-weighted fraction of past cycles
+            // where this dimension was below threshold. More recent cycles (later
+            // indices) receive higher weight.
             let weakness_rate = if past_baselines.is_empty() {
                 0.0
             } else {
-                let weak_count = past_baselines
-                    .iter()
-                    .filter(|s| dimension_value(s, name) < weak_threshold)
-                    .count();
-                weak_count as f64 / past_baselines.len() as f64
+                let n = past_baselines.len();
+                let mut weighted_weak = 0.0;
+                let mut total_weight = 0.0;
+                for (i, s) in past_baselines.iter().enumerate() {
+                    // Linear decay: weight = (i + 1) / n, so latest cycle has weight 1.0
+                    let w = (i + 1) as f64 / n as f64;
+                    if dimension_value(s, name) < weak_threshold {
+                        weighted_weak += w;
+                    }
+                    total_weight += w;
+                }
+                if total_weight > 0.0 {
+                    weighted_weak / total_weight
+                } else {
+                    0.0
+                }
             };
 
             // Trend: compare first and last past baselines.
@@ -157,9 +178,19 @@ pub fn prioritize_dimensions(
             };
             let trend_signal = (-trend_velocity).clamp(0.0, 1.0);
 
+            // Plateau: currently weak, ≥3 past cycles, and near-zero velocity.
+            let plateau_detected =
+                current_deficit > 0.0 && past_baselines.len() >= 3 && trend_velocity.abs() < 0.05;
+
+            let plateau_boost = if plateau_detected {
+                weights.plateau
+            } else {
+                0.0
+            };
             let priority = weights.deficit * normalized_deficit
                 + weights.chronic * weakness_rate
-                + weights.trend * trend_signal;
+                + weights.trend * trend_signal
+                + plateau_boost;
             let priority = if priority.is_finite() { priority } else { 0.0 };
 
             PrioritizedDimension {
@@ -169,6 +200,7 @@ pub fn prioritize_dimensions(
                 historical_weakness_rate: weakness_rate,
                 worsening,
                 trend_velocity,
+                plateau_detected,
             }
         })
         .collect();
