@@ -143,6 +143,18 @@ impl ImprovementConfig {
                 ),
             });
         }
+        if let Some(ref dim) = self.target_dimension {
+            if !super::prioritization::DIMENSION_NAMES.contains(&dim.as_str()) {
+                return Err(crate::error::SimardError::InvalidImprovementRecord {
+                    field: "target_dimension".into(),
+                    reason: format!(
+                        "unknown dimension '{}'; valid dimensions: {}",
+                        dim,
+                        super::prioritization::DIMENSION_NAMES.join(", ")
+                    ),
+                });
+            }
+        }
         Ok(())
     }
 }
@@ -184,6 +196,22 @@ impl ImprovementCycle {
     /// Returns `true` if the cycle decided to revert.
     pub fn is_reverted(&self) -> bool {
         matches!(&self.decision, Some(ImprovementDecision::Revert { .. }))
+    }
+
+    /// Enrich the cycle with plateau detection from historical baselines.
+    ///
+    /// Call this after `run_improvement_cycle` when you have past cycle data
+    /// available. Without history, `plateau_dimensions` remains empty.
+    pub fn enrich_with_history(
+        &mut self,
+        weak_threshold: f64,
+        past_baselines: &[crate::gym_scoring::GymSuiteScore],
+    ) {
+        self.plateau_dimensions = super::prioritization::detect_plateau_dimensions(
+            &self.baseline,
+            weak_threshold,
+            past_baselines,
+        );
     }
 }
 
@@ -507,5 +535,60 @@ mod tests {
             ..Default::default()
         };
         assert!(threshold_one.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_unknown_target_dimension_rejected() {
+        let cfg = ImprovementConfig {
+            target_dimension: Some("not_a_real_dimension".into()),
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(format!("{err:?}").contains("target_dimension"));
+    }
+
+    #[test]
+    fn validate_valid_target_dimension_accepted() {
+        for dim in &[
+            "factual_accuracy",
+            "specificity",
+            "temporal_awareness",
+            "source_attribution",
+            "confidence_calibration",
+        ] {
+            let cfg = ImprovementConfig {
+                target_dimension: Some(dim.to_string()),
+                ..Default::default()
+            };
+            assert!(cfg.validate().is_ok(), "dimension '{dim}' should be valid");
+        }
+    }
+
+    #[test]
+    fn validate_none_target_dimension_accepted() {
+        let cfg = ImprovementConfig {
+            target_dimension: None,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn enrich_with_history_fills_plateau_dimensions() {
+        let mut cycle = ImprovementCycle {
+            baseline: make_score(0.5),
+            proposed_changes: Vec::new(),
+            post_score: None,
+            regressions: Vec::new(),
+            decision: None,
+            final_phase: ImprovementPhase::Eval,
+            weak_dimensions: Vec::new(),
+            weak_dimension_details: Vec::new(),
+            target_dimension: None,
+            plateau_dimensions: Vec::new(),
+        };
+        let past = vec![make_score(0.5), make_score(0.5), make_score(0.5)];
+        cycle.enrich_with_history(0.6, &past);
+        assert!(!cycle.plateau_dimensions.is_empty());
     }
 }

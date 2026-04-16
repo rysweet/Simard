@@ -38,6 +38,11 @@ pub fn run_improvement_cycle(
     );
     let weak_names: Vec<String> = weak_details.iter().map(|w| w.name.clone()).collect();
 
+    // Detect plateau dimensions via prioritization (requires historical data,
+    // which we don't have in a single cycle — populate empty for now; callers
+    // with history can enrich via `prioritize_dimensions_default`).
+    let plateau_dims: Vec<String> = Vec::new();
+
     // Phase 3: Research — check if we have proposed changes
     if config.proposed_changes.is_empty() {
         return Ok(ImprovementCycle {
@@ -59,7 +64,7 @@ pub fn run_improvement_cycle(
             weak_dimensions: weak_names,
             weak_dimension_details: weak_details,
             target_dimension: config.target_dimension.clone(),
-            plateau_dimensions: Vec::new(),
+            plateau_dimensions: plateau_dims,
         });
     }
 
@@ -85,7 +90,7 @@ pub fn run_improvement_cycle(
         weak_dimensions: weak_names,
         weak_dimension_details: weak_details,
         target_dimension: config.target_dimension.clone(),
-        plateau_dimensions: Vec::new(),
+        plateau_dimensions: plateau_dims,
     })
 }
 
@@ -161,6 +166,13 @@ pub fn summarize_cycle(cycle: &ImprovementCycle) -> String {
 
     if let Some(ref dim) = cycle.target_dimension {
         lines.push(format!("Target dimension: {dim}"));
+    }
+
+    if !cycle.plateau_dimensions.is_empty() {
+        lines.push(format!(
+            "Plateau dimensions (stalled): {}",
+            cycle.plateau_dimensions.join(", ")
+        ));
     }
 
     if !cycle.weak_dimension_details.is_empty() {

@@ -457,3 +457,66 @@ fn plateau_not_detected_when_currently_strong() {
         );
     }
 }
+
+#[test]
+fn detect_plateau_dimensions_returns_names() {
+    let current = make_score(0.5);
+    let past = vec![
+        make_score(0.5),
+        make_score(0.5),
+        make_score(0.5),
+        make_score(0.5),
+    ];
+    let plateaus = detect_plateau_dimensions(&current, 0.6, &past);
+    assert!(
+        plateaus.contains(&"source_attribution".to_string()),
+        "source_attribution should be plateaued"
+    );
+    assert!(
+        plateaus.contains(&"temporal_awareness".to_string()),
+        "temporal_awareness should be plateaued"
+    );
+}
+
+#[test]
+fn detect_plateau_dimensions_empty_when_strong() {
+    let current = make_score(0.9);
+    let past = vec![make_score(0.9), make_score(0.9), make_score(0.9)];
+    let plateaus = detect_plateau_dimensions(&current, 0.6, &past);
+    assert!(plateaus.is_empty());
+}
+
+#[test]
+fn enrich_with_history_populates_plateau_dimensions() {
+    use super::types::ImprovementCycle;
+    use super::types::ImprovementPhase;
+
+    let mut cycle = ImprovementCycle {
+        baseline: make_score(0.5),
+        proposed_changes: Vec::new(),
+        post_score: None,
+        regressions: Vec::new(),
+        decision: None,
+        final_phase: ImprovementPhase::Analyze,
+        weak_dimensions: Vec::new(),
+        weak_dimension_details: Vec::new(),
+        target_dimension: None,
+        plateau_dimensions: Vec::new(),
+    };
+    let past = vec![
+        make_score(0.5),
+        make_score(0.5),
+        make_score(0.5),
+        make_score(0.5),
+    ];
+    cycle.enrich_with_history(0.6, &past);
+    assert!(
+        !cycle.plateau_dimensions.is_empty(),
+        "enrich_with_history should populate plateau_dimensions"
+    );
+    assert!(
+        cycle
+            .plateau_dimensions
+            .contains(&"source_attribution".to_string())
+    );
+}

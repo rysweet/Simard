@@ -505,3 +505,46 @@ fn summarize_cycle_shows_deficit_when_details_present() {
     let summary = summarize_cycle(&cycle);
     assert!(summary.contains("source_attribution (25.0% deficit)"));
 }
+
+#[test]
+fn validate_rejects_unknown_target_dimension() {
+    let cfg = ImprovementConfig {
+        target_dimension: Some("specficity_typo".into()),
+        ..Default::default()
+    };
+    let err = cfg.validate().unwrap_err();
+    assert!(format!("{err:?}").contains("target_dimension"));
+    assert!(format!("{err:?}").contains("specficity_typo"));
+}
+
+#[test]
+fn validate_accepts_known_target_dimension() {
+    let cfg = ImprovementConfig {
+        target_dimension: Some("specificity".into()),
+        ..Default::default()
+    };
+    assert!(cfg.validate().is_ok());
+}
+
+#[test]
+fn summarize_cycle_shows_plateau_dimensions() {
+    let cycle = ImprovementCycle {
+        baseline: make_score(0.50),
+        proposed_changes: vec![],
+        post_score: None,
+        regressions: vec![],
+        decision: None,
+        final_phase: ImprovementPhase::Analyze,
+        weak_dimensions: Vec::new(),
+        weak_dimension_details: Vec::new(),
+        target_dimension: None,
+        plateau_dimensions: vec!["source_attribution".into(), "temporal_awareness".into()],
+    };
+    let summary = summarize_cycle(&cycle);
+    assert!(
+        summary.contains("Plateau dimensions (stalled)"),
+        "summary should mention plateau dimensions: {summary}"
+    );
+    assert!(summary.contains("source_attribution"));
+    assert!(summary.contains("temporal_awareness"));
+}

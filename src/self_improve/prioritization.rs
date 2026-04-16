@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use super::types::WeakDimension;
 
 /// The five standard scoring dimensions.
-const DIMENSION_NAMES: [&str; 5] = [
+pub(crate) const DIMENSION_NAMES: [&str; 5] = [
     "factual_accuracy",
     "specificity",
     "temporal_awareness",
@@ -236,4 +236,21 @@ pub fn dimension_value(score: &GymSuiteScore, name: &str) -> f64 {
         "confidence_calibration" => score.dimensions.confidence_calibration,
         _ => 0.0,
     }
+}
+
+/// Return names of dimensions detected as plateaued given current score and history.
+///
+/// A plateau means the dimension is currently weak, has ≥3 past cycles of data,
+/// and near-zero velocity (stuck). This is a convenience wrapper around
+/// [`prioritize_dimensions_default`].
+pub fn detect_plateau_dimensions(
+    current_score: &GymSuiteScore,
+    weak_threshold: f64,
+    past_baselines: &[GymSuiteScore],
+) -> Vec<String> {
+    prioritize_dimensions_default(current_score, weak_threshold, past_baselines)
+        .into_iter()
+        .filter(|d| d.plateau_detected)
+        .map(|d| d.name)
+        .collect()
 }
