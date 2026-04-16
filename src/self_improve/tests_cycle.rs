@@ -548,3 +548,143 @@ fn summarize_cycle_shows_plateau_dimensions() {
     assert!(summary.contains("source_attribution"));
     assert!(summary.contains("temporal_awareness"));
 }
+
+#[test]
+fn dimension_deltas_with_post_score() {
+    let cycle = ImprovementCycle {
+        baseline: make_score(0.50),
+        proposed_changes: vec![],
+        post_score: Some(make_score(0.70)),
+        regressions: vec![],
+        decision: Some(ImprovementDecision::Commit {
+            net_improvement: 0.20,
+        }),
+        final_phase: ImprovementPhase::Decide,
+        weak_dimensions: Vec::new(),
+        weak_dimension_details: Vec::new(),
+        target_dimension: None,
+        plateau_dimensions: Vec::new(),
+    };
+    let deltas = cycle.dimension_deltas();
+    assert_eq!(deltas.len(), 5);
+    // factual_accuracy: 0.70 - 0.50 = 0.20
+    let fa = deltas
+        .iter()
+        .find(|(n, _)| n == "factual_accuracy")
+        .unwrap();
+    assert!((fa.1 - 0.20).abs() < 1e-9);
+    // source_attribution: 0.49 - 0.35 = 0.14
+    let sa = deltas
+        .iter()
+        .find(|(n, _)| n == "source_attribution")
+        .unwrap();
+    assert!((sa.1 - 0.14).abs() < 1e-9);
+    // sorted by delta descending
+    for i in 0..deltas.len() - 1 {
+        assert!(
+            deltas[i].1 >= deltas[i + 1].1,
+            "deltas should be sorted descending"
+        );
+    }
+}
+
+#[test]
+fn dimension_deltas_empty_without_post_score() {
+    let cycle = ImprovementCycle {
+        baseline: make_score(0.50),
+        proposed_changes: vec![],
+        post_score: None,
+        regressions: vec![],
+        decision: None,
+        final_phase: ImprovementPhase::Analyze,
+        weak_dimensions: Vec::new(),
+        weak_dimension_details: Vec::new(),
+        target_dimension: None,
+        plateau_dimensions: Vec::new(),
+    };
+    let deltas = cycle.dimension_deltas();
+    assert!(deltas.is_empty());
+}
+
+#[test]
+fn summarize_cycle_shows_dimension_breakdown() {
+    let cycle = ImprovementCycle {
+        baseline: make_score(0.50),
+        proposed_changes: vec![],
+        post_score: Some(make_score(0.70)),
+        regressions: vec![],
+        decision: Some(ImprovementDecision::Commit {
+            net_improvement: 0.20,
+        }),
+        final_phase: ImprovementPhase::Decide,
+        weak_dimensions: Vec::new(),
+        weak_dimension_details: Vec::new(),
+        target_dimension: None,
+        plateau_dimensions: Vec::new(),
+    };
+    let summary = summarize_cycle(&cycle);
+    assert!(
+        summary.contains("Dimensions:"),
+        "summary should contain per-dimension breakdown: {summary}"
+    );
+    assert!(summary.contains("factual_accuracy: +20.0%"));
+}
+
+#[test]
+fn decide_reverts_when_target_dimension_regressed() {
+    let mut cfg = ImprovementConfig::default();
+    cfg.target_dimension = Some("specificity".into());
+    let baseline = GymSuiteScore {
+        suite_id: "test".into(),
+        overall: 0.60,
+        dimensions: ScoreDimensions {
+            factual_accuracy: 0.60,
+            specificity: 0.60,
+            temporal_awareness: 0.60,
+            source_attribution: 0.60,
+            confidence_calibration: 0.60,
+        },
+        scenario_count: 4,
+        scenarios_passed: 4,
+        pass_rate: 1.0,
+        recorded_at_unix_ms: None,
+    };
+    let post = GymSuiteScore {
+        suite_id: "test".into(),
+        overall: 0.70,
+        dimensions: ScoreDimensions {
+            factual_accuracy: 0.80,
+            specificity: 0.55, // target regressed
+            temporal_awareness: 0.75,
+            source_attribution: 0.70,
+            confidence_calibration: 0.70,
+        },
+        scenario_count: 4,
+        scenarios_passed: 4,
+        pass_rate: 1.0,
+        recorded_at_unix_ms: None,
+    };
+    let d = decide(&cfg, &baseline, &post, &[]);
+    match d {
+        ImprovementDecision::Revert { reason } => {
+            assert!(reason.contains("target dimension"));
+            assert!(reason.contains("specificity"));
+        }
+        ImprovementDecision::Commit { .. } => {
+            panic!("expected revert when target dimension regressed")
+        }
+    }
+}
+
+#[test]
+fn decide_commits_when_target_dimension_improved() {
+    let mut cfg = ImprovementConfig::default();
+    cfg.target_dimension = Some("specificity".into());
+    let baseline = make_score(0.50);
+    let post = make_score(0.60);
+    let d = decide(&cfg, &baseline, &post, &[]);
+    assert!(
+        matches!(d, ImprovementDecision::Commit { .. }),
+        "expected commit when target dimension improved"
+    );
+}

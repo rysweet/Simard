@@ -213,6 +213,27 @@ impl ImprovementCycle {
             past_baselines,
         );
     }
+
+    /// Compute per-dimension deltas between baseline and post-change scores.
+    ///
+    /// Returns a vec of `(dimension_name, delta)` pairs sorted by delta
+    /// (largest improvement first). Returns empty if no post-score exists.
+    pub fn dimension_deltas(&self) -> Vec<(String, f64)> {
+        let post = match &self.post_score {
+            Some(p) => p,
+            None => return Vec::new(),
+        };
+        let mut deltas: Vec<(String, f64)> = super::prioritization::DIMENSION_NAMES
+            .iter()
+            .map(|&name| {
+                let baseline_val = super::prioritization::dimension_value(&self.baseline, name);
+                let post_val = super::prioritization::dimension_value(post, name);
+                (name.to_string(), post_val - baseline_val)
+            })
+            .collect();
+        deltas.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        deltas
+    }
 }
 
 impl std::fmt::Display for ImprovementCycle {

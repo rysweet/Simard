@@ -23,6 +23,7 @@ pub use cycle::{apply_improvements, run_improvement_cycle, summarize_cycle};
 pub use prioritization::{
     DIMENSION_NAMES, PrioritizedDimension, PriorityWeights, detect_plateau_dimensions,
     find_weak_dimensions_detailed, prioritize_dimensions, prioritize_dimensions_default,
+    suggest_next_target,
 };
 pub use types::{
     ImprovementConfig, ImprovementCycle, ImprovementDecision, ImprovementPhase, ProposedChange,

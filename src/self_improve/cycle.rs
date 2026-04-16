@@ -96,6 +96,10 @@ pub fn run_improvement_cycle(
 
 /// Apply the decision rule: commit if net improvement >= threshold
 /// and no single dimension regresses beyond the allowed maximum.
+///
+/// When `config.target_dimension` is set, the targeted dimension must not
+/// have regressed — even within the normal max-regression budget — for the
+/// change to be committed.
 pub(super) fn decide(
     config: &ImprovementConfig,
     baseline: &GymSuiteScore,
@@ -126,6 +130,22 @@ pub(super) fn decide(
                 detail.join("; ")
             ),
         };
+    }
+
+    // If a target dimension was specified, reject if that dimension regressed
+    if let Some(ref target) = config.target_dimension {
+        let baseline_val = super::prioritization::dimension_value(baseline, target);
+        let post_val = super::prioritization::dimension_value(post, target);
+        if post_val < baseline_val {
+            return ImprovementDecision::Revert {
+                reason: format!(
+                    "target dimension '{}' regressed ({:.1}% -> {:.1}%)",
+                    target,
+                    baseline_val * 100.0,
+                    post_val * 100.0,
+                ),
+            };
+        }
     }
 
     if net < config.min_net_improvement {
@@ -210,6 +230,22 @@ pub fn summarize_cycle(cycle: &ImprovementCycle) -> String {
             if net >= 0.0 { "+" } else { "" },
             net * 100.0,
         ));
+
+        let deltas = cycle.dimension_deltas();
+        if !deltas.is_empty() {
+            let detail: Vec<String> = deltas
+                .iter()
+                .map(|(name, delta)| {
+                    format!(
+                        "{}: {}{:.1}%",
+                        name,
+                        if *delta >= 0.0 { "+" } else { "" },
+                        delta * 100.0
+                    )
+                })
+                .collect();
+            lines.push(format!("  Dimensions: {}", detail.join(", ")));
+        }
     }
 
     if !cycle.regressions.is_empty() {

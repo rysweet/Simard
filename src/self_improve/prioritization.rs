@@ -226,6 +226,19 @@ pub fn prioritize_dimensions_default(
     )
 }
 
+/// Suggest the best dimension to target for the next improvement cycle.
+///
+/// Returns the highest-priority dimension that is currently weak (deficit > 0).
+/// Returns `None` when all dimensions are above the threshold.
+pub fn suggest_next_target(
+    current_score: &GymSuiteScore,
+    weak_threshold: f64,
+    past_baselines: &[GymSuiteScore],
+) -> Option<PrioritizedDimension> {
+    let ranked = prioritize_dimensions_default(current_score, weak_threshold, past_baselines);
+    ranked.into_iter().find(|d| d.current_deficit > 0.0)
+}
+
 /// Look up a single dimension's value by name.
 pub fn dimension_value(score: &GymSuiteScore, name: &str) -> f64 {
     match name {
