@@ -76,7 +76,8 @@ impl GoalBoard {
 
     /// Render a durable summary of the board state.
     pub fn durable_summary(&self) -> String {
-        let active_labels: Vec<String> = self.active.iter().map(|g| g.concise_label()).collect();
+        let active_labels: Vec<String> =
+            self.active.iter().map(ActiveGoal::concise_label).collect();
         let active_text = if active_labels.is_empty() {
             "none".to_string()
         } else {

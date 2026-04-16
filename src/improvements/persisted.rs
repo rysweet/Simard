@@ -168,7 +168,7 @@ fn parse_persisted_approval_entry(
             ),
         });
     };
-    let digit_count = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    let digit_count = rest.chars().take_while(char::is_ascii_digit).count();
     if digit_count == 0 {
         return Err(SimardError::InvalidImprovementRecord {
             field: field.to_string(),

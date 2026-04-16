@@ -254,7 +254,7 @@ impl NativeCognitiveMemory {
             Err(panic_info) => {
                 let msg = panic_info
                     .downcast_ref::<String>()
-                    .map(|s| s.as_str())
+                    .map(String::as_str)
                     .or_else(|| panic_info.downcast_ref::<&str>().copied())
                     .unwrap_or("unknown panic");
                 eprintln!("[simard] LadybugDB panicked on open (likely WAL corruption): {msg}");
@@ -633,7 +633,7 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
                     tags: if tags_str.is_empty() {
                         vec![]
                     } else {
-                        tags_str.split(',').map(|s| s.to_string()).collect()
+                        tags_str.split(',').map(ToString::to_string).collect()
                     },
                 }
             })

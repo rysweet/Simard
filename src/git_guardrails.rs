@@ -32,7 +32,7 @@ fn protected_roots() -> Vec<String> {
         .unwrap_or_default()
         .split(':')
         .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
+        .map(ToString::to_string)
         .collect()
 }
 

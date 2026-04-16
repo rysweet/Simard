@@ -190,7 +190,7 @@ pub(crate) fn extract_file_path_from_objective(objective: &str) -> Option<String
     objective
         .split_whitespace()
         .find(|w| w.contains('/') || (w.contains('.') && w.len() > 2))
-        .map(|s| s.to_string())
+        .map(ToString::to_string)
 }
 
 pub(crate) fn parse_structured_edit_request(

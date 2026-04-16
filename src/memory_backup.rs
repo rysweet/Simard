@@ -318,7 +318,7 @@ pub fn list_backups(config: &BackupConfig) -> SimardResult<Vec<BackupVerificatio
 
     let mut entries: Vec<PathBuf> = fs::read_dir(dir)
         .map_err(|e| store_error("list-dir", dir, e.to_string()))?
-        .filter_map(|e| e.ok())
+        .filter_map(Result::ok)
         .filter(|e| e.path().is_dir())
         .map(|e| e.path())
         .collect();
@@ -338,7 +338,7 @@ pub fn prune_old_backups(config: &BackupConfig) -> SimardResult<usize> {
 
     let mut entries: Vec<PathBuf> = fs::read_dir(dir)
         .map_err(|e| store_error("list-dir", dir, e.to_string()))?
-        .filter_map(|e| e.ok())
+        .filter_map(Result::ok)
         .filter(|e| e.path().is_dir())
         .map(|e| e.path())
         .collect();

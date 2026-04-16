@@ -13,7 +13,7 @@ pub(super) async fn execute_tool_locally(
                 .unwrap_or("");
             let timeout_ms = tool_input
                 .get("timeout")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .unwrap_or(120_000);
 
             let mut cmd = tokio::process::Command::new("sh");

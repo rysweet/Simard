@@ -471,7 +471,7 @@ fn extract_assignee(sentence: &str) -> Option<String> {
                 let clean = name.trim_matches(|c: char| !c.is_alphanumeric());
                 if !clean.is_empty()
                     && clean.len() >= 2
-                    && clean.chars().next().is_some_and(|c| c.is_uppercase())
+                    && clean.chars().next().is_some_and(char::is_uppercase)
                 {
                     return Some(clean.to_string());
                 }
@@ -560,7 +560,7 @@ pub fn link_action_items_to_goals(
             .to_lowercase()
             .split_whitespace()
             .filter(|w| w.len() > 2)
-            .map(|w| w.to_string())
+            .map(ToString::to_string)
             .collect();
 
         let mut best_match: Option<(&str, usize)> = None;
@@ -570,7 +570,7 @@ pub fn link_action_items_to_goals(
                 .to_lowercase()
                 .split_whitespace()
                 .filter(|w| w.len() > 2)
-                .map(|w| w.to_string())
+                .map(ToString::to_string)
                 .collect();
 
             let overlap = item_words.iter().filter(|w| goal_words.contains(w)).count();

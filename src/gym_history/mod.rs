@@ -180,7 +180,7 @@ impl ScoreHistory {
                 action: "query_history".into(),
                 reason: e.to_string(),
             })?
-            .filter_map(|r| r.ok())
+            .filter_map(Result::ok)
             .collect();
         Ok(rows)
     }
@@ -203,7 +203,7 @@ impl ScoreHistory {
                 action: "query_scenario_ids".into(),
                 reason: e.to_string(),
             })?
-            .filter_map(|r| r.ok())
+            .filter_map(Result::ok)
             .collect();
         Ok(rows)
     }
