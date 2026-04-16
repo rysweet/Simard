@@ -1,8 +1,7 @@
 use proptest::prelude::*;
 use simard::{
-    GoalStatus, ImprovementPromotionPlan, MeetingCommand, PersistedImprovementRecord,
-    PersistedMeetingRecord, SessionId, parse_copilot_response, parse_meeting_command,
-    parse_turn_output,
+    GoalStatus, ImprovementPromotionPlan, PersistedImprovementRecord, PersistedMeetingRecord,
+    SessionId, parse_copilot_response, parse_meeting_command, parse_turn_output,
 };
 
 proptest! {
