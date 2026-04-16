@@ -379,4 +379,86 @@ mod tests {
             "test-flow"
         );
     }
+
+    #[test]
+    fn from_handoff_missing_required_evidence_fails() {
+        // Missing "backend-implementation=" evidence record
+        let evidence = vec![
+            make_evidence("shell=/bin/bash"),
+            make_evidence("terminal-working-directory=/home/user/project"),
+            make_evidence("terminal-command-count=5"),
+            make_evidence("terminal-transcript-preview=$ echo hello"),
+        ];
+        let handoff = make_handoff(Some(make_session()), evidence);
+        let result = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state"),
+            handoff,
+            "test-handoff.json".to_string(),
+            None,
+        );
+        assert!(
+            result.is_err(),
+            "should fail without backend-implementation evidence"
+        );
+    }
+
+    #[test]
+    fn from_handoff_preserves_continuity_source() {
+        let handoff = make_handoff(Some(make_session()), required_evidence());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state"),
+            handoff,
+            "test-handoff.json".to_string(),
+            Some("previous-session.json".to_string()),
+        )
+        .unwrap();
+        assert_eq!(
+            view.continuity_source.as_deref(),
+            Some("previous-session.json")
+        );
+    }
+
+    #[test]
+    fn from_handoff_none_continuity_source() {
+        let handoff = make_handoff(Some(make_session()), required_evidence());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state"),
+            handoff,
+            "test-handoff.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert!(view.continuity_source.is_none());
+    }
+
+    #[test]
+    fn from_handoff_counts_memory_and_evidence_records() {
+        let evidence = required_evidence();
+        let evidence_len = evidence.len();
+        let handoff = make_handoff(Some(make_session()), evidence);
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state"),
+            handoff,
+            "test-handoff.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(view.memory_record_count, 0);
+        assert_eq!(view.evidence_record_count, evidence_len);
+    }
+
+    #[test]
+    fn from_handoff_no_steps_or_checkpoints() {
+        let handoff = make_handoff(Some(make_session()), required_evidence());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state"),
+            handoff,
+            "test-handoff.json".to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(view.step_count, 0);
+        assert!(view.steps.is_empty());
+        assert!(view.checkpoints.is_empty());
+    }
 }

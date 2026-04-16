@@ -463,4 +463,48 @@ mod tests {
         // The test binary should have been built recently (within last year)
         assert!(elapsed < Duration::from_secs(365 * 24 * 3600));
     }
+
+    #[test]
+    fn daemon_log_creates_file_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("ooda.log");
+        assert!(!log_path.exists());
+        daemon_log(dir.path(), "creation test");
+        assert!(log_path.exists());
+    }
+
+    #[test]
+    fn daemon_log_includes_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        daemon_log(dir.path(), "timestamped message");
+        let contents = std::fs::read_to_string(dir.path().join("ooda.log")).unwrap();
+        // Timestamp format: YYYY-MM-DDTHH:MM:SSZ
+        assert!(
+            contents.contains('T') && contents.contains('Z'),
+            "log should contain ISO timestamp, got: {contents}"
+        );
+    }
+
+    #[test]
+    fn binary_changed_false_for_current_time() {
+        // If start_time is now, binary should not appear changed.
+        assert!(!binary_changed(SystemTime::now()));
+    }
+
+    #[test]
+    fn interruptible_sleep_very_short_duration() {
+        let shutdown = AtomicBool::new(false);
+        let start = Instant::now();
+        interruptible_sleep(Duration::from_millis(1), &shutdown);
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn dashboard_config_fields_are_independent() {
+        let mut config = DaemonDashboardConfig::default();
+        config.enabled = false;
+        config.port = 3000;
+        assert!(!config.enabled);
+        assert_eq!(config.port, 3000);
+    }
 }
