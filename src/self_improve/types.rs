@@ -44,6 +44,18 @@ pub struct ProposedChange {
     pub expected_impact: String,
 }
 
+/// A dimension that scored below the weak threshold, with its deficit.
+///
+/// The deficit indicates how far below the threshold the dimension scored,
+/// enabling callers to prioritize improvements by severity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WeakDimension {
+    /// Name of the scoring dimension (e.g. "specificity").
+    pub name: String,
+    /// How far below the threshold this dimension scored (always >= 0).
+    pub deficit: f64,
+}
+
 /// The outcome of the decision phase.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ImprovementDecision {
@@ -111,6 +123,18 @@ pub struct ImprovementCycle {
     pub weak_dimensions: Vec<String>,
     /// The dimension that was targeted for this cycle (if any).
     pub target_dimension: Option<String>,
+}
+
+impl ImprovementCycle {
+    /// Returns `true` if the cycle decided to commit.
+    pub fn is_committed(&self) -> bool {
+        matches!(&self.decision, Some(ImprovementDecision::Commit { .. }))
+    }
+
+    /// Returns `true` if the cycle decided to revert.
+    pub fn is_reverted(&self) -> bool {
+        matches!(&self.decision, Some(ImprovementDecision::Revert { .. }))
+    }
 }
 
 impl std::fmt::Display for ImprovementCycle {
@@ -286,5 +310,57 @@ mod tests {
         let display = cycle.to_string();
         assert!(display.contains("Baseline"));
         assert!(display.contains("70.0%"));
+    }
+
+    #[test]
+    fn is_committed_true_for_commit_decision() {
+        let cycle = ImprovementCycle {
+            baseline: make_score(0.7),
+            proposed_changes: Vec::new(),
+            post_score: Some(make_score(0.8)),
+            regressions: Vec::new(),
+            decision: Some(ImprovementDecision::Commit {
+                net_improvement: 0.1,
+            }),
+            final_phase: ImprovementPhase::Decide,
+            weak_dimensions: Vec::new(),
+            target_dimension: None,
+        };
+        assert!(cycle.is_committed());
+        assert!(!cycle.is_reverted());
+    }
+
+    #[test]
+    fn is_reverted_true_for_revert_decision() {
+        let cycle = ImprovementCycle {
+            baseline: make_score(0.7),
+            proposed_changes: Vec::new(),
+            post_score: None,
+            regressions: Vec::new(),
+            decision: Some(ImprovementDecision::Revert {
+                reason: "test".into(),
+            }),
+            final_phase: ImprovementPhase::Decide,
+            weak_dimensions: Vec::new(),
+            target_dimension: None,
+        };
+        assert!(cycle.is_reverted());
+        assert!(!cycle.is_committed());
+    }
+
+    #[test]
+    fn is_committed_and_reverted_false_when_no_decision() {
+        let cycle = ImprovementCycle {
+            baseline: make_score(0.7),
+            proposed_changes: Vec::new(),
+            post_score: None,
+            regressions: Vec::new(),
+            decision: None,
+            final_phase: ImprovementPhase::Eval,
+            weak_dimensions: Vec::new(),
+            target_dimension: None,
+        };
+        assert!(!cycle.is_committed());
+        assert!(!cycle.is_reverted());
     }
 }
