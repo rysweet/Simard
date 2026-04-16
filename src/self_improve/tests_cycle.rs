@@ -583,4 +583,69 @@ fn summarize_cycle_multiple_weak_dimension_details() {
     let summary = summarize_cycle(&cycle);
     assert!(summary.contains("source_attribution (30.0% deficit)"));
     assert!(summary.contains("specificity (15.0% deficit)"));
+    // When details are present, the plain-name fallback should NOT appear
+    assert!(
+        !summary.contains("Weak dimensions: source_attribution, specificity\n"),
+        "details branch should suppress plain-name fallback"
+    );
+}
+
+#[test]
+fn summarize_cycle_weak_dimensions_without_details() {
+    // When weak_dimension_details is empty but weak_dimensions has entries,
+    // the fallback branch renders plain names without deficit percentages.
+    let cycle = ImprovementCycle {
+        baseline: make_score(0.40),
+        proposed_changes: vec![],
+        post_score: None,
+        regressions: vec![],
+        decision: None,
+        final_phase: ImprovementPhase::Analyze,
+        weak_dimensions: vec!["source_attribution".into(), "specificity".into()],
+        weak_dimension_details: vec![],
+        target_dimension: None,
+    };
+    let summary = summarize_cycle(&cycle);
+    assert!(
+        summary.contains("Weak dimensions: source_attribution, specificity"),
+        "plain-name fallback should render when details are empty"
+    );
+    assert!(
+        !summary.contains("deficit"),
+        "no deficit info without details"
+    );
+}
+
+#[test]
+fn summarize_cycle_shows_proposed_changes_count() {
+    use super::types::ProposedChange;
+    let cycle = ImprovementCycle {
+        baseline: make_score(0.50),
+        proposed_changes: vec![
+            ProposedChange {
+                file_path: "src/a.rs".into(),
+                description: "fix error handling".into(),
+                expected_impact: "fewer panics".into(),
+            },
+            ProposedChange {
+                file_path: "src/b.rs".into(),
+                description: "add retry logic".into(),
+                expected_impact: "better reliability".into(),
+            },
+        ],
+        post_score: Some(make_score(0.60)),
+        regressions: vec![],
+        decision: Some(ImprovementDecision::Commit {
+            net_improvement: 0.10,
+        }),
+        final_phase: ImprovementPhase::Decide,
+        weak_dimensions: Vec::new(),
+        weak_dimension_details: Vec::new(),
+        target_dimension: None,
+    };
+    let summary = summarize_cycle(&cycle);
+    assert!(
+        summary.contains("Proposed changes: 2"),
+        "should show proposed changes count"
+    );
 }

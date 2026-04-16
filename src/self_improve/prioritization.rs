@@ -1,13 +1,15 @@
 //! Composite dimension prioritization combining current deficits with historical cycles.
 //!
-//! [`find_weak_dimensions`](super::cycle::find_weak_dimensions) returns dimension names
-//! but not their deficits. This module adds deficit-aware analysis and composite
-//! prioritization that weighs current deficit magnitude, historical weakness
-//! frequency, and trend direction across past cycles.
+//! [`find_weak_dimensions`](super::cycle::find_weak_dimensions) returns
+//! `WeakDimension` entries with deficit magnitudes, sorted by severity.
+//! This module adds composite prioritization that weighs current deficit
+//! magnitude, historical weakness frequency, and trend direction across
+//! past cycles.
 
 use crate::gym_scoring::GymSuiteScore;
 use serde::{Deserialize, Serialize};
 
+use super::cycle::find_weak_dimensions;
 use super::types::WeakDimension;
 
 /// The five standard scoring dimensions.
@@ -32,6 +34,8 @@ pub struct PrioritizedDimension {
     pub historical_weakness_rate: f64,
     /// Whether the dimension is trending downward across past cycles.
     pub worsening: bool,
+    /// Rate of change per cycle (negative = declining). Zero when no history.
+    pub trend_velocity: f64,
 }
 
 /// Weights for composite scoring. Should sum to 1.0 for a normalized result.
@@ -57,42 +61,14 @@ impl Default for PriorityWeights {
 
 /// Identify dimensions scoring below the threshold, returning deficit details.
 ///
-/// This is a standalone implementation that mirrors the deficit-aware behavior
-/// now also present in [`find_weak_dimensions`](super::cycle::find_weak_dimensions),
-/// with results sorted by deficit (largest first).
+/// Delegates to [`find_weak_dimensions`](super::cycle::find_weak_dimensions),
+/// which returns `WeakDimension` entries sorted by deficit (largest first).
 pub fn find_weak_dimensions_detailed(
     score: &GymSuiteScore,
     weak_threshold: f64,
     target: Option<&str>,
 ) -> Vec<WeakDimension> {
-    let dims = &score.dimensions;
-    let checks: [(&str, f64); 5] = [
-        ("factual_accuracy", dims.factual_accuracy),
-        ("specificity", dims.specificity),
-        ("temporal_awareness", dims.temporal_awareness),
-        ("source_attribution", dims.source_attribution),
-        ("confidence_calibration", dims.confidence_calibration),
-    ];
-    let mut weak = Vec::new();
-    for (name, value) in checks {
-        if let Some(t) = target
-            && name != t
-        {
-            continue;
-        }
-        if value < weak_threshold {
-            weak.push(WeakDimension {
-                name: name.to_string(),
-                deficit: weak_threshold - value,
-            });
-        }
-    }
-    weak.sort_by(|a, b| {
-        b.deficit
-            .partial_cmp(&a.deficit)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    weak
+    find_weak_dimensions(score, weak_threshold, target)
 }
 
 /// Build a prioritized ranking of dimensions by combining current-cycle
@@ -138,17 +114,24 @@ pub fn prioritize_dimensions(
             };
 
             // Trend: compare first and last past baselines.
-            let worsening = if past_baselines.len() >= 2 {
+            let (worsening, trend_velocity) = if past_baselines.len() >= 2 {
                 let first = dimension_value(&past_baselines[0], name);
                 let last = dimension_value(
                     past_baselines.last().expect("len >= 2 guarantees last()"),
                     name,
                 );
-                last < first
+                let vel = (last - first) / (past_baselines.len() - 1) as f64;
+                (last < first, vel)
             } else {
-                false
+                (false, 0.0)
             };
-            let trend_signal = if worsening { 1.0 } else { 0.0 };
+            // Proportional trend signal: use velocity magnitude (clamped to [0, 1])
+            // so faster declines get higher priority than slow ones.
+            let trend_signal = if worsening {
+                trend_velocity.abs().min(1.0)
+            } else {
+                0.0
+            };
 
             let priority = weights.deficit * normalized_deficit
                 + weights.chronic * weakness_rate
@@ -160,6 +143,7 @@ pub fn prioritize_dimensions(
                 current_deficit,
                 historical_weakness_rate: weakness_rate,
                 worsening,
+                trend_velocity,
             }
         })
         .collect();

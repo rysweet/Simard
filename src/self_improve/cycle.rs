@@ -141,7 +141,7 @@ pub(super) fn decide(
 ///
 /// Results are sorted by deficit (largest first) so callers can prioritize
 /// the weakest dimension for improvement.
-pub(super) fn find_weak_dimensions(
+pub(crate) fn find_weak_dimensions(
     score: &GymSuiteScore,
     weak_threshold: f64,
     target: Option<&str>,
