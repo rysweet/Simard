@@ -161,7 +161,7 @@ pub use evidence::{
 pub use goal_curation::{
     ActiveGoal, BacklogItem, DEFAULT_SEED_GOALS, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS,
     add_active_goal, add_backlog_item, archive_completed, load_goal_board, persist_board,
-    promote_to_active, seed_default_board, update_goal_progress,
+    promote_to_active, seed_default_board, surface_developer_discoveries, update_goal_progress,
 };
 pub use goals::{
     FileBackedGoalStore, GoalRecord, GoalStatus, GoalStore, GoalUpdate, InMemoryGoalStore,
@@ -267,8 +267,9 @@ pub use remote_azlin::{AzlinConfig, AzlinExecutor, AzlinVm, RealAzlinExecutor};
 pub use remote_session::{RemoteConfig, RemoteSession, RemoteStatus};
 pub use remote_transfer::MemorySnapshot;
 pub use research_tracker::{
-    DeveloperWatch, ResearchStatus, ResearchTopic, ResearchTracker, add_research_topic,
-    load_research_topics, track_developer, update_topic_status,
+    DeveloperWatch, EventFetcher, GhCliFetcher, ResearchStatus, ResearchTopic, ResearchTracker,
+    add_research_topic, check_developer_activity, load_research_topics, track_developer,
+    update_topic_status,
 };
 pub use review::{
     ImprovementProposal, ReviewArtifact, ReviewRequest, ReviewSignal, ReviewTargetKind,

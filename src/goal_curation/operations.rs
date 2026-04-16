@@ -4,6 +4,7 @@ use serde_json::json;
 
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
+use crate::research_tracker::{EventFetcher, ResearchTracker};
 
 use super::types::{ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS};
 
@@ -208,6 +209,63 @@ pub fn archive_completed(board: &mut GoalBoard) -> Vec<ActiveGoal> {
         }
     });
     archived
+}
+
+// ---------------------------------------------------------------------------
+// Developer activity integration
+// ---------------------------------------------------------------------------
+
+/// Poll tracked developers for GitHub activity and surface new discoveries as
+/// backlog items on the goal board. Skips topics that already exist in the
+/// backlog. Returns the number of new backlog items added.
+pub fn surface_developer_discoveries(
+    board: &mut GoalBoard,
+    tracker: &mut ResearchTracker,
+    fetcher: &dyn EventFetcher,
+    bridge: &dyn CognitiveMemoryOps,
+) -> SimardResult<usize> {
+    let new_topics = crate::research_tracker::check_developer_activity(tracker, fetcher)?;
+
+    let mut added = 0;
+    for topic in &new_topics {
+        // Skip if already in backlog
+        if board.backlog.iter().any(|b| b.id == topic.id) {
+            continue;
+        }
+
+        let item = BacklogItem {
+            id: topic.id.clone(),
+            description: topic.title.clone(),
+            source: topic.source.clone(),
+            score: 0.5,
+        };
+
+        if add_backlog_item(board, item).is_ok() {
+            added += 1;
+        }
+    }
+
+    // Persist discovered topics to cognitive memory
+    for topic in new_topics {
+        let _ = crate::research_tracker::add_research_topic(topic, bridge);
+    }
+
+    // Also add new topics to the tracker's in-memory list for dedup in future polls
+    tracker.topics.extend(
+        board
+            .backlog
+            .iter()
+            .filter(|b| b.source.starts_with("github:"))
+            .map(|b| crate::research_tracker::ResearchTopic {
+                id: b.id.clone(),
+                title: b.description.clone(),
+                source: b.source.clone(),
+                priority: 3,
+                status: crate::research_tracker::ResearchStatus::Proposed,
+            }),
+    );
+
+    Ok(added)
 }
 
 // ---------------------------------------------------------------------------

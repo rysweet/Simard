@@ -235,3 +235,93 @@ fn promote_at_capacity_fails() {
     let err = promote_to_active(&mut board, "bl-cap", 1, None).unwrap_err();
     assert!(err.to_string().contains("capacity"), "{}", err);
 }
+
+// ---------------------------------------------------------------------------
+// surface_developer_discoveries integration tests
+// ---------------------------------------------------------------------------
+
+use crate::research_tracker::activity::GitHubEvent;
+use crate::research_tracker::activity::GitHubRepo;
+use crate::research_tracker::{EventFetcher, ResearchTracker};
+
+struct MockEventFetcher {
+    events: Vec<GitHubEvent>,
+}
+
+impl EventFetcher for MockEventFetcher {
+    fn fetch_events(&self, _github_id: &str) -> crate::error::SimardResult<Vec<GitHubEvent>> {
+        Ok(self.events.clone())
+    }
+}
+
+#[test]
+fn surface_discoveries_adds_backlog_items() {
+    let bridge = mock_bridge();
+    let fetcher = MockEventFetcher {
+        events: vec![GitHubEvent {
+            event_type: "PushEvent".to_string(),
+            repo: GitHubRepo {
+                name: "user/agent-frameworks".to_string(),
+            },
+            created_at: "2026-04-16T00:00:00Z".to_string(),
+        }],
+    };
+    let mut board = GoalBoard::default();
+    let mut tracker = ResearchTracker {
+        topics: vec![],
+        watches: vec![crate::research_tracker::DeveloperWatch {
+            github_id: "octocat".to_string(),
+            focus_areas: vec!["agent-frameworks".to_string()],
+            last_checked: None,
+        }],
+    };
+
+    let added = surface_developer_discoveries(&mut board, &mut tracker, &fetcher, &bridge).unwrap();
+    assert_eq!(added, 1);
+    assert_eq!(board.backlog.len(), 1);
+    assert!(board.backlog[0].source.starts_with("github:"));
+}
+
+#[test]
+fn surface_discoveries_skips_existing_backlog() {
+    let bridge = mock_bridge();
+    let fetcher = MockEventFetcher {
+        events: vec![GitHubEvent {
+            event_type: "PushEvent".to_string(),
+            repo: GitHubRepo {
+                name: "user/agent-frameworks".to_string(),
+            },
+            created_at: "2026-04-16T00:00:00Z".to_string(),
+        }],
+    };
+    let mut board = GoalBoard::default();
+    let mut tracker = ResearchTracker {
+        topics: vec![],
+        watches: vec![crate::research_tracker::DeveloperWatch {
+            github_id: "octocat".to_string(),
+            focus_areas: vec!["agent-frameworks".to_string()],
+            last_checked: None,
+        }],
+    };
+
+    // First call adds the item
+    surface_developer_discoveries(&mut board, &mut tracker, &fetcher, &bridge).unwrap();
+    assert_eq!(board.backlog.len(), 1);
+
+    // Second call with same data: tracker already has topic, so 0 new
+    let added = surface_developer_discoveries(&mut board, &mut tracker, &fetcher, &bridge).unwrap();
+    assert_eq!(added, 0);
+    assert_eq!(board.backlog.len(), 1);
+}
+
+#[test]
+fn surface_discoveries_no_events_no_items() {
+    let bridge = mock_bridge();
+    let fetcher = MockEventFetcher { events: vec![] };
+    let mut board = GoalBoard::default();
+    let mut tracker = ResearchTracker::with_default_watches();
+
+    let added = surface_developer_discoveries(&mut board, &mut tracker, &fetcher, &bridge).unwrap();
+    assert_eq!(added, 0);
+    assert!(board.backlog.is_empty());
+}

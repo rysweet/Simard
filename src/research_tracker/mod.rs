@@ -4,11 +4,13 @@
 //! engineering work. Also maintains a watch list of developers whose public
 //! activity is relevant to Simard's focus areas.
 
+pub mod activity;
 mod operations;
 mod types;
 mod watches;
 
 // Re-export all public items so `crate::research_tracker::X` still works.
+pub use activity::{EventFetcher, GhCliFetcher, check_developer_activity};
 pub use operations::{
     add_research_topic, load_research_topics, track_developer, update_topic_status,
 };
