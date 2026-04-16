@@ -145,9 +145,10 @@ pub fn run_ooda_daemon(
     }
 
     let state_root = state_root_override.unwrap_or_else(|| {
-        PathBuf::from(
-            std::env::var("SIMARD_STATE_ROOT").unwrap_or_else(|_| "/tmp/simard-ooda".to_string()),
-        )
+        PathBuf::from(std::env::var("SIMARD_STATE_ROOT").unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
+            format!("{home}/.simard/state")
+        }))
     });
 
     std::fs::create_dir_all(&state_root)?;
