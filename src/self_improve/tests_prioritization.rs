@@ -216,6 +216,7 @@ fn prioritized_dimension_serde_round_trip() {
         current_deficit: 0.15,
         historical_weakness_rate: 0.6,
         worsening: true,
+        trend_velocity: -0.05,
     };
     let json = serde_json::to_string(&dim).unwrap();
     let parsed: PrioritizedDimension = serde_json::from_str(&json).unwrap();
