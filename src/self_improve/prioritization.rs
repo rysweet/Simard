@@ -1,7 +1,8 @@
 //! Composite dimension prioritization combining current deficits with historical cycles.
 //!
-//! [`find_weak_dimensions`](super::cycle::find_weak_dimensions) returns
-//! `WeakDimension` entries with deficit magnitudes, sorted by severity.
+//! [`find_weak_dimensions_detailed`] is the canonical weak-dimension detector,
+//! returning `WeakDimension` entries with deficit magnitudes sorted by severity.
+//! [`super::cycle::find_weak_dimensions`] delegates here.
 //! This module adds composite prioritization that weighs current deficit
 //! magnitude, historical weakness frequency, and trend direction across
 //! past cycles.
@@ -9,7 +10,6 @@
 use crate::gym_scoring::GymSuiteScore;
 use serde::{Deserialize, Serialize};
 
-use super::cycle::find_weak_dimensions;
 use super::types::WeakDimension;
 
 /// The five standard scoring dimensions.
@@ -61,14 +61,42 @@ impl Default for PriorityWeights {
 
 /// Identify dimensions scoring below the threshold, returning deficit details.
 ///
-/// Delegates to [`find_weak_dimensions`](super::cycle::find_weak_dimensions),
-/// which returns `WeakDimension` entries sorted by deficit (largest first).
+/// This is the canonical implementation for weak-dimension detection.
+/// [`find_weak_dimensions`](super::cycle::find_weak_dimensions) delegates here.
+/// Results are sorted by deficit (largest first).
 pub fn find_weak_dimensions_detailed(
     score: &GymSuiteScore,
     weak_threshold: f64,
     target: Option<&str>,
 ) -> Vec<WeakDimension> {
-    find_weak_dimensions(score, weak_threshold, target)
+    let dims = &score.dimensions;
+    let checks: [(&str, f64); 5] = [
+        ("factual_accuracy", dims.factual_accuracy),
+        ("specificity", dims.specificity),
+        ("temporal_awareness", dims.temporal_awareness),
+        ("source_attribution", dims.source_attribution),
+        ("confidence_calibration", dims.confidence_calibration),
+    ];
+    let mut weak = Vec::new();
+    for (name, value) in checks {
+        if let Some(t) = target
+            && name != t
+        {
+            continue;
+        }
+        if value < weak_threshold {
+            weak.push(WeakDimension {
+                name: name.to_string(),
+                deficit: weak_threshold - value,
+            });
+        }
+    }
+    weak.sort_by(|a, b| {
+        b.deficit
+            .partial_cmp(&a.deficit)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    weak
 }
 
 /// Build a prioritized ranking of dimensions by combining current-cycle

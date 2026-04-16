@@ -649,3 +649,105 @@ fn summarize_cycle_shows_proposed_changes_count() {
         "should show proposed changes count"
     );
 }
+
+#[test]
+fn decide_commits_with_mixed_regression_severities() {
+    // One regression below max (ok) and sufficient net improvement — should commit.
+    let cfg = ImprovementConfig::default(); // max_single_regression = 0.05
+    let baseline = make_score(0.60);
+    let post = make_score(0.70);
+    let regressions = vec![
+        Regression {
+            dimension: "specificity".into(),
+            baseline_score: 0.6,
+            current_score: 0.57,
+            delta: -0.03, // below max, ok
+            severity: RegressionSeverity::Minor,
+        },
+        Regression {
+            dimension: "temporal_awareness".into(),
+            baseline_score: 0.5,
+            current_score: 0.48,
+            delta: -0.02, // below max, ok
+            severity: RegressionSeverity::Minor,
+        },
+    ];
+    let d = decide(&cfg, &baseline, &post, &regressions);
+    assert!(
+        matches!(d, ImprovementDecision::Commit { .. }),
+        "should commit when all regressions are below max threshold"
+    );
+}
+
+#[test]
+fn decide_revert_reason_includes_all_severe_dimensions() {
+    // Multiple regressions exceeding max — revert reason should name all of them.
+    let cfg = ImprovementConfig {
+        max_single_regression: 0.05,
+        ..ImprovementConfig::default()
+    };
+    let baseline = make_score(0.60);
+    let post = make_score(0.70);
+    let regressions = vec![
+        Regression {
+            dimension: "specificity".into(),
+            baseline_score: 0.6,
+            current_score: 0.5,
+            delta: -0.10,
+            severity: RegressionSeverity::Severe,
+        },
+        Regression {
+            dimension: "temporal_awareness".into(),
+            baseline_score: 0.5,
+            current_score: 0.3,
+            delta: -0.20,
+            severity: RegressionSeverity::Severe,
+        },
+        Regression {
+            dimension: "confidence_calibration".into(),
+            baseline_score: 0.7,
+            current_score: 0.68,
+            delta: -0.02, // below max, not included in reason
+            severity: RegressionSeverity::Minor,
+        },
+    ];
+    let d = decide(&cfg, &baseline, &post, &regressions);
+    match d {
+        ImprovementDecision::Revert { reason } => {
+            assert!(
+                reason.contains("specificity"),
+                "reason should name specificity"
+            );
+            assert!(
+                reason.contains("temporal_awareness"),
+                "reason should name temporal_awareness"
+            );
+            assert!(
+                !reason.contains("confidence_calibration"),
+                "minor regression should not appear in reason"
+            );
+        }
+        ImprovementDecision::Commit { .. } => panic!("expected revert"),
+    }
+}
+
+#[test]
+fn summarize_cycle_zero_net_change() {
+    let cycle = ImprovementCycle {
+        baseline: make_score(0.70),
+        proposed_changes: vec![],
+        post_score: Some(make_score(0.70)),
+        regressions: vec![],
+        decision: Some(ImprovementDecision::Revert {
+            reason: "no improvement".into(),
+        }),
+        final_phase: ImprovementPhase::Decide,
+        weak_dimensions: Vec::new(),
+        weak_dimension_details: Vec::new(),
+        target_dimension: None,
+    };
+    let summary = summarize_cycle(&cycle);
+    // Net should be +0.0% (or equivalent)
+    assert!(summary.contains("net +0.0%") || summary.contains("net -0.0%"));
+    assert!(summary.contains("REVERT"));
+}

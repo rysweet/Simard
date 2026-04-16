@@ -206,6 +206,152 @@ fn dimension_value_unknown_returns_zero() {
     assert!((dimension_value(&score, "") - 0.0).abs() < 1e-9);
 }
 
+// ---- trend_velocity computation ----
+
+#[test]
+fn prioritize_trend_velocity_computed_correctly() {
+    let current = make_score(0.5);
+    // 3 cycles: 0.7 -> 0.6 -> 0.5, velocity = (0.5 - 0.7) / 2 = -0.1 per cycle
+    let past = vec![make_score(0.7), make_score(0.6), make_score(0.5)];
+    let result = prioritize_dimensions_default(&current, 0.6, &past);
+    let fa = result
+        .iter()
+        .find(|d| d.name == "factual_accuracy")
+        .unwrap();
+    // factual_accuracy: first=0.7, last=0.5, velocity = (0.5 - 0.7) / 2 = -0.1
+    assert!(
+        (fa.trend_velocity - (-0.1)).abs() < 1e-9,
+        "expected velocity -0.1, got {}",
+        fa.trend_velocity
+    );
+    assert!(fa.worsening);
+}
+
+#[test]
+fn prioritize_trend_velocity_positive_when_improving() {
+    let current = make_score(0.8);
+    // 3 cycles: 0.5 -> 0.6 -> 0.7, velocity = (0.7 - 0.5) / 2 = +0.1 per cycle
+    let past = vec![make_score(0.5), make_score(0.6), make_score(0.7)];
+    let result = prioritize_dimensions_default(&current, 0.6, &past);
+    let fa = result
+        .iter()
+        .find(|d| d.name == "factual_accuracy")
+        .unwrap();
+    assert!(
+        (fa.trend_velocity - 0.1).abs() < 1e-9,
+        "expected velocity +0.1, got {}",
+        fa.trend_velocity
+    );
+    assert!(!fa.worsening);
+}
+
+#[test]
+fn prioritize_trend_velocity_zero_with_no_history() {
+    let current = make_score(0.5);
+    let result = prioritize_dimensions_default(&current, 0.6, &[]);
+    for dim in &result {
+        assert!(
+            (dim.trend_velocity - 0.0).abs() < 1e-9,
+            "{} should have zero velocity with no history, got {}",
+            dim.name,
+            dim.trend_velocity
+        );
+    }
+}
+
+#[test]
+fn prioritize_fast_decline_higher_priority_than_slow() {
+    // Fast decline: 0.9 -> 0.3 over 2 steps = velocity -0.3/step
+    let fast_past = vec![make_score(0.9), make_score(0.6), make_score(0.3)];
+    // Slow decline: 0.7 -> 0.5 over 2 steps = velocity -0.1/step
+    let slow_past = vec![make_score(0.7), make_score(0.6), make_score(0.5)];
+
+    let current = make_score(0.5);
+    let weights = PriorityWeights {
+        deficit: 0.0,
+        chronic: 0.0,
+        trend: 1.0, // only trend matters
+    };
+
+    let fast_result = prioritize_dimensions(&current, 0.6, &fast_past, &weights);
+    let slow_result = prioritize_dimensions(&current, 0.6, &slow_past, &weights);
+
+    let fast_fa = fast_result
+        .iter()
+        .find(|d| d.name == "factual_accuracy")
+        .unwrap();
+    let slow_fa = slow_result
+        .iter()
+        .find(|d| d.name == "factual_accuracy")
+        .unwrap();
+
+    assert!(
+        fast_fa.priority > slow_fa.priority,
+        "fast decline ({}) should have higher trend priority than slow decline ({})",
+        fast_fa.priority,
+        slow_fa.priority
+    );
+}
+
+#[test]
+fn prioritize_trend_velocity_per_dimension_varies() {
+    // Build scores where different dimensions decline at different rates
+    let past_1 = GymSuiteScore {
+        suite_id: "test".into(),
+        overall: 0.8,
+        dimensions: ScoreDimensions {
+            factual_accuracy: 0.8,
+            specificity: 0.8,
+            temporal_awareness: 0.8,
+            source_attribution: 0.8,
+            confidence_calibration: 0.8,
+        },
+        scenario_count: 4,
+        scenarios_passed: 4,
+        pass_rate: 1.0,
+        recorded_at_unix_ms: None,
+    };
+    let past_2 = GymSuiteScore {
+        suite_id: "test".into(),
+        overall: 0.5,
+        dimensions: ScoreDimensions {
+            factual_accuracy: 0.7,        // dropped 0.1
+            specificity: 0.4,             // dropped 0.4
+            temporal_awareness: 0.8,      // no change
+            source_attribution: 0.6,      // dropped 0.2
+            confidence_calibration: 0.75, // dropped 0.05
+        },
+        scenario_count: 4,
+        scenarios_passed: 4,
+        pass_rate: 1.0,
+        recorded_at_unix_ms: None,
+    };
+    let current = make_score(0.5);
+    let result = prioritize_dimensions_default(&current, 0.6, &[past_1, past_2]);
+
+    let spec = result.iter().find(|d| d.name == "specificity").unwrap();
+    let fa = result
+        .iter()
+        .find(|d| d.name == "factual_accuracy")
+        .unwrap();
+    let ta = result
+        .iter()
+        .find(|d| d.name == "temporal_awareness")
+        .unwrap();
+
+    // specificity dropped 0.4 in 1 step = velocity -0.4
+    assert!((spec.trend_velocity - (-0.4)).abs() < 1e-9);
+    assert!(spec.worsening);
+
+    // factual_accuracy dropped 0.1 in 1 step = velocity -0.1
+    assert!((fa.trend_velocity - (-0.1)).abs() < 1e-9);
+    assert!(fa.worsening);
+
+    // temporal_awareness didn't change = velocity 0.0, not worsening
+    assert!((ta.trend_velocity - 0.0).abs() < 1e-9);
+    assert!(!ta.worsening);
+}
+
 // ---- PrioritizedDimension serde ----
 
 #[test]
