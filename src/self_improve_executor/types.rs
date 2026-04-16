@@ -64,16 +64,22 @@ impl std::fmt::Display for ApplyResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Applied { findings } => {
-                write!(f, "applied ({} findings)", findings.len())
+                let n = findings.len();
+                let noun = if n == 1 { "finding" } else { "findings" };
+                write!(f, "applied ({n} {noun})")
             }
             Self::ReviewBlocked { findings } => {
-                write!(f, "review-blocked ({} findings)", findings.len())
+                let n = findings.len();
+                let noun = if n == 1 { "finding" } else { "findings" };
+                write!(f, "review-blocked ({n} {noun})")
             }
             Self::PlanFailed { reason } => {
                 write!(f, "plan-failed: {reason}")
             }
             Self::CommitFailed { reason, findings } => {
-                write!(f, "commit-failed: {reason} ({} findings)", findings.len())
+                let n = findings.len();
+                let noun = if n == 1 { "finding" } else { "findings" };
+                write!(f, "commit-failed: {reason} ({n} {noun})")
             }
         }
     }
@@ -190,6 +196,6 @@ mod tests {
             reason: "git err".to_string(),
             findings: vec![make_finding(Severity::Low)],
         };
-        assert_eq!(format!("{r}"), "commit-failed: git err (1 findings)");
+        assert_eq!(format!("{r}"), "commit-failed: git err (1 finding)");
     }
 }

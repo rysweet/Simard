@@ -28,12 +28,13 @@ pub fn run_improvement_cycle(
     let baseline_result = gym.run_suite(&config.suite_id)?;
     let baseline = suite_score_from_result(&baseline_result);
 
-    // Phase 2: Analyze — identify weak dimensions
-    let weak_dimensions = find_weak_dimensions(
+    // Phase 2: Analyze — identify weak dimensions (sorted by deficit)
+    let weak_details = find_weak_dimensions(
         &baseline,
         config.weak_threshold,
         config.target_dimension.as_deref(),
     );
+    let weak_names: Vec<String> = weak_details.iter().map(|w| w.name.clone()).collect();
 
     // Phase 3: Research — check if we have proposed changes
     if config.proposed_changes.is_empty() {
@@ -45,15 +46,16 @@ pub fn run_improvement_cycle(
             decision: Some(ImprovementDecision::Revert {
                 reason: format!(
                     "no changes proposed; weak dimensions: {}",
-                    if weak_dimensions.is_empty() {
+                    if weak_names.is_empty() {
                         "none".to_string()
                     } else {
-                        weak_dimensions.join(", ")
+                        weak_names.join(", ")
                     }
                 ),
             }),
             final_phase: ImprovementPhase::Analyze,
-            weak_dimensions,
+            weak_dimensions: weak_names,
+            weak_dimension_details: weak_details,
             target_dimension: config.target_dimension.clone(),
         });
     }
@@ -77,7 +79,8 @@ pub fn run_improvement_cycle(
         regressions,
         decision: Some(decision),
         final_phase: ImprovementPhase::Decide,
-        weak_dimensions,
+        weak_dimensions: weak_names,
+        weak_dimension_details: weak_details,
         target_dimension: config.target_dimension.clone(),
     })
 }
@@ -135,11 +138,14 @@ pub(super) fn decide(
 ///
 /// When `target` is `Some`, only that dimension is checked. When `None`, all
 /// five standard dimensions are checked.
+///
+/// Results are sorted by deficit (largest first) so callers can prioritize
+/// the weakest dimension for improvement.
 pub(super) fn find_weak_dimensions(
     score: &GymSuiteScore,
     weak_threshold: f64,
     target: Option<&str>,
-) -> Vec<String> {
+) -> Vec<super::types::WeakDimension> {
     let dims = &score.dimensions;
     let checks: [(&str, f64); 5] = [
         ("factual_accuracy", dims.factual_accuracy),
@@ -156,9 +162,17 @@ pub(super) fn find_weak_dimensions(
             continue;
         }
         if value < weak_threshold {
-            weak.push(name.to_string());
+            weak.push(super::types::WeakDimension {
+                name: name.to_string(),
+                deficit: weak_threshold - value,
+            });
         }
     }
+    weak.sort_by(|a, b| {
+        b.deficit
+            .partial_cmp(&a.deficit)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     weak
 }
 
@@ -170,7 +184,14 @@ pub fn summarize_cycle(cycle: &ImprovementCycle) -> String {
         lines.push(format!("Target dimension: {dim}"));
     }
 
-    if !cycle.weak_dimensions.is_empty() {
+    if !cycle.weak_dimension_details.is_empty() {
+        let detail: Vec<String> = cycle
+            .weak_dimension_details
+            .iter()
+            .map(|w| format!("{} ({:.1}% deficit)", w.name, w.deficit * 100.0))
+            .collect();
+        lines.push(format!("Weak dimensions: {}", detail.join(", ")));
+    } else if !cycle.weak_dimensions.is_empty() {
         lines.push(format!(
             "Weak dimensions: {}",
             cycle.weak_dimensions.join(", ")
@@ -342,7 +363,7 @@ mod tests {
         let score = make_score(0.5);
         let weak = find_weak_dimensions(&score, 0.45, None);
         // source_attribution = 0.5 * 0.7 = 0.35, below 0.45
-        assert!(weak.contains(&"source_attribution".to_string()));
+        assert!(weak.iter().any(|w| w.name == "source_attribution"));
     }
 
     #[test]
@@ -351,7 +372,8 @@ mod tests {
         let weak = find_weak_dimensions(&score, 0.6, Some("factual_accuracy"));
         // factual_accuracy = 0.5, below 0.6
         assert_eq!(weak.len(), 1);
-        assert_eq!(weak[0], "factual_accuracy");
+        assert_eq!(weak[0].name, "factual_accuracy");
+        assert!((weak[0].deficit - 0.1).abs() < 1e-9);
     }
 
     #[test]
@@ -373,6 +395,7 @@ mod tests {
             decision: None,
             final_phase: ImprovementPhase::Analyze,
             weak_dimensions: Vec::new(),
+            weak_dimension_details: Vec::new(),
             target_dimension: None,
         };
         let summary = summarize_cycle(&cycle);
@@ -393,6 +416,7 @@ mod tests {
             }),
             final_phase: ImprovementPhase::Decide,
             weak_dimensions: Vec::new(),
+            weak_dimension_details: Vec::new(),
             target_dimension: None,
         };
         let summary = summarize_cycle(&cycle);
@@ -412,6 +436,7 @@ mod tests {
             }),
             final_phase: ImprovementPhase::Decide,
             weak_dimensions: Vec::new(),
+            weak_dimension_details: Vec::new(),
             target_dimension: None,
         };
         let summary = summarize_cycle(&cycle);
@@ -429,6 +454,7 @@ mod tests {
             decision: None,
             final_phase: ImprovementPhase::Eval,
             weak_dimensions: Vec::new(),
+            weak_dimension_details: Vec::new(),
             target_dimension: Some("specificity".into()),
         };
         let summary = summarize_cycle(&cycle);
@@ -462,6 +488,7 @@ mod tests {
             }),
             final_phase: ImprovementPhase::Decide,
             weak_dimensions: Vec::new(),
+            weak_dimension_details: Vec::new(),
             target_dimension: None,
         };
         let summary = summarize_cycle(&cycle);

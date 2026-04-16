@@ -1,9 +1,10 @@
 //! Types for the self-improvement loop.
 
 use crate::gym_scoring::{GymSuiteScore, Regression};
+use serde::{Deserialize, Serialize};
 
 /// Phases of a single self-improvement cycle.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ImprovementPhase {
     /// Run the gym suite to establish a baseline score.
     Eval,
@@ -34,7 +35,7 @@ impl std::fmt::Display for ImprovementPhase {
 }
 
 /// A single proposed change to prompts, policies, or orchestration.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProposedChange {
     /// Path to the file that would be changed.
     pub file_path: String,
@@ -48,7 +49,7 @@ pub struct ProposedChange {
 ///
 /// The deficit indicates how far below the threshold the dimension scored,
 /// enabling callers to prioritize improvements by severity.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WeakDimension {
     /// Name of the scoring dimension (e.g. "specificity").
     pub name: String,
@@ -57,7 +58,7 @@ pub struct WeakDimension {
 }
 
 /// The outcome of the decision phase.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ImprovementDecision {
     /// The changes should be committed.
     Commit {
@@ -105,7 +106,7 @@ impl Default for ImprovementConfig {
 }
 
 /// A complete improvement cycle record with full provenance.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ImprovementCycle {
     /// The baseline score established in the Eval phase.
     pub baseline: GymSuiteScore,
@@ -121,6 +122,9 @@ pub struct ImprovementCycle {
     pub final_phase: ImprovementPhase,
     /// Dimensions that scored below the weak threshold during Analyze.
     pub weak_dimensions: Vec<String>,
+    /// Detailed weak dimension info with deficits, sorted by severity (largest deficit first).
+    #[serde(default)]
+    pub weak_dimension_details: Vec<WeakDimension>,
     /// The dimension that was targeted for this cycle (if any).
     pub target_dimension: Option<String>,
 }
@@ -264,6 +268,7 @@ mod tests {
             decision: None,
             final_phase: ImprovementPhase::Eval,
             weak_dimensions: Vec::new(),
+            weak_dimension_details: Vec::new(),
             target_dimension: None,
         };
         assert!(cycle.proposed_changes.is_empty());
@@ -288,6 +293,7 @@ mod tests {
             }),
             final_phase: ImprovementPhase::Decide,
             weak_dimensions: vec!["specificity".into()],
+            weak_dimension_details: Vec::new(),
             target_dimension: Some("specificity".into()),
         };
         assert_eq!(cycle.target_dimension.as_deref(), Some("specificity"));
@@ -305,6 +311,7 @@ mod tests {
             decision: None,
             final_phase: ImprovementPhase::Analyze,
             weak_dimensions: Vec::new(),
+            weak_dimension_details: Vec::new(),
             target_dimension: None,
         };
         let display = cycle.to_string();
@@ -324,6 +331,7 @@ mod tests {
             }),
             final_phase: ImprovementPhase::Decide,
             weak_dimensions: Vec::new(),
+            weak_dimension_details: Vec::new(),
             target_dimension: None,
         };
         assert!(cycle.is_committed());
@@ -342,6 +350,7 @@ mod tests {
             }),
             final_phase: ImprovementPhase::Decide,
             weak_dimensions: Vec::new(),
+            weak_dimension_details: Vec::new(),
             target_dimension: None,
         };
         assert!(cycle.is_reverted());
@@ -358,6 +367,7 @@ mod tests {
             decision: None,
             final_phase: ImprovementPhase::Eval,
             weak_dimensions: Vec::new(),
+            weak_dimension_details: Vec::new(),
             target_dimension: None,
         };
         assert!(!cycle.is_committed());

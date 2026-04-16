@@ -56,8 +56,9 @@ impl Default for PriorityWeights {
 
 /// Identify dimensions scoring below the threshold, returning deficit details.
 ///
-/// Like [`find_weak_dimensions`](super::cycle::find_weak_dimensions) but returns
-/// [`WeakDimension`] with deficit magnitudes, sorted by deficit (largest first).
+/// This is a standalone implementation that mirrors the deficit-aware behavior
+/// now also present in [`find_weak_dimensions`](super::cycle::find_weak_dimensions),
+/// with results sorted by deficit (largest first).
 pub fn find_weak_dimensions_detailed(
     score: &GymSuiteScore,
     weak_threshold: f64,

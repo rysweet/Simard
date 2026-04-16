@@ -93,6 +93,7 @@ fn summarize_cycle_commit() {
         }),
         final_phase: ImprovementPhase::Decide,
         weak_dimensions: Vec::new(),
+        weak_dimension_details: Vec::new(),
         target_dimension: None,
     };
     let summary = summarize_cycle(&cycle);
@@ -112,6 +113,7 @@ fn summarize_cycle_revert() {
         }),
         final_phase: ImprovementPhase::Decide,
         weak_dimensions: Vec::new(),
+        weak_dimension_details: Vec::new(),
         target_dimension: None,
     };
     let summary = summarize_cycle(&cycle);
@@ -129,6 +131,7 @@ fn summarize_cycle_incomplete() {
         decision: None,
         final_phase: ImprovementPhase::Analyze,
         weak_dimensions: Vec::new(),
+        weak_dimension_details: Vec::new(),
         target_dimension: None,
     };
     let summary = summarize_cycle(&cycle);
@@ -148,6 +151,7 @@ fn improvement_cycle_display_delegates_to_summarize() {
         }),
         final_phase: ImprovementPhase::Decide,
         weak_dimensions: Vec::new(),
+        weak_dimension_details: Vec::new(),
         target_dimension: None,
     };
     assert_eq!(cycle.to_string(), summarize_cycle(&cycle));
@@ -218,8 +222,11 @@ fn find_weak_dimensions_mixed() {
     };
     let weak = find_weak_dimensions(&score, 0.6, None);
     assert_eq!(weak.len(), 2);
-    assert!(weak.contains(&"specificity".to_string()));
-    assert!(weak.contains(&"source_attribution".to_string()));
+    // Sorted by deficit: source_attribution (0.2 deficit) before specificity (0.1 deficit)
+    assert_eq!(weak[0].name, "source_attribution");
+    assert!((weak[0].deficit - 0.2).abs() < 1e-9);
+    assert_eq!(weak[1].name, "specificity");
+    assert!((weak[1].deficit - 0.1).abs() < 1e-9);
 }
 
 #[test]
@@ -249,6 +256,7 @@ fn summarize_cycle_with_regressions() {
         }),
         final_phase: ImprovementPhase::Decide,
         weak_dimensions: Vec::new(),
+        weak_dimension_details: Vec::new(),
         target_dimension: None,
     };
     let summary = summarize_cycle(&cycle);
@@ -292,7 +300,9 @@ fn find_weak_dimensions_with_target_filters_single() {
     };
     // Target specificity (weak) — should return it
     let weak = find_weak_dimensions(&score, 0.6, Some("specificity"));
-    assert_eq!(weak, vec!["specificity"]);
+    assert_eq!(weak.len(), 1);
+    assert_eq!(weak[0].name, "specificity");
+    assert!((weak[0].deficit - 0.1).abs() < 1e-9);
 
     // Target factual_accuracy (strong) — should return empty
     let weak = find_weak_dimensions(&score, 0.6, Some("factual_accuracy"));
@@ -300,7 +310,9 @@ fn find_weak_dimensions_with_target_filters_single() {
 
     // Target source_attribution (weak) — should return it
     let weak = find_weak_dimensions(&score, 0.6, Some("source_attribution"));
-    assert_eq!(weak, vec!["source_attribution"]);
+    assert_eq!(weak.len(), 1);
+    assert_eq!(weak[0].name, "source_attribution");
+    assert!((weak[0].deficit - 0.2).abs() < 1e-9);
 }
 
 #[test]
@@ -322,6 +334,7 @@ fn summarize_cycle_shows_target_dimension() {
         }),
         final_phase: ImprovementPhase::Decide,
         weak_dimensions: Vec::new(),
+        weak_dimension_details: Vec::new(),
         target_dimension: Some("specificity".to_string()),
     };
     let summary = summarize_cycle(&cycle);
@@ -341,6 +354,7 @@ fn summarize_cycle_omits_target_when_none() {
         }),
         final_phase: ImprovementPhase::Decide,
         weak_dimensions: Vec::new(),
+        weak_dimension_details: Vec::new(),
         target_dimension: None,
     };
     let summary = summarize_cycle(&cycle);
@@ -424,9 +438,61 @@ fn summarize_cycle_negative_improvement() {
         }),
         final_phase: ImprovementPhase::Decide,
         weak_dimensions: Vec::new(),
+        weak_dimension_details: Vec::new(),
         target_dimension: None,
     };
     let summary = summarize_cycle(&cycle);
     assert!(summary.contains("REVERT"));
     assert!(summary.contains("-10.0%"));
+}
+
+#[test]
+fn find_weak_dimensions_sorted_by_deficit() {
+    let score = GymSuiteScore {
+        suite_id: "test".to_string(),
+        overall: 0.65,
+        dimensions: ScoreDimensions {
+            factual_accuracy: 0.55,       // deficit 0.05
+            specificity: 0.50,            // deficit 0.10
+            temporal_awareness: 0.70,     // above threshold
+            source_attribution: 0.30,     // deficit 0.30 (largest)
+            confidence_calibration: 0.58, // deficit 0.02
+        },
+        scenario_count: 6,
+        scenarios_passed: 6,
+        pass_rate: 1.0,
+        recorded_at_unix_ms: None,
+    };
+    let weak = find_weak_dimensions(&score, 0.6, None);
+    assert_eq!(weak.len(), 4);
+    // Sorted by deficit descending
+    assert_eq!(weak[0].name, "source_attribution");
+    assert!((weak[0].deficit - 0.30).abs() < 1e-9);
+    assert_eq!(weak[1].name, "specificity");
+    assert_eq!(weak[2].name, "factual_accuracy");
+    assert_eq!(weak[3].name, "confidence_calibration");
+    assert!(weak[0].deficit >= weak[1].deficit);
+    assert!(weak[1].deficit >= weak[2].deficit);
+    assert!(weak[2].deficit >= weak[3].deficit);
+}
+
+#[test]
+fn summarize_cycle_shows_deficit_when_details_present() {
+    use super::types::WeakDimension;
+    let cycle = ImprovementCycle {
+        baseline: make_score(0.50),
+        proposed_changes: vec![],
+        post_score: None,
+        regressions: vec![],
+        decision: None,
+        final_phase: ImprovementPhase::Analyze,
+        weak_dimensions: vec!["source_attribution".into()],
+        weak_dimension_details: vec![WeakDimension {
+            name: "source_attribution".into(),
+            deficit: 0.25,
+        }],
+        target_dimension: None,
+    };
+    let summary = summarize_cycle(&cycle);
+    assert!(summary.contains("source_attribution (25.0% deficit)"));
 }

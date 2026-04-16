@@ -317,7 +317,7 @@ fn apply_result_display_applied() {
     let r = ApplyResult::Applied {
         findings: vec![finding(FindingCategory::Bug, Severity::Low)],
     };
-    assert_eq!(r.to_string(), "applied (1 findings)");
+    assert_eq!(r.to_string(), "applied (1 finding)");
 }
 
 #[test]
