@@ -302,4 +302,117 @@ mod tests {
             "cleanup must not create the destination file before rename succeeds"
         );
     }
+
+    #[test]
+    fn load_json_or_default_returns_default_for_missing_file() {
+        let temp_dir = TestDir::new("simard-load-missing");
+        let path = temp_dir.path().join("nonexistent.json");
+        let result: Vec<String> =
+            super::load_json_or_default("test", &path).expect("should return default");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn load_json_or_default_reads_valid_file() {
+        let temp_dir = TestDir::new("simard-load-valid");
+        let path = temp_dir.path().join("data.json");
+        fs::write(&path, r#"["alpha","beta"]"#).expect("write test file");
+        let result: Vec<String> =
+            super::load_json_or_default("test", &path).expect("should parse valid JSON");
+        assert_eq!(result, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn load_json_or_default_rejects_corrupt_file() {
+        let temp_dir = TestDir::new("simard-load-corrupt");
+        let path = temp_dir.path().join("bad.json");
+        fs::write(&path, "not-json!!!").expect("write corrupt file");
+        let result: Result<Vec<String>, _> = super::load_json_or_default("test", &path);
+        assert!(result.is_err(), "corrupt JSON should produce an error");
+    }
+
+    #[test]
+    fn persist_json_roundtrip() {
+        let temp_dir = TestDir::new("simard-persist-roundtrip");
+        let path = temp_dir.path().join("roundtrip.json");
+        let data = vec!["one".to_string(), "two".to_string()];
+        persist_json("test", &path, &data).expect("persist should succeed");
+        let loaded: Vec<String> =
+            super::load_json_or_default("test", &path).expect("load should succeed");
+        assert_eq!(loaded, data);
+    }
+
+    #[test]
+    fn persist_json_creates_parent_dirs() {
+        let temp_dir = TestDir::new("simard-persist-parents");
+        let path = temp_dir
+            .path()
+            .join("a")
+            .join("b")
+            .join("c")
+            .join("deep.json");
+        persist_json("test", &path, &42u32).expect("persist with nested dirs should succeed");
+        assert!(
+            path.exists(),
+            "file should exist in deeply nested directory"
+        );
+        let loaded: u32 =
+            super::load_json_or_default("test", &path).expect("should load nested file");
+        assert_eq!(loaded, 42);
+    }
+
+    #[test]
+    fn persist_json_overwrites_existing() {
+        let temp_dir = TestDir::new("simard-persist-overwrite");
+        let path = temp_dir.path().join("overwrite.json");
+        persist_json("test", &path, &"first").expect("first write");
+        persist_json("test", &path, &"second").expect("second write");
+        let loaded: String =
+            super::load_json_or_default("test", &path).expect("should load overwritten");
+        assert_eq!(loaded, "second");
+    }
+
+    #[test]
+    fn unique_temp_path_produces_distinct_paths() {
+        let parent = Path::new("/tmp");
+        let p1 = super::unique_temp_path(parent, "test.json", 0);
+        let p2 = super::unique_temp_path(parent, "test.json", 0);
+        assert_ne!(p1, p2, "sequential calls should produce unique paths");
+    }
+
+    #[test]
+    fn temp_file_guard_file_mut_after_close_returns_error() {
+        let temp_dir = TestDir::new("simard-guard-closed");
+        let store_path = temp_dir.path().join("data.json");
+        let mut guard = TempFileGuard::new("test", &store_path).expect("should create guard");
+        guard.close();
+        let result = guard.file_mut();
+        assert!(result.is_err(), "file_mut after close should fail");
+    }
+
+    #[test]
+    fn temp_file_guard_persist_renames_to_destination() {
+        let temp_dir = TestDir::new("simard-guard-persist");
+        let store_path = temp_dir.path().join("final.json");
+        let mut guard = TempFileGuard::new("test", &store_path).expect("should create guard");
+        let temp_path = guard.path().to_path_buf();
+        guard
+            .file_mut()
+            .expect("file open")
+            .write_all(b"payload")
+            .expect("write");
+        guard
+            .persist("test", &store_path)
+            .expect("persist should succeed");
+        assert!(
+            store_path.exists(),
+            "destination should exist after persist"
+        );
+        assert!(
+            !temp_path.exists(),
+            "temp file should be gone after persist"
+        );
+        let contents = fs::read_to_string(&store_path).expect("read destination");
+        assert_eq!(contents, "payload");
+    }
 }
