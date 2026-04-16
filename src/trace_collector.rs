@@ -54,7 +54,7 @@ fn ensure_ring() -> std::sync::MutexGuard<'static, Option<Vec<SpanRecord>>> {
 /// Drain recent span records (up to `limit`). Returns newest first.
 pub fn drain_recent(limit: usize) -> Vec<SpanRecord> {
     let guard = ensure_ring();
-    let ring = guard.as_ref().unwrap();
+    let ring = guard.as_ref().expect("ensure_ring guarantees Some");
     let write_idx = WRITE_INDEX.load(Ordering::Relaxed);
     let count = limit.min(RING_SIZE).min(write_idx);
 
@@ -95,7 +95,7 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for SpanCollectorLayer {
             };
 
             let mut guard = ensure_ring();
-            let ring = guard.as_mut().unwrap();
+            let ring = guard.as_mut().expect("ensure_ring guarantees Some");
             let idx = WRITE_INDEX.fetch_add(1, Ordering::Relaxed) % RING_SIZE;
             ring[idx] = record;
         }

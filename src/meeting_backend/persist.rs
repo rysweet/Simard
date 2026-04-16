@@ -576,7 +576,7 @@ pub fn link_action_items_to_goals(
             let overlap = item_words.iter().filter(|w| goal_words.contains(w)).count();
 
             let threshold = if goal_words.len() <= 2 { 1 } else { 2 };
-            if overlap >= threshold && (best_match.is_none() || overlap > best_match.unwrap().1) {
+            if overlap >= threshold && best_match.is_none_or(|(_, prev)| overlap > prev) {
                 best_match = Some((slug.as_str(), overlap));
             }
         }
