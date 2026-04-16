@@ -32,10 +32,8 @@ fn detailed_weak_dims_all_above_threshold() {
 #[test]
 fn detailed_weak_dims_some_below() {
     let score = make_score(0.5);
-    // source_attribution = 0.35, temporal_awareness = 0.40, both below 0.45
     let weak = find_weak_dimensions_detailed(&score, 0.45, None);
     assert!(weak.iter().any(|w| w.name == "source_attribution"));
-    // sorted by deficit descending
     assert!(weak[0].deficit >= weak.last().unwrap().deficit);
 }
 
@@ -56,7 +54,6 @@ fn detailed_weak_dims_deficit_values_correct() {
         assert!(w.deficit > 0.0);
         assert!(w.deficit <= 0.6);
     }
-    // source_attribution = 0.35, deficit = 0.25
     let sa = weak
         .iter()
         .find(|w| w.name == "source_attribution")
@@ -71,23 +68,23 @@ fn prioritize_no_history_uses_deficit_only() {
     let current = make_score(0.5);
     let result = prioritize_dimensions_default(&current, 0.6, &[]);
     assert_eq!(result.len(), 5);
-    // source_attribution has highest deficit (0.25) so should be first
     assert_eq!(result[0].name, "source_attribution");
     assert!((result[0].current_deficit - 0.25).abs() < 1e-9);
+    for dim in &result {
+        assert!((dim.trend_slope - 0.0).abs() < 1e-9);
+    }
 }
 
 #[test]
 fn prioritize_with_history_boosts_chronically_weak() {
-    let current = make_score(0.7); // all dims above 0.6 except source_attribution=0.49
+    let current = make_score(0.7);
     let past = vec![make_score(0.5), make_score(0.5), make_score(0.5)];
     let result = prioritize_dimensions_default(&current, 0.6, &past);
-    // source_attribution was weak in all 3 past cycles (0.35 < 0.6) AND currently weak
     let sa = result
         .iter()
         .find(|d| d.name == "source_attribution")
         .unwrap();
     assert!((sa.historical_weakness_rate - 1.0).abs() < 1e-9);
-    // factual_accuracy was weak in all 3 past cycles (0.5 < 0.6) but NOT currently weak (0.7)
     let fa = result
         .iter()
         .find(|d| d.name == "factual_accuracy")
@@ -99,11 +96,15 @@ fn prioritize_with_history_boosts_chronically_weak() {
 #[test]
 fn prioritize_worsening_trend_detected() {
     let current = make_score(0.5);
-    // Trend: first=0.7 -> last=0.5 = worsening for all dimensions
     let past = vec![make_score(0.7), make_score(0.6), make_score(0.5)];
     let result = prioritize_dimensions_default(&current, 0.6, &past);
     for dim in &result {
         assert!(dim.worsening, "{} should be worsening", dim.name);
+        assert!(
+            dim.trend_slope < 0.0,
+            "{} should have negative slope",
+            dim.name
+        );
     }
 }
 
@@ -119,13 +120,9 @@ fn prioritize_improving_trend_not_worsening() {
 
 #[test]
 fn prioritize_all_signals_combined() {
-    // current: source_attribution = 0.35 (deficit 0.25 from threshold 0.6)
     let current = make_score(0.5);
-    // past: worsening from 0.7 to 0.5, all dims were weak in past cycles at 0.5
     let past = vec![make_score(0.7), make_score(0.5)];
     let result = prioritize_dimensions_default(&current, 0.6, &past);
-
-    // source_attribution has highest deficit, was weak in 50% of history, and is worsening
     let sa = &result[0];
     assert_eq!(sa.name, "source_attribution");
     assert!(sa.current_deficit > 0.0);
@@ -144,7 +141,6 @@ fn prioritize_custom_weights() {
         trend: 1.0,
     };
     let result = prioritize_dimensions(&current, 0.6, &past, &weights);
-    // No worsening (all past cycles same), so all trend signals are 0
     for dim in &result {
         assert!((dim.priority - 0.0).abs() < 1e-9);
     }
@@ -155,7 +151,6 @@ fn prioritize_single_past_cycle_no_trend() {
     let current = make_score(0.5);
     let past = vec![make_score(0.8)];
     let result = prioritize_dimensions_default(&current, 0.6, &past);
-    // With only 1 past cycle, worsening can't be determined
     for dim in &result {
         assert!(!dim.worsening);
     }
@@ -185,4 +180,75 @@ fn prioritize_returns_all_five_dimensions() {
     assert!(names.contains(&"temporal_awareness"));
     assert!(names.contains(&"source_attribution"));
     assert!(names.contains(&"confidence_calibration"));
+}
+
+#[test]
+fn prioritize_trend_slope_continuous_value() {
+    let current = make_score(0.5);
+    let past = vec![
+        make_score(0.8),
+        make_score(0.7),
+        make_score(0.6),
+        make_score(0.5),
+    ];
+    let result = prioritize_dimensions_default(&current, 0.6, &past);
+    let fa = result
+        .iter()
+        .find(|d| d.name == "factual_accuracy")
+        .unwrap();
+    assert!((fa.trend_slope - (-0.1)).abs() < 1e-9);
+}
+
+#[test]
+fn prioritize_improving_trend_positive_slope() {
+    let current = make_score(0.7);
+    let past = vec![make_score(0.5), make_score(0.6), make_score(0.7)];
+    let result = prioritize_dimensions_default(&current, 0.6, &past);
+    let fa = result
+        .iter()
+        .find(|d| d.name == "factual_accuracy")
+        .unwrap();
+    assert!(
+        fa.trend_slope > 0.0,
+        "improving dim should have positive slope"
+    );
+    assert!(!fa.worsening);
+}
+
+#[test]
+fn prioritize_recency_weights_recent_weakness_more() {
+    let current = make_score(0.5);
+    let past_a = vec![make_score(0.9), make_score(0.9), make_score(0.3)];
+    let result_a = prioritize_dimensions_default(&current, 0.6, &past_a);
+    let past_b = vec![make_score(0.3), make_score(0.9), make_score(0.9)];
+    let result_b = prioritize_dimensions_default(&current, 0.6, &past_b);
+    let fa_a = result_a
+        .iter()
+        .find(|d| d.name == "factual_accuracy")
+        .unwrap();
+    let fa_b = result_b
+        .iter()
+        .find(|d| d.name == "factual_accuracy")
+        .unwrap();
+    assert!(
+        fa_a.historical_weakness_rate > fa_b.historical_weakness_rate,
+        "recent weakness should rate higher: {} vs {}",
+        fa_a.historical_weakness_rate,
+        fa_b.historical_weakness_rate,
+    );
+}
+
+#[test]
+fn prioritize_flat_trend_zero_slope() {
+    let current = make_score(0.5);
+    let past = vec![make_score(0.5), make_score(0.5), make_score(0.5)];
+    let result = prioritize_dimensions_default(&current, 0.6, &past);
+    for dim in &result {
+        assert!(
+            dim.trend_slope.abs() < 1e-9,
+            "{} should have zero slope on flat data",
+            dim.name,
+        );
+        assert!(!dim.worsening);
+    }
 }
