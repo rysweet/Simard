@@ -119,8 +119,7 @@ pub fn run_ooda_cycle(
         .active_goals
         .active
         .first()
-        .map(|g| g.description.clone())
-        .unwrap_or_else(|| "ooda-cycle".to_string());
+        .map_or_else(|| "ooda-cycle".to_string(), |g| g.description.clone());
     if let Err(e) = memory_consolidation::intake_memory_operations(
         &cycle_objective,
         &cycle_session_id,
@@ -325,12 +324,13 @@ pub fn run_ooda_cycle(
 
     // Also write the board to disk so the dashboard can read it.
     {
-        let state_root = std::env::var("SIMARD_STATE_ROOT")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| {
+        let state_root = std::env::var("SIMARD_STATE_ROOT").map_or_else(
+            |_| {
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".into());
                 std::path::PathBuf::from(home).join(".simard")
-            });
+            },
+            std::path::PathBuf::from,
+        );
         let goal_path = state_root.join("goal_records.json");
         if let Err(e) = std::fs::create_dir_all(&state_root) {
             eprintln!("[simard] OODA curate: failed to create state dir: {e}");

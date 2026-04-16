@@ -122,10 +122,10 @@ pub fn run_handoff_probe(
     println!("Restored state: {}", restored_snapshot.runtime_state);
     println!(
         "Restored session phase: {}",
-        restored_snapshot
-            .session_phase
-            .map(|phase: crate::SessionPhase| phase.to_string())
-            .unwrap_or_else(|| "<none>".to_string())
+        restored_snapshot.session_phase.map_or_else(
+            || "<none>".to_string(),
+            |phase: crate::SessionPhase| phase.to_string()
+        )
     );
     println!(
         "Restored adapter implementation: {}",

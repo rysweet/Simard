@@ -9,9 +9,7 @@ fn install_dir() -> PathBuf {
 }
 
 fn dirs_or_home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/usr/local"))
+    std::env::var_os("HOME").map_or_else(|| PathBuf::from("/usr/local"), PathBuf::from)
 }
 
 /// Run the install flow: copy current exe to ~/.simard/bin/simard.

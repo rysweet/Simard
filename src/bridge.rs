@@ -89,8 +89,7 @@ pub trait BridgeTransport: Send + Sync {
             None => {
                 let message = response
                     .error
-                    .map(|e| e.message)
-                    .unwrap_or_else(|| "no result in health response".to_string());
+                    .map_or_else(|| "no result in health response".to_string(), |e| e.message);
                 Err(SimardError::BridgeCallFailed {
                     bridge: "health".to_string(),
                     method: "bridge.health".to_string(),

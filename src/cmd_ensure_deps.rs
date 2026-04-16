@@ -169,9 +169,7 @@ fn memory_lib_candidates() -> Vec<PathBuf> {
 }
 
 fn dirs_or_home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/usr/local"))
+    std::env::var_os("HOME").map_or_else(|| PathBuf::from("/usr/local"), PathBuf::from)
 }
 
 fn ensure_memory_lib() -> DepCheck {

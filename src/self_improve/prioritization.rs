@@ -133,8 +133,7 @@ pub fn prioritize_dimensions(
             let current_deficit = weak_dims
                 .iter()
                 .find(|w| w.name == name)
-                .map(|w| w.deficit)
-                .unwrap_or(0.0);
+                .map_or(0.0, |w| w.deficit);
 
             let normalized_deficit = current_deficit / max_deficit;
 

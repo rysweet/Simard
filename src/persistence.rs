@@ -138,10 +138,10 @@ where
 
 fn create_temp_file(store: &str, path: &Path) -> SimardResult<(PathBuf, File)> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "simard-store".to_string());
+    let file_name = path.file_name().map_or_else(
+        || "simard-store".to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
 
     for attempt in 0..32 {
         let temp_path = unique_temp_path(parent, &file_name, attempt);

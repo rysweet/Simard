@@ -22,9 +22,7 @@ pub struct MetricEntry {
 
 /// Return the directory where metrics are stored: `~/.simard/metrics/`.
 fn metrics_dir() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/usr/local"));
+    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/usr/local"), PathBuf::from);
     home.join(".simard").join("metrics")
 }
 

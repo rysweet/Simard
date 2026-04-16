@@ -193,12 +193,14 @@ async fn metrics() -> Json<Value> {
 }
 
 async fn costs() -> Json<Value> {
-    let daily = crate::cost_tracking::daily_summary()
-        .map(|s| serde_json::to_value(s).unwrap_or_default())
-        .unwrap_or_else(|e| json!({"error": format!("daily: {e}")}));
-    let weekly = crate::cost_tracking::weekly_summary()
-        .map(|s| serde_json::to_value(s).unwrap_or_default())
-        .unwrap_or_else(|e| json!({"error": format!("weekly: {e}")}));
+    let daily = crate::cost_tracking::daily_summary().map_or_else(
+        |e| json!({"error": format!("daily: {e}")}),
+        |s| serde_json::to_value(s).unwrap_or_default(),
+    );
+    let weekly = crate::cost_tracking::weekly_summary().map_or_else(
+        |e| json!({"error": format!("weekly: {e}")}),
+        |s| serde_json::to_value(s).unwrap_or_default(),
+    );
     Json(json!({
         "daily": daily,
         "weekly": weekly,
@@ -643,8 +645,10 @@ async fn distributed() -> Json<Value> {
     let local_host = std::process::Command::new("hostname")
         .output()
         .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+        .map_or_else(
+            || "unknown".to_string(),
+            |o| String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        );
 
     Json(json!({
         "local": {
@@ -1364,8 +1368,7 @@ async fn memory_metrics() -> Json<Value> {
     // Prefer LadybugDB counts when available, fall back to JSON file counts
     let total = native_stats
         .as_ref()
-        .map(|s| s.total())
-        .unwrap_or(fact_count + evidence_count + goal_count);
+        .map_or(fact_count + evidence_count + goal_count, |s| s.total());
 
     let db_path = state_root.join("cognitive_memory.ladybug");
 
@@ -1413,12 +1416,13 @@ async fn memory_metrics() -> Json<Value> {
 }
 
 fn resolve_state_root() -> std::path::PathBuf {
-    std::env::var("SIMARD_STATE_ROOT")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
+    std::env::var("SIMARD_STATE_ROOT").map_or_else(
+        |_| {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
             std::path::PathBuf::from(home).join(".simard")
-        })
+        },
+        std::path::PathBuf::from,
+    )
 }
 
 fn file_metrics(path: &std::path::Path) -> (u64, Option<String>) {

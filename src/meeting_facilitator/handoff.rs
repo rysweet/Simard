@@ -22,11 +22,10 @@ pub const MEETING_SESSION_WIP_FILENAME: &str = "meeting_session_wip.json";
 /// Respects `SIMARD_HANDOFF_DIR` when set, otherwise falls back to
 /// `$CARGO_MANIFEST_DIR/target/meeting_handoffs`.
 pub fn default_handoff_dir() -> PathBuf {
-    std::env::var_os("SIMARD_HANDOFF_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/meeting_handoffs")
-        })
+    std::env::var_os("SIMARD_HANDOFF_DIR").map_or_else(
+        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/meeting_handoffs"),
+        PathBuf::from,
+    )
 }
 
 /// A handoff artifact produced when a meeting closes. Contains decisions,

@@ -55,11 +55,10 @@ pub fn apply_and_review(patch: &ImprovementPatch, workspace_path: &Path) -> Appl
     let exec_result: PlanExecutionResult = execute_plan(&patch.plan, workspace_path);
 
     if exec_result.stopped_early {
-        let reason = exec_result
-            .completed
-            .last()
-            .map(|r| format!("step '{}' failed: {}", r.step.target, r.stderr))
-            .unwrap_or_else(|| "plan execution stopped early".to_string());
+        let reason = exec_result.completed.last().map_or_else(
+            || "plan execution stopped early".to_string(),
+            |r| format!("step '{}' failed: {}", r.step.target, r.stderr),
+        );
         if let Err(rb_err) = rollback(workspace_path) {
             return ApplyResult::PlanFailed {
                 reason: format!("{reason}; rollback also failed: {rb_err}"),

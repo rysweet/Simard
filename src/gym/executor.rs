@@ -220,8 +220,7 @@ fn build_scenario_checks(
                 "restored session phase was '{}'",
                 arts.restored_snapshot
                     .session_phase
-                    .map(|phase| phase.to_string())
-                    .unwrap_or_else(|| "<none>".to_string())
+                    .map_or_else(|| "<none>".to_string(), |phase| phase.to_string())
             ),
         },
         BenchmarkCheckResult {
@@ -230,14 +229,10 @@ fn build_scenario_checks(
                 session.objective.starts_with("objective-metadata(")
                     && session.objective.ends_with(')')
             }),
-            detail: arts
-                .exported
-                .session
-                .as_ref()
-                .map(|session| format!("exported session objective was '{}'", session.objective))
-                .unwrap_or_else(|| {
-                    "exported handoff did not include a session boundary".to_string()
-                }),
+            detail: arts.exported.session.as_ref().map_or_else(
+                || "exported handoff did not include a session boundary".to_string(),
+                |session| format!("exported session objective was '{}'", session.objective),
+            ),
         },
     ];
     let class_checks = scenarios::class_specific_checks(scenario, &arts.outcome, &arts.exported);

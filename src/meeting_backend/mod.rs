@@ -502,8 +502,9 @@ impl MeetingBackend {
     fn elapsed_secs(&self) -> u64 {
         chrono::DateTime::parse_from_rfc3339(&self.started_at)
             .ok()
-            .map(|start| Utc::now().signed_duration_since(start).num_seconds().max(0) as u64)
-            .unwrap_or(0)
+            .map_or(0, |start| {
+                Utc::now().signed_duration_since(start).num_seconds().max(0) as u64
+            })
     }
 
     /// Save an in-progress transcript after every turn so killed meetings
