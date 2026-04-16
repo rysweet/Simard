@@ -18,6 +18,7 @@ use super::types::{HeartbeatStatus, SubordinateConfig, SubordinateHandle};
 ///
 /// The function validates the configuration (depth limits, non-empty
 /// fields) before spawning.
+#[tracing::instrument(skip_all, fields(identity = %config.agent_name))]
 pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<SubordinateHandle> {
     config.validate()?;
 

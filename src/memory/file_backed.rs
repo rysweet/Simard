@@ -31,6 +31,7 @@ fn compute_crc32(records: &[MemoryRecord]) -> SimardResult<u32> {
 
 /// Load memory records from a file, validating the CRC32 checksum.
 /// Supports both the new checksummed format and legacy plain-array format.
+#[tracing::instrument(skip_all)]
 fn load_checksummed(path: &Path) -> SimardResult<Vec<MemoryRecord>> {
     if !path.exists() {
         return Ok(Vec::new());
@@ -122,6 +123,7 @@ impl MemoryStore for FileBackedMemoryStore {
         self.descriptor.clone()
     }
 
+    #[tracing::instrument(skip_all)]
     fn put(&self, record: MemoryRecord) -> SimardResult<()> {
         let mut records = self
             .records

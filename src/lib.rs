@@ -92,6 +92,7 @@ pub mod session_builder;
 pub mod skill_builder;
 pub mod terminal_engineer_bridge;
 mod terminal_session;
+pub mod trace_collector;
 #[doc(hidden)]
 pub mod test_support;
 

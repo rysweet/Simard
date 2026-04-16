@@ -79,6 +79,7 @@ impl MeetingBackend {
     ///
     /// Appends both the user message and the assistant response to history.
     /// The full conversation context is sent to the LLM on each turn.
+    #[tracing::instrument(skip(self), fields(input_len = user_input.len()))]
     pub fn send_message(&mut self, user_input: &str) -> SimardResult<MeetingResponse> {
         if !self.is_open {
             return Err(SimardError::ActionExecutionFailed {
@@ -150,6 +151,7 @@ impl MeetingBackend {
     ///
     /// Returns a `MeetingSummary` with the LLM-generated summary text and
     /// structured action items.
+    #[tracing::instrument(skip(self))]
     pub fn close(&mut self) -> SimardResult<MeetingSummary> {
         if !self.is_open {
             return Err(SimardError::ActionExecutionFailed {

@@ -7,7 +7,8 @@ use tracing::{debug, info, warn};
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 use crate::meeting_facilitator::{
-    MeetingHandoff, OpenQuestion, default_handoff_dir, write_meeting_handoff,
+    ActionItem, MeetingDecision, MeetingHandoff, OpenQuestion, default_handoff_dir,
+    write_meeting_handoff,
 };
 
 use super::types::{ConversationMessage, HandoffActionItem, MeetingTranscript};
@@ -163,7 +164,7 @@ pub fn write_handoff(
     // Convert backend HandoffActionItems to facilitator ActionItems for the handoff.
     let facilitator_actions: Vec<crate::meeting_facilitator::ActionItem> = action_items
         .iter()
-        .map(|a| crate::meeting_facilitator::ActionItem {
+        .map(|a| ActionItem {
             description: a.description.clone(),
             owner: a.assignee.clone().unwrap_or_else(|| "unassigned".to_string()),
             priority: 0,
@@ -173,11 +174,11 @@ pub fn write_handoff(
 
     // Convert decision strings to MeetingDecision structs, extracting
     // rationale context from surrounding messages when available.
-    let facilitator_decisions: Vec<crate::meeting_facilitator::MeetingDecision> = decisions
+    let facilitator_decisions: Vec<MeetingDecision> = decisions
         .iter()
         .map(|d| {
             let rationale = extract_decision_rationale(d, messages);
-            crate::meeting_facilitator::MeetingDecision {
+            MeetingDecision {
                 description: d.clone(),
                 rationale,
                 participants: extract_decision_participants(d, messages),

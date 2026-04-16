@@ -5,6 +5,7 @@ use crate::error::SimardResult;
 use super::{ActionKind, OodaConfig, PlannedAction, Priority};
 
 /// Decide: select actions from priorities, capped by `max_concurrent_actions`.
+#[tracing::instrument(skip_all)]
 pub fn decide(priorities: &[Priority], config: &OodaConfig) -> SimardResult<Vec<PlannedAction>> {
     let limit = config.max_concurrent_actions as usize;
     let mut actions = Vec::with_capacity(limit);

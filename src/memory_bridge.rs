@@ -49,6 +49,7 @@ impl CognitiveMemoryBridge {
     }
 
     /// Record a short-lived sensory observation. Returns the `node_id`.
+    #[tracing::instrument(skip(self))]
     pub fn record_sensory(
         &self,
         modality: &str,
@@ -73,6 +74,7 @@ impl CognitiveMemoryBridge {
     }
 
     /// Push a slot into working memory for a given task. Returns the `node_id`.
+    #[tracing::instrument(skip(self))]
     pub fn push_working(
         &self,
         slot_type: &str,
@@ -106,6 +108,7 @@ impl CognitiveMemoryBridge {
     }
 
     /// Store an episodic memory. Returns the `node_id`.
+    #[tracing::instrument(skip(self))]
     pub fn store_episode(
         &self,
         content: &str,
@@ -124,6 +127,7 @@ impl CognitiveMemoryBridge {
     }
 
     /// Consolidate oldest un-compressed episodes. Returns `None` if insufficient.
+    #[tracing::instrument(skip(self))]
     pub fn consolidate_episodes(&self, batch_size: u32) -> SimardResult<Option<String>> {
         let result: OptionalIdResponse = self.call(
             "memory.consolidate_episodes",
@@ -133,6 +137,7 @@ impl CognitiveMemoryBridge {
     }
 
     /// Store a semantic fact. Returns the `node_id`.
+    #[tracing::instrument(skip(self))]
     pub fn store_fact(
         &self,
         concept: &str,
@@ -155,6 +160,7 @@ impl CognitiveMemoryBridge {
     }
 
     /// Search semantic facts by keyword matching.
+    #[tracing::instrument(skip(self))]
     pub fn search_facts(
         &self,
         query: &str,

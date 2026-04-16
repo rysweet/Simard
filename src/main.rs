@@ -47,6 +47,7 @@ fn init_tracing() {
             .with(filter)
             .with(tracing_subscriber::fmt::layer().json().with_target(true))
             .with(otel)
+            .with(simard::trace_collector::SpanCollectorLayer)
             .init();
     } else {
         let otel = endpoint
@@ -57,6 +58,7 @@ fn init_tracing() {
             .with(filter)
             .with(tracing_subscriber::fmt::layer().with_target(true))
             .with(otel)
+            .with(simard::trace_collector::SpanCollectorLayer)
             .init();
     }
 }

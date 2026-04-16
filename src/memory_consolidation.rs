@@ -44,6 +44,7 @@ pub struct FactExtraction {
 /// This is the first thing that happens when a new session starts. The
 /// objective is recorded as a sensory observation (modality "objective") and
 /// pushed into working memory so that subsequent phases can reference it.
+#[tracing::instrument(skip_all)]
 pub fn intake_memory_operations(
     objective: &str,
     session_id: &SessionId,
@@ -70,6 +71,7 @@ pub fn intake_memory_operations(
 /// Searches semantic memory for facts related to the objective, checks
 /// prospective memories for any triggered actions, and recalls relevant
 /// procedures. The assembled context is returned for use during execution.
+#[tracing::instrument(skip_all)]
 pub fn preparation_memory_operations(
     objective: &str,
     session_id: &SessionId,
@@ -110,6 +112,7 @@ pub fn preparation_memory_operations(
 /// During execution, the agent interacts with the terminal. Each chunk of
 /// output is recorded as a sensory observation so that it can be attended
 /// to if noteworthy.
+#[tracing::instrument(skip_all)]
 pub fn execution_memory_operations(
     pty_output: &str,
     session_id: &SessionId,
@@ -142,6 +145,7 @@ pub fn execution_memory_operations(
 /// After execution completes, the agent reflects on what happened. The
 /// transcript is stored as an episodic memory, and any extracted facts
 /// are stored in semantic memory.
+#[tracing::instrument(skip_all)]
 pub fn reflection_memory_operations(
     transcript: &str,
     facts: &[FactExtraction],
@@ -174,6 +178,7 @@ pub fn reflection_memory_operations(
 /// This is the final phase of a session. Working memory for this session is
 /// cleared, expired sensory items are pruned, and episode consolidation is
 /// attempted to keep episodic memory compact.
+#[tracing::instrument(skip_all)]
 pub fn persistence_memory_operations(
     session_id: &SessionId,
     bridge: &dyn CognitiveMemoryOps,
