@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::{SimardError, SimardResult};
 
 use super::types::{
-    BenchmarkComparisonReport, BenchmarkComparisonRunSummary, BenchmarkComparisonStatus,
-    BenchmarkRunReport,
+    BenchmarkComparisonDelta, BenchmarkComparisonReport, BenchmarkComparisonRunSummary,
+    BenchmarkComparisonStatus, BenchmarkRunReport,
 };
 
 #[derive(Clone, Debug, Deserialize)]
@@ -175,7 +175,7 @@ pub(super) fn render_comparison_summary(
     status: BenchmarkComparisonStatus,
     current: &BenchmarkComparisonRunSummary,
     previous: &BenchmarkComparisonRunSummary,
-    delta: &super::types::BenchmarkComparisonDelta,
+    delta: &BenchmarkComparisonDelta,
 ) -> String {
     let unnecessary_action_delta = render_benchmark_delta(delta.unnecessary_action_count);
     let retry_delta = render_benchmark_delta(delta.retry_count);

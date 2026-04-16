@@ -170,6 +170,20 @@ pub fn summarize_cycle(cycle: &ImprovementCycle) -> String {
         lines.push(format!("Target dimension: {dim}"));
     }
 
+    if !cycle.weak_dimensions.is_empty() {
+        lines.push(format!(
+            "Weak dimensions: {}",
+            cycle.weak_dimensions.join(", ")
+        ));
+    }
+
+    if !cycle.proposed_changes.is_empty() {
+        lines.push(format!(
+            "Proposed changes: {}",
+            cycle.proposed_changes.len(),
+        ));
+    }
+
     lines.push(format!(
         "Baseline: {:.1}% overall ({} scenarios)",
         cycle.baseline.overall * 100.0,
