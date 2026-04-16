@@ -65,6 +65,7 @@ fn sample_handoff() -> MeetingHandoff {
         started_at: chrono::Utc::now().to_rfc3339(),
         participants: Vec::new(),
         explicit_questions: Vec::new(),
+        themes: Vec::new(),
     };
     MeetingHandoff::from_session(&session)
 }
@@ -258,6 +259,7 @@ fn act_on_decisions_with_empty_handoff_creates_no_issues() {
         started_at: chrono::Utc::now().to_rfc3339(),
         participants: Vec::new(),
         explicit_questions: Vec::new(),
+        themes: Vec::new(),
     };
     let handoff = MeetingHandoff::from_session(&session);
     write_meeting_handoff(&dir, &handoff).unwrap();
