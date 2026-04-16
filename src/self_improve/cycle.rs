@@ -141,39 +141,14 @@ pub(super) fn decide(
 ///
 /// Results are sorted by deficit (largest first) so callers can prioritize
 /// the weakest dimension for improvement.
+/// Delegates to [`find_weak_dimensions_detailed`](super::prioritization::find_weak_dimensions_detailed)
+/// to avoid duplicating the dimension-check logic.
 pub(super) fn find_weak_dimensions(
     score: &GymSuiteScore,
     weak_threshold: f64,
     target: Option<&str>,
 ) -> Vec<super::types::WeakDimension> {
-    let dims = &score.dimensions;
-    let checks: [(&str, f64); 5] = [
-        ("factual_accuracy", dims.factual_accuracy),
-        ("specificity", dims.specificity),
-        ("temporal_awareness", dims.temporal_awareness),
-        ("source_attribution", dims.source_attribution),
-        ("confidence_calibration", dims.confidence_calibration),
-    ];
-    let mut weak = Vec::new();
-    for (name, value) in checks {
-        if let Some(t) = target
-            && name != t
-        {
-            continue;
-        }
-        if value < weak_threshold {
-            weak.push(super::types::WeakDimension {
-                name: name.to_string(),
-                deficit: weak_threshold - value,
-            });
-        }
-    }
-    weak.sort_by(|a, b| {
-        b.deficit
-            .partial_cmp(&a.deficit)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    weak
+    super::prioritization::find_weak_dimensions_detailed(score, weak_threshold, target)
 }
 
 /// Summary of an improvement cycle suitable for persistence or display.
