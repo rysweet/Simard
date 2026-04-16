@@ -95,6 +95,7 @@ fn summarize_cycle_commit() {
         weak_dimensions: Vec::new(),
         weak_dimension_details: Vec::new(),
         target_dimension: None,
+        plateau_dimensions: Vec::new(),
     };
     let summary = summarize_cycle(&cycle);
     assert!(summary.contains("COMMIT"));
@@ -115,6 +116,7 @@ fn summarize_cycle_revert() {
         weak_dimensions: Vec::new(),
         weak_dimension_details: Vec::new(),
         target_dimension: None,
+        plateau_dimensions: Vec::new(),
     };
     let summary = summarize_cycle(&cycle);
     assert!(summary.contains("REVERT"));
@@ -133,6 +135,7 @@ fn summarize_cycle_incomplete() {
         weak_dimensions: Vec::new(),
         weak_dimension_details: Vec::new(),
         target_dimension: None,
+        plateau_dimensions: Vec::new(),
     };
     let summary = summarize_cycle(&cycle);
     assert!(summary.contains("INCOMPLETE"));
@@ -153,6 +156,7 @@ fn improvement_cycle_display_delegates_to_summarize() {
         weak_dimensions: Vec::new(),
         weak_dimension_details: Vec::new(),
         target_dimension: None,
+        plateau_dimensions: Vec::new(),
     };
     assert_eq!(cycle.to_string(), summarize_cycle(&cycle));
 }
@@ -258,6 +262,7 @@ fn summarize_cycle_with_regressions() {
         weak_dimensions: Vec::new(),
         weak_dimension_details: Vec::new(),
         target_dimension: None,
+        plateau_dimensions: Vec::new(),
     };
     let summary = summarize_cycle(&cycle);
     assert!(summary.contains("Regressions: 2 total (1 severe)"));
@@ -336,6 +341,7 @@ fn summarize_cycle_shows_target_dimension() {
         weak_dimensions: Vec::new(),
         weak_dimension_details: Vec::new(),
         target_dimension: Some("specificity".to_string()),
+        plateau_dimensions: Vec::new(),
     };
     let summary = summarize_cycle(&cycle);
     assert!(summary.contains("Target dimension: specificity"));
@@ -356,6 +362,7 @@ fn summarize_cycle_omits_target_when_none() {
         weak_dimensions: Vec::new(),
         weak_dimension_details: Vec::new(),
         target_dimension: None,
+        plateau_dimensions: Vec::new(),
     };
     let summary = summarize_cycle(&cycle);
     assert!(!summary.contains("Target dimension"));
@@ -440,6 +447,7 @@ fn summarize_cycle_negative_improvement() {
         weak_dimensions: Vec::new(),
         weak_dimension_details: Vec::new(),
         target_dimension: None,
+        plateau_dimensions: Vec::new(),
     };
     let summary = summarize_cycle(&cycle);
     assert!(summary.contains("REVERT"));
@@ -492,6 +500,7 @@ fn summarize_cycle_shows_deficit_when_details_present() {
             deficit: 0.25,
         }],
         target_dimension: None,
+        plateau_dimensions: Vec::new(),
     };
     let summary = summarize_cycle(&cycle);
     assert!(summary.contains("source_attribution (25.0% deficit)"));

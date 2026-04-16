@@ -24,6 +24,8 @@ pub fn run_improvement_cycle(
     gym: &GymBridge,
     config: &ImprovementConfig,
 ) -> SimardResult<ImprovementCycle> {
+    config.validate()?;
+
     // Phase 1: Eval — establish baseline
     let baseline_result = gym.run_suite(&config.suite_id)?;
     let baseline = suite_score_from_result(&baseline_result);
@@ -57,6 +59,7 @@ pub fn run_improvement_cycle(
             weak_dimensions: weak_names,
             weak_dimension_details: weak_details,
             target_dimension: config.target_dimension.clone(),
+            plateau_dimensions: Vec::new(),
         });
     }
 
@@ -82,6 +85,7 @@ pub fn run_improvement_cycle(
         weak_dimensions: weak_names,
         weak_dimension_details: weak_details,
         target_dimension: config.target_dimension.clone(),
+        plateau_dimensions: Vec::new(),
     })
 }
 
@@ -372,6 +376,7 @@ mod tests {
             weak_dimensions: Vec::new(),
             weak_dimension_details: Vec::new(),
             target_dimension: None,
+            plateau_dimensions: Vec::new(),
         };
         let summary = summarize_cycle(&cycle);
         assert!(summary.contains("Baseline"));
@@ -393,6 +398,7 @@ mod tests {
             weak_dimensions: Vec::new(),
             weak_dimension_details: Vec::new(),
             target_dimension: None,
+            plateau_dimensions: Vec::new(),
         };
         let summary = summarize_cycle(&cycle);
         assert!(summary.contains("COMMIT"));
@@ -413,6 +419,7 @@ mod tests {
             weak_dimensions: Vec::new(),
             weak_dimension_details: Vec::new(),
             target_dimension: None,
+            plateau_dimensions: Vec::new(),
         };
         let summary = summarize_cycle(&cycle);
         assert!(summary.contains("REVERT"));
@@ -431,6 +438,7 @@ mod tests {
             weak_dimensions: Vec::new(),
             weak_dimension_details: Vec::new(),
             target_dimension: Some("specificity".into()),
+            plateau_dimensions: Vec::new(),
         };
         let summary = summarize_cycle(&cycle);
         assert!(summary.contains("Target dimension: specificity"));
@@ -465,6 +473,7 @@ mod tests {
             weak_dimensions: Vec::new(),
             weak_dimension_details: Vec::new(),
             target_dimension: None,
+            plateau_dimensions: Vec::new(),
         };
         let summary = summarize_cycle(&cycle);
         assert!(summary.contains("Regressions: 2 total (1 severe)"));
