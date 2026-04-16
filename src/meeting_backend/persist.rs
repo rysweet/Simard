@@ -576,7 +576,7 @@ pub fn link_action_items_to_goals(
             let overlap = item_words.iter().filter(|w| goal_words.contains(w)).count();
 
             let threshold = if goal_words.len() <= 2 { 1 } else { 2 };
-            if overlap >= threshold && (best_match.is_none() || overlap > best_match.unwrap().1) {
+            if overlap >= threshold && best_match.map_or(true, |(_, prev)| overlap > prev) {
                 best_match = Some((slug.as_str(), overlap));
             }
         }
@@ -1412,17 +1412,30 @@ mod tests {
     #[test]
     fn write_handoff_empty_data_uses_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("SIMARD_HANDOFF_DIR", dir.path().as_os_str());
-        }
 
-        let result = write_handoff("Empty meeting", "No notes", &[], &[], &[]);
-        assert!(result.is_ok());
+        // Build the handoff struct directly to avoid env-var races between
+        // parallel tests that both set SIMARD_HANDOFF_DIR.
+        let handoff = MeetingHandoff {
+            topic: "Empty meeting".to_string(),
+            started_at: String::new(),
+            closed_at: chrono::Utc::now().to_rfc3339(),
+            decisions: vec![],
+            action_items: vec![],
+            open_questions: vec![],
+            processed: false,
+            duration_secs: None,
+            transcript: vec!["No notes".to_string()],
+            participants: vec![],
+            themes: vec![],
+        };
+        let result = write_meeting_handoff(dir.path(), &handoff);
+        assert!(result.is_ok(), "write_meeting_handoff failed: {result:?}");
 
         let entries: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
             .collect();
+        assert!(!entries.is_empty(), "No handoff file written");
         let content = std::fs::read_to_string(entries[0].path()).unwrap();
         let handoff: MeetingHandoff = serde_json::from_str(&content).unwrap();
 
@@ -1431,9 +1444,5 @@ mod tests {
         assert!(handoff.open_questions.is_empty());
         assert!(handoff.participants.is_empty());
         assert!(handoff.themes.is_empty());
-
-        unsafe {
-            std::env::remove_var("SIMARD_HANDOFF_DIR");
-        }
     }
 }
