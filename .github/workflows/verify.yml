@@ -18,7 +18,9 @@ jobs:
 
       - name: Add swap space (4 GB)
         run: |
-          sudo fallocate -l 4G /swapfile
+          sudo swapoff /swapfile 2>/dev/null || true
+          sudo rm -f /swapfile
+          sudo fallocate -l 4G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=4096
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
@@ -59,7 +61,9 @@ jobs:
 
       - name: Add swap space (4 GB)
         run: |
-          sudo fallocate -l 4G /swapfile
+          sudo swapoff /swapfile 2>/dev/null || true
+          sudo rm -f /swapfile
+          sudo fallocate -l 4G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=4096
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
