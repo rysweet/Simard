@@ -139,6 +139,15 @@ pub fn run_ooda_cycle(
         _ => {}
     }
 
+    // --- Resource cleanup: proactive disk/process management (issue #373) ---
+    {
+        use crate::cmd_cleanup::handle_cleanup;
+        eprintln!("[simard] OODA cycle: running resource cleanup");
+        if let Err(e) = handle_cleanup() {
+            eprintln!("[simard] OODA cycle: resource cleanup had errors: {e}");
+        }
+    }
+
     // --- Observe ---
     state.current_phase = OodaPhase::Observe;
     eprintln!("[simard] OODA cycle: entering Observe phase");
