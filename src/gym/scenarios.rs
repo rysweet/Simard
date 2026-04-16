@@ -1073,7 +1073,8 @@ mod tests {
             assert!(
                 scenario.identity == "simard-gym" || scenario.identity == "simard-engineer",
                 "unexpected identity '{}' in scenario '{}'",
-                scenario.identity, scenario.id
+                scenario.identity,
+                scenario.id
             );
         }
     }
@@ -1084,7 +1085,8 @@ mod tests {
             assert!(
                 scenario.base_type == "local-harness" || scenario.base_type == "terminal-shell",
                 "unexpected base_type '{}' in scenario '{}'",
-                scenario.base_type, scenario.id
+                scenario.base_type,
+                scenario.id
             );
         }
     }
@@ -1095,7 +1097,10 @@ mod tests {
     fn all_scenario_ids_are_lowercase_kebab_case() {
         for scenario in benchmark_scenarios() {
             assert!(
-                scenario.id.chars().all(|c| c.is_ascii_lowercase() || c == '-' || c.is_ascii_digit()),
+                scenario
+                    .id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c == '-' || c.is_ascii_digit()),
                 "scenario id '{}' must be lowercase kebab-case",
                 scenario.id
             );
@@ -1108,7 +1113,8 @@ mod tests {
             assert!(
                 scenario.expected_min_runtime_evidence <= 20,
                 "scenario '{}' requires too many evidence records: {}",
-                scenario.id, scenario.expected_min_runtime_evidence
+                scenario.id,
+                scenario.expected_min_runtime_evidence
             );
         }
     }

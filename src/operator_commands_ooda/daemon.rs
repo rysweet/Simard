@@ -413,7 +413,7 @@ mod tests {
     #[test]
     fn daemon_dashboard_config_default_values() {
         // Clear any env override to test the true default
-        std::env::remove_var("SIMARD_DASHBOARD_PORT");
+        unsafe { std::env::remove_var("SIMARD_DASHBOARD_PORT") };
         let config = DaemonDashboardConfig::default();
         assert!(config.enabled);
         assert_eq!(config.port, 8080);
@@ -421,19 +421,19 @@ mod tests {
 
     #[test]
     fn daemon_dashboard_config_env_override() {
-        std::env::set_var("SIMARD_DASHBOARD_PORT", "9090");
+        unsafe { std::env::set_var("SIMARD_DASHBOARD_PORT", "9090") };
         let config = DaemonDashboardConfig::default();
         assert_eq!(config.port, 9090);
         // Clean up
-        std::env::remove_var("SIMARD_DASHBOARD_PORT");
+        unsafe { std::env::remove_var("SIMARD_DASHBOARD_PORT") };
     }
 
     #[test]
     fn daemon_dashboard_config_invalid_env_falls_back() {
-        std::env::set_var("SIMARD_DASHBOARD_PORT", "not_a_number");
+        unsafe { std::env::set_var("SIMARD_DASHBOARD_PORT", "not_a_number") };
         let config = DaemonDashboardConfig::default();
         assert_eq!(config.port, 8080);
-        std::env::remove_var("SIMARD_DASHBOARD_PORT");
+        unsafe { std::env::remove_var("SIMARD_DASHBOARD_PORT") };
     }
 
     #[test]

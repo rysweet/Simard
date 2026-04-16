@@ -5,13 +5,13 @@
 //! endpoint can drain this buffer to show live span data without requiring
 //! an external OTel collector.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tracing::Subscriber;
+use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::Layer;
 
 /// Maximum number of recent spans to retain.
 const RING_SIZE: usize = 512;
@@ -35,14 +35,17 @@ fn ensure_ring() -> std::sync::MutexGuard<'static, Option<Vec<SpanRecord>>> {
     let mut guard = RING.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
         let mut v = Vec::with_capacity(RING_SIZE);
-        v.resize(RING_SIZE, SpanRecord {
-            name: String::new(),
-            target: String::new(),
-            level: String::new(),
-            duration_us: 0,
-            fields: String::new(),
-            timestamp_epoch_ms: 0,
-        });
+        v.resize(
+            RING_SIZE,
+            SpanRecord {
+                name: String::new(),
+                target: String::new(),
+                level: String::new(),
+                duration_us: 0,
+                fields: String::new(),
+                timestamp_epoch_ms: 0,
+            },
+        );
         *guard = Some(v);
     }
     guard
@@ -121,7 +124,12 @@ mod tests {
     fn drain_recent_empty_returns_empty() {
         let result = drain_recent(10);
         // Ring is initialized with empty records, so non-empty ones = 0
-        assert!(result.is_empty() || result.iter().all(|r| r.name.is_empty() || !r.name.is_empty()));
+        assert!(
+            result.is_empty()
+                || result
+                    .iter()
+                    .all(|r| r.name.is_empty() || !r.name.is_empty())
+        );
     }
 
     #[test]

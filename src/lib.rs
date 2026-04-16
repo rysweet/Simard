@@ -92,9 +92,9 @@ pub mod session_builder;
 pub mod skill_builder;
 pub mod terminal_engineer_bridge;
 mod terminal_session;
-pub mod trace_collector;
 #[doc(hidden)]
 pub mod test_support;
+pub mod trace_collector;
 
 pub use agent_goal_assignment::{
     SubordinateProgress, assign_goal, poll_progress, read_assigned_goal, report_progress,

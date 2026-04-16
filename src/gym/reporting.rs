@@ -705,12 +705,8 @@ mod tests {
             exported_memory_records: 0,
             exported_evidence_records: 0,
         };
-        let summary = render_comparison_summary(
-            BenchmarkComparisonStatus::Unchanged,
-            &a,
-            &b,
-            &delta,
-        );
+        let summary =
+            render_comparison_summary(BenchmarkComparisonStatus::Unchanged, &a, &b, &delta);
         assert!(summary.contains("matched"));
     }
 

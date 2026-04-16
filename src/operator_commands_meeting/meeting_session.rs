@@ -29,7 +29,9 @@ fn launch_real_meeting_bridge() -> Result<Box<dyn CognitiveMemoryOps>, Box<dyn s
             eprintln!(
                 "[simard] cognitive memory read-write open failed (likely locked by OODA daemon): {rw_err}"
             );
-            eprintln!("[simard] falling back to read-only mode — meeting outcomes will be saved to disk only");
+            eprintln!(
+                "[simard] falling back to read-only mode — meeting outcomes will be saved to disk only"
+            );
             let mem = NativeCognitiveMemory::open_read_only(&state_root)
                 .map_err(|e| format!("cognitive memory failed to open even read-only: {e}"))?;
             Ok(Box::new(mem))

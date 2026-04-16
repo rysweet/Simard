@@ -210,7 +210,10 @@ impl NativeCognitiveMemory {
         let db = Self::with_open_lock(&db_path, || {
             lbug::Database::new(&db_path, config).map_err(|e| SimardError::RuntimeInitFailed {
                 component: "cognitive-memory".into(),
-                reason: format!("Failed to open LadybugDB read-only at {}: {e}", db_path.display()),
+                reason: format!(
+                    "Failed to open LadybugDB read-only at {}: {e}",
+                    db_path.display()
+                ),
             })
         })?;
         let mem = Self {

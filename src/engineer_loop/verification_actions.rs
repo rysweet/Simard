@@ -782,10 +782,13 @@ mod tests {
         let file_path = dir.path().join("hello.txt");
         std::fs::write(&file_path, "hello world").unwrap();
         let inspection = RepoInspection {
+            workspace_root: dir.path().to_path_buf(),
             repo_root: dir.path().to_path_buf(),
-            head_sha: "abc123".into(),
+            head: "abc123".into(),
             branch: "main".into(),
-            dirty_paths: vec![],
+            worktree_dirty: false,
+            changed_files: vec![],
+            active_goals: vec![],
             carried_meeting_decisions: vec![],
             architecture_gap_summary: String::new(),
         };
@@ -796,17 +799,24 @@ mod tests {
         let mut checks = Vec::new();
         verify_create_file(&inspection, &req, &mut checks).unwrap();
         assert!(checks.iter().any(|c| c.contains("file-exists=hello.txt")));
-        assert!(checks.iter().any(|c| c.contains("file-content-matches=true")));
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.contains("file-content-matches=true"))
+        );
     }
 
     #[test]
     fn verify_create_file_missing_file_errors() {
         let dir = tempfile::tempdir().unwrap();
         let inspection = RepoInspection {
+            workspace_root: dir.path().to_path_buf(),
             repo_root: dir.path().to_path_buf(),
-            head_sha: "abc123".into(),
+            head: "abc123".into(),
             branch: "main".into(),
-            dirty_paths: vec![],
+            worktree_dirty: false,
+            changed_files: vec![],
+            active_goals: vec![],
             carried_meeting_decisions: vec![],
             architecture_gap_summary: String::new(),
         };
@@ -824,10 +834,13 @@ mod tests {
         let file_path = dir.path().join("hello.txt");
         std::fs::write(&file_path, "wrong content").unwrap();
         let inspection = RepoInspection {
+            workspace_root: dir.path().to_path_buf(),
             repo_root: dir.path().to_path_buf(),
-            head_sha: "abc123".into(),
+            head: "abc123".into(),
             branch: "main".into(),
-            dirty_paths: vec![],
+            worktree_dirty: false,
+            changed_files: vec![],
+            active_goals: vec![],
             carried_meeting_decisions: vec![],
             architecture_gap_summary: String::new(),
         };
@@ -847,10 +860,13 @@ mod tests {
         let file_path = dir.path().join("log.txt");
         std::fs::write(&file_path, "old line\nnew entry\n").unwrap();
         let inspection = RepoInspection {
+            workspace_root: dir.path().to_path_buf(),
             repo_root: dir.path().to_path_buf(),
-            head_sha: "abc123".into(),
+            head: "abc123".into(),
             branch: "main".into(),
-            dirty_paths: vec![],
+            worktree_dirty: false,
+            changed_files: vec![],
+            active_goals: vec![],
             carried_meeting_decisions: vec![],
             architecture_gap_summary: String::new(),
         };
@@ -860,7 +876,11 @@ mod tests {
         };
         let mut checks = Vec::new();
         verify_append_to_file(&inspection, &req, &mut checks).unwrap();
-        assert!(checks.iter().any(|c| c.contains("file-contains-appended=log.txt")));
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.contains("file-contains-appended=log.txt"))
+        );
     }
 
     #[test]
@@ -869,10 +889,13 @@ mod tests {
         let file_path = dir.path().join("log.txt");
         std::fs::write(&file_path, "old line only\n").unwrap();
         let inspection = RepoInspection {
+            workspace_root: dir.path().to_path_buf(),
             repo_root: dir.path().to_path_buf(),
-            head_sha: "abc123".into(),
+            head: "abc123".into(),
             branch: "main".into(),
-            dirty_paths: vec![],
+            worktree_dirty: false,
+            changed_files: vec![],
+            active_goals: vec![],
             carried_meeting_decisions: vec![],
             architecture_gap_summary: String::new(),
         };
@@ -927,6 +950,10 @@ mod tests {
         action.stderr = "test result: ok. 12 passed; 0 failed; 0 ignored".to_string();
         let mut checks = Vec::new();
         verify_cargo_test(&action, &mut checks).unwrap();
-        assert!(checks.iter().any(|c| c.contains("cargo-test-result-present=true")));
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.contains("cargo-test-result-present=true"))
+        );
     }
 }

@@ -191,9 +191,9 @@ impl MeetingHandoff {
             "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with",
             "by", "is", "it", "that", "this", "was", "are", "be", "has", "have", "had", "not",
             "we", "they", "you", "will", "can", "should", "would", "could", "do", "does", "did",
-            "from", "about", "into", "out", "if", "then", "so", "up", "one", "all", "been",
-            "just", "also", "than", "like", "more", "some", "what", "when", "how", "who",
-            "which", "there", "their", "our", "i", "my", "me", "your", "its",
+            "from", "about", "into", "out", "if", "then", "so", "up", "one", "all", "been", "just",
+            "also", "than", "like", "more", "some", "what", "when", "how", "who", "which", "there",
+            "their", "our", "i", "my", "me", "your", "its",
         ];
 
         let mut word_freq: HashMap<String, usize> = HashMap::new();
@@ -202,7 +202,7 @@ impl MeetingHandoff {
             let words: Vec<String> = note
                 .to_lowercase()
                 .split(|c: char| !c.is_alphanumeric() && c != '-')
-                .filter(|w| w.len() > 3 && !STOP_WORDS.contains(&w.as_ref()))
+                .filter(|w| w.len() > 3 && !STOP_WORDS.contains(w))
                 .map(String::from)
                 .collect();
             for w in words {

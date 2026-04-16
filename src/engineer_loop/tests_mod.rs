@@ -1089,13 +1089,13 @@ fn is_meeting_decision_record_full_match() {
 }
 
 #[test]
-fn is_meeting_decision_record_missing_field() {
+fn is_meeting_decision_record_missing_field_v2() {
     let value = "agenda=sprint updates=done decisions=ship risks=none";
     assert!(!super::is_meeting_decision_record(value));
 }
 
 #[test]
-fn is_meeting_decision_record_empty() {
+fn is_meeting_decision_record_empty_v2() {
     assert!(!super::is_meeting_decision_record(""));
 }
 

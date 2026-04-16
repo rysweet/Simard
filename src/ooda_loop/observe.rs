@@ -135,6 +135,7 @@ pub(super) fn collect_pending_improvements(
                 decision: None,
                 final_phase: ImprovementPhase::Eval,
                 weak_dimensions: Vec::new(),
+                weak_dimension_details: Vec::new(),
                 target_dimension: None,
             });
         }
@@ -160,6 +161,7 @@ pub(super) fn collect_pending_improvements(
                 decision: None,
                 final_phase: ImprovementPhase::Eval,
                 weak_dimensions: Vec::new(),
+                weak_dimension_details: Vec::new(),
                 target_dimension: None,
             });
         }
@@ -207,6 +209,7 @@ pub(super) fn collect_pending_improvements(
                     decision: None,
                     final_phase: ImprovementPhase::Eval,
                     weak_dimensions: Vec::new(),
+                    weak_dimension_details: Vec::new(),
                     target_dimension: None,
                 });
             }
@@ -313,6 +316,7 @@ mod tests {
             decision: None,
             final_phase: ImprovementPhase::Eval,
             weak_dimensions: Vec::new(),
+            weak_dimension_details: Vec::new(),
             target_dimension: None,
         };
         let mut state = OodaState::new(crate::goal_curation::GoalBoard::new());

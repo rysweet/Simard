@@ -227,10 +227,10 @@ impl MeetingBackend {
             }
         }
         for a in &action_items {
-            if let Some(ref assignee) = a.assignee {
-                if !participants.contains(assignee) {
-                    participants.push(assignee.clone());
-                }
+            if let Some(ref assignee) = a.assignee
+                && !participants.contains(assignee)
+            {
+                participants.push(assignee.clone());
             }
         }
 
