@@ -186,3 +186,56 @@ fn prioritize_returns_all_five_dimensions() {
     assert!(names.contains(&"source_attribution"));
     assert!(names.contains(&"confidence_calibration"));
 }
+
+#[test]
+fn proportional_trend_velocity_affects_priority() {
+    let current = make_score(0.5);
+    // Sharp decline: 0.8 → 0.5 over 2 intervals, velocity = -0.15
+    let steep = vec![make_score(0.8), make_score(0.65), make_score(0.5)];
+    // Mild decline: 0.6 → 0.5 over 2 intervals, velocity = -0.05
+    let mild = vec![make_score(0.6), make_score(0.55), make_score(0.5)];
+
+    let weights = PriorityWeights {
+        deficit: 0.0,
+        chronic: 0.0,
+        trend: 1.0,
+    };
+
+    let steep_result = prioritize_dimensions(&current, 0.6, &steep, &weights);
+    let mild_result = prioritize_dimensions(&current, 0.6, &mild, &weights);
+
+    // Every dimension should have strictly higher trend priority under steep decline
+    for (s, m) in steep_result.iter().zip(mild_result.iter()) {
+        assert_eq!(s.name, m.name);
+        assert!(
+            s.priority > m.priority,
+            "{}: steep priority {:.4} should exceed mild {:.4}",
+            s.name,
+            s.priority,
+            m.priority,
+        );
+    }
+}
+
+#[test]
+fn trend_velocity_populated_on_worsening_dimension() {
+    let current = make_score(0.5);
+    let past = vec![make_score(0.7), make_score(0.5)];
+    let result = prioritize_dimensions_default(&current, 0.6, &past);
+    // factual_accuracy: 0.7 → 0.5, velocity = -0.2
+    let fa = result
+        .iter()
+        .find(|d| d.name == "factual_accuracy")
+        .unwrap();
+    assert!(fa.worsening);
+    assert!((fa.trend_velocity - (-0.2)).abs() < 1e-9);
+}
+
+#[test]
+fn trend_velocity_zero_when_no_history() {
+    let current = make_score(0.5);
+    let result = prioritize_dimensions_default(&current, 0.6, &[]);
+    for dim in &result {
+        assert!((dim.trend_velocity - 0.0).abs() < 1e-9);
+    }
+}

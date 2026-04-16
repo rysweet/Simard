@@ -47,6 +47,10 @@ pub struct DimensionTrend {
     pub total_delta: f64,
     pub average: f64,
     pub history: Vec<f64>,
+    /// Rate of change per interval (positive = improving, negative = declining).
+    /// Zero when fewer than 2 data points exist.
+    #[serde(default)]
+    pub velocity: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -174,12 +178,24 @@ pub fn track_improvement(history: &[GymSuiteScore]) -> ImprovementTrend {
         let total_delta = scores.last().unwrap_or(&0.0) - scores.first().unwrap_or(&0.0);
         let average = scores.iter().sum::<f64>() / scores.len() as f64;
         let direction = classify_trend(total_delta);
+        let intervals = if scores.len() >= 2 {
+            (scores.len() - 1) as f64
+        } else {
+            1.0
+        };
+        let velocity = if scores.len() >= 2 {
+            let v = total_delta / intervals;
+            if v.is_finite() { v } else { 0.0 }
+        } else {
+            0.0
+        };
         DimensionTrend {
             dimension: name.to_string(),
             direction,
             total_delta,
             average,
             history: scores,
+            velocity,
         }
     };
 
@@ -295,5 +311,32 @@ mod tests {
             track_improvement(&[ss(0.9), ss(0.7), ss(0.5)]).overall_direction,
             TrendDirection::Declining
         );
+    }
+
+    #[test]
+    fn dimension_trend_velocity_computed() {
+        let t = track_improvement(&[ss(0.5), ss(0.6), ss(0.8)]);
+        let fa = t
+            .dimension_trends
+            .iter()
+            .find(|d| d.dimension == "factual_accuracy")
+            .unwrap();
+        // 3 data points = 2 intervals; delta = 0.3; velocity = 0.15
+        assert!((fa.velocity - 0.15).abs() < 1e-9);
+    }
+
+    #[test]
+    fn dimension_trend_deserialize_without_velocity() {
+        let json = r#"{
+            "dimension": "specificity",
+            "direction": "declining",
+            "total_delta": -0.1,
+            "average": 0.5,
+            "history": [0.6, 0.5]
+        }"#;
+        let trend: DimensionTrend =
+            serde_json::from_str(json).expect("should deserialize without velocity");
+        assert_eq!(trend.dimension, "specificity");
+        assert!((trend.velocity - 0.0).abs() < 1e-9);
     }
 }

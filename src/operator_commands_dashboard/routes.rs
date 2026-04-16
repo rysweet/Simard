@@ -64,14 +64,14 @@ async fn login(Json(body): Json<Value>) -> response::Response {
             .body(axum::body::Body::from(
                 json!({"ok": true}).to_string(),
             ))
-            .unwrap(),
+            .expect("valid login success response"),
         None => response::Response::builder()
             .status(401)
             .header("content-type", "application/json")
             .body(axum::body::Body::from(
                 json!({"ok": false, "error": "invalid code"}).to_string(),
             ))
-            .unwrap(),
+            .expect("valid login failure response"),
     }
 }
 
@@ -395,7 +395,7 @@ async fn seed_goals() -> Json<Value> {
     }
     match std::fs::write(
         &goal_path,
-        serde_json::to_string_pretty(&seed_board).unwrap(),
+        serde_json::to_string_pretty(&seed_board).expect("GoalBoard serializes to JSON"),
     ) {
         Ok(()) => {
             Json(json!({"status": "ok", "message": "Seeded 3 active goals and 2 backlog items"}))

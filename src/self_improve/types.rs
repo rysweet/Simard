@@ -126,6 +126,7 @@ pub struct ImprovementCycle {
     #[serde(default)]
     pub weak_dimension_details: Vec<WeakDimension>,
     /// The dimension that was targeted for this cycle (if any).
+    #[serde(default)]
     pub target_dimension: Option<String>,
 }
 
@@ -372,5 +373,23 @@ mod tests {
         };
         assert!(!cycle.is_committed());
         assert!(!cycle.is_reverted());
+    }
+
+    #[test]
+    fn improvement_cycle_deserialize_without_target_dimension() {
+        // Older JSON payloads may lack target_dimension; #[serde(default)] handles this.
+        let json = r#"{
+            "baseline": {"suite_id":"s","overall":0.5,"dimensions":{"factual_accuracy":0.5,"specificity":0.45,"temporal_awareness":0.4,"source_attribution":0.35,"confidence_calibration":0.42},"scenario_count":1,"scenarios_passed":1,"pass_rate":1.0,"recorded_at_unix_ms":null},
+            "proposed_changes": [],
+            "post_score": null,
+            "regressions": [],
+            "decision": null,
+            "final_phase": "Eval",
+            "weak_dimensions": []
+        }"#;
+        let cycle: ImprovementCycle =
+            serde_json::from_str(json).expect("should deserialize without target_dimension");
+        assert!(cycle.target_dimension.is_none());
+        assert!(cycle.weak_dimension_details.is_empty());
     }
 }

@@ -135,7 +135,7 @@ pub async fn require_auth(request: Request, next: Next) -> Result<Response, Stat
             .status(303)
             .header("location", "/login")
             .body(axum::body::Body::empty())
-            .unwrap())
+            .expect("valid redirect response"))
     }
 }
 

@@ -32,6 +32,10 @@ pub struct PrioritizedDimension {
     pub historical_weakness_rate: f64,
     /// Whether the dimension is trending downward across past cycles.
     pub worsening: bool,
+    /// Rate of change per cycle (negative = declining). Zero when fewer than 2
+    /// data points exist.
+    #[serde(default)]
+    pub trend_velocity: f64,
 }
 
 /// Weights for composite scoring. Should sum to 1.0 for a normalized result.
@@ -138,21 +142,25 @@ pub fn prioritize_dimensions(
             };
 
             // Trend: compare first and last past baselines.
-            let worsening = if past_baselines.len() >= 2 {
+            let (worsening, trend_velocity) = if past_baselines.len() >= 2 {
                 let first = dimension_value(&past_baselines[0], name);
                 let last = dimension_value(
                     past_baselines.last().expect("len >= 2 guarantees last()"),
                     name,
                 );
-                last < first
+                let intervals = (past_baselines.len() - 1) as f64;
+                let vel = (last - first) / intervals;
+                let vel = if vel.is_finite() { vel } else { 0.0 };
+                (vel < 0.0, vel)
             } else {
-                false
+                (false, 0.0)
             };
-            let trend_signal = if worsening { 1.0 } else { 0.0 };
+            let trend_signal = (-trend_velocity).clamp(0.0, 1.0);
 
             let priority = weights.deficit * normalized_deficit
                 + weights.chronic * weakness_rate
                 + weights.trend * trend_signal;
+            let priority = if priority.is_finite() { priority } else { 0.0 };
 
             PrioritizedDimension {
                 name: name.to_string(),
@@ -160,6 +168,7 @@ pub fn prioritize_dimensions(
                 current_deficit,
                 historical_weakness_rate: weakness_rate,
                 worsening,
+                trend_velocity,
             }
         })
         .collect();
