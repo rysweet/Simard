@@ -373,4 +373,99 @@ mod tests {
         assert!(!cycle.is_committed());
         assert!(!cycle.is_reverted());
     }
+
+    #[test]
+    fn weak_dimension_serde_round_trip() {
+        let wd = WeakDimension {
+            name: "specificity".into(),
+            deficit: 0.15,
+        };
+        let json = serde_json::to_string(&wd).unwrap();
+        let parsed: WeakDimension = serde_json::from_str(&json).unwrap();
+        assert_eq!(wd, parsed);
+    }
+
+    #[test]
+    fn improvement_phase_serde_round_trip() {
+        for phase in [
+            ImprovementPhase::Eval,
+            ImprovementPhase::Analyze,
+            ImprovementPhase::Research,
+            ImprovementPhase::Improve,
+            ImprovementPhase::ReEval,
+            ImprovementPhase::Decide,
+        ] {
+            let json = serde_json::to_string(&phase).unwrap();
+            let parsed: ImprovementPhase = serde_json::from_str(&json).unwrap();
+            assert_eq!(phase, parsed);
+        }
+    }
+
+    #[test]
+    fn improvement_decision_serde_round_trip() {
+        let commit = ImprovementDecision::Commit {
+            net_improvement: 0.05,
+        };
+        let json = serde_json::to_string(&commit).unwrap();
+        let parsed: ImprovementDecision = serde_json::from_str(&json).unwrap();
+        assert_eq!(commit, parsed);
+
+        let revert = ImprovementDecision::Revert {
+            reason: "regression too large".into(),
+        };
+        let json = serde_json::to_string(&revert).unwrap();
+        let parsed: ImprovementDecision = serde_json::from_str(&json).unwrap();
+        assert_eq!(revert, parsed);
+    }
+
+    #[test]
+    fn improvement_cycle_serde_round_trip() {
+        let cycle = ImprovementCycle {
+            baseline: make_score(0.7),
+            proposed_changes: vec![ProposedChange {
+                file_path: "src/a.rs".into(),
+                description: "fix".into(),
+                expected_impact: "better".into(),
+            }],
+            post_score: Some(make_score(0.8)),
+            regressions: Vec::new(),
+            decision: Some(ImprovementDecision::Commit {
+                net_improvement: 0.1,
+            }),
+            final_phase: ImprovementPhase::Decide,
+            weak_dimensions: vec!["specificity".into()],
+            weak_dimension_details: vec![WeakDimension {
+                name: "specificity".into(),
+                deficit: 0.1,
+            }],
+            target_dimension: Some("specificity".into()),
+        };
+        let json = serde_json::to_string(&cycle).unwrap();
+        let parsed: ImprovementCycle = serde_json::from_str(&json).unwrap();
+        assert_eq!(cycle.baseline.overall, parsed.baseline.overall);
+        assert_eq!(cycle.decision, parsed.decision);
+        assert_eq!(
+            cycle.weak_dimension_details.len(),
+            parsed.weak_dimension_details.len()
+        );
+        assert_eq!(cycle.target_dimension, parsed.target_dimension);
+    }
+
+    #[test]
+    fn improvement_cycle_serde_defaults_for_missing_details() {
+        // Verify that weak_dimension_details defaults to empty when missing from JSON
+        // (for backward compatibility with cycles serialized before this field was added)
+        let json = r#"{
+            "baseline": {"suite_id":"t","overall":0.5,"dimensions":{"factual_accuracy":0.5,"specificity":0.45,"temporal_awareness":0.4,"source_attribution":0.35,"confidence_calibration":0.425},"scenario_count":4,"scenarios_passed":4,"pass_rate":1.0,"recorded_at_unix_ms":null},
+            "proposed_changes": [],
+            "post_score": null,
+            "regressions": [],
+            "decision": null,
+            "final_phase": "Eval",
+            "weak_dimensions": [],
+            "target_dimension": null
+        }"#;
+        let parsed: ImprovementCycle = serde_json::from_str(json).unwrap();
+        assert!(parsed.weak_dimension_details.is_empty());
+    }
 }

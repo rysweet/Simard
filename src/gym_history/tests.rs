@@ -169,3 +169,71 @@ fn generate_signals_skips_single_record() {
     let sigs = generate_signals(&h, "progressive").unwrap();
     assert!(sigs.is_empty());
 }
+
+#[test]
+fn score_record_serde_round_trip() {
+    let r = ScoreRecord {
+        suite_id: "progressive".into(),
+        scenario_id: "L3".into(),
+        score: 0.876,
+        timestamp: 1_700_000_042,
+        commit_hash: Some("deadbeef".into()),
+    };
+    let json = serde_json::to_string(&r).unwrap();
+    let parsed: ScoreRecord = serde_json::from_str(&json).unwrap();
+    assert_eq!(r, parsed);
+}
+
+#[test]
+fn score_record_serde_none_commit() {
+    let r = ScoreRecord {
+        suite_id: "s".into(),
+        scenario_id: "sc".into(),
+        score: 0.5,
+        timestamp: 100,
+        commit_hash: None,
+    };
+    let json = serde_json::to_string(&r).unwrap();
+    let parsed: ScoreRecord = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed.commit_hash, None);
+}
+
+#[test]
+fn gym_signal_serde_round_trip() {
+    for signal in [
+        GymSignal::Improvement { delta: 0.15 },
+        GymSignal::Regression { delta: -0.08 },
+        GymSignal::Stable,
+        GymSignal::Promoted,
+    ] {
+        let json = serde_json::to_string(&signal).unwrap();
+        let parsed: GymSignal = serde_json::from_str(&json).unwrap();
+        assert_eq!(signal, parsed);
+    }
+}
+
+#[test]
+fn scenario_signal_serde_round_trip() {
+    let sig = ScenarioSignal {
+        scenario_id: "L5".into(),
+        signal: GymSignal::Improvement { delta: 0.1 },
+    };
+    let json = serde_json::to_string(&sig).unwrap();
+    let parsed: ScenarioSignal = serde_json::from_str(&json).unwrap();
+    assert_eq!(sig, parsed);
+}
+
+#[test]
+fn history_returns_empty_for_unknown_scenario() {
+    let h = mem_history();
+    h.record(&rec("L1", 0.5, 1)).unwrap();
+    let rows = h.history("progressive", "nonexistent", 10).unwrap();
+    assert!(rows.is_empty());
+}
+
+#[test]
+fn generate_signals_empty_suite() {
+    let h = mem_history();
+    let sigs = generate_signals(&h, "nonexistent").unwrap();
+    assert!(sigs.is_empty());
+}

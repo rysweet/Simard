@@ -186,3 +186,173 @@ fn prioritize_returns_all_five_dimensions() {
     assert!(names.contains(&"source_attribution"));
     assert!(names.contains(&"confidence_calibration"));
 }
+
+// ---- dimension_value ----
+
+#[test]
+fn dimension_value_known_dimensions() {
+    let score = make_score(0.7);
+    assert!((dimension_value(&score, "factual_accuracy") - 0.7).abs() < 1e-9);
+    assert!((dimension_value(&score, "specificity") - 0.63).abs() < 1e-9);
+    assert!((dimension_value(&score, "temporal_awareness") - 0.56).abs() < 1e-9);
+    assert!((dimension_value(&score, "source_attribution") - 0.49).abs() < 1e-9);
+    assert!((dimension_value(&score, "confidence_calibration") - 0.595).abs() < 1e-9);
+}
+
+#[test]
+fn dimension_value_unknown_returns_zero() {
+    let score = make_score(0.8);
+    assert!((dimension_value(&score, "nonexistent") - 0.0).abs() < 1e-9);
+    assert!((dimension_value(&score, "") - 0.0).abs() < 1e-9);
+}
+
+// ---- PrioritizedDimension serde ----
+
+#[test]
+fn prioritized_dimension_serde_round_trip() {
+    let dim = PrioritizedDimension {
+        name: "specificity".into(),
+        priority: 0.85,
+        current_deficit: 0.15,
+        historical_weakness_rate: 0.6,
+        worsening: true,
+    };
+    let json = serde_json::to_string(&dim).unwrap();
+    let parsed: PrioritizedDimension = serde_json::from_str(&json).unwrap();
+    assert_eq!(dim, parsed);
+}
+
+// ---- PriorityWeights ----
+
+#[test]
+fn priority_weights_default_sums_to_one() {
+    let w = PriorityWeights::default();
+    let sum = w.deficit + w.chronic + w.trend;
+    assert!(
+        (sum - 1.0).abs() < 1e-9,
+        "weights should sum to 1.0, got {sum}"
+    );
+}
+
+#[test]
+fn prioritize_all_zero_weights_yields_zero_priority() {
+    let current = make_score(0.3);
+    let past = vec![make_score(0.8), make_score(0.3)];
+    let weights = PriorityWeights {
+        deficit: 0.0,
+        chronic: 0.0,
+        trend: 0.0,
+    };
+    let result = prioritize_dimensions(&current, 0.6, &past, &weights);
+    for dim in &result {
+        assert!(
+            (dim.priority - 0.0).abs() < 1e-9,
+            "{} should have zero priority with zero weights, got {}",
+            dim.name,
+            dim.priority
+        );
+    }
+}
+
+#[test]
+fn dimension_value_unknown_returns_zero() {
+    let score = make_score(0.8);
+    assert!((dimension_value(&score, "nonexistent") - 0.0).abs() < 1e-9);
+    assert!((dimension_value(&score, "") - 0.0).abs() < 1e-9);
+}
+
+#[test]
+fn dimension_value_all_known_dimensions() {
+    let score = make_score(0.8);
+    assert!((dimension_value(&score, "factual_accuracy") - 0.8).abs() < 1e-9);
+    assert!((dimension_value(&score, "specificity") - 0.72).abs() < 1e-9);
+    assert!((dimension_value(&score, "temporal_awareness") - 0.64).abs() < 1e-9);
+    assert!((dimension_value(&score, "source_attribution") - 0.56).abs() < 1e-9);
+    assert!((dimension_value(&score, "confidence_calibration") - 0.68).abs() < 1e-9);
+}
+
+#[test]
+fn detailed_weak_dims_at_exact_threshold_not_weak() {
+    let score = GymSuiteScore {
+        suite_id: "test".into(),
+        overall: 0.6,
+        dimensions: ScoreDimensions {
+            factual_accuracy: 0.6,
+            specificity: 0.6,
+            temporal_awareness: 0.6,
+            source_attribution: 0.6,
+            confidence_calibration: 0.6,
+        },
+        scenario_count: 4,
+        scenarios_passed: 4,
+        pass_rate: 1.0,
+        recorded_at_unix_ms: None,
+    };
+    let weak = find_weak_dimensions_detailed(&score, 0.6, None);
+    assert!(
+        weak.is_empty(),
+        "dimensions at exact threshold should not be weak"
+    );
+}
+
+#[test]
+fn prioritize_equal_deficit_deterministic_order() {
+    // When all dimensions have identical scores, the output order should be
+    // deterministic (stable — preserving the DIMENSION_NAMES declaration order
+    // since all priorities are equal).
+    let score = GymSuiteScore {
+        suite_id: "test".into(),
+        overall: 0.5,
+        dimensions: ScoreDimensions {
+            factual_accuracy: 0.5,
+            specificity: 0.5,
+            temporal_awareness: 0.5,
+            source_attribution: 0.5,
+            confidence_calibration: 0.5,
+        },
+        scenario_count: 4,
+        scenarios_passed: 4,
+        pass_rate: 1.0,
+        recorded_at_unix_ms: None,
+    };
+    let result1 = prioritize_dimensions_default(&score, 0.6, &[]);
+    let result2 = prioritize_dimensions_default(&score, 0.6, &[]);
+    let names1: Vec<&str> = result1.iter().map(|d| d.name.as_str()).collect();
+    let names2: Vec<&str> = result2.iter().map(|d| d.name.as_str()).collect();
+    assert_eq!(
+        names1, names2,
+        "equal-priority dimensions should have deterministic order"
+    );
+    // All priorities should be equal
+    for dim in &result1 {
+        assert!(
+            (dim.priority - result1[0].priority).abs() < 1e-9,
+            "all dimensions should have equal priority"
+        );
+    }
+}
+
+#[test]
+fn prioritize_zero_overall_score() {
+    let score = GymSuiteScore {
+        suite_id: "test".into(),
+        overall: 0.0,
+        dimensions: ScoreDimensions {
+            factual_accuracy: 0.0,
+            specificity: 0.0,
+            temporal_awareness: 0.0,
+            source_attribution: 0.0,
+            confidence_calibration: 0.0,
+        },
+        scenario_count: 0,
+        scenarios_passed: 0,
+        pass_rate: 0.0,
+        recorded_at_unix_ms: None,
+    };
+    let result = prioritize_dimensions_default(&score, 0.6, &[]);
+    assert_eq!(result.len(), 5);
+    // All should have maximum deficit (0.6) and equal normalized priority
+    for dim in &result {
+        assert!((dim.current_deficit - 0.6).abs() < 1e-9);
+    }
+}
