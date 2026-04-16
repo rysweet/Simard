@@ -205,7 +205,7 @@ impl BaseTypeSession for LightweightChatSession {
 }
 
 /// Strip copilot bootstrap noise and usage stats from stdout output.
-fn strip_copilot_noise(raw: &str) -> String {
+pub(crate) fn strip_copilot_noise(raw: &str) -> String {
     let mut result = String::with_capacity(raw.len());
     let mut skip_rest = false;
 
@@ -221,6 +221,9 @@ fn strip_copilot_noise(raw: &str) -> String {
         if trimmed.starts_with("Total usage est:")
             || trimmed.starts_with("API time spent:")
             || trimmed.starts_with("Total session time:")
+            || trimmed.starts_with("Changes ")
+            || trimmed.starts_with("Requests ")
+            || trimmed.starts_with("Tokens ")
         {
             skip_rest = true;
             continue;
@@ -235,6 +238,17 @@ fn strip_copilot_noise(raw: &str) -> String {
             continue;
         }
         if trimmed.contains("XPIA") || trimmed.starts_with("Script started on") {
+            continue;
+        }
+        // Skip Warning lines from copilot config validation
+        if trimmed.starts_with("Warning:") {
+            continue;
+        }
+        // Skip single-character progress indicator lines (● C\n  o\n  n\n...)
+        if trimmed.len() <= 2 && !trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('●') {
             continue;
         }
 

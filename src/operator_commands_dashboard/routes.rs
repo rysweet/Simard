@@ -815,18 +815,6 @@ fn load_dashboard_meeting_prompt() -> SimardResult<String> {
     })
 }
 
-/// Open a lightweight chat session that bypasses PTY/amplihack overhead (#568).
-/// Returns `None` with an explicit warning if the lightweight backend is unavailable.
-fn open_lightweight_chat_session() -> Option<Box<dyn crate::base_types::BaseTypeSession>> {
-    match crate::meeting_backend::lightweight::LightweightChatSession::new() {
-        Ok(s) => Some(Box::new(s)),
-        Err(e) => {
-            eprintln!("[simard][DEGRADED] lightweight chat failed to initialize: {e}");
-            None
-        }
-    }
-}
-
 /// Open a full agent session for the dashboard chat, using the same infrastructure
 /// as the meeting REPL.  Returns the session or logs the error and returns `None`.
 fn open_dashboard_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeSession>> {
@@ -851,34 +839,23 @@ async fn ws_chat_handler(ws: WebSocketUpgrade) -> response::Response {
 async fn handle_ws_chat(mut socket: WebSocket) {
     use crate::meeting_backend::{MeetingBackend, MeetingCommand, parse_command};
 
-    // Prefer the lightweight session for fast chat (~5s vs ~80s per turn).
-    // If lightweight is unavailable, use the full agent session.
-    // If BOTH fail, the user gets an explicit error message below.
-    let lightweight_session: Option<Box<dyn crate::base_types::BaseTypeSession>> =
-        tokio::task::spawn_blocking(open_lightweight_chat_session)
-            .await
-            .ok()
-            .flatten();
-
+    // Use the full agent session (SessionBuilder) for chat.
+    // The lightweight piped-subprocess path is disabled — it spawns
+    // `amplihack copilot --subprocess-safe` which hangs indefinitely
+    // because the Copilot CLI doesn't support non-interactive piped mode.
     let agent_session: Option<Box<dyn crate::base_types::BaseTypeSession>> =
         tokio::task::spawn_blocking(open_dashboard_agent_session)
             .await
             .ok()
             .flatten();
 
-    // Use lightweight if available; full agent is the secondary option.
-    // Neither is a degradation — both are valid backends. Log which one is active.
-    let agent = match (lightweight_session, agent_session) {
-        (Some(light), _) => {
-            eprintln!("[simard] chat using lightweight backend");
-            light
-        }
-        (None, Some(full)) => {
-            eprintln!("[simard][DEGRADED] lightweight unavailable, using full agent backend");
+    let agent = match agent_session {
+        Some(full) => {
+            eprintln!("[simard] chat using full agent backend");
             full
         }
-        (None, None) => {
-            eprintln!("[simard][ERROR] no chat backend available — both lightweight and full agent failed");
+        None => {
+            eprintln!("[simard][ERROR] no chat backend available — agent session failed to open");
             let _ = socket
                 .send(Message::Text(
                     json!({"role":"system","content":"No agent backend available. Check SIMARD_LLM_PROVIDER and auth config."})
@@ -1015,9 +992,10 @@ async fn handle_ws_chat(mut socket: WebSocket) {
                         match result {
                             Ok((returned_backend, Ok(resp))) => {
                                 backend = returned_backend;
+                                let clean = crate::meeting_backend::lightweight::strip_copilot_noise(&resp.content);
                                 let _ = socket
                                     .send(Message::Text(
-                                        json!({"role":"assistant","content": resp.content})
+                                        json!({"role":"assistant","content": clean})
                                             .to_string()
                                             .into(),
                                     ))
