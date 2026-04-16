@@ -226,15 +226,10 @@ fn build_scenario_checks(
         },
         BenchmarkCheckResult {
             id: "handoff-objective-redacted".to_string(),
-            passed: arts
-                .exported
-                .session
-                .as_ref()
-                .map(|session| {
-                    session.objective.starts_with("objective-metadata(")
-                        && session.objective.ends_with(')')
-                })
-                .unwrap_or(false),
+            passed: arts.exported.session.as_ref().is_some_and(|session| {
+                session.objective.starts_with("objective-metadata(")
+                    && session.objective.ends_with(')')
+            }),
             detail: arts
                 .exported
                 .session

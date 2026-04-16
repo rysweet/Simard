@@ -61,23 +61,24 @@ impl RuntimeState {
     pub fn can_transition_to(self, next: RuntimeState) -> bool {
         matches!(
             (self, next),
-            (Self::Initializing, Self::Ready)
-                | (Self::Initializing, Self::Stopping)
-                | (Self::Ready, Self::Active)
-                | (Self::Ready, Self::Stopping)
-                | (Self::Active, Self::Reflecting)
-                | (Self::Active, Self::Stopping)
-                | (Self::Reflecting, Self::Persisting)
-                | (Self::Reflecting, Self::Stopping)
-                | (Self::Persisting, Self::Ready)
-                | (Self::Persisting, Self::Stopping)
+            (
+                Self::Initializing,
+                Self::Ready | Self::Stopping | Self::Failed
+            ) | (Self::Ready, Self::Active | Self::Stopping | Self::Failed)
+                | (
+                    Self::Active,
+                    Self::Reflecting | Self::Stopping | Self::Failed
+                )
+                | (
+                    Self::Reflecting,
+                    Self::Persisting | Self::Stopping | Self::Failed
+                )
+                | (
+                    Self::Persisting,
+                    Self::Ready | Self::Stopping | Self::Failed
+                )
                 | (Self::Failed, Self::Stopping)
                 | (Self::Stopping, Self::Stopped)
-                | (Self::Initializing, Self::Failed)
-                | (Self::Ready, Self::Failed)
-                | (Self::Active, Self::Failed)
-                | (Self::Reflecting, Self::Failed)
-                | (Self::Persisting, Self::Failed)
         )
     }
 }

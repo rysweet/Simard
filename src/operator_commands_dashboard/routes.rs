@@ -64,14 +64,14 @@ async fn login(Json(body): Json<Value>) -> response::Response {
             .body(axum::body::Body::from(
                 json!({"ok": true}).to_string(),
             ))
-            .expect("static response builder"),
+            .unwrap(),
         None => response::Response::builder()
             .status(401)
             .header("content-type", "application/json")
             .body(axum::body::Body::from(
                 json!({"ok": false, "error": "invalid code"}).to_string(),
             ))
-            .expect("static response builder"),
+            .unwrap(),
     }
 }
 
@@ -339,8 +339,7 @@ async fn seed_goals() -> Json<Value> {
         let has_goals = val
             .get("active")
             .and_then(|a| a.as_array())
-            .map(|a| !a.is_empty())
-            .unwrap_or(false);
+            .is_some_and(|a| !a.is_empty());
         if has_goals {
             return Json(json!({"status": "already_seeded", "message": "Goals already exist"}));
         }
@@ -396,8 +395,7 @@ async fn seed_goals() -> Json<Value> {
     }
     match std::fs::write(
         &goal_path,
-        serde_json::to_string_pretty(&seed_board)
-            .expect("seed_board is a static JSON-serializable struct"),
+        serde_json::to_string_pretty(&seed_board).unwrap(),
     ) {
         Ok(()) => {
             Json(json!({"status": "ok", "message": "Seeded 3 active goals and 2 backlog items"}))
@@ -603,17 +601,17 @@ async fn distributed() -> Json<Value> {
                             "hostname" => vm_info["hostname"] = json!(val),
                             "uptime" => vm_info["uptime"] = json!(val),
                             "disk_root" => {
-                                vm_info["disk_root_pct"] = json!(val.parse::<u32>().ok())
+                                vm_info["disk_root_pct"] = json!(val.parse::<u32>().ok());
                             }
                             "disk_data" => {
-                                vm_info["disk_data_pct"] = json!(val.parse::<u32>().ok())
+                                vm_info["disk_data_pct"] = json!(val.parse::<u32>().ok());
                             }
                             "disk_tmp" => vm_info["disk_tmp_pct"] = json!(val.parse::<u32>().ok()),
                             "simard_procs" => {
-                                vm_info["simard_processes"] = json!(val.parse::<u32>().ok())
+                                vm_info["simard_processes"] = json!(val.parse::<u32>().ok());
                             }
                             "cargo_procs" => {
-                                vm_info["cargo_processes"] = json!(val.parse::<u32>().ok())
+                                vm_info["cargo_processes"] = json!(val.parse::<u32>().ok());
                             }
                             "load" => vm_info["load_avg"] = json!(val),
                             "mem_used" => vm_info["memory_mb"] = json!(val),
@@ -1502,7 +1500,7 @@ const LOGIN_HTML: &str = r#"<!DOCTYPE html>
 </html>
 "#;
 
-const INDEX_HTML: &str = r##"<!DOCTYPE html>
+const INDEX_HTML: &str = r#"<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -2149,7 +2147,7 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
   </script>
 </body>
 </html>
-"##;
+"#;
 
 #[cfg(test)]
 mod tests {

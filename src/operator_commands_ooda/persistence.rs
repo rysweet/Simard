@@ -124,4 +124,54 @@ mod tests {
         assert!(dir.path().join("cycle_reports/cycle_1.json").exists());
         assert!(dir.path().join("cycle_reports/cycle_2.json").exists());
     }
+
+    #[test]
+    fn persist_cycle_report_overwrites_same_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        persist_cycle_report(dir.path(), &minimal_report(1));
+        let first = std::fs::read_to_string(dir.path().join("cycle_reports/cycle_1.json")).unwrap();
+        persist_cycle_report(dir.path(), &minimal_report(1));
+        let second =
+            std::fs::read_to_string(dir.path().join("cycle_reports/cycle_1.json")).unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn persist_cycle_report_with_no_outcomes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut report = minimal_report(10);
+        report.outcomes.clear();
+        persist_cycle_report(dir.path(), &report);
+        let path = dir.path().join("cycle_reports/cycle_10.json");
+        assert!(path.exists());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("10"));
+    }
+
+    #[test]
+    fn persist_cycle_report_with_mixed_outcomes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut report = minimal_report(5);
+        report.outcomes.push(ActionOutcome {
+            action: PlannedAction {
+                kind: ActionKind::ConsolidateMemory,
+                goal_id: None,
+                description: "consolidate".to_string(),
+            },
+            success: false,
+            detail: "failed".to_string(),
+        });
+        persist_cycle_report(dir.path(), &report);
+        let path = dir.path().join("cycle_reports/cycle_5.json");
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn persist_cycle_report_nonexistent_deep_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a").join("b").join("c");
+        let report = minimal_report(99);
+        persist_cycle_report(&nested, &report);
+        assert!(nested.join("cycle_reports/cycle_99.json").exists());
+    }
 }
