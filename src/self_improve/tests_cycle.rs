@@ -496,3 +496,91 @@ fn summarize_cycle_shows_deficit_when_details_present() {
     let summary = summarize_cycle(&cycle);
     assert!(summary.contains("source_attribution (25.0% deficit)"));
 }
+
+#[test]
+fn find_weak_dimensions_all_below_preserves_deficit_sort() {
+    // All five dimensions below threshold — verify sorting by deficit descending.
+    let score = GymSuiteScore {
+        suite_id: "test".to_string(),
+        overall: 0.30,
+        dimensions: ScoreDimensions {
+            factual_accuracy: 0.50,       // deficit 0.10
+            specificity: 0.45,            // deficit 0.15
+            temporal_awareness: 0.40,     // deficit 0.20
+            source_attribution: 0.30,     // deficit 0.30
+            confidence_calibration: 0.55, // deficit 0.05
+        },
+        scenario_count: 6,
+        scenarios_passed: 6,
+        pass_rate: 1.0,
+        recorded_at_unix_ms: None,
+    };
+    let weak = find_weak_dimensions(&score, 0.60, None);
+    assert_eq!(weak.len(), 5);
+    // Verify strictly descending deficit order
+    for window in weak.windows(2) {
+        assert!(
+            window[0].deficit >= window[1].deficit,
+            "{} deficit ({}) should be >= {} deficit ({})",
+            window[0].name,
+            window[0].deficit,
+            window[1].name,
+            window[1].deficit,
+        );
+    }
+    assert_eq!(weak[0].name, "source_attribution");
+    assert_eq!(weak[4].name, "confidence_calibration");
+}
+
+#[test]
+fn find_weak_dimensions_at_exact_threshold_not_weak() {
+    // Dimensions exactly at threshold should NOT be flagged as weak.
+    let score = GymSuiteScore {
+        suite_id: "test".to_string(),
+        overall: 0.60,
+        dimensions: ScoreDimensions {
+            factual_accuracy: 0.60,
+            specificity: 0.60,
+            temporal_awareness: 0.60,
+            source_attribution: 0.60,
+            confidence_calibration: 0.60,
+        },
+        scenario_count: 6,
+        scenarios_passed: 6,
+        pass_rate: 1.0,
+        recorded_at_unix_ms: None,
+    };
+    let weak = find_weak_dimensions(&score, 0.60, None);
+    assert!(
+        weak.is_empty(),
+        "dimensions at exact threshold should not be weak"
+    );
+}
+
+#[test]
+fn summarize_cycle_multiple_weak_dimension_details() {
+    use super::types::WeakDimension;
+    let cycle = ImprovementCycle {
+        baseline: make_score(0.40),
+        proposed_changes: vec![],
+        post_score: None,
+        regressions: vec![],
+        decision: None,
+        final_phase: ImprovementPhase::Analyze,
+        weak_dimensions: vec!["source_attribution".into(), "specificity".into()],
+        weak_dimension_details: vec![
+            WeakDimension {
+                name: "source_attribution".into(),
+                deficit: 0.30,
+            },
+            WeakDimension {
+                name: "specificity".into(),
+                deficit: 0.15,
+            },
+        ],
+        target_dimension: None,
+    };
+    let summary = summarize_cycle(&cycle);
+    assert!(summary.contains("source_attribution (30.0% deficit)"));
+    assert!(summary.contains("specificity (15.0% deficit)"));
+}
