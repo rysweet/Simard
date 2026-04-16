@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use super::types::WeakDimension;
 
 /// The five standard scoring dimensions.
-pub(crate) const DIMENSION_NAMES: [&str; 5] = [
+pub const DIMENSION_NAMES: [&str; 5] = [
     "factual_accuracy",
     "specificity",
     "temporal_awareness",
