@@ -129,7 +129,11 @@ pub fn run_ooda_cycle(
         eprintln!("[simard] OODA consolidation: intake failed: {e}");
     }
     // Hydrate prior-session facts into working memory for cross-cycle recall.
-    match memory_consolidation::consolidation_intake(&cycle_session_id, &*bridges.memory) {
+    match memory_consolidation::consolidation_intake(
+        &cycle_session_id,
+        &cycle_objective,
+        &*bridges.memory,
+    ) {
         Ok(n) if n > 0 => {
             eprintln!("[simard] OODA consolidation: hydrated {n} prior-session facts");
         }

@@ -255,7 +255,7 @@ fn prioritize_all_zero_weights_yields_zero_priority() {
 }
 
 #[test]
-fn dimension_value_unknown_returns_zero() {
+fn dimension_value_unknown_returns_zero_empty_key() {
     let score = make_score(0.8);
     assert!((dimension_value(&score, "nonexistent") - 0.0).abs() < 1e-9);
     assert!((dimension_value(&score, "") - 0.0).abs() < 1e-9);

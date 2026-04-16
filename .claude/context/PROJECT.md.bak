@@ -10,7 +10,7 @@ Replace the sections below with information about your project.
 
 ---
 
-## Project: issue-544-fix-ci-linker-oom-for-ladybugdb-lbug-builds-in-git
+## Project: main
 
 ## Overview
 
