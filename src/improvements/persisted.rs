@@ -273,6 +273,192 @@ mod tests {
         );
     }
 
+    // ---- duplicate field ----
+
+    #[test]
+    fn rejects_duplicate_field() {
+        let err = PersistedImprovementRecord::parse(
+            "review=a review=b target=t approvals=[] deferred=[]",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, SimardError::InvalidImprovementRecord { field, reason }
+            if field == "review" && reason.contains("more than once"))
+        );
+    }
+
+    // ---- unsupported field ----
+
+    #[test]
+    fn rejects_unsupported_field() {
+        let err = PersistedImprovementRecord::parse(
+            "review=a target=t approvals=[] deferred=[] bogus=xyz",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, SimardError::InvalidImprovementRecord { field, .. }
+            if field == "bogus")
+        );
+    }
+
+    // ---- missing required fields ----
+
+    #[test]
+    fn rejects_missing_review_id() {
+        let err =
+            PersistedImprovementRecord::parse("target=t approvals=[] deferred=[]").unwrap_err();
+        assert!(
+            matches!(err, SimardError::InvalidImprovementRecord { field, .. }
+            if field == "review")
+        );
+    }
+
+    #[test]
+    fn rejects_missing_target() {
+        let err =
+            PersistedImprovementRecord::parse("review=r approvals=[] deferred=[]").unwrap_err();
+        assert!(
+            matches!(err, SimardError::InvalidImprovementRecord { field, .. }
+            if field == "target")
+        );
+    }
+
+    #[test]
+    fn rejects_missing_approvals() {
+        let err = PersistedImprovementRecord::parse("review=r target=t deferred=[]").unwrap_err();
+        assert!(
+            matches!(err, SimardError::InvalidImprovementRecord { field, .. }
+            if field == "approvals")
+        );
+    }
+
+    #[test]
+    fn rejects_missing_deferred() {
+        let err = PersistedImprovementRecord::parse("review=r target=t approvals=[]").unwrap_err();
+        assert!(
+            matches!(err, SimardError::InvalidImprovementRecord { field, .. }
+            if field == "deferred")
+        );
+    }
+
+    // ---- count mismatch ----
+
+    #[test]
+    fn rejects_approval_count_mismatch() {
+        let err = PersistedImprovementRecord::parse(
+            "review=r target=t approvals=5 approved_goals=[p1 [active] Test] deferred=[]",
+        );
+        // Either the count mismatch is caught, or parsing fails earlier
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn rejects_deferral_count_mismatch() {
+        let err = PersistedImprovementRecord::parse(
+            "review=r target=t approvals=[] deferrals=3 deferred=[Foo (reason)]",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, SimardError::InvalidImprovementRecord { field, reason }
+            if field == "deferrals" && reason.contains("does not match"))
+        );
+    }
+
+    // ---- optional fields ----
+
+    #[test]
+    fn parses_optional_fields() {
+        let record = PersistedImprovementRecord::parse(
+            "review=r target=t approvals=[] deferred=[] selected-base-type=operator topology=single-process outcome=success",
+        )
+        .unwrap();
+        assert_eq!(record.selected_base_type.as_deref(), Some("operator"));
+        assert_eq!(record.topology.as_deref(), Some("single-process"));
+        assert_eq!(record.outcome.as_deref(), Some("success"));
+    }
+
+    // ---- approval entry parsing edge cases ----
+
+    #[test]
+    fn rejects_approval_entry_missing_p_prefix() {
+        let err = PersistedImprovementRecord::parse(
+            "review=r target=t approvals=[1 [active] Test] deferred=[]",
+        )
+        .unwrap_err();
+        assert!(matches!(err, SimardError::InvalidImprovementRecord { .. }));
+    }
+
+    #[test]
+    fn rejects_approval_entry_zero_priority() {
+        let err = PersistedImprovementRecord::parse(
+            "review=r target=t approvals=[p0 [active] Test] deferred=[]",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, SimardError::InvalidImprovementRecord { reason, .. }
+            if reason.contains("priority 1 or greater"))
+        );
+    }
+
+    #[test]
+    fn rejects_approval_entry_missing_status() {
+        let err =
+            PersistedImprovementRecord::parse("review=r target=t approvals=[p1 Test] deferred=[]")
+                .unwrap_err();
+        assert!(
+            matches!(err, SimardError::InvalidImprovementRecord { reason, .. }
+            if reason.contains("missing [status]"))
+        );
+    }
+
+    // ---- deferral entry parsing edge cases ----
+
+    #[test]
+    fn rejects_deferral_missing_closing_paren() {
+        let err = PersistedImprovementRecord::parse(
+            "review=r target=t approvals=[] deferred=[Foo (reason]",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, SimardError::InvalidImprovementRecord { reason, .. }
+            if reason.contains("must end with"))
+        );
+    }
+
+    #[test]
+    fn rejects_deferral_missing_rationale() {
+        let err = PersistedImprovementRecord::parse(
+            "review=r target=t approvals=[] deferred=[NoRationale)]",
+        )
+        .unwrap_err();
+        assert!(matches!(err, SimardError::InvalidImprovementRecord { .. }));
+    }
+
+    // ---- concise_record ----
+
+    #[test]
+    fn concise_record_with_empty_lists() {
+        let record =
+            PersistedImprovementRecord::parse("review=R1 target=T1 approvals=[] deferred=[]")
+                .unwrap();
+        assert_eq!(
+            record.concise_record(),
+            "review=R1 target=T1 approvals=[] deferred=[]"
+        );
+    }
+
+    // ---- approved_goals alias ----
+
+    #[test]
+    fn approved_goals_alias_works() {
+        let record = PersistedImprovementRecord::parse(
+            "review=r | target=t | approved_goals=[p2 [proposed] Improvement] | deferred=[]",
+        )
+        .unwrap();
+        assert_eq!(record.approved_proposals.len(), 1);
+        assert_eq!(record.approved_proposals[0].priority, 2);
+    }
+
     #[test]
     fn rejects_persisted_improvement_record_with_malformed_approvals() {
         let error = PersistedImprovementRecord::parse(

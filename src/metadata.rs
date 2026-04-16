@@ -112,7 +112,7 @@ impl BackendDescriptor {
 mod tests {
     use std::time::Duration;
 
-    use super::{Freshness, FreshnessState, UNIX_EPOCH};
+    use super::*;
     use crate::error::SimardError;
 
     #[test]
@@ -124,5 +124,114 @@ mod tests {
         .expect_err("times before the unix epoch should fail");
 
         assert!(matches!(error, SimardError::ClockBeforeUnixEpoch { .. }));
+    }
+
+    #[test]
+    fn freshness_from_system_time_success() {
+        let time = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let f = Freshness::from_system_time(FreshnessState::Current, time).unwrap();
+        assert_eq!(f.state, FreshnessState::Current);
+        assert_eq!(f.observed_at_unix_ms, 1_700_000_000_000);
+    }
+
+    #[test]
+    fn freshness_current_returns_current_state() {
+        let f = Freshness::current().unwrap();
+        assert_eq!(f.state, FreshnessState::Current);
+        assert!(f.observed_at_unix_ms > 0);
+    }
+
+    #[test]
+    fn freshness_now_is_alias_for_current() {
+        let f = Freshness::now().unwrap();
+        assert_eq!(f.state, FreshnessState::Current);
+    }
+
+    #[test]
+    fn freshness_stale_returns_stale_state() {
+        let f = Freshness::stale().unwrap();
+        assert_eq!(f.state, FreshnessState::Stale);
+    }
+
+    #[test]
+    fn freshness_observed_passes_through_state() {
+        let current = Freshness::observed(FreshnessState::Current).unwrap();
+        assert_eq!(current.state, FreshnessState::Current);
+        let stale = Freshness::observed(FreshnessState::Stale).unwrap();
+        assert_eq!(stale.state, FreshnessState::Stale);
+    }
+
+    #[test]
+    fn freshness_at_unix_epoch_yields_zero() {
+        let f = Freshness::from_system_time(FreshnessState::Current, UNIX_EPOCH).unwrap();
+        assert_eq!(f.observed_at_unix_ms, 0);
+    }
+
+    // ---- Provenance ----
+
+    #[test]
+    fn provenance_new() {
+        let p = Provenance::new("test-source", "test-locator");
+        assert_eq!(p.source, "test-source");
+        assert_eq!(p.locator, "test-locator");
+    }
+
+    #[test]
+    fn provenance_builtin() {
+        let p = Provenance::builtin("identity/manifest.json");
+        assert_eq!(p.source, "builtin");
+        assert_eq!(p.locator, "identity/manifest.json");
+    }
+
+    #[test]
+    fn provenance_injected() {
+        let p = Provenance::injected("operator-cli");
+        assert_eq!(p.source, "injected");
+    }
+
+    #[test]
+    fn provenance_runtime() {
+        let p = Provenance::runtime("session-42");
+        assert_eq!(p.source, "runtime");
+        assert_eq!(p.locator, "session-42");
+    }
+
+    #[test]
+    fn provenance_runtime_type_with_detail() {
+        let p = Provenance::runtime_type::<String>("detail");
+        assert_eq!(p.source, "runtime");
+        assert!(p.locator.contains("String"));
+        assert!(p.locator.contains("detail"));
+    }
+
+    #[test]
+    fn provenance_runtime_type_empty_detail() {
+        let p = Provenance::runtime_type::<u32>("");
+        assert_eq!(p.source, "runtime");
+        assert!(p.locator.contains("u32"));
+        assert!(!p.locator.contains("::"));
+    }
+
+    // ---- BackendDescriptor ----
+
+    #[test]
+    fn backend_descriptor_new() {
+        let f = Freshness::from_system_time(
+            FreshnessState::Current,
+            UNIX_EPOCH + Duration::from_secs(100),
+        )
+        .unwrap();
+        let p = Provenance::builtin("test");
+        let desc = BackendDescriptor::new("test-backend", p.clone(), f);
+        assert_eq!(desc.identity, "test-backend");
+        assert_eq!(desc.provenance, p);
+        assert_eq!(desc.freshness, f);
+    }
+
+    #[test]
+    fn backend_descriptor_for_runtime_type() {
+        let f = Freshness::current().unwrap();
+        let desc = BackendDescriptor::for_runtime_type::<Vec<u8>>("store", "detail", f);
+        assert!(desc.provenance.locator.contains("Vec"));
     }
 }

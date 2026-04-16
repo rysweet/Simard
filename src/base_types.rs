@@ -270,4 +270,166 @@ mod tests {
         assert!(input.identity_context.is_empty());
         assert!(input.prompt_preamble.is_empty());
     }
+
+    // ---- BaseTypeCapability Display ----
+
+    #[test]
+    fn base_type_capability_display_all_variants() {
+        assert_eq!(
+            BaseTypeCapability::PromptAssets.to_string(),
+            "prompt-assets"
+        );
+        assert_eq!(
+            BaseTypeCapability::SessionLifecycle.to_string(),
+            "session-lifecycle"
+        );
+        assert_eq!(BaseTypeCapability::Memory.to_string(), "memory");
+        assert_eq!(BaseTypeCapability::Evidence.to_string(), "evidence");
+        assert_eq!(BaseTypeCapability::Reflection.to_string(), "reflection");
+        assert_eq!(
+            BaseTypeCapability::TerminalSession.to_string(),
+            "terminal-session"
+        );
+    }
+
+    // ---- standard_session_capabilities ----
+
+    #[test]
+    fn standard_session_capabilities_has_five_caps() {
+        let caps = standard_session_capabilities();
+        assert_eq!(caps.len(), 5);
+        assert!(caps.contains(&BaseTypeCapability::PromptAssets));
+        assert!(caps.contains(&BaseTypeCapability::SessionLifecycle));
+        assert!(caps.contains(&BaseTypeCapability::Memory));
+        assert!(caps.contains(&BaseTypeCapability::Evidence));
+        assert!(caps.contains(&BaseTypeCapability::Reflection));
+        // TerminalSession is NOT included in the standard set
+        assert!(!caps.contains(&BaseTypeCapability::TerminalSession));
+    }
+
+    // ---- ensure_session_* guards ----
+
+    fn test_descriptor() -> BaseTypeDescriptor {
+        use crate::metadata::{Freshness, FreshnessState, Provenance};
+        use std::time::{Duration, UNIX_EPOCH};
+        let f = Freshness::from_system_time(
+            FreshnessState::Current,
+            UNIX_EPOCH + Duration::from_secs(1),
+        )
+        .unwrap();
+        BaseTypeDescriptor {
+            id: BaseTypeId::new("test"),
+            backend: crate::metadata::BackendDescriptor::new("test", Provenance::builtin("t"), f),
+            capabilities: capability_set([]),
+            supported_topologies: [RuntimeTopology::SingleProcess].into_iter().collect(),
+        }
+    }
+
+    #[test]
+    fn ensure_session_not_closed_passes_when_open() {
+        let desc = test_descriptor();
+        assert!(ensure_session_not_closed(&desc, false, "run").is_ok());
+    }
+
+    #[test]
+    fn ensure_session_not_closed_fails_when_closed() {
+        let desc = test_descriptor();
+        let err = ensure_session_not_closed(&desc, true, "run").unwrap_err();
+        assert!(matches!(
+            err,
+            SimardError::InvalidBaseTypeSessionState { .. }
+        ));
+    }
+
+    #[test]
+    fn ensure_session_open_passes_when_open() {
+        let desc = test_descriptor();
+        assert!(ensure_session_open(&desc, true, "turn").is_ok());
+    }
+
+    #[test]
+    fn ensure_session_open_fails_when_not_open() {
+        let desc = test_descriptor();
+        let err = ensure_session_open(&desc, false, "turn").unwrap_err();
+        assert!(matches!(
+            err,
+            SimardError::InvalidBaseTypeSessionState { .. }
+        ));
+    }
+
+    #[test]
+    fn ensure_session_not_already_open_passes_when_closed() {
+        let desc = test_descriptor();
+        assert!(ensure_session_not_already_open(&desc, false).is_ok());
+    }
+
+    #[test]
+    fn ensure_session_not_already_open_fails_when_open() {
+        let desc = test_descriptor();
+        let err = ensure_session_not_already_open(&desc, true).unwrap_err();
+        assert!(matches!(
+            err,
+            SimardError::InvalidBaseTypeSessionState { .. }
+        ));
+    }
+
+    // ---- BaseTypeDescriptor ----
+
+    #[test]
+    fn supports_topology_returns_true_for_included() {
+        let desc = test_descriptor();
+        assert!(desc.supports_topology(RuntimeTopology::SingleProcess));
+    }
+
+    #[test]
+    fn supports_topology_returns_false_for_excluded() {
+        let desc = test_descriptor();
+        assert!(!desc.supports_topology(RuntimeTopology::Distributed));
+    }
+
+    // ---- process_output_evidence ----
+
+    #[test]
+    fn process_output_evidence_captures_exit_code_and_streams() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: b"hello world".to_vec(),
+            stderr: b"warning: something".to_vec(),
+        };
+        let evidence = process_output_evidence("test", &output);
+        assert!(evidence.iter().any(|e| e.contains("test-exit-code=")));
+        assert!(evidence.iter().any(|e| e.contains("test-stdout-bytes=11")));
+        assert!(evidence.iter().any(|e| e.contains("test-stderr-bytes=")));
+        assert!(
+            evidence
+                .iter()
+                .any(|e| e.contains("test-stdout-head=hello world"))
+        );
+    }
+
+    #[test]
+    fn process_output_evidence_empty_streams() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(256), // exit code 1
+            stdout: vec![],
+            stderr: vec![],
+        };
+        let evidence = process_output_evidence("cmd", &output);
+        assert_eq!(evidence.len(), 3); // only exit code + byte counts, no head
+        assert!(evidence[0].contains("cmd-exit-code=1"));
+        assert!(evidence[1].contains("cmd-stdout-bytes=0"));
+        assert!(evidence[2].contains("cmd-stderr-bytes=0"));
+    }
+
+    // ---- BaseTypeId serde ----
+
+    #[test]
+    fn base_type_id_serde_round_trip() {
+        let id = BaseTypeId::new("rustyclawd");
+        let json = serde_json::to_string(&id).unwrap();
+        let parsed: BaseTypeId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, parsed);
+    }
 }

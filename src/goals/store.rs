@@ -220,6 +220,165 @@ mod tests {
         .expect("goal record should be valid")
     }
 
+    fn make_descriptor() -> BackendDescriptor {
+        BackendDescriptor::new(
+            "goals::test",
+            Provenance::injected("test:goal-store"),
+            Freshness::now().expect("freshness should be observable"),
+        )
+    }
+
+    // ---- InMemoryGoalStore ----
+
+    #[test]
+    fn in_memory_list_empty_initially() {
+        let store = InMemoryGoalStore::new(make_descriptor());
+        let list = store.list().expect("list should succeed");
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn in_memory_try_default_creates_valid_store() {
+        let store = InMemoryGoalStore::try_default().expect("try_default should succeed");
+        assert!(store.list().expect("list should succeed").is_empty());
+    }
+
+    #[test]
+    fn in_memory_put_and_list_round_trip() {
+        let store = InMemoryGoalStore::new(make_descriptor());
+        store
+            .put(goal_record("Goal A", GoalStatus::Active, 1))
+            .unwrap();
+        store
+            .put(goal_record("Goal B", GoalStatus::Proposed, 2))
+            .unwrap();
+        let list = store.list().unwrap();
+        assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn in_memory_upsert_replaces_existing_record_by_slug() {
+        let store = InMemoryGoalStore::new(make_descriptor());
+        store
+            .put(goal_record("Goal A", GoalStatus::Active, 3))
+            .unwrap();
+        store
+            .put(goal_record("Goal A", GoalStatus::Completed, 1))
+            .unwrap();
+        let list = store.list().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].status, GoalStatus::Completed);
+    }
+
+    #[test]
+    fn in_memory_top_goals_by_status_filters_correctly() {
+        let store = InMemoryGoalStore::new(make_descriptor());
+        store
+            .put(goal_record("Active 1", GoalStatus::Active, 1))
+            .unwrap();
+        store
+            .put(goal_record("Proposed 1", GoalStatus::Proposed, 1))
+            .unwrap();
+        store
+            .put(goal_record("Active 2", GoalStatus::Active, 2))
+            .unwrap();
+        let active = store.top_goals_by_status(GoalStatus::Active, 10).unwrap();
+        assert_eq!(active.len(), 2);
+        assert!(active.iter().all(|r| r.status == GoalStatus::Active));
+    }
+
+    #[test]
+    fn in_memory_top_goals_respects_limit() {
+        let store = InMemoryGoalStore::new(make_descriptor());
+        for i in 1..=5 {
+            store
+                .put(goal_record(&format!("G{i}"), GoalStatus::Active, i))
+                .unwrap();
+        }
+        let top2 = store.active_top_goals(2).unwrap();
+        assert_eq!(top2.len(), 2);
+    }
+
+    #[test]
+    fn in_memory_descriptor_returns_stored_descriptor() {
+        let desc = make_descriptor();
+        let store = InMemoryGoalStore::new(desc.clone());
+        assert_eq!(store.descriptor().identity, desc.identity);
+    }
+
+    // ---- FileBackedGoalStore ----
+
+    #[test]
+    fn file_backed_try_new_creates_store() {
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        let path = dir.path().join("goals.json");
+        let store = FileBackedGoalStore::try_new(&path).expect("try_new should succeed");
+        assert!(store.list().unwrap().is_empty());
+        assert_eq!(store.path(), path);
+    }
+
+    #[test]
+    fn file_backed_put_persists_to_disk() {
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        let path = dir.path().join("goals.json");
+        let store = FileBackedGoalStore::try_new(&path).unwrap();
+        store
+            .put(goal_record("Persist me", GoalStatus::Active, 1))
+            .unwrap();
+        drop(store);
+        // Reload from same path
+        let store2 = FileBackedGoalStore::try_new(&path).unwrap();
+        let list = store2.list().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].title, "Persist me");
+    }
+
+    #[test]
+    fn file_backed_upsert_persists_update() {
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        let path = dir.path().join("goals.json");
+        let store = FileBackedGoalStore::try_new(&path).unwrap();
+        store
+            .put(goal_record("Goal X", GoalStatus::Active, 1))
+            .unwrap();
+        store
+            .put(goal_record("Goal X", GoalStatus::Completed, 1))
+            .unwrap();
+        drop(store);
+        let store2 = FileBackedGoalStore::try_new(&path).unwrap();
+        let list = store2.list().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].status, GoalStatus::Completed);
+    }
+
+    #[test]
+    fn file_backed_top_goals_by_status_filters() {
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        let path = dir.path().join("goals.json");
+        let store = FileBackedGoalStore::try_new(&path).unwrap();
+        store.put(goal_record("A", GoalStatus::Active, 1)).unwrap();
+        store
+            .put(goal_record("B", GoalStatus::Proposed, 1))
+            .unwrap();
+        let proposed = store.top_goals_by_status(GoalStatus::Proposed, 5).unwrap();
+        assert_eq!(proposed.len(), 1);
+        assert_eq!(proposed[0].title, "B");
+    }
+
+    // ---- sorting ----
+
+    #[test]
+    fn sorted_goal_records_orders_by_status_then_priority_then_title() {
+        let records = vec![
+            goal_record("Z Active", GoalStatus::Active, 2),
+            goal_record("A Active", GoalStatus::Active, 1),
+            goal_record("Proposed", GoalStatus::Proposed, 1),
+        ];
+        let sorted = sorted_goal_records(records);
+        assert_eq!(sorted[0].title, "A Active");
+        assert_eq!(sorted[1].title, "Z Active");
+    }
+
     #[test]
     fn in_memory_goal_store_upserts_and_orders_active_goals() {
         let store = InMemoryGoalStore::new(BackendDescriptor::new(
