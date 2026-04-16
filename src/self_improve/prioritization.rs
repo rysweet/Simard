@@ -6,6 +6,7 @@
 //! frequency, and trend direction across past cycles.
 
 use crate::gym_scoring::GymSuiteScore;
+use serde::{Deserialize, Serialize};
 
 use super::types::WeakDimension;
 
@@ -19,7 +20,7 @@ const DIMENSION_NAMES: [&str; 5] = [
 ];
 
 /// A dimension with a composite priority score combining multiple signals.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PrioritizedDimension {
     /// Dimension name (e.g. "specificity").
     pub name: String,
@@ -74,10 +75,10 @@ pub fn find_weak_dimensions_detailed(
     ];
     let mut weak = Vec::new();
     for (name, value) in checks {
-        if let Some(t) = target {
-            if name != t {
-                continue;
-            }
+        if let Some(t) = target
+            && name != t
+        {
+            continue;
         }
         if value < weak_threshold {
             weak.push(WeakDimension {
@@ -139,7 +140,10 @@ pub fn prioritize_dimensions(
             // Trend: compare first and last past baselines.
             let worsening = if past_baselines.len() >= 2 {
                 let first = dimension_value(&past_baselines[0], name);
-                let last = dimension_value(past_baselines.last().unwrap(), name);
+                let last = dimension_value(
+                    past_baselines.last().expect("len >= 2 guarantees last()"),
+                    name,
+                );
                 last < first
             } else {
                 false
@@ -182,7 +186,8 @@ pub fn prioritize_dimensions_default(
     )
 }
 
-fn dimension_value(score: &GymSuiteScore, name: &str) -> f64 {
+/// Look up a single dimension's value by name.
+pub fn dimension_value(score: &GymSuiteScore, name: &str) -> f64 {
     match name {
         "factual_accuracy" => score.dimensions.factual_accuracy,
         "specificity" => score.dimensions.specificity,

@@ -58,11 +58,14 @@ impl MeetingBackend {
     /// - `system_prompt`: pre-built system prompt (identity + live context).
     pub fn new_session(
         topic: &str,
-        agent: Box<dyn BaseTypeSession>,
+        mut agent: Box<dyn BaseTypeSession>,
         bridge: Option<Box<dyn CognitiveMemoryOps>>,
         system_prompt: String,
     ) -> Self {
         let started_at = Utc::now().to_rfc3339();
+        if let Err(e) = agent.open() {
+            tracing::warn!(%e, "failed to open agent session during meeting creation");
+        }
         info!(topic, "Meeting session created");
         Self {
             topic: topic.to_string(),

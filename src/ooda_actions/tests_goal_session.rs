@@ -70,7 +70,9 @@ fn session_objective_includes_assessment_steps() {
 
     // Must mention launching amplihack sessions.
     assert!(
-        obj.contains("simard engineer") || obj.contains("amplihack copilot"),
+        obj.contains("simard engineer")
+            || obj.contains("simard spawn engineer")
+            || obj.contains("amplihack copilot"),
         "objective should mention delegation commands, got: {obj}"
     );
 
@@ -258,8 +260,9 @@ fn objective_includes_concrete_commands() {
         "objective should include concrete gh issue create command"
     );
     assert!(
-        input.objective.contains("amplihack copilot"),
-        "objective should include amplihack copilot command"
+        input.objective.contains("amplihack copilot")
+            || input.objective.contains("simard spawn engineer"),
+        "objective should include delegation command"
     );
     assert!(
         input.objective.contains("cargo test"),

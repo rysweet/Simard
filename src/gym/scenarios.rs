@@ -1071,7 +1071,9 @@ mod tests {
     fn all_scenarios_use_valid_identity() {
         for scenario in benchmark_scenarios() {
             assert!(
-                scenario.identity == "simard-gym" || scenario.identity == "simard-engineer",
+                scenario.identity == "simard-gym"
+                    || scenario.identity == "simard-engineer"
+                    || scenario.identity == "simard-composite-engineer",
                 "unexpected identity '{}' in scenario '{}'",
                 scenario.identity,
                 scenario.id
@@ -1083,7 +1085,10 @@ mod tests {
     fn all_scenarios_use_valid_base_type() {
         for scenario in benchmark_scenarios() {
             assert!(
-                scenario.base_type == "local-harness" || scenario.base_type == "terminal-shell",
+                scenario.base_type == "local-harness"
+                    || scenario.base_type == "terminal-shell"
+                    || scenario.base_type == "copilot-sdk"
+                    || scenario.base_type == "rusty-clawd",
                 "unexpected base_type '{}' in scenario '{}'",
                 scenario.base_type,
                 scenario.id
