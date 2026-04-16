@@ -121,16 +121,14 @@ mod tests {
     #[test]
     fn drain_recent_empty_returns_empty() {
         let result = drain_recent(10);
-        // Ring is initialized with empty records, so non-empty ones = 0
         assert!(
-            result.is_empty()
-                || result
-                    .iter()
-                    .all(|r| r.name.is_empty() || !r.name.is_empty())
+            result.is_empty(),
+            "fresh ring should yield no recorded spans"
         );
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn ring_size_is_reasonable() {
         assert!(RING_SIZE >= 64);
     }
