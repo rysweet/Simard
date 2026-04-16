@@ -141,9 +141,10 @@ mod tests {
     #[test]
     fn parse_theme_empty_arg_is_conversation() {
         // "/theme" with only whitespace after — not a valid theme, treated as conversation
+        // parse_command trims input, so "/theme   " becomes "/theme" in the Conversation payload
         assert_eq!(
             parse_command("/theme   "),
-            MeetingCommand::Conversation("/theme   ".to_string()),
+            MeetingCommand::Conversation("/theme".to_string()),
         );
     }
 
