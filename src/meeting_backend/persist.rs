@@ -455,6 +455,7 @@ pub fn extract_action_items(messages: &[ConversationMessage]) -> Vec<HandoffActi
                 assignee,
                 deadline,
                 linked_goal: None,
+                priority: None,
             });
         }
     }
@@ -725,6 +726,11 @@ fn extract_decision_rationale(decision: &str, messages: &[ConversationMessage]) 
     String::new()
 }
 
+/// Public wrapper for extracting rationale — used by the backend on close.
+pub fn extract_decision_rationale_pub(decision: &str, messages: &[ConversationMessage]) -> String {
+    extract_decision_rationale(decision, messages)
+}
+
 /// Extract participant roles involved in a decision from the message that
 /// contains it and the preceding message.
 fn extract_decision_participants(decision: &str, messages: &[ConversationMessage]) -> Vec<String> {
@@ -755,6 +761,14 @@ fn extract_decision_participants(decision: &str, messages: &[ConversationMessage
     participants
 }
 
+/// Public wrapper for extracting decision participants — used by the backend on close.
+pub fn extract_decision_participants_pub(
+    decision: &str,
+    messages: &[ConversationMessage],
+) -> Vec<String> {
+    extract_decision_participants(decision, messages)
+}
+
 /// Write a rich markdown meeting report including summary, decisions,
 /// action items table, and transcript — triggered automatically on `/end`.
 pub fn write_handoff_markdown_report(
@@ -763,7 +777,7 @@ pub fn write_handoff_markdown_report(
     summary: &str,
     messages: &[ConversationMessage],
     action_items: &[HandoffActionItem],
-    decisions: &[String],
+    decisions: &[MeetingDecision],
 ) -> SimardResult<PathBuf> {
     let dir = meetings_dir();
     std::fs::create_dir_all(&dir).map_err(|e| SimardError::ActionExecutionFailed {
@@ -788,6 +802,34 @@ pub fn write_handoff_markdown_report(
     md.push_str(&format!("# Meeting Report: {topic}\n\n"));
     md.push_str(&format!("**Date:** {started_at}\n\n"));
 
+    // Participants section
+    let mut participants: Vec<String> = Vec::new();
+    for msg in messages {
+        let role_name = match msg.role {
+            super::types::Role::User => "operator",
+            super::types::Role::Assistant => "simard",
+            super::types::Role::System => "system",
+        };
+        let s = role_name.to_string();
+        if !participants.contains(&s) {
+            participants.push(s);
+        }
+    }
+    for a in action_items {
+        if let Some(ref assignee) = a.assignee
+            && !participants.contains(assignee)
+        {
+            participants.push(assignee.clone());
+        }
+    }
+    if !participants.is_empty() {
+        md.push_str("## Participants\n\n");
+        for p in &participants {
+            md.push_str(&format!("- {p}\n"));
+        }
+        md.push('\n');
+    }
+
     md.push_str("## Summary\n\n");
     md.push_str(summary);
     md.push_str("\n\n");
@@ -797,7 +839,13 @@ pub fn write_handoff_markdown_report(
         md.push_str("_No explicit decisions recorded._\n\n");
     } else {
         for (i, d) in decisions.iter().enumerate() {
-            md.push_str(&format!("{}. {}\n", i + 1, d));
+            md.push_str(&format!("{}. **{}**\n", i + 1, d.description));
+            if !d.rationale.is_empty() {
+                md.push_str(&format!("   - *Rationale:* {}\n", d.rationale));
+            }
+            if !d.participants.is_empty() {
+                md.push_str(&format!("   - *By:* {}\n", d.participants.join(", ")));
+            }
         }
         md.push('\n');
     }
@@ -806,18 +854,23 @@ pub fn write_handoff_markdown_report(
     if action_items.is_empty() {
         md.push_str("_No action items extracted._\n\n");
     } else {
-        md.push_str("| # | Description | Assignee | Deadline | Goal |\n");
-        md.push_str("|---|-------------|----------|----------|------|\n");
+        md.push_str("| # | Description | Assignee | Deadline | Priority | Goal |\n");
+        md.push_str("|---|-------------|----------|----------|----------|------|\n");
         for (i, item) in action_items.iter().enumerate() {
             let assignee = item.assignee.as_deref().unwrap_or("\u{2014}");
             let deadline = item.deadline.as_deref().unwrap_or("\u{2014}");
+            let priority = item
+                .priority
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "\u{2014}".to_string());
             let goal = item.linked_goal.as_deref().unwrap_or("\u{2014}");
             md.push_str(&format!(
-                "| {} | {} | {} | {} | {} |\n",
+                "| {} | {} | {} | {} | {} | {} |\n",
                 i + 1,
                 item.description,
                 assignee,
                 deadline,
+                priority,
                 goal
             ));
         }
@@ -1208,6 +1261,7 @@ mod tests {
             assignee: None,
             deadline: None,
             linked_goal: None,
+            priority: None,
         }];
         let goals = vec![(
             "ci-pipeline".to_string(),
@@ -1224,6 +1278,7 @@ mod tests {
             assignee: None,
             deadline: None,
             linked_goal: None,
+            priority: None,
         }];
         let goals = vec![(
             "improve-testing".to_string(),
@@ -1360,6 +1415,7 @@ mod tests {
             assignee: Some("alice".to_string()),
             deadline: Some("Friday".to_string()),
             linked_goal: None,
+            priority: None,
         }];
         let decisions = vec!["We will adopt TDD".to_string()];
 

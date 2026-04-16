@@ -3,11 +3,13 @@
 //! All meeting intelligence lives in `meeting_backend`. This module provides
 //! the CLI-specific REPL loop and backward-compatible re-exports.
 
+mod color;
 mod repl;
 mod spinner;
 #[cfg(test)]
 mod test_support;
 
+pub use color::{cyan, green, yellow};
 pub use repl::run_meeting_repl;
 
 // Backward-compatible re-exports: the old `MeetingCommand` and

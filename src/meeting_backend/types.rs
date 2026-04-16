@@ -36,6 +36,9 @@ pub struct HandoffActionItem {
     pub deadline: Option<String>,
     /// Slug of the linked Simard goal, if the action advances a known goal.
     pub linked_goal: Option<String>,
+    /// Priority level (lower = higher priority). Defaults to None when not set.
+    #[serde(default)]
+    pub priority: Option<u32>,
 }
 
 /// Summary produced when a meeting is closed.
@@ -135,6 +138,7 @@ mod tests {
                 assignee: Some("Alice".to_string()),
                 deadline: Some("by friday".to_string()),
                 linked_goal: Some("improve-testing".to_string()),
+                priority: Some(1),
             }],
             decisions: vec!["Adopt TDD".to_string()],
             markdown_report_path: Some("/home/user/.simard/meetings/test_report.md".to_string()),
@@ -173,10 +177,20 @@ mod tests {
             assignee: Some("Bob".to_string()),
             deadline: None,
             linked_goal: None,
+            priority: Some(2),
         };
         let json = serde_json::to_string(&item).unwrap();
         let i2: HandoffActionItem = serde_json::from_str(&json).unwrap();
         assert_eq!(item, i2);
+    }
+
+    #[test]
+    fn handoff_action_item_priority_defaults_none() {
+        // Old JSON without priority field should deserialize with priority = None
+        let json =
+            r#"{"description":"Fix bug","assignee":null,"deadline":null,"linked_goal":null}"#;
+        let item: HandoffActionItem = serde_json::from_str(json).unwrap();
+        assert_eq!(item.priority, None, "priority should default to None");
     }
 
     #[test]
