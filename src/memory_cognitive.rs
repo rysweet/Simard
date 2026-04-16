@@ -14,7 +14,6 @@ use serde::{Deserialize, Serialize};
 ///
 /// Used by future `get_recent_sensory` bridge method (Phase 3+).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct CognitiveSensoryItem {
     pub node_id: String,
     pub modality: String,
@@ -43,7 +42,6 @@ pub struct CognitiveWorkingSlot {
 ///
 /// Used by future `get_episodes` bridge method (Phase 3+).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct CognitiveEpisode {
     pub node_id: String,
     pub content: String,

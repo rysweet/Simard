@@ -224,12 +224,9 @@ impl EngineerReadView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::EvidenceRecord;
     use crate::evidence::EvidenceSource;
     use crate::session::{SessionId, SessionPhase};
-    use crate::{
-        BaseTypeId, EvidenceRecord, OperatingMode, RuntimeAddress, RuntimeHandoffSnapshot,
-        RuntimeNodeId, RuntimeState, RuntimeTopology,
-    };
 
     fn make_evidence(detail: &str) -> EvidenceRecord {
         EvidenceRecord {
@@ -238,19 +235,6 @@ mod tests {
             phase: SessionPhase::Execution,
             detail: detail.to_string(),
             source: EvidenceSource::Runtime,
-        }
-    }
-
-    #[allow(dead_code)]
-    fn make_session() -> crate::session::SessionRecord {
-        crate::session::SessionRecord {
-            id: SessionId::parse("00000000-0000-0000-0000-000000000001").unwrap(),
-            mode: OperatingMode::Engineer,
-            objective: "objective-metadata(chars=42, words=8, lines=2)".to_string(),
-            phase: SessionPhase::Complete,
-            selected_base_type: BaseTypeId::from("terminal-shell"),
-            evidence_ids: vec![],
-            memory_keys: vec![],
         }
     }
 
@@ -271,25 +255,6 @@ mod tests {
             make_evidence("verification-status=passed"),
             make_evidence("verification-summary=all checks passed"),
         ]
-    }
-
-    #[allow(dead_code)]
-    fn make_handoff(
-        session: Option<crate::session::SessionRecord>,
-        evidence: Vec<EvidenceRecord>,
-    ) -> RuntimeHandoffSnapshot {
-        RuntimeHandoffSnapshot {
-            exported_state: RuntimeState::Ready,
-            identity_name: "simard-engineer".to_string(),
-            selected_base_type: BaseTypeId::from("terminal-shell"),
-            topology: RuntimeTopology::SingleProcess,
-            source_runtime_node: RuntimeNodeId::new("test-node"),
-            source_mailbox_address: RuntimeAddress::new("test-addr"),
-            session,
-            memory_records: vec![],
-            evidence_records: evidence,
-            copilot_submit_audit: None,
-        }
     }
 
     #[test]

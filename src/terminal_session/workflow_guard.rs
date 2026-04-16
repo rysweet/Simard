@@ -153,7 +153,6 @@ mod tests {
             }
         }
 
-        #[allow(dead_code)]
         fn file(path: PathBuf) -> Self {
             Self {
                 path,

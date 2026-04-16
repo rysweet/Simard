@@ -106,9 +106,7 @@ pub trait CognitiveMemoryOps: Send + Sync {
 /// the skwaq `LadybugGraphDb`). All errors propagate via [`SimardResult`].
 pub struct NativeCognitiveMemory {
     db: Arc<lbug::Database>,
-    #[allow(dead_code)]
-    path: PathBuf,
-    #[allow(dead_code)]
+    _path: PathBuf,
     _temp_dir: Option<Arc<tempfile::TempDir>>,
 }
 
@@ -150,7 +148,7 @@ impl NativeCognitiveMemory {
         let db = Self::open_db_with_recovery(&db_path)?;
         let mem = Self {
             db: Arc::new(db),
-            path: db_path,
+            _path: db_path,
             _temp_dir: None,
         };
         mem.ensure_schema()?;
@@ -181,7 +179,7 @@ impl NativeCognitiveMemory {
         })?;
         let mem = Self {
             db: Arc::new(db),
-            path: db_path,
+            _path: db_path,
             _temp_dir: Some(Arc::new(tmp)),
         };
         mem.ensure_schema()?;
@@ -218,7 +216,7 @@ impl NativeCognitiveMemory {
         })?;
         let mem = Self {
             db: Arc::new(db),
-            path: db_path,
+            _path: db_path,
             _temp_dir: None,
         };
         eprintln!(

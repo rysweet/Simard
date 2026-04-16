@@ -34,16 +34,16 @@ pub(super) fn execute_scenario(
     let (runtime_artifacts, metric_facts) = run_scenario_runtime(&scenario, suite_id)?;
     let checks = build_scenario_checks(&scenario, &runtime_artifacts);
     let passed = checks.iter().all(|check| check.passed);
-    build_and_write_report(
-        &scenario,
+    build_and_write_report(ReportInput {
+        scenario: &scenario,
         suite_id,
         output_root,
         started_at_unix_ms,
-        runtime_artifacts,
+        arts: runtime_artifacts,
         metric_facts,
         checks,
         passed,
-    )
+    })
 }
 
 struct RuntimeArtifacts {
@@ -239,17 +239,28 @@ fn build_scenario_checks(
     [core_checks, class_checks].concat()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build_and_write_report(
-    scenario: &BenchmarkScenario,
-    suite_id: &str,
-    output_root: &Path,
+struct ReportInput<'a> {
+    scenario: &'a BenchmarkScenario,
+    suite_id: &'a str,
+    output_root: &'a Path,
     started_at_unix_ms: u128,
     arts: RuntimeArtifacts,
     metric_facts: BenchmarkMetricFacts,
     checks: Vec<BenchmarkCheckResult>,
     passed: bool,
-) -> SimardResult<BenchmarkRunReport> {
+}
+
+fn build_and_write_report(input: ReportInput<'_>) -> SimardResult<BenchmarkRunReport> {
+    let ReportInput {
+        scenario,
+        suite_id,
+        output_root,
+        started_at_unix_ms,
+        arts,
+        metric_facts,
+        checks,
+        passed,
+    } = input;
     let run_dir = output_root
         .join(scenario.id)
         .join(arts.outcome.session.id.as_str());
