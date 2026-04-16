@@ -129,6 +129,7 @@ mod tests {
             started_at: "".to_string(),
             participants: vec!["alice".to_string()],
             explicit_questions: vec![],
+            themes: vec![],
         };
         let summary = session.durable_summary();
         assert!(summary.contains("Planning"));
