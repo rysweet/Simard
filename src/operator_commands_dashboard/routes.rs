@@ -395,10 +395,13 @@ async fn seed_goals() -> Json<Value> {
             json!({"status": "error", "error": format!("failed to create state dir: {e}")}),
         );
     }
-    match std::fs::write(
-        &goal_path,
-        serde_json::to_string_pretty(&seed_board).expect("GoalBoard serializes to JSON"),
-    ) {
+    let serialized = match serde_json::to_string_pretty(&seed_board) {
+        Ok(s) => s,
+        Err(e) => {
+            return Json(json!({"status": "error", "error": format!("serialization failed: {e}")}));
+        }
+    };
+    match std::fs::write(&goal_path, serialized) {
         Ok(()) => {
             Json(json!({"status": "ok", "message": "Seeded 3 active goals and 2 backlog items"}))
         }

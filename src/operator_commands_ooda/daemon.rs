@@ -134,8 +134,7 @@ pub fn run_ooda_daemon(
         let flag = Arc::clone(&shutdown);
         ctrlc::set_handler(move || {
             flag.store(true, Ordering::SeqCst);
-        })
-        .expect("failed to install SIGTERM/SIGINT handler");
+        })?;
     }
     // --------------------------------------------------------------------
 
