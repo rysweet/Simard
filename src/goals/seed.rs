@@ -16,7 +16,12 @@ pub fn seed_default_goals(store: &dyn GoalStore) -> SimardResult<Vec<GoalRecord>
 
     let mut seeded = Vec::with_capacity(crate::goal_curation::DEFAULT_SEED_GOALS.len());
     for (priority, title, description) in crate::goal_curation::DEFAULT_SEED_GOALS {
-        let update = GoalUpdate::new(title, description, GoalStatus::Active, priority as u8)?;
+        let update = GoalUpdate::new(
+            title,
+            description,
+            GoalStatus::Active,
+            u8::try_from(priority).unwrap_or(u8::MAX),
+        )?;
         let record = GoalRecord::from_update(
             update,
             "simard-seed",

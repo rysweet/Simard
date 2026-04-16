@@ -141,14 +141,15 @@ impl StructuredMeetingNotes {
                 "decision" => notes.decisions.push(value.to_string()),
                 "risk" => notes.risks.push(value.to_string()),
                 "next-step" | "next_step" | "action" | "action-item" => {
-                    notes.next_steps.push(value.to_string())
+                    notes.next_steps.push(value.to_string());
                 }
                 "open-question" | "open_question" | "question" => {
-                    notes.open_questions.push(value.to_string())
+                    notes.open_questions.push(value.to_string());
                 }
-                "goal" => notes
-                    .goals
-                    .push(parse_goal_directive(value, (notes.goals.len() + 1) as u8)?),
+                "goal" => notes.goals.push(parse_goal_directive(
+                    value,
+                    u8::try_from(notes.goals.len() + 1).unwrap_or(u8::MAX),
+                )?),
                 _ => agenda_fragments.push(line.to_string()),
             }
         }

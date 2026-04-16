@@ -68,10 +68,9 @@ pub fn latest_review_artifact(
         let artifact = load_review_artifact(&path)?;
         let is_newer = latest
             .as_ref()
-            .map(|(_, current): &(PathBuf, ReviewArtifact)| {
+            .is_none_or(|(_, current): &(PathBuf, ReviewArtifact)| {
                 artifact.reviewed_at_unix_ms > current.reviewed_at_unix_ms
-            })
-            .unwrap_or(true);
+            });
         if is_newer {
             latest = Some((path, artifact));
         }

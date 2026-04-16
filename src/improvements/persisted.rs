@@ -56,7 +56,7 @@ impl PersistedImprovementRecord {
                 }
                 "selected-base-type" => {
                     selected_base_type =
-                        Some(required_improvement_field("selected-base-type", value)?)
+                        Some(required_improvement_field("selected-base-type", value)?);
                 }
                 "topology" => topology = Some(required_improvement_field("topology", value)?),
                 "outcome" => outcome = Some(required_improvement_field("outcome", value)?),

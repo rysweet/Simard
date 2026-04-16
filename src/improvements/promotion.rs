@@ -35,7 +35,7 @@ impl ImprovementPromotionPlan {
                 "proposal" => proposals.push(parse_proposal_record(value)?),
                 "approve" | "promote" => approvals.push(parse_approval_directive(
                     value,
-                    (approvals.len() + 1) as u8,
+                    u8::try_from(approvals.len() + 1).unwrap_or(u8::MAX),
                 )?),
                 "defer" => deferrals.push(parse_deferral_directive(value)?),
                 _ => {}
@@ -218,7 +218,7 @@ fn parse_proposal_record(raw: &str) -> SimardResult<ImprovementProposalRecord> {
             "category" => category = required_improvement_field("proposal.category", value)?,
             "rationale" => rationale = required_improvement_field("proposal.rationale", value)?,
             "suggested_change" | "suggested-change" => {
-                suggested_change = required_improvement_field("proposal.suggested_change", value)?
+                suggested_change = required_improvement_field("proposal.suggested_change", value)?;
             }
             "evidence" => {
                 evidence = value
@@ -300,7 +300,7 @@ fn parse_approval_directive(raw: &str, default_priority: u8) -> SimardResult<Imp
                         field: "approve.status".to_string(),
                         reason: "status must be active, proposed, paused, or completed".to_string(),
                     }
-                })?
+                })?;
             }
             "rationale" => rationale = required_improvement_field("approve.rationale", value)?,
             _ => {

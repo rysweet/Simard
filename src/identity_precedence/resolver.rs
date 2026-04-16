@@ -109,8 +109,7 @@ impl PrecedenceResolver {
             let manifest_name = self
                 .manifests
                 .get(index)
-                .map(|m| m.name.as_str())
-                .unwrap_or("unknown");
+                .map_or("unknown", |m| m.name.as_str());
 
             for (key, value) in meta {
                 if let Some((_, winner_name)) = merged.get(key) {

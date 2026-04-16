@@ -153,8 +153,7 @@ fn truncate_output(s: &str, max_len: usize) -> String {
             .char_indices()
             .take_while(|(i, _)| *i < max_len)
             .last()
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(0);
+            .map_or(0, |(i, c)| i + c.len_utf8());
         format!("{}...", s[..boundary].trim())
     }
 }

@@ -113,7 +113,7 @@ impl StructuredGoalPlan {
             if label == "goal" {
                 plan.goals.push(parse_goal_directive(
                     value.trim(),
-                    (plan.goals.len() + 1) as u8,
+                    u8::try_from(plan.goals.len() + 1).unwrap_or(u8::MAX),
                 )?);
             }
         }

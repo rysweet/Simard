@@ -150,7 +150,7 @@ pub(crate) fn verify_kind_specific(
     match &action.selected.kind {
         EngineerActionKind::ReadOnlyScan => match action.selected.label.as_str() {
             "cargo-metadata-scan" => {
-                verify_cargo_metadata(&inspection.repo_root, &action.stdout, checks)?
+                verify_cargo_metadata(&inspection.repo_root, &action.stdout, checks)?;
             }
             "git-tracked-file-scan" => {
                 if action.stdout.lines().next().is_none() {
