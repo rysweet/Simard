@@ -154,12 +154,12 @@ mod tests {
     }
 
     #[test]
-    fn default_if_empty_uses_fallback_when_empty() {
+    fn default_if_empty_uses_default_when_empty() {
         assert_eq!(default_if_empty("", "default"), "default");
     }
 
     #[test]
-    fn default_if_empty_uses_fallback_when_whitespace() {
+    fn default_if_empty_uses_default_when_whitespace() {
         assert_eq!(default_if_empty("   ", "default"), "default");
     }
 

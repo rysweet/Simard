@@ -84,7 +84,7 @@ mod tests {
             );
             assert!(
                 home.to_string_lossy() != "/usr/local",
-                "should use HOME, not fallback"
+                "should use HOME, not default"
             );
         }
     }

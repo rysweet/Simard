@@ -115,7 +115,7 @@ fn parse_plan_response(text: &str) -> SimardResult<Plan> {
 /// Ask the LLM for a multi-step plan to accomplish `objective`.
 ///
 /// Returns `Err(PlanningUnavailable)` when no LLM session can be opened or the
-/// response is unparseable.  Callers fall back to keyword-based `analyze_objective`.
+/// response is unparseable.  Callers use keyword-based `analyze_objective`.
 pub fn plan_objective(objective: &str, inspection: &RepoInspection) -> SimardResult<Plan> {
     let mut session = SessionBuilder::new(OperatingMode::Engineer)
         .node_id("engineer-planner")

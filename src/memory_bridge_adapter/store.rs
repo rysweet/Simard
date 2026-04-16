@@ -25,10 +25,10 @@ use super::{BRIDGE_READ_MAX_RETRIES, BRIDGE_RETRY_BACKOFF_MS, STORE_NAME};
 /// - tags = [scope tag, session tag, phase tag]
 /// - source_id = "memory-store-adapter"
 ///
-/// Falls back to `FileBackedMemoryStore` if the bridge fails.
+/// Dual-writes to both the cognitive bridge and a local `FileBackedMemoryStore` for persistence.
 pub struct CognitiveBridgeMemoryStore {
     bridge: Box<dyn CognitiveMemoryOps>,
-    fallback: FileBackedMemoryStore,
+    local_store: FileBackedMemoryStore,
     /// Track records locally for list/count operations since cognitive memory
     /// search is keyword-based and cannot filter by exact scope/session.
     /// Keyed by record key for O(1) dedup on put.
@@ -41,9 +41,9 @@ pub struct CognitiveBridgeMemoryStore {
 impl CognitiveBridgeMemoryStore {
     pub fn new(
         bridge: impl CognitiveMemoryOps + 'static,
-        fallback_path: impl Into<PathBuf>,
+        local_store_path: impl Into<PathBuf>,
     ) -> SimardResult<Self> {
-        let fallback = FileBackedMemoryStore::try_new(fallback_path)?;
+        let local_store = FileBackedMemoryStore::try_new(local_store_path)?;
         let mut store = Self {
             bridge: Box::new(bridge),
             records: Mutex::new(HashMap::new()),
@@ -53,7 +53,7 @@ impl CognitiveBridgeMemoryStore {
                 "runtime-port:memory-store:cognitive-bridge",
                 Freshness::now()?,
             ),
-            fallback,
+            local_store,
         };
         store.hydrate_from_file_store()?;
         Ok(store)
@@ -76,7 +76,7 @@ impl CognitiveBridgeMemoryStore {
 
         let mut hydrated = 0usize;
         for scope in ALL_SCOPES {
-            let records = self.fallback.list(scope)?;
+            let records = self.local_store.list(scope)?;
             if let Ok(mut map) = self.records.lock() {
                 for record in records {
                     map.insert(record.key.clone(), record);
@@ -251,7 +251,7 @@ impl MemoryStore for CognitiveBridgeMemoryStore {
         self.store_as_fact(&record)?;
 
         // Also persist to local file store for handoff/recovery.
-        self.fallback.put(record.clone())?;
+        self.local_store.put(record.clone())?;
 
         // Maintain local index for list/count — O(1) insert/overwrite via HashMap.
         let mut records = self
@@ -445,7 +445,7 @@ mod tests {
         ));
         let _ = std::fs::create_dir_all(&dir);
         let bridge = CognitiveMemoryBridge::new(Box::new(transport));
-        CognitiveBridgeMemoryStore::new(bridge, dir.join("fallback.json")).unwrap()
+        CognitiveBridgeMemoryStore::new(bridge, dir.join("local_store.json")).unwrap()
     }
 
     fn make_record(key: &str, scope: MemoryScope) -> MemoryRecord {
@@ -554,7 +554,7 @@ mod tests {
     #[test]
     fn put_with_bridge_failure_returns_error() {
         let store = make_store(MockTransport::new_failing());
-        // Bridge store failure propagates — no silent fallback to file-only.
+        // Bridge store failure propagates — no silent degradation to file-only.
         let result = store.put(make_record("k1", MemoryScope::Decision));
         assert!(
             result.is_err(),

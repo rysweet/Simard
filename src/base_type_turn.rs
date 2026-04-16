@@ -197,7 +197,7 @@ pub fn parse_turn_output(raw: &str) -> SimardResult<TurnOutput> {
                     continue;
                 }
             }
-            // Fallback: treat the whole line as description with kind "unknown".
+            // Unrecognized format: treat the whole line as description with kind "unknown".
             if !rest.is_empty() {
                 actions.push(ProposedAction {
                     kind: "unknown".to_string(),

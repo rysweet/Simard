@@ -1,4 +1,4 @@
-//! Tests for bridge interaction: fallback queries, retry logic, and bridge hydration.
+//! Tests for bridge interaction: bridge queries, retry logic, and bridge hydration.
 
 use super::store::CognitiveBridgeMemoryStore;
 use super::test_helpers::make_record;
@@ -10,12 +10,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 #[test]
-fn local_miss_triggers_bridge_fallback() {
+fn local_miss_triggers_bridge_query() {
     // When local index is empty for a scope, list() queries the bridge.
     let sid = Uuid::nil();
     let transport =
-        InMemoryBridgeTransport::new("test-fallback", move |method, _params| match method {
-            "memory.store_fact" => Ok(json!({"id": "sem_fallback"})),
+        InMemoryBridgeTransport::new("test-bridge-query", move |method, _params| match method {
+            "memory.store_fact" => Ok(json!({"id": "sem_bridge"})),
             "memory.search_facts" => Ok(json!({
                 "facts": [{
                     "node_id": "n1",
@@ -39,10 +39,10 @@ fn local_miss_triggers_bridge_fallback() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("fallback-test-{unique}.json"));
+    let path = std::env::temp_dir().join(format!("bridge-test-{unique}.json"));
     let store = CognitiveBridgeMemoryStore::new(bridge, path.clone()).unwrap();
 
-    // No local records in Decision scope — should fall back to bridge.
+    // No local records in Decision scope — should query bridge for remote records.
     let results = store.list(MemoryScope::Decision).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].key, "bridge-fact");
@@ -96,7 +96,7 @@ fn bridge_timeout_triggers_retry() {
     let path = std::env::temp_dir().join(format!("retry-test-{unique}.json"));
     let store = CognitiveBridgeMemoryStore::new(bridge, path.clone()).unwrap();
 
-    // list() for empty scope should trigger bridge fallback with retry.
+    // list() for empty scope should trigger bridge query with retry.
     let results = store.list(MemoryScope::Project).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].key, "retried-fact");

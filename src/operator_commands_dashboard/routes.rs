@@ -816,12 +816,12 @@ fn load_dashboard_meeting_prompt() -> SimardResult<String> {
 }
 
 /// Open a lightweight chat session that bypasses PTY/amplihack overhead (#568).
-/// Falls back to None if the lightweight backend is unavailable.
+/// Returns `None` with an explicit warning if the lightweight backend is unavailable.
 fn open_lightweight_chat_session() -> Option<Box<dyn crate::base_types::BaseTypeSession>> {
     match crate::meeting_backend::lightweight::LightweightChatSession::new() {
         Ok(s) => Some(Box::new(s)),
         Err(e) => {
-            eprintln!("[simard] lightweight chat unavailable, will fall back: {e}");
+            eprintln!("[simard][DEGRADED] lightweight chat failed to initialize: {e}");
             None
         }
     }
@@ -852,7 +852,8 @@ async fn handle_ws_chat(mut socket: WebSocket) {
     use crate::meeting_backend::{MeetingBackend, MeetingCommand, parse_command};
 
     // Prefer the lightweight session for fast chat (~5s vs ~80s per turn).
-    // Falls back to the full agent session for complex operations.
+    // If lightweight is unavailable, use the full agent session.
+    // If BOTH fail, the user gets an explicit error message below.
     let lightweight_session: Option<Box<dyn crate::base_types::BaseTypeSession>> =
         tokio::task::spawn_blocking(open_lightweight_chat_session)
             .await
@@ -865,11 +866,19 @@ async fn handle_ws_chat(mut socket: WebSocket) {
             .ok()
             .flatten();
 
-    // Use lightweight if available, otherwise fall back to full agent.
+    // Use lightweight if available; full agent is the secondary option.
+    // Neither is a degradation — both are valid backends. Log which one is active.
     let agent = match (lightweight_session, agent_session) {
-        (Some(light), _) => light,
-        (None, Some(full)) => full,
+        (Some(light), _) => {
+            eprintln!("[simard] chat using lightweight backend");
+            light
+        }
+        (None, Some(full)) => {
+            eprintln!("[simard][DEGRADED] lightweight unavailable, using full agent backend");
+            full
+        }
         (None, None) => {
+            eprintln!("[simard][ERROR] no chat backend available — both lightweight and full agent failed");
             let _ = socket
                 .send(Message::Text(
                     json!({"role":"system","content":"No agent backend available. Check SIMARD_LLM_PROVIDER and auth config."})
@@ -1071,7 +1080,8 @@ async fn logs() -> Json<Value> {
         })
         .unwrap_or_default();
 
-    // Fall back to journalctl if no file-based logs found
+    // Try journalctl if no file-based logs found (not a degradation —
+    // journalctl is another valid log source, and the UI shows which was used).
     let combined_log = if daemon_log.is_empty() {
         read_journal_logs().await
     } else {
@@ -1181,7 +1191,7 @@ async fn read_journal_logs() -> Vec<String> {
         }
     }
 
-    // Fall back to system-level journal
+    // Also try system-level journal (broader scope than user-level).
     let output = tokio::process::Command::new("journalctl")
         .args([
             "--unit=simard*",
@@ -1361,7 +1371,7 @@ async fn memory_metrics() -> Json<Value> {
             dt.to_rfc3339()
         });
 
-    // Prefer LadybugDB counts when available, fall back to JSON file counts
+    // Use LadybugDB counts when available; JSON file counts are the legacy source.
     let total = native_stats
         .as_ref()
         .map(|s| s.total())

@@ -316,7 +316,7 @@ fn persist_and_select_roundtrip_engineer() {
 }
 
 #[test]
-fn select_optional_finds_compatibility_fallback() {
+fn select_optional_finds_compatibility_match() {
     let dir = TempDir::new().unwrap();
     let snapshot = minimal_snapshot(vec![]);
 
@@ -325,7 +325,7 @@ fn select_optional_finds_compatibility_fallback() {
     let artifact =
         select_optional_handoff_artifact(dir.path(), ScopedHandoffMode::Engineer, "test")
             .unwrap()
-            .expect("should fall back to compatibility file");
+            .expect("should find compatibility file");
     assert_eq!(artifact.file_name, COMPATIBILITY_HANDOFF_FILE_NAME);
 
     let loaded = load_runtime_handoff_snapshot(&artifact, "test").unwrap();

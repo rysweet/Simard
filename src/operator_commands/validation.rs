@@ -285,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn artifact_name_returns_fallback_for_root() {
+    fn artifact_name_returns_default_for_root() {
         assert_eq!(artifact_name(Path::new("/")), "file");
     }
 

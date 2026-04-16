@@ -377,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn analyze_objective_readonly_fallback() {
+    fn analyze_objective_readonly_default() {
         assert_eq!(
             analyze_objective("inspect the workspace layout"),
             AnalyzedAction::ReadOnlyScan

@@ -117,7 +117,7 @@ fn analyze_structured_text_replace() {
 }
 
 #[test]
-fn analyze_read_only_scan_fallback() {
+fn analyze_read_only_scan_default() {
     assert_eq!(
         analyze_objective("analyze the architecture"),
         AnalyzedAction::ReadOnlyScan

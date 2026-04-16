@@ -292,7 +292,7 @@ mod tests {
     fn goal_curator_additional_memory_records_empty_for_no_goals_in_output() {
         let program = GoalCuratorProgram::try_default().expect("create test program");
         // Natural language objective gets one auto-goal, so memory records are non-empty.
-        // To get empty, we'd need parse to produce empty goals, but the fallback always adds one.
+        // To get empty, we'd need parse to produce empty goals, but the parser always adds one.
         // Instead, test that goal_updates returns the parsed goals.
         let context = test_context("goal: Test | priority=1 | status=active");
         let updates = program

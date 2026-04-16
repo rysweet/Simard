@@ -303,7 +303,7 @@ fn build_copilot_terminal_objective(
 /// truncated preview.  The full transcript is newline-delimited; the
 /// preview is pipe-delimited.
 fn extract_copilot_response_from_evidence(evidence: &[String]) -> String {
-    // Prefer full transcript; fall back to the preview.
+    // Prefer full transcript; use preview if transcript is empty.
     let transcript = evidence
         .iter()
         .find_map(|e| e.strip_prefix("terminal-transcript-full="))
@@ -586,7 +586,7 @@ Script done on 2025-04-07 02:56:00+00:00";
     }
 
     #[test]
-    fn extract_response_from_transcript_pipe_delimited_fallback() {
+    fn extract_response_from_transcript_pipe_delimited_secondary() {
         // Preview format: pipe-delimited
         let transcript = "SIMARD_PROMPT_FILE=x && amplihack copilot -p test | Hello from Simard | bash-5.2$ exit";
         let response = extract_response_from_transcript(transcript);
@@ -636,7 +636,7 @@ Script done on 2025-04-07 02:56:00+00:00";
         let response = extract_copilot_response_from_evidence(&evidence);
         assert!(
             response.contains("Hello from Simard"),
-            "should fall back to preview: got '{response}'"
+            "should use preview: got '{response}'"
         );
     }
 

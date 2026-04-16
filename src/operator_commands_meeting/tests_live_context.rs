@@ -31,7 +31,7 @@ fn defaults_with_empty_bridge() {
     );
     assert!(
         ctx.contains("operator"),
-        "expected generic operator fallback"
+        "expected generic operator default"
     );
     // No hardcoded project list when memory is empty
     assert!(
@@ -70,7 +70,7 @@ fn empty_env_var_falls_back_to_generic() {
 
     assert!(
         ctx.contains("Your operator is operator"),
-        "empty env var should fall back to generic 'operator'"
+        "empty env var should resolve to generic 'operator'"
     );
 }
 
@@ -129,7 +129,7 @@ fn includes_operator_facts() {
         ctx.contains("Custom operator identity"),
         "expected operator content from bridge"
     );
-    // Should NOT contain any fallback operator text when bridge provides facts
+    // Should NOT contain any default operator text when bridge provides facts
     assert!(
         !ctx.contains("Ryan Sweet"),
         "should not contain default operator when bridge provides custom operator"
@@ -190,7 +190,7 @@ fn with_all_fact_types() {
     assert!(ctx.contains("Known Projects"));
     assert!(ctx.contains("Research Topics"));
     assert!(ctx.contains("Improvement Backlog"));
-    // Should NOT contain the "No cognitive memory" fallback
+    // Should NOT contain the "No cognitive memory" placeholder
     assert!(!ctx.contains("No cognitive memory available"));
 }
 
@@ -198,7 +198,7 @@ fn with_all_fact_types() {
 fn has_live_state_header() {
     let bridge = empty_bridge();
     let ctx = build_live_meeting_context(&bridge).unwrap();
-    // Even with only the operator fallback, the section is present so it uses the live header
+    // Even with only the operator default, the section is present so it uses the live header
     assert!(ctx.starts_with("## Live State"));
 }
 
@@ -258,7 +258,7 @@ fn empty_bridge_returns_empty_search_results() {
 fn empty_bridge_has_operator_section_only() {
     let bridge = empty_bridge();
     let ctx = build_live_meeting_context(&bridge).unwrap();
-    // With empty bridge, only the operator fallback section appears (no hardcoded projects)
+    // With empty bridge, only the operator default section appears (no hardcoded projects)
     assert!(ctx.contains("## Operator Context"));
     assert!(!ctx.contains("## Known Projects"));
     let section_count = ctx.matches("## ").count();
@@ -291,7 +291,7 @@ fn live_state_header_always_present() {
 }
 
 #[test]
-fn with_all_types_does_not_contain_no_memory_fallback() {
+fn with_all_types_does_not_contain_no_memory_placeholder() {
     let bridge = bridge_with_all_fact_types();
     let ctx = build_live_meeting_context(&bridge).unwrap();
     assert!(!ctx.contains("No cognitive memory available"));

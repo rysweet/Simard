@@ -292,7 +292,7 @@ pub(crate) fn select_engineer_action(
     }
 
     // LLM-based planning. If unavailable, use keyword analysis as the
-    // base strategy (not a fallback — keyword analysis is the foundational
+    // base strategy — keyword analysis is the foundational
     // implementation, LLM planning is an enhancement).
     let analyzed = match crate::engineer_plan::plan_objective(objective, inspection) {
         Ok(plan) if !plan.steps().is_empty() => plan.steps()[0].action.clone(),

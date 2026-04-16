@@ -707,7 +707,7 @@ fn legacy_plain_json_file_loads_without_error() {
     }];
     std::fs::write(&path, serde_json::to_string(&records).unwrap()).unwrap();
 
-    // Should load fine via legacy fallback.
+    // Should load fine via legacy format support.
     let store = FileBackedMemoryStore::try_new(&path).unwrap();
     let all = store.list_all().unwrap();
     assert_eq!(all.len(), 1);

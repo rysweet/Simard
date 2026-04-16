@@ -1,4 +1,4 @@
-//! Core store and hydration-from-fallback tests.
+//! Core store and hydration-from-local-store tests.
 
 use super::store::CognitiveBridgeMemoryStore;
 use super::test_helpers::{make_record, test_store};
@@ -71,15 +71,15 @@ fn descriptor_identifies_cognitive_bridge() {
 }
 
 #[test]
-fn hydration_loads_records_from_fallback() {
-    // Step 1: create a fallback file with pre-existing records.
+fn hydration_loads_records_from_local_store() {
+    // Step 1: create a local store file with pre-existing records.
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
     let path = std::env::temp_dir().join(format!("hydrate-test-{unique}.json"));
 
-    // Seed the fallback with records via a standalone FileBackedMemoryStore.
+    // Seed the local store with records via a standalone FileBackedMemoryStore.
     {
         let seed = FileBackedMemoryStore::try_new(&path).unwrap();
         seed.put(make_record("prior-a", MemoryScope::Decision))
@@ -114,7 +114,7 @@ fn hydration_loads_records_from_fallback() {
 }
 
 #[test]
-fn hydration_with_empty_fallback_starts_empty() {
+fn hydration_with_empty_local_store_starts_empty() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -133,7 +133,7 @@ fn hydration_with_empty_fallback_starts_empty() {
     let bridge = CognitiveMemoryBridge::new(Box::new(transport));
     let store = CognitiveBridgeMemoryStore::new(bridge, &path).unwrap();
 
-    // No records should exist — hydration from empty fallback is a no-op.
+    // No records should exist — hydration from empty local store is a no-op.
     for scope in [
         MemoryScope::SessionScratch,
         MemoryScope::SessionSummary,
@@ -144,7 +144,7 @@ fn hydration_with_empty_fallback_starts_empty() {
     ] {
         assert!(
             store.list(scope).unwrap().is_empty(),
-            "scope {scope:?} should be empty after hydrating empty fallback"
+            "scope {scope:?} should be empty after hydrating empty local store"
         );
     }
 

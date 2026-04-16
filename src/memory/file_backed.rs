@@ -59,7 +59,7 @@ fn load_checksummed(path: &Path) -> SimardResult<Vec<MemoryRecord>> {
         return Ok(payload.records);
     }
 
-    // Fall back to legacy plain-array format.
+    // Try legacy plain-array format (migration support).
     serde_json::from_slice::<Vec<MemoryRecord>>(&contents).map_err(|e| {
         SimardError::PersistentStoreIo {
             store: MEMORY_STORE_NAME.to_string(),

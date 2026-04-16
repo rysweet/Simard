@@ -128,7 +128,7 @@ mod tests {
     // ── resolve_operator_name ───────────────────────────────────────
 
     #[test]
-    fn resolve_operator_name_default_fallback() {
+    fn resolve_operator_name_default() {
         let _lock = ENV_MUTEX.lock().unwrap();
         unsafe { std::env::remove_var("SIMARD_OPERATOR_NAME") };
         let name = resolve_operator_name();

@@ -112,7 +112,7 @@ fn analyze_objective_structured_replace() {
 }
 
 #[test]
-fn analyze_objective_read_only_fallback() {
+fn analyze_objective_read_only_default() {
     assert_eq!(
         analyze_objective("inspect the codebase"),
         AnalyzedAction::ReadOnlyScan

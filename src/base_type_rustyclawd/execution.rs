@@ -166,7 +166,7 @@ mod tests {
         assert!(system_prompt.contains("You are a test agent"));
     }
 
-    // -- RUSTYCLAWD_BIN env fallback --
+    // -- RUSTYCLAWD_BIN env override --
 
     #[test]
     fn rustyclawd_bin_defaults_to_rustyclawd() {

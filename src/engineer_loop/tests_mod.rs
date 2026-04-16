@@ -173,7 +173,7 @@ fn analyze_objective_run_tests_maps_to_cargo_test() {
 }
 
 #[test]
-fn analyze_objective_default_fallback() {
+fn analyze_objective_default_behavior() {
     assert_eq!(
         analyze_objective("unknown gibberish"),
         AnalyzedAction::ReadOnlyScan

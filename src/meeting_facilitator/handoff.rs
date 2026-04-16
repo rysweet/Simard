@@ -155,17 +155,17 @@ impl MeetingHandoff {
             }
         }
 
-        // Extract themes from notes; fall back to decision/action text if notes
+        // Extract themes from notes; use decision/action text if notes
         // are empty (common in the backend code path which uses messages, not notes).
         let mut themes = Self::extract_themes_from_notes(&session.notes);
         if themes.is_empty() {
-            let fallback_texts: Vec<String> = session
+            let alt_texts: Vec<String> = session
                 .decisions
                 .iter()
                 .map(|d| d.description.clone())
                 .chain(session.action_items.iter().map(|a| a.description.clone()))
                 .collect();
-            themes = Self::extract_themes_from_notes(&fallback_texts);
+            themes = Self::extract_themes_from_notes(&alt_texts);
         }
 
         Self {

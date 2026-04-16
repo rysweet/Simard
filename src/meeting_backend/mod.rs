@@ -486,7 +486,7 @@ impl MeetingBackend {
     }
 
     /// Metadata-only summary (no LLM involved). Used when the LLM summary
-    /// call fails or returns empty — this is NOT a silent fallback, it's the
+    /// call fails or returns empty — this is the
     /// structural record of what happened.
     fn metadata_summary(&self) -> String {
         let user_count = self.history.iter().filter(|m| m.role == Role::User).count();

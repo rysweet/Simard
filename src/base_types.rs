@@ -219,7 +219,7 @@ pub fn ensure_session_not_already_open(
 }
 
 /// Collect evidence from a completed child process output. Shared by adapters
-/// that fall back to process-based execution.
+/// that defer to process-based execution.
 pub fn process_output_evidence(prefix: &str, output: &std::process::Output) -> Vec<String> {
     let exit_code = output.status.code().unwrap_or(-1);
 
