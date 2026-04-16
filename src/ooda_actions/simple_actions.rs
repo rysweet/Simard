@@ -153,4 +153,103 @@ mod tests {
         assert!(outcomes[0].success);
         assert!(outcomes[0].detail.contains("cargo-build"));
     }
+
+    #[test]
+    fn dispatch_consolidate_memory_succeeds() {
+        let mut bridges = test_bridges();
+        let mut state = OodaState::new(GoalBoard::new());
+        let action = PlannedAction {
+            kind: ActionKind::ConsolidateMemory,
+            goal_id: None,
+            description: "consolidate".into(),
+        };
+        let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert!(outcomes[0].success);
+        assert!(outcomes[0].detail.contains("consolidated"));
+    }
+
+    #[test]
+    fn dispatch_research_query_lists_packs() {
+        let mut bridges = test_bridges();
+        let mut state = OodaState::new(GoalBoard::new());
+        let action = PlannedAction {
+            kind: ActionKind::ResearchQuery,
+            goal_id: None,
+            description: "research".into(),
+        };
+        let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert!(outcomes[0].success);
+        assert!(outcomes[0].detail.contains("knowledge packs"));
+    }
+
+    #[test]
+    fn dispatch_multiple_actions_concurrently() {
+        let mut bridges = test_bridges();
+        let mut state = OodaState::new(GoalBoard::new());
+        let actions = vec![
+            PlannedAction {
+                kind: ActionKind::ConsolidateMemory,
+                goal_id: None,
+                description: "consolidate".into(),
+            },
+            PlannedAction {
+                kind: ActionKind::ResearchQuery,
+                goal_id: None,
+                description: "research".into(),
+            },
+            PlannedAction {
+                kind: ActionKind::BuildSkill,
+                goal_id: None,
+                description: "build".into(),
+            },
+        ];
+        let outcomes = dispatch_actions(&actions, &mut bridges, &mut state).unwrap();
+        assert_eq!(outcomes.len(), 3);
+        assert!(outcomes.iter().all(|o| o.success));
+    }
+
+    #[test]
+    fn dispatch_empty_actions_returns_empty() {
+        let mut bridges = test_bridges();
+        let mut state = OodaState::new(GoalBoard::new());
+        let outcomes = dispatch_actions(&[], &mut bridges, &mut state).unwrap();
+        assert!(outcomes.is_empty());
+    }
+
+    #[test]
+    fn make_outcome_preserves_action_fields() {
+        use super::make_outcome;
+        let action = PlannedAction {
+            kind: ActionKind::ResearchQuery,
+            goal_id: Some("g-42".into()),
+            description: "test action".into(),
+        };
+        let outcome = make_outcome(&action, true, "details".into());
+        assert_eq!(outcome.action.kind, ActionKind::ResearchQuery);
+        assert_eq!(outcome.action.goal_id.as_deref(), Some("g-42"));
+        assert_eq!(outcome.action.description, "test action");
+        assert!(outcome.success);
+        assert_eq!(outcome.detail, "details");
+    }
+
+    #[test]
+    fn make_outcome_failure() {
+        use super::make_outcome;
+        let action = PlannedAction {
+            kind: ActionKind::ConsolidateMemory,
+            goal_id: None,
+            description: "fail test".into(),
+        };
+        let outcome = make_outcome(&action, false, "error reason".into());
+        assert!(!outcome.success);
+        assert_eq!(outcome.detail, "error reason");
+    }
+
+    #[test]
+    fn skill_min_usage_is_reasonable() {
+        assert!(super::SKILL_MIN_USAGE >= 2, "skill extraction needs meaningful usage count");
+        assert!(super::SKILL_MIN_USAGE <= 10, "threshold should not be unreasonably high");
+    }
 }

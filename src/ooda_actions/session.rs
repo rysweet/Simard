@@ -96,4 +96,42 @@ mod tests {
     fn action_kind_launch_session_displays_correctly() {
         assert_eq!(ActionKind::LaunchSession.to_string(), "launch-session");
     }
+
+    #[test]
+    fn dispatch_launch_session_produces_outcome_without_panic() {
+        let action = PlannedAction {
+            kind: ActionKind::LaunchSession,
+            goal_id: Some("goal-77".into()),
+            description: "a bounded test task".into(),
+        };
+        let outcome = super::dispatch_launch_session(&action);
+        // Whether it succeeds or fails depends on environment, but it must
+        // not panic and must produce a meaningful detail string.
+        assert!(!outcome.detail.is_empty());
+        assert_eq!(outcome.action.kind, ActionKind::LaunchSession);
+        assert_eq!(outcome.action.goal_id.as_deref(), Some("goal-77"));
+    }
+
+    #[test]
+    fn dispatch_launch_session_with_special_chars_in_description() {
+        let action = PlannedAction {
+            kind: ActionKind::LaunchSession,
+            goal_id: None,
+            description: "task with 'quotes' and \\backslashes\\".into(),
+        };
+        let outcome = super::dispatch_launch_session(&action);
+        // Must not panic on special shell characters
+        assert!(!outcome.detail.is_empty());
+    }
+
+    #[test]
+    fn dispatch_launch_session_empty_description() {
+        let action = PlannedAction {
+            kind: ActionKind::LaunchSession,
+            goal_id: None,
+            description: String::new(),
+        };
+        let outcome = super::dispatch_launch_session(&action);
+        assert!(!outcome.detail.is_empty());
+    }
 }

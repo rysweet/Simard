@@ -409,4 +409,58 @@ mod tests {
         // Should return well before 60s
         assert!(start.elapsed() < Duration::from_secs(2));
     }
+
+    #[test]
+    fn daemon_dashboard_config_default_values() {
+        // Clear any env override to test the true default
+        std::env::remove_var("SIMARD_DASHBOARD_PORT");
+        let config = DaemonDashboardConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.port, 8080);
+    }
+
+    #[test]
+    fn daemon_dashboard_config_env_override() {
+        std::env::set_var("SIMARD_DASHBOARD_PORT", "9090");
+        let config = DaemonDashboardConfig::default();
+        assert_eq!(config.port, 9090);
+        // Clean up
+        std::env::remove_var("SIMARD_DASHBOARD_PORT");
+    }
+
+    #[test]
+    fn daemon_dashboard_config_invalid_env_falls_back() {
+        std::env::set_var("SIMARD_DASHBOARD_PORT", "not_a_number");
+        let config = DaemonDashboardConfig::default();
+        assert_eq!(config.port, 8080);
+        std::env::remove_var("SIMARD_DASHBOARD_PORT");
+    }
+
+    #[test]
+    fn daemon_log_writes_to_stderr_and_file() {
+        let dir = tempfile::tempdir().unwrap();
+        daemon_log(dir.path(), "test daemon log message");
+        let log_path = dir.path().join("ooda.log");
+        assert!(log_path.is_file());
+        let contents = std::fs::read_to_string(&log_path).unwrap();
+        assert!(contents.contains("test daemon log message"));
+    }
+
+    #[test]
+    fn daemon_log_appends_not_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        daemon_log(dir.path(), "first message");
+        daemon_log(dir.path(), "second message");
+        let contents = std::fs::read_to_string(dir.path().join("ooda.log")).unwrap();
+        assert!(contents.contains("first message"));
+        assert!(contents.contains("second message"));
+    }
+
+    #[test]
+    fn exe_mtime_is_in_reasonable_range() {
+        let mtime = exe_mtime().unwrap();
+        let elapsed = mtime.elapsed().unwrap_or(Duration::ZERO);
+        // The test binary should have been built recently (within last year)
+        assert!(elapsed < Duration::from_secs(365 * 24 * 3600));
+    }
 }

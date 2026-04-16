@@ -549,4 +549,193 @@ mod tests {
         let ms = now_unix_ms().unwrap();
         assert!(ms > 0);
     }
+
+    // --- compare_runs: evidence quality tiebreaker ---
+
+    #[test]
+    fn compare_runs_evidence_quality_improved() {
+        let mut current = make_run_summary(true, 8, 4, 3);
+        current.evidence_quality = "sufficient".into();
+        let mut previous = make_run_summary(true, 8, 4, 3);
+        previous.evidence_quality = "thin".into();
+        assert_eq!(
+            compare_runs(&current, &previous),
+            BenchmarkComparisonStatus::Improved
+        );
+    }
+
+    #[test]
+    fn compare_runs_evidence_quality_regressed() {
+        let mut current = make_run_summary(true, 8, 4, 3);
+        current.evidence_quality = "thin".into();
+        let mut previous = make_run_summary(true, 8, 4, 3);
+        previous.evidence_quality = "sufficient".into();
+        assert_eq!(
+            compare_runs(&current, &previous),
+            BenchmarkComparisonStatus::Regressed
+        );
+    }
+
+    // --- compare_runs: unnecessary_action_count tiebreaker ---
+
+    #[test]
+    fn compare_runs_fewer_unnecessary_actions_is_improved() {
+        let mut current = make_run_summary(true, 8, 4, 3);
+        current.unnecessary_action_count = Some(1);
+        let mut previous = make_run_summary(true, 8, 4, 3);
+        previous.unnecessary_action_count = Some(5);
+        assert_eq!(
+            compare_runs(&current, &previous),
+            BenchmarkComparisonStatus::Improved
+        );
+    }
+
+    #[test]
+    fn compare_runs_more_unnecessary_actions_is_regressed() {
+        let mut current = make_run_summary(true, 8, 4, 3);
+        current.unnecessary_action_count = Some(5);
+        let mut previous = make_run_summary(true, 8, 4, 3);
+        previous.unnecessary_action_count = Some(1);
+        assert_eq!(
+            compare_runs(&current, &previous),
+            BenchmarkComparisonStatus::Regressed
+        );
+    }
+
+    // --- compare_runs: retry_count tiebreaker ---
+
+    #[test]
+    fn compare_runs_fewer_retries_is_improved() {
+        let mut current = make_run_summary(true, 8, 4, 3);
+        current.retry_count = Some(0);
+        let mut previous = make_run_summary(true, 8, 4, 3);
+        previous.retry_count = Some(3);
+        assert_eq!(
+            compare_runs(&current, &previous),
+            BenchmarkComparisonStatus::Improved
+        );
+    }
+
+    // --- compare_runs: evidence records differ ---
+
+    #[test]
+    fn compare_runs_more_evidence_is_improved() {
+        let current = make_run_summary(true, 8, 6, 3);
+        let previous = make_run_summary(true, 8, 2, 3);
+        assert_eq!(
+            compare_runs(&current, &previous),
+            BenchmarkComparisonStatus::Improved
+        );
+    }
+
+    #[test]
+    fn compare_runs_fewer_evidence_is_regressed() {
+        let current = make_run_summary(true, 8, 1, 3);
+        let previous = make_run_summary(true, 8, 5, 3);
+        assert_eq!(
+            compare_runs(&current, &previous),
+            BenchmarkComparisonStatus::Regressed
+        );
+    }
+
+    // --- compare_runs: memory records differ ---
+
+    #[test]
+    fn compare_runs_more_memory_is_improved() {
+        let current = make_run_summary(true, 8, 4, 10);
+        let previous = make_run_summary(true, 8, 4, 2);
+        assert_eq!(
+            compare_runs(&current, &previous),
+            BenchmarkComparisonStatus::Improved
+        );
+    }
+
+    // --- render_comparison_summary ---
+
+    #[test]
+    fn render_comparison_summary_improved() {
+        let current = make_run_summary(true, 9, 5, 4);
+        let previous = make_run_summary(false, 7, 3, 2);
+        let delta = BenchmarkComparisonDelta {
+            correctness_checks_passed: 2,
+            unnecessary_action_count: None,
+            retry_count: None,
+            exported_memory_records: 2,
+            exported_evidence_records: 2,
+        };
+        let summary = render_comparison_summary(
+            BenchmarkComparisonStatus::Improved,
+            &current,
+            &previous,
+            &delta,
+        );
+        assert!(summary.contains("improved"));
+        assert!(summary.contains(&current.session_id));
+        assert!(summary.contains(&previous.session_id));
+    }
+
+    #[test]
+    fn render_comparison_summary_regressed() {
+        let current = make_run_summary(false, 5, 2, 1);
+        let previous = make_run_summary(true, 8, 4, 3);
+        let delta = BenchmarkComparisonDelta {
+            correctness_checks_passed: -3,
+            unnecessary_action_count: None,
+            retry_count: None,
+            exported_memory_records: -2,
+            exported_evidence_records: -2,
+        };
+        let summary = render_comparison_summary(
+            BenchmarkComparisonStatus::Regressed,
+            &current,
+            &previous,
+            &delta,
+        );
+        assert!(summary.contains("regressed"));
+    }
+
+    #[test]
+    fn render_comparison_summary_unchanged() {
+        let a = make_run_summary(true, 8, 4, 3);
+        let b = make_run_summary(true, 8, 4, 3);
+        let delta = BenchmarkComparisonDelta {
+            correctness_checks_passed: 0,
+            unnecessary_action_count: None,
+            retry_count: None,
+            exported_memory_records: 0,
+            exported_evidence_records: 0,
+        };
+        let summary = render_comparison_summary(
+            BenchmarkComparisonStatus::Unchanged,
+            &a,
+            &b,
+            &delta,
+        );
+        assert!(summary.contains("matched"));
+    }
+
+    // --- evidence_quality_rank: edge cases ---
+
+    #[test]
+    fn evidence_quality_rank_empty_string() {
+        assert_eq!(evidence_quality_rank(""), 0);
+    }
+
+    #[test]
+    fn evidence_quality_rank_case_sensitive() {
+        assert_eq!(evidence_quality_rank("Sufficient"), 0);
+        assert_eq!(evidence_quality_rank("THIN"), 0);
+    }
+
+    // --- render_benchmark_delta: large values ---
+
+    #[test]
+    fn render_benchmark_delta_large_positive() {
+        assert_eq!(render_benchmark_delta(Some(999999)), "+999999");
+    }
+
+    #[test]
+    fn render_benchmark_delta_large_negative() {
+        assert_eq!(render_benchmark_delta(Some(-123456)), "-123456");
+    }
 }

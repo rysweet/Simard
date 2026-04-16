@@ -298,7 +298,7 @@ async fn goals() -> Json<Value> {
     };
 
     // Pull meeting-captured actions and decisions from cognitive memory (#415)
-    if let Ok(mem) = NativeCognitiveMemory::open(&state_root) {
+    if let Ok(mem) = NativeCognitiveMemory::open_read_only(&state_root) {
         for tag in &["goal", "action", "decision"] {
             if let Ok(facts) = mem.search_facts(tag, 20, 0.0) {
                 for fact in facts {
@@ -1346,7 +1346,7 @@ async fn memory_metrics() -> Json<Value> {
     // Capture the error so the dashboard can show *why* data is missing
     // instead of silently returning zeros.
     let native_result =
-        NativeCognitiveMemory::open(&state_root).and_then(|mem| mem.get_statistics());
+        NativeCognitiveMemory::open_read_only(&state_root).and_then(|mem| mem.get_statistics());
     let native_error = native_result.as_ref().err().map(|e| e.to_string());
     let native_stats = native_result.ok();
 

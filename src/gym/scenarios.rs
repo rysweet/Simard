@@ -1053,4 +1053,91 @@ mod tests {
             assert_eq!(class.to_string(), label);
         }
     }
+
+    // --- resolve_benchmark_scenario: all scenarios resolve ---
+
+    #[test]
+    fn all_scenarios_resolve_by_id() {
+        for scenario in benchmark_scenarios() {
+            let resolved = resolve_benchmark_scenario(scenario.id).unwrap();
+            assert_eq!(resolved.id, scenario.id);
+            assert_eq!(resolved.class, scenario.class);
+        }
+    }
+
+    // --- scenario consistency: identities match expected patterns ---
+
+    #[test]
+    fn all_scenarios_use_valid_identity() {
+        for scenario in benchmark_scenarios() {
+            assert!(
+                scenario.identity == "simard-gym" || scenario.identity == "simard-engineer",
+                "unexpected identity '{}' in scenario '{}'",
+                scenario.identity, scenario.id
+            );
+        }
+    }
+
+    #[test]
+    fn all_scenarios_use_valid_base_type() {
+        for scenario in benchmark_scenarios() {
+            assert!(
+                scenario.base_type == "local-harness" || scenario.base_type == "terminal-shell",
+                "unexpected base_type '{}' in scenario '{}'",
+                scenario.base_type, scenario.id
+            );
+        }
+    }
+
+    // --- scenario ID format conventions ---
+
+    #[test]
+    fn all_scenario_ids_are_lowercase_kebab_case() {
+        for scenario in benchmark_scenarios() {
+            assert!(
+                scenario.id.chars().all(|c| c.is_ascii_lowercase() || c == '-' || c.is_ascii_digit()),
+                "scenario id '{}' must be lowercase kebab-case",
+                scenario.id
+            );
+        }
+    }
+
+    #[test]
+    fn all_scenarios_have_reasonable_evidence_requirements() {
+        for scenario in benchmark_scenarios() {
+            assert!(
+                scenario.expected_min_runtime_evidence <= 20,
+                "scenario '{}' requires too many evidence records: {}",
+                scenario.id, scenario.expected_min_runtime_evidence
+            );
+        }
+    }
+
+    // --- BenchmarkClass: all 12 classes covered by at least one scenario ---
+
+    #[test]
+    fn every_benchmark_class_has_at_least_one_scenario() {
+        let all_classes = [
+            BenchmarkClass::RepoExploration,
+            BenchmarkClass::Documentation,
+            BenchmarkClass::SafeCodeChange,
+            BenchmarkClass::SessionQuality,
+            BenchmarkClass::TestWriting,
+            BenchmarkClass::BugFix,
+            BenchmarkClass::Refactoring,
+            BenchmarkClass::DependencyAnalysis,
+            BenchmarkClass::ErrorHandling,
+            BenchmarkClass::PerformanceAnalysis,
+            BenchmarkClass::SecurityAudit,
+            BenchmarkClass::ApiDesign,
+        ];
+        let scenarios = benchmark_scenarios();
+        for class in all_classes {
+            assert!(
+                scenarios.iter().any(|s| s.class == class),
+                "no scenario covers class '{}'",
+                class
+            );
+        }
+    }
 }

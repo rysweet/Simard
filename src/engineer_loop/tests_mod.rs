@@ -1063,3 +1063,66 @@ fn cleared_git_env_vars_all_start_with_git() {
         );
     }
 }
+
+#[test]
+fn shell_command_allowlist_contains_cargo() {
+    assert!(super::SHELL_COMMAND_ALLOWLIST.contains(&"cargo"));
+}
+
+#[test]
+fn shell_command_allowlist_contains_git() {
+    assert!(super::SHELL_COMMAND_ALLOWLIST.contains(&"git"));
+}
+
+#[test]
+fn max_carried_meeting_decisions_is_positive() {
+    assert!(super::MAX_CARRIED_MEETING_DECISIONS > 0);
+    assert!(super::MAX_CARRIED_MEETING_DECISIONS <= 10);
+}
+
+// ---- is_meeting_decision_record ----
+
+#[test]
+fn is_meeting_decision_record_full_match() {
+    let value = "agenda=sprint review updates=done decisions=ship risks=none next_steps=deploy open_questions=none goals=release";
+    assert!(super::is_meeting_decision_record(value));
+}
+
+#[test]
+fn is_meeting_decision_record_missing_field() {
+    let value = "agenda=sprint updates=done decisions=ship risks=none";
+    assert!(!super::is_meeting_decision_record(value));
+}
+
+#[test]
+fn is_meeting_decision_record_empty() {
+    assert!(!super::is_meeting_decision_record(""));
+}
+
+#[test]
+fn is_meeting_decision_record_partial_fragments() {
+    let value = "agenda= updates= decisions=";
+    assert!(!super::is_meeting_decision_record(value));
+}
+
+// ---- constants: identity and base type ----
+
+#[test]
+fn engineer_identity_is_nonempty() {
+    assert!(!super::ENGINEER_IDENTITY.is_empty());
+}
+
+#[test]
+fn engineer_base_type_is_nonempty() {
+    assert!(!super::ENGINEER_BASE_TYPE.is_empty());
+}
+
+#[test]
+fn execution_scope_is_local_only() {
+    assert_eq!(super::EXECUTION_SCOPE, "local-only");
+}
+
+#[test]
+fn cargo_timeout_exceeds_git_timeout() {
+    assert!(super::CARGO_COMMAND_TIMEOUT_SECS >= super::GIT_COMMAND_TIMEOUT_SECS);
+}

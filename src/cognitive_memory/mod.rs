@@ -188,6 +188,43 @@ impl NativeCognitiveMemory {
         Ok(mem)
     }
 
+    /// Open LadybugDB in **read-only** mode for concurrent access.
+    ///
+    /// Multiple processes can open the same DB read-only simultaneously
+    /// (no exclusive flock needed). Uses `SystemConfig::read_only(true)`
+    /// following the skwaq `LadybugGraphDb::open_read_only` pattern.
+    /// Write operations will fail — use `open()` for the primary writer.
+    #[cfg(unix)]
+    pub fn open_read_only(state_root: &Path) -> SimardResult<Self> {
+        let db_path = state_root.join("cognitive_memory.ladybug");
+        if !db_path.exists() {
+            return Err(SimardError::RuntimeInitFailed {
+                component: "cognitive-memory".into(),
+                reason: format!(
+                    "Cannot open LadybugDB read-only: {} does not exist",
+                    db_path.display()
+                ),
+            });
+        }
+        let config = lbug::SystemConfig::default().read_only(true);
+        let db = Self::with_open_lock(&db_path, || {
+            lbug::Database::new(&db_path, config).map_err(|e| SimardError::RuntimeInitFailed {
+                component: "cognitive-memory".into(),
+                reason: format!("Failed to open LadybugDB read-only at {}: {e}", db_path.display()),
+            })
+        })?;
+        let mem = Self {
+            db: Arc::new(db),
+            path: db_path,
+            _temp_dir: None,
+        };
+        eprintln!(
+            "[simard] cognitive memory opened read-only — LadybugDB at {}",
+            state_root.display()
+        );
+        Ok(mem)
+    }
+
     /// Open LadybugDB with WAL corruption recovery.
     ///
     /// Wraps the `Database::new()` call in `catch_unwind` to survive the

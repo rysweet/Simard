@@ -773,4 +773,160 @@ mod tests {
         let mut checks = Vec::new();
         assert!(verify_cargo_metadata(&canonical_root, &json.to_string(), &mut checks).is_err());
     }
+
+    // --- verify_create_file with tempdir ---
+
+    #[test]
+    fn verify_create_file_succeeds_when_file_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("hello.txt");
+        std::fs::write(&file_path, "hello world").unwrap();
+        let inspection = RepoInspection {
+            repo_root: dir.path().to_path_buf(),
+            head_sha: "abc123".into(),
+            branch: "main".into(),
+            dirty_paths: vec![],
+            carried_meeting_decisions: vec![],
+            architecture_gap_summary: String::new(),
+        };
+        let req = CreateFileRequest {
+            relative_path: "hello.txt".into(),
+            content: "hello world".into(),
+        };
+        let mut checks = Vec::new();
+        verify_create_file(&inspection, &req, &mut checks).unwrap();
+        assert!(checks.iter().any(|c| c.contains("file-exists=hello.txt")));
+        assert!(checks.iter().any(|c| c.contains("file-content-matches=true")));
+    }
+
+    #[test]
+    fn verify_create_file_missing_file_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let inspection = RepoInspection {
+            repo_root: dir.path().to_path_buf(),
+            head_sha: "abc123".into(),
+            branch: "main".into(),
+            dirty_paths: vec![],
+            carried_meeting_decisions: vec![],
+            architecture_gap_summary: String::new(),
+        };
+        let req = CreateFileRequest {
+            relative_path: "nonexistent.txt".into(),
+            content: "data".into(),
+        };
+        let mut checks = Vec::new();
+        assert!(verify_create_file(&inspection, &req, &mut checks).is_err());
+    }
+
+    #[test]
+    fn verify_create_file_wrong_content_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("hello.txt");
+        std::fs::write(&file_path, "wrong content").unwrap();
+        let inspection = RepoInspection {
+            repo_root: dir.path().to_path_buf(),
+            head_sha: "abc123".into(),
+            branch: "main".into(),
+            dirty_paths: vec![],
+            carried_meeting_decisions: vec![],
+            architecture_gap_summary: String::new(),
+        };
+        let req = CreateFileRequest {
+            relative_path: "hello.txt".into(),
+            content: "expected content".into(),
+        };
+        let mut checks = Vec::new();
+        assert!(verify_create_file(&inspection, &req, &mut checks).is_err());
+    }
+
+    // --- verify_append_to_file with tempdir ---
+
+    #[test]
+    fn verify_append_to_file_succeeds_when_content_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("log.txt");
+        std::fs::write(&file_path, "old line\nnew entry\n").unwrap();
+        let inspection = RepoInspection {
+            repo_root: dir.path().to_path_buf(),
+            head_sha: "abc123".into(),
+            branch: "main".into(),
+            dirty_paths: vec![],
+            carried_meeting_decisions: vec![],
+            architecture_gap_summary: String::new(),
+        };
+        let req = AppendToFileRequest {
+            relative_path: "log.txt".into(),
+            content: "new entry".into(),
+        };
+        let mut checks = Vec::new();
+        verify_append_to_file(&inspection, &req, &mut checks).unwrap();
+        assert!(checks.iter().any(|c| c.contains("file-contains-appended=log.txt")));
+    }
+
+    #[test]
+    fn verify_append_to_file_missing_content_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("log.txt");
+        std::fs::write(&file_path, "old line only\n").unwrap();
+        let inspection = RepoInspection {
+            repo_root: dir.path().to_path_buf(),
+            head_sha: "abc123".into(),
+            branch: "main".into(),
+            dirty_paths: vec![],
+            carried_meeting_decisions: vec![],
+            architecture_gap_summary: String::new(),
+        };
+        let req = AppendToFileRequest {
+            relative_path: "log.txt".into(),
+            content: "missing entry".into(),
+        };
+        let mut checks = Vec::new();
+        assert!(verify_append_to_file(&inspection, &req, &mut checks).is_err());
+    }
+
+    // --- verify_cargo_metadata: workspace root mismatch ---
+
+    #[test]
+    fn verify_cargo_metadata_workspace_root_mismatch_errors() {
+        let json = serde_json::json!({
+            "workspace_root": "/some/other/path",
+            "packages": [{"name": "demo"}]
+        });
+        let mut checks = Vec::new();
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let canonical_root = std::fs::canonicalize(&repo_root).unwrap();
+        assert!(verify_cargo_metadata(&canonical_root, &json.to_string(), &mut checks).is_err());
+    }
+
+    // --- verify_cargo_check: zero errors stderr ---
+
+    #[test]
+    fn verify_cargo_check_failed_zero_error_lines() {
+        let action = dummy_executed(EngineerActionKind::CargoCheck, 1, "", "warning: unused");
+        let mut checks = Vec::new();
+        verify_cargo_check(&action, &mut checks);
+        assert!(checks.iter().any(|c| c.contains("errors=0")));
+    }
+
+    // --- verify_open_issue: github.com without https prefix ---
+
+    #[test]
+    fn verify_open_issue_bare_github_domain() {
+        let mut action = dummy_executed(EngineerActionKind::ReadOnlyScan, 0, "", "");
+        action.stdout = "Created issue at github.com/org/repo/issues/7".to_string();
+        let mut checks = Vec::new();
+        verify_open_issue(&action, &mut checks).unwrap();
+        assert!(checks.iter().any(|c| c.contains("issue-url-present=true")));
+    }
+
+    // --- verify_cargo_test: result in stderr (compiler output) ---
+
+    #[test]
+    fn verify_cargo_test_result_in_stderr() {
+        let mut action = dummy_executed(EngineerActionKind::CargoTest, 0, "", "");
+        action.stderr = "test result: ok. 12 passed; 0 failed; 0 ignored".to_string();
+        let mut checks = Vec::new();
+        verify_cargo_test(&action, &mut checks).unwrap();
+        assert!(checks.iter().any(|c| c.contains("cargo-test-result-present=true")));
+    }
 }

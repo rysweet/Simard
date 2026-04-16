@@ -15,13 +15,26 @@ fn load_meeting_system_prompt() -> String {
     std::fs::read_to_string(&path).unwrap_or_default()
 }
 
-/// Launch the native cognitive memory backend for meeting mode (mandatory).
+/// Launch the native cognitive memory backend for meeting mode.
+///
+/// Attempts read-write first (needed for storing meeting outcomes).
+/// Falls back to read-only if the DB is locked by the OODA daemon,
+/// so meetings can still access existing memory for context enrichment.
 fn launch_real_meeting_bridge() -> Result<Box<dyn CognitiveMemoryOps>, Box<dyn std::error::Error>> {
     let state_root = BuildLock::default_state_root();
     let _ = std::fs::create_dir_all(&state_root);
-    let native_mem = NativeCognitiveMemory::open(&state_root)
-        .map_err(|e| format!("cognitive memory failed to open: {e}"))?;
-    Ok(Box::new(native_mem))
+    match NativeCognitiveMemory::open(&state_root) {
+        Ok(mem) => Ok(Box::new(mem)),
+        Err(rw_err) => {
+            eprintln!(
+                "[simard] cognitive memory read-write open failed (likely locked by OODA daemon): {rw_err}"
+            );
+            eprintln!("[simard] falling back to read-only mode — meeting outcomes will be saved to disk only");
+            let mem = NativeCognitiveMemory::open_read_only(&state_root)
+                .map_err(|e| format!("cognitive memory failed to open even read-only: {e}"))?;
+            Ok(Box::new(mem))
+        }
+    }
 }
 
 /// Open an agent session for the meeting REPL using the standard base type
