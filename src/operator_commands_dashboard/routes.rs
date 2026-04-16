@@ -922,7 +922,7 @@ async fn handle_ws_chat(mut socket: WebSocket) {
                         break;
                     }
                     MeetingCommand::Help => {
-                        let help = "Commands: /status, /template [name], /export, /close, /help. Everything else is natural conversation with Simard.";
+                        let help = "Commands: /status, /template [name], /export, /theme <text>, /recap, /preview, /close, /help. Everything else is natural conversation with Simard.";
                         let _ = socket
                             .send(Message::Text(
                                 json!({"role":"system","content": help}).to_string().into(),
@@ -978,6 +978,54 @@ async fn handle_ws_chat(mut socket: WebSocket) {
                         let _ = socket
                             .send(Message::Text(
                                 json!({"role":"system","content": content})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await;
+                    }
+                    MeetingCommand::Theme(theme) => {
+                        backend.push_theme(theme.clone());
+                        let content = format!("Theme recorded: {theme}");
+                        let _ = socket
+                            .send(Message::Text(
+                                json!({"role":"system","content": content})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await;
+                    }
+                    MeetingCommand::Recap => {
+                        let status = backend.status();
+                        let themes = backend.explicit_themes();
+                        let mut recap = format!(
+                            "── Meeting Recap ──\nTopic: {}\nMessages: {}\nStarted: {}",
+                            status.topic, status.message_count, status.started_at
+                        );
+                        if !themes.is_empty() {
+                            recap.push_str(&format!("\nThemes: {}", themes.join(", ")));
+                        }
+                        let _ = socket
+                            .send(Message::Text(
+                                json!({"role":"system","content": recap}).to_string().into(),
+                            ))
+                            .await;
+                    }
+                    MeetingCommand::Preview => {
+                        let status = backend.status();
+                        let themes = backend.explicit_themes();
+                        let preview = format!(
+                            "── Handoff Preview ──\nTopic: {}\nMessages so far: {}\nThemes: {}",
+                            status.topic,
+                            status.message_count,
+                            if themes.is_empty() {
+                                "none yet".to_string()
+                            } else {
+                                themes.join(", ")
+                            }
+                        );
+                        let _ = socket
+                            .send(Message::Text(
+                                json!({"role":"system","content": preview})
                                     .to_string()
                                     .into(),
                             ))
