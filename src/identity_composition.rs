@@ -17,8 +17,6 @@ use crate::identity::IdentityManifest;
 /// their own guardrails — Simard should not impose artificial depth limits.
 const ENV_MAX_DEPTH: &str = "SIMARD_MAX_SUBORDINATE_DEPTH";
 const DEFAULT_MAX_DEPTH: u32 = u32::MAX;
-/// Absolute upper bound kept only for env-var validation sanity.
-const ABSOLUTE_MAX_DEPTH: u32 = u32::MAX;
 
 /// A subordinate's identity within a composition.
 ///
@@ -90,7 +88,6 @@ pub fn max_subordinate_depth() -> u32 {
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(DEFAULT_MAX_DEPTH)
-            .min(ABSOLUTE_MAX_DEPTH)
     })
 }
 

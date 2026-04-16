@@ -15,8 +15,8 @@ use tracing::{debug, info, warn};
 
 use crate::base_types::{
     BaseTypeCapability, BaseTypeDescriptor, BaseTypeId, BaseTypeOutcome, BaseTypeSession,
-    BaseTypeTurnInput, capability_set, ensure_session_not_already_open,
-    ensure_session_not_closed, ensure_session_open,
+    BaseTypeTurnInput, capability_set, ensure_session_not_already_open, ensure_session_not_closed,
+    ensure_session_open,
 };
 use crate::error::{SimardError, SimardResult};
 use crate::metadata::{BackendDescriptor, Freshness};
@@ -93,17 +93,21 @@ impl LightweightChatSession {
             // stdin dropped here, closing the pipe
         }
 
-        let output = child.wait_with_output().map_err(|e| {
-            SimardError::AdapterInvocationFailed {
-                base_type: "lightweight-chat".to_string(),
-                reason: format!("copilot subprocess failed: {e}"),
-            }
-        })?;
+        let output =
+            child
+                .wait_with_output()
+                .map_err(|e| SimardError::AdapterInvocationFailed {
+                    base_type: "lightweight-chat".to_string(),
+                    reason: format!("copilot subprocess failed: {e}"),
+                })?;
 
         // Log stderr separately — never include in response (#568)
         let stderr_text = String::from_utf8_lossy(&output.stderr);
         if !stderr_text.trim().is_empty() {
-            debug!(stderr_lines = stderr_text.lines().count(), "Copilot subprocess stderr captured (not included in response)");
+            debug!(
+                stderr_lines = stderr_text.lines().count(),
+                "Copilot subprocess stderr captured (not included in response)"
+            );
         }
 
         if !output.status.success() {
@@ -187,10 +191,7 @@ impl BaseTypeSession for LightweightChatSession {
             execution_summary: response_text,
             evidence: vec![
                 format!("lightweight-chat-turn={}", self.turn_count),
-                format!(
-                    "elapsed-ms={}",
-                    start.elapsed().as_millis()
-                ),
+                format!("elapsed-ms={}", start.elapsed().as_millis()),
             ],
         })
     }

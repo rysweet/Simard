@@ -171,4 +171,139 @@ mod tests {
         let config = HiveConfig::default();
         assert_eq!(config.agent_name, "");
     }
+
+    // --- Additional threshold validation tests ---
+
+    #[test]
+    fn validate_rejects_confidence_gate_above_one() {
+        let config = HiveConfig::new("agent-1", 0.5, 1.01);
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_boundary_zero_zero() {
+        let config = HiveConfig::new("agent-1", 0.0, 0.0);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_boundary_one_one() {
+        let config = HiveConfig::new("agent-1", 1.0, 1.0);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_error_message_includes_quality_threshold_value() {
+        let config = HiveConfig::new("agent-1", -0.5, 0.5);
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("-0.5"),
+            "error should contain the bad value: {err}"
+        );
+        assert!(
+            err.contains("quality_threshold"),
+            "error should name the field: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_error_message_includes_confidence_gate_value() {
+        let config = HiveConfig::new("agent-1", 0.5, 2.0);
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("2"),
+            "error should contain the bad value: {err}"
+        );
+        assert!(
+            err.contains("confidence_gate"),
+            "error should name the field: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_nan_quality_threshold() {
+        let config = HiveConfig::new("agent-1", f64::NAN, 0.5);
+        assert!(config.validate().is_err(), "NaN should be rejected");
+    }
+
+    #[test]
+    fn validate_rejects_nan_confidence_gate() {
+        let config = HiveConfig::new("agent-1", 0.5, f64::NAN);
+        assert!(config.validate().is_err(), "NaN should be rejected");
+    }
+
+    #[test]
+    fn validate_rejects_infinity() {
+        let config = HiveConfig::new("agent-1", f64::INFINITY, 0.5);
+        assert!(config.validate().is_err(), "infinity should be rejected");
+    }
+
+    // --- should_promote / should_import edge cases ---
+
+    #[test]
+    fn should_promote_at_zero_gate_accepts_everything() {
+        let config = HiveConfig::new("agent-1", 0.3, 0.0);
+        assert!(config.should_promote(0.0));
+        assert!(config.should_promote(0.001));
+        assert!(config.should_promote(1.0));
+    }
+
+    #[test]
+    fn should_promote_at_one_gate_only_accepts_one() {
+        let config = HiveConfig::new("agent-1", 0.3, 1.0);
+        assert!(!config.should_promote(0.999));
+        assert!(config.should_promote(1.0));
+    }
+
+    #[test]
+    fn should_import_at_zero_threshold_accepts_everything() {
+        let config = HiveConfig::new("agent-1", 0.0, 0.3);
+        assert!(config.should_import(0.0));
+        assert!(config.should_import(0.001));
+        assert!(config.should_import(1.0));
+    }
+
+    #[test]
+    fn should_import_at_one_threshold_only_accepts_one() {
+        let config = HiveConfig::new("agent-1", 1.0, 0.3);
+        assert!(!config.should_import(0.999));
+        assert!(config.should_import(1.0));
+    }
+
+    // --- HiveConfig construction / equality ---
+
+    #[test]
+    fn new_sets_all_fields() {
+        let config = HiveConfig::new("my-agent", 0.6, 0.8);
+        assert_eq!(config.agent_name, "my-agent");
+        assert!((config.quality_threshold - 0.6).abs() < f64::EPSILON);
+        assert!((config.confidence_gate - 0.8).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn default_agent_name_is_empty() {
+        let config = HiveConfig::default();
+        assert!(config.agent_name.is_empty());
+    }
+
+    #[test]
+    fn hive_config_clone_and_eq() {
+        let a = HiveConfig::new("agent-1", 0.3, 0.5);
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn hive_config_debug_output() {
+        let config = HiveConfig::new("agent-1", 0.3, 0.5);
+        let debug = format!("{config:?}");
+        assert!(debug.contains("HiveConfig"));
+        assert!(debug.contains("agent-1"));
+    }
+
+    #[test]
+    fn constants_match_defaults() {
+        assert!((DEFAULT_QUALITY_THRESHOLD - 0.3).abs() < f64::EPSILON);
+        assert!((DEFAULT_CONFIDENCE_GATE - 0.3).abs() < f64::EPSILON);
+    }
 }

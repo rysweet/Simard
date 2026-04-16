@@ -62,7 +62,7 @@ fn spawn_accepts_any_depth() {
     // It should fail because current_exe() won't work as a subordinate launcher
     // in test mode, but the error should be BridgeSpawnFailed, NOT depth-related.
     match result {
-        Ok(_) => {} // spawned successfully — fine
+        Ok(_) => {}                                      // spawned successfully — fine
         Err(SimardError::BridgeSpawnFailed { .. }) => {} // expected in test
         Err(other) => panic!("expected BridgeSpawnFailed, got: {other}"),
     }

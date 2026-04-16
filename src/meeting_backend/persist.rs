@@ -166,7 +166,10 @@ pub fn write_handoff(
         .iter()
         .map(|a| ActionItem {
             description: a.description.clone(),
-            owner: a.assignee.clone().unwrap_or_else(|| "unassigned".to_string()),
+            owner: a
+                .assignee
+                .clone()
+                .unwrap_or_else(|| "unassigned".to_string()),
             priority: 0,
             due_description: a.deadline.clone(),
         })
@@ -204,10 +207,10 @@ pub fn write_handoff(
     }
     // Also include action item assignees.
     for a in action_items {
-        if let Some(ref assignee) = a.assignee {
-            if !participants.contains(assignee) {
-                participants.push(assignee.clone());
-            }
+        if let Some(ref assignee) = a.assignee
+            && !participants.contains(assignee)
+        {
+            participants.push(assignee.clone());
         }
     }
 
@@ -659,12 +662,12 @@ pub fn extract_themes(messages: &[ConversationMessage]) -> Vec<String> {
 
     // Common stop words to ignore.
     const STOP_WORDS: &[&str] = &[
-        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with",
-        "by", "is", "it", "that", "this", "was", "are", "be", "has", "have", "had", "not",
-        "we", "they", "you", "will", "can", "should", "would", "could", "do", "does", "did",
-        "from", "about", "into", "out", "if", "then", "so", "up", "one", "all", "been",
-        "just", "also", "than", "like", "more", "some", "what", "when", "how", "who",
-        "which", "there", "their", "our", "i", "my", "me", "your", "its",
+        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by",
+        "is", "it", "that", "this", "was", "are", "be", "has", "have", "had", "not", "we", "they",
+        "you", "will", "can", "should", "would", "could", "do", "does", "did", "from", "about",
+        "into", "out", "if", "then", "so", "up", "one", "all", "been", "just", "also", "than",
+        "like", "more", "some", "what", "when", "how", "who", "which", "there", "their", "our",
+        "i", "my", "me", "your", "its",
     ];
 
     let mut word_freq: HashMap<String, usize> = HashMap::new();
@@ -677,7 +680,7 @@ pub fn extract_themes(messages: &[ConversationMessage]) -> Vec<String> {
             .content
             .to_lowercase()
             .split(|c: char| !c.is_alphanumeric() && c != '-')
-            .filter(|w| w.len() > 3 && !STOP_WORDS.contains(&w.as_ref()))
+            .filter(|w| w.len() > 3 && !STOP_WORDS.contains(w))
             .map(String::from)
             .collect();
         // Count unique words per message to avoid single-message spam.
@@ -724,10 +727,7 @@ fn extract_decision_rationale(decision: &str, messages: &[ConversationMessage]) 
 
 /// Extract participant roles involved in a decision from the message that
 /// contains it and the preceding message.
-fn extract_decision_participants(
-    decision: &str,
-    messages: &[ConversationMessage],
-) -> Vec<String> {
+fn extract_decision_participants(decision: &str, messages: &[ConversationMessage]) -> Vec<String> {
     let decision_lower = decision.to_lowercase();
     let mut participants = Vec::new();
     for (i, msg) in messages.iter().enumerate() {
@@ -1328,7 +1328,10 @@ mod tests {
     #[test]
     fn extract_themes_skips_system_messages() {
         let messages = vec![
-            make_msg(Role::System, "System prompt with repeated system words system."),
+            make_msg(
+                Role::System,
+                "System prompt with repeated system words system.",
+            ),
             make_msg(Role::User, "Hello"),
         ];
         let themes = extract_themes(&messages);
@@ -1341,7 +1344,9 @@ mod tests {
     #[test]
     fn write_handoff_includes_structured_data() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", dir.path().as_os_str()); }
+        unsafe {
+            std::env::set_var("SIMARD_HANDOFF_DIR", dir.path().as_os_str());
+        }
 
         let messages = vec![
             make_msg(Role::User, "We need better testing."),
@@ -1358,7 +1363,13 @@ mod tests {
         }];
         let decisions = vec!["We will adopt TDD".to_string()];
 
-        let result = write_handoff("Sprint planning", "Good meeting", &messages, &action_items, &decisions);
+        let result = write_handoff(
+            "Sprint planning",
+            "Good meeting",
+            &messages,
+            &action_items,
+            &decisions,
+        );
         assert!(result.is_ok(), "write_handoff failed: {result:?}");
 
         // Read the written handoff file.
@@ -1393,13 +1404,17 @@ mod tests {
         // Transcript contains summary.
         assert!(handoff.transcript.contains(&"Good meeting".to_string()));
 
-        unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR"); }
+        unsafe {
+            std::env::remove_var("SIMARD_HANDOFF_DIR");
+        }
     }
 
     #[test]
     fn write_handoff_empty_data_uses_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", dir.path().as_os_str()); }
+        unsafe {
+            std::env::set_var("SIMARD_HANDOFF_DIR", dir.path().as_os_str());
+        }
 
         let result = write_handoff("Empty meeting", "No notes", &[], &[], &[]);
         assert!(result.is_ok());
@@ -1417,6 +1432,8 @@ mod tests {
         assert!(handoff.participants.is_empty());
         assert!(handoff.themes.is_empty());
 
-        unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR"); }
+        unsafe {
+            std::env::remove_var("SIMARD_HANDOFF_DIR");
+        }
     }
 }

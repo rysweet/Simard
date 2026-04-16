@@ -46,7 +46,9 @@ impl SubordinateConfig {
         if depth_limit < u32::MAX && self.current_depth >= depth_limit {
             eprintln!(
                 "warning: subordinate '{}' depth {} exceeds configured limit {} — spawning anyway (external tools have their own guardrails)",
-                self.agent_name, self.current_depth + 1, depth_limit
+                self.agent_name,
+                self.current_depth + 1,
+                depth_limit
             );
         }
         Ok(())

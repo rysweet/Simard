@@ -513,17 +513,19 @@ async fn traces() -> Json<Value> {
     // Include in-process span data from SpanCollectorLayer
     let recent_spans: Vec<Value> = crate::trace_collector::drain_recent(100)
         .into_iter()
-        .map(|s| json!({
-            "source": "in-process",
-            "data": {
-                "name": s.name,
-                "target": s.target,
-                "level": s.level,
-                "duration_us": s.duration_us,
-                "fields": s.fields,
-                "timestamp_epoch_ms": s.timestamp_epoch_ms,
-            }
-        }))
+        .map(|s| {
+            json!({
+                "source": "in-process",
+                "data": {
+                    "name": s.name,
+                    "target": s.target,
+                    "level": s.level,
+                    "duration_us": s.duration_us,
+                    "fields": s.fields,
+                    "timestamp_epoch_ms": s.timestamp_epoch_ms,
+                }
+            })
+        })
         .collect();
     spans.extend(recent_spans);
 
