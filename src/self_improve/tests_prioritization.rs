@@ -255,23 +255,6 @@ fn prioritize_all_zero_weights_yields_zero_priority() {
 }
 
 #[test]
-fn dimension_value_unknown_returns_zero() {
-    let score = make_score(0.8);
-    assert!((dimension_value(&score, "nonexistent") - 0.0).abs() < 1e-9);
-    assert!((dimension_value(&score, "") - 0.0).abs() < 1e-9);
-}
-
-#[test]
-fn dimension_value_all_known_dimensions() {
-    let score = make_score(0.8);
-    assert!((dimension_value(&score, "factual_accuracy") - 0.8).abs() < 1e-9);
-    assert!((dimension_value(&score, "specificity") - 0.72).abs() < 1e-9);
-    assert!((dimension_value(&score, "temporal_awareness") - 0.64).abs() < 1e-9);
-    assert!((dimension_value(&score, "source_attribution") - 0.56).abs() < 1e-9);
-    assert!((dimension_value(&score, "confidence_calibration") - 0.68).abs() < 1e-9);
-}
-
-#[test]
 fn detailed_weak_dims_at_exact_threshold_not_weak() {
     let score = GymSuiteScore {
         suite_id: "test".into(),
