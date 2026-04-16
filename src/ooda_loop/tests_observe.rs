@@ -228,6 +228,7 @@ fn collect_pending_improvements_drains_review_improvements() {
         weak_dimensions: Vec::new(),
         weak_dimension_details: Vec::new(),
         target_dimension: None,
+        plateau_dimensions: Vec::new(),
     });
     let result = collect_pending_improvements(&mut state, &None);
     assert!(

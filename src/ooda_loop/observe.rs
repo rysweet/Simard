@@ -137,6 +137,7 @@ pub(super) fn collect_pending_improvements(
                 weak_dimensions: Vec::new(),
                 weak_dimension_details: Vec::new(),
                 target_dimension: None,
+                plateau_dimensions: Vec::new(),
             });
         }
     }
@@ -163,6 +164,7 @@ pub(super) fn collect_pending_improvements(
                 weak_dimensions: Vec::new(),
                 weak_dimension_details: Vec::new(),
                 target_dimension: None,
+                plateau_dimensions: Vec::new(),
             });
         }
         Ok(false) => {}
@@ -211,6 +213,7 @@ pub(super) fn collect_pending_improvements(
                     weak_dimensions: Vec::new(),
                     weak_dimension_details: Vec::new(),
                     target_dimension: None,
+                    plateau_dimensions: Vec::new(),
                 });
             }
         }
@@ -318,6 +321,7 @@ mod tests {
             weak_dimensions: Vec::new(),
             weak_dimension_details: Vec::new(),
             target_dimension: None,
+            plateau_dimensions: Vec::new(),
         };
         let mut state = OodaState::new(crate::goal_curation::GoalBoard::new());
         state.review_improvements = vec![cycle];

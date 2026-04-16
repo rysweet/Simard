@@ -105,6 +105,48 @@ impl Default for ImprovementConfig {
     }
 }
 
+impl ImprovementConfig {
+    /// Validate that config fields contain sensible values.
+    ///
+    /// Returns an error for empty suite IDs or thresholds outside [0.0, 1.0].
+    pub fn validate(&self) -> crate::error::SimardResult<()> {
+        if self.suite_id.is_empty() {
+            return Err(crate::error::SimardError::InvalidImprovementRecord {
+                field: "suite_id".into(),
+                reason: "suite_id must not be empty".into(),
+            });
+        }
+        if !(0.0..=1.0).contains(&self.weak_threshold) {
+            return Err(crate::error::SimardError::InvalidImprovementRecord {
+                field: "weak_threshold".into(),
+                reason: format!(
+                    "weak_threshold must be in 0.0..=1.0, got {}",
+                    self.weak_threshold
+                ),
+            });
+        }
+        if self.min_net_improvement < 0.0 {
+            return Err(crate::error::SimardError::InvalidImprovementRecord {
+                field: "min_net_improvement".into(),
+                reason: format!(
+                    "min_net_improvement must be >= 0.0, got {}",
+                    self.min_net_improvement
+                ),
+            });
+        }
+        if self.max_single_regression < 0.0 {
+            return Err(crate::error::SimardError::InvalidImprovementRecord {
+                field: "max_single_regression".into(),
+                reason: format!(
+                    "max_single_regression must be >= 0.0, got {}",
+                    self.max_single_regression
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// A complete improvement cycle record with full provenance.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ImprovementCycle {
@@ -128,6 +170,9 @@ pub struct ImprovementCycle {
     /// The dimension that was targeted for this cycle (if any).
     #[serde(default)]
     pub target_dimension: Option<String>,
+    /// Dimensions detected as plateaued (weak for 3+ consecutive cycles with near-zero velocity).
+    #[serde(default)]
+    pub plateau_dimensions: Vec<String>,
 }
 
 impl ImprovementCycle {
@@ -271,6 +316,7 @@ mod tests {
             weak_dimensions: Vec::new(),
             weak_dimension_details: Vec::new(),
             target_dimension: None,
+            plateau_dimensions: Vec::new(),
         };
         assert!(cycle.proposed_changes.is_empty());
         assert!(cycle.post_score.is_none());
@@ -296,6 +342,7 @@ mod tests {
             weak_dimensions: vec!["specificity".into()],
             weak_dimension_details: Vec::new(),
             target_dimension: Some("specificity".into()),
+            plateau_dimensions: Vec::new(),
         };
         assert_eq!(cycle.target_dimension.as_deref(), Some("specificity"));
         assert_eq!(cycle.proposed_changes.len(), 1);
@@ -314,6 +361,7 @@ mod tests {
             weak_dimensions: Vec::new(),
             weak_dimension_details: Vec::new(),
             target_dimension: None,
+            plateau_dimensions: Vec::new(),
         };
         let display = cycle.to_string();
         assert!(display.contains("Baseline"));
@@ -334,6 +382,7 @@ mod tests {
             weak_dimensions: Vec::new(),
             weak_dimension_details: Vec::new(),
             target_dimension: None,
+            plateau_dimensions: Vec::new(),
         };
         assert!(cycle.is_committed());
         assert!(!cycle.is_reverted());
@@ -353,6 +402,7 @@ mod tests {
             weak_dimensions: Vec::new(),
             weak_dimension_details: Vec::new(),
             target_dimension: None,
+            plateau_dimensions: Vec::new(),
         };
         assert!(cycle.is_reverted());
         assert!(!cycle.is_committed());
@@ -370,6 +420,7 @@ mod tests {
             weak_dimensions: Vec::new(),
             weak_dimension_details: Vec::new(),
             target_dimension: None,
+            plateau_dimensions: Vec::new(),
         };
         assert!(!cycle.is_committed());
         assert!(!cycle.is_reverted());
@@ -391,5 +442,70 @@ mod tests {
             serde_json::from_str(json).expect("should deserialize without target_dimension");
         assert!(cycle.target_dimension.is_none());
         assert!(cycle.weak_dimension_details.is_empty());
+    }
+
+    #[test]
+    fn validate_default_config_ok() {
+        assert!(ImprovementConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn validate_empty_suite_id() {
+        let cfg = ImprovementConfig {
+            suite_id: String::new(),
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(format!("{err:?}").contains("suite_id"));
+    }
+
+    #[test]
+    fn validate_weak_threshold_out_of_range() {
+        let above = ImprovementConfig {
+            weak_threshold: 1.5,
+            ..Default::default()
+        };
+        assert!(above.validate().is_err());
+
+        let below = ImprovementConfig {
+            weak_threshold: -0.1,
+            ..Default::default()
+        };
+        assert!(below.validate().is_err());
+    }
+
+    #[test]
+    fn validate_negative_min_net_improvement() {
+        let cfg = ImprovementConfig {
+            min_net_improvement: -0.01,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_negative_max_single_regression() {
+        let cfg = ImprovementConfig {
+            max_single_regression: -0.01,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_boundary_values_ok() {
+        let zeros = ImprovementConfig {
+            weak_threshold: 0.0,
+            min_net_improvement: 0.0,
+            max_single_regression: 0.0,
+            ..Default::default()
+        };
+        assert!(zeros.validate().is_ok());
+
+        let threshold_one = ImprovementConfig {
+            weak_threshold: 1.0,
+            ..Default::default()
+        };
+        assert!(threshold_one.validate().is_ok());
     }
 }

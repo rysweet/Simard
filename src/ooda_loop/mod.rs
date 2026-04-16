@@ -296,6 +296,7 @@ pub fn run_ooda_cycle(
                 weak_dimensions: Vec::new(),
                 weak_dimension_details: Vec::new(),
                 target_dimension: None,
+                plateau_dimensions: Vec::new(),
             });
         }
     }
