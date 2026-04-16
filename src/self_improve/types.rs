@@ -89,6 +89,9 @@ pub struct ImprovementConfig {
     pub weak_threshold: f64,
     /// If set, focus analysis on this single dimension instead of all dimensions.
     pub target_dimension: Option<String>,
+    /// Maximum number of improvement cycles to run before stopping.
+    /// `None` means no limit (caller controls termination).
+    pub max_cycles: Option<u32>,
 }
 
 impl Default for ImprovementConfig {
@@ -101,6 +104,7 @@ impl Default for ImprovementConfig {
             auto_apply: false,
             weak_threshold: 0.6,
             target_dimension: None,
+            max_cycles: None,
         }
     }
 }
@@ -153,6 +157,12 @@ impl ImprovementConfig {
                     dim,
                     super::prioritization::DIMENSION_NAMES.join(", ")
                 ),
+            });
+        }
+        if self.max_cycles == Some(0) {
+            return Err(crate::error::SimardError::InvalidImprovementRecord {
+                field: "max_cycles".into(),
+                reason: "max_cycles must be None or > 0".into(),
             });
         }
         Ok(())
@@ -611,5 +621,67 @@ mod tests {
         let past = vec![make_score(0.5), make_score(0.5), make_score(0.5)];
         cycle.enrich_with_history(0.6, &past);
         assert!(!cycle.plateau_dimensions.is_empty());
+    }
+
+    #[test]
+    fn validate_max_cycles_zero_rejected() {
+        let cfg = ImprovementConfig {
+            max_cycles: Some(0),
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(format!("{err:?}").contains("max_cycles"));
+    }
+
+    #[test]
+    fn validate_max_cycles_positive_accepted() {
+        let cfg = ImprovementConfig {
+            max_cycles: Some(5),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_max_cycles_none_accepted() {
+        let cfg = ImprovementConfig {
+            max_cycles: None,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn dimension_deltas_with_nan_scores() {
+        let baseline = make_score(0.5);
+        let post = GymSuiteScore {
+            suite_id: "test".into(),
+            overall: f64::NAN,
+            dimensions: ScoreDimensions {
+                factual_accuracy: f64::NAN,
+                specificity: f64::NAN,
+                temporal_awareness: f64::NAN,
+                source_attribution: f64::NAN,
+                confidence_calibration: f64::NAN,
+            },
+            scenario_count: 0,
+            scenarios_passed: 0,
+            pass_rate: 0.0,
+            recorded_at_unix_ms: None,
+        };
+        let cycle = ImprovementCycle {
+            baseline,
+            proposed_changes: Vec::new(),
+            post_score: Some(post),
+            regressions: Vec::new(),
+            decision: None,
+            final_phase: ImprovementPhase::Decide,
+            weak_dimensions: Vec::new(),
+            weak_dimension_details: Vec::new(),
+            target_dimension: None,
+            plateau_dimensions: Vec::new(),
+        };
+        let deltas = cycle.dimension_deltas();
+        assert_eq!(deltas.len(), 5);
     }
 }

@@ -520,3 +520,127 @@ fn enrich_with_history_populates_plateau_dimensions() {
             .contains(&"source_attribution".to_string())
     );
 }
+
+// ---- suggest_next_target ----
+
+#[test]
+fn suggest_next_target_returns_weakest_dimension() {
+    let current = make_score(0.5);
+    let suggestion = suggest_next_target(&current, 0.6, &[]);
+    assert!(suggestion.is_some());
+    let dim = suggestion.unwrap();
+    // source_attribution has the largest deficit (0.5 * 0.7 = 0.35, deficit = 0.25)
+    assert_eq!(dim.name, "source_attribution");
+    assert!(dim.current_deficit > 0.0);
+}
+
+#[test]
+fn suggest_next_target_none_when_all_strong() {
+    let current = make_score(0.9);
+    let suggestion = suggest_next_target(&current, 0.6, &[]);
+    assert!(suggestion.is_none());
+}
+
+#[test]
+fn suggest_next_target_considers_history() {
+    let current = make_score(0.5);
+    let past = vec![make_score(0.7), make_score(0.5)];
+    let suggestion = suggest_next_target(&current, 0.6, &past);
+    assert!(suggestion.is_some());
+    let dim = suggestion.unwrap();
+    assert_eq!(dim.name, "source_attribution");
+    assert!(dim.worsening);
+}
+
+// ---- PriorityWeights::validate ----
+
+#[test]
+fn priority_weights_default_validates() {
+    assert!(PriorityWeights::default().validate().is_ok());
+}
+
+#[test]
+fn priority_weights_bad_sum_rejected() {
+    let w = PriorityWeights {
+        deficit: 0.5,
+        chronic: 0.5,
+        trend: 0.5,
+        plateau: 0.1,
+    };
+    let err = w.validate().unwrap_err();
+    assert!(err.contains("sum to ~1.0"));
+}
+
+#[test]
+fn priority_weights_negative_rejected() {
+    let w = PriorityWeights {
+        deficit: -0.1,
+        chronic: 0.6,
+        trend: 0.5,
+        plateau: 0.1,
+    };
+    let err = w.validate().unwrap_err();
+    assert!(err.contains("non-negative"));
+}
+
+#[test]
+fn priority_weights_custom_valid() {
+    let w = PriorityWeights {
+        deficit: 0.3,
+        chronic: 0.3,
+        trend: 0.4,
+        plateau: 0.2,
+    };
+    assert!(w.validate().is_ok());
+}
+
+// ---- plateau detection edge cases ----
+
+#[test]
+fn plateau_detected_with_exactly_three_cycles() {
+    let current = make_score(0.5);
+    let past = vec![make_score(0.5), make_score(0.5), make_score(0.5)];
+    let result = prioritize_dimensions_default(&current, 0.6, &past);
+    let sa = result
+        .iter()
+        .find(|d| d.name == "source_attribution")
+        .unwrap();
+    assert!(
+        sa.plateau_detected,
+        "plateau should be detected with exactly 3 cycles"
+    );
+}
+
+#[test]
+fn plateau_boundary_velocity_at_threshold() {
+    // Velocity of exactly 0.05 should NOT trigger plateau (requires < 0.05)
+    let current = make_score(0.5);
+    // factual_accuracy: 0.4 → 0.5 over 2 intervals = velocity 0.05
+    let past = vec![make_score(0.4), make_score(0.45), make_score(0.5)];
+    let result = prioritize_dimensions_default(&current, 0.6, &past);
+    let fa = result
+        .iter()
+        .find(|d| d.name == "factual_accuracy")
+        .unwrap();
+    assert!(
+        !fa.plateau_detected,
+        "velocity exactly at 0.05 boundary should not trigger plateau"
+    );
+}
+
+// ---- dimension_value unknown dimension ----
+
+#[test]
+fn dimension_value_unknown_returns_zero() {
+    let score = make_score(0.8);
+    assert!((dimension_value(&score, "nonexistent") - 0.0).abs() < 1e-9);
+}
+
+#[test]
+fn dimension_value_all_known_dimensions() {
+    let score = make_score(0.8);
+    for name in DIMENSION_NAMES {
+        let val = dimension_value(&score, name);
+        assert!(val > 0.0, "{name} should have a positive value");
+    }
+}

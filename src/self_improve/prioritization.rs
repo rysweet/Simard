@@ -56,6 +56,24 @@ pub struct PriorityWeights {
     pub plateau: f64,
 }
 
+impl PriorityWeights {
+    /// Validate that the base weights (deficit + chronic + trend) sum to
+    /// approximately 1.0. The plateau bonus is additive and excluded from the
+    /// check. Returns an error description on failure.
+    pub fn validate(&self) -> Result<(), String> {
+        let sum = self.deficit + self.chronic + self.trend;
+        if (sum - 1.0).abs() > 0.01 {
+            return Err(format!(
+                "base weights (deficit + chronic + trend) must sum to ~1.0, got {sum:.3}"
+            ));
+        }
+        if self.deficit < 0.0 || self.chronic < 0.0 || self.trend < 0.0 || self.plateau < 0.0 {
+            return Err("all weights must be non-negative".into());
+        }
+        Ok(())
+    }
+}
+
 impl Default for PriorityWeights {
     fn default() -> Self {
         Self {
