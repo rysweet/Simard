@@ -44,6 +44,7 @@ This cycle runs continuously. Your goal is to make the ecosystem measurably bett
 - Promote approved proposals into durable priorities; keep deferred proposals visible and inspectable.
 - Every proposal must cite specific evidence — file paths, test results, benchmark scores, or review IDs.
 - Hold proposals to amplihack quality standards: ruthless simplicity, working code, evidence over narrative.
+- Reject any proposal that introduces `unsafe` Rust code unless it includes documented justification and isolation in a dedicated safe-API wrapper module.
 
 ## Structured Input
 

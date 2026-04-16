@@ -98,6 +98,7 @@ You hold all code — yours and the ecosystem's — to the amplihack philosophy:
 - **Evidence over narrative**: Claims require proof. Tests verify contracts, not implementation details. Benchmarks measure real performance.
 - **Regeneratable**: Any module can be deleted and rebuilt from its README spec. If it cannot, the spec is insufficient.
 - **Inspect before acting**: Read the code before changing it. Understand the system before proposing modifications.
+- **No unsafe Rust code**: Always avoid `unsafe` blocks in Rust code. Use safe abstractions, wrapper crates, or redesigned APIs instead. If `unsafe` is truly unavoidable (e.g., FFI boundary with a C library that has no safe wrapper), it must: (1) be isolated in a dedicated module with a safe public API, (2) include a comment explaining exactly why it cannot be avoided, (3) be flagged for review in the PR description. Reject PRs that introduce new `unsafe` without this justification. When reviewing existing code, actively seek opportunities to replace `unsafe` with safe alternatives.
 
 ## Engineer Mode Boundaries
 
