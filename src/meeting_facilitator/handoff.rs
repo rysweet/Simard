@@ -155,6 +155,19 @@ impl MeetingHandoff {
             }
         }
 
+        // Extract themes from notes; fall back to decision/action text if notes
+        // are empty (common in the backend code path which uses messages, not notes).
+        let mut themes = Self::extract_themes_from_notes(&session.notes);
+        if themes.is_empty() {
+            let fallback_texts: Vec<String> = session
+                .decisions
+                .iter()
+                .map(|d| d.description.clone())
+                .chain(session.action_items.iter().map(|a| a.description.clone()))
+                .collect();
+            themes = Self::extract_themes_from_notes(&fallback_texts);
+        }
+
         Self {
             topic: session.topic.clone(),
             started_at: session.started_at.clone(),
@@ -166,8 +179,47 @@ impl MeetingHandoff {
             duration_secs,
             transcript,
             participants: all_participants,
-            themes: Vec::new(),
+            themes,
         }
+    }
+
+    /// Extract recurring theme keywords from meeting notes.
+    fn extract_themes_from_notes(notes: &[String]) -> Vec<String> {
+        use std::collections::HashMap;
+
+        const STOP_WORDS: &[&str] = &[
+            "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with",
+            "by", "is", "it", "that", "this", "was", "are", "be", "has", "have", "had", "not",
+            "we", "they", "you", "will", "can", "should", "would", "could", "do", "does", "did",
+            "from", "about", "into", "out", "if", "then", "so", "up", "one", "all", "been",
+            "just", "also", "than", "like", "more", "some", "what", "when", "how", "who",
+            "which", "there", "their", "our", "i", "my", "me", "your", "its",
+        ];
+
+        let mut word_freq: HashMap<String, usize> = HashMap::new();
+        for note in notes {
+            let mut seen = std::collections::HashSet::new();
+            let words: Vec<String> = note
+                .to_lowercase()
+                .split(|c: char| !c.is_alphanumeric() && c != '-')
+                .filter(|w| w.len() > 3 && !STOP_WORDS.contains(&w.as_ref()))
+                .map(String::from)
+                .collect();
+            for w in words {
+                if seen.insert(w.clone()) {
+                    *word_freq.entry(w).or_insert(0) += 1;
+                }
+            }
+        }
+
+        let min_freq = 2;
+        let mut themes: Vec<(String, usize)> = word_freq
+            .into_iter()
+            .filter(|(_, count)| *count >= min_freq)
+            .collect();
+        themes.sort_by(|a, b| b.1.cmp(&a.1));
+        themes.truncate(10);
+        themes.into_iter().map(|(word, _)| word).collect()
     }
 }
 
@@ -563,6 +615,35 @@ mod tests {
         assert!(!handoff.open_questions[0].explicit);
         assert!(handoff.open_questions[1].text.starts_with("TODO:"));
         assert!(!handoff.open_questions[1].explicit);
+    }
+
+    #[test]
+    fn from_session_populates_themes_from_notes() {
+        let session = make_session(
+            "Theme test",
+            vec![
+                "We discussed testing strategies.",
+                "Testing coverage needs improvement.",
+                "More testing will help quality.",
+                "Deployment pipelines look good.",
+            ],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let handoff = MeetingHandoff::from_session(&session);
+        assert!(
+            handoff.themes.contains(&"testing".to_string()),
+            "Expected 'testing' theme from recurring notes: {:?}",
+            handoff.themes
+        );
+    }
+
+    #[test]
+    fn from_session_empty_notes_no_themes() {
+        let session = make_session("No themes", vec![], vec![], vec![], vec![]);
+        let handoff = MeetingHandoff::from_session(&session);
+        assert!(handoff.themes.is_empty());
     }
 
     // -----------------------------------------------------------------------

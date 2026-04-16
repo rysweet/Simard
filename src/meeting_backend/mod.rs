@@ -194,8 +194,42 @@ impl MeetingBackend {
         };
 
         // Write MeetingHandoff artifact for OODA integration
-        if let Err(e) = persist::write_handoff(&self.topic, &summary_text, &self.history) {
+        if let Err(e) = persist::write_handoff(
+            &self.topic,
+            &summary_text,
+            &self.history,
+            &action_items,
+            &decisions,
+        ) {
             warn!("Failed to write meeting handoff: {e}");
+        }
+
+        // ── Extract open questions and themes for the summary ──
+        let open_questions: Vec<String> = persist::extract_open_questions(&self.history)
+            .into_iter()
+            .map(|q| q.text)
+            .collect();
+        let themes = persist::extract_themes(&self.history);
+
+        // Collect unique participants from messages and action item assignees.
+        let mut participants: Vec<String> = Vec::new();
+        for msg in &self.history {
+            let role_name = match msg.role {
+                Role::User => "operator",
+                Role::Assistant => "simard",
+                Role::System => "system",
+            };
+            let s = role_name.to_string();
+            if !participants.contains(&s) {
+                participants.push(s);
+            }
+        }
+        for a in &action_items {
+            if let Some(ref assignee) = a.assignee {
+                if !participants.contains(assignee) {
+                    participants.push(assignee.clone());
+                }
+            }
         }
 
         // ── Auto-export markdown report on /end ──
@@ -249,6 +283,9 @@ impl MeetingBackend {
             action_items,
             decisions,
             markdown_report_path,
+            open_questions,
+            themes,
+            participants,
         })
     }
 

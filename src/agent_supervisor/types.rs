@@ -39,16 +39,15 @@ impl SubordinateConfig {
                 reason: "subordinate goal cannot be empty".to_string(),
             });
         }
+        // Depth limits are informational only — external agent tools (Copilot,
+        // Claude, etc.) enforce their own session guardrails. Log a warning for
+        // visibility but never block a spawn based on depth.
         let depth_limit = max_subordinate_depth();
-        if self.current_depth >= depth_limit {
-            return Err(SimardError::InvalidIdentityComposition {
-                identity: self.agent_name.clone(),
-                reason: format!(
-                    "subordinate depth {} would exceed max depth {} (SIMARD_MAX_SUBORDINATE_DEPTH)",
-                    self.current_depth + 1,
-                    depth_limit
-                ),
-            });
+        if depth_limit < u32::MAX && self.current_depth >= depth_limit {
+            eprintln!(
+                "warning: subordinate '{}' depth {} exceeds configured limit {} — spawning anyway (external tools have their own guardrails)",
+                self.agent_name, self.current_depth + 1, depth_limit
+            );
         }
         Ok(())
     }
@@ -193,11 +192,11 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_depth_at_limit() {
+    fn validate_accepts_depth_at_limit() {
+        // Depth limits are now warnings, not errors — external tools have guardrails.
         let limit = max_subordinate_depth();
         let config = make_config("agent-1", "goal", limit);
-        let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("depth"), "{err}");
+        assert!(config.validate().is_ok());
     }
 
     #[test]
