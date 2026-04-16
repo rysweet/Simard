@@ -379,4 +379,41 @@ mod tests {
             "test-flow"
         );
     }
+
+    #[test]
+    fn from_handoff_fails_when_required_evidence_missing() {
+        // Omit "backend-implementation=" — this is a required field.
+        let evidence = vec![
+            make_evidence("shell=/bin/bash"),
+            make_evidence("terminal-working-directory=/home/user/project"),
+            make_evidence("terminal-command-count=5"),
+            make_evidence("terminal-transcript-preview=$ echo hello"),
+        ];
+        let handoff = make_handoff(Some(make_session()), evidence);
+        let result = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state"),
+            handoff,
+            "test-handoff.json".to_string(),
+            None,
+        );
+        assert!(
+            result.is_err(),
+            "should fail when backend-implementation is absent"
+        );
+    }
+
+    #[test]
+    fn from_handoff_session_phase_is_captured() {
+        let handoff = make_handoff(Some(make_session()), required_evidence());
+        let view = TerminalReadView::from_handoff(
+            PathBuf::from("/test/state"),
+            handoff,
+            "test-handoff.json".to_string(),
+            None,
+        )
+        .unwrap();
+        // The session fixture uses SessionPhase::Complete.
+        assert!(!view.session_phase.is_empty());
+        assert_eq!(view.session_phase.to_lowercase(), "complete");
+    }
 }
