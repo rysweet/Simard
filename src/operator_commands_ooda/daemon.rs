@@ -411,6 +411,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn daemon_dashboard_config_default_values() {
         // Clear any env override to test the true default
         unsafe { std::env::remove_var("SIMARD_DASHBOARD_PORT") };
@@ -420,6 +421,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn daemon_dashboard_config_env_override() {
         unsafe { std::env::set_var("SIMARD_DASHBOARD_PORT", "9090") };
         let config = DaemonDashboardConfig::default();
@@ -429,6 +431,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn daemon_dashboard_config_invalid_env_falls_back() {
         unsafe { std::env::set_var("SIMARD_DASHBOARD_PORT", "not_a_number") };
         let config = DaemonDashboardConfig::default();

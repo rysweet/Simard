@@ -118,6 +118,89 @@ fn prioritize_improving_trend_not_worsening() {
 }
 
 #[test]
+fn prioritize_trend_velocity_proportional() {
+    let current = make_score(0.5);
+    // 2 past cycles: 0.7 → 0.5, velocity = (0.5 - 0.7) / 1 = -0.2 per cycle
+    let past = vec![make_score(0.7), make_score(0.5)];
+    let result = prioritize_dimensions_default(&current, 0.6, &past);
+    let fa = result
+        .iter()
+        .find(|d| d.name == "factual_accuracy")
+        .unwrap();
+    assert!((fa.trend_velocity - (-0.2)).abs() < 1e-9);
+    assert!(fa.worsening);
+
+    // Improving trend: velocity should be positive
+    let past_up = vec![make_score(0.5), make_score(0.7)];
+    let result_up = prioritize_dimensions_default(&current, 0.6, &past_up);
+    let fa_up = result_up
+        .iter()
+        .find(|d| d.name == "factual_accuracy")
+        .unwrap();
+    assert!((fa_up.trend_velocity - 0.2).abs() < 1e-9);
+    assert!(!fa_up.worsening);
+}
+
+#[test]
+fn prioritize_trend_velocity_zero_with_single_history() {
+    let current = make_score(0.5);
+    let past = vec![make_score(0.7)];
+    let result = prioritize_dimensions_default(&current, 0.6, &past);
+    for dim in &result {
+        assert!((dim.trend_velocity - 0.0).abs() < 1e-9);
+    }
+}
+
+#[test]
+fn trend_velocity_nan_guard() {
+    let nan_score = GymSuiteScore {
+        suite_id: "test".into(),
+        overall: f64::NAN,
+        dimensions: ScoreDimensions {
+            factual_accuracy: f64::NAN,
+            specificity: f64::NAN,
+            temporal_awareness: f64::NAN,
+            source_attribution: f64::NAN,
+            confidence_calibration: f64::NAN,
+        },
+        scenario_count: 0,
+        scenarios_passed: 0,
+        pass_rate: 0.0,
+        recorded_at_unix_ms: None,
+    };
+    let current = make_score(0.5);
+    let past = vec![nan_score.clone(), nan_score];
+    let result = prioritize_dimensions_default(&current, 0.6, &past);
+    for dim in &result {
+        assert!(
+            dim.trend_velocity.is_finite(),
+            "trend_velocity should be finite for {}",
+            dim.name
+        );
+        assert!(
+            dim.priority.is_finite(),
+            "priority should be finite for {}",
+            dim.name
+        );
+    }
+}
+
+#[test]
+fn prioritized_dimension_deserialize_without_trend_velocity() {
+    let json = r#"{
+        "name": "specificity",
+        "priority": 0.5,
+        "current_deficit": 0.1,
+        "historical_weakness_rate": 0.3,
+        "worsening": true
+    }"#;
+    let dim: PrioritizedDimension =
+        serde_json::from_str(json).expect("should deserialize without trend_velocity");
+    assert_eq!(dim.name, "specificity");
+    assert!((dim.trend_velocity - 0.0).abs() < 1e-9);
+}
+
+#[test]
 fn prioritize_all_signals_combined() {
     // current: source_attribution = 0.35 (deficit 0.25 from threshold 0.6)
     let current = make_score(0.5);

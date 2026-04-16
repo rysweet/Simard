@@ -32,6 +32,10 @@ pub struct PrioritizedDimension {
     pub historical_weakness_rate: f64,
     /// Whether the dimension is trending downward across past cycles.
     pub worsening: bool,
+    /// Rate of change per cycle (negative = declining). Zero when fewer than 2
+    /// data points exist. Used for proportional trend weighting.
+    #[serde(default)]
+    pub trend_velocity: f64,
 }
 
 /// Weights for composite scoring. Should sum to 1.0 for a normalized result.
@@ -137,18 +141,24 @@ pub fn prioritize_dimensions(
                 weak_count as f64 / past_baselines.len() as f64
             };
 
-            // Trend: compare first and last past baselines.
-            let worsening = if past_baselines.len() >= 2 {
+            // Trend: compute velocity from first and last past baselines.
+            // Velocity is normalized by dividing by the number of intervals,
+            // then scaled by 5x so typical declines (0.02–0.2 per cycle)
+            // produce meaningful signal before clamping to [0, 1].
+            let (worsening, trend_velocity) = if past_baselines.len() >= 2 {
                 let first = dimension_value(&past_baselines[0], name);
                 let last = dimension_value(
                     past_baselines.last().expect("len >= 2 guarantees last()"),
                     name,
                 );
-                last < first
+                let intervals = (past_baselines.len() - 1) as f64;
+                let vel = (last - first) / intervals;
+                (vel < 0.0, vel)
             } else {
-                false
+                (false, 0.0)
             };
-            let trend_signal = if worsening { 1.0 } else { 0.0 };
+            // Proportional trend signal: larger declines produce stronger signal.
+            let trend_signal = (-trend_velocity * 5.0).clamp(0.0, 1.0);
 
             let priority = weights.deficit * normalized_deficit
                 + weights.chronic * weakness_rate
@@ -160,6 +170,7 @@ pub fn prioritize_dimensions(
                 current_deficit,
                 historical_weakness_rate: weakness_rate,
                 worsening,
+                trend_velocity,
             }
         })
         .collect();

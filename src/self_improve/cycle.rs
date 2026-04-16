@@ -24,6 +24,8 @@ pub fn run_improvement_cycle(
     gym: &GymBridge,
     config: &ImprovementConfig,
 ) -> SimardResult<ImprovementCycle> {
+    config.validate()?;
+
     // Phase 1: Eval — establish baseline
     let baseline_result = gym.run_suite(&config.suite_id)?;
     let baseline = suite_score_from_result(&baseline_result);

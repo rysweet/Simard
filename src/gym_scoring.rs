@@ -47,6 +47,10 @@ pub struct DimensionTrend {
     pub total_delta: f64,
     pub average: f64,
     pub history: Vec<f64>,
+    /// Rate of change per cycle (total_delta / number of intervals).
+    /// Zero when fewer than 2 data points exist.
+    #[serde(default)]
+    pub velocity: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -174,12 +178,15 @@ pub fn track_improvement(history: &[GymSuiteScore]) -> ImprovementTrend {
         let total_delta = scores.last().unwrap_or(&0.0) - scores.first().unwrap_or(&0.0);
         let average = scores.iter().sum::<f64>() / scores.len() as f64;
         let direction = classify_trend(total_delta);
+        let intervals = scores.len().saturating_sub(1).max(1) as f64;
+        let velocity = total_delta / intervals;
         DimensionTrend {
             dimension: name.to_string(),
             direction,
             total_delta,
             average,
             history: scores,
+            velocity,
         }
     };
 

@@ -1,5 +1,6 @@
 //! Types for the self-improvement loop.
 
+use crate::error::SimardResult;
 use crate::gym_scoring::{GymSuiteScore, Regression};
 use serde::{Deserialize, Serialize};
 
@@ -102,6 +103,41 @@ impl Default for ImprovementConfig {
             weak_threshold: 0.6,
             target_dimension: None,
         }
+    }
+}
+
+impl ImprovementConfig {
+    /// Validate that config fields contain sensible values.
+    pub fn validate(&self) -> SimardResult<()> {
+        if self.suite_id.is_empty() {
+            return Err(crate::error::SimardError::InvalidConfigValue {
+                key: "suite_id".into(),
+                value: String::new(),
+                help: "suite_id must not be empty".into(),
+            });
+        }
+        if self.min_net_improvement < 0.0 || self.min_net_improvement > 1.0 {
+            return Err(crate::error::SimardError::InvalidConfigValue {
+                key: "min_net_improvement".into(),
+                value: self.min_net_improvement.to_string(),
+                help: "must be between 0.0 and 1.0".into(),
+            });
+        }
+        if self.max_single_regression < 0.0 || self.max_single_regression > 1.0 {
+            return Err(crate::error::SimardError::InvalidConfigValue {
+                key: "max_single_regression".into(),
+                value: self.max_single_regression.to_string(),
+                help: "must be between 0.0 and 1.0".into(),
+            });
+        }
+        if self.weak_threshold < 0.0 || self.weak_threshold > 1.0 {
+            return Err(crate::error::SimardError::InvalidConfigValue {
+                key: "weak_threshold".into(),
+                value: self.weak_threshold.to_string(),
+                help: "must be between 0.0 and 1.0".into(),
+            });
+        }
+        Ok(())
     }
 }
 

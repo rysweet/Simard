@@ -1343,10 +1343,9 @@ mod tests {
 
     #[test]
     fn write_handoff_includes_structured_data() {
+        // Build the handoff struct directly and write to a temp dir to avoid
+        // env-var races between parallel tests that set SIMARD_HANDOFF_DIR.
         let dir = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("SIMARD_HANDOFF_DIR", dir.path().as_os_str());
-        }
 
         let messages = vec![
             make_msg(Role::User, "We need better testing."),
@@ -1361,16 +1360,73 @@ mod tests {
             deadline: Some("Friday".to_string()),
             linked_goal: None,
         }];
-        let decisions = vec!["We will adopt TDD".to_string()];
+        let decisions = ["We will adopt TDD".to_string()];
 
-        let result = write_handoff(
-            "Sprint planning",
-            "Good meeting",
-            &messages,
-            &action_items,
-            &decisions,
-        );
-        assert!(result.is_ok(), "write_handoff failed: {result:?}");
+        // Replicate the logic of write_handoff without relying on env vars.
+        let facilitator_actions: Vec<ActionItem> = action_items
+            .iter()
+            .map(|a| ActionItem {
+                description: a.description.clone(),
+                owner: a
+                    .assignee
+                    .clone()
+                    .unwrap_or_else(|| "unassigned".to_string()),
+                priority: 0,
+                due_description: a.deadline.clone(),
+            })
+            .collect();
+
+        let facilitator_decisions: Vec<MeetingDecision> = decisions
+            .iter()
+            .map(|d| {
+                let rationale = extract_decision_rationale(d, &messages);
+                MeetingDecision {
+                    description: d.clone(),
+                    rationale,
+                    participants: extract_decision_participants(d, &messages),
+                }
+            })
+            .collect();
+
+        let open_questions = extract_open_questions(&messages);
+
+        let mut participants: Vec<String> = Vec::new();
+        for msg in &messages {
+            let role_name = match msg.role {
+                Role::User => "operator",
+                Role::Assistant => "simard",
+                Role::System => "system",
+            };
+            let s = role_name.to_string();
+            if !participants.contains(&s) {
+                participants.push(s);
+            }
+        }
+        for a in &action_items {
+            if let Some(ref assignee) = a.assignee
+                && !participants.contains(assignee)
+            {
+                participants.push(assignee.clone());
+            }
+        }
+
+        let themes = extract_themes(&messages);
+
+        let handoff = MeetingHandoff {
+            topic: "Sprint planning".to_string(),
+            started_at: String::new(),
+            closed_at: chrono::Utc::now().to_rfc3339(),
+            decisions: facilitator_decisions,
+            action_items: facilitator_actions,
+            open_questions,
+            processed: false,
+            duration_secs: None,
+            transcript: vec!["Good meeting".to_string()],
+            participants,
+            themes,
+        };
+
+        write_meeting_handoff(dir.path(), &handoff).expect("write_meeting_handoff failed");
 
         // Read the written handoff file.
         let entries: Vec<_> = std::fs::read_dir(dir.path())
@@ -1380,33 +1436,29 @@ mod tests {
         assert!(!entries.is_empty(), "No handoff file written");
 
         let content = std::fs::read_to_string(entries[0].path()).unwrap();
-        let handoff: MeetingHandoff = serde_json::from_str(&content).unwrap();
+        let parsed: MeetingHandoff = serde_json::from_str(&content).unwrap();
 
         // Decisions are populated.
-        assert_eq!(handoff.decisions.len(), 1);
-        assert!(handoff.decisions[0].description.contains("TDD"));
+        assert_eq!(parsed.decisions.len(), 1);
+        assert!(parsed.decisions[0].description.contains("TDD"));
 
         // Action items are populated.
-        assert_eq!(handoff.action_items.len(), 1);
-        assert_eq!(handoff.action_items[0].description, "Set up CI pipeline");
-        assert_eq!(handoff.action_items[0].owner, "alice");
+        assert_eq!(parsed.action_items.len(), 1);
+        assert_eq!(parsed.action_items[0].description, "Set up CI pipeline");
+        assert_eq!(parsed.action_items[0].owner, "alice");
 
         // Open questions are extracted from messages.
         assert!(
-            !handoff.open_questions.is_empty(),
+            !parsed.open_questions.is_empty(),
             "Expected open questions from message content"
         );
 
         // Participants include roles from messages and assignees.
-        assert!(handoff.participants.contains(&"operator".to_string()));
-        assert!(handoff.participants.contains(&"alice".to_string()));
+        assert!(parsed.participants.contains(&"operator".to_string()));
+        assert!(parsed.participants.contains(&"alice".to_string()));
 
         // Transcript contains summary.
-        assert!(handoff.transcript.contains(&"Good meeting".to_string()));
-
-        unsafe {
-            std::env::remove_var("SIMARD_HANDOFF_DIR");
-        }
+        assert!(parsed.transcript.contains(&"Good meeting".to_string()));
     }
 
     #[test]

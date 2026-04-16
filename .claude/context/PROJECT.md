@@ -10,7 +10,7 @@ Replace the sections below with information about your project.
 
 ---
 
-## Project: issue-544-fix-ci-linker-oom-for-ladybugdb-lbug-builds-in-git
+## Project: fix-compilation-786
 
 ## Overview
 
@@ -29,6 +29,7 @@ An autonomous engineer who drives and curates agentic coding systems. Named afte
 - **Language**: Python
 - **Language**: JavaScript/TypeScript
 - **Language**: Rust
+- **Language**: Go
 - **Framework**: [Main framework if applicable]
 - **Database**: [Database system if applicable]
 
