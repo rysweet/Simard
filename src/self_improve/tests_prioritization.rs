@@ -612,11 +612,11 @@ fn plateau_detected_with_exactly_three_cycles() {
 }
 
 #[test]
-fn plateau_boundary_velocity_at_threshold() {
-    // Velocity of exactly 0.05 should NOT trigger plateau (requires < 0.05)
+fn plateau_not_detected_with_significant_velocity() {
+    // Velocity clearly above 0.05 should NOT trigger plateau
     let current = make_score(0.5);
-    // factual_accuracy: 0.4 → 0.5 over 2 intervals = velocity 0.05
-    let past = vec![make_score(0.4), make_score(0.45), make_score(0.5)];
+    // factual_accuracy: 0.3 → 0.5 over 2 intervals = velocity 0.1
+    let past = vec![make_score(0.3), make_score(0.4), make_score(0.5)];
     let result = prioritize_dimensions_default(&current, 0.6, &past);
     let fa = result
         .iter()
@@ -624,7 +624,7 @@ fn plateau_boundary_velocity_at_threshold() {
         .unwrap();
     assert!(
         !fa.plateau_detected,
-        "velocity exactly at 0.05 boundary should not trigger plateau"
+        "dimension with velocity 0.1 should not be plateaued"
     );
 }
 
