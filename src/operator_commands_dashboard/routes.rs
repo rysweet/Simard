@@ -815,13 +815,14 @@ fn load_dashboard_meeting_prompt() -> SimardResult<String> {
     })
 }
 
-/// Open a full agent session for the dashboard chat, using the same infrastructure
-/// as the meeting REPL.  Returns the session or logs the error and returns `None`.
+/// Open a RustyClawd agent session for the dashboard chat.
+/// Uses the native Rust SDK (no subprocess, no CLI piping).
 fn open_dashboard_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeSession>> {
     match crate::session_builder::SessionBuilder::new(crate::identity::OperatingMode::Meeting)
         .node_id("dashboard-chat")
         .address("dashboard-chat://local")
         .adapter_tag("meeting-dashboard")
+        .provider(crate::session_builder::LlmProvider::RustyClawd)
         .open()
     {
         Ok(s) => Some(s),
@@ -992,10 +993,9 @@ async fn handle_ws_chat(mut socket: WebSocket) {
                         match result {
                             Ok((returned_backend, Ok(resp))) => {
                                 backend = returned_backend;
-                                let clean = crate::meeting_backend::lightweight::strip_copilot_noise(&resp.content);
                                 let _ = socket
                                     .send(Message::Text(
-                                        json!({"role":"assistant","content": clean})
+                                        json!({"role":"assistant","content": resp.content})
                                             .to_string()
                                             .into(),
                                     ))
