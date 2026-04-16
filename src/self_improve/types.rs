@@ -143,17 +143,17 @@ impl ImprovementConfig {
                 ),
             });
         }
-        if let Some(ref dim) = self.target_dimension {
-            if !super::prioritization::DIMENSION_NAMES.contains(&dim.as_str()) {
-                return Err(crate::error::SimardError::InvalidImprovementRecord {
-                    field: "target_dimension".into(),
-                    reason: format!(
-                        "unknown dimension '{}'; valid dimensions: {}",
-                        dim,
-                        super::prioritization::DIMENSION_NAMES.join(", ")
-                    ),
-                });
-            }
+        if let Some(ref dim) = self.target_dimension
+            && !super::prioritization::DIMENSION_NAMES.contains(&dim.as_str())
+        {
+            return Err(crate::error::SimardError::InvalidImprovementRecord {
+                field: "target_dimension".into(),
+                reason: format!(
+                    "unknown dimension '{}'; valid dimensions: {}",
+                    dim,
+                    super::prioritization::DIMENSION_NAMES.join(", ")
+                ),
+            });
         }
         Ok(())
     }
