@@ -28,14 +28,14 @@ impl TerminalTurnSpec {
             match label.as_str() {
                 "shell" => shell = Some(normalize_shell(value, base_type)?),
                 "working-directory" | "working_directory" | "cwd" => {
-                    working_directory = Some(PathBuf::from(value))
+                    working_directory = Some(PathBuf::from(value));
                 }
                 "wait-timeout-seconds" | "wait_timeout_seconds" | "wait-timeout" => {
-                    wait_timeout = parse_wait_timeout(value, base_type)?
+                    wait_timeout = parse_wait_timeout(value, base_type)?;
                 }
                 "command" | "input" => steps.push(TerminalStep::Input(value.to_string())),
                 "wait-for" | "wait_for" | "expect" => {
-                    steps.push(TerminalStep::WaitFor(value.to_string()))
+                    steps.push(TerminalStep::WaitFor(value.to_string()));
                 }
                 _ => steps.push(TerminalStep::Input(line.to_string())),
             }

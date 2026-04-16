@@ -54,7 +54,7 @@ fn ensure_ring() -> std::sync::MutexGuard<'static, Option<Vec<SpanRecord>>> {
 /// Drain recent span records (up to `limit`). Returns newest first.
 pub fn drain_recent(limit: usize) -> Vec<SpanRecord> {
     let guard = ensure_ring();
-    let ring = guard.as_ref().expect("ensure_ring guarantees Some");
+    let ring = guard.as_ref().unwrap();
     let write_idx = WRITE_INDEX.load(Ordering::Relaxed);
     let count = limit.min(RING_SIZE).min(write_idx);
 
@@ -78,13 +78,11 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for SpanCollectorLayer {
             let exts = span.extensions();
             let duration_us = exts
                 .get::<std::time::Instant>()
-                .map(|start| start.elapsed().as_micros() as u64)
-                .unwrap_or(0);
+                .map_or(0, |start| start.elapsed().as_micros() as u64);
 
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
+                .map_or(0, |d| d.as_millis() as u64);
 
             let metadata = span.metadata();
             let record = SpanRecord {
@@ -97,7 +95,7 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for SpanCollectorLayer {
             };
 
             let mut guard = ensure_ring();
-            let ring = guard.as_mut().expect("ensure_ring guarantees Some");
+            let ring = guard.as_mut().unwrap();
             let idx = WRITE_INDEX.fetch_add(1, Ordering::Relaxed) % RING_SIZE;
             ring[idx] = record;
         }
@@ -133,6 +131,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn ring_size_is_reasonable() {
         assert!(RING_SIZE >= 64);
     }

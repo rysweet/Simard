@@ -202,8 +202,9 @@ impl EngineerReadView {
             self.terminal_bridge_context.as_ref(),
             self.terminal_bridge_context
                 .as_ref()
-                .map(|context| context.continuity_source.as_str())
-                .unwrap_or(SHARED_DEFAULT_STATE_ROOT_SOURCE),
+                .map_or(SHARED_DEFAULT_STATE_ROOT_SOURCE, |context| {
+                    context.continuity_source.as_str()
+                }),
         );
         print_text("Selected action", &self.selected_action);
         print_text("Action plan", &self.action_plan);
