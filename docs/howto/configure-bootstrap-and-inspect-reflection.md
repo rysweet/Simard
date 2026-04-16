@@ -20,7 +20,7 @@ Use this guide when you need to answer two questions:
 - what bootstrap inputs did Simard actually use?
 - what does the live runtime report through reflection?
 
-Use the canonical surfaces `simard bootstrap run ...` and `simard engineer terminal ...`. The old zero-argument `simard` bootstrap fallback is gone, and `simard_operator_probe terminal-run ...` remains only as a compatibility alias.
+Use the canonical surfaces `simard bootstrap run ...` and `simard engineer terminal ...`. The old zero-argument `simard` bootstrap path is gone, and `simard_operator_probe terminal-run ...` remains only as a compatibility alias.
 
 ## Prerequisites
 
@@ -56,7 +56,7 @@ In the current bootstrap contract:
 - unsupported identity and base-type combinations fail explicitly
 - unsupported topology and base-type combinations fail explicitly
 - state roots are validated before persistence is touched
-- no missing value is replaced through a hidden bootstrap fallback
+- no missing value is replaced through a hidden bootstrap default
 
 ### Variation: exercise a non-default builtin base type
 

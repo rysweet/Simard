@@ -50,7 +50,7 @@ Simard guarantees these operator-visible namespaces on the primary binary:
 - `simard spawn ...`
 - `simard handover ...`
 
-Bare `simard` prints the unified help text instead of attempting a hidden environment-only bootstrap fallback.
+Bare `simard` prints the unified help text instead of attempting a hidden environment-only bootstrap.
 
 ## Compatibility binaries
 

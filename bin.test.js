@@ -147,11 +147,11 @@ test("gh release download uses --clobber for idempotent downloads", () => {
 test("falls back to curl for public access", () => {
   assert.ok(
     binSource.includes("curl"),
-    "should fall back to curl when gh fails"
+    "should use curl when gh fails"
   );
   assert.ok(
     binSource.includes("releases/latest/download"),
-    "curl fallback should use GitHub releases URL"
+    "curl alternative should use GitHub releases URL"
   );
 });
 

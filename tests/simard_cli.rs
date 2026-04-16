@@ -530,7 +530,7 @@ fn bare_simard_shows_unified_help_instead_of_bootstrap_env_errors() {
     );
     assert!(
         !rendered.contains("SIMARD_PROMPT_ROOT"),
-        "bare simard should not fall back to the legacy env-only bootstrap path:\n{rendered}"
+        "bare simard should not degrade to the legacy env-only bootstrap path:\n{rendered}"
     );
 }
 
@@ -2360,7 +2360,7 @@ fn simard_engineer_read_prefers_latest_engineer_handoff_over_compatibility_hando
 
 #[test]
 #[ignore] // Spawns simard binary — hangs in pre-commit
-fn simard_engineer_read_fails_closed_on_malformed_mode_scoped_handoff_before_fallback() {
+fn simard_engineer_read_fails_closed_on_malformed_mode_scoped_handoff_before_legacy_compat() {
     let state_root = TempDirGuard::new("simard-cli-engineer-read-malformed-mode-handoff");
     let repo_root = repo_root();
     let run_output = Command::new(env!("CARGO_BIN_EXE_simard"))
@@ -4175,7 +4175,7 @@ fn simard_gym_rejects_unregistered_scenarios_before_accessing_artifacts() {
 
 #[test]
 #[ignore] // Spawns simard binary — hangs in pre-commit
-fn simard_bootstrap_run_accepts_positional_operator_arguments_without_env_only_fallback() {
+fn simard_bootstrap_run_accepts_positional_operator_arguments_without_env_only_bootstrap() {
     let state_root = TempDirGuard::new("simard-cli-bootstrap");
     let output = Command::new(env!("CARGO_BIN_EXE_simard"))
         .arg("bootstrap")

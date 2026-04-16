@@ -13,7 +13,7 @@ related:
 
 # Concept: truthful runtime metadata
 
-Truthful runtime metadata means reflection must describe the runtime that is actually running, not a convenient label, thin wrapper, or fallback story.
+Truthful runtime metadata means reflection must describe the runtime that is actually running, not a convenient label, thin wrapper, or degradation story.
 
 ## Contents
 
@@ -27,7 +27,7 @@ Truthful runtime metadata means reflection must describe the runtime that is act
 
 The current repo guarantees:
 
-- bootstrap defaults are opt-in rather than silent fallback
+- bootstrap defaults are opt-in rather than silent degradation
 - bootstrap fails if UTF-8 config decoding fails instead of pretending the value is missing
 - prompt loading failures stay failures
 - `ManifestContract` carries `entrypoint`, `provenance`, and `freshness`

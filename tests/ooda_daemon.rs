@@ -386,7 +386,7 @@ fn goal_objective_contains_goal_id_and_description() {
 /// This test defines the expected new API. The function should:
 /// - Accept an optional Box<dyn BaseTypeSession>
 /// - Use it for run_turn calls during AdvanceGoal actions
-/// - Fall back to bridge-only dispatch if session is None
+/// - Use bridge-only dispatch if session is None
 #[test]
 fn run_ooda_daemon_with_session_uses_session_for_advance_goal() {
     // This tests the new function signature that we need to implement.

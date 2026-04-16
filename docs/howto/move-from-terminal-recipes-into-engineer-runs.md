@@ -169,7 +169,7 @@ For predictable bridge behavior, keep these rules in mind:
 - treat `engineer terminal*` and `engineer run/read` as separate operator-visible modes even though they share the `simard engineer ...` namespace
 - expect `terminal-read` to prefer `latest_terminal_handoff.json`
 - expect `engineer read` to prefer `latest_engineer_handoff.json`
-- expect compatibility fallback to `latest_handoff.json` only when the mode-specific file is absent
+- expect compatibility bridge to `latest_handoff.json` only when the mode-specific file is absent
 - expect a malformed mode-specific handoff to fail explicitly instead of silently falling back
 - keep `workspace-root` and engineer `objective` explicit on every engineer run
 

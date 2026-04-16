@@ -69,7 +69,7 @@ The following are hard constraints for the first implementation, not deferred as
 - **Dependency injection from the outset**: runtime composition must happen through explicit ports, traits, and typed configuration rather than hidden globals or direct construction buried inside the core loop.
 - **Distributed-readiness from the outset**: runtime, session, memory, and reflection contracts must not assume in-process execution even when the first deployment path is single-process.
 - **Multiple base types from the outset**: identity manifests and runtime selection logic must support multiple base types immediately. In the current v1 scaffold, `local-harness`, `terminal-shell`, `rusty-clawd`, and `copilot-sdk` are all selectable builtin base types for the engineer identity. `terminal-shell` is a local PTY-backed shell path, `rusty-clawd` is a distinct session backend, and `copilot-sdk` remains an explicit alias of the local single-process harness implementation.
-- **Visible failures from the outset**: unsupported capabilities, missing prompt assets, invalid lifecycle transitions, and unsupported topologies must fail explicitly through typed errors instead of silent fallbacks.
+- **Visible failures from the outset**: unsupported capabilities, missing prompt assets, invalid lifecycle transitions, and unsupported topologies must fail explicitly through typed errors instead of silent degradation.
 
 ## Non-Goals
 
@@ -176,7 +176,7 @@ Prompt loading, base-type selection, memory access, evidence capture, and reflec
 This is not ceremony for its own sake.
 It is what keeps the inner loop stable when the deployment shape changes from one local process to multiple workers or distributed hosts.
 
-### 11. Honest Degradation Beats Hidden Fallback
+### 11. Honest Degradation Beats Hidden Silence
 
 When a requested capability, prompt asset, base type, or topology is unavailable, the runtime should fail visibly.
 It may support alternate configurations through explicit selection, but it must not quietly downgrade behavior and pretend nothing changed.
@@ -289,7 +289,7 @@ The concrete v1 handoff contract is:
 
 - `latest_terminal_handoff.json` is authoritative for `engineer terminal`, `engineer terminal-file`, `engineer terminal-recipe`, `engineer copilot-submit`, and `engineer terminal-read`
 - `latest_engineer_handoff.json` is authoritative for `engineer run` and `engineer read`
-- `latest_handoff.json` exists only as a compatibility fallback when the relevant mode-scoped handoff file is absent
+- `latest_handoff.json` exists only as a compatibility bridge when the relevant mode-scoped handoff file is absent
 - mode-scoped readback must report which artifact it used and render in a deterministic operator-visible order: runtime header, handoff session summary, adapter details, shell or repo details, action/checkpoint audit, transcript or continuity summary, explicit next-step guidance, durable record counts
 - malformed mode-scoped state fails closed instead of silently falling back
 

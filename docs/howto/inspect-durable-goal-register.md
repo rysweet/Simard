@@ -43,7 +43,7 @@ goal: Keep Simard's top 5 goals current | priority=1 | status=active | rationale
 goal: Preserve meeting-to-engineer continuity | priority=2 | status=active | rationale=meeting outputs should shape later engineer sessions
 goal: Promote benchmark drift alerts | priority=3 | status=proposed | rationale=operators should see drift candidates before they become active work
 goal: Expand multi-process orchestration carefully | priority=4 | status=paused | rationale=the architecture matters, but current local reliability is still more urgent
-goal: Ship the canonical bootstrap contract | priority=5 | status=completed | rationale=bootstrap no longer depends on a hidden environment-only fallback
+goal: Ship the canonical bootstrap contract | priority=5 | status=completed | rationale=bootstrap no longer depends on a hidden environment-only bootstrap
 EOF
 )"
 

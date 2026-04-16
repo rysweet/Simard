@@ -151,7 +151,7 @@ Bootstrap registers all adapters via `register_builtin_base_type` in `bootstrap.
 
 - `local-harness` → `TestAdapter` (lightweight canned-result adapter for tests)
 - `terminal-shell` → `RealLocalHarnessAdapter` (PTY-backed shell execution)
-- `rusty-clawd` → `RustyClawdAdapter` (rustyclawd-core SDK with process fallback)
+- `rusty-clawd` → `RustyClawdAdapter` (rustyclawd-core SDK with process delegation)
 - `copilot-sdk` → `CopilotSdkAdapter` (PTY + memory/knowledge enrichment)
 - `claude-agent-sdk` → `PendingSdkAdapter` (structural — SDK not yet published)
 - `ms-agent-framework` → `PendingSdkAdapter` (structural — integration not yet available)
@@ -169,7 +169,7 @@ The runtime validates that the selected base type:
 2. Supports the requested topology
 3. Satisfies all capabilities required by the identity manifest
 
-Unsupported combinations fail with typed errors — never silent fallbacks.
+Unsupported combinations fail with typed errors — never silent degradation.
 
 ## Planned Base Types
 

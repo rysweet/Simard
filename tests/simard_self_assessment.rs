@@ -314,7 +314,7 @@ fn simard_feature_comparison_against_original_prompt() {
     println!("  Architecture: identity/runtime/base-type separation is real.");
     println!("  I have 5 base types, 9 gym scenarios, a full OODA loop with");
     println!("  improvement proposals, meeting REPL, goal curation with top-5");
-    println!("  seeding, memory persistence with bridge fallback + retry,");
+    println!("  seeding, memory persistence with bridge query + retry,");
     println!("  5 tracked developers, and dual rysweet/rysweet_microsoft identity.");
     println!();
     println!("  To become fully operational, I need:");

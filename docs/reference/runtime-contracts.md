@@ -80,7 +80,7 @@ The shipped operator-facing command tree is:
 
 Shipped terminal contract: `simard engineer copilot-submit <topology> [state-root] [--json]`. It is documented below as the bounded one-shot local Copilot submission surface.
 
-Bare `simard` prints help for that tree instead of attempting a hidden bootstrap fallback.
+Bare `simard` prints help for that tree instead of attempting a hidden bootstrap.
 
 ## Shared state-root contract
 
@@ -100,7 +100,7 @@ When terminal session surfaces and the repo-grounded engineer loop reuse one exp
 
 - `latest_terminal_handoff.json`
 - `latest_engineer_handoff.json`
-- `latest_handoff.json` as the compatibility fallback
+- `latest_handoff.json` as the compatibility bridge
 
 Those files have different jobs:
 
@@ -112,7 +112,7 @@ Fail-closed rules:
 
 - `terminal-read` prefers `latest_terminal_handoff.json`
 - `engineer read` prefers `latest_engineer_handoff.json`
-- fallback to `latest_handoff.json` is allowed only when the mode-specific file is absent
+- lookup of `latest_handoff.json` is allowed only when the mode-specific file is absent
 - if a mode-specific handoff exists but is malformed, the command fails explicitly instead of silently replaying stale compatibility data
 
 The bridge is descriptive continuity only. Terminal-derived data must never override `workspace-root`, the engineer objective, action selection, or verification.
@@ -166,7 +166,7 @@ The contract is intentionally explicit:
 - any explicit `state-root` must already exist as a directory before readback begins
 - `engineer read` requires readable regular-file `memory_records.json` and `evidence_records.json`; symlinked artifacts are rejected
 - `latest_engineer_handoff.json` is authoritative for identity, selected base type, topology, session phase, redacted objective metadata, and the exported memory/evidence snapshot tied to the latest engineer run
-- `latest_handoff.json` is used only as a compatibility fallback when the engineer-scoped handoff is absent
+- `latest_handoff.json` is used only as a compatibility bridge when the engineer-scoped handoff is absent
 - the rendered output includes which handoff file was used
 - persisted handoff objective metadata must already be trusted `objective-metadata(chars=<n>, words=<n>, lines=<n>)`; malformed or tampered metadata fails instead of being replayed
 - standalone `memory_records.json` and `evidence_records.json` files act as durability checks and supporting record-count sources; if they disagree with the handoff snapshot, handoff-derived values win
@@ -216,7 +216,7 @@ The contract is intentionally explicit:
 - any explicit `state-root` must already exist as a directory before readback begins
 - `terminal-read` requires readable regular-file `memory_records.json` and `evidence_records.json`; symlinked artifacts are rejected
 - `latest_terminal_handoff.json` is authoritative for identity, selected base type, topology, session phase, redacted objective metadata, and the persisted terminal evidence summary tied to the latest terminal session
-- `latest_handoff.json` is used only as a compatibility fallback when the terminal-scoped handoff is absent
+- `latest_handoff.json` is used only as a compatibility bridge when the terminal-scoped handoff is absent
 - the rendered output includes which handoff file was used
 - persisted terminal evidence may include ordered terminal step lines, satisfied wait checkpoints, and the last observed output line so operators can inspect how a bounded interactive session was driven instead of relying only on aggregate counters
 - when `engineer copilot-submit` persisted truthful audit data, the same readback exposes the Copilot flow asset, fixed payload identifier, outcome, and any explicit unsupported reason code
@@ -425,7 +425,7 @@ The operator-facing bootstrap contract is now explicit:
 
 - required values are passed positionally
 - identity, base type, and topology mismatches fail explicitly
-- there is no public zero-argument fallback path
+- there is no public zero-argument bootstrap path
 - state-root validation runs before durable artifacts are read or written
 
 ## Durable carryover contract

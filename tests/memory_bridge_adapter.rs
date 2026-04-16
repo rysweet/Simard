@@ -15,7 +15,7 @@ use simard::session::SessionPhase;
 struct TestFixture {
     store: CognitiveBridgeMemoryStore,
     state_root: PathBuf,
-    fallback: PathBuf,
+    local_store: PathBuf,
 }
 
 impl TestFixture {
@@ -24,13 +24,13 @@ impl TestFixture {
             std::env::temp_dir().join(format!("adapter-live-{}", uuid::Uuid::now_v7()));
         let native_mem =
             NativeCognitiveMemory::open(&state_root).expect("native memory should open");
-        let fallback =
-            std::env::temp_dir().join(format!("adapter-fb-{}.json", uuid::Uuid::now_v7()));
-        let store = CognitiveBridgeMemoryStore::new(native_mem, &fallback).expect("adapter");
+        let local_store =
+            std::env::temp_dir().join(format!("adapter-ls-{}.json", uuid::Uuid::now_v7()));
+        let store = CognitiveBridgeMemoryStore::new(native_mem, &local_store).expect("adapter");
         Self {
             store,
             state_root,
-            fallback,
+            local_store,
         }
     }
 }
@@ -38,7 +38,7 @@ impl TestFixture {
 impl Drop for TestFixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.state_root);
-        let _ = std::fs::remove_file(&self.fallback);
+        let _ = std::fs::remove_file(&self.local_store);
     }
 }
 

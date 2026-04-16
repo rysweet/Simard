@@ -133,13 +133,13 @@ Simard writes mode-scoped handoffs under the shared root:
 
 - `latest_terminal_handoff.json`
 - `latest_engineer_handoff.json`
-- `latest_handoff.json` as the compatibility fallback
+- `latest_handoff.json` as the compatibility bridge
 
 Readback is fail-closed:
 
 - `terminal-read` prefers `latest_terminal_handoff.json`
 - `engineer read` prefers `latest_engineer_handoff.json`
-- fallback to `latest_handoff.json` happens only when the mode-scoped file is absent
+- lookup of `latest_handoff.json` happens only when the mode-scoped file is absent
 - if a mode-scoped handoff exists but is malformed, the command fails instead of silently replaying older data
 
 The bridge is descriptive continuity only. It does not auto-resume, auto-launch engineer mode, infer a repo path, or replace the engineer loop's inspect -> plan -> act -> verify contract.
@@ -775,7 +775,7 @@ simard review read local-harness single-process "$STATE_ROOT"
 
 ### `simard bootstrap run <identity> <base-type> <topology> <objective> [state-root]`
 
-Bootstraps an explicit runtime selection from positional CLI arguments. This is the only supported bootstrap entrypoint on the canonical CLI surface; the old zero-argument environment-only fallback is gone.
+Bootstraps an explicit runtime selection from positional CLI arguments. This is the only supported bootstrap entrypoint on the canonical CLI surface; the old zero-argument environment-only bootstrap path is gone.
 
 Example:
 
