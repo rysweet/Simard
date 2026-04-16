@@ -415,4 +415,95 @@ mod tests {
         let contents = fs::read_to_string(&store_path).expect("read destination");
         assert_eq!(contents, "payload");
     }
+
+    #[test]
+    fn persist_json_with_nested_struct() {
+        use std::collections::HashMap;
+        let temp_dir = TestDir::new("simard-persist-nested");
+        let path = temp_dir.path().join("nested.json");
+        let mut data = HashMap::new();
+        data.insert("key1".to_string(), vec![1, 2, 3]);
+        data.insert("key2".to_string(), vec![4, 5]);
+        persist_json("test", &path, &data).expect("persist nested");
+        let loaded: HashMap<String, Vec<i32>> =
+            super::load_json_or_default("test", &path).expect("load nested");
+        assert_eq!(loaded, data);
+    }
+
+    #[test]
+    fn persist_json_empty_value() {
+        let temp_dir = TestDir::new("simard-persist-empty");
+        let path = temp_dir.path().join("empty.json");
+        let data: Vec<String> = vec![];
+        persist_json("test", &path, &data).expect("persist empty vec");
+        let loaded: Vec<String> =
+            super::load_json_or_default("test", &path).expect("load empty vec");
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn persist_json_preserves_unicode() {
+        let temp_dir = TestDir::new("simard-persist-unicode");
+        let path = temp_dir.path().join("unicode.json");
+        let data = vec![
+            "héllo".to_string(),
+            "wörld".to_string(),
+            "日本語".to_string(),
+        ];
+        persist_json("test", &path, &data).expect("persist unicode");
+        let loaded: Vec<String> = super::load_json_or_default("test", &path).expect("load unicode");
+        assert_eq!(loaded, data);
+    }
+
+    #[test]
+    fn load_json_or_default_with_boolean() {
+        let temp_dir = TestDir::new("simard-load-bool");
+        let path = temp_dir.path().join("bool.json");
+        fs::write(&path, "true").expect("write bool");
+        let loaded: bool = super::load_json_or_default("test", &path).expect("load bool");
+        assert!(loaded);
+    }
+
+    #[test]
+    fn load_json_or_default_type_mismatch_fails() {
+        let temp_dir = TestDir::new("simard-load-mismatch");
+        let path = temp_dir.path().join("mismatch.json");
+        fs::write(&path, r#"{"key": "value"}"#).expect("write object");
+        let result: Result<Vec<String>, _> = super::load_json_or_default("test", &path);
+        assert!(result.is_err(), "type mismatch should produce error");
+    }
+
+    #[test]
+    fn unique_temp_path_includes_attempt_number() {
+        let parent = Path::new("/tmp");
+        let p0 = super::unique_temp_path(parent, "test.json", 0);
+        let p5 = super::unique_temp_path(parent, "test.json", 5);
+        let p0_str = p0.to_string_lossy();
+        let p5_str = p5.to_string_lossy();
+        assert!(p0_str.ends_with(".0"), "attempt 0 should end path with .0");
+        assert!(p5_str.ends_with(".5"), "attempt 5 should end path with .5");
+    }
+
+    #[test]
+    fn persist_json_multiple_rapid_writes() {
+        let temp_dir = TestDir::new("simard-persist-rapid");
+        let path = temp_dir.path().join("rapid.json");
+        for i in 0..10 {
+            persist_json("test", &path, &i).expect("rapid write should succeed");
+        }
+        let loaded: i32 = super::load_json_or_default("test", &path).expect("load last write");
+        assert_eq!(loaded, 9);
+    }
+
+    #[test]
+    fn temp_file_guard_new_creates_file() {
+        let temp_dir = TestDir::new("simard-guard-creates");
+        let store_path = temp_dir.path().join("target.json");
+        let guard = TempFileGuard::new("test", &store_path).expect("should create guard");
+        assert!(
+            guard.path().exists(),
+            "temp file should exist after guard creation"
+        );
+        // guard dropped here, temp cleaned up
+    }
 }

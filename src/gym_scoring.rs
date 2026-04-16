@@ -419,4 +419,97 @@ mod tests {
         assert_eq!(classify_trend(-0.021), TrendDirection::Declining);
         assert_eq!(classify_trend(0.0), TrendDirection::Stable);
     }
+
+    #[test]
+    fn aggregate_all_failed_scenarios() {
+        let results = vec![sr("a", 0.1, false), sr("b", 0.2, false)];
+        let score = aggregate_suite_scores("fail-suite", &results);
+        assert_eq!(score.scenarios_passed, 0);
+        assert!((score.pass_rate - 0.0).abs() < 1e-9);
+        assert_eq!(score.scenario_count, 2);
+    }
+
+    #[test]
+    fn aggregate_preserves_suite_id() {
+        let score = aggregate_suite_scores("my-unique-id", &[sr("x", 0.5, true)]);
+        assert_eq!(score.suite_id, "my-unique-id");
+    }
+
+    #[test]
+    fn regression_identical_scores_empty() {
+        let score = ss(0.75);
+        assert!(
+            detect_regression(&score, &score.clone()).is_empty(),
+            "identical scores should produce no regressions"
+        );
+    }
+
+    #[test]
+    fn regression_within_threshold_no_regression() {
+        // delta of -0.005 is well within threshold (0.01), no regression
+        let current = ss(0.795);
+        let baseline = ss(0.80);
+        let regs = detect_regression(&current, &baseline);
+        assert!(
+            regs.is_empty(),
+            "delta within threshold should produce no regressions"
+        );
+    }
+
+    #[test]
+    fn regression_severity_bands() {
+        let baseline = ss(0.80);
+        // Minor: delta abs between 0.01 and 0.05
+        let minor = detect_regression(&ss(0.76), &baseline);
+        let overall_minor = minor.iter().find(|r| r.dimension == "overall").unwrap();
+        assert_eq!(overall_minor.severity, RegressionSeverity::Minor);
+
+        // Severe: delta abs > 0.15 (use 0.60 for clear separation)
+        let severe = detect_regression(&ss(0.60), &baseline);
+        let overall_severe = severe.iter().find(|r| r.dimension == "overall").unwrap();
+        assert_eq!(overall_severe.severity, RegressionSeverity::Severe);
+    }
+
+    #[test]
+    fn regression_records_delta_and_scores() {
+        let current = ss(0.5);
+        let baseline = ss(0.8);
+        let regs = detect_regression(&current, &baseline);
+        let overall = regs.iter().find(|r| r.dimension == "overall").unwrap();
+        assert!((overall.baseline_score - 0.8).abs() < 1e-9);
+        assert!((overall.current_score - 0.5).abs() < 1e-9);
+        assert!((overall.delta - (-0.3)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn suite_score_from_result_preserves_scenario_counts() {
+        let scenario_results = vec![sr("a", 0.9, true), sr("b", 0.1, false), sr("c", 0.5, true)];
+        let suite_result = GymSuiteResult {
+            suite_id: "counts".into(),
+            success: true,
+            overall_score: 0.5,
+            dimensions: dims(0.5),
+            scenario_results,
+            scenarios_passed: 2,
+            scenarios_total: 3,
+            error_message: None,
+            degraded_sources: vec![],
+        };
+        let score = suite_score_from_result(&suite_result);
+        assert_eq!(score.scenario_count, 3);
+        assert_eq!(score.scenarios_passed, 2);
+    }
+
+    #[test]
+    fn trend_long_history_tracks_overall_delta() {
+        let scores: Vec<GymSuiteScore> = (0..10).map(|i| ss(0.3 + i as f64 * 0.05)).collect();
+        let trend = track_improvement(&scores);
+        assert_eq!(trend.run_count, 10);
+        assert_eq!(trend.overall_direction, TrendDirection::Improving);
+        assert!((trend.overall_delta - 0.45).abs() < 1e-9);
+        assert_eq!(trend.dimension_trends.len(), 5);
+        for dt in &trend.dimension_trends {
+            assert_eq!(dt.history.len(), 10);
+        }
+    }
 }

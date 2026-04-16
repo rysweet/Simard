@@ -423,4 +423,134 @@ mod tests {
         };
         assert_eq!(goal.concise_label(), "p3 [paused] Review docs");
     }
+
+    #[test]
+    fn concise_label_all_statuses() {
+        let make = |status: GoalStatus| PersistedMeetingGoalUpdate {
+            priority: 1,
+            status,
+            title: "T".to_string(),
+            rationale: "R".to_string(),
+        };
+        assert!(
+            make(GoalStatus::Proposed)
+                .concise_label()
+                .contains("[proposed]")
+        );
+        assert!(
+            make(GoalStatus::Active)
+                .concise_label()
+                .contains("[active]")
+        );
+        assert!(
+            make(GoalStatus::Completed)
+                .concise_label()
+                .contains("[completed]")
+        );
+    }
+
+    #[test]
+    fn parse_goal_non_numeric_priority_fails() {
+        let err = PersistedMeetingRecord::parse(
+            "agenda=test; updates=[]; decisions=[]; risks=[]; next_steps=[]; open_questions=[]; goals=[pX:active:Title:Reason]",
+        )
+        .expect_err("non-numeric priority should fail");
+        match err {
+            SimardError::InvalidMeetingRecord { reason, .. } => {
+                assert!(reason.contains("invalid priority"));
+            }
+            other => panic!("expected InvalidMeetingRecord, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_goal_empty_title_fails() {
+        let err = PersistedMeetingRecord::parse(
+            "agenda=test; updates=[]; decisions=[]; risks=[]; next_steps=[]; open_questions=[]; goals=[p1:active::Reason]",
+        )
+        .expect_err("empty title should fail");
+        match err {
+            SimardError::InvalidMeetingRecord { reason, .. } => {
+                assert!(reason.contains("cannot be empty"));
+            }
+            other => panic!("expected InvalidMeetingRecord, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_goal_empty_rationale_fails() {
+        let err = PersistedMeetingRecord::parse(
+            "agenda=test; updates=[]; decisions=[]; risks=[]; next_steps=[]; open_questions=[]; goals=[p1:active:Title:]",
+        )
+        .expect_err("empty rationale should fail");
+        match err {
+            SimardError::InvalidMeetingRecord { reason, .. } => {
+                assert!(reason.contains("cannot be empty"));
+            }
+            other => panic!("expected InvalidMeetingRecord, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn looks_like_partial_fields_returns_false() {
+        // Has some but not all required fields
+        assert!(!super::looks_like_persisted_meeting_record(
+            "agenda=x; updates=[]; decisions=[]"
+        ));
+        assert!(!super::looks_like_persisted_meeting_record(
+            "agenda=x; updates=[]; decisions=[]; risks=[]; next_steps=[]"
+        ));
+    }
+
+    #[test]
+    fn parse_missing_decisions_field_fails() {
+        let err = PersistedMeetingRecord::parse(
+            "agenda=test; updates=[]; MISSING=[]; risks=[]; next_steps=[]; open_questions=[]; goals=[]",
+        )
+        .expect_err("missing decisions= should fail");
+        match err {
+            SimardError::InvalidMeetingRecord { field, .. } => {
+                assert_eq!(field, "updates");
+            }
+            other => panic!("expected InvalidMeetingRecord, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_unbracketed_updates_fails() {
+        let err = PersistedMeetingRecord::parse(
+            "agenda=test; updates=no-brackets; decisions=[]; risks=[]; next_steps=[]; open_questions=[]; goals=[]",
+        )
+        .expect_err("unbracketed value should fail");
+        match err {
+            SimardError::InvalidMeetingRecord { reason, .. } => {
+                assert!(reason.contains("bracketed list syntax"));
+            }
+            other => panic!("expected InvalidMeetingRecord, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_goal_without_p_prefix_fails() {
+        let err = PersistedMeetingRecord::parse(
+            "agenda=test; updates=[]; decisions=[]; risks=[]; next_steps=[]; open_questions=[]; goals=[1:active:Title:Reason]",
+        )
+        .expect_err("goal without p prefix should fail");
+        match err {
+            SimardError::InvalidMeetingRecord { reason, .. } => {
+                assert!(reason.contains("p<priority>"));
+            }
+            other => panic!("expected InvalidMeetingRecord, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_record_with_whitespace_around_values() {
+        let record = PersistedMeetingRecord::parse(
+            "agenda=  spaced agenda  ; updates=[ item with spaces ]; decisions=[]; risks=[]; next_steps=[]; open_questions=[]; goals=[]",
+        )
+        .expect("whitespace in values should parse");
+        assert_eq!(record.agenda, "spaced agenda");
+        assert_eq!(record.updates, vec!["item with spaces"]);
+    }
 }
