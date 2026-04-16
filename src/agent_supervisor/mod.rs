@@ -15,10 +15,12 @@ mod types;
 mod tests;
 
 /// Maximum retries per goal before the supervisor gives up.
-const MAX_RETRIES_PER_GOAL: u32 = 2;
+const MAX_RETRIES_PER_GOAL: u32 = 5;
 
 /// Seconds after which a subordinate is considered stale.
-const STALE_THRESHOLD_SECONDS: u64 = 120;
+/// Agent sessions routinely take 10-30 minutes per step — 120s was far too
+/// aggressive and caused false stale detections. 30 minutes is reasonable.
+const STALE_THRESHOLD_SECONDS: u64 = 1800;
 
 // Re-export all public items so `crate::agent_supervisor::X` still works.
 pub use lifecycle::{check_heartbeat, is_goal_complete, kill_subordinate, spawn_subordinate};

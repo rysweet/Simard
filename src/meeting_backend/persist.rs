@@ -6,7 +6,9 @@ use tracing::{debug, info, warn};
 
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
-use crate::meeting_facilitator::{MeetingHandoff, default_handoff_dir, write_meeting_handoff};
+use crate::meeting_facilitator::{
+    MeetingHandoff, OpenQuestion, default_handoff_dir, write_meeting_handoff,
+};
 
 use super::types::{ConversationMessage, HandoffActionItem, MeetingTranscript};
 
@@ -133,29 +135,96 @@ pub fn write_auto_save(transcript: &MeetingTranscript) -> SimardResult<PathBuf> 
 
 /// Write a `MeetingHandoff` artifact for OODA integration.
 ///
-/// The handoff uses empty decisions/action_items vectors (per the arch spec —
-/// the LLM extracts these conversationally, not via structured parsing). The
-/// conversation summary goes in the `transcript` field.
+/// Serializes the full structured data extracted from the meeting session —
+/// decisions, action items, open questions, participants, and themes — into the
+/// handoff JSON. Falls back to sensible defaults when fields are empty.
 pub fn write_handoff(
     topic: &str,
     summary: &str,
     messages: &[ConversationMessage],
+    action_items: &[HandoffActionItem],
+    decisions: &[String],
 ) -> SimardResult<()> {
+    let started_at = messages
+        .first()
+        .map(|m| m.timestamp.clone())
+        .unwrap_or_default();
+    let closed_at = chrono::Utc::now().to_rfc3339();
+
+    let duration_secs = chrono::DateTime::parse_from_rfc3339(&started_at)
+        .ok()
+        .map(|start| {
+            chrono::Utc::now()
+                .signed_duration_since(start)
+                .num_seconds()
+                .max(0) as u64
+        });
+
+    // Convert backend HandoffActionItems to facilitator ActionItems for the handoff.
+    let facilitator_actions: Vec<crate::meeting_facilitator::ActionItem> = action_items
+        .iter()
+        .map(|a| crate::meeting_facilitator::ActionItem {
+            description: a.description.clone(),
+            owner: a.assignee.clone().unwrap_or_else(|| "unassigned".to_string()),
+            priority: 0,
+            due_description: a.deadline.clone(),
+        })
+        .collect();
+
+    // Convert decision strings to MeetingDecision structs, extracting
+    // rationale context from surrounding messages when available.
+    let facilitator_decisions: Vec<crate::meeting_facilitator::MeetingDecision> = decisions
+        .iter()
+        .map(|d| {
+            let rationale = extract_decision_rationale(d, messages);
+            crate::meeting_facilitator::MeetingDecision {
+                description: d.clone(),
+                rationale,
+                participants: extract_decision_participants(d, messages),
+            }
+        })
+        .collect();
+
+    // Extract open questions from message content.
+    let open_questions = extract_open_questions(messages);
+
+    // Collect unique participants from messages.
+    let mut participants: Vec<String> = Vec::new();
+    for msg in messages {
+        let role_name = match msg.role {
+            super::types::Role::User => "operator",
+            super::types::Role::Assistant => "simard",
+            super::types::Role::System => "system",
+        };
+        let s = role_name.to_string();
+        if !participants.contains(&s) {
+            participants.push(s);
+        }
+    }
+    // Also include action item assignees.
+    for a in action_items {
+        if let Some(ref assignee) = a.assignee {
+            if !participants.contains(assignee) {
+                participants.push(assignee.clone());
+            }
+        }
+    }
+
+    // Extract themes from meeting content.
+    let themes = extract_themes(messages);
+
     let handoff = MeetingHandoff {
         topic: topic.to_string(),
-        started_at: messages
-            .first()
-            .map(|m| m.timestamp.clone())
-            .unwrap_or_default(),
-        closed_at: chrono::Utc::now().to_rfc3339(),
-        decisions: Vec::new(),
-        action_items: Vec::new(),
-        open_questions: Vec::new(),
+        started_at,
+        closed_at,
+        decisions: facilitator_decisions,
+        action_items: facilitator_actions,
+        open_questions,
         processed: false,
-        duration_secs: None,
+        duration_secs,
         transcript: vec![summary.to_string()],
-        participants: vec!["operator".to_string()],
-        themes: Vec::new(),
+        participants,
+        themes,
     };
 
     let dir = default_handoff_dir();
@@ -540,6 +609,151 @@ pub fn extract_decisions(messages: &[ConversationMessage]) -> Vec<String> {
     decisions
 }
 
+/// Extract open questions from transcript messages.
+///
+/// Looks for explicit question markers (`OPEN:`, `QUESTION:`, `TBD:`, etc.) and
+/// genuine questions (sentences containing `?` that aren't too short/rhetorical).
+pub fn extract_open_questions(messages: &[ConversationMessage]) -> Vec<OpenQuestion> {
+    let explicit_prefixes = ["open:", "question:", "tbd:", "unresolved:"];
+    let mut questions: Vec<OpenQuestion> = Vec::new();
+
+    for msg in messages {
+        for sentence in split_sentences(&msg.content) {
+            let lower = sentence.trim().to_lowercase();
+
+            // Check explicit markers first.
+            let is_explicit = explicit_prefixes.iter().any(|p| lower.starts_with(p));
+            if is_explicit {
+                let text = sentence.trim().to_string();
+                if !questions.iter().any(|q| q.text == text) {
+                    questions.push(OpenQuestion {
+                        text,
+                        explicit: true,
+                    });
+                }
+                continue;
+            }
+
+            // Genuine questions: contains `?`, long enough to not be rhetorical.
+            if sentence.contains('?') && sentence.trim().len() >= 15 {
+                let text = sentence.trim().to_string();
+                if !questions.iter().any(|q| q.text == text) {
+                    questions.push(OpenQuestion {
+                        text,
+                        explicit: false,
+                    });
+                }
+            }
+        }
+    }
+    questions
+}
+
+/// Extract high-level themes from transcript messages by frequency analysis.
+///
+/// Identifies recurring topic keywords (nouns/phrases that appear across multiple
+/// messages) and returns them as theme strings.
+pub fn extract_themes(messages: &[ConversationMessage]) -> Vec<String> {
+    use std::collections::HashMap;
+
+    // Common stop words to ignore.
+    const STOP_WORDS: &[&str] = &[
+        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with",
+        "by", "is", "it", "that", "this", "was", "are", "be", "has", "have", "had", "not",
+        "we", "they", "you", "will", "can", "should", "would", "could", "do", "does", "did",
+        "from", "about", "into", "out", "if", "then", "so", "up", "one", "all", "been",
+        "just", "also", "than", "like", "more", "some", "what", "when", "how", "who",
+        "which", "there", "their", "our", "i", "my", "me", "your", "its",
+    ];
+
+    let mut word_freq: HashMap<String, usize> = HashMap::new();
+    for msg in messages {
+        // Only count user and assistant messages, skip system.
+        if matches!(msg.role, super::types::Role::System) {
+            continue;
+        }
+        let words: Vec<String> = msg
+            .content
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric() && c != '-')
+            .filter(|w| w.len() > 3 && !STOP_WORDS.contains(&w.as_ref()))
+            .map(String::from)
+            .collect();
+        // Count unique words per message to avoid single-message spam.
+        let mut seen = std::collections::HashSet::new();
+        for w in words {
+            if seen.insert(w.clone()) {
+                *word_freq.entry(w).or_insert(0) += 1;
+            }
+        }
+    }
+
+    // Themes are words appearing in at least 2 messages.
+    let min_freq = 2;
+    let mut themes: Vec<(String, usize)> = word_freq
+        .into_iter()
+        .filter(|(_, count)| *count >= min_freq)
+        .collect();
+    themes.sort_by(|a, b| b.1.cmp(&a.1));
+    themes.truncate(10);
+    themes.into_iter().map(|(word, _)| word).collect()
+}
+
+/// Extract rationale context for a decision from surrounding messages.
+///
+/// Looks for the message containing the decision text and checks the preceding
+/// message for context that explains *why* the decision was made.
+fn extract_decision_rationale(decision: &str, messages: &[ConversationMessage]) -> String {
+    let decision_lower = decision.to_lowercase();
+    for (i, msg) in messages.iter().enumerate() {
+        if msg.content.to_lowercase().contains(&decision_lower) {
+            // Check the preceding message for rationale context.
+            if i > 0 {
+                let prev = &messages[i - 1].content;
+                // Truncate long rationale to keep handoff concise.
+                if prev.len() > 300 {
+                    return format!("{}…", &prev[..297]);
+                }
+                return prev.clone();
+            }
+        }
+    }
+    String::new()
+}
+
+/// Extract participant roles involved in a decision from the message that
+/// contains it and the preceding message.
+fn extract_decision_participants(
+    decision: &str,
+    messages: &[ConversationMessage],
+) -> Vec<String> {
+    let decision_lower = decision.to_lowercase();
+    let mut participants = Vec::new();
+    for (i, msg) in messages.iter().enumerate() {
+        if msg.content.to_lowercase().contains(&decision_lower) {
+            let role = match msg.role {
+                super::types::Role::User => "operator",
+                super::types::Role::Assistant => "simard",
+                super::types::Role::System => "system",
+            };
+            participants.push(role.to_string());
+            // Include the role from the preceding message if it contributed.
+            if i > 0 {
+                let prev_role = match messages[i - 1].role {
+                    super::types::Role::User => "operator",
+                    super::types::Role::Assistant => "simard",
+                    super::types::Role::System => "system",
+                };
+                if !participants.contains(&prev_role.to_string()) {
+                    participants.push(prev_role.to_string());
+                }
+            }
+            break;
+        }
+    }
+    participants
+}
+
 /// Write a rich markdown meeting report including summary, decisions,
 /// action items table, and transcript — triggered automatically on `/end`.
 pub fn write_handoff_markdown_report(
@@ -605,6 +819,31 @@ pub fn write_handoff_markdown_report(
                 deadline,
                 goal
             ));
+        }
+        md.push('\n');
+    }
+
+    // Open questions extracted from transcript.
+    let open_questions = extract_open_questions(messages);
+    md.push_str("## Open Questions\n\n");
+    if open_questions.is_empty() {
+        md.push_str("_No open questions identified._\n\n");
+    } else {
+        for q in &open_questions {
+            let tag = if q.explicit { " *(explicit)*" } else { "" };
+            md.push_str(&format!("- {}{tag}\n", q.text));
+        }
+        md.push('\n');
+    }
+
+    // Themes extracted from meeting content.
+    let themes = extract_themes(messages);
+    md.push_str("## Themes\n\n");
+    if themes.is_empty() {
+        md.push_str("_No recurring themes identified._\n\n");
+    } else {
+        for t in &themes {
+            md.push_str(&format!("- {t}\n"));
         }
         md.push('\n');
     }
@@ -1019,5 +1258,164 @@ mod tests {
         ];
         let decisions = extract_decisions(&messages);
         assert!(decisions.is_empty());
+    }
+
+    // ── Open question extraction tests ──────────────────────────────
+
+    #[test]
+    fn extract_open_questions_explicit_markers() {
+        let messages = vec![
+            make_msg(Role::User, "OPEN: What database should we use?"),
+            make_msg(Role::Assistant, "Question: Who owns the rollback plan?"),
+        ];
+        let questions = extract_open_questions(&messages);
+        assert_eq!(questions.len(), 2);
+        assert!(questions[0].explicit);
+        assert!(questions[1].explicit);
+    }
+
+    #[test]
+    fn extract_open_questions_genuine_question() {
+        let messages = vec![make_msg(
+            Role::User,
+            "How should we handle backward compatibility for the API?",
+        )];
+        let questions = extract_open_questions(&messages);
+        assert_eq!(questions.len(), 1);
+        assert!(!questions[0].explicit);
+        assert!(questions[0].text.contains("backward compatibility"));
+    }
+
+    #[test]
+    fn extract_open_questions_skips_short() {
+        let messages = vec![make_msg(Role::User, "Why not?")];
+        let questions = extract_open_questions(&messages);
+        assert!(
+            questions.is_empty(),
+            "Short rhetorical-like questions should be filtered"
+        );
+    }
+
+    #[test]
+    fn extract_open_questions_empty_messages() {
+        let questions = extract_open_questions(&[]);
+        assert!(questions.is_empty());
+    }
+
+    // ── Theme extraction tests ──────────────────────────────────────
+
+    #[test]
+    fn extract_themes_recurring_words() {
+        let messages = vec![
+            make_msg(Role::User, "We need to improve testing coverage."),
+            make_msg(Role::Assistant, "Testing is important for quality."),
+            make_msg(Role::User, "Let's add more testing to the pipeline."),
+        ];
+        let themes = extract_themes(&messages);
+        assert!(
+            themes.contains(&"testing".to_string()),
+            "Expected 'testing' in themes: {themes:?}"
+        );
+    }
+
+    #[test]
+    fn extract_themes_empty_messages() {
+        let themes = extract_themes(&[]);
+        assert!(themes.is_empty());
+    }
+
+    #[test]
+    fn extract_themes_skips_system_messages() {
+        let messages = vec![
+            make_msg(Role::System, "System prompt with repeated system words system."),
+            make_msg(Role::User, "Hello"),
+        ];
+        let themes = extract_themes(&messages);
+        // "system" only appeared in system messages, which are skipped.
+        assert!(!themes.contains(&"system".to_string()));
+    }
+
+    // ── write_handoff completeness test ─────────────────────────────
+
+    #[test]
+    fn write_handoff_includes_structured_data() {
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", dir.path().as_os_str()); }
+
+        let messages = vec![
+            make_msg(Role::User, "We need better testing."),
+            make_msg(
+                Role::Assistant,
+                "Decision: We will adopt TDD. OPEN: Who will lead the effort?",
+            ),
+        ];
+        let action_items = vec![HandoffActionItem {
+            description: "Set up CI pipeline".to_string(),
+            assignee: Some("alice".to_string()),
+            deadline: Some("Friday".to_string()),
+            linked_goal: None,
+        }];
+        let decisions = vec!["We will adopt TDD".to_string()];
+
+        let result = write_handoff("Sprint planning", "Good meeting", &messages, &action_items, &decisions);
+        assert!(result.is_ok(), "write_handoff failed: {result:?}");
+
+        // Read the written handoff file.
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(!entries.is_empty(), "No handoff file written");
+
+        let content = std::fs::read_to_string(entries[0].path()).unwrap();
+        let handoff: MeetingHandoff = serde_json::from_str(&content).unwrap();
+
+        // Decisions are populated.
+        assert_eq!(handoff.decisions.len(), 1);
+        assert!(handoff.decisions[0].description.contains("TDD"));
+
+        // Action items are populated.
+        assert_eq!(handoff.action_items.len(), 1);
+        assert_eq!(handoff.action_items[0].description, "Set up CI pipeline");
+        assert_eq!(handoff.action_items[0].owner, "alice");
+
+        // Open questions are extracted from messages.
+        assert!(
+            !handoff.open_questions.is_empty(),
+            "Expected open questions from message content"
+        );
+
+        // Participants include roles from messages and assignees.
+        assert!(handoff.participants.contains(&"operator".to_string()));
+        assert!(handoff.participants.contains(&"alice".to_string()));
+
+        // Transcript contains summary.
+        assert!(handoff.transcript.contains(&"Good meeting".to_string()));
+
+        unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR"); }
+    }
+
+    #[test]
+    fn write_handoff_empty_data_uses_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", dir.path().as_os_str()); }
+
+        let result = write_handoff("Empty meeting", "No notes", &[], &[], &[]);
+        assert!(result.is_ok());
+
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        let content = std::fs::read_to_string(entries[0].path()).unwrap();
+        let handoff: MeetingHandoff = serde_json::from_str(&content).unwrap();
+
+        assert!(handoff.decisions.is_empty());
+        assert!(handoff.action_items.is_empty());
+        assert!(handoff.open_questions.is_empty());
+        assert!(handoff.participants.is_empty());
+        assert!(handoff.themes.is_empty());
+
+        unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR"); }
     }
 }

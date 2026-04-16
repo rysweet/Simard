@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use crate::agent_goal_assignment::SubordinateProgress;
 use crate::agent_roles::AgentRole;
 use crate::error::SimardError;
-use crate::identity_composition::max_subordinate_depth;
 
 use super::*;
 
@@ -53,14 +52,20 @@ fn spawn_rejects_empty_goal() {
 }
 
 #[test]
-fn spawn_rejects_excessive_depth() {
+fn spawn_accepts_any_depth() {
+    // Depth limits are now warnings only — external tools have their own guardrails.
+    // spawn_subordinate will fail with BridgeSpawnFailed (can't exec) but NOT
+    // InvalidIdentityComposition, proving depth validation no longer blocks.
     let mut config = test_config();
-    config.current_depth = max_subordinate_depth();
-    let err = spawn_subordinate(&config).expect_err("excessive depth should fail");
-    assert!(matches!(
-        err,
-        SimardError::InvalidIdentityComposition { .. }
-    ));
+    config.current_depth = 100;
+    let result = spawn_subordinate(&config);
+    // It should fail because current_exe() won't work as a subordinate launcher
+    // in test mode, but the error should be BridgeSpawnFailed, NOT depth-related.
+    match result {
+        Ok(_) => {} // spawned successfully — fine
+        Err(SimardError::BridgeSpawnFailed { .. }) => {} // expected in test
+        Err(other) => panic!("expected BridgeSpawnFailed, got: {other}"),
+    }
 }
 
 #[test]
@@ -98,6 +103,12 @@ fn retry_tracking_works() {
     assert_eq!(handle.record_retry(), 1);
     assert!(handle.can_retry());
     assert_eq!(handle.record_retry(), 2);
+    assert!(handle.can_retry());
+    assert_eq!(handle.record_retry(), 3);
+    assert!(handle.can_retry());
+    assert_eq!(handle.record_retry(), 4);
+    assert!(handle.can_retry());
+    assert_eq!(handle.record_retry(), 5);
     assert!(!handle.can_retry());
 }
 

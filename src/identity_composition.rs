@@ -12,11 +12,13 @@ use crate::agent_roles::AgentRole;
 use crate::error::{SimardError, SimardResult};
 use crate::identity::IdentityManifest;
 
-/// Maximum subordinate nesting depth from the environment, defaulting to 3.
+/// Maximum subordinate nesting depth from the environment, defaulting to
+/// unlimited (u32::MAX). External agent tools (Copilot, Claude, etc.) have
+/// their own guardrails — Simard should not impose artificial depth limits.
 const ENV_MAX_DEPTH: &str = "SIMARD_MAX_SUBORDINATE_DEPTH";
-const DEFAULT_MAX_DEPTH: u32 = 3;
-/// Absolute upper bound for subordinate depth regardless of env config.
-const ABSOLUTE_MAX_DEPTH: u32 = 10;
+const DEFAULT_MAX_DEPTH: u32 = u32::MAX;
+/// Absolute upper bound kept only for env-var validation sanity.
+const ABSOLUTE_MAX_DEPTH: u32 = u32::MAX;
 
 /// A subordinate's identity within a composition.
 ///
@@ -103,8 +105,6 @@ pub fn compose_identity(
     primary: IdentityManifest,
     subordinates: Vec<SubordinateIdentity>,
 ) -> SimardResult<CompositeIdentity> {
-    let depth_limit = max_subordinate_depth();
-
     // Validate no name collisions with primary.
     for sub in &subordinates {
         if sub.manifest.name == primary.name {
@@ -132,16 +132,15 @@ pub fn compose_identity(
         }
     }
 
-    // Validate depth limits.
+    // Log depth warnings but never block composition — external tools enforce
+    // their own session guardrails.
+    let depth_limit = max_subordinate_depth();
     for sub in &subordinates {
-        if sub.max_depth > depth_limit {
-            return Err(SimardError::InvalidIdentityComposition {
-                identity: primary.name.clone(),
-                reason: format!(
-                    "subordinate '{}' has max_depth {} which exceeds the environment limit of {} ({}={})",
-                    sub.manifest.name, sub.max_depth, depth_limit, ENV_MAX_DEPTH, depth_limit
-                ),
-            });
+        if depth_limit < u32::MAX && sub.max_depth > depth_limit {
+            eprintln!(
+                "warning: subordinate '{}' has max_depth {} exceeding env limit {} — proceeding anyway",
+                sub.manifest.name, sub.max_depth, depth_limit
+            );
         }
     }
 
@@ -219,25 +218,21 @@ mod tests {
     }
 
     #[test]
-    fn compose_rejects_excessive_depth() {
+    fn compose_accepts_any_depth() {
         let primary = test_primary();
         let depth_limit = max_subordinate_depth();
-        let sub = test_sub(AgentRole::Reviewer, "deep", depth_limit + 1);
+        // Even exceeding the env limit should succeed — external tools have guardrails.
+        let sub = test_sub(AgentRole::Reviewer, "deep", depth_limit.saturating_add(1));
 
-        let err =
-            compose_identity(primary, vec![sub]).expect_err("excessive depth should be rejected");
-        assert!(matches!(
-            err,
-            SimardError::InvalidIdentityComposition { .. }
-        ));
+        let result = compose_identity(primary, vec![sub]);
+        assert!(result.is_ok(), "depth should not block composition");
     }
 
     #[test]
     fn max_subordinate_depth_returns_default_when_unset() {
-        // Cannot safely modify env in parallel tests, so just verify the
-        // function returns a reasonable value.
+        // Default is now u32::MAX (unlimited) — external tools have guardrails.
         let depth = max_subordinate_depth();
-        assert!((1..=10).contains(&depth));
+        assert!(depth >= 1);
     }
 
     #[test]

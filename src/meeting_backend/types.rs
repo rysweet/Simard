@@ -55,6 +55,15 @@ pub struct MeetingSummary {
     /// Path to the auto-generated markdown report (if export succeeded).
     #[serde(default)]
     pub markdown_report_path: Option<String>,
+    /// Open questions identified during the meeting.
+    #[serde(default)]
+    pub open_questions: Vec<String>,
+    /// High-level themes or recurring topics from the meeting.
+    #[serde(default)]
+    pub themes: Vec<String>,
+    /// Participants identified from the conversation.
+    #[serde(default)]
+    pub participants: Vec<String>,
 }
 
 /// Current status of a meeting session.
@@ -129,6 +138,9 @@ mod tests {
             }],
             decisions: vec!["Adopt TDD".to_string()],
             markdown_report_path: Some("/home/user/.simard/meetings/test_report.md".to_string()),
+            open_questions: vec!["Who will lead the effort?".to_string()],
+            themes: vec!["testing".to_string(), "quality".to_string()],
+            participants: vec!["operator".to_string(), "simard".to_string()],
         };
         let json = serde_json::to_string(&summary).unwrap();
         let s2: MeetingSummary = serde_json::from_str(&json).unwrap();
@@ -149,6 +161,9 @@ mod tests {
         assert!(s.action_items.is_empty());
         assert!(s.decisions.is_empty());
         assert!(s.markdown_report_path.is_none());
+        assert!(s.open_questions.is_empty());
+        assert!(s.themes.is_empty());
+        assert!(s.participants.is_empty());
     }
 
     #[test]
