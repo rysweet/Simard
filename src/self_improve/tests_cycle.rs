@@ -1085,3 +1085,219 @@ fn validate_max_single_regression_exactly_one_accepted() {
     };
     assert!(cfg.validate().is_ok(), "1.0 is a valid fraction");
 }
+
+// ---- CycleHistory::overall_velocity with missing post_score ----
+
+#[test]
+fn cycle_history_velocity_uses_baseline_when_no_post_score() {
+    // When a cycle has no post_score (aborted before ReEval), overall_velocity
+    // should fall back to that cycle's baseline for the "last" value.
+    let mut h = CycleHistory::new();
+    // First cycle: baseline 0.50 -> post 0.55 (committed)
+    h.push(make_cycle_with_net(0.50, 0.55, true));
+    // Second cycle: no post_score — create manually
+    let no_post = ImprovementCycle {
+        baseline: make_score(0.55),
+        proposed_changes: Vec::new(),
+        post_score: None,
+        regressions: Vec::new(),
+        decision: Some(ImprovementDecision::Revert {
+            reason: "aborted".into(),
+        }),
+        final_phase: ImprovementPhase::Analyze,
+        weak_dimensions: Vec::new(),
+        weak_dimension_details: Vec::new(),
+        target_dimension: None,
+        plateau_dimensions: Vec::new(),
+    };
+    h.push(no_post);
+
+    // overall_velocity: (last_effective_score - first_baseline) / intervals
+    // last effective = no_post.baseline.overall = 0.55 (no post_score fallback)
+    // first = first cycle baseline = 0.50
+    // intervals = 1
+    // velocity = (0.55 - 0.50) / 1 = 0.05
+    let vel = h.overall_velocity();
+    assert!(
+        vel.is_finite(),
+        "velocity should be finite when last cycle has no post_score"
+    );
+    assert!(
+        vel >= 0.0,
+        "velocity should be non-negative when scores are flat or improving"
+    );
+}
+
+// ---- ImprovementConfig serde backward compat for max_cycles ----
+
+#[test]
+fn improvement_config_deserialize_without_max_cycles() {
+    // Older serialized configs lack max_cycles; Default provides None.
+    let json = r#"{
+        "suite_id": "progressive",
+        "min_net_improvement": 0.02,
+        "max_single_regression": 0.05,
+        "proposed_changes": [],
+        "auto_apply": false,
+        "weak_threshold": 0.6
+    }"#;
+    let cfg: ImprovementConfig =
+        serde_json::from_str(json).expect("should deserialize config without max_cycles");
+    assert!(
+        cfg.max_cycles.is_none(),
+        "missing max_cycles should default to None"
+    );
+    assert!(cfg.validate().is_ok());
+}
+
+// ---- CycleHistory::baselines() ----
+
+#[test]
+fn cycle_history_baselines_empty() {
+    let h = CycleHistory::new();
+    assert!(h.baselines().is_empty());
+}
+
+#[test]
+fn cycle_history_baselines_returns_all_in_order() {
+    let mut h = CycleHistory::new();
+    h.push(make_cycle_with_net(0.50, 0.55, true));
+    h.push(make_cycle_with_net(0.55, 0.62, true));
+    h.push(make_cycle_with_net(0.62, 0.68, false));
+    let baselines = h.baselines();
+    assert_eq!(baselines.len(), 3);
+    assert!((baselines[0].overall - 0.50).abs() < 1e-9);
+    assert!((baselines[1].overall - 0.55).abs() < 1e-9);
+    assert!((baselines[2].overall - 0.62).abs() < 1e-9);
+}
+
+#[test]
+fn cycle_history_baselines_count_matches_len() {
+    let mut h = CycleHistory::new();
+    for i in 0..5 {
+        h.push(make_cycle_with_net(
+            0.50 + i as f64 * 0.05,
+            0.55 + i as f64 * 0.05,
+            true,
+        ));
+    }
+    assert_eq!(h.baselines().len(), h.len());
+}
+
+// ---- ImprovementCycle::enrich_from_history ----
+
+#[test]
+fn enrich_from_history_populates_plateau_dimensions() {
+    let mut cycle = ImprovementCycle {
+        baseline: make_score(0.5),
+        proposed_changes: Vec::new(),
+        post_score: None,
+        regressions: Vec::new(),
+        decision: None,
+        final_phase: ImprovementPhase::Analyze,
+        weak_dimensions: Vec::new(),
+        weak_dimension_details: Vec::new(),
+        target_dimension: None,
+        plateau_dimensions: Vec::new(),
+    };
+    let mut history = CycleHistory::new();
+    for _ in 0..4 {
+        history.push(make_cycle_with_net(0.5, 0.5, false));
+    }
+    cycle.enrich_from_history(0.6, &history);
+    assert!(
+        !cycle.plateau_dimensions.is_empty(),
+        "enrich_from_history should populate plateau_dimensions from history"
+    );
+    assert!(
+        cycle
+            .plateau_dimensions
+            .contains(&"source_attribution".to_string()),
+        "source_attribution should be plateaued"
+    );
+}
+
+#[test]
+fn enrich_from_history_empty_history_leaves_plateau_empty() {
+    let mut cycle = ImprovementCycle {
+        baseline: make_score(0.5),
+        proposed_changes: Vec::new(),
+        post_score: None,
+        regressions: Vec::new(),
+        decision: None,
+        final_phase: ImprovementPhase::Analyze,
+        weak_dimensions: Vec::new(),
+        weak_dimension_details: Vec::new(),
+        target_dimension: None,
+        plateau_dimensions: Vec::new(),
+    };
+    let empty_history = CycleHistory::new();
+    cycle.enrich_from_history(0.6, &empty_history);
+    assert!(
+        cycle.plateau_dimensions.is_empty(),
+        "empty history should leave plateau_dimensions empty"
+    );
+}
+
+#[test]
+fn enrich_from_history_replaces_stale_plateau_dimensions() {
+    let mut cycle = ImprovementCycle {
+        baseline: make_score(0.9), // all dimensions strong
+        proposed_changes: Vec::new(),
+        post_score: None,
+        regressions: Vec::new(),
+        decision: None,
+        final_phase: ImprovementPhase::Analyze,
+        weak_dimensions: Vec::new(),
+        weak_dimension_details: Vec::new(),
+        target_dimension: None,
+        plateau_dimensions: vec!["stale_entry".to_string()],
+    };
+    let mut history = CycleHistory::new();
+    // Past with strong scores — no plateaus expected
+    for _ in 0..4 {
+        history.push(make_cycle_with_net(0.9, 0.9, true));
+    }
+    cycle.enrich_from_history(0.6, &history);
+    assert!(
+        !cycle
+            .plateau_dimensions
+            .contains(&"stale_entry".to_string()),
+        "enrich_from_history should replace, not accumulate, plateau_dimensions"
+    );
+    assert!(
+        cycle.plateau_dimensions.is_empty(),
+        "all-strong history should yield no plateau dimensions"
+    );
+}
+
+#[test]
+fn enrich_from_history_and_enrich_with_history_agree() {
+    let mut cycle_a = ImprovementCycle {
+        baseline: make_score(0.5),
+        proposed_changes: Vec::new(),
+        post_score: None,
+        regressions: Vec::new(),
+        decision: None,
+        final_phase: ImprovementPhase::Analyze,
+        weak_dimensions: Vec::new(),
+        weak_dimension_details: Vec::new(),
+        target_dimension: None,
+        plateau_dimensions: Vec::new(),
+    };
+    let mut cycle_b = cycle_a.clone();
+
+    let mut history = CycleHistory::new();
+    for _ in 0..4 {
+        history.push(make_cycle_with_net(0.5, 0.5, false));
+    }
+    let baselines = history.baselines();
+
+    cycle_a.enrich_from_history(0.6, &history);
+    cycle_b.enrich_with_history(0.6, &baselines);
+
+    assert_eq!(
+        cycle_a.plateau_dimensions, cycle_b.plateau_dimensions,
+        "enrich_from_history and enrich_with_history should produce identical results"
+    );
+}

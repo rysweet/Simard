@@ -91,6 +91,7 @@ pub struct ImprovementConfig {
     pub target_dimension: Option<String>,
     /// Maximum number of improvement cycles to run before stopping.
     /// `None` means no limit (caller controls termination).
+    #[serde(default)]
     pub max_cycles: Option<u32>,
 }
 
@@ -222,6 +223,16 @@ impl ImprovementCycle {
             weak_threshold,
             past_baselines,
         );
+    }
+
+    /// Enrich the cycle with plateau detection from a [`CycleHistory`].
+    ///
+    /// Convenience wrapper around [`enrich_with_history`](Self::enrich_with_history)
+    /// that extracts baselines from a `CycleHistory` automatically. Callers
+    /// typically have a `CycleHistory` rather than a bare `&[GymSuiteScore]`,
+    /// so this avoids the manual `.baselines()` call.
+    pub fn enrich_from_history(&mut self, weak_threshold: f64, history: &CycleHistory) {
+        self.enrich_with_history(weak_threshold, &history.baselines());
     }
 
     /// Returns the delta for the targeted dimension, if one was set and a
@@ -398,6 +409,110 @@ impl CycleHistory {
             .filter(|c| matches!(c.decision, Some(ImprovementDecision::Commit { .. })))
             .count();
         committed as f64 / self.cycles.len() as f64
+    }
+
+    /// Return the baseline scores for all recorded cycles, in chronological order.
+    ///
+    /// Useful for feeding into [`prioritize_dimensions`](super::prioritization::prioritize_dimensions)
+    /// or [`ImprovementCycle::enrich_with_history`] without manually iterating
+    /// over `self.cycles`.
+    pub fn baselines(&self) -> Vec<crate::gym_scoring::GymSuiteScore> {
+        self.cycles.iter().map(|c| c.baseline.clone()).collect()
+    }
+
+    /// Return dimensions that appear in `plateau_dimensions` in at least
+    /// `min_occurrences` of the last `window` cycles.
+    ///
+    /// This identifies dimensions that are *persistently* stuck rather than
+    /// transiently plateaued in a single cycle, enabling stagnation-break
+    /// rotation. A `window` of 3 with `min_occurrences` of 2 means: "has been
+    /// plateaued in at least 2 of the last 3 cycles."
+    ///
+    /// Returns an empty vec when the history is shorter than `window`.
+    pub fn persistent_plateau_dimensions(
+        &self,
+        window: usize,
+        min_occurrences: usize,
+    ) -> Vec<String> {
+        if window == 0 || min_occurrences == 0 || self.cycles.len() < window {
+            return Vec::new();
+        }
+        let recent = &self.cycles[self.cycles.len() - window..];
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for cycle in recent {
+            for dim in &cycle.plateau_dimensions {
+                *counts.entry(dim.as_str()).or_insert(0) += 1;
+            }
+        }
+        let mut persistent: Vec<String> = counts
+            .into_iter()
+            .filter(|(_, count)| *count >= min_occurrences)
+            .map(|(name, _)| name.to_string())
+            .collect();
+        persistent.sort();
+        persistent
+    }
+
+    /// Suggest the next dimension to target, rotating away from persistently
+    /// plateaued dimensions.
+    ///
+    /// Looks at the last `window` cycles to find dimensions that appear stuck
+    /// in at least half of those cycles, then calls
+    /// [`suggest_next_target_excluding`](super::prioritization::suggest_next_target_excluding)
+    /// to pick the best non-stuck candidate for the next cycle.
+    ///
+    /// This is the primary entry-point for multi-cycle stagnation-break logic.
+    /// Returns `None` when no dimension is currently weak.
+    pub fn suggest_rotation_target(
+        &self,
+        current_score: &crate::gym_scoring::GymSuiteScore,
+        weak_threshold: f64,
+        window: usize,
+    ) -> Option<super::prioritization::PrioritizedDimension> {
+        let past = self.baselines();
+        // Dimensions that have been persistently plateaued in at least half the
+        // recent window should be skipped; we need at least 1 occurrence.
+        let min_occ = (window / 2).max(1);
+        let stuck = self.persistent_plateau_dimensions(window, min_occ);
+        let exclude: Vec<&str> = stuck.iter().map(String::as_str).collect();
+        super::prioritization::suggest_next_target_excluding(
+            current_score,
+            weak_threshold,
+            &past,
+            &exclude,
+        )
+    }
+
+    /// Count the current streak of consecutively committed cycles from the tail.
+    ///
+    /// Returns 0 if the most recent cycle was reverted or the history is empty.
+    /// A long streak signals that the improvement loop is "on a roll" and the
+    /// current approach is working well; callers may use this to raise confidence
+    /// thresholds or reduce exploration.
+    pub fn commit_streak(&self) -> usize {
+        self.cycles
+            .iter()
+            .rev()
+            .take_while(|c| matches!(c.decision, Some(ImprovementDecision::Commit { .. })))
+            .count()
+    }
+
+    /// Suggest the highest-priority weak dimension to target next, drawing on
+    /// the full recorded history as context.
+    ///
+    /// Delegates to [`suggest_next_target`](super::prioritization::suggest_next_target)
+    /// using the most recent cycle's baseline as the current score and all
+    /// recorded baselines as historical context.
+    ///
+    /// Returns `None` when the history is empty or every dimension is already
+    /// above `weak_threshold`.
+    pub fn suggest_next_target(
+        &self,
+        weak_threshold: f64,
+    ) -> Option<super::prioritization::PrioritizedDimension> {
+        let current = self.cycles.last()?;
+        let past = self.baselines();
+        super::prioritization::suggest_next_target(&current.baseline, weak_threshold, &past)
     }
 
     /// Returns a reference to the committed cycle with the highest `net_improvement`.
@@ -967,5 +1082,104 @@ mod tests {
             plateau_dimensions: Vec::new(),
         };
         assert!(!cycle.target_dimension_improved());
+    }
+
+    fn make_commit_cycle(overall: f64, net: f64) -> ImprovementCycle {
+        ImprovementCycle {
+            baseline: make_score(overall),
+            proposed_changes: Vec::new(),
+            post_score: Some(make_score(overall + net)),
+            regressions: Vec::new(),
+            decision: Some(ImprovementDecision::Commit {
+                net_improvement: net,
+            }),
+            final_phase: ImprovementPhase::Decide,
+            weak_dimensions: Vec::new(),
+            weak_dimension_details: Vec::new(),
+            target_dimension: None,
+            plateau_dimensions: Vec::new(),
+        }
+    }
+
+    fn make_revert_cycle(overall: f64) -> ImprovementCycle {
+        ImprovementCycle {
+            baseline: make_score(overall),
+            proposed_changes: Vec::new(),
+            post_score: None,
+            regressions: Vec::new(),
+            decision: Some(ImprovementDecision::Revert {
+                reason: "test".into(),
+            }),
+            final_phase: ImprovementPhase::Decide,
+            weak_dimensions: Vec::new(),
+            weak_dimension_details: Vec::new(),
+            target_dimension: None,
+            plateau_dimensions: Vec::new(),
+        }
+    }
+
+    // ---- CycleHistory::commit_streak ----
+
+    #[test]
+    fn commit_streak_empty_history_is_zero() {
+        let history = CycleHistory::new();
+        assert_eq!(history.commit_streak(), 0);
+    }
+
+    #[test]
+    fn commit_streak_all_commits() {
+        let mut history = CycleHistory::new();
+        history.push(make_commit_cycle(0.5, 0.05));
+        history.push(make_commit_cycle(0.55, 0.05));
+        history.push(make_commit_cycle(0.60, 0.05));
+        assert_eq!(history.commit_streak(), 3);
+    }
+
+    #[test]
+    fn commit_streak_revert_breaks_streak() {
+        let mut history = CycleHistory::new();
+        history.push(make_commit_cycle(0.5, 0.05));
+        history.push(make_commit_cycle(0.55, 0.05));
+        history.push(make_revert_cycle(0.60));
+        assert_eq!(history.commit_streak(), 0);
+    }
+
+    #[test]
+    fn commit_streak_counts_only_trailing_commits() {
+        let mut history = CycleHistory::new();
+        history.push(make_revert_cycle(0.5));
+        history.push(make_commit_cycle(0.5, 0.05));
+        history.push(make_commit_cycle(0.55, 0.05));
+        assert_eq!(history.commit_streak(), 2);
+    }
+
+    // ---- CycleHistory::suggest_next_target ----
+
+    #[test]
+    fn suggest_next_target_empty_history_returns_none() {
+        let history = CycleHistory::new();
+        assert!(history.suggest_next_target(0.6).is_none());
+    }
+
+    #[test]
+    fn suggest_next_target_all_strong_returns_none() {
+        let mut history = CycleHistory::new();
+        history.push(make_commit_cycle(0.9, 0.02));
+        // All dimensions are above 0.6 when overall = 0.9
+        assert!(history.suggest_next_target(0.6).is_none());
+    }
+
+    #[test]
+    fn suggest_next_target_returns_highest_priority_weak_dim() {
+        let mut history = CycleHistory::new();
+        history.push(make_commit_cycle(0.5, 0.02));
+        history.push(make_commit_cycle(0.52, 0.02));
+        history.push(make_commit_cycle(0.54, 0.02));
+        // source_attribution = overall * 0.7 ≈ 0.35–0.38, highest deficit
+        let suggestion = history
+            .suggest_next_target(0.6)
+            .expect("should suggest a target");
+        assert_eq!(suggestion.name, "source_attribution");
+        assert!(suggestion.current_deficit > 0.0);
     }
 }
