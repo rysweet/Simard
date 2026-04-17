@@ -8,10 +8,10 @@ Simard is the **Rust-native successor** to [amplihack](https://github.com/ryswee
 
 | Area | amplihack | Simard today | Parity? |
 |---|---|---|---|
-| [Memory](#memory) | `amplihack-memory-lib` (Python + Rust) | `cognitive_memory` (Rust, via `amplihack-memory` crate) | ✅ Yes — same crate |
+| [Memory](#memory) | `amplihack-memory-lib` (Python + Rust) | `cognitive_memory` (Rust, via `amplihack-memory` crate) | ✅ Rust surface — same crate; Python surface not ported |
 | [Workflow execution](#workflow-execution) | `amplihack-recipe-runner` + `smart-orchestrator` YAML recipes | OODA daemon + engineer loop (Rust) | ⚠ Functional coverage, no YAML DSL |
-| [Agent catalog](#agents) | 38 markdown agents under `amplifier-bundle/agents/` | Base types + identity manifests (Rust) | ❌ Gap — no markdown catalog |
-| [Skills](#skills) | 87 bundled skills under `amplifier-bundle/skills/` | None native | ❌ Gap — full port needed |
+| [Agent catalog](#agents) | Dozens of markdown agents under `amplifier-bundle/agents/` | Base types + identity manifests (Rust) | ❌ Gap — no markdown catalog |
+| [Skills](#skills) | ~150+ bundled skills under `amplifier-bundle/skills/` | None native | ❌ Gap — full port needed |
 | [Evaluation](#evaluation) | `amplihack-agent-eval` (Python) | Python bridge into `amplihack.eval.*` | ❌ Gap — bridge is the dependency |
 | [`copilot-sdk` adapter](#copilot-sdk) | amplihack copilot CLI | PTY shell-out to `amplihack copilot` | ❌ Gap — runtime dep |
 | [XPIA defense](#xpia) | `amplihack-xpia-defender` | Not shipped in Simard | ❌ Gap — not yet on roadmap |
@@ -23,7 +23,7 @@ Simard is the **Rust-native successor** to [amplihack](https://github.com/ryswee
 
 **Simard:** the `cognitive_memory` module uses the **`amplihack-memory` Rust crate** directly as a git dependency in `Cargo.toml`. This is the same crate that backs amplihack's Rust-side memory. The name is legacy — despite the `amplihack-` prefix, no Python runtime is required for the core memory operations.
 
-**Gap:** none functional. Naming mismatch only. A future rename would eliminate surface-level confusion but is not blocking.
+**Gap:** only the Rust surface of `amplihack-memory-lib` is covered. The Python bindings and Python-side adapters in `amplihack-memory-lib` are not mirrored and are not used by Simard. For Simard's own workloads this is complete; for operators migrating a pure-Python pipeline, the Python surface is still unported.
 
 **Migration path:** already migrated. See [architecture/cognitive-memory.md](architecture/cognitive-memory.md).
 
@@ -39,7 +39,7 @@ Simard is the **Rust-native successor** to [amplihack](https://github.com/ryswee
 
 ## Agents
 
-**amplihack:** 38 markdown agents under `amplifier-bundle/agents/` organized into `core/`, `specialized/`, `workflows/`. Each agent is a markdown file with system-prompt-shaped content and metadata.
+**amplihack:** dozens of markdown agents under `amplifier-bundle/agents/` organized into `core/`, `specialized/`, `workflows/` (verify with `find amplifier-bundle/agents -name '*.md' | wc -l`). Each agent is a markdown file with system-prompt-shaped content and metadata.
 
 **Simard:** agent behavior is expressed through **base types** (the runtime adapter layer — `claude-agent-sdk`, `rusty-clawd`, `copilot-sdk`, `ms-agent-framework`) plus **identity manifests** (Rust structures + markdown prompts under `prompt_assets/simard/`). No markdown-catalog agent system.
 
@@ -49,7 +49,7 @@ Simard is the **Rust-native successor** to [amplihack](https://github.com/ryswee
 
 ## Skills
 
-**amplihack:** ~87 bundled skills under `amplifier-bundle/skills/`. A skill is a named capability with activation conditions, a prompt fragment, and optional wiring to recipes / MCP servers.
+**amplihack:** a large bundled skill catalog under `amplifier-bundle/skills/` (150+ skills as of April 2026; verify with `ls amplifier-bundle/skills | wc -l`). A skill is a named capability with activation conditions, a prompt fragment, and optional wiring to recipes / MCP servers.
 
 **Simard:** zero bundled skills.
 
@@ -134,4 +134,4 @@ Keep amplihack installed alongside until your workflow no longer hits any of the
 
 ## Tracked parity issues
 
-All gaps above have (or will have) GitHub issues labeled `parity`. See the label on [rysweet/Simard](https://github.com/rysweet/Simard/issues?q=label%3Aparity).
+All gaps above **will be** filed as GitHub issues labeled `parity` as part of the PR that lands these docs. The `parity` label and the six tracking issues (YAML recipe DSL, markdown agent catalog, skill catalog, native gym eval, native `copilot-sdk`, retire `cmd_ensure_deps`) are not yet filed at the time of writing — this note will be removed once they exist. See the label on [rysweet/Simard](https://github.com/rysweet/Simard/issues?q=label%3Aparity).

@@ -20,9 +20,28 @@ Everything committed to `main` must actually do its job. If a function's body is
 
 When something fails, report the specific failure: the error, the input that caused it, the file/line. Never say "something went wrong." Never silently degrade. If Simard can't do the job, she says so, with the reason.
 
-### 5. Modular, regeneratable components
+### 5. Modular, regeneratable components — bricks and studs
 
-Each subsystem (memory, OODA daemon, base types, gym) is a brick with clear edges. Any brick should be rewritable in isolation without rewriting its neighbors.
+Each subsystem (memory, OODA daemon, base types, gym) is a **brick** with clear edges and a narrow public contract — its **studs**. A brick is rewritable in isolation without rewriting its neighbors, because the neighbors only see the studs. In practice this means:
+
+- Public modules expose small, documented surfaces. Internal details stay `pub(crate)` or private.
+- Cross-subsystem calls go through named types, not through shared mutable state.
+- A brick can be regenerated (deleted and re-authored, possibly by an LLM) from its spec + its stud contract without breaking callers.
+
+### 6. Ruthless simplicity is hierarchical
+
+Simplicity is applied top-down, not uniformly:
+
+1. First, simplify the **architecture** — fewer subsystems, narrower interfaces, less coupling.
+2. Then simplify the **control flow** — fewer branches, explicit states, no silent fallbacks.
+3. Then simplify the **data shapes** — fewer optional fields, fewer nullable indirections.
+4. Only then simplify **syntax** — shorter names, fewer lines.
+
+Optimizing step (4) while leaving (1)-(3) complex is anti-simplification.
+
+### 7. Formal specification as a thinking tool
+
+For any requirement that involves concurrency, multi-actor state, or multi-step invariants, write the invariant as a **formal predicate** (e.g. `failedAgents ≠ {} ⟹ phase ≠ complete`) or a **Gherkin scenario** before writing code. The predicate is the bar. The code either upholds it or does not. Prose requirements hide ambiguity that formal predicates expose.
 
 ### 6. Honesty about gaps
 
@@ -38,3 +57,8 @@ Simard is the successor to amplihack and is *on the path* to replacement — not
 ## Origins
 
 Most of these principles come directly from amplihack's `PHILOSOPHY.md` and `TRUST.md`. Simard keeps them because they work. See also [AGENTS.md](../AGENTS.md) for role-specific guidance.
+
+## Next
+
+- [Patterns](patterns.md)
+- [Workflows](workflows.md)

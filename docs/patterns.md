@@ -41,3 +41,8 @@ Every review surfaces: what changed, what tests run, what evidence supports the 
 ## Graceful-degradation is banned
 
 If a dependency fails, Simard errors out and reports the specific failure. Silent fallback paths are not acceptable because they hide brokenness from operators.
+
+## Next
+
+- [Philosophy](philosophy.md)
+- [Workflows](workflows.md)

@@ -57,3 +57,9 @@ Evaluate against gym → analyze weaknesses → propose improvements → re-eval
 | Resumption after crash | Recipe-runner persists per-step state | Session record replay |
 
 See [recipes.md](recipes.md) for what Simard currently does that overlaps with amplihack recipes.
+
+## Next
+
+- [Recipes](recipes.md)
+- [Agents](agents.md)
+- [amplihack comparison](amplihack-comparison.md#workflow-execution)

@@ -14,7 +14,7 @@ Simard is the Rust-native **successor to [amplihack](https://github.com/rysweet/
 
 Simard **today** natively provides:
 
-- **Cognitive memory** — the `cognitive_memory` module (backed by the `amplihack-memory` Rust crate) reaches parity with `amplihack-memory-lib`.
+- **Cognitive memory (Rust surface)** — the `cognitive_memory` module is backed directly by the `amplihack-memory` Rust crate. This covers the core memory operations; `amplihack-memory-lib`'s Python surface is not mirrored and is not required by Simard.
 - **Workflow execution** — the OODA daemon plus the engineer loop cover the ground held by `amplihack-recipe-runner` + `smart-orchestrator`, though the YAML recipe DSL is not yet ported.
 - **Meeting backend / facilitator / REPL** — a new capability with no amplihack analog.
 - **Goal curation, improvement curation, review pipelines, dashboard.**
@@ -25,7 +25,7 @@ Simard **still depends on amplihack at runtime** for:
 - **Gym evaluation** — `python/simard_gym_bridge.py` imports `amplihack.eval.progressive_test_suite` and `amplihack.eval.long_horizon_memory`. No native Rust gym eval yet.
 - **Optional install shim** — `simard ensure-deps` / `cmd_ensure_deps.rs` can auto-install `amplihack` when the copilot adapter needs it.
 
-These are tracked in GitHub issues labeled `parity`. See [docs/amplihack-comparison.md](docs/amplihack-comparison.md) for the full feature-by-feature matrix and migration path for each gap.
+These will be tracked in GitHub issues labeled `parity` (label and issues to be filed with the first PR landing these docs). See [docs/amplihack-comparison.md](docs/amplihack-comparison.md) for the full feature-by-feature matrix and migration path for each gap.
 
 ## Recommended migration from amplihack
 

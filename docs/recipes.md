@@ -25,7 +25,7 @@ See [howto/move-from-terminal-recipes-into-engineer-runs.md](howto/move-from-ter
 
 ## Gap: YAML recipe DSL
 
-A native Simard recipe DSL that matches `amplihack-recipe-runner` is a tracked parity issue. The design intent:
+A native Simard recipe DSL that matches `amplihack-recipe-runner` is a tracked parity issue. The design below is a **sketch, not a committed specification** — it will graduate to a proper `Specs/` document before implementation starts. The design intent:
 
 - YAML-like declarative recipes describing ordered steps, each step running a base-type adapter or a local bash command.
 - First-class support for nested recipes, per-step environment, and error recovery.
@@ -38,3 +38,8 @@ When this ships, recipes currently driven through `amplihack copilot` can be mig
 - Use the **engineer loop** for most multi-step work.
 - Use the **OODA daemon** for autonomous continuous operation.
 - Use **meeting REPL → handoff → engineer run** to carry decisions across sessions.
+
+## Next
+
+- [Workflows](workflows.md)
+- [amplihack comparison](amplihack-comparison.md#workflow-execution)

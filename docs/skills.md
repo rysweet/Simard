@@ -2,7 +2,7 @@
 
 ## Current state
 
-**Simard does not ship a bundled skill catalog yet.** amplihack ships roughly 87 skills under `amplifier-bundle/skills/`; Simard today ships zero equivalent native skills.
+**Simard does not ship a bundled skill catalog yet.** amplihack ships a large skill catalog under `amplifier-bundle/skills/` (150+ skills as of April 2026); Simard today ships zero equivalent native skills.
 
 This is the **largest parity gap** between amplihack and Simard. It is tracked in the parity issue list linked from [amplihack-comparison.md](amplihack-comparison.md).
 
@@ -41,4 +41,9 @@ When skill-catalog parity work starts, prioritize:
 - A Rust loader parses front matter, registers activation conditions, and exposes skills to identity manifests.
 - No hard dependency on amplihack or Claude Code.
 
-This design is not implemented yet. Contributions welcome on the tracking issue.
+This design is a sketch, not a committed specification. It will graduate to a `Specs/` document when skill-catalog parity work starts.
+
+## Next
+
+- [Agents](agents.md)
+- [amplihack comparison](amplihack-comparison.md#skills)

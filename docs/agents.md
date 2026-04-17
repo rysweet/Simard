@@ -30,14 +30,17 @@ Identity prompts live under [`prompt_assets/simard/`](../prompt_assets/simard/).
 
 ## 3. Topologies
 
-A topology describes how many agents, how they communicate, and who holds control. Common topologies:
+A topology describes how many agents, how they communicate, and who holds control. Simard's `RuntimeTopology` enum (see `src/runtime`) declares:
 
-- `single-process` — one agent in one process.
-- Custom topologies can be declared in session bootstrap.
+- `single-process` — one agent in one process. The default and the only topology exercised end-to-end today.
+- `multi-process` — multiple agents cooperating across OS processes. Wired through the session builder; used by tests.
+- `distributed` — agents split across machines. Declared and type-checked; not yet exercised in production.
+
+Only `single-process` is a safe choice for operator-driven runs today. The other variants exist to pin the future shape of the API.
 
 ## Comparison with amplihack agents
 
-amplihack ships **38 markdown agent definitions** under `amplifier-bundle/agents/` (core / specialized / workflows). Simard does not yet ship an equivalent markdown catalog. This is a tracked parity gap — see [amplihack-comparison.md](amplihack-comparison.md#agents).
+amplihack ships **dozens of markdown agent definitions** under `amplifier-bundle/agents/` (core / specialized / workflows — run `find amplifier-bundle/agents -name '*.md' | wc -l` for the current count). Simard does not yet ship an equivalent markdown catalog. This is a tracked parity gap — see [amplihack-comparison.md](amplihack-comparison.md#agents).
 
 For now: if you need an amplihack agent, invoke it via the `copilot-sdk` base type (which spawns `amplihack copilot`). Simard stewards the session; amplihack provides the agent persona.
 
@@ -48,3 +51,9 @@ For now: if you need an amplihack agent, invoke it via the `copilot-sdk` base ty
 3. Wire it to a command or workflow.
 
 No code change is required to edit an existing identity's prompt — prompts are shipped assets loaded at runtime.
+
+## Next
+
+- [Skills](skills.md)
+- [Workflows](workflows.md)
+- [amplihack comparison](amplihack-comparison.md#agents)
