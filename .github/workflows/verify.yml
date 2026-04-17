@@ -6,11 +6,18 @@ on:
 
 env:
   CARGO_BUILD_JOBS: 2
+  # Reduce DWARF size to keep peak linker memory under runner limits.
+  # Full debug info pushes rust-lld over the runner's RSS limit and the
+  # kernel kills it with SIGBUS (signal 7) during the link step.
+  CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+  CARGO_PROFILE_DEV_INCREMENTAL: "false"
+  CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
+  CARGO_PROFILE_TEST_INCREMENTAL: "false"
 
 jobs:
   pre-commit:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
       - name: Check out repository
@@ -73,7 +80,7 @@ jobs:
 
   install-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
       - name: Check out repository
