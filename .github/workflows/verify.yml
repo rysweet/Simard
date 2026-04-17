@@ -10,7 +10,7 @@ env:
 jobs:
   pre-commit:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
 
     steps:
       - name: Check out repository
@@ -54,7 +54,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: simard-ci
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -114,7 +114,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: simard-ci
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: true
 
       - name: Run install smoke test
         env:
