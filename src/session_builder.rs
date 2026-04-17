@@ -8,8 +8,8 @@
 //!
 //! | Value         | Behaviour                                            |
 //! |---------------|------------------------------------------------------|
-//! | `copilot`     | Copilot SDK via `gh` auth **(default)**               |
-//! | `rustyclawd`  | RustyClawd / Anthropic (requires `ANTHROPIC_API_KEY`) |
+//! | `copilot`     | Copilot SDK via `gh` auth                             |
+//! | `rustyclawd`  | RustyClawd / Anthropic (requires `ANTHROPIC_API_KEY`) **(default)** |
 
 use crate::base_type_copilot::CopilotSdkAdapter;
 use crate::base_type_rustyclawd::RustyClawdAdapter;
@@ -22,19 +22,19 @@ use crate::session::SessionId;
 /// Which LLM provider to use for agent sessions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LlmProvider {
-    /// GitHub Copilot SDK via `gh` auth (default).
+    /// GitHub Copilot SDK via `gh` auth.
     Copilot,
-    /// RustyClawd / Anthropic (requires `ANTHROPIC_API_KEY`).
+    /// RustyClawd / Anthropic (requires `ANTHROPIC_API_KEY`). Default.
     RustyClawd,
 }
 
 impl LlmProvider {
-    /// Read from `SIMARD_LLM_PROVIDER` env var.  Defaults to `Copilot`.
+    /// Read from `SIMARD_LLM_PROVIDER` env var.  Defaults to `RustyClawd`.
     pub fn from_env() -> Self {
         match std::env::var("SIMARD_LLM_PROVIDER").as_deref() {
-            Ok("rustyclawd") => Self::RustyClawd,
-            // "copilot" or anything else (including unset) → Copilot
-            _ => Self::Copilot,
+            Ok("copilot") => Self::Copilot,
+            // "rustyclawd" or anything else (including unset) → RustyClawd
+            _ => Self::RustyClawd,
         }
     }
 }

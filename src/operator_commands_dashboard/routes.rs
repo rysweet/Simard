@@ -815,14 +815,14 @@ fn load_dashboard_meeting_prompt() -> SimardResult<String> {
     })
 }
 
-/// Open a RustyClawd agent session for the dashboard chat.
-/// Uses the native Rust SDK (no subprocess, no CLI piping).
+/// Open an agent session for the dashboard chat.
+/// Uses the same config-driven provider as the CLI meeting REPL
+/// (controlled by `SIMARD_LLM_PROVIDER`, defaults to RustyClawd).
 fn open_dashboard_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeSession>> {
     match crate::session_builder::SessionBuilder::new(crate::identity::OperatingMode::Meeting)
         .node_id("dashboard-chat")
         .address("dashboard-chat://local")
         .adapter_tag("meeting-dashboard")
-        .provider(crate::session_builder::LlmProvider::RustyClawd)
         .open()
     {
         Ok(s) => Some(s),
