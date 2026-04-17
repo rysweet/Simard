@@ -501,9 +501,10 @@ mod tests {
 
     #[test]
     fn dashboard_config_fields_are_independent() {
-        let mut config = DaemonDashboardConfig::default();
-        config.enabled = false;
-        config.port = 3000;
+        let config = DaemonDashboardConfig {
+            enabled: false,
+            port: 3000,
+        };
         assert!(!config.enabled);
         assert_eq!(config.port, 3000);
     }

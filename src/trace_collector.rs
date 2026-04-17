@@ -132,6 +132,8 @@ mod tests {
 
     #[test]
     fn ring_size_is_reasonable() {
-        assert!(RING_SIZE >= 64);
+        const {
+            assert!(RING_SIZE >= 64);
+        }
     }
 }
