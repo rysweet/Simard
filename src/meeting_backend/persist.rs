@@ -698,7 +698,7 @@ pub fn extract_themes(messages: &[ConversationMessage]) -> Vec<String> {
         .into_iter()
         .filter(|(_, count)| *count >= min_freq)
         .collect();
-    themes.sort_by(|a, b| b.1.cmp(&a.1));
+    themes.sort_by_key(|a| std::cmp::Reverse(a.1));
     themes.truncate(10);
     themes.into_iter().map(|(word, _)| word).collect()
 }
