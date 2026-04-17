@@ -87,4 +87,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run install smoke test
+        env:
+          # Linker OOMs (signal 7) when embedding full debug info for the
+          # `simard` binary under test on the 7GB GH runner. Line tables
+          # keep backtraces working at a fraction of the size.
+          CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+          CARGO_PROFILE_DEV_INCREMENTAL: "false"
         run: cargo test --test install_smoke -- --nocapture
