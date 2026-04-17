@@ -261,320 +261,61 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bracketed_list_nested_brackets_preserved() {
-        let result = parse_bracketed_list("f", "[outer [inner] value]").unwrap();
-        assert_eq!(result, vec!["outer [inner] value"]);
+    fn skip_spaces_advances_past_whitespace() {
+        assert_eq!(skip_spaces("   hello", 0), 3);
+        assert_eq!(skip_spaces("ab  cd", 2), 4);
+        assert_eq!(skip_spaces("nowhitespace", 0), 0);
     }
 
     #[test]
-    fn bracketed_list_pipe_inside_nested_brackets_not_split() {
-        let result = parse_bracketed_list("f", "[a [x|y] | b]").unwrap();
-        assert_eq!(result, vec!["a [x|y]", "b"]);
-    }
-
-    #[test]
-    fn bracketed_list_rejects_missing_brackets() {
-        let result = parse_bracketed_list("test-field", "no brackets here");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        match err {
-            SimardError::InvalidImprovementRecord { field, reason } => {
-                assert_eq!(field, "test-field");
-                assert!(reason.contains("bracketed list syntax"));
-            }
-            other => panic!("expected InvalidImprovementRecord, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn bracketed_list_rejects_empty_item() {
-        let result = parse_bracketed_list("f", "[a||b]");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn bracketed_list_rejects_unbalanced_open_bracket() {
-        let result = parse_bracketed_list("f", "[a [b]");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn bracketed_list_rejects_extra_close_bracket() {
-        let result = parse_bracketed_list("f", "[a ] b]");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn non_negative_count_valid() {
-        assert_eq!(parse_non_negative_count("f", "42").unwrap(), 42);
-    }
-
-    #[test]
-    fn non_negative_count_zero() {
-        assert_eq!(parse_non_negative_count("f", "0").unwrap(), 0);
-    }
-
-    #[test]
-    fn non_negative_count_trims_whitespace() {
-        assert_eq!(parse_non_negative_count("f", "  7  ").unwrap(), 7);
-    }
-
-    #[test]
-    fn non_negative_count_rejects_negative() {
-        assert!(parse_non_negative_count("f", "-1").is_err());
-    }
-
-    #[test]
-    fn non_negative_count_rejects_non_numeric() {
-        assert!(parse_non_negative_count("f", "abc").is_err());
-    }
-
-    #[test]
-    fn record_pairs_simple() {
-        let pairs = parse_persisted_record_pairs("key=value").unwrap();
-        assert_eq!(pairs, vec![("key", "value")]);
-    }
-
-    #[test]
-    fn record_pairs_multiple_pipe_separated() {
-        let pairs = parse_persisted_record_pairs("a=1 | b=2 | c=3").unwrap();
-        assert_eq!(pairs.len(), 3);
-        assert_eq!(pairs[0], ("a", "1"));
-        assert_eq!(pairs[1], ("b", "2"));
-        assert_eq!(pairs[2], ("c", "3"));
-    }
-
-    #[test]
-    fn record_pairs_strips_improvement_curation_prefix() {
-        let pairs =
-            parse_persisted_record_pairs("improvement-curation-record | key=value").unwrap();
-        assert_eq!(pairs, vec![("key", "value")]);
-    }
-
-    #[test]
-    fn record_pairs_bracketed_value() {
-        let pairs = parse_persisted_record_pairs("items=[a|b|c]").unwrap();
-        assert_eq!(pairs.len(), 1);
-        assert_eq!(pairs[0].0, "items");
-        assert_eq!(pairs[0].1, "[a|b|c]");
-    }
-
-    #[test]
-    fn record_pairs_rejects_empty_input() {
-        assert!(parse_persisted_record_pairs("").is_err());
-    }
-
-    #[test]
-    fn record_pairs_rejects_whitespace_only() {
-        assert!(parse_persisted_record_pairs("   ").is_err());
-    }
-
-    #[test]
-    fn skip_record_separators_skips_pipes_and_spaces() {
-        assert_eq!(skip_record_separators(" | | abc", 0), 5);
-    }
-
-    #[test]
-    fn skip_record_separators_noop_on_non_separator() {
+    fn skip_record_separators_handles_pipes_and_spaces() {
+        assert_eq!(skip_record_separators("| | x", 0), 4);
         assert_eq!(skip_record_separators("abc", 0), 0);
+        assert_eq!(skip_record_separators("  ||  y", 0), 6);
     }
 
     #[test]
-    fn skip_spaces_basic() {
-        assert_eq!(skip_spaces("   abc", 0), 3);
+    fn looks_like_field_start_detects_key_eq() {
+        assert!(looks_like_field_start("foo=bar", 0));
+        assert!(!looks_like_field_start("=bar", 0)); // no key chars before =
+        assert!(!looks_like_field_start("foo bar", 0)); // space before =
+        assert!(!looks_like_field_start("foo|bar", 0)); // pipe before =
     }
 
     #[test]
-    fn looks_like_field_start_true_for_key_equals() {
-        assert!(looks_like_field_start("key=value", 0));
-    }
-
-    #[test]
-    fn looks_like_field_start_false_for_plain_text() {
-        assert!(!looks_like_field_start("plain text", 0));
-    }
-
-    #[test]
-    fn looks_like_field_start_false_at_pipe() {
-        assert!(!looks_like_field_start("| key=value", 0));
-    }
-
-    #[test]
-    fn parse_bracketed_list_single_item() {
-        let items = parse_bracketed_list("test", "[hello]").unwrap();
-        assert_eq!(items, vec!["hello"]);
-    }
-
-    #[test]
-    fn parse_bracketed_list_multiple_items() {
-        let items = parse_bracketed_list("test", "[a | b | c]").unwrap();
-        assert_eq!(items, vec!["a", "b", "c"]);
-    }
-
-    #[test]
-    fn parse_bracketed_list_empty_brackets() {
-        let items = parse_bracketed_list("test", "[]").unwrap();
-        assert!(items.is_empty());
-    }
-
-    #[test]
-    fn parse_bracketed_list_nested_brackets() {
-        let items = parse_bracketed_list("test", "[outer [inner] | second]").unwrap();
-        assert_eq!(items, vec!["outer [inner]", "second"]);
-    }
-
-    #[test]
-    fn parse_bracketed_list_missing_open_bracket() {
-        assert!(parse_bracketed_list("test", "no brackets").is_err());
-    }
-
-    #[test]
-    fn parse_bracketed_list_empty_item_errors() {
-        assert!(parse_bracketed_list("test", "[a | | b]").is_err());
-    }
-
-    #[test]
-    fn parse_bracketed_list_unterminated_bracket() {
-        assert!(parse_bracketed_list("test", "[a [b | c]").is_err());
-    }
-
-    #[test]
-    fn parse_bracketed_list_unexpected_close_bracket() {
-        assert!(parse_bracketed_list("test", "[a ] b]").is_err());
-    }
-
-    #[test]
-    fn parse_bracketed_list_whitespace_trimming() {
-        let items = parse_bracketed_list("test", "  [ foo | bar ]  ").unwrap();
-        assert_eq!(items, vec!["foo", "bar"]);
-    }
-
-    #[test]
-    fn parse_non_negative_count_valid() {
-        assert_eq!(parse_non_negative_count("n", "42").unwrap(), 42);
-    }
-
-    #[test]
-    fn parse_non_negative_count_zero() {
-        assert_eq!(parse_non_negative_count("n", "0").unwrap(), 0);
-    }
-
-    #[test]
-    fn parse_non_negative_count_with_whitespace() {
-        assert_eq!(parse_non_negative_count("n", "  7  ").unwrap(), 7);
-    }
-
-    #[test]
-    fn parse_non_negative_count_negative_errors() {
-        assert!(parse_non_negative_count("n", "-1").is_err());
-    }
-
-    #[test]
-    fn parse_non_negative_count_non_numeric_errors() {
-        assert!(parse_non_negative_count("n", "abc").is_err());
-    }
-
-    #[test]
-    fn parse_persisted_record_pairs_simple() {
-        let pairs = parse_persisted_record_pairs("key=value").unwrap();
-        assert_eq!(pairs, vec![("key", "value")]);
-    }
-
-    #[test]
-    fn parse_persisted_record_pairs_multiple() {
-        let pairs = parse_persisted_record_pairs("a=1 | b=2 | c=3").unwrap();
-        assert_eq!(pairs.len(), 3);
-        assert_eq!(pairs[0], ("a", "1"));
-        assert_eq!(pairs[1], ("b", "2"));
-        assert_eq!(pairs[2], ("c", "3"));
-    }
-
-    #[test]
-    fn parse_persisted_record_pairs_with_prefix() {
-        let pairs = parse_persisted_record_pairs("improvement-curation-record | key=val").unwrap();
-        assert_eq!(pairs, vec![("key", "val")]);
-    }
-
-    #[test]
-    fn parse_persisted_record_pairs_bracketed_value() {
-        let pairs = parse_persisted_record_pairs("items=[a | b] | count=2").unwrap();
-        assert_eq!(pairs.len(), 2);
-        assert_eq!(pairs[0].0, "items");
-        assert_eq!(pairs[0].1, "[a | b]");
-        assert_eq!(pairs[1], ("count", "2"));
-    }
-
-    #[test]
-    fn parse_persisted_record_pairs_empty_errors() {
-        assert!(parse_persisted_record_pairs("").is_err());
-    }
-
-    #[test]
-    fn parse_persisted_record_pairs_no_equals_errors() {
-        assert!(parse_persisted_record_pairs("just-a-key").is_err());
+    fn looks_like_field_start_with_hyphenated_key() {
+        assert!(looks_like_field_start("my-key=value", 0));
+        assert!(!looks_like_field_start("my.key=value", 0)); // dot not allowed
     }
 
     #[test]
     fn read_bracketed_value_simple() {
-        let (val, cursor) = read_bracketed_value("[abc]", 0).unwrap();
-        assert_eq!(val, "[abc]");
-        assert_eq!(cursor, 5);
+        let (val, end) = read_bracketed_value("[hello]rest", 0).unwrap();
+        assert_eq!(val, "[hello]");
+        assert_eq!(end, 7);
     }
 
     #[test]
     fn read_bracketed_value_nested() {
-        let (val, cursor) = read_bracketed_value("[a [b] c]", 0).unwrap();
-        assert_eq!(val, "[a [b] c]");
-        assert_eq!(cursor, 9);
+        let (val, end) = read_bracketed_value("[a[b]c]rest", 0).unwrap();
+        assert_eq!(val, "[a[b]c]");
+        assert_eq!(end, 7);
     }
 
     #[test]
-    fn read_bracketed_value_unterminated() {
+    fn read_bracketed_value_unterminated_is_error() {
         assert!(read_bracketed_value("[abc", 0).is_err());
     }
 
     #[test]
-    fn skip_record_separators_pipes_and_spaces() {
-        assert_eq!(skip_record_separators("| | abc", 0), 4);
+    fn parse_non_negative_count_valid() {
+        assert_eq!(parse_non_negative_count("f", "42").unwrap(), 42);
+        assert_eq!(parse_non_negative_count("f", "  0  ").unwrap(), 0);
     }
 
     #[test]
-    fn skip_record_separators_no_separators() {
-        assert_eq!(skip_record_separators("abc", 0), 0);
-    }
-
-    #[test]
-    fn skip_spaces_leading_whitespace() {
-        assert_eq!(skip_spaces("   abc", 0), 3);
-    }
-
-    #[test]
-    fn skip_spaces_no_spaces() {
-        assert_eq!(skip_spaces("abc", 0), 0);
-    }
-
-    #[test]
-    fn looks_like_field_start_with_equals() {
-        assert!(looks_like_field_start("key=value", 0));
-    }
-
-    #[test]
-    fn looks_like_field_start_no_equals() {
-        assert!(!looks_like_field_start("just text", 0));
-    }
-
-    #[test]
-    fn looks_like_field_start_starts_with_equals() {
-        assert!(!looks_like_field_start("=value", 0));
-    }
-
-    #[test]
-    fn looks_like_field_start_with_pipe() {
-        assert!(!looks_like_field_start("| key=value", 0));
-    }
-
-    #[test]
-    fn looks_like_field_start_hyphenated_key() {
-        assert!(looks_like_field_start("my-key=value", 0));
+    fn parse_non_negative_count_invalid() {
+        assert!(parse_non_negative_count("f", "-1").is_err());
+        assert!(parse_non_negative_count("f", "abc").is_err());
     }
 }

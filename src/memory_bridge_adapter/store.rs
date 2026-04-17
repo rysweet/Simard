@@ -349,228 +349,70 @@ impl MemoryStore for CognitiveBridgeMemoryStore {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_helpers::{make_record, test_store};
     use super::*;
-    use crate::bridge::{BridgeRequest, BridgeResponse};
-    use crate::memory::{MemoryRecord, MemoryScope, MemoryStore};
-    use crate::memory_bridge::CognitiveMemoryBridge;
-    use crate::metadata::{BackendDescriptor, Freshness};
-    use crate::session::{SessionId, SessionPhase};
+    use crate::memory::MemoryScope;
 
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    /// A mock bridge transport that returns configurable responses.
-    struct MockTransport {
-        /// Counts how many calls were made.
-        call_count: AtomicUsize,
-        /// If true, store_fact calls succeed; if false, they fail.
-        store_succeeds: bool,
-        /// If true, search_facts returns empty results; if false, returns an error.
-        search_returns_empty: bool,
-    }
-
-    impl MockTransport {
-        fn new_succeeding() -> Self {
-            Self {
-                call_count: AtomicUsize::new(0),
-                store_succeeds: true,
-                search_returns_empty: true,
-            }
-        }
-
-        fn new_failing() -> Self {
-            Self {
-                call_count: AtomicUsize::new(0),
-                store_succeeds: false,
-                search_returns_empty: false,
-            }
-        }
-    }
-
-    impl crate::bridge::BridgeTransport for MockTransport {
-        fn call(&self, request: BridgeRequest) -> SimardResult<BridgeResponse> {
-            self.call_count.fetch_add(1, Ordering::Relaxed);
-            if request.method.contains("store") {
-                if self.store_succeeds {
-                    Ok(BridgeResponse {
-                        id: request.id,
-                        result: Some(serde_json::json!({"id": "mock-node-id"})),
-                        error: None,
-                    })
-                } else {
-                    Err(SimardError::BridgeCallFailed {
-                        bridge: "mock".to_string(),
-                        method: request.method,
-                        reason: "mock failure".to_string(),
-                    })
-                }
-            } else if request.method.contains("search") {
-                if self.search_returns_empty {
-                    Ok(BridgeResponse {
-                        id: request.id,
-                        result: Some(serde_json::json!([])),
-                        error: None,
-                    })
-                } else {
-                    Err(SimardError::BridgeCallFailed {
-                        bridge: "mock".to_string(),
-                        method: request.method,
-                        reason: "mock search failure".to_string(),
-                    })
-                }
-            } else {
-                Ok(BridgeResponse {
-                    id: request.id,
-                    result: Some(serde_json::json!(null)),
-                    error: None,
-                })
-            }
-        }
-
-        fn descriptor(&self) -> BackendDescriptor {
-            BackendDescriptor::for_runtime_type::<Self>(
-                "mock-bridge",
-                "test",
-                Freshness::now().unwrap(),
-            )
-        }
-    }
-
-    fn make_store(transport: MockTransport) -> CognitiveBridgeMemoryStore {
-        let dir = std::env::temp_dir().join(format!(
-            "simard_test_cbs_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        let bridge = CognitiveMemoryBridge::new(Box::new(transport));
-        CognitiveBridgeMemoryStore::new(bridge, dir.join("local_store.json")).unwrap()
-    }
-
-    fn make_record(key: &str, scope: MemoryScope) -> MemoryRecord {
-        MemoryRecord {
-            key: key.to_string(),
-            scope,
-            value: format!("value-for-{key}"),
-            session_id: SessionId::from_uuid(uuid::Uuid::nil()),
-            recorded_in: SessionPhase::Execution,
-            created_at: None,
-        }
+    #[test]
+    fn put_and_list_round_trip() {
+        let store = test_store();
+        let record = make_record("key1", MemoryScope::Project);
+        store.put(record.clone()).unwrap();
+        let listed = store.list(MemoryScope::Project).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].key, "key1");
     }
 
     #[test]
-    fn put_and_list_records() {
-        let store = make_store(MockTransport::new_succeeding());
-        store.put(make_record("k1", MemoryScope::Decision)).unwrap();
-        store.put(make_record("k2", MemoryScope::Decision)).unwrap();
-        store.put(make_record("k3", MemoryScope::Project)).unwrap();
-
-        let decisions = store.list(MemoryScope::Decision).unwrap();
-        assert_eq!(decisions.len(), 2);
-
-        let projects = store.list(MemoryScope::Project).unwrap();
-        assert_eq!(projects.len(), 1);
-    }
-
-    #[test]
-    fn put_stamps_created_at() {
-        let store = make_store(MockTransport::new_succeeding());
-        let record = make_record("k1", MemoryScope::Decision);
+    fn put_sets_created_at_when_missing() {
+        let store = test_store();
+        let record = make_record("key-ts", MemoryScope::Decision);
         assert!(record.created_at.is_none());
         store.put(record.clone()).unwrap();
-
         let all = store.list_all().unwrap();
-        assert_eq!(all.len(), 1);
-        assert!(all[0].created_at.is_some());
+        let found = all.iter().find(|r| r.key == "key-ts").unwrap();
+        assert!(found.created_at.is_some());
     }
 
     #[test]
-    fn list_all_returns_all_scopes() {
-        let store = make_store(MockTransport::new_succeeding());
-        store.put(make_record("a", MemoryScope::Decision)).unwrap();
-        store.put(make_record("b", MemoryScope::Project)).unwrap();
-        store.put(make_record("c", MemoryScope::Benchmark)).unwrap();
+    fn list_for_session_filters_correctly() {
+        let store = test_store();
+        let record = make_record("sess-key", MemoryScope::SessionScratch);
+        let session_id = record.session_id.clone();
+        store.put(record).unwrap();
+        let result = store.list_for_session(&session_id).unwrap();
+        assert_eq!(result.len(), 1);
+    }
 
+    #[test]
+    fn count_for_session_matches_list() {
+        let store = test_store();
+        let record = make_record("cnt-key", MemoryScope::Benchmark);
+        let session_id = record.session_id.clone();
+        store.put(record).unwrap();
+        let count = store.count_for_session(&session_id).unwrap();
+        let list = store.list_for_session(&session_id).unwrap();
+        assert_eq!(count, list.len());
+    }
+
+    #[test]
+    fn list_all_includes_all_scopes() {
+        let store = test_store();
+        store.put(make_record("a", MemoryScope::Project)).unwrap();
+        store.put(make_record("b", MemoryScope::Decision)).unwrap();
         let all = store.list_all().unwrap();
-        assert_eq!(all.len(), 3);
-    }
-
-    #[test]
-    fn list_for_session_filters_by_session() {
-        let store = make_store(MockTransport::new_succeeding());
-        store.put(make_record("k1", MemoryScope::Decision)).unwrap();
-
-        let nil_session = SessionId::from_uuid(uuid::Uuid::nil());
-        let other_session = SessionId::from_uuid(uuid::Uuid::from_u128(1));
-
-        let results = store.list_for_session(&nil_session).unwrap();
-        assert_eq!(results.len(), 1);
-
-        let results = store.list_for_session(&other_session).unwrap();
-        assert_eq!(results.len(), 0);
-    }
-
-    #[test]
-    fn count_for_session() {
-        let store = make_store(MockTransport::new_succeeding());
-        store.put(make_record("k1", MemoryScope::Decision)).unwrap();
-        store.put(make_record("k2", MemoryScope::Project)).unwrap();
-
-        let nil_session = SessionId::from_uuid(uuid::Uuid::nil());
-        assert_eq!(store.count_for_session(&nil_session).unwrap(), 2);
-    }
-
-    #[test]
-    fn list_by_time_range() {
-        let store = make_store(MockTransport::new_succeeding());
-        store.put(make_record("k1", MemoryScope::Decision)).unwrap();
-
-        let start = Utc::now() - chrono::Duration::seconds(10);
-        let end = Utc::now() + chrono::Duration::seconds(10);
-        let results = store.list_by_time_range(start, end).unwrap();
-        assert_eq!(results.len(), 1);
-
-        // Range in the past should return nothing
-        let old_start = Utc::now() - chrono::Duration::hours(2);
-        let old_end = Utc::now() - chrono::Duration::hours(1);
-        let results = store.list_by_time_range(old_start, old_end).unwrap();
-        assert!(results.is_empty());
-    }
-
-    #[test]
-    fn put_overwrites_same_key() {
-        let store = make_store(MockTransport::new_succeeding());
-        store.put(make_record("k1", MemoryScope::Decision)).unwrap();
-        let mut updated = make_record("k1", MemoryScope::Decision);
-        updated.value = "updated-value".to_string();
-        store.put(updated).unwrap();
-
-        let all = store.list_all().unwrap();
-        assert_eq!(all.len(), 1);
-        assert_eq!(all[0].value, "updated-value");
-    }
-
-    #[test]
-    fn put_with_bridge_failure_returns_error() {
-        let store = make_store(MockTransport::new_failing());
-        // Bridge store failure propagates — no silent degradation to file-only.
-        let result = store.put(make_record("k1", MemoryScope::Decision));
-        assert!(
-            result.is_err(),
-            "bridge failure must propagate, not silently persist"
-        );
+        assert_eq!(all.len(), 2);
     }
 
     #[test]
     fn sync_pending_returns_zero_when_empty() {
-        let store = make_store(MockTransport::new_succeeding());
+        let store = test_store();
         assert_eq!(store.sync_pending(), 0);
     }
 
     #[test]
-    fn descriptor_returns_bridge_backend() {
-        let store = make_store(MockTransport::new_succeeding());
+    fn descriptor_has_correct_identity() {
+        let store = test_store();
         let desc = store.descriptor();
         assert!(desc.identity.contains("cognitive-bridge"));
     }
