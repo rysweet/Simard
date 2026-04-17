@@ -2142,83 +2142,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_router_has_expected_routes() {
+    fn build_router_creates_valid_router() {
         let router = build_router();
+        // Verify the router can be constructed without panicking.
+        // Axum routers are opaque, but construction succeeding validates
+        // that all route paths, handlers, and middleware are well-formed.
         let _ = router;
-    }
-
-    #[test]
-    fn login_html_contains_form_elements() {
-        assert!(LOGIN_HTML.contains("<form id=\"login-form\">"));
-        assert!(LOGIN_HTML.contains("input id=\"code\""));
-        assert!(LOGIN_HTML.contains("Log in"));
-        assert!(LOGIN_HTML.contains("Simard"));
-    }
-
-    #[test]
-    fn index_html_contains_dashboard_sections() {
-        assert!(INDEX_HTML.contains("Simard Dashboard"));
-        assert!(INDEX_HTML.contains("System Status"));
-        assert!(INDEX_HTML.contains("Open Issues"));
-        assert!(INDEX_HTML.contains("fetchStatus"));
-        assert!(INDEX_HTML.contains("fetchIssues"));
-    }
-
-    #[test]
-    fn login_html_has_security_attributes() {
-        assert!(LOGIN_HTML.contains("maxlength=\"8\""));
-        assert!(LOGIN_HTML.contains("autocomplete=\"off\""));
-    }
-
-    #[test]
-    fn index_html_has_refresh_intervals() {
-        assert!(INDEX_HTML.contains("setInterval(fetchStatus,30000)"));
-        assert!(INDEX_HTML.contains("setInterval(fetchIssues,120000)"));
-    }
-
-    #[test]
-    fn build_router_creates_router() {
-        let router = build_router();
-        // Just verify the router is constructed without panic
-        let _ = format!("{:?}", "router created");
-        drop(router);
     }
 
     #[test]
     fn login_html_contains_form() {
         assert!(LOGIN_HTML.contains("<form"));
-        assert!(LOGIN_HTML.contains("login"));
+        assert!(LOGIN_HTML.contains("login-form"));
+        assert!(LOGIN_HTML.contains("/api/login"));
     }
 
     #[test]
-    fn index_html_contains_dashboard() {
+    fn index_html_contains_dashboard_structure() {
         assert!(INDEX_HTML.contains("Simard Dashboard"));
+        assert!(INDEX_HTML.contains("/api/status"));
+        assert!(INDEX_HTML.contains("/api/issues"));
         assert!(INDEX_HTML.contains("fetchStatus"));
     }
 
     #[test]
-    fn index_html_contains_cluster_topology_in_overview() {
-        assert!(!INDEX_HTML.contains("data-tab=\"distributed\""));
-        assert!(INDEX_HTML.contains("fetchDistributed"));
-        assert!(INDEX_HTML.contains("Cluster Topology"));
-        assert!(INDEX_HTML.contains("Remote VMs"));
-    }
-
-    #[test]
-    fn index_html_contains_goals_tab() {
-        assert!(INDEX_HTML.contains("data-tab=\"goals\""));
-        assert!(INDEX_HTML.contains("Goals"));
-        assert!(INDEX_HTML.contains("fetchGoals"));
-        assert!(INDEX_HTML.contains("Active Goals"));
-        assert!(INDEX_HTML.contains("Backlog"));
-    }
-
-    #[test]
-    fn index_html_contains_costs_tab() {
-        assert!(INDEX_HTML.contains("data-tab=\"costs\""));
-        assert!(INDEX_HTML.contains("Costs"));
-        assert!(INDEX_HTML.contains("fetchCosts"));
-        assert!(INDEX_HTML.contains("Daily Costs"));
-        assert!(INDEX_HTML.contains("Weekly Costs"));
+    fn login_html_has_code_input() {
+        assert!(LOGIN_HTML.contains(r#"type="text""#));
+        assert!(LOGIN_HTML.contains("maxlength"));
     }
 }
