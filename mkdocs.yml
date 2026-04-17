@@ -44,6 +44,24 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - Getting Started:
+    - Installation: installation.md
+    - Quickstart: quickstart.md
+  - Concepts:
+    - Philosophy: philosophy.md
+    - Patterns: patterns.md
+    - Workflows: workflows.md
+    - Truthful Runtime Metadata: concepts/truthful-runtime-metadata.md
+  - Reference:
+    - CLI Reference: reference/simard-cli.md
+    - Agents: agents.md
+    - Skills: skills.md
+    - Recipes: recipes.md
+    - Runtime Contracts: reference/runtime-contracts.md
+    - Bridge Wire Protocol: reference/bridge-wire-protocol.md
+    - Dashboard E2E Tests: reference/dashboard-e2e-tests.md
+  - Comparison with amplihack: amplihack-comparison.md
+  - Troubleshooting: troubleshooting.md
   - Roadmap: ROADMAP.md
   - Architecture:
     - Overview: architecture/overview.md
@@ -51,8 +69,6 @@ nav:
     - Cognitive Memory: architecture/cognitive-memory.md
     - Agent Composition: architecture/agent-composition.md
     - Implementation Plan: architecture/implementation-plan.md
-  - Concepts:
-    - Truthful Runtime Metadata: concepts/truthful-runtime-metadata.md
   - Tutorials:
     - First Local Session: tutorials/run-your-first-local-session.md
     - First Benchmark Suite: tutorials/run-your-first-benchmark-gym.md
@@ -65,8 +81,3 @@ nav:
     - Reclaim Disk Space: howto/reclaim-disk-space-and-run-low-space-rust-builds.md
     - Inspect Goal Register: howto/inspect-durable-goal-register.md
     - Dashboard E2E Tests: howto/run-dashboard-e2e-tests.md
-  - Reference:
-    - CLI Reference: reference/simard-cli.md
-    - Runtime Contracts: reference/runtime-contracts.md
-    - Bridge Wire Protocol: reference/bridge-wire-protocol.md
-    - Dashboard E2E Tests: reference/dashboard-e2e-tests.md

@@ -8,7 +8,33 @@ Named after [Suzanne Simard](https://en.wikipedia.org/wiki/Suzanne_Simard), the 
 
 Simard is a terminal-native engineering agent built in Rust. She operates like a disciplined software engineer: she understands codebases, works through tasks in explicit sessions, preserves useful memory, evaluates herself against benchmarks, and improves through structured review loops.
 
-Simard is part of the [amplihack](https://github.com/rysweet/amplihack) ecosystem of agentic coding tools.
+Simard is the Rust-native **successor to [amplihack](https://github.com/rysweet/amplihack)**. The trajectory is replacement: migrate every amplihack capability onto native Rust where it makes sense, and keep amplihack only where a native replacement does not yet exist.
+
+## Status: Successor-in-progress, not a drop-in replacement today
+
+Simard **today** natively provides:
+
+- **Cognitive memory** — the `cognitive_memory` module (backed by the `amplihack-memory` Rust crate) reaches parity with `amplihack-memory-lib`.
+- **Workflow execution** — the OODA daemon plus the engineer loop cover the ground held by `amplihack-recipe-runner` + `smart-orchestrator`, though the YAML recipe DSL is not yet ported.
+- **Meeting backend / facilitator / REPL** — a new capability with no amplihack analog.
+- **Goal curation, improvement curation, review pipelines, dashboard.**
+
+Simard **still depends on amplihack at runtime** for:
+
+- **`copilot-sdk` base type** — `base_type_copilot.rs` and friends spawn `amplihack copilot` over PTY. Removing this would break the copilot adapter.
+- **Gym evaluation** — `python/simard_gym_bridge.py` imports `amplihack.eval.progressive_test_suite` and `amplihack.eval.long_horizon_memory`. No native Rust gym eval yet.
+- **Optional install shim** — `simard ensure-deps` / `cmd_ensure_deps.rs` can auto-install `amplihack` when the copilot adapter needs it.
+
+These are tracked in GitHub issues labeled `parity`. See [docs/amplihack-comparison.md](docs/amplihack-comparison.md) for the full feature-by-feature matrix and migration path for each gap.
+
+## Recommended migration from amplihack
+
+```bash
+# Install Simard (amplihack remains usable; Simard opts in per feature)
+npx github:rysweet/Simard install
+```
+
+You can keep amplihack installed alongside Simard. The `copilot-sdk` base type and the gym bridge will continue to call through to amplihack until their parity issues ship.
 
 ## Install
 
@@ -115,7 +141,7 @@ Simard delegates work to agent runtimes through base types:
 | Base Type | Description | Status |
 |-----------|-------------|--------|
 | `rusty-clawd` | RustyClawd SDK — LLM + tool calling pipeline | Real (needs `ANTHROPIC_API_KEY`) |
-| `copilot-sdk` | amplihack copilot via PTY terminal | Real (needs `amplihack copilot`) |
+| `copilot-sdk` | amplihack copilot via PTY terminal — runtime dep on amplihack, see [comparison](docs/amplihack-comparison.md) | Real (needs `amplihack copilot`) |
 | `claude-agent-sdk` | Claude Code CLI as subprocess agent | Real (needs `claude` binary) |
 | `ms-agent-framework` | Microsoft Agent Framework | Real (needs `ms-agent-framework` or `python -m microsoft_agent_framework`) |
 | `local-harness` | Test adapter for development | Always available |
@@ -261,6 +287,16 @@ cargo fmt --all
 # Run a gym benchmark
 cargo run -- gym run repo-exploration-local
 ```
+
+## Documentation
+
+Full docs live under [`docs/`](docs/) and are published to [rysweet.github.io/Simard](https://rysweet.github.io/Simard/):
+
+- [Installation](docs/installation.md) · [Quickstart](docs/quickstart.md)
+- [Philosophy](docs/philosophy.md) · [Patterns](docs/patterns.md) · [Workflows](docs/workflows.md)
+- [Agents](docs/agents.md) · [Skills](docs/skills.md) · [Recipes](docs/recipes.md)
+- [CLI reference](docs/reference/simard-cli.md) · [Troubleshooting](docs/troubleshooting.md)
+- **[Comparison with amplihack](docs/amplihack-comparison.md)** — feature-by-feature matrix, what replaces what, what still depends on amplihack.
 
 ## License
 
