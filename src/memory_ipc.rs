@@ -185,20 +185,17 @@ pub fn spawn_server(
     if let Some(parent) = socket_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    // Reap stale socket file: if it exists and no one is listening, remove it.
-    if socket_path.exists() {
-        if UnixStream::connect(&socket_path).is_err() {
-            let _ = std::fs::remove_file(&socket_path);
-        } else {
-            return Err(SimardError::BridgeSpawnFailed {
-                bridge: "memory-ipc".into(),
-                reason: format!(
-                    "socket {} is already in use by another daemon",
-                    socket_path.display()
-                ),
-            });
-        }
-    }
+    // Always unlink the socket file before binding.
+    //
+    // Rationale: the caller has just opened the DB with an exclusive flock,
+    // so by definition it is the authoritative writer for this state-root.
+    // Any socket file left behind belongs to a prior (now-dead) daemon.
+    // An earlier version of this code tried to detect a live listener via
+    // `UnixStream::connect`; that was racy against systemd-style restarts
+    // where the previous process was still draining its listen queue, and
+    // would falsely report "socket in use" — leaving the new daemon
+    // without an IPC server while meetings kept falling back to direct open.
+    let _ = std::fs::remove_file(&socket_path);
     let listener =
         UnixListener::bind(&socket_path).map_err(|e| SimardError::BridgeSpawnFailed {
             bridge: "memory-ipc".into(),
