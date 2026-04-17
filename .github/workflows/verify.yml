@@ -10,7 +10,7 @@ env:
 jobs:
   pre-commit:
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 90
 
     steps:
       - name: Check out repository
@@ -55,6 +55,7 @@ jobs:
         with:
           shared-key: simard-ci
           save-if: true
+          cache-on-failure: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -72,7 +73,7 @@ jobs:
 
   install-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - name: Check out repository
@@ -115,6 +116,7 @@ jobs:
         with:
           shared-key: simard-ci
           save-if: true
+          cache-on-failure: true
 
       - name: Run install smoke test
         env:
