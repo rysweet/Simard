@@ -56,7 +56,7 @@ Simard is the successor to amplihack and is *on the path* to replacement — not
 
 ## Origins
 
-Most of these principles come directly from amplihack's `PHILOSOPHY.md` and `TRUST.md`. Simard keeps them because they work. See also [AGENTS.md](../AGENTS.md) for role-specific guidance.
+Most of these principles come directly from amplihack's `PHILOSOPHY.md` and `TRUST.md`. Simard keeps them because they work. See also the `AGENTS.md` file at the repository root for role-specific guidance.
 
 ## Next
 
