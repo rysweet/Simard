@@ -266,11 +266,10 @@ impl NativeCognitiveMemory {
     /// (fresh DB before schema init), runs a lightweight catalog query
     /// instead to confirm the engine is responsive.
     fn verify_db_health(db: &lbug::Database) -> SimardResult<()> {
-        let conn =
-            lbug::Connection::new(db).map_err(|e| SimardError::RuntimeInitFailed {
-                component: "cognitive-memory".into(),
-                reason: format!("Health check connection failed: {e}"),
-            })?;
+        let conn = lbug::Connection::new(db).map_err(|e| SimardError::RuntimeInitFailed {
+            component: "cognitive-memory".into(),
+            reason: format!("Health check connection failed: {e}"),
+        })?;
         match conn.query("MATCH (n:Fact) RETURN count(n)") {
             Ok(_) => Ok(()),
             Err(e) => {
@@ -278,10 +277,11 @@ impl NativeCognitiveMemory {
                 if msg.contains("does not exist") {
                     // Table missing — DB is valid but schema not yet applied.
                     // Verify engine works with a simple query.
-                    conn.query("RETURN 1").map_err(|e2| SimardError::RuntimeInitFailed {
-                        component: "cognitive-memory".into(),
-                        reason: format!("Health check basic query failed: {e2}"),
-                    })?;
+                    conn.query("RETURN 1")
+                        .map_err(|e2| SimardError::RuntimeInitFailed {
+                            component: "cognitive-memory".into(),
+                            reason: format!("Health check basic query failed: {e2}"),
+                        })?;
                     Ok(())
                 } else {
                     Err(SimardError::RuntimeInitFailed {
@@ -306,10 +306,10 @@ impl NativeCognitiveMemory {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                if let Some(epoch_str) = name_str.strip_prefix(prefix) {
-                    if let Ok(epoch) = epoch_str.parse::<u64>() {
-                        candidates.push((epoch, entry.path()));
-                    }
+                if let Some(epoch_str) = name_str.strip_prefix(prefix)
+                    && let Ok(epoch) = epoch_str.parse::<u64>()
+                {
+                    candidates.push((epoch, entry.path()));
                 }
             }
         }
@@ -319,12 +319,11 @@ impl NativeCognitiveMemory {
 
     /// Try to restore from the most recent verified backup.
     fn try_restore_from_backup(db_path: &Path) -> SimardResult<lbug::Database> {
-        let backup_path = Self::find_latest_backup(db_path).ok_or_else(|| {
-            SimardError::RuntimeInitFailed {
+        let backup_path =
+            Self::find_latest_backup(db_path).ok_or_else(|| SimardError::RuntimeInitFailed {
                 component: "cognitive-memory".into(),
                 reason: "No backups available for restore".into(),
-            }
-        })?;
+            })?;
 
         let epoch_str = backup_path
             .file_name()
@@ -540,17 +539,20 @@ impl NativeCognitiveMemory {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                if let Some(epoch_str) = name_str.strip_prefix(prefix) {
-                    if let Ok(epoch) = epoch_str.parse::<u64>() {
-                        backups.push((epoch, entry.path()));
-                    }
+                if let Some(epoch_str) = name_str.strip_prefix(prefix)
+                    && let Ok(epoch) = epoch_str.parse::<u64>()
+                {
+                    backups.push((epoch, entry.path()));
                 }
             }
         }
         backups.sort_by(|a, b| b.0.cmp(&a.0));
         for (_, path) in backups.into_iter().skip(keep) {
             if let Err(e) = std::fs::remove_file(&path) {
-                eprintln!("[simard] failed to remove old backup {}: {e}", path.display());
+                eprintln!(
+                    "[simard] failed to remove old backup {}: {e}",
+                    path.display()
+                );
             }
         }
     }

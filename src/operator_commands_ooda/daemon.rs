@@ -286,18 +286,12 @@ pub fn run_ooda_daemon(
                 Ok(backup_path) => {
                     daemon_log(
                         &state_root,
-                        &format!(
-                            "[simard] DB backup created: {}",
-                            backup_path.display()
-                        ),
+                        &format!("[simard] DB backup created: {}", backup_path.display()),
                     );
                     NativeCognitiveMemory::prune_old_backups(&state_root, 5);
                 }
                 Err(e) => {
-                    daemon_log(
-                        &state_root,
-                        &format!("[simard] DB backup failed: {e}"),
-                    );
+                    daemon_log(&state_root, &format!("[simard] DB backup failed: {e}"));
                 }
             }
             last_db_backup = Instant::now();
