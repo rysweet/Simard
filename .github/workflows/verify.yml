@@ -18,6 +18,12 @@ jobs:
 
       - name: Add swap space (4 GB)
         run: |
+          # GitHub runners ship with /swapfile pre-mounted; resizing with fallocate
+          # fails ("Text file busy"). Disable + remove first, then recreate.
+          if sudo swapon --show | awk 'NR>1 {print $1}' | grep -qx /swapfile; then
+            sudo swapoff /swapfile || true
+          fi
+          sudo rm -f /swapfile
           sudo fallocate -l 4G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
@@ -59,6 +65,12 @@ jobs:
 
       - name: Add swap space (4 GB)
         run: |
+          # GitHub runners ship with /swapfile pre-mounted; resizing with fallocate
+          # fails ("Text file busy"). Disable + remove first, then recreate.
+          if sudo swapon --show | awk 'NR>1 {print $1}' | grep -qx /swapfile; then
+            sudo swapoff /swapfile || true
+          fi
+          sudo rm -f /swapfile
           sudo fallocate -l 4G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
