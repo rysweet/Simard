@@ -56,6 +56,7 @@ pub mod memory_bridge_adapter;
 pub mod memory_cognitive;
 pub mod memory_consolidation;
 pub mod memory_hive;
+pub mod memory_ipc;
 pub mod metadata;
 pub mod ooda_actions;
 pub mod ooda_loop;

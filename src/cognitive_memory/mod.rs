@@ -327,6 +327,19 @@ impl NativeCognitiveMemory {
             });
         }
 
+        // Record our pid so external tooling (and `memory_ipc::reap_stale_open_lock`)
+        // can tell whether the lock owner is still alive after an unclean exit.
+        {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&lock_path)
+            {
+                let _ = writeln!(f, "{}", std::process::id());
+            }
+        }
+
         let result = f();
 
         unsafe {
