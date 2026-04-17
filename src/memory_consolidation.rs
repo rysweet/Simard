@@ -158,8 +158,13 @@ pub fn reflection_memory_operations(
         None,
     )?;
 
-    // Store each extracted fact in semantic memory.
+    // Store each extracted fact in semantic memory, deduplicating by concept
+    // so that repeated facts within the same session don't produce redundant entries.
+    let mut seen_concepts = std::collections::HashSet::<String>::new();
     for fact in facts {
+        if !seen_concepts.insert(fact.concept.clone()) {
+            continue;
+        }
         bridge.store_fact(
             &fact.concept,
             &fact.content,
@@ -188,8 +193,11 @@ pub fn persistence_memory_operations(
     // Prune expired sensory items.
     bridge.prune_expired_sensory()?;
 
-    // Attempt episode consolidation (batch of 10).
-    bridge.consolidate_episodes(10)?;
+    // Attempt episode consolidation (batch of 10) — best-effort; don't abort
+    // session teardown if the consolidation flush fails.
+    if let Err(e) = bridge.consolidate_episodes(10) {
+        eprintln!("[memory] consolidate_episodes error in persistence_memory_operations: {e}");
+    }
 
     // Store a final episodic memory marking session end.
     bridge.store_episode(
@@ -296,8 +304,11 @@ pub fn consolidation_persistence(
         None,
     )?;
 
-    // Consolidate any remaining episodes into long-term storage.
-    bridge.consolidate_episodes(20)?;
+    // Consolidate any remaining episodes into long-term storage — best-effort;
+    // a flush error should not abort the persistence phase.
+    if let Err(e) = bridge.consolidate_episodes(20) {
+        eprintln!("[memory] consolidate_episodes error in consolidation_persistence: {e}");
+    }
 
     Ok(())
 }
@@ -376,6 +387,26 @@ mod tests {
         reflection_memory_operations("transcript...", &facts, &test_session_id(), &bridge).unwrap();
         // 1 store_episode + 2 store_fact = 3
         assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn reflection_deduplicates_facts_by_concept() {
+        let (bridge, count) = counting_bridge();
+        let facts = vec![
+            FactExtraction {
+                concept: "rust".to_string(),
+                content: "Rust is safe".to_string(),
+                confidence: 0.9,
+            },
+            FactExtraction {
+                concept: "rust".to_string(), // duplicate concept — should be skipped
+                content: "Rust is fast".to_string(),
+                confidence: 0.8,
+            },
+        ];
+        reflection_memory_operations("transcript...", &facts, &test_session_id(), &bridge).unwrap();
+        // 1 store_episode + 1 store_fact (second duplicate skipped) = 2
+        assert_eq!(count.load(Ordering::SeqCst), 2);
     }
 
     #[test]
