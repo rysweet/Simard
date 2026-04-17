@@ -18,10 +18,12 @@ jobs:
 
       - name: Add swap space (4 GB)
         run: |
-          sudo fallocate -l 4G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          if [ ! -f /swapfile ]; then
+            sudo fallocate -l 4G /swapfile
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile
+          fi
+          sudo swapon /swapfile 2>/dev/null || true
           echo "Swap enabled: $(swapon --show)"
 
       - name: Set up Rust
@@ -59,10 +61,12 @@ jobs:
 
       - name: Add swap space (4 GB)
         run: |
-          sudo fallocate -l 4G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          if [ ! -f /swapfile ]; then
+            sudo fallocate -l 4G /swapfile
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile
+          fi
+          sudo swapon /swapfile 2>/dev/null || true
           echo "Swap enabled: $(swapon --show)"
 
       - name: Set up Rust
