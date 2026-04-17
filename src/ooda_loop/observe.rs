@@ -401,7 +401,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let result = scan_unprocessed_handoffs_in(dir.path());
         // Empty directory has no handoff files.
-        assert_eq!(result.unwrap_or(false), false);
+        assert!(!result.unwrap_or(false));
     }
 
     #[test]
