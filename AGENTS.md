@@ -87,23 +87,12 @@ Your next tool call(s) must include the recipe runner launch (alongside
 #### Default: Direct Execution
 
 The recipe runner is a plain subprocess — it does **not** require tmux.
-Call `run_recipe_by_name()` directly:
+Run it via the `amplihack` CLI:
 
 ```bash
-cd /path/to/repo && env -u CLAUDECODE \
-  AMPLIHACK_HOME=/path/to/amplihack PYTHONPATH=src python3 -c "
-from amplihack.recipes import run_recipe_by_name
-
-result = run_recipe_by_name(
-    'smart-orchestrator',
-    user_context={
-        'task_description': '''TASK_DESCRIPTION_HERE''',
-        'repo_path': '.',
-    },
-    progress=True,
-)
-print(f'Recipe result: {result}')
-"
+cd /path/to/repo && amplihack recipe run smart-orchestrator \
+  --task "TASK_DESCRIPTION_HERE" \
+  --repo-path .
 ```
 
 **Key points:**
@@ -127,33 +116,15 @@ Use tmux **only** when:
 - You want to detach and monitor a long-running recipe interactively
 
 ```bash
-LOG_FILE=$(mktemp /tmp/recipe-runner-output.XXXXXX.log)
-SCRIPT_FILE=$(mktemp /tmp/recipe-runner-script.XXXXXX.py)
-chmod 600 "$LOG_FILE" "$SCRIPT_FILE"
-cat > "$SCRIPT_FILE" << 'RECIPE_SCRIPT'
-from amplihack.recipes import run_recipe_by_name
-
-result = run_recipe_by_name(
-    "smart-orchestrator",
-    user_context={
-        "task_description": """TASK_DESCRIPTION_HERE""",
-        "repo_path": ".",
-    },
-    progress=True,
-)
-print(f"Recipe result: {result}")
-RECIPE_SCRIPT
 tmux new-session -d -s recipe-runner \
-  "cd /path/to/repo && env -u CLAUDECODE \
-   AMPLIHACK_HOME=/path/to/amplihack PYTHONPATH=src python3 $SCRIPT_FILE 2>&1 | tee $LOG_FILE"
-echo "Recipe runner log: $LOG_FILE"
+  "cd /path/to/repo && amplihack recipe run smart-orchestrator \
+     --task 'TASK_DESCRIPTION_HERE' \
+     --repo-path . 2>&1 | tee recipe-runner.log"
+echo "Recipe runner log: recipe-runner.log"
 ```
 
-- The Python payload is written to a temp script to avoid nested quoting
-  issues that cause silent launch failures (see issue #3215)
-- `chmod 600 "$LOG_FILE" "$SCRIPT_FILE"` — keeps both files private
 - `tmux new-session -d` — detached session, no timeout, survives disconnects
-- Monitor with: `tail -f "$LOG_FILE"` or `tmux attach -t recipe-runner`
+- Monitor with: `tail -f recipe-runner.log` or `tmux attach -t recipe-runner`
 
 **Restarting a stale tmux session**: Some runtimes (e.g. Copilot CLI) block
 `tmux kill-session` because it does not target a numeric PID. Use one of these

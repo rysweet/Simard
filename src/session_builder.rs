@@ -206,10 +206,10 @@ mod tests {
     }
 
     #[test]
-    fn default_provider_is_copilot() {
-        // Unless SIMARD_LLM_PROVIDER=rustyclawd, default is Copilot.
+    fn default_provider_is_rustyclawd() {
+        // Unless SIMARD_LLM_PROVIDER is set, default is RustyClawd.
         unsafe { std::env::remove_var("SIMARD_LLM_PROVIDER") };
-        assert_eq!(LlmProvider::from_env(), LlmProvider::Copilot);
+        assert_eq!(LlmProvider::from_env(), LlmProvider::RustyClawd);
     }
 
     #[test]
