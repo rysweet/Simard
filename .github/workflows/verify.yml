@@ -126,3 +126,4 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
           CARGO_PROFILE_DEV_INCREMENTAL: "false"
         run: cargo test --test install_smoke -- --nocapture
+
