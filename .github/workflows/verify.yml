@@ -16,6 +16,21 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Free disk space
+        run: |
+          # GitHub runners ship with ~14GB free; lbug + amplihack-memory + simard
+          # exhaust this. Remove preinstalled toolchains we don't use to free
+          # ~30GB. Failures are non-fatal (some paths may be missing).
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /usr/local/share/boost || true
+          sudo rm -rf /usr/local/share/chromium || true
+          sudo rm -rf /usr/local/.ghcup || true
+          sudo apt-get clean || true
+          df -h /
+
       - name: Add swap space (4 GB)
         run: |
           # GitHub runners ship with /swapfile pre-mounted; resizing with fallocate
@@ -57,11 +72,26 @@ jobs:
 
   install-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          # GitHub runners ship with ~14GB free; lbug + amplihack-memory + simard
+          # exhaust this. Remove preinstalled toolchains we don't use to free
+          # ~30GB. Failures are non-fatal (some paths may be missing).
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /usr/local/share/boost || true
+          sudo rm -rf /usr/local/share/chromium || true
+          sudo rm -rf /usr/local/.ghcup || true
+          sudo apt-get clean || true
+          df -h /
 
       - name: Add swap space (4 GB)
         run: |
