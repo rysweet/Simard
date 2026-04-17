@@ -60,7 +60,7 @@ pub fn enrich_planning_context(
         .collect();
 
     // Sort descending by score.
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|a| std::cmp::Reverse(a.0));
     scored.truncate(MAX_PACKS_PER_OBJECTIVE);
 
     let mut relevant_knowledge = Vec::new();
