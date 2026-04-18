@@ -47,6 +47,8 @@ pub struct MeetingBackend {
     bridge: Option<Box<dyn CognitiveMemoryOps>>,
     started_at: String,
     is_open: bool,
+    /// Explicit themes recorded via the `/theme` command.
+    themes: Vec<String>,
 }
 
 impl MeetingBackend {
@@ -75,6 +77,7 @@ impl MeetingBackend {
             bridge,
             started_at,
             is_open: true,
+            themes: Vec::new(),
         }
     }
 
@@ -214,7 +217,15 @@ impl MeetingBackend {
             .into_iter()
             .map(|q| q.text)
             .collect();
-        let themes = persist::extract_themes(&self.history);
+        // Explicit /theme entries come first; inferred themes fill in the rest.
+        let inferred_themes = persist::extract_themes(&self.history);
+        let mut themes: Vec<String> = self.themes.clone();
+        for t in inferred_themes {
+            let lower = t.to_lowercase();
+            if !themes.iter().any(|e| e.to_lowercase() == lower) {
+                themes.push(t);
+            }
+        }
 
         // Collect unique participants from messages and action item assignees.
         let mut participants: Vec<String> = Vec::new();
@@ -238,13 +249,26 @@ impl MeetingBackend {
         }
 
         // ── Auto-export markdown report on /end ──
+        // Convert extracted decision strings to MeetingDecision structs (with rationale).
+        let structured_decisions: Vec<crate::meeting_facilitator::MeetingDecision> = decisions
+            .iter()
+            .map(|d| {
+                let rationale = persist::extract_decision_rationale_pub(d, &self.history);
+                let participants = persist::extract_decision_participants_pub(d, &self.history);
+                crate::meeting_facilitator::MeetingDecision {
+                    description: d.clone(),
+                    rationale,
+                    participants,
+                }
+            })
+            .collect();
         let markdown_report_path = match persist::write_handoff_markdown_report(
             &self.topic,
             &self.started_at,
             &summary_text,
             &self.history,
             &action_items,
-            &decisions,
+            &structured_decisions,
         ) {
             Ok(p) => Some(p.to_string_lossy().to_string()),
             Err(e) => {
@@ -322,6 +346,21 @@ impl MeetingBackend {
     /// Access the session start time (for export).
     pub fn started_at(&self) -> &str {
         &self.started_at
+    }
+
+    /// Record an explicit theme for this meeting.
+    ///
+    /// Themes recorded here are merged with inferred themes on `close()`.
+    pub fn push_theme(&mut self, theme: String) {
+        let lower = theme.to_lowercase();
+        if !self.themes.iter().any(|t| t.to_lowercase() == lower) {
+            self.themes.push(theme);
+        }
+    }
+
+    /// Read the explicit themes recorded so far.
+    pub fn explicit_themes(&self) -> &[String] {
+        &self.themes
     }
 
     // --- Private helpers ---

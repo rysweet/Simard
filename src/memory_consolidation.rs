@@ -158,8 +158,20 @@ pub fn reflection_memory_operations(
         None,
     )?;
 
-    // Store each extracted fact in semantic memory.
+    // Store each extracted fact in semantic memory, deduplicating by concept
+    // both within this session and across prior sessions.
+    let mut seen_concepts = std::collections::HashSet::<String>::new();
     for fact in facts {
+        if !seen_concepts.insert(fact.concept.clone()) {
+            continue;
+        }
+        // Cross-session dedup: skip if an existing fact has >= confidence.
+        let existing = bridge
+            .search_facts(&fact.concept, 5, fact.confidence)
+            .unwrap_or_default();
+        if existing.iter().any(|f| f.confidence >= fact.confidence) {
+            continue;
+        }
         bridge.store_fact(
             &fact.concept,
             &fact.content,
@@ -188,8 +200,11 @@ pub fn persistence_memory_operations(
     // Prune expired sensory items.
     bridge.prune_expired_sensory()?;
 
-    // Attempt episode consolidation (batch of 10).
-    bridge.consolidate_episodes(10)?;
+    // Attempt episode consolidation (batch of 10) — best-effort; don't abort
+    // session teardown if the consolidation flush fails.
+    if let Err(e) = bridge.consolidate_episodes(10) {
+        eprintln!("[memory] consolidate_episodes error in persistence_memory_operations: {e}");
+    }
 
     // Store a final episodic memory marking session end.
     bridge.store_episode(
@@ -198,7 +213,60 @@ pub fn persistence_memory_operations(
         None,
     )?;
 
+    // Save a JSON snapshot for durable cross-session recall.  Errors are
+    // non-fatal: log and continue so a snapshot failure never aborts the
+    // session lifecycle.
+    if let Some(dir) = crate::memory_snapshot::snapshot_dir(None) {
+        match crate::memory_snapshot::save_session_snapshot(bridge, session_id.as_str(), &dir) {
+            Ok(path) => {
+                eprintln!("[simard] memory_snapshot: saved {}", path.display());
+                // Prune: keep only the 10 most recent snapshots.
+                prune_snapshots(&dir, 10);
+            }
+            Err(e) => {
+                eprintln!("[simard] memory_snapshot: save failed (non-fatal): {e}");
+            }
+        }
+    }
+
     Ok(())
+}
+
+/// Delete all but the `keep` most-recent snapshot files in `dir`.
+///
+/// Filenames are `<agent>-<epoch>.json`; lexicographic sort == chronological.
+/// Errors during deletion are logged but not propagated.
+fn prune_snapshots(dir: &std::path::Path, keep: usize) {
+    let mut entries: Vec<std::path::PathBuf> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd
+            .filter_map(|e| {
+                let e = e.ok()?;
+                let p = e.path();
+                if p.extension().and_then(|x| x.to_str()) == Some("json") {
+                    Some(p)
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        Err(e) => {
+            eprintln!("[simard] memory_snapshot: prune read_dir failed (non-fatal): {e}");
+            return;
+        }
+    };
+    if entries.len() <= keep {
+        return;
+    }
+    entries.sort();
+    let to_delete = entries.len() - keep;
+    for path in entries.iter().take(to_delete) {
+        if let Err(e) = std::fs::remove_file(path) {
+            eprintln!(
+                "[simard] memory_snapshot: prune delete {} failed (non-fatal): {e}",
+                path.display()
+            );
+        }
+    }
 }
 
 // ============================================================================
@@ -213,9 +281,10 @@ pub fn persistence_memory_operations(
 /// into working memory so the agent can reason over prior session knowledge.
 pub fn consolidation_intake(
     session_id: &SessionId,
+    objective: &str,
     bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<usize> {
-    let prior_facts = bridge.search_facts("prior-session", 50, 0.0)?;
+    let prior_facts = bridge.search_facts(objective, 50, 0.0)?;
     let count = prior_facts.len();
     if count > 0 {
         let summary = format!("Hydrated {count} prior-session facts for cross-session recall");
@@ -242,8 +311,11 @@ pub fn consolidation_persistence(
         None,
     )?;
 
-    // Consolidate any remaining episodes into long-term storage.
-    bridge.consolidate_episodes(20)?;
+    // Consolidate any remaining episodes into long-term storage — best-effort;
+    // a flush error should not abort the persistence phase.
+    if let Err(e) = bridge.consolidate_episodes(20) {
+        eprintln!("[memory] consolidate_episodes error in consolidation_persistence: {e}");
+    }
 
     Ok(())
 }
@@ -320,7 +392,27 @@ mod tests {
             },
         ];
         reflection_memory_operations("transcript...", &facts, &test_session_id(), &bridge).unwrap();
-        // 1 store_episode + 2 store_fact = 3
+        // 1 store_episode + 2*(search_facts + store_fact) = 5
+        assert_eq!(count.load(Ordering::SeqCst), 5);
+    }
+
+    #[test]
+    fn reflection_deduplicates_facts_by_concept() {
+        let (bridge, count) = counting_bridge();
+        let facts = vec![
+            FactExtraction {
+                concept: "rust".to_string(),
+                content: "Rust is safe".to_string(),
+                confidence: 0.9,
+            },
+            FactExtraction {
+                concept: "rust".to_string(), // duplicate concept — should be skipped
+                content: "Rust is fast".to_string(),
+                confidence: 0.8,
+            },
+        ];
+        reflection_memory_operations("transcript...", &facts, &test_session_id(), &bridge).unwrap();
+        // 1 store_episode + 1*(search_facts + store_fact) (second duplicate skipped) = 3
         assert_eq!(count.load(Ordering::SeqCst), 3);
     }
 
@@ -346,13 +438,14 @@ mod tests {
         let (bridge, count) = counting_bridge();
         persistence_memory_operations(&test_session_id(), &bridge).unwrap();
         // clear_working + prune_expired_sensory + consolidate_episodes + store_episode = 4
-        assert_eq!(count.load(Ordering::SeqCst), 4);
+        // + snapshot: search_facts("*") + recall_procedure("*") = 2 more → 6 total
+        assert_eq!(count.load(Ordering::SeqCst), 6);
     }
 
     #[test]
     fn consolidation_intake_returns_zero_when_no_prior_facts() {
         let (bridge, count) = counting_bridge();
-        let hydrated = consolidation_intake(&test_session_id(), &bridge).unwrap();
+        let hydrated = consolidation_intake(&test_session_id(), "test-objective", &bridge).unwrap();
         assert_eq!(hydrated, 0);
         // Only 1 call: search_facts
         assert_eq!(count.load(Ordering::SeqCst), 1);
@@ -384,7 +477,7 @@ mod tests {
             }
         });
         let bridge = CognitiveMemoryBridge::new(Box::new(transport));
-        let hydrated = consolidation_intake(&test_session_id(), &bridge).unwrap();
+        let hydrated = consolidation_intake(&test_session_id(), "test-objective", &bridge).unwrap();
         assert_eq!(hydrated, 1);
         // search_facts + push_working + store_episode = 3
         assert_eq!(call_count.load(Ordering::SeqCst), 3);

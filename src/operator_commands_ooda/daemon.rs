@@ -266,6 +266,20 @@ pub fn run_ooda_daemon(
         daemon_log(&state_root, "[simard] OODA daemon: auto-reload enabled");
     }
 
+    // --- periodic DB backup state -----------------------------------------
+    let db_backup_interval_secs: u64 = std::env::var("SIMARD_DB_BACKUP_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3600);
+    let mut last_db_backup = Instant::now()
+        .checked_sub(Duration::from_secs(db_backup_interval_secs))
+        .unwrap_or_else(Instant::now);
+    daemon_log(
+        &state_root,
+        &format!("[simard] OODA daemon: DB backup interval = {db_backup_interval_secs}s"),
+    );
+    // -------------------------------------------------------------------
+
     let mut cycles_run = 0u32;
 
     loop {
@@ -296,6 +310,24 @@ pub fn run_ooda_daemon(
             );
             break;
         }
+
+        // --- periodic DB backup (at START of cycle) ------------------------
+        if last_db_backup.elapsed() >= Duration::from_secs(db_backup_interval_secs) {
+            match NativeCognitiveMemory::create_verified_backup(&state_root) {
+                Ok(backup_path) => {
+                    daemon_log(
+                        &state_root,
+                        &format!("[simard] DB backup created: {}", backup_path.display()),
+                    );
+                    NativeCognitiveMemory::prune_old_backups(&state_root, 5);
+                }
+                Err(e) => {
+                    daemon_log(&state_root, &format!("[simard] DB backup failed: {e}"));
+                }
+            }
+            last_db_backup = Instant::now();
+        }
+        // -------------------------------------------------------------------
 
         let cycle_start = Instant::now();
 

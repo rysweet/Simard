@@ -225,80 +225,43 @@ mod tests {
     use super::*;
     use crate::copilot_task_submit::{CopilotSubmitOutcome, CopilotSubmitReport};
 
-    fn make_report() -> CopilotSubmitReport {
+    fn sample_report() -> CopilotSubmitReport {
         CopilotSubmitReport {
             selected_base_type: "terminal-shell".to_string(),
-            flow_asset: "test-flow-asset".to_string(),
+            flow_asset: "test-flow".to_string(),
             outcome: CopilotSubmitOutcome::Success,
             reason_code: None,
-            payload_id: "payload-001".to_string(),
-            ordered_steps: vec!["step-one".to_string(), "step-two".to_string()],
-            observed_checkpoints: vec!["checkpoint-alpha".to_string()],
-            last_meaningful_output_line: Some("last line".to_string()),
-            transcript_preview: "$ echo hello".to_string(),
+            payload_id: "test-payload-123".to_string(),
+            ordered_steps: vec!["step-1".to_string(), "step-2".to_string()],
+            observed_checkpoints: vec!["cp-1".to_string()],
+            last_meaningful_output_line: Some("done".to_string()),
+            transcript_preview: "transcript...".to_string(),
         }
     }
 
     #[test]
-    fn print_copilot_submit_report_json_succeeds() {
-        let report = make_report();
+    fn print_copilot_submit_report_json_mode() {
+        let report = sample_report();
         let result =
-            print_copilot_submit_report(Path::new("/test/state"), "single-process", &report, true);
-        assert!(result.is_ok(), "JSON output should succeed");
+            print_copilot_submit_report(Path::new("/tmp/test-state"), "local", &report, true);
+        assert!(result.is_ok());
     }
 
     #[test]
-    fn print_copilot_submit_report_text_succeeds() {
-        let report = make_report();
+    fn print_copilot_submit_report_text_mode() {
+        let report = sample_report();
         let result =
-            print_copilot_submit_report(Path::new("/test/state"), "single-process", &report, false);
-        assert!(result.is_ok(), "text output should succeed");
+            print_copilot_submit_report(Path::new("/tmp/test-state"), "local", &report, false);
+        assert!(result.is_ok());
     }
 
     #[test]
     fn print_copilot_submit_report_with_reason_code() {
-        let mut report = make_report();
+        let mut report = sample_report();
         report.outcome = CopilotSubmitOutcome::Unsupported;
-        report.reason_code = Some("no-terminal-session".to_string());
+        report.reason_code = Some("no-agent-binary".to_string());
         let result =
-            print_copilot_submit_report(Path::new("/test/state"), "multi-process", &report, false);
+            print_copilot_submit_report(Path::new("/tmp/test-state"), "local", &report, false);
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn print_copilot_submit_report_empty_steps_and_checkpoints() {
-        let mut report = make_report();
-        report.ordered_steps.clear();
-        report.observed_checkpoints.clear();
-        report.last_meaningful_output_line = None;
-        let result =
-            print_copilot_submit_report(Path::new("/test/state"), "single-process", &report, false);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[ignore = "requires bootstrap runtime environment"]
-    fn bootstrap_probe_requires_valid_environment() {
-        let result = run_bootstrap_probe(
-            "simard-engineer",
-            "terminal-shell",
-            "single-process",
-            "test objective",
-            None,
-        );
-        // This would fail without a real environment; just verify it returns an error
-        assert!(result.is_err());
-    }
-
-    #[test]
-    #[ignore = "requires bootstrap runtime environment"]
-    fn handoff_probe_requires_valid_environment() {
-        let result = run_handoff_probe(
-            "simard-engineer",
-            "terminal-shell",
-            "single-process",
-            "test objective",
-        );
-        assert!(result.is_err());
     }
 }

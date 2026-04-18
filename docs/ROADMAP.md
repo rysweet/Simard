@@ -28,7 +28,7 @@
 | Dashboard v2 | WebSocket chat, logs, processes, memory, auth, issues | `src/operator_commands_dashboard/` |
 | Remote Session | azlin-based remote VM orchestration with lifecycle | `src/remote_session.rs`, `src/remote_azlin.rs` |
 | Self-Metrics | Metric recording, daily reports, cost tracking | `src/self_metrics/`, `src/cost_tracking/` |
-| Ensure-Deps | Auto-install runtime dependencies (git, python3, gh, etc.) | `src/cmd_ensure_deps.rs` |
+| Ensure-Deps | Check runtime dependencies (git, python3, gh) with warnings | `src/cmd_ensure_deps.rs` |
 | Cleanup Command | Resource reclamation (canary dirs, stale targets, orphans) | `src/cmd_cleanup.rs` |
 | Test Coverage | 3,177 tests across 238 source files (100% file coverage) | `tests/` |
 

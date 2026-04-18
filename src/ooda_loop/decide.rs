@@ -19,6 +19,8 @@ pub fn decide(priorities: &[Priority], config: &OodaConfig) -> SimardResult<Vec<
         let kind = match priority.goal_id.as_str() {
             "__memory__" => ActionKind::ConsolidateMemory,
             "__improvement__" => ActionKind::RunImprovement,
+            "__poll_activity__" => ActionKind::PollDeveloperActivity,
+            "__extract_ideas__" => ActionKind::ExtractIdeas,
             _ => ActionKind::AdvanceGoal,
         };
         actions.push(PlannedAction {
@@ -148,5 +150,19 @@ mod tests {
         let config = OodaConfig::default();
         let actions = decide(&priorities, &config).unwrap();
         assert_eq!(actions[0].description, "important task");
+    }
+
+    #[test]
+    fn decide_maps_extract_ideas_priority() {
+        let priorities = vec![Priority {
+            goal_id: "__extract_ideas__".to_string(),
+            urgency: 0.6,
+            reason: "surface research ideas from activity".to_string(),
+        }];
+        let config = OodaConfig::default();
+        let actions = decide(&priorities, &config).unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, ActionKind::ExtractIdeas);
+        assert!(actions[0].goal_id.is_none());
     }
 }

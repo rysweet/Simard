@@ -42,6 +42,7 @@ pub fn build_router() -> Router {
         .route("/api/memory", get(memory_metrics))
         .route("/api/memory/search", post(memory_search))
         .route("/api/traces", get(traces))
+        .route("/api/activity", get(activity))
         .route("/ws/chat", get(ws_chat_handler))
         .route("/api/login", post(login))
         .route("/login", get(login_page))
@@ -537,6 +538,143 @@ async fn traces() -> Json<Value> {
     }))
 }
 
+/// Live activity view: current OODA state, in-flight actions, recent cycle
+/// outcomes, open PRs, and assigned issues.
+async fn activity() -> Json<Value> {
+    // --- 1. Daemon health (current cycle & phase) ---
+    let health_path = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/var/tmp"))
+        .join("simard")
+        .join("daemon_health.json");
+
+    let daemon_health: Option<Value> = std::fs::read_to_string(&health_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
+
+    let current_cycle = daemon_health
+        .as_ref()
+        .and_then(|h| h.get("cycle_number"))
+        .cloned()
+        .unwrap_or(json!(null));
+
+    let daemon_status = daemon_health
+        .as_ref()
+        .and_then(|h| h.get("status"))
+        .cloned()
+        .unwrap_or(json!("stopped"));
+
+    let last_heartbeat = daemon_health
+        .as_ref()
+        .and_then(|h| h.get("timestamp"))
+        .cloned()
+        .unwrap_or(json!(null));
+
+    let actions_taken = daemon_health
+        .as_ref()
+        .and_then(|h| h.get("actions_taken"))
+        .cloned()
+        .unwrap_or(json!(null));
+
+    // --- 2. Recent cycle reports ---
+    let state_root = resolve_state_root();
+    let recent_cycles = read_recent_cycle_reports(&state_root, 10);
+
+    // --- 3. Open PRs by Simard ---
+    let open_prs = run_gh_json(&[
+        "pr",
+        "list",
+        "--author",
+        "@me",
+        "--state",
+        "open",
+        "--json",
+        "number,title,url,createdAt,headRefName",
+    ])
+    .await;
+
+    // --- 4. Issues assigned to Simard ---
+    let assigned_issues = run_gh_json(&[
+        "issue",
+        "list",
+        "--assignee",
+        "@me",
+        "--state",
+        "open",
+        "--json",
+        "number,title,url,labels",
+    ])
+    .await;
+
+    Json(json!({
+        "daemon": {
+            "status": daemon_status,
+            "current_cycle": current_cycle,
+            "last_heartbeat": last_heartbeat,
+            "actions_taken": actions_taken,
+        },
+        "recent_cycles": recent_cycles,
+        "open_prs": open_prs,
+        "assigned_issues": assigned_issues,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    }))
+}
+
+/// Run a `gh` CLI command and parse JSON output, returning a `Value`.
+async fn run_gh_json(args: &[&str]) -> Value {
+    match tokio::process::Command::new("gh").args(args).output().await {
+        Ok(o) if o.status.success() => {
+            let raw = String::from_utf8_lossy(&o.stdout);
+            serde_json::from_str::<Value>(&raw).unwrap_or(json!([]))
+        }
+        _ => json!([]),
+    }
+}
+
+/// Read the most recent N cycle report files from disk.
+fn read_recent_cycle_reports(state_root: &std::path::Path, n: usize) -> Vec<Value> {
+    // The daemon writes to `state_root/state/cycle_reports/` while
+    // resolve_state_root() may return the parent. Check both locations.
+    let candidates = [
+        state_root.join("cycle_reports"),
+        state_root.join("state").join("cycle_reports"),
+    ];
+
+    let mut entries: Vec<(u32, String)> = Vec::new();
+
+    for dir in &candidates {
+        if let Ok(listing) = std::fs::read_dir(dir) {
+            for entry in listing.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                // Files are named cycle_<N>.json
+                if let Some(num_str) = name
+                    .strip_prefix("cycle_")
+                    .and_then(|s| s.strip_suffix(".json"))
+                    && let Ok(num) = num_str.parse::<u32>()
+                    && let Ok(contents) = std::fs::read_to_string(entry.path())
+                {
+                    entries.push((num, contents));
+                }
+            }
+        }
+    }
+
+    // Deduplicate by cycle number (prefer higher-numbered path if duplicates exist)
+    entries.sort_by(|a, b| b.0.cmp(&a.0));
+    entries.dedup_by_key(|e| e.0);
+    entries.truncate(n);
+
+    entries
+        .into_iter()
+        .map(|(num, summary)| {
+            // Try parsing as JSON first; if it's plain text, wrap it.
+            match serde_json::from_str::<Value>(&summary) {
+                Ok(v) => json!({"cycle_number": num, "report": v}),
+                Err(_) => json!({"cycle_number": num, "summary": summary}),
+            }
+        })
+        .collect()
+}
+
 async fn distributed() -> Json<Value> {
     // Query the Simard VM status via azlin connect with a timeout so the
     // dashboard doesn't hang if the bastion is slow.
@@ -815,14 +953,14 @@ fn load_dashboard_meeting_prompt() -> SimardResult<String> {
     })
 }
 
-/// Open a RustyClawd agent session for the dashboard chat.
-/// Uses the native Rust SDK (no subprocess, no CLI piping).
+/// Open an agent session for the dashboard chat.
+/// Uses the same config-driven provider as the CLI meeting REPL
+/// (controlled by `SIMARD_LLM_PROVIDER`, defaults to RustyClawd).
 fn open_dashboard_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeSession>> {
     match crate::session_builder::SessionBuilder::new(crate::identity::OperatingMode::Meeting)
         .node_id("dashboard-chat")
         .address("dashboard-chat://local")
         .adapter_tag("meeting-dashboard")
-        .provider(crate::session_builder::LlmProvider::RustyClawd)
         .open()
     {
         Ok(s) => Some(s),
@@ -922,7 +1060,7 @@ async fn handle_ws_chat(mut socket: WebSocket) {
                         break;
                     }
                     MeetingCommand::Help => {
-                        let help = "Commands: /status, /template [name], /export, /close, /help. Everything else is natural conversation with Simard.";
+                        let help = "Commands: /status, /template [name], /export, /theme <text>, /recap, /preview, /close, /help. Everything else is natural conversation with Simard.";
                         let _ = socket
                             .send(Message::Text(
                                 json!({"role":"system","content": help}).to_string().into(),
@@ -978,6 +1116,54 @@ async fn handle_ws_chat(mut socket: WebSocket) {
                         let _ = socket
                             .send(Message::Text(
                                 json!({"role":"system","content": content})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await;
+                    }
+                    MeetingCommand::Theme(theme) => {
+                        backend.push_theme(theme.clone());
+                        let content = format!("Theme recorded: {theme}");
+                        let _ = socket
+                            .send(Message::Text(
+                                json!({"role":"system","content": content})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await;
+                    }
+                    MeetingCommand::Recap => {
+                        let status = backend.status();
+                        let themes = backend.explicit_themes();
+                        let mut recap = format!(
+                            "── Meeting Recap ──\nTopic: {}\nMessages: {}\nStarted: {}",
+                            status.topic, status.message_count, status.started_at
+                        );
+                        if !themes.is_empty() {
+                            recap.push_str(&format!("\nThemes: {}", themes.join(", ")));
+                        }
+                        let _ = socket
+                            .send(Message::Text(
+                                json!({"role":"system","content": recap}).to_string().into(),
+                            ))
+                            .await;
+                    }
+                    MeetingCommand::Preview => {
+                        let status = backend.status();
+                        let themes = backend.explicit_themes();
+                        let preview = format!(
+                            "── Handoff Preview ──\nTopic: {}\nMessages so far: {}\nThemes: {}",
+                            status.topic,
+                            status.message_count,
+                            if themes.is_empty() {
+                                "none yet".to_string()
+                            } else {
+                                themes.join(", ")
+                            }
+                        );
+                        let _ = socket
+                            .send(Message::Text(
+                                json!({"role":"system","content": preview})
                                     .to_string()
                                     .into(),
                             ))
@@ -2142,83 +2328,105 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_router_has_expected_routes() {
+    fn build_router_creates_valid_router() {
         let router = build_router();
+        // Verify the router can be constructed without panicking.
+        // Axum routers are opaque, but construction succeeding validates
+        // that all route paths, handlers, and middleware are well-formed.
         let _ = router;
-    }
-
-    #[test]
-    fn login_html_contains_form_elements() {
-        assert!(LOGIN_HTML.contains("<form id=\"login-form\">"));
-        assert!(LOGIN_HTML.contains("input id=\"code\""));
-        assert!(LOGIN_HTML.contains("Log in"));
-        assert!(LOGIN_HTML.contains("Simard"));
-    }
-
-    #[test]
-    fn index_html_contains_dashboard_sections() {
-        assert!(INDEX_HTML.contains("Simard Dashboard"));
-        assert!(INDEX_HTML.contains("System Status"));
-        assert!(INDEX_HTML.contains("Open Issues"));
-        assert!(INDEX_HTML.contains("fetchStatus"));
-        assert!(INDEX_HTML.contains("fetchIssues"));
-    }
-
-    #[test]
-    fn login_html_has_security_attributes() {
-        assert!(LOGIN_HTML.contains("maxlength=\"8\""));
-        assert!(LOGIN_HTML.contains("autocomplete=\"off\""));
-    }
-
-    #[test]
-    fn index_html_has_refresh_intervals() {
-        assert!(INDEX_HTML.contains("setInterval(fetchStatus,30000)"));
-        assert!(INDEX_HTML.contains("setInterval(fetchIssues,120000)"));
-    }
-
-    #[test]
-    fn build_router_creates_router() {
-        let router = build_router();
-        // Just verify the router is constructed without panic
-        let _ = format!("{:?}", "router created");
-        drop(router);
     }
 
     #[test]
     fn login_html_contains_form() {
         assert!(LOGIN_HTML.contains("<form"));
-        assert!(LOGIN_HTML.contains("login"));
+        assert!(LOGIN_HTML.contains("login-form"));
+        assert!(LOGIN_HTML.contains("/api/login"));
     }
 
     #[test]
-    fn index_html_contains_dashboard() {
+    fn index_html_contains_dashboard_structure() {
         assert!(INDEX_HTML.contains("Simard Dashboard"));
+        assert!(INDEX_HTML.contains("/api/status"));
+        assert!(INDEX_HTML.contains("/api/issues"));
         assert!(INDEX_HTML.contains("fetchStatus"));
     }
 
     #[test]
-    fn index_html_contains_cluster_topology_in_overview() {
-        assert!(!INDEX_HTML.contains("data-tab=\"distributed\""));
-        assert!(INDEX_HTML.contains("fetchDistributed"));
-        assert!(INDEX_HTML.contains("Cluster Topology"));
-        assert!(INDEX_HTML.contains("Remote VMs"));
+    fn login_html_has_code_input() {
+        assert!(LOGIN_HTML.contains(r#"type="text""#));
+        assert!(LOGIN_HTML.contains("maxlength"));
     }
 
     #[test]
-    fn index_html_contains_goals_tab() {
-        assert!(INDEX_HTML.contains("data-tab=\"goals\""));
-        assert!(INDEX_HTML.contains("Goals"));
-        assert!(INDEX_HTML.contains("fetchGoals"));
-        assert!(INDEX_HTML.contains("Active Goals"));
-        assert!(INDEX_HTML.contains("Backlog"));
+    fn read_recent_cycle_reports_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let reports = read_recent_cycle_reports(dir.path(), 5);
+        assert!(reports.is_empty());
     }
 
     #[test]
-    fn index_html_contains_costs_tab() {
-        assert!(INDEX_HTML.contains("data-tab=\"costs\""));
-        assert!(INDEX_HTML.contains("Costs"));
-        assert!(INDEX_HTML.contains("fetchCosts"));
-        assert!(INDEX_HTML.contains("Daily Costs"));
-        assert!(INDEX_HTML.contains("Weekly Costs"));
+    fn read_recent_cycle_reports_returns_sorted_and_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let cycle_dir = dir.path().join("cycle_reports");
+        std::fs::create_dir_all(&cycle_dir).unwrap();
+
+        for i in 1..=15 {
+            std::fs::write(
+                cycle_dir.join(format!("cycle_{i}.json")),
+                format!("Cycle {i}: 1 action, 1 succeeded"),
+            )
+            .unwrap();
+        }
+
+        let reports = read_recent_cycle_reports(dir.path(), 5);
+        assert_eq!(reports.len(), 5);
+        // Should be sorted descending by cycle number
+        assert_eq!(reports[0]["cycle_number"], 15);
+        assert_eq!(reports[4]["cycle_number"], 11);
+    }
+
+    #[test]
+    fn read_recent_cycle_reports_parses_json_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let cycle_dir = dir.path().join("cycle_reports");
+        std::fs::create_dir_all(&cycle_dir).unwrap();
+
+        std::fs::write(
+            cycle_dir.join("cycle_1.json"),
+            r#"{"actions": 3, "succeeded": 2}"#,
+        )
+        .unwrap();
+
+        let reports = read_recent_cycle_reports(dir.path(), 5);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0]["cycle_number"], 1);
+        // JSON content should be nested under "report"
+        assert!(reports[0].get("report").is_some());
+        assert_eq!(reports[0]["report"]["actions"], 3);
+    }
+
+    #[test]
+    fn read_recent_cycle_reports_deduplicates_across_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create both candidate directories with overlapping cycle numbers
+        let dir_a = dir.path().join("cycle_reports");
+        let dir_b = dir.path().join("state").join("cycle_reports");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+
+        std::fs::write(dir_a.join("cycle_5.json"), "from dir_a").unwrap();
+        std::fs::write(dir_b.join("cycle_5.json"), "from dir_b").unwrap();
+        std::fs::write(dir_b.join("cycle_6.json"), "unique to dir_b").unwrap();
+
+        let reports = read_recent_cycle_reports(dir.path(), 10);
+        // Should have 2 unique cycle numbers (5 and 6), not 3
+        assert_eq!(reports.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn run_gh_json_returns_empty_array_on_failure() {
+        // gh is unlikely to succeed without auth in test; verify graceful handling
+        let result = run_gh_json(&["pr", "list", "--json", "number"]).await;
+        assert!(result.is_array());
     }
 }

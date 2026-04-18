@@ -19,6 +19,13 @@ pub enum BenchmarkClass {
     PerformanceAnalysis,
     SecurityAudit,
     ApiDesign,
+    CodeReview,
+    Debugging,
+    ConfigManagement,
+    ConcurrencyAnalysis,
+    MigrationPlanning,
+    ObservabilityInstrumentation,
+    DataModeling,
 }
 
 impl Display for BenchmarkClass {
@@ -36,6 +43,13 @@ impl Display for BenchmarkClass {
             Self::PerformanceAnalysis => "performance-analysis",
             Self::SecurityAudit => "security-audit",
             Self::ApiDesign => "api-design",
+            Self::CodeReview => "code-review",
+            Self::Debugging => "debugging",
+            Self::ConfigManagement => "config-management",
+            Self::ConcurrencyAnalysis => "concurrency-analysis",
+            Self::MigrationPlanning => "migration-planning",
+            Self::ObservabilityInstrumentation => "observability-instrumentation",
+            Self::DataModeling => "data-modeling",
         };
         f.write_str(label)
     }
@@ -237,6 +251,25 @@ mod tests {
         );
         assert_eq!(BenchmarkClass::SecurityAudit.to_string(), "security-audit");
         assert_eq!(BenchmarkClass::ApiDesign.to_string(), "api-design");
+        assert_eq!(BenchmarkClass::CodeReview.to_string(), "code-review");
+        assert_eq!(BenchmarkClass::Debugging.to_string(), "debugging");
+        assert_eq!(
+            BenchmarkClass::ConfigManagement.to_string(),
+            "config-management"
+        );
+        assert_eq!(
+            BenchmarkClass::ConcurrencyAnalysis.to_string(),
+            "concurrency-analysis"
+        );
+        assert_eq!(
+            BenchmarkClass::MigrationPlanning.to_string(),
+            "migration-planning"
+        );
+        assert_eq!(
+            BenchmarkClass::ObservabilityInstrumentation.to_string(),
+            "observability-instrumentation"
+        );
+        assert_eq!(BenchmarkClass::DataModeling.to_string(), "data-modeling");
     }
 
     #[test]

@@ -67,7 +67,7 @@ fn full_session_lifecycle_triggers_all_consolidation_phases() {
     );
 
     // Phase 1b: Cross-session recall
-    consolidation_intake(&sid, &bridge).unwrap();
+    consolidation_intake(&sid, "", &bridge).unwrap();
     let after_consolidation_intake = call_count.load(Ordering::SeqCst);
     assert!(
         after_consolidation_intake > after_intake,
@@ -237,7 +237,7 @@ fn cross_session_recall_hydrates_prior_facts() {
 
     // Cross-session recall should find 2 prior facts and push summary to
     // working memory.
-    let hydrated = consolidation_intake(&sid, &bridge).unwrap();
+    let hydrated = consolidation_intake(&sid, "continue prior work", &bridge).unwrap();
     assert_eq!(hydrated, 2, "should hydrate 2 prior-session facts");
 
     // Verify bridge calls: intake (3) + consolidation_intake with facts (3)

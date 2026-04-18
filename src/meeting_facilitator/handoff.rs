@@ -157,15 +157,26 @@ impl MeetingHandoff {
 
         // Extract themes from notes; use decision/action text if notes
         // are empty (common in the backend code path which uses messages, not notes).
-        let mut themes = Self::extract_themes_from_notes(&session.notes);
-        if themes.is_empty() {
-            let alt_texts: Vec<String> = session
-                .decisions
-                .iter()
-                .map(|d| d.description.clone())
-                .chain(session.action_items.iter().map(|a| a.description.clone()))
-                .collect();
-            themes = Self::extract_themes_from_notes(&alt_texts);
+        // Explicit /theme entries from session always take priority.
+        let inferred: Vec<String> = {
+            let mut t = Self::extract_themes_from_notes(&session.notes);
+            if t.is_empty() {
+                let fallback_texts: Vec<String> = session
+                    .decisions
+                    .iter()
+                    .map(|d| d.description.clone())
+                    .chain(session.action_items.iter().map(|a| a.description.clone()))
+                    .collect();
+                t = Self::extract_themes_from_notes(&fallback_texts);
+            }
+            t
+        };
+        let mut themes: Vec<String> = session.themes.clone();
+        for t in inferred {
+            let lower = t.to_lowercase();
+            if !themes.iter().any(|e| e.to_lowercase() == lower) {
+                themes.push(t);
+            }
         }
 
         Self {
@@ -217,7 +228,7 @@ impl MeetingHandoff {
             .into_iter()
             .filter(|(_, count)| *count >= min_freq)
             .collect();
-        themes.sort_by_key(|b| std::cmp::Reverse(b.1));
+        themes.sort_by_key(|a| std::cmp::Reverse(a.1));
         themes.truncate(10);
         themes.into_iter().map(|(word, _)| word).collect()
     }
@@ -426,6 +437,7 @@ mod tests {
             started_at: chrono::Utc::now().to_rfc3339(),
             participants: participants.into_iter().map(String::from).collect(),
             explicit_questions: Vec::new(),
+            themes: Vec::new(),
         }
     }
 
@@ -644,6 +656,51 @@ mod tests {
         let session = make_session("No themes", vec![], vec![], vec![], vec![]);
         let handoff = MeetingHandoff::from_session(&session);
         assert!(handoff.themes.is_empty());
+    }
+
+    #[test]
+    fn from_session_explicit_themes_come_first() {
+        let mut session = make_session(
+            "Explicit theme test",
+            vec![
+                "We discussed testing strategies.",
+                "Testing coverage needs improvement.",
+                "More testing will help quality.",
+            ],
+            vec![],
+            vec![],
+            vec![],
+        );
+        session.themes = vec!["performance".to_string(), "reliability".to_string()];
+        let handoff = MeetingHandoff::from_session(&session);
+        // Explicit themes must appear before inferred ones
+        assert_eq!(handoff.themes[0], "performance");
+        assert_eq!(handoff.themes[1], "reliability");
+        // Inferred "testing" still present (not a duplicate)
+        assert!(
+            handoff.themes.contains(&"testing".to_string()),
+            "inferred theme should also appear: {:?}",
+            handoff.themes
+        );
+    }
+
+    #[test]
+    fn from_session_explicit_themes_deduplicated() {
+        let mut session = make_session("Dedup test", vec![], vec![], vec![], vec![]);
+        session.themes = vec!["Performance".to_string()];
+        // Inferred would also produce "performance" if it appeared in notes
+        // Just verify no duplicate casing issues in round-trip
+        let handoff = MeetingHandoff::from_session(&session);
+        let count = handoff
+            .themes
+            .iter()
+            .filter(|t| t.to_lowercase() == "performance")
+            .count();
+        assert_eq!(
+            count, 1,
+            "no duplicate performance theme: {:?}",
+            handoff.themes
+        );
     }
 
     // -----------------------------------------------------------------------

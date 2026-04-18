@@ -14,6 +14,8 @@ mod tests_review_persist;
 #[cfg(test)]
 mod tests_selection;
 #[cfg(test)]
+mod tests_selection_extra;
+#[cfg(test)]
 mod tests_types;
 #[cfg(test)]
 mod tests_types_inline;

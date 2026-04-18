@@ -103,6 +103,45 @@ pub(super) fn dispatch_build_skill(action: &PlannedAction, bridges: &OodaBridges
     }
 }
 
+/// PollDeveloperActivity: fetch recent GitHub activity for tracked developers
+/// and store noteworthy events as semantic facts in cognitive memory.
+pub(super) fn dispatch_poll_developer_activity(
+    action: &PlannedAction,
+    bridges: &OodaBridges,
+) -> ActionOutcome {
+    use crate::research_tracker::{
+        default_developer_watches, poll_all_developer_activity, summarize_poll_results,
+    };
+
+    let watches = default_developer_watches();
+    let results = poll_all_developer_activity(&watches, &*bridges.memory, 5);
+    let summary = summarize_poll_results(&results);
+    let total_events: usize = results.iter().map(|r| r.events.len()).sum();
+
+    make_outcome(
+        action,
+        true,
+        format!("activity poll complete ({total_events} events): {summary}"),
+    )
+}
+
+/// ExtractIdeas: analyse recent developer-activity facts in cognitive memory
+/// and surface promising research ideas as `research:` issue proposals.
+pub(super) fn dispatch_extract_ideas(
+    action: &PlannedAction,
+    bridges: &OodaBridges,
+) -> ActionOutcome {
+    use crate::research_tracker::{extract_ideas, summarize_extraction};
+
+    match extract_ideas(&*bridges.memory) {
+        Ok(result) => {
+            let summary = summarize_extraction(&result);
+            make_outcome(action, true, format!("idea extraction complete: {summary}"))
+        }
+        Err(e) => make_outcome(action, false, format!("idea extraction failed: {e}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::goal_curation::GoalBoard;
@@ -250,13 +289,17 @@ mod tests {
     #[test]
     #[allow(clippy::assertions_on_constants)]
     fn skill_min_usage_is_reasonable() {
-        assert!(
-            super::SKILL_MIN_USAGE >= 2,
-            "skill extraction needs meaningful usage count"
-        );
-        assert!(
-            super::SKILL_MIN_USAGE <= 10,
-            "threshold should not be unreasonably high"
-        );
+        const {
+            assert!(
+                super::SKILL_MIN_USAGE >= 2,
+                "skill extraction needs meaningful usage count"
+            )
+        };
+        const {
+            assert!(
+                super::SKILL_MIN_USAGE <= 10,
+                "threshold should not be unreasonably high"
+            )
+        };
     }
 }

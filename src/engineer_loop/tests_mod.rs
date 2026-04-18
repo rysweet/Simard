@@ -1077,8 +1077,8 @@ fn shell_command_allowlist_contains_git() {
 #[test]
 #[allow(clippy::assertions_on_constants)]
 fn max_carried_meeting_decisions_is_positive() {
-    assert!(super::MAX_CARRIED_MEETING_DECISIONS > 0);
-    assert!(super::MAX_CARRIED_MEETING_DECISIONS <= 10);
+    const { assert!(super::MAX_CARRIED_MEETING_DECISIONS > 0) };
+    const { assert!(super::MAX_CARRIED_MEETING_DECISIONS <= 10) };
 }
 
 // ---- is_meeting_decision_record ----
@@ -1126,5 +1126,5 @@ fn execution_scope_is_local_only() {
 #[test]
 #[allow(clippy::assertions_on_constants)]
 fn cargo_timeout_exceeds_git_timeout() {
-    assert!(super::CARGO_COMMAND_TIMEOUT_SECS >= super::GIT_COMMAND_TIMEOUT_SECS);
+    const { assert!(super::CARGO_COMMAND_TIMEOUT_SECS >= super::GIT_COMMAND_TIMEOUT_SECS) };
 }

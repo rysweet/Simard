@@ -10,7 +10,7 @@ fi
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/.." && pwd)"
 common_dir="$(git -C "${repo_root}" rev-parse --git-common-dir 2>/dev/null || printf '%s/.git' "${repo_root}")"
-common_dir="$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "${common_dir}")"
+common_dir="$(realpath "${common_dir}")"
 common_root="$(dirname -- "${common_dir}")"
 shared_target_dir="${SIMARD_CARGO_TARGET_DIR:-${common_root}/target-shared}"
 

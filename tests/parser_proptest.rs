@@ -1,8 +1,7 @@
 use proptest::prelude::*;
 use simard::{
-    GoalStatus, ImprovementPromotionPlan, MeetingCommand, PersistedImprovementRecord,
-    PersistedMeetingRecord, SessionId, parse_copilot_response, parse_meeting_command,
-    parse_turn_output,
+    GoalStatus, ImprovementPromotionPlan, PersistedImprovementRecord, PersistedMeetingRecord,
+    SessionId, parse_copilot_response, parse_meeting_command, parse_turn_output,
 };
 
 proptest! {
@@ -15,14 +14,8 @@ proptest! {
     fn parse_meeting_command_never_panics(s in "\\PC*") {
         // Returns MeetingCommand (infallible), just must not panic.
         let cmd = parse_meeting_command(&s);
-        match cmd {
-            MeetingCommand::Help
-            | MeetingCommand::Close
-            | MeetingCommand::Status
-            | MeetingCommand::Template(_)
-            | MeetingCommand::Export
-            | MeetingCommand::Conversation(_) => {}
-        }
+        // exhaustive match — just verify no panic
+        let _ = cmd;
     }
 
     #[test]

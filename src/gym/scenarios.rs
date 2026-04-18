@@ -4,7 +4,7 @@ use crate::runtime::RuntimeTopology;
 
 use super::types::{BenchmarkCheckResult, BenchmarkClass, BenchmarkScenario};
 
-const BENCHMARK_SCENARIOS: [BenchmarkScenario; 35] = [
+const BENCHMARK_SCENARIOS: [BenchmarkScenario; 67] = [
     BenchmarkScenario {
         id: "repo-exploration-local",
         title: "Repo exploration on local harness",
@@ -397,6 +397,367 @@ const BENCHMARK_SCENARIOS: [BenchmarkScenario; 35] = [
         topology: RuntimeTopology::SingleProcess,
         objective: "Plan the addition of a new variant to an existing enum in the Simard codebase (e.g., a new BenchmarkClass or RuntimeTopology variant). Describe: (1) the enum to modify and the new variant name, (2) every match expression across the codebase that handles this enum (list file and line for each), (3) what the new arm should do in each match, (4) any Display, Serialize, or other trait implementations that need updating. Verify the plan would result in a compiling codebase with no unhandled match arms.",
         expected_min_runtime_evidence: 3,
+    },
+    // --- Wave 4: CodeReview scenarios ---
+    BenchmarkScenario {
+        id: "code-review-public-api-surface",
+        title: "Review public API surface for consistency",
+        description: "Perform a code review of the public API surface in a Rust module, checking for naming consistency, documentation coverage, and type safety patterns.",
+        class: BenchmarkClass::CodeReview,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Review the public API surface of src/gym/types.rs. Evaluate: (1) naming consistency across public structs and enums (snake_case fields, PascalCase types), (2) documentation coverage — which public items lack doc comments, (3) derive macro consistency — whether all serializable types derive the same set of traits, (4) type safety — whether any fields use String where an enum or newtype would be more appropriate. Produce a structured review with findings and severity ratings.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "code-review-error-propagation",
+        title: "Review error propagation patterns in module",
+        description: "Audit a module for correct error propagation using Result types, ensuring no silent error swallowing and consistent use of the ? operator.",
+        class: BenchmarkClass::CodeReview,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Review error propagation in src/gym/executor.rs. Check: (1) all fallible operations return Result, (2) unwrap/expect calls are justified with comments or used only in test code, (3) error context is preserved when converting between error types, (4) the ? operator is used consistently instead of manual match-on-Result patterns. List each finding with file location and recommended fix.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "code-review-test-quality",
+        title: "Review test quality and coverage gaps",
+        description: "Evaluate the quality of existing tests in a module, checking for assertion quality, edge case coverage, and test isolation.",
+        class: BenchmarkClass::CodeReview,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Review the test quality in src/gym/tests_scenarios.rs. Evaluate: (1) whether tests use specific assertions (assert_eq!) rather than boolean checks (assert!), (2) whether edge cases are covered (empty input, boundary values), (3) whether tests are isolated and do not depend on ordering, (4) whether test names clearly describe what is being tested. Produce a quality report with improvement suggestions.",
+        expected_min_runtime_evidence: 3,
+    },
+    // --- Wave 4: Debugging scenarios ---
+    BenchmarkScenario {
+        id: "debugging-trace-error-origin",
+        title: "Trace an error to its origin across modules",
+        description: "Given an error type, trace its construction sites and propagation path through the codebase to identify where and why it originates.",
+        class: BenchmarkClass::Debugging,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Trace the SimardError::BenchmarkScenarioNotFound variant through the Simard codebase. Identify: (1) where this error variant is defined, (2) every location where it is constructed (list file and line), (3) how it propagates through the call stack (which functions return it via ?), (4) where it is ultimately handled or displayed. Produce a propagation diagram showing the full error flow.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "debugging-type-mismatch",
+        title: "Diagnose a hypothetical type mismatch scenario",
+        description: "Analyze a function signature to identify potential type mismatch issues that could arise from callers passing incorrect argument types.",
+        class: BenchmarkClass::Debugging,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze the function `resolve_benchmark_scenario(scenario_id: &str)` in src/gym/scenarios.rs. Determine: (1) all call sites that invoke this function, (2) what types the callers pass (literal, String::as_str, format! result, etc.), (3) whether any caller could accidentally pass an owned String where &str is expected and what the compiler behavior would be, (4) whether the error message provides enough context to debug a wrong-id issue. Suggest diagnostic improvements.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "debugging-runtime-state-inspection",
+        title: "Inspect runtime state transitions for correctness",
+        description: "Examine the state machine transitions in the runtime lifecycle to verify all state transitions are valid and no illegal transitions are possible.",
+        class: BenchmarkClass::Debugging,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Inspect the RuntimeState enum and its transitions in the Simard codebase. Determine: (1) all valid states and their meaning, (2) what triggers each state transition, (3) whether any code path could produce an invalid state transition (e.g., going from Stopped back to Running), (4) whether state transitions are logged or observable for debugging. Produce a state transition table with validity annotations.",
+        expected_min_runtime_evidence: 4,
+    },
+    // --- Wave 4: ConfigManagement scenarios ---
+    BenchmarkScenario {
+        id: "config-management-cargo-feature-audit",
+        title: "Audit Cargo feature flags for correctness",
+        description: "Analyze the Cargo.toml feature flags to ensure they are correctly defined, documented, and do not create conflicting configurations.",
+        class: BenchmarkClass::ConfigManagement,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Audit the Cargo.toml file(s) in the Simard repository. Determine: (1) all defined feature flags and their purpose, (2) which features enable optional dependencies, (3) whether any features conflict or create impossible configurations, (4) whether the default feature set is appropriate for common use cases. Produce a feature matrix showing which capabilities each feature enables.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "config-management-env-var-inventory",
+        title: "Inventory environment variable usage",
+        description: "Scan the codebase for environment variable reads and produce a complete inventory of expected configuration, defaults, and validation.",
+        class: BenchmarkClass::ConfigManagement,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Scan the Simard codebase for all environment variable access (env!, option_env!, std::env::var, std::env::var_os). For each variable found: (1) name, (2) where it is read (file and line), (3) whether a default is provided if missing, (4) whether the value is validated after reading. Produce a configuration inventory table and flag any variables that lack defaults or validation.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "config-management-topology-matrix",
+        title: "Validate topology configuration combinations",
+        description: "Analyze the RuntimeTopology enum and its configuration paths to verify all topology variants produce valid, functional configurations.",
+        class: BenchmarkClass::ConfigManagement,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze the RuntimeTopology enum and how each variant configures the runtime in src/gym/mod.rs (runtime_ports_for_topology function). For each topology: (1) list which backends are selected (transport, mesh, supervisor), (2) verify the configuration is internally consistent (e.g., MultiProcess uses loopback transport), (3) identify any topology that lacks test coverage, (4) determine whether adding a new topology variant would require changes beyond this function. Produce a topology configuration matrix.",
+        expected_min_runtime_evidence: 3,
+    },
+    // --- Wave 4: expand thin classes ---
+    BenchmarkScenario {
+        id: "session-quality-memory-export",
+        title: "Session quality: memory export completeness",
+        description: "Verify that a session exports complete and well-structured memory records that preserve the session context for future reference.",
+        class: BenchmarkClass::SessionQuality,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Run a bounded engineering session and evaluate the quality of exported memory records. Check: (1) memory records have meaningful keys (not auto-generated UUIDs), (2) memory scopes are correctly assigned (session vs global), (3) at least one memory record captures the session objective, (4) exported records are sufficient to reconstruct what happened in the session. Produce a memory quality assessment.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "error-handling-custom-error-design",
+        title: "Evaluate custom error type design",
+        description: "Assess the design quality of a custom error enum, checking for informative variants, Display implementations, and From conversions.",
+        class: BenchmarkClass::ErrorHandling,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Evaluate the SimardError enum design in the Simard codebase. Assess: (1) whether each variant carries enough context for diagnostic messages, (2) whether the Display implementation produces actionable error messages, (3) whether From conversions exist for common upstream error types (io::Error, serde_json::Error, etc.), (4) whether error variants follow Rust naming conventions. Produce a design quality report with specific improvement suggestions.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "dependency-analysis-version-audit",
+        title: "Audit dependency versions for staleness",
+        description: "Analyze Cargo.toml dependencies to identify outdated, yanked, or unnecessarily pinned versions and recommend updates.",
+        class: BenchmarkClass::DependencyAnalysis,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Audit the dependencies in Cargo.toml for the Simard project. For each dependency: (1) note the current version constraint, (2) identify whether the constraint is too tight (exact pin) or too loose (wildcard), (3) check whether the dependency is used in the codebase (search for use/extern crate statements), (4) flag any dev-dependencies that appear in normal dependencies or vice versa. Produce a dependency health report with update recommendations.",
+        expected_min_runtime_evidence: 3,
+    },
+    // --- Wave 5: ConcurrencyAnalysis scenarios ---
+    BenchmarkScenario {
+        id: "concurrency-race-condition-audit",
+        title: "Audit codebase for potential race conditions",
+        description: "Analyze shared mutable state and concurrent access patterns to identify potential race conditions in the runtime.",
+        class: BenchmarkClass::ConcurrencyAnalysis,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Scan the Simard codebase for shared mutable state accessed from multiple threads or async tasks. Identify: (1) all uses of Arc<Mutex<_>>, Arc<RwLock<_>>, and atomics, (2) whether any shared state is accessed without proper synchronization, (3) potential TOCTOU (time-of-check-time-of-use) patterns where a value is read and then acted upon without holding a lock, (4) whether any channel-based patterns could deadlock if the receiver is dropped. Produce a race condition risk assessment.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "concurrency-deadlock-analysis",
+        title: "Analyze lock ordering for deadlock potential",
+        description: "Examine lock acquisition patterns across the codebase to identify potential deadlock scenarios from inconsistent lock ordering.",
+        class: BenchmarkClass::ConcurrencyAnalysis,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze all mutex and rwlock usage in the Simard codebase for deadlock potential. Determine: (1) all lock types and where they are defined, (2) whether any code path acquires multiple locks and in what order, (3) whether async code holds locks across .await points (which can cause deadlocks with non-async-aware mutexes), (4) whether any lock guard is held longer than necessary. Produce a lock ordering analysis with deadlock risk ratings.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "concurrency-async-safety-review",
+        title: "Review async task safety and cancellation handling",
+        description: "Assess async task spawning patterns for proper cancellation handling, resource cleanup, and structured concurrency.",
+        class: BenchmarkClass::ConcurrencyAnalysis,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Review all async task spawning (tokio::spawn, tokio::task::spawn_blocking) in the Simard codebase. Assess: (1) whether spawned tasks have proper error handling for JoinError, (2) whether task cancellation is handled gracefully (e.g., select! branches with cleanup), (3) whether any spawned tasks hold resources that would leak on cancellation, (4) whether structured concurrency patterns (JoinSet, TaskTracker) are used where appropriate. Produce a task safety assessment.",
+        expected_min_runtime_evidence: 3,
+    },
+    // --- Wave 5: MigrationPlanning scenarios ---
+    BenchmarkScenario {
+        id: "migration-schema-evolution-plan",
+        title: "Plan schema evolution for runtime state",
+        description: "Design a migration strategy for evolving the runtime state serialization format while maintaining backward compatibility.",
+        class: BenchmarkClass::MigrationPlanning,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze the serialized state structures in the Simard codebase (RuntimeHandoffSnapshot, session state, memory records). Plan: (1) which fields are serialized and their current format, (2) what would break if a field were added, removed, or renamed, (3) whether serde attributes (default, skip_serializing_if, rename) are used to maintain compatibility, (4) a migration strategy for adding a new required field to RuntimeHandoffSnapshot without breaking existing serialized data. Produce a schema evolution plan.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "migration-api-versioning-strategy",
+        title: "Design API versioning strategy for public interfaces",
+        description: "Evaluate the public API surface and design a versioning strategy that supports backward-compatible evolution.",
+        class: BenchmarkClass::MigrationPlanning,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze the public API surface of the Simard codebase (pub functions, pub structs, pub traits). Plan: (1) which APIs are stable vs experimental, (2) which API changes would be breaking (removing fields, changing types, removing functions), (3) whether the current API uses any deprecation markers (#[deprecated]), (4) a versioning strategy for introducing a v2 of a core trait while maintaining the v1 interface. Produce an API migration roadmap.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "migration-dependency-upgrade-plan",
+        title: "Plan major dependency upgrade migration",
+        description: "Analyze the impact of upgrading a major dependency and produce a step-by-step migration plan.",
+        class: BenchmarkClass::MigrationPlanning,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze the Cargo.toml dependencies and select the most impactful major dependency (e.g., tokio, serde, or another core crate). Plan: (1) which modules directly depend on this crate, (2) which API changes a major version bump would introduce, (3) whether any transitive dependencies would conflict, (4) a step-by-step migration plan with intermediate checkpoints where the build can be verified. Produce a dependency upgrade migration plan.",
+        expected_min_runtime_evidence: 3,
+    },
+    // --- Wave 5: ObservabilityInstrumentation scenarios ---
+    BenchmarkScenario {
+        id: "observability-logging-audit",
+        title: "Audit logging coverage and consistency",
+        description: "Analyze logging statements across the codebase for coverage gaps, inconsistent log levels, and missing context.",
+        class: BenchmarkClass::ObservabilityInstrumentation,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Scan the Simard codebase for all logging statements (log::info!, log::warn!, log::error!, tracing::info!, etc.). Assess: (1) whether error paths consistently log before returning errors, (2) whether log levels are used appropriately (debug for verbose, info for milestones, warn for recoverable issues, error for failures), (3) whether log messages include sufficient context (identifiers, state values), (4) which modules lack any logging. Produce a logging coverage report with specific recommendations.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "observability-tracing-instrumentation",
+        title: "Design tracing instrumentation for request flows",
+        description: "Design a tracing strategy to instrument key request flows with spans, events, and context propagation.",
+        class: BenchmarkClass::ObservabilityInstrumentation,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze the key execution flows in the Simard codebase (session lifecycle, message handling, state transitions). Design: (1) where tracing spans should be placed to capture the full request lifecycle, (2) which fields should be recorded on each span (session_id, phase, objective), (3) whether existing instrumentation (if any) follows OpenTelemetry conventions, (4) how span context should propagate across async task boundaries. Produce a tracing instrumentation plan with specific code locations.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "observability-metrics-design",
+        title: "Design metrics collection for runtime health",
+        description: "Design a metrics collection strategy covering runtime health indicators, throughput, latency, and error rates.",
+        class: BenchmarkClass::ObservabilityInstrumentation,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze the Simard runtime for key health indicators that should be measured. Design: (1) which counters to track (sessions started, messages processed, errors encountered), (2) which histograms to track (session duration, message latency, state transition time), (3) which gauges to track (active sessions, queue depth, memory usage), (4) labeling strategy for dimensional metrics (by topology, by phase, by error type). Produce a metrics specification with metric names, types, and collection points.",
+        expected_min_runtime_evidence: 3,
+    },
+    // --- Wave 5: DataModeling scenarios ---
+    BenchmarkScenario {
+        id: "data-modeling-entity-relationship-map",
+        title: "Map entity relationships across domain types",
+        description: "Analyze domain types to produce an entity-relationship map showing ownership, references, and lifecycle dependencies.",
+        class: BenchmarkClass::DataModeling,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze the core domain types in the Simard codebase (session, runtime, memory, evidence, handoff structures). Map: (1) which types contain or reference other types (ownership vs borrowing), (2) lifecycle dependencies (which entities must exist before others can be created), (3) whether any circular references exist between types, (4) which types serve as aggregate roots vs value objects. Produce an entity-relationship diagram description with cardinality annotations.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "data-modeling-serialization-consistency",
+        title: "Audit serialization format consistency across types",
+        description: "Check that serialization conventions (field naming, optional handling, enum representation) are consistent across all serializable types.",
+        class: BenchmarkClass::DataModeling,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Audit all types that derive Serialize or Deserialize in the Simard codebase. Check: (1) whether serde rename conventions are consistent (kebab-case vs snake_case vs camelCase), (2) whether Option fields consistently use skip_serializing_if or not, (3) whether enum serialization is consistent (externally tagged vs internally tagged vs untagged), (4) whether any types use custom serializers that could produce surprising output. Produce a serialization consistency report.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "data-modeling-type-safety-assessment",
+        title: "Assess type safety of domain model boundaries",
+        description: "Evaluate whether the type system effectively prevents invalid states and enforces domain invariants at compile time.",
+        class: BenchmarkClass::DataModeling,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze the domain model types in the Simard codebase for type safety. Assess: (1) whether enums are used to represent finite state sets instead of stringly-typed fields, (2) whether newtypes or wrapper types prevent mixing up identifiers (session ID vs suite ID), (3) whether builder patterns or constructor functions enforce required fields, (4) whether any pub fields allow construction of invalid states. Produce a type safety assessment with specific improvement recommendations.",
+        expected_min_runtime_evidence: 3,
+    },
+    // --- wave 6: topology and base_type diversity ---
+    BenchmarkScenario {
+        id: "repo-exploration-distributed-copilot",
+        title: "Repo exploration on distributed copilot-sdk",
+        description: "Exercise a repo-exploration task through the distributed topology with the copilot-sdk base type to cover an under-represented topology–base_type pair.",
+        class: BenchmarkClass::RepoExploration,
+        identity: "simard-gym",
+        base_type: "copilot-sdk",
+        topology: RuntimeTopology::Distributed,
+        objective: "Inspect repository structure using the distributed topology. Identify top-level modules, summarize their responsibilities, and verify that distributed transport is selected in the runtime report.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "bug-fix-multiprocess-terminal-shell",
+        title: "Bug-fix scenario on multi-process terminal-shell",
+        description: "Exercise a bug-fix benchmark through the multi-process topology with the terminal-shell base type, covering a combination absent from earlier waves.",
+        class: BenchmarkClass::BugFix,
+        identity: "simard-gym",
+        base_type: "terminal-shell",
+        topology: RuntimeTopology::MultiProcess,
+        objective: "Identify a plausible bug surface in the codebase, propose a minimal fix, and produce evidence that the loopback multi-process transport was active during the session.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "test-writing-distributed-rusty-clawd",
+        title: "Test writing on distributed rusty-clawd",
+        description: "Exercise a test-writing benchmark on the distributed topology with the rusty-clawd base type.",
+        class: BenchmarkClass::TestWriting,
+        identity: "simard-gym",
+        base_type: "rusty-clawd",
+        topology: RuntimeTopology::Distributed,
+        objective: "Analyze existing test coverage in the gym module and propose concrete new test cases. Verify that the distributed runtime backend is reflected in the runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "security-audit-multiprocess-copilot",
+        title: "Security audit on multi-process copilot-sdk",
+        description: "Exercise a security-audit benchmark through the multi-process topology with the copilot-sdk base type.",
+        class: BenchmarkClass::SecurityAudit,
+        identity: "simard-gym",
+        base_type: "copilot-sdk",
+        topology: RuntimeTopology::MultiProcess,
+        objective: "Audit the runtime and session modules for security-relevant patterns: (1) untrusted input handling, (2) error messages that leak internals, (3) unsafe blocks, (4) privilege boundaries. Confirm multi-process transport is active in the runtime report.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "refactoring-distributed-terminal-shell",
+        title: "Refactoring scenario on distributed terminal-shell",
+        description: "Exercise a refactoring benchmark through the distributed topology with the terminal-shell base type.",
+        class: BenchmarkClass::Refactoring,
+        identity: "simard-gym",
+        base_type: "terminal-shell",
+        topology: RuntimeTopology::Distributed,
+        objective: "Identify a refactoring opportunity in the gym module (extract helper, reduce duplication, or simplify a match arm). Propose the change and verify that distributed transport appears in the runtime evidence.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "error-handling-multiprocess-rusty-clawd",
+        title: "Error handling on multi-process rusty-clawd",
+        description: "Exercise an error-handling benchmark through the multi-process topology with the rusty-clawd base type.",
+        class: BenchmarkClass::ErrorHandling,
+        identity: "simard-gym",
+        base_type: "rusty-clawd",
+        topology: RuntimeTopology::MultiProcess,
+        objective: "Trace the error propagation path from a runtime subsystem through the gym executor. Verify: (1) errors are not silently swallowed, (2) context is preserved across module boundaries, (3) the multi-process transport is reflected in runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "config-management-distributed-copilot",
+        title: "Config management on distributed copilot-sdk",
+        description: "Exercise a config-management benchmark through the distributed topology with the copilot-sdk base type.",
+        class: BenchmarkClass::ConfigManagement,
+        identity: "simard-gym",
+        base_type: "copilot-sdk",
+        topology: RuntimeTopology::Distributed,
+        objective: "Audit configuration surfaces (environment variables, feature flags, topology parameters) and verify they are documented and validated. Confirm the distributed topology backend appears in runtime evidence.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "code-review-multiprocess-terminal-shell",
+        title: "Code review on multi-process terminal-shell",
+        description: "Exercise a code-review benchmark through the multi-process topology with the terminal-shell base type.",
+        class: BenchmarkClass::CodeReview,
+        identity: "simard-gym",
+        base_type: "terminal-shell",
+        topology: RuntimeTopology::MultiProcess,
+        objective: "Perform a structured code review of the gym executor module. Evaluate: (1) function length and complexity, (2) error handling consistency, (3) naming conventions, (4) separation of concerns. Verify multi-process transport is active in the runtime report.",
+        expected_min_runtime_evidence: 4,
     },
 ];
 
@@ -967,6 +1328,371 @@ pub(super) fn class_specific_checks(
                 },
             ]
         }
+        BenchmarkClass::CodeReview => {
+            let review_findings = combined.contains("finding")
+                || combined.contains("issue")
+                || combined.contains("concern")
+                || combined.contains("inconsisten")
+                || combined.contains("review");
+            let severity_assessed = combined.contains("severity")
+                || combined.contains("critical")
+                || combined.contains("minor")
+                || combined.contains("major")
+                || combined.contains("nit");
+            let fix_suggested = combined.contains("suggest")
+                || combined.contains("recommend")
+                || combined.contains("fix")
+                || combined.contains("improv")
+                || combined.contains("should");
+            vec![
+                BenchmarkCheckResult {
+                    id: "review-findings-present".to_string(),
+                    passed: review_findings,
+                    detail: format!(
+                        "execution output {} review findings",
+                        if review_findings { "includes" } else { "lacks" }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "review-severity-assessed".to_string(),
+                    passed: severity_assessed,
+                    detail: format!(
+                        "execution output {} severity assessment",
+                        if severity_assessed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "review-fix-suggested".to_string(),
+                    passed: fix_suggested,
+                    detail: format!(
+                        "execution output {} fix suggestions",
+                        if fix_suggested { "includes" } else { "lacks" }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::Debugging => {
+            let root_cause_traced = combined.contains("trace")
+                || combined.contains("origin")
+                || combined.contains("root cause")
+                || combined.contains("source of")
+                || combined.contains("caused by");
+            let call_path_analyzed = combined.contains("call")
+                || combined.contains("stack")
+                || combined.contains("propagat")
+                || combined.contains("invoked")
+                || combined.contains("transition");
+            let diagnostic_suggested = combined.contains("diagnostic")
+                || combined.contains("debug")
+                || combined.contains("log")
+                || combined.contains("inspect")
+                || combined.contains("breakpoint");
+            vec![
+                BenchmarkCheckResult {
+                    id: "debug-root-cause-traced".to_string(),
+                    passed: root_cause_traced,
+                    detail: format!(
+                        "execution output {} root cause tracing",
+                        if root_cause_traced {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "debug-call-path-analyzed".to_string(),
+                    passed: call_path_analyzed,
+                    detail: format!(
+                        "execution output {} call path analysis",
+                        if call_path_analyzed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "debug-diagnostic-suggested".to_string(),
+                    passed: diagnostic_suggested,
+                    detail: format!(
+                        "execution output {} diagnostic suggestions",
+                        if diagnostic_suggested {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::ConfigManagement => {
+            let config_inventoried = combined.contains("config")
+                || combined.contains("feature")
+                || combined.contains("env")
+                || combined.contains("cargo.toml")
+                || combined.contains("setting");
+            let validation_checked = combined.contains("valid")
+                || combined.contains("default")
+                || combined.contains("missing")
+                || combined.contains("required")
+                || combined.contains("optional");
+            let matrix_produced = combined.contains("matrix")
+                || combined.contains("table")
+                || combined.contains("inventory")
+                || combined.contains("summary")
+                || combined.contains("report");
+            vec![
+                BenchmarkCheckResult {
+                    id: "config-inventoried".to_string(),
+                    passed: config_inventoried,
+                    detail: format!(
+                        "execution output {} configuration inventory",
+                        if config_inventoried {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "config-validation-checked".to_string(),
+                    passed: validation_checked,
+                    detail: format!(
+                        "execution output {} validation assessment",
+                        if validation_checked {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "config-matrix-produced".to_string(),
+                    passed: matrix_produced,
+                    detail: format!(
+                        "execution output {} configuration matrix",
+                        if matrix_produced { "includes" } else { "lacks" }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::ConcurrencyAnalysis => {
+            let race_condition_analyzed = combined.contains("race")
+                || combined.contains("concurrent")
+                || combined.contains("shared")
+                || combined.contains("mutex")
+                || combined.contains("atomic");
+            let synchronization_assessed = combined.contains("lock")
+                || combined.contains("synchroniz")
+                || combined.contains("rwlock")
+                || combined.contains("channel")
+                || combined.contains("arc");
+            let safety_evaluated = combined.contains("deadlock")
+                || combined.contains("safe")
+                || combined.contains("cancel")
+                || combined.contains("await")
+                || combined.contains("spawn");
+            vec![
+                BenchmarkCheckResult {
+                    id: "concurrency-race-analyzed".to_string(),
+                    passed: race_condition_analyzed,
+                    detail: format!(
+                        "execution output {} race condition analysis",
+                        if race_condition_analyzed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "concurrency-sync-assessed".to_string(),
+                    passed: synchronization_assessed,
+                    detail: format!(
+                        "execution output {} synchronization assessment",
+                        if synchronization_assessed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "concurrency-safety-evaluated".to_string(),
+                    passed: safety_evaluated,
+                    detail: format!(
+                        "execution output {} concurrency safety evaluation",
+                        if safety_evaluated {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::MigrationPlanning => {
+            let migration_scope_defined = combined.contains("migrat")
+                || combined.contains("schema")
+                || combined.contains("version")
+                || combined.contains("upgrade")
+                || combined.contains("evolution");
+            let compatibility_assessed = combined.contains("compat")
+                || combined.contains("backward")
+                || combined.contains("breaking")
+                || combined.contains("deprecat")
+                || combined.contains("serde");
+            let plan_produced = combined.contains("step")
+                || combined.contains("plan")
+                || combined.contains("phase")
+                || combined.contains("roadmap")
+                || combined.contains("checkpoint");
+            vec![
+                BenchmarkCheckResult {
+                    id: "migration-scope-defined".to_string(),
+                    passed: migration_scope_defined,
+                    detail: format!(
+                        "execution output {} migration scope definition",
+                        if migration_scope_defined {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "migration-compatibility-assessed".to_string(),
+                    passed: compatibility_assessed,
+                    detail: format!(
+                        "execution output {} compatibility assessment",
+                        if compatibility_assessed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "migration-plan-produced".to_string(),
+                    passed: plan_produced,
+                    detail: format!(
+                        "execution output {} migration plan",
+                        if plan_produced { "includes" } else { "lacks" }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::ObservabilityInstrumentation => {
+            let instrumentation_analyzed = combined.contains("log")
+                || combined.contains("trac")
+                || combined.contains("metric")
+                || combined.contains("instrument")
+                || combined.contains("observab");
+            let coverage_assessed = combined.contains("coverage")
+                || combined.contains("gap")
+                || combined.contains("missing")
+                || combined.contains("module")
+                || combined.contains("path");
+            let recommendation_present = combined.contains("recommend")
+                || combined.contains("suggest")
+                || combined.contains("should")
+                || combined.contains("add")
+                || combined.contains("design");
+            vec![
+                BenchmarkCheckResult {
+                    id: "observability-instrumentation-analyzed".to_string(),
+                    passed: instrumentation_analyzed,
+                    detail: format!(
+                        "execution output {} instrumentation analysis",
+                        if instrumentation_analyzed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "observability-coverage-assessed".to_string(),
+                    passed: coverage_assessed,
+                    detail: format!(
+                        "execution output {} coverage assessment",
+                        if coverage_assessed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "observability-recommendation-present".to_string(),
+                    passed: recommendation_present,
+                    detail: format!(
+                        "execution output {} observability recommendations",
+                        if recommendation_present {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::DataModeling => {
+            let model_analyzed = combined.contains("type")
+                || combined.contains("struct")
+                || combined.contains("entity")
+                || combined.contains("field")
+                || combined.contains("schema");
+            let relationships_mapped = combined.contains("relation")
+                || combined.contains("reference")
+                || combined.contains("owner")
+                || combined.contains("contain")
+                || combined.contains("cardinality");
+            let quality_assessed = combined.contains("consisten")
+                || combined.contains("safety")
+                || combined.contains("invalid")
+                || combined.contains("invariant")
+                || combined.contains("newtype");
+            vec![
+                BenchmarkCheckResult {
+                    id: "data-model-analyzed".to_string(),
+                    passed: model_analyzed,
+                    detail: format!(
+                        "execution output {} data model analysis",
+                        if model_analyzed { "includes" } else { "lacks" }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "data-relationships-mapped".to_string(),
+                    passed: relationships_mapped,
+                    detail: format!(
+                        "execution output {} relationship mapping",
+                        if relationships_mapped {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "data-quality-assessed".to_string(),
+                    passed: quality_assessed,
+                    detail: format!(
+                        "execution output {} data quality assessment",
+                        if quality_assessed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
     }
 }
 
@@ -1141,6 +1867,13 @@ mod tests {
             BenchmarkClass::PerformanceAnalysis,
             BenchmarkClass::SecurityAudit,
             BenchmarkClass::ApiDesign,
+            BenchmarkClass::CodeReview,
+            BenchmarkClass::Debugging,
+            BenchmarkClass::ConfigManagement,
+            BenchmarkClass::ConcurrencyAnalysis,
+            BenchmarkClass::MigrationPlanning,
+            BenchmarkClass::ObservabilityInstrumentation,
+            BenchmarkClass::DataModeling,
         ];
         let scenarios = benchmark_scenarios();
         for class in all_classes {

@@ -11,7 +11,9 @@ mod simple_actions;
 mod verification;
 
 #[cfg(test)]
-mod test_helpers;
+pub(crate) mod test_helpers;
+#[cfg(test)]
+mod tests_dispatch;
 #[cfg(test)]
 mod tests_goal_session;
 
@@ -96,5 +98,9 @@ fn dispatch_one(
         ActionKind::RunGymEval => simple_actions::dispatch_run_gym_eval(action, bridges),
         ActionKind::BuildSkill => simple_actions::dispatch_build_skill(action, bridges),
         ActionKind::LaunchSession => session::dispatch_launch_session(action),
+        ActionKind::PollDeveloperActivity => {
+            simple_actions::dispatch_poll_developer_activity(action, bridges)
+        }
+        ActionKind::ExtractIdeas => simple_actions::dispatch_extract_ideas(action, bridges),
     }
 }

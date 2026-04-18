@@ -56,7 +56,7 @@ pub fn extract_skill_candidates(
         .collect();
 
     // Sort by usage count descending (implicit from the procedure data).
-    candidates.sort_by_key(|b| std::cmp::Reverse(b.steps.len()));
+    candidates.sort_by_key(|a| std::cmp::Reverse(a.steps.len()));
 
     Ok(candidates)
 }

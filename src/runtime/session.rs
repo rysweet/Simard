@@ -28,7 +28,11 @@ impl RuntimeKernel {
                 eprintln!("[simard] session consolidation: intake failed: {e}");
             }
             // Hydrate prior-session facts into working memory for cross-session recall.
-            match crate::memory_consolidation::consolidation_intake(&session.id, &**bridge) {
+            match crate::memory_consolidation::consolidation_intake(
+                &session.id,
+                &session.objective,
+                &**bridge,
+            ) {
                 Ok(n) if n > 0 => {
                     eprintln!("[simard] session consolidation: hydrated {n} prior-session facts");
                 }
@@ -50,6 +54,14 @@ impl RuntimeKernel {
         self.persist_session_summary(&mut session, &outcome, &context)?;
 
         // --- Memory consolidation: persistence at session end ---
+
+        // Flush any pending bridge writes before final persistence so that
+        // records that fell back to the local file store get one last retry.
+        let synced = self.ports.memory_store.flush_pending();
+        if synced > 0 {
+            eprintln!("[simard] session teardown: flushed {synced} pending memory records");
+        }
+
         if let Some(bridge) = &self.cognitive_bridge {
             // Flush working memory to episodes before final persistence.
             if let Err(e) =
@@ -61,6 +73,23 @@ impl RuntimeKernel {
                 crate::memory_consolidation::persistence_memory_operations(&session.id, &**bridge)
             {
                 eprintln!("[simard] session consolidation: persistence failed: {e}");
+            }
+
+            // Save a cognitive memory snapshot and prune to 10 most recent.
+            if let Some(dir) = crate::memory_snapshot::snapshot_dir(None) {
+                match crate::memory_snapshot::save_session_snapshot(
+                    &**bridge,
+                    &self.request.manifest.name,
+                    &dir,
+                ) {
+                    Ok(path) => {
+                        eprintln!("[simard] snapshot: saved {}", path.display());
+                        crate::memory_snapshot::prune_snapshots(&dir, 10);
+                    }
+                    Err(e) => {
+                        eprintln!("[simard] snapshot: save failed: {e}");
+                    }
+                }
             }
         }
 
