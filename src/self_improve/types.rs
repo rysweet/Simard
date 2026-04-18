@@ -1,7 +1,8 @@
 //! Types for the self-improvement loop.
 
-use crate::gym_scoring::{GymSuiteScore, Regression};
 use serde::{Deserialize, Serialize};
+
+use crate::gym_scoring::{GymSuiteScore, Regression};
 
 /// Phases of a single self-improvement cycle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -73,7 +74,7 @@ pub enum ImprovementDecision {
 }
 
 /// Configuration for an improvement cycle.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ImprovementConfig {
     /// The gym suite to evaluate against.
     pub suite_id: String,
