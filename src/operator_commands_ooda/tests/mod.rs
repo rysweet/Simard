@@ -1,4 +1,5 @@
 mod auto_reload_tests;
+mod persistence_memory_tests;
 mod persistence_tests;
 mod report_tests;
 
