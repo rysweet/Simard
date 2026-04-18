@@ -358,4 +358,17 @@ mod tests {
             required_engineer_evidence_value(&records, "nonexistent-field=", "test-source");
         assert!(result.is_err());
     }
+
+    #[test]
+    fn parse_engineer_summary_list_with_single_item() {
+        let result = parse_engineer_summary_list("only-one-goal", ", ");
+        assert_eq!(result, vec!["only-one-goal"]);
+    }
+
+    #[test]
+    fn parse_carried_meeting_decisions_with_content() {
+        let record = "agenda=Sprint review; updates=[Updated A]; decisions=[Use strategy X | Defer Y]; risks=[Risk 1]; next_steps=[Step 1]; open_questions=[Question 1]; goals=[p1:active:Goal title:Goal rationale]";
+        let result = parse_carried_meeting_decisions(record).unwrap();
+        assert_eq!(result, vec!["Use strategy X", "Defer Y"]);
+    }
 }
