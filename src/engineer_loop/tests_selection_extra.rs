@@ -244,3 +244,40 @@ fn keyword_action_shell_command_needs_extractable_command() {
         "check if the tests pass"
     ));
 }
+
+// ── Issue #912: prose-fragment rejection ────────────────────────
+
+#[test]
+fn keyword_action_shell_command_rejects_prose_fragment() {
+    // The exact scenario from issue #912: "git commit -m and open PR against #890."
+    // should not produce a RunShellCommand action.
+    assert!(!is_keyword_action_achievable(
+        &AnalyzedAction::RunShellCommand,
+        "run git commit -m and open PR against #890."
+    ));
+}
+
+#[test]
+fn keyword_action_git_commit_rejects_prose_message() {
+    // "commit -m and open PR against #890." is prose, not a valid commit message.
+    assert!(!is_keyword_action_achievable(
+        &AnalyzedAction::GitCommit,
+        "git commit -m and open PR against #890."
+    ));
+}
+
+#[test]
+fn keyword_action_git_commit_accepts_clean_message() {
+    assert!(is_keyword_action_achievable(
+        &AnalyzedAction::GitCommit,
+        "commit fix typo in README"
+    ));
+}
+
+#[test]
+fn keyword_action_shell_rejects_task_description_prose() {
+    assert!(!is_keyword_action_achievable(
+        &AnalyzedAction::RunShellCommand,
+        "execute the plan and then verify results."
+    ));
+}
