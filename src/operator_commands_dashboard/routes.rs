@@ -1,8 +1,9 @@
 use axum::{
     Json, Router,
+    extract::Path,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
     middleware, response,
-    routing::{get, post},
+    routing::{delete, get, post, put},
 };
 use serde_json::{Value, json};
 
@@ -11,8 +12,8 @@ use crate::agent_registry::{AgentRegistry, FileBackedAgentRegistry};
 use crate::build_lock::BuildLock;
 use crate::cognitive_memory::{as_f64, as_i64, as_str, CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::error::{SimardError, SimardResult};
-use crate::goal_curation::GoalBoard;
-use crate::goals::GoalRecord;
+use crate::goal_curation::{ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS};
+use crate::goals::{GoalRecord, goal_slug};
 
 pub fn build_router() -> Router {
     Router::new()
@@ -21,8 +22,11 @@ pub fn build_router() -> Router {
         .route("/api/metrics", get(metrics))
         .route("/api/costs", get(costs))
         .route("/api/budget", get(get_budget).post(set_budget))
-        .route("/api/goals", get(goals))
+        .route("/api/goals", get(goals).post(add_goal))
         .route("/api/goals/seed", post(seed_goals))
+        .route("/api/goals/promote/{id}", post(promote_backlog_item))
+        .route("/api/goals/{id}", delete(remove_goal))
+        .route("/api/goals/{id}/status", put(update_goal_status))
         .route("/api/distributed", get(distributed))
         .route(
             "/api/hosts",
@@ -409,6 +413,169 @@ async fn seed_goals() -> Json<Value> {
     }
 }
 
+
+async fn add_goal(Json(body): Json<Value>) -> Json<Value> {
+    let state_root = resolve_state_root();
+    let goal_path = state_root.join("goal_records.json");
+    let content = std::fs::read_to_string(&goal_path).unwrap_or_default();
+    let mut board = serde_json::from_str::<GoalBoard>(&content).unwrap_or_default();
+
+    let desc = match body.get("description").and_then(|v| v.as_str()) {
+        Some(d) if !d.trim().is_empty() => d.trim().to_string(),
+        _ => return Json(json!({"error": "description is required"})),
+    };
+
+    let goal_type = body
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("active");
+    let id = goal_slug(&desc);
+
+    if goal_type == "backlog" {
+        let score = body.get("score").and_then(|v| v.as_f64()).unwrap_or(0.5);
+        board.backlog.push(BacklogItem {
+            id: id.clone(),
+            description: desc,
+            source: "dashboard".to_string(),
+            score,
+        });
+    } else {
+        if board.active.len() >= MAX_ACTIVE_GOALS {
+            return Json(json!({"error": format!(
+                "Maximum {} active goals reached. Remove one first or add to backlog.",
+                MAX_ACTIVE_GOALS
+            )}));
+        }
+        let priority = body
+            .get("priority")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(3) as u32;
+        board.active.push(ActiveGoal {
+            id: id.clone(),
+            description: desc,
+            priority,
+            status: GoalProgress::NotStarted,
+            assigned_to: None,
+        });
+    }
+
+    match std::fs::write(
+        &goal_path,
+        serde_json::to_string_pretty(&board).unwrap_or_default(),
+    ) {
+        Ok(_) => Json(json!({"status": "ok", "id": id})),
+        Err(e) => Json(json!({"error": format!("{e}")})),
+    }
+}
+
+async fn remove_goal(Path(id): Path<String>) -> Json<Value> {
+    let state_root = resolve_state_root();
+    let goal_path = state_root.join("goal_records.json");
+    let content = std::fs::read_to_string(&goal_path).unwrap_or_default();
+    let mut board = serde_json::from_str::<GoalBoard>(&content).unwrap_or_default();
+
+    let before_active = board.active.len();
+    let before_backlog = board.backlog.len();
+    board.active.retain(|g| g.id != id);
+    board.backlog.retain(|g| g.id != id);
+
+    if board.active.len() == before_active && board.backlog.len() == before_backlog {
+        return Json(json!({"error": "goal not found"}));
+    }
+
+    match std::fs::write(
+        &goal_path,
+        serde_json::to_string_pretty(&board).unwrap_or_default(),
+    ) {
+        Ok(_) => Json(json!({"status": "ok"})),
+        Err(e) => Json(json!({"error": format!("{e}")})),
+    }
+}
+
+async fn update_goal_status(Path(id): Path<String>, Json(body): Json<Value>) -> Json<Value> {
+    let state_root = resolve_state_root();
+    let goal_path = state_root.join("goal_records.json");
+    let content = std::fs::read_to_string(&goal_path).unwrap_or_default();
+    let mut board = serde_json::from_str::<GoalBoard>(&content).unwrap_or_default();
+
+    let status_str = match body.get("status").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return Json(json!({"error": "status is required"})),
+    };
+
+    let new_status = match status_str {
+        "not-started" => GoalProgress::NotStarted,
+        "in-progress" => GoalProgress::InProgress { percent: 0 },
+        "blocked" => {
+            let reason = body
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unspecified")
+                .to_string();
+            GoalProgress::Blocked(reason)
+        }
+        "completed" => GoalProgress::Completed,
+        other => return Json(json!({"error": format!("unknown status: {other}")})),
+    };
+
+    let mut found = false;
+    for goal in &mut board.active {
+        if goal.id == id {
+            goal.status = new_status.clone();
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        return Json(json!({"error": "goal not found in active goals"}));
+    }
+
+    match std::fs::write(
+        &goal_path,
+        serde_json::to_string_pretty(&board).unwrap_or_default(),
+    ) {
+        Ok(_) => Json(json!({"status": "ok"})),
+        Err(e) => Json(json!({"error": format!("{e}")})),
+    }
+}
+
+async fn promote_backlog_item(Path(id): Path<String>) -> Json<Value> {
+    let state_root = resolve_state_root();
+    let goal_path = state_root.join("goal_records.json");
+    let content = std::fs::read_to_string(&goal_path).unwrap_or_default();
+    let mut board = serde_json::from_str::<GoalBoard>(&content).unwrap_or_default();
+
+    if board.active.len() >= MAX_ACTIVE_GOALS {
+        return Json(json!({"error": format!(
+            "Maximum {} active goals reached. Remove one first.",
+            MAX_ACTIVE_GOALS
+        )}));
+    }
+
+    let pos = board.backlog.iter().position(|g| g.id == id);
+    let item = match pos {
+        Some(i) => board.backlog.remove(i),
+        None => return Json(json!({"error": "backlog item not found"})),
+    };
+
+    board.active.push(ActiveGoal {
+        id: item.id,
+        description: item.description,
+        priority: 3,
+        status: GoalProgress::NotStarted,
+        assigned_to: None,
+    });
+
+    match std::fs::write(
+        &goal_path,
+        serde_json::to_string_pretty(&board).unwrap_or_default(),
+    ) {
+        Ok(_) => Json(json!({"status": "ok"})),
+        Err(e) => Json(json!({"error": format!("{e}")})),
+    }
+}
+
 async fn memory_search(Json(body): Json<Value>) -> Json<Value> {
     let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
     if query.is_empty() {
@@ -462,6 +629,162 @@ async fn memory_search(Json(body): Json<Value>) -> Json<Value> {
         "result_count": results.len(),
         "results": results,
         "timestamp": chrono::Utc::now().to_rfc3339(),
+    }))
+}
+
+async fn memory_graph() -> Json<Value> {
+    let state_root = resolve_state_root();
+    let mem = match NativeCognitiveMemory::open_read_only(&state_root) {
+        Ok(m) => m,
+        Err(e) => {
+            return Json(json!({
+                "nodes": [],
+                "edges": [],
+                "stats": {},
+                "error": format!("Cannot open cognitive memory: {e}"),
+            }));
+        }
+    };
+
+    let stats = mem.get_statistics().unwrap_or_default();
+    let mut nodes: Vec<Value> = Vec::new();
+    let mut edges: Vec<Value> = Vec::new();
+
+    let query_rows = |cypher: &str| -> Vec<Vec<lbug::Value>> {
+        mem.query(cypher).unwrap_or_default()
+    };
+
+    for row in query_rows(
+        "MATCH (w:WorkingMemory) RETURN w.id, w.slot_type, w.content, w.task_id, w.relevance LIMIT 100",
+    ) {
+        if let Some(id) = row.first().and_then(as_str) {
+            let content = row.get(2).and_then(as_str).unwrap_or("");
+            let label = if content.len() > 60 { format!("{}…", &content[..60]) } else { content.to_string() };
+            nodes.push(json!({
+                "id": id, "type": "WorkingMemory", "label": label,
+                "content": content,
+                "task_id": row.get(3).and_then(as_str).unwrap_or(""),
+                "relevance": row.get(4).and_then(as_f64).unwrap_or(0.0),
+            }));
+        }
+    }
+
+    for row in query_rows(
+        "MATCH (f:Fact) RETURN f.id, f.concept, f.content, f.confidence, f.source_id, f.tags LIMIT 100",
+    ) {
+        if let Some(id) = row.first().and_then(as_str) {
+            let concept = row.get(1).and_then(as_str).unwrap_or("");
+            let content = row.get(2).and_then(as_str).unwrap_or("");
+            let label = if concept.is_empty() {
+                if content.len() > 60 { format!("{}…", &content[..60]) } else { content.to_string() }
+            } else { concept.to_string() };
+            nodes.push(json!({
+                "id": id, "type": "SemanticFact", "label": label,
+                "content": content, "confidence": row.get(3).and_then(as_f64).unwrap_or(0.0),
+                "source_id": row.get(4).and_then(as_str).unwrap_or(""),
+            }));
+        }
+    }
+
+    for row in query_rows(
+        "MATCH (e:Episode) RETURN e.id, e.content, e.source_label, e.temporal_index LIMIT 100",
+    ) {
+        if let Some(id) = row.first().and_then(as_str) {
+            let content = row.get(1).and_then(as_str).unwrap_or("");
+            let label = if content.len() > 60 { format!("{}…", &content[..60]) } else { content.to_string() };
+            nodes.push(json!({
+                "id": id, "type": "EpisodicMemory", "label": label,
+                "content": content,
+                "temporal_index": row.get(3).and_then(as_i64).unwrap_or(0),
+            }));
+        }
+    }
+
+    for row in query_rows(
+        "MATCH (p:Procedure) RETURN p.id, p.name, p.steps, p.prerequisites, p.usage_count LIMIT 100",
+    ) {
+        if let Some(id) = row.first().and_then(as_str) {
+            nodes.push(json!({
+                "id": id, "type": "ProceduralMemory",
+                "label": row.get(1).and_then(as_str).unwrap_or(""),
+                "content": row.get(2).and_then(as_str).unwrap_or(""),
+                "usage_count": row.get(4).and_then(as_i64).unwrap_or(0),
+            }));
+        }
+    }
+
+    for row in query_rows(
+        "MATCH (p:Prospective) RETURN p.id, p.description, p.trigger_condition, p.action_on_trigger, p.status, p.priority LIMIT 100",
+    ) {
+        if let Some(id) = row.first().and_then(as_str) {
+            nodes.push(json!({
+                "id": id, "type": "ProspectiveMemory",
+                "label": row.get(1).and_then(as_str).unwrap_or(""),
+                "content": row.get(2).and_then(as_str).unwrap_or(""),
+                "status": row.get(4).and_then(as_str).unwrap_or("pending"),
+            }));
+        }
+    }
+
+    for row in query_rows("MATCH (s:Sensory) RETURN s.id, s.modality, s.raw_data LIMIT 100") {
+        if let Some(id) = row.first().and_then(as_str) {
+            let modality = row.get(1).and_then(as_str).unwrap_or("");
+            let raw = row.get(2).and_then(as_str).unwrap_or("");
+            let label = if raw.len() > 40 {
+                format!("[{modality}] {}…", &raw[..40])
+            } else {
+                format!("[{modality}] {raw}")
+            };
+            nodes.push(json!({
+                "id": id, "type": "SensoryBuffer", "label": label,
+                "content": raw, "modality": modality,
+            }));
+        }
+    }
+
+    // Infer edges: link WorkingMemory to nodes sharing the same task_id via source_id
+    let working_nodes: Vec<(String, String)> = nodes.iter()
+        .filter(|n| n["type"] == "WorkingMemory")
+        .filter_map(|n| {
+            let id = n["id"].as_str()?.to_string();
+            let tid = n["task_id"].as_str()?.to_string();
+            if tid.is_empty() { None } else { Some((id, tid)) }
+        })
+        .collect();
+    for wn in &working_nodes {
+        for other in &nodes {
+            if other["type"] == "WorkingMemory" { continue; }
+            if let Some(oid) = other["id"].as_str() {
+                if let Some(src) = other["source_id"].as_str() {
+                    if !src.is_empty() && src == wn.1 {
+                        edges.push(json!({"source": wn.0, "target": oid, "type": "REFERENCES"}));
+                    }
+                }
+            }
+        }
+    }
+
+    // Link episodes with sequential temporal indices
+    let mut episode_ids: Vec<(String, i64)> = nodes.iter()
+        .filter(|n| n["type"] == "EpisodicMemory")
+        .filter_map(|n| Some((n["id"].as_str()?.to_string(), n["temporal_index"].as_i64().unwrap_or(0))))
+        .collect();
+    episode_ids.sort_by_key(|e| e.1);
+    for pair in episode_ids.windows(2) {
+        edges.push(json!({"source": pair[0].0, "target": pair[1].0, "type": "FOLLOWS"}));
+    }
+
+    Json(json!({
+        "nodes": nodes,
+        "edges": edges,
+        "stats": {
+            "working": stats.working_count,
+            "semantic": stats.semantic_count,
+            "episodic": stats.episodic_count,
+            "procedural": stats.procedural_count,
+            "prospective": stats.prospective_count,
+            "sensory": stats.sensory_count,
+        },
     }))
 }
 
@@ -2306,7 +2629,22 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       <h2>Active Goals
         <button class="btn" onclick="fetchGoals()">Refresh</button>
         <button class="btn" onclick="seedGoals()" style="margin-left:.5rem">Seed Default Goals</button>
+        <button class="btn" onclick="showAddGoalForm()" style="margin-left:.5rem">+ Add Goal</button>
       </h2>
+      <div id="add-goal-form" style="display:none;margin-bottom:1rem;padding:.75rem;background:var(--bg);border:1px solid var(--border);border-radius:6px">
+        <div style="display:flex;gap:.5rem;margin-bottom:.5rem">
+          <input id="new-goal-desc" placeholder="Goal description" style="flex:1;padding:.4rem;background:var(--card);color:var(--fg);border:1px solid var(--border);border-radius:4px">
+          <select id="new-goal-type" style="padding:.4rem;background:var(--card);color:var(--fg);border:1px solid var(--border);border-radius:4px">
+            <option value="active">Active</option>
+            <option value="backlog">Backlog</option>
+          </select>
+          <input id="new-goal-priority" type="number" min="1" max="5" value="3" style="width:50px;padding:.4rem;background:var(--card);color:var(--fg);border:1px solid var(--border);border-radius:4px" placeholder="Pri">
+        </div>
+        <div style="display:flex;gap:.5rem">
+          <button class="btn" onclick="submitGoal()">Add</button>
+          <button class="btn" onclick="document.getElementById('add-goal-form').style.display='none'" style="background:#21262d">Cancel</button>
+        </div>
+      </div>
       <div id="goals-active"><span class="loading">Loading…</span></div>
     </div>
     <div class="card">
@@ -2512,6 +2850,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         if(tab.dataset.tab==='traces') fetchTraces();
         if(tab.dataset.tab==='chat') initChat();
         if(tab.dataset.tab==='workboard') {fetchWorkboard();tabRefreshTimers.wb=setInterval(fetchWorkboard,30000);}
+        if(tab.dataset.tab==='thinking') {fetchThinking();tabRefreshTimers.thinking=setInterval(fetchThinking,30000);}
       });
     });
     setInterval(()=>{document.getElementById('clock').textContent=new Date().toLocaleString()},1000);
@@ -2777,25 +3116,33 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         const r=await fetch('/api/goals'); const d=await r.json();
         if(d.active?.length){
           document.getElementById('goals-active').innerHTML=`<table class="proc-table">
-            <tr><th>Priority</th><th>ID</th><th>Description</th><th>Status</th><th>Assigned</th></tr>
+            <tr><th>Priority</th><th>ID</th><th>Description</th><th>Status</th><th>Assigned</th><th>Actions</th></tr>
             ${d.active.map(g=>`<tr>
               <td style="text-align:center">${g.priority??'—'}</td>
               <td><code>${esc(g.id)}</code></td>
               <td>${esc(g.description)}</td>
               <td>${esc(g.status)}</td>
               <td>${g.assigned_to?esc(g.assigned_to):'—'}</td>
+              <td>
+                <button class="btn" style="font-size:.7rem;padding:2px 6px" onclick="removeGoal('${esc(g.id)}')">✕</button>
+                <button class="btn" style="font-size:.7rem;padding:2px 6px;margin-left:4px" onclick="updateGoalStatus('${esc(g.id)}')">Status</button>
+              </td>
             </tr>`).join('')}
           </table>
           <div style="margin-top:.5rem;color:#8b949e;font-size:.8rem">${d.active_count} active goal(s)</div>`;
         }else{document.getElementById('goals-active').innerHTML='<span style="color:#8b949e">No active goals. Use "Seed Default Goals" or run the OODA daemon to generate goals from meetings.</span>';}
         if(d.backlog?.length){
           document.getElementById('goals-backlog').innerHTML=`<table class="proc-table">
-            <tr><th>ID</th><th>Description</th><th>Source</th><th>Score</th></tr>
+            <tr><th>ID</th><th>Description</th><th>Source</th><th>Score</th><th>Actions</th></tr>
             ${d.backlog.map(b=>`<tr>
               <td><code>${esc(b.id)}</code></td>
               <td>${esc(b.description)}</td>
               <td>${esc(b.source||'')}</td>
               <td>${b.score??'—'}</td>
+              <td>
+                <button class="btn" style="font-size:.7rem;padding:2px 6px" onclick="promoteGoal('${esc(b.id)}')">▲ Promote</button>
+                <button class="btn" style="font-size:.7rem;padding:2px 6px;margin-left:4px" onclick="removeGoal('${esc(b.id)}')">✕</button>
+              </td>
             </tr>`).join('')}
           </table>`;
         }else{document.getElementById('goals-backlog').innerHTML='<span style="color:#8b949e">No backlog items</span>';}
@@ -2813,6 +3160,51 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           alert('Seed failed: '+(d.error||'unknown'));
         }
       }catch(e){alert('Seed failed: '+e);}
+    }
+
+    function showAddGoalForm(){document.getElementById('add-goal-form').style.display='block';document.getElementById('new-goal-desc').focus();}
+
+    async function submitGoal(){
+      const desc=document.getElementById('new-goal-desc').value.trim();
+      if(!desc){alert('Description required');return;}
+      const type=document.getElementById('new-goal-type').value;
+      const priority=parseInt(document.getElementById('new-goal-priority').value)||3;
+      try{
+        const r=await fetch('/api/goals',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({description:desc,type:type,priority:priority})});
+        const d=await r.json();
+        if(d.status==='ok'){document.getElementById('add-goal-form').style.display='none';document.getElementById('new-goal-desc').value='';fetchGoals();}
+        else{alert(d.error||'Failed');}
+      }catch(e){alert('Error: '+e);}
+    }
+
+    async function removeGoal(id){
+      if(!confirm('Remove goal "'+id+'"?'))return;
+      try{
+        const r=await fetch('/api/goals/'+encodeURIComponent(id),{method:'DELETE'});
+        const d=await r.json();
+        if(d.status==='ok')fetchGoals();
+        else alert(d.error||'Failed');
+      }catch(e){alert('Error: '+e);}
+    }
+
+    async function promoteGoal(id){
+      try{
+        const r=await fetch('/api/goals/promote/'+encodeURIComponent(id),{method:'POST'});
+        const d=await r.json();
+        if(d.status==='ok')fetchGoals();
+        else alert(d.error||'Failed');
+      }catch(e){alert('Error: '+e);}
+    }
+
+    async function updateGoalStatus(id){
+      const status=prompt('New status (not-started, in-progress, blocked, completed):');
+      if(!status)return;
+      try{
+        const r=await fetch('/api/goals/'+encodeURIComponent(id)+'/status',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:status})});
+        const d=await r.json();
+        if(d.status==='ok')fetchGoals();
+        else alert(d.error||'Failed');
+      }catch(e){alert('Error: '+e);}
     }
 
     /* --- Traces --- */
@@ -3067,6 +3459,74 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           ].map(([k,v])=>'<span style="margin-right:1rem"><strong>'+k+':</strong> '+(v||0)+'</span>').join('');
         }else{document.getElementById('wb-cog-stats').innerHTML='<span style="color:#8b949e">No cognitive memory available</span>';}
       }catch(e){document.getElementById('wb-engineers').innerHTML='<span class="err">Failed to load workboard data</span>';}
+    }
+
+    /* --- Thinking --- */
+    async function fetchThinking(){
+      try{
+        const r=await fetch('/api/ooda-thinking');
+        const d=await r.json();
+        const el=document.getElementById('thinking-timeline');
+        if(!d.reports?.length){el.innerHTML='<span style="color:#8b949e">No cycle reports yet. The OODA daemon generates these during autonomous work.</span>';return;}
+        el.innerHTML=d.reports.map(rpt=>{
+          if(rpt.legacy){
+            return `<div class="thinking-cycle legacy">
+              <div class="cycle-header"><span class="cycle-num">Cycle #${rpt.cycle_number}</span><span class="cycle-badge">legacy</span></div>
+              <div class="cycle-summary">${esc(rpt.summary)}</div>
+            </div>`;
+          }
+          const phases=[];
+          if(rpt.observation){
+            const obs=rpt.observation;
+            phases.push(`<div class="phase observe">
+              <div class="phase-label">👁 Observe</div>
+              <div class="phase-content">
+                <div>${obs.goal_count} goals tracked</div>
+                ${obs.goals?.map(g=>`<div class="goal-line">• ${esc(g.id)}: ${esc(g.progress)}</div>`).join('')||''}
+                ${obs.gym_health?`<div>Gym: ${(obs.gym_health.pass_rate*100).toFixed(0)}% pass rate (${obs.gym_health.scenario_count} scenarios)</div>`:''}
+                ${obs.environment?`<div>Env: ${obs.environment.open_issues} issues, ${obs.environment.recent_commits} recent commits${obs.environment.git_status?'':' (clean)'}</div>`:''}
+              </div>
+            </div>`);
+          }
+          if(rpt.priorities?.length){
+            phases.push(`<div class="phase orient">
+              <div class="phase-label">🧭 Orient</div>
+              <div class="phase-content">
+                ${rpt.priorities.map(p=>`<div class="priority-line">
+                  <span class="urgency" style="color:${p.urgency>0.7?'var(--red)':p.urgency>0.4?'var(--yellow)':'var(--green)'}">●</span>
+                  <strong>${esc(p.goal_id)}</strong> (urgency: ${p.urgency.toFixed(2)}) — ${esc(p.reason)}
+                </div>`).join('')}
+              </div>
+            </div>`);
+          }
+          if(rpt.planned_actions?.length){
+            phases.push(`<div class="phase decide">
+              <div class="phase-label">🎯 Decide</div>
+              <div class="phase-content">
+                ${rpt.planned_actions.map(a=>`<div>→ <code>${esc(a.kind)}</code> ${a.goal_id?'['+esc(a.goal_id)+']':''} ${esc(a.description)}</div>`).join('')}
+              </div>
+            </div>`);
+          }
+          if(rpt.outcomes?.length){
+            phases.push(`<div class="phase act">
+              <div class="phase-label">⚡ Act</div>
+              <div class="phase-content">
+                ${rpt.outcomes.map(o=>`<div class="outcome ${o.success?'success':'failure'}">
+                  ${o.success?'✅':'❌'} <code>${esc(o.action_kind)}</code> — ${esc(o.action_description)}
+                  <div class="outcome-detail">${esc((o.detail||'').substring(0,300))}${(o.detail||'').length>300?'…':''}</div>
+                </div>`).join('')}
+              </div>
+            </div>`);
+          }
+          return `<div class="thinking-cycle">
+            <div class="cycle-header">
+              <span class="cycle-num">Cycle #${rpt.cycle_number}</span>
+              <span class="cycle-summary-inline">${esc(rpt.summary||'')}</span>
+            </div>
+            <div class="cycle-phases">${phases.join('')}</div>
+          </div>`;
+        }).join('');
+      }catch(e){document.getElementById('thinking-timeline').innerHTML='<span class="err">Failed to load: '+esc(e.toString())+'</span>';}
     }
 
     /* --- Init --- */
