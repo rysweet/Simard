@@ -8,8 +8,9 @@ use serde_json::{Value, json};
 use simard::{
     AgentRole, BridgeErrorPayload, CognitiveMemoryBridge, HeartbeatStatus, InMemoryBridgeTransport,
     SubordinateConfig, SubordinateHandle, SubordinateIdentity, SubordinateProgress, assign_goal,
-    check_heartbeat, compose_identity, identity_for_role, kill_subordinate, max_subordinate_depth,
-    poll_progress, read_assigned_goal, report_progress, role_for_objective, spawn_subordinate,
+    check_heartbeat, compose_identity, identity_for_role, kill_subordinate, max_retries_per_goal,
+    max_subordinate_depth, poll_progress, read_assigned_goal, report_progress, role_for_objective,
+    spawn_subordinate,
 };
 
 struct StoredFact {
@@ -279,6 +280,13 @@ fn composite_identity_rejects_depth_exceeding_limit() {
     let mut sub = identity_for_role(AgentRole::Reviewer).expect("sub");
     sub.name = "sub-deep".to_string();
     let depth = max_subordinate_depth();
+    // After f1d98537 the default limit is u32::MAX (artificial limits
+    // removed). Skip the over-limit case unless the operator has set a
+    // finite limit via SIMARD_MAX_SUBORDINATE_DEPTH; otherwise depth+1
+    // overflows and the test is no longer meaningful.
+    if depth == u32::MAX {
+        return;
+    }
     let err = compose_identity(
         primary,
         vec![SubordinateIdentity {
@@ -321,12 +329,21 @@ fn identity_for_all_roles_produces_valid_manifests() {
 
 #[test]
 fn spawn_rejects_depth_at_limit() {
+    let depth_limit = max_subordinate_depth();
+    if depth_limit == u32::MAX {
+        // Per f1d98537, validate() now only warns at the depth limit
+        // (default u32::MAX) and never rejects. Skip the rejection
+        // assertion when no finite limit is configured; the per-module
+        // unit tests in src/agent_supervisor/types.rs cover the
+        // warning behaviour.
+        return;
+    }
     let config = SubordinateConfig {
         agent_name: "sub-deep".to_string(),
         goal: "goal".to_string(),
         role: AgentRole::Engineer,
         worktree_path: PathBuf::from("/tmp/deep"),
-        current_depth: max_subordinate_depth(),
+        current_depth: depth_limit,
     };
     let err = spawn_subordinate(&config).expect_err("reject");
     assert!(err.to_string().contains("depth"));
@@ -335,10 +352,11 @@ fn spawn_rejects_depth_at_limit() {
 #[test]
 fn retry_policy_enforced() {
     let mut handle = test_handle("sub-retry", "flaky");
-    assert!(handle.can_retry());
-    handle.record_retry();
-    assert!(handle.can_retry());
-    handle.record_retry();
+    let max = max_retries_per_goal();
+    for _ in 0..max {
+        assert!(handle.can_retry());
+        handle.record_retry();
+    }
     assert!(!handle.can_retry());
 }
 
