@@ -618,7 +618,7 @@ impl NativeCognitiveMemory {
         })
     }
 
-    fn query(&self, cypher: &str) -> SimardResult<Vec<Vec<lbug::Value>>> {
+    pub(crate) fn query(&self, cypher: &str) -> SimardResult<Vec<Vec<lbug::Value>>> {
         let conn = self.conn()?;
         let result = conn
             .query(cypher)
@@ -667,21 +667,21 @@ impl NativeCognitiveMemory {
     }
 }
 
-fn as_str(val: &lbug::Value) -> Option<&str> {
+pub(crate) fn as_str(val: &lbug::Value) -> Option<&str> {
     match val {
         lbug::Value::String(s) => Some(s.as_str()),
         _ => None,
     }
 }
 
-fn as_i64(val: &lbug::Value) -> Option<i64> {
+pub(crate) fn as_i64(val: &lbug::Value) -> Option<i64> {
     match val {
         lbug::Value::Int64(n) => Some(*n),
         _ => None,
     }
 }
 
-fn as_f64(val: &lbug::Value) -> Option<f64> {
+pub(crate) fn as_f64(val: &lbug::Value) -> Option<f64> {
     match val {
         lbug::Value::Double(d) => Some(*d),
         lbug::Value::Int64(n) => Some(*n as f64),
