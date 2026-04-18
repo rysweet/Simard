@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use super::auth::{require_auth, try_login};
 use crate::agent_registry::{AgentRegistry, FileBackedAgentRegistry};
 use crate::build_lock::BuildLock;
-use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
+use crate::cognitive_memory::{as_f64, as_i64, as_str, CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::error::{SimardError, SimardResult};
 use crate::goal_curation::GoalBoard;
 use crate::goals::GoalRecord;
@@ -41,10 +41,12 @@ pub fn build_router() -> Router {
         .route("/api/build-lock/release", post(build_lock_force_release))
         .route("/api/memory", get(memory_metrics))
         .route("/api/memory/search", post(memory_search))
+        .route("/api/memory/graph", get(memory_graph))
         .route("/api/traces", get(traces))
         .route("/api/activity", get(activity))
         .route("/api/workboard", get(workboard))
         .route("/api/current-work", get(current_work))
+        .route("/api/ooda-thinking", get(ooda_thinking))
         .route("/ws/chat", get(ws_chat_handler))
         .route("/api/login", post(login))
         .route("/login", get(login_page))
@@ -2034,6 +2036,57 @@ async fn memory_metrics() -> Json<Value> {
     }))
 }
 
+async fn ooda_thinking() -> Json<Value> {
+    let state_root = resolve_state_root();
+    let dir = state_root.join("cycle_reports");
+    let mut reports = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        let mut paths: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+        paths.sort_by(|a, b| {
+            let num = |p: &std::fs::DirEntry| -> u32 {
+                p.file_name()
+                    .to_str()
+                    .unwrap_or("")
+                    .strip_prefix("cycle_")
+                    .unwrap_or("")
+                    .strip_suffix(".json")
+                    .unwrap_or("")
+                    .parse()
+                    .unwrap_or(0)
+            };
+            num(b).cmp(&num(a))
+        });
+
+        for entry in paths.into_iter().take(20) {
+            if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                if let Ok(val) = serde_json::from_str::<Value>(&content) {
+                    reports.push(val);
+                } else {
+                    // Legacy one-line summary
+                    let cycle_num = entry
+                        .file_name()
+                        .to_str()
+                        .unwrap_or("")
+                        .strip_prefix("cycle_")
+                        .unwrap_or("")
+                        .strip_suffix(".json")
+                        .unwrap_or("")
+                        .parse::<u32>()
+                        .unwrap_or(0);
+                    reports.push(json!({
+                        "cycle_number": cycle_num,
+                        "summary": content.trim(),
+                        "legacy": true,
+                    }));
+                }
+            }
+        }
+    }
+
+    Json(json!({ "reports": reports }))
+}
+
 fn resolve_state_root() -> std::path::PathBuf {
     std::env::var("SIMARD_STATE_ROOT")
         .map(std::path::PathBuf::from)
@@ -2162,6 +2215,11 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     #chat-messages{background:#010409;border:1px solid var(--border);border-radius:6px;padding:.75rem;height:400px;overflow-y:auto;font-size:.9rem;margin-bottom:.75rem}
     .chat-msg{margin-bottom:.5rem} .chat-msg .role{font-weight:700;margin-right:.5rem}
     .chat-msg .role.user{color:var(--accent)} .chat-msg .role.system{color:var(--yellow)} .chat-msg .role.assistant{color:var(--green)}
+    .typing-dots span{animation:blink 1.4s infinite both;font-size:1.2em}
+    .typing-dots span:nth-child(2){animation-delay:.2s}
+    .typing-dots span:nth-child(3){animation-delay:.4s}
+    @keyframes blink{0%,80%,100%{opacity:0}40%{opacity:1}}
+    #chat-send:disabled{opacity:.5;cursor:not-allowed}
     #chat-input-row{display:flex;gap:.5rem}
     #chat-input{flex:1;padding:.5rem;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--fg);font-size:.9rem;resize:none;height:42px}
     #chat-input:focus{outline:none;border-color:var(--accent)}
@@ -2173,6 +2231,27 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     .badge{display:inline-block;padding:.15rem .5rem;border-radius:10px;font-size:.75rem;font-weight:600;background:#1f6feb33;color:var(--accent)}
     .btn{background:var(--accent);color:#0d1117;border:none;border-radius:4px;padding:.2rem .6rem;cursor:pointer;font-size:.8rem;float:right}
     .btn:hover{opacity:.9}
+    .thinking-cycle{border:1px solid var(--border);border-radius:8px;padding:1rem;margin-bottom:1rem;background:var(--card)}
+    .thinking-cycle.legacy{opacity:0.7}
+    .cycle-header{display:flex;align-items:center;gap:.75rem;margin-bottom:.75rem;padding-bottom:.5rem;border-bottom:1px solid var(--border)}
+    .cycle-num{font-weight:700;font-size:1rem;color:var(--accent)}
+    .cycle-summary-inline{font-size:.85rem;color:#8b949e}
+    .cycle-badge{font-size:.7rem;padding:2px 6px;border-radius:4px;background:#21262d;color:#8b949e}
+    .phase{margin-bottom:.75rem;padding-left:1rem;border-left:3px solid var(--border)}
+    .phase.observe{border-left-color:var(--accent)}
+    .phase.orient{border-left-color:var(--yellow)}
+    .phase.decide{border-left-color:#a371f7}
+    .phase.act{border-left-color:var(--green)}
+    .phase-label{font-weight:600;font-size:.9rem;margin-bottom:.3rem}
+    .phase-content{font-size:.85rem;color:#c9d1d9}
+    .phase-content div{margin-bottom:.2rem}
+    .goal-line{padding-left:.5rem;color:#8b949e}
+    .priority-line{padding-left:.5rem}
+    .urgency{margin-right:.3rem}
+    .outcome{padding:.4rem;border-radius:4px;margin-bottom:.3rem}
+    .outcome.success{background:rgba(63,185,80,0.1)}
+    .outcome.failure{background:rgba(248,81,73,0.1)}
+    .outcome-detail{font-size:.8rem;color:#8b949e;margin-top:.2rem;padding-left:1rem;font-family:monospace;white-space:pre-wrap;max-height:100px;overflow-y:auto}
   </style>
 </head>
 <body>
@@ -2194,6 +2273,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     <div class="tab" data-tab="costs">Costs</div>
     <div class="tab" data-tab="chat">Chat</div>
     <div class="tab" data-tab="workboard">Whiteboard</div>
+    <div class="tab" data-tab="thinking">🧠 Thinking</div>
   </div>
 
   <div class="tab-content active" id="tab-overview">
@@ -2308,6 +2388,13 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           <span id="budget-status"></span>
         </div>
       </div>
+    </div>
+  </div>
+
+  <div class="tab-content" id="tab-thinking">
+    <div class="card">
+      <h2>OODA Internal Reasoning <button class="btn" onclick="fetchThinking()">Refresh</button></h2>
+      <div id="thinking-timeline"><span class="loading">Loading…</span></div>
     </div>
   </div>
 
@@ -2839,12 +2926,13 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       ws.onopen=()=>{st.innerHTML='<span style="color:var(--green)">● Connected</span>';};
       ws.onclose=()=>{
         st.innerHTML='<span style="color:var(--red)">● Disconnected</span> <button class="btn" onclick="initChat()" style="font-size:.75rem;padding:.1rem .4rem;margin-left:.5rem">Reconnect</button>';
-        chatInit=false;
+        chatInit=false;removeTypingIndicator();setChatBusy(false);
       };
       ws.onerror=()=>{
         st.innerHTML='<span style="color:var(--red)">● Error</span> <button class="btn" onclick="initChat()" style="font-size:.75rem;padding:.1rem .4rem;margin-left:.5rem">Retry</button>';
+        removeTypingIndicator();setChatBusy(false);
       };
-      ws.onmessage=ev=>{try{const m=JSON.parse(ev.data);appendMsg(m.role||'system',m.content||ev.data);}catch(ex){appendMsg('system',ev.data);}};
+      ws.onmessage=ev=>{removeTypingIndicator();setChatBusy(false);try{const m=JSON.parse(ev.data);appendMsg(m.role||'system',m.content||ev.data);}catch(ex){appendMsg('system',ev.data);}};
     }
     function sendChat(){
       const inp=document.getElementById('chat-input'); const txt=inp.value.trim();
@@ -2854,6 +2942,25 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         return;
       }
       appendMsg('user',txt); ws.send(txt); inp.value='';
+      showTypingIndicator(); setChatBusy(true);
+    }
+    function showTypingIndicator(){
+      removeTypingIndicator();
+      const el=document.getElementById('chat-messages');
+      const div=document.createElement('div');
+      div.id='typing-indicator';
+      div.className='chat-msg';
+      div.innerHTML='<span class="role assistant">simard:</span> <span class="typing-dots"><span>.</span><span>.</span><span>.</span></span>';
+      el.appendChild(div);
+      el.scrollTop=el.scrollHeight;
+    }
+    function removeTypingIndicator(){
+      const ind=document.getElementById('typing-indicator');
+      if(ind) ind.remove();
+    }
+    function setChatBusy(busy){
+      document.getElementById('chat-send').disabled=busy;
+      document.getElementById('chat-input').disabled=busy;
     }
     function appendMsg(role,content){
       const el=document.getElementById('chat-messages');

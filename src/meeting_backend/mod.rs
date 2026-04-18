@@ -569,9 +569,11 @@ fn extract_response(outcome: &BaseTypeOutcome) -> String {
     sanitize_agent_output(outcome.execution_summary.trim())
 }
 
-/// Remove agentic tool-call log lines and XML-style tool blocks from LLM
-/// output so the terminal displays only the conversational content.
+/// Remove agentic tool-call log lines, ANSI escape codes, and infrastructure
+/// noise from LLM output so the dashboard displays only conversational content.
 fn sanitize_agent_output(raw: &str) -> String {
+    let raw = strip_ansi_escapes(raw);
+
     let mut result = String::with_capacity(raw.len());
     let mut in_tool_block = false;
     let mut consecutive_blank = 0u8;
@@ -595,6 +597,10 @@ fn sanitize_agent_output(raw: &str) -> String {
             continue;
         }
 
+        if is_agent_noise_line(trimmed) {
+            continue;
+        }
+
         if trimmed.is_empty() {
             consecutive_blank += 1;
             if consecutive_blank <= 2 {
@@ -609,6 +615,68 @@ fn sanitize_agent_output(raw: &str) -> String {
     }
 
     result.trim().to_string()
+}
+
+/// Strip ANSI escape sequences (CSI sequences: ESC [ params final-byte).
+fn strip_ansi_escapes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if let Some(next) = chars.next() {
+                if next == '[' {
+                    for ch in chars.by_ref() {
+                        if ch.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Detect lines that are agent infrastructure noise, not conversational content.
+fn is_agent_noise_line(trimmed: &str) -> bool {
+    if trimmed.len() > 20 && trimmed.starts_with("202") {
+        if let Some('-') = trimmed.chars().nth(4) {
+            return true;
+        }
+    }
+    if trimmed.contains("newer version of amplihack") || trimmed.contains("amplihack update") {
+        return true;
+    }
+    if trimmed.contains("NODE_OPTIONS=") {
+        return true;
+    }
+    if trimmed.starts_with("ACTION:")
+        || trimmed.starts_with("EXPLANATION:")
+        || trimmed.starts_with("CONFIDENCE:")
+    {
+        return true;
+    }
+    if trimmed.starts_with("Changes ") && trimmed.contains("Requests") {
+        return true;
+    }
+    if trimmed.starts_with("Tokens ") && (trimmed.contains('\u{2191}') || trimmed.contains('\u{2193}'))
+    {
+        return true;
+    }
+    if trimmed.contains("launching copilot") && trimmed.contains("binary=") {
+        return true;
+    }
+    if trimmed.starts_with("\u{2139} ") || trimmed.starts_with("\u{2713} ") {
+        return true;
+    }
+    if trimmed.contains(" INFO ")
+        && (trimmed.contains("simard") || trimmed.contains("rustyclawd"))
+    {
+        return true;
+    }
+    false
 }
 
 fn is_tool_block_open(trimmed: &str) -> bool {
@@ -860,6 +928,29 @@ mod tests {
     fn sanitize_handles_empty_input() {
         assert_eq!(sanitize_agent_output(""), "");
         assert_eq!(sanitize_agent_output("   "), "");
+    }
+
+    #[test]
+    fn sanitize_strips_ansi_escape_codes() {
+        let input = "\x1b[33mWarning\x1b[0m: something \x1b[2mhappened\x1b[0m";
+        let result = sanitize_agent_output(input);
+        assert_eq!(result, "Warning: something happened");
+    }
+
+    #[test]
+    fn sanitize_strips_agent_noise_lines() {
+        let input = "Hello user.\n2026-04-18T18:23:41.151133Z INFO launching copilot binary=copilot\nACTION: search\nEXPLANATION: looking\nCONFIDENCE: 0.95\nChanges +0 -0 Requests 7.5 Premium (16s)\nTokens \u{2191} 64.7k \u{2193} 12k\nA newer version of amplihack is available.\n\u{2139} Loading...\n\u{2713} Done\nNODE_OPTIONS=--max-old-space\nGoodbye user.";
+        let result = sanitize_agent_output(input);
+        assert!(result.contains("Hello user."), "result: {result}");
+        assert!(result.contains("Goodbye user."), "result: {result}");
+        assert!(!result.contains("INFO"), "result: {result}");
+        assert!(!result.contains("ACTION:"), "result: {result}");
+        assert!(!result.contains("EXPLANATION:"), "result: {result}");
+        assert!(!result.contains("CONFIDENCE:"), "result: {result}");
+        assert!(!result.contains("Changes +0"), "result: {result}");
+        assert!(!result.contains("Tokens"), "result: {result}");
+        assert!(!result.contains("amplihack"), "result: {result}");
+        assert!(!result.contains("NODE_OPTIONS"), "result: {result}");
     }
 
     #[test]
