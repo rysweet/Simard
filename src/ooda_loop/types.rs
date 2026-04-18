@@ -11,13 +11,14 @@ use crate::memory_cognitive::CognitiveStatistics;
 use crate::memory_consolidation::PreparedContext;
 use crate::self_improve::ImprovementCycle;
 
-/// The four phases of a single OODA cycle.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// The four phases of a single OODA cycle, plus Sleep between cycles.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
 pub enum OodaPhase {
     Observe,
     Orient,
     Decide,
     Act,
+    Sleep,
 }
 
 impl Display for OodaPhase {
@@ -27,6 +28,7 @@ impl Display for OodaPhase {
             Self::Orient => f.write_str("orient"),
             Self::Decide => f.write_str("decide"),
             Self::Act => f.write_str("act"),
+            Self::Sleep => f.write_str("sleep"),
         }
     }
 }
@@ -43,6 +45,12 @@ pub struct OodaState {
     /// Populated each cycle so the Act phase can use recalled facts, triggered
     /// prospectives, and relevant procedures when advancing goals.
     pub prepared_context: Option<PreparedContext>,
+    /// Unix epoch (seconds) when the current cycle started.
+    pub cycle_start_epoch: u64,
+    /// Human-readable summary from the last completed cycle.
+    pub last_cycle_summary: Option<String>,
+    /// Duration in seconds of the last completed cycle.
+    pub last_cycle_duration_secs: Option<u64>,
 }
 
 impl OodaState {
@@ -54,6 +62,9 @@ impl OodaState {
             last_observation: None,
             review_improvements: Vec::new(),
             prepared_context: None,
+            cycle_start_epoch: 0,
+            last_cycle_summary: None,
+            last_cycle_duration_secs: None,
         }
     }
 }
@@ -217,6 +228,7 @@ mod tests {
         assert_eq!(OodaPhase::Orient.to_string(), "orient");
         assert_eq!(OodaPhase::Decide.to_string(), "decide");
         assert_eq!(OodaPhase::Act.to_string(), "act");
+        assert_eq!(OodaPhase::Sleep.to_string(), "sleep");
     }
 
     #[test]
@@ -243,6 +255,9 @@ mod tests {
         assert!(state.review_improvements.is_empty());
         assert!(state.active_goals.active.is_empty());
         assert!(state.prepared_context.is_none());
+        assert_eq!(state.cycle_start_epoch, 0);
+        assert!(state.last_cycle_summary.is_none());
+        assert!(state.last_cycle_duration_secs.is_none());
     }
 
     #[test]

@@ -9,7 +9,7 @@ use crate::goal_curation::load_goal_board;
 use crate::identity::OperatingMode;
 use crate::memory_ipc;
 use crate::ooda_loop::{
-    OodaBridges, OodaConfig, OodaState, run_ooda_cycle, summarize_cycle_report,
+    OodaBridges, OodaConfig, OodaPhase, OodaState, run_ooda_cycle, summarize_cycle_report,
 };
 use crate::session_builder::SessionBuilder;
 
@@ -330,6 +330,11 @@ pub fn run_ooda_daemon(
         // -------------------------------------------------------------------
 
         let cycle_start = Instant::now();
+        let cycle_start_epoch = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        state.cycle_start_epoch = cycle_start_epoch;
 
         // Write heartbeat at cycle START so the dashboard never sees "stale"
         // during a long-running cycle.
@@ -342,6 +347,9 @@ pub fn run_ooda_daemon(
                 "timestamp": chrono::Utc::now().to_rfc3339(),
                 "cycle_number": cycles_run + 1,
                 "status": "running",
+                "cycle_phase": state.current_phase.to_string(),
+                "cycle_start_epoch": cycle_start_epoch,
+                "interval_secs": interval_secs,
                 "actions_taken": format!("Starting cycle #{}", cycles_run + 1),
             });
             let _ = std::fs::write(
@@ -354,6 +362,9 @@ pub fn run_ooda_daemon(
             Ok(report) => {
                 let cycle_elapsed = cycle_start.elapsed();
                 let summary = summarize_cycle_report(&report);
+                state.last_cycle_summary = Some(summary.clone());
+                state.last_cycle_duration_secs = Some(cycle_elapsed.as_secs());
+                state.current_phase = OodaPhase::Sleep;
                 daemon_log(&state_root, &format!("[simard] {summary}"));
                 // Persist the cycle report to filesystem for auditability.
                 persist_cycle_report(&state_root, &report);
@@ -369,7 +380,12 @@ pub fn run_ooda_daemon(
                         "timestamp": chrono::Utc::now().to_rfc3339(),
                         "cycle_number": cycles_run + 1,
                         "status": "healthy",
+                        "cycle_phase": "sleep",
+                        "cycle_start_epoch": cycle_start_epoch,
+                        "cycle_duration_secs": cycle_elapsed.as_secs(),
+                        "interval_secs": interval_secs,
                         "actions_taken": summary.clone(),
+                        "last_cycle_summary": summary,
                     });
                     let health_path = health_dir.join("daemon_health.json");
                     if let Err(e) = std::fs::write(
