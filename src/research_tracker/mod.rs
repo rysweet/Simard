@@ -5,6 +5,7 @@
 //! activity is relevant to Simard's focus areas.
 
 pub mod activity_polling;
+pub mod idea_extraction;
 mod operations;
 mod types;
 mod watches;
@@ -14,6 +15,7 @@ pub use activity_polling::{
     GitHubActivityEvent, PollResult, fetch_activity, poll_all_developer_activity,
     poll_developer_activity, store_activity_events, summarize_poll_results,
 };
+pub use idea_extraction::{ExtractionResult, IdeaProposal, extract_ideas, summarize_extraction};
 pub use operations::{
     add_research_topic, load_research_topics, track_developer, update_topic_status,
 };

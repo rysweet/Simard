@@ -267,8 +267,9 @@ pub use remote_azlin::{AzlinConfig, AzlinExecutor, AzlinVm, RealAzlinExecutor};
 pub use remote_session::{RemoteConfig, RemoteSession, RemoteStatus};
 pub use remote_transfer::MemorySnapshot;
 pub use research_tracker::{
-    DeveloperWatch, ResearchStatus, ResearchTopic, ResearchTracker, add_research_topic,
-    load_research_topics, track_developer, update_topic_status,
+    DeveloperWatch, ExtractionResult, IdeaProposal, ResearchStatus, ResearchTopic, ResearchTracker,
+    add_research_topic, extract_ideas, load_research_topics, summarize_extraction, track_developer,
+    update_topic_status,
 };
 pub use review::{
     ImprovementProposal, ReviewArtifact, ReviewRequest, ReviewSignal, ReviewTargetKind,

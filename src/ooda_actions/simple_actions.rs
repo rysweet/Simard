@@ -125,6 +125,23 @@ pub(super) fn dispatch_poll_developer_activity(
     )
 }
 
+/// ExtractIdeas: analyse recent developer-activity facts in cognitive memory
+/// and surface promising research ideas as `research:` issue proposals.
+pub(super) fn dispatch_extract_ideas(
+    action: &PlannedAction,
+    bridges: &OodaBridges,
+) -> ActionOutcome {
+    use crate::research_tracker::{extract_ideas, summarize_extraction};
+
+    match extract_ideas(&*bridges.memory) {
+        Ok(result) => {
+            let summary = summarize_extraction(&result);
+            make_outcome(action, true, format!("idea extraction complete: {summary}"))
+        }
+        Err(e) => make_outcome(action, false, format!("idea extraction failed: {e}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::goal_curation::GoalBoard;
