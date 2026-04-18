@@ -2515,7 +2515,7 @@ const LOGIN_HTML: &str = r#"<!DOCTYPE html>
     document.getElementById('login-form').addEventListener('submit', async (e) => {
       e.preventDefault();
       const code = document.getElementById('code').value;
-      const r = await fetch('/api/login', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({code}) });
+      const r = await apiFetch('/api/login', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({code}) });
       if (r.ok) { window.location.href = '/'; }
       else { document.getElementById('error').style.display = 'block'; }
     });
@@ -2871,6 +2871,14 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     /* --- Helpers --- */
     function fmtB(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';return(b/1048576).toFixed(1)+' MB';}
     function esc(s){if(s==null)return'';const d=document.createElement('div');d.textContent=String(s);return d.innerHTML;}
+    async function apiFetch(url,opts){
+      const r=await fetch(url,opts);
+      if(r.status===401){window.location.href='/login';throw new Error('Session expired — redirecting to login');}
+      if(!r.ok){const t=await r.text();throw new Error(t||('HTTP '+r.status));}
+      const text=await r.text();
+      if(!text)return {};
+      return JSON.parse(text);
+    }
     function timeAgo(ts){
       if(!ts)return'—';
       const d=new Date(ts);if(isNaN(d))return ts;
@@ -2920,7 +2928,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     /* --- Status --- */
     async function fetchStatus(){
       try{
-        const r=await fetch('/api/status'); const d=await r.json();
+        const d=await apiFetch('/api/status');
         const dc=d.disk_usage_pct>90?'err':d.disk_usage_pct>70?'warn':'ok';
         const oc=d.ooda_daemon==='running'?'ok':(d.ooda_daemon==='stale'?'warn':'err');
         const shortHash=d.git_hash?d.git_hash.substring(0,7):'';
@@ -2945,7 +2953,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     /* --- Issues --- */
     async function fetchIssues(){
       try{
-        const r=await fetch('/api/issues'); const data=await r.json();
+        const data=await apiFetch('/api/issues');
         if(Array.isArray(data)){
           if(!data.length){document.getElementById('issues-list').innerHTML='<li style="color:#8b949e">No open issues 🎉</li>';return;}
           document.getElementById('issues-list').innerHTML=data.map(i=>{
@@ -2962,7 +2970,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     let allLogLines=[];
     async function fetchLogs(){
       try{
-        const r=await fetch('/api/logs'); const d=await r.json();
+        const d=await apiFetch('/api/logs');
         allLogLines=d.daemon_log_lines||[];
         applyLogFilter();
         const tEl=document.getElementById('ooda-transcripts');
@@ -3055,8 +3063,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
     async function fetchProcessTree() {
       try {
-        const r = await fetch('/api/process-tree');
-        const d = await r.json();
+        const d=await apiFetch('/api/process-tree');
         const container = document.getElementById('proc-tree-container');
         const summary = document.getElementById('proc-tree-summary');
         if (d.root) {
@@ -3074,7 +3081,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     /* --- Memory --- */
     async function fetchMemory(){
       try{
-        const r=await fetch('/api/memory'); const d=await r.json();
+        const d=await apiFetch('/api/memory');
         let overviewHtml=`
           <div class="stat"><span class="label">Total Facts</span><span class="value">${d.total_facts}</span></div>
           <div class="stat"><span class="label">Last Consolidation</span><span class="value">${d.last_consolidation?timeAgo(d.last_consolidation)+' ('+new Date(d.last_consolidation).toLocaleString()+')':'Never'}</span></div>
@@ -3111,7 +3118,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     async function fetchDistributed(){
       document.getElementById('cluster-topology').innerHTML='<span class="loading">Querying remote VMs… (this may take 10-30s)</span>';
       try{
-        const r=await fetch('/api/distributed'); const d=await r.json();
+        const d=await apiFetch('/api/distributed');
         document.getElementById('cluster-topology').innerHTML=`
           <div class="stat"><span class="label">Topology</span><span class="value">${esc(d.topology)}</span></div>
           <div class="stat"><span class="label">Local Host</span><span class="value">${esc(d.local?.hostname||'?')}</span></div>
@@ -3137,7 +3144,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     }
     async function fetchHosts(){
       try{
-        const r=await fetch('/api/hosts');const d=await r.json();
+        const d=await apiFetch('/api/hosts');
         const el=document.getElementById('hosts-list');
         let html='';
 
@@ -3184,16 +3191,15 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       }catch(e){document.getElementById('hosts-list').innerHTML='<span class="err">Failed to load hosts</span>';}
     }
     function quickAddHost(name,rg){
-      fetch('/api/hosts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,resource_group:rg||'rysweet-linux-vm-pool'})})
-        .then(r=>r.json()).then(d=>{if(d.status==='ok')fetchHosts();else alert(d.error||'Failed');}).catch(e=>alert('Error: '+e));
+      apiFetch('/api/hosts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,resource_group:rg||'rysweet-linux-vm-pool'})})
+        .then(d=>{if(d.status==='ok')fetchHosts();else alert(d.error||'Failed');}).catch(e=>alert('Error: '+e));
     }
     async function addHost(){
       const name=document.getElementById('host-name').value.trim();
       const rg=document.getElementById('host-rg').value.trim();
       if(!name){document.getElementById('host-status').textContent='Name required';return;}
       try{
-        const r=await fetch('/api/hosts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,resource_group:rg})});
-        const d=await r.json();
+        const d=await apiFetch('/api/hosts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,resource_group:rg})});
         document.getElementById('host-status').textContent=d.status==='ok'?'Added ✓':'Error: '+(d.error||'');
         document.getElementById('host-name').value='';
         fetchHosts();
@@ -3202,7 +3208,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     }
     async function removeHost(name){
       if(!confirm('Remove host "'+name+'"?'))return;
-      await fetch('/api/hosts',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+      await apiFetch('/api/hosts',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
       fetchHosts();
     }
     fetchHosts();
@@ -3210,7 +3216,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     /* --- Goals --- */
     async function fetchGoals(){
       try{
-        const r=await fetch('/api/goals'); const d=await r.json();
+        const d=await apiFetch('/api/goals');
         if(d.active?.length){
           document.getElementById('goals-active').innerHTML=`<table class="proc-table">
             <tr><th>Priority</th><th>ID</th><th>Description</th><th>Status</th><th>Assigned</th><th>Actions</th></tr>
@@ -3249,8 +3255,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     async function seedGoals(){
       if(!confirm('Seed default goals? This only works if no active goals exist.'))return;
       try{
-        const r=await fetch('/api/goals/seed',{method:'POST'});
-        const d=await r.json();
+        const d=await apiFetch('/api/goals/seed',{method:'POST'});
         if(d.status==='ok'||d.status==='already_seeded'){
           fetchGoals();
         }else{
@@ -3267,8 +3272,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       const type=document.getElementById('new-goal-type').value;
       const priority=parseInt(document.getElementById('new-goal-priority').value)||3;
       try{
-        const r=await fetch('/api/goals',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({description:desc,type:type,priority:priority})});
-        const d=await r.json();
+        const d=await apiFetch('/api/goals',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({description:desc,type:type,priority:priority})});
         if(d.status==='ok'){document.getElementById('add-goal-form').style.display='none';document.getElementById('new-goal-desc').value='';fetchGoals();}
         else{alert(d.error||'Failed');}
       }catch(e){alert('Error: '+e);}
@@ -3277,8 +3281,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     async function removeGoal(id){
       if(!confirm('Remove goal "'+id+'"?'))return;
       try{
-        const r=await fetch('/api/goals/'+encodeURIComponent(id),{method:'DELETE'});
-        const d=await r.json();
+        const d=await apiFetch('/api/goals/'+encodeURIComponent(id),{method:'DELETE'});
         if(d.status==='ok')fetchGoals();
         else alert(d.error||'Failed');
       }catch(e){alert('Error: '+e);}
@@ -3286,8 +3289,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
     async function promoteGoal(id){
       try{
-        const r=await fetch('/api/goals/promote/'+encodeURIComponent(id),{method:'POST'});
-        const d=await r.json();
+        const d=await apiFetch('/api/goals/promote/'+encodeURIComponent(id),{method:'POST'});
         if(d.status==='ok')fetchGoals();
         else alert(d.error||'Failed');
       }catch(e){alert('Error: '+e);}
@@ -3297,8 +3299,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       const status=prompt('New status (not-started, in-progress, blocked, completed):');
       if(!status)return;
       try{
-        const r=await fetch('/api/goals/'+encodeURIComponent(id)+'/status',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:status})});
-        const d=await r.json();
+        const d=await apiFetch('/api/goals/'+encodeURIComponent(id)+'/status',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:status})});
         if(d.status==='ok')fetchGoals();
         else alert(d.error||'Failed');
       }catch(e){alert('Error: '+e);}
@@ -3307,7 +3308,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     /* --- Traces --- */
     async function fetchTraces(){
       try{
-        const r=await fetch('/api/traces'); const d=await r.json();
+        const d=await apiFetch('/api/traces');
         const status=d.otel_enabled
           ?`<span class="ok">OTEL enabled</span> → <code>${esc(d.otel_endpoint||'')}</code>`
           :'<span class="warn">OTEL not configured</span> — set OTEL_EXPORTER_OTLP_ENDPOINT to enable';
@@ -3335,8 +3336,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       if(!q){document.getElementById('mem-search-results').innerHTML='<span class="warn">Enter a search term</span>';return;}
       document.getElementById('mem-search-results').innerHTML='<span class="loading">Searching…</span>';
       try{
-        const r=await fetch('/api/memory/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q})});
-        const d=await r.json();
+        const d=await apiFetch('/api/memory/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q})});
         if(d.results?.length){
           document.getElementById('mem-search-results').innerHTML=`
             <p style="color:#8b949e;font-size:.85rem">${d.result_count} result(s) for "${esc(d.query)}"</p>
@@ -3378,7 +3378,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
     async function fetchMemoryGraph(){
       try{
-        const r=await fetch('/api/memory/graph');const d=await r.json();
+        const d=await apiFetch('/api/memory/graph');
         if(d.error){document.getElementById('mem-graph-stats').textContent='Error: '+d.error;return;}
         const s=d.stats||{};
         document.getElementById('mem-graph-stats').textContent=
@@ -3538,7 +3538,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     }
     async function fetchCosts(){
       try{
-        const r=await fetch('/api/costs'); const d=await r.json();
+        const d=await apiFetch('/api/costs');
         function renderSummary(s){
           if(!s||s.error) return `<span class="err">${esc(s?.error||'No cost data — is cost tracking configured?')}</span>`;
           return Object.entries(s).map(([k,v])=>{
@@ -3561,7 +3561,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     }
     async function fetchBudget(){
       try{
-        const r=await fetch('/api/budget');const d=await r.json();
+        const d=await apiFetch('/api/budget');
         document.getElementById('budget-daily').value=d.daily_budget_usd||500;
         document.getElementById('budget-weekly').value=d.weekly_budget_usd||2500;
       }catch(e){}
@@ -3570,8 +3570,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       const daily=parseFloat(document.getElementById('budget-daily').value)||500;
       const weekly=parseFloat(document.getElementById('budget-weekly').value)||2500;
       try{
-        const r=await fetch('/api/budget',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({daily_budget_usd:daily,weekly_budget_usd:weekly})});
-        const d=await r.json();
+        const d=await apiFetch('/api/budget',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({daily_budget_usd:daily,weekly_budget_usd:weekly})});
         const el=document.getElementById('budget-status');
         el.textContent=d.status==='ok'?'✓ Saved':'Error: '+(d.error||'unknown');
         el.style.color=d.status==='ok'?'var(--green)':'var(--red)';
@@ -3662,7 +3661,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     }
     async function fetchWorkboard(){
       try{
-        const r=await fetch('/api/workboard'); const d=await r.json();
+        const d=await apiFetch('/api/workboard');
         // Header
         const phase=d.cycle?.phase||'unknown';
         document.getElementById('wb-phase-dot').style.background=phaseColors[phase]||phaseColors.unknown;
@@ -3738,8 +3737,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     /* --- Thinking --- */
     async function fetchThinking(){
       try{
-        const r=await fetch('/api/ooda-thinking');
-        const d=await r.json();
+        const d=await apiFetch('/api/ooda-thinking');
         const el=document.getElementById('thinking-timeline');
         if(!d.reports?.length){el.innerHTML='<span style="color:#8b949e">No cycle reports yet. The OODA daemon generates these during autonomous work.</span>';return;}
         el.innerHTML=d.reports.map(rpt=>{
