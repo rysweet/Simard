@@ -13,6 +13,12 @@ pub enum MeetingCommand {
     Template(String),
     /// Export the current meeting as markdown to ~/.simard/meetings/.
     Export,
+    /// Record an explicit theme for the meeting (e.g. `/theme performance`).
+    Theme(String),
+    /// Show a color-coded recap of the current session (decisions, actions, questions, themes).
+    Recap,
+    /// Preview what the handoff artifact will look like when the meeting closes.
+    Preview,
     /// Natural language — forwarded to the LLM.
     Conversation(String),
 }
@@ -33,10 +39,20 @@ pub fn parse_command(input: &str) -> MeetingCommand {
         "/close" | "/done" => MeetingCommand::Close,
         "/status" => MeetingCommand::Status,
         "/export" => MeetingCommand::Export,
+        "/recap" => MeetingCommand::Recap,
+        "/preview" => MeetingCommand::Preview,
         "/template" => MeetingCommand::Template(String::new()),
         _ if lower.starts_with("/template ") => {
             let arg = trimmed["/template ".len()..].trim().to_string();
             MeetingCommand::Template(arg)
+        }
+        _ if lower.starts_with("/theme ") => {
+            let arg = trimmed["/theme ".len()..].trim().to_string();
+            if arg.is_empty() {
+                MeetingCommand::Conversation(trimmed.to_string())
+            } else {
+                MeetingCommand::Theme(arg)
+            }
         }
         _ => MeetingCommand::Conversation(trimmed.to_string()),
     }
@@ -108,6 +124,40 @@ mod tests {
     fn parse_export() {
         assert_eq!(parse_command("/export"), MeetingCommand::Export);
         assert_eq!(parse_command("  /EXPORT  "), MeetingCommand::Export);
+    }
+
+    #[test]
+    fn parse_theme_with_arg() {
+        assert_eq!(
+            parse_command("/theme performance"),
+            MeetingCommand::Theme("performance".to_string()),
+        );
+        assert_eq!(
+            parse_command("  /Theme  scalability  "),
+            MeetingCommand::Theme("scalability".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_theme_empty_arg_is_conversation() {
+        // "/theme" with only whitespace after — not a valid theme, treated as conversation
+        // parse_command trims input, so "/theme   " becomes "/theme" in the Conversation payload
+        assert_eq!(
+            parse_command("/theme   "),
+            MeetingCommand::Conversation("/theme".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_recap() {
+        assert_eq!(parse_command("/recap"), MeetingCommand::Recap);
+        assert_eq!(parse_command("  /RECAP  "), MeetingCommand::Recap);
+    }
+
+    #[test]
+    fn parse_preview() {
+        assert_eq!(parse_command("/preview"), MeetingCommand::Preview);
+        assert_eq!(parse_command("  /PREVIEW  "), MeetingCommand::Preview);
     }
 
     #[test]

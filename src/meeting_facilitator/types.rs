@@ -59,6 +59,9 @@ pub struct MeetingSession {
     /// Questions explicitly added via `/question`.
     #[serde(default)]
     pub explicit_questions: Vec<String>,
+    /// Themes explicitly recorded via `/theme`.
+    #[serde(default)]
+    pub themes: Vec<String>,
 }
 
 impl MeetingSession {
@@ -239,6 +242,7 @@ mod tests {
             started_at: "2025-01-01T00:00:00Z".to_string(),
             participants: vec!["alice".to_string(), "bob".to_string()],
             explicit_questions: vec!["What about testing?".to_string()],
+            themes: vec!["performance".to_string()],
         }
     }
 
@@ -252,7 +256,7 @@ mod tests {
 
     #[test]
     fn session_explicit_questions_default() {
-        // explicit_questions has #[serde(default)], so missing field should default to empty vec
+        // explicit_questions and themes have #[serde(default)], so missing fields default to empty vec
         let json = r#"{
             "topic": "test",
             "decisions": [],
@@ -264,6 +268,7 @@ mod tests {
         }"#;
         let s: MeetingSession = serde_json::from_str(json).unwrap();
         assert!(s.explicit_questions.is_empty());
+        assert!(s.themes.is_empty());
     }
 
     #[test]
@@ -307,6 +312,7 @@ mod tests {
             started_at: "".to_string(),
             participants: vec![],
             explicit_questions: vec![],
+            themes: vec![],
         };
         let summary = s.durable_summary();
         assert!(summary.contains("decisions=[none]"));
@@ -326,8 +332,28 @@ mod tests {
             started_at: "not-a-date".to_string(),
             participants: vec![],
             explicit_questions: vec![],
+            themes: vec![],
         };
         let summary = s.durable_summary();
         assert!(summary.contains("duration=unknown"));
+    }
+
+    #[test]
+    fn session_themes_default_empty() {
+        let json = r#"{
+            "topic": "old-format",
+            "decisions": [],
+            "action_items": [],
+            "notes": [],
+            "status": "Open",
+            "started_at": "",
+            "participants": [],
+            "explicit_questions": []
+        }"#;
+        let s: MeetingSession = serde_json::from_str(json).unwrap();
+        assert!(
+            s.themes.is_empty(),
+            "themes should default to [] for old JSON"
+        );
     }
 }

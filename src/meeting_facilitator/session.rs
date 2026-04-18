@@ -59,6 +59,7 @@ pub fn start_meeting(topic: &str, bridge: &dyn CognitiveMemoryOps) -> SimardResu
         started_at: chrono::Utc::now().to_rfc3339(),
         participants: Vec::new(),
         explicit_questions: Vec::new(),
+        themes: Vec::new(),
     })
 }
 
