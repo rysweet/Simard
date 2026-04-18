@@ -4,7 +4,7 @@ use crate::runtime::RuntimeTopology;
 
 use super::types::{BenchmarkCheckResult, BenchmarkClass, BenchmarkScenario};
 
-const BENCHMARK_SCENARIOS: [BenchmarkScenario; 67] = [
+const BENCHMARK_SCENARIOS: [BenchmarkScenario; 79] = [
     BenchmarkScenario {
         id: "repo-exploration-local",
         title: "Repo exploration on local harness",
@@ -757,6 +757,141 @@ const BENCHMARK_SCENARIOS: [BenchmarkScenario; 67] = [
         base_type: "terminal-shell",
         topology: RuntimeTopology::MultiProcess,
         objective: "Perform a structured code review of the gym executor module. Evaluate: (1) function length and complexity, (2) error handling consistency, (3) naming conventions, (4) separation of concerns. Verify multi-process transport is active in the runtime report.",
+        expected_min_runtime_evidence: 4,
+    },
+    // --- Wave 7: new BenchmarkClass variants (DataMigration, CicdPipeline,
+    // DependencyUpgrade, ReleaseManagement). Each class has at least one
+    // non-default topology and at least one non-local-harness base_type.
+    BenchmarkScenario {
+        id: "data-migration-schema-version-bump",
+        title: "Data migration schema version bump",
+        description: "Plan a backward-compatible schema/data migration between two versions of a persisted record. Scored on whether the analysis names old and new fields, addresses backfill, and identifies a rollback path.",
+        class: BenchmarkClass::DataMigration,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Inspect a serializable struct in src/session or src/memory. Propose a schema migration that adds a new optional field while preserving deserialization of existing records. Describe: (1) the old vs. new schema, (2) how existing data is read (default values, serde defaults), (3) a backfill or lazy upgrade strategy, (4) a rollback path if the migration must be reverted.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "data-migration-multiprocess-rusty-clawd",
+        title: "Data migration on multi-process rusty-clawd",
+        description: "Exercise a data-migration benchmark through the multi-process topology with the rusty-clawd base type so distributed migration steps and runtime evidence are exercised together.",
+        class: BenchmarkClass::DataMigration,
+        identity: "simard-gym",
+        base_type: "rusty-clawd",
+        topology: RuntimeTopology::MultiProcess,
+        objective: "Plan a data migration that must run across multiple processes (e.g., session records persisted by one node and consumed by another). Identify: (1) the schema delta, (2) ordering constraints between writers and readers, (3) compatibility windows during rollout, (4) confirm the multi-process transport is reflected in the runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "data-migration-distributed-copilot",
+        title: "Data migration on distributed copilot-sdk",
+        description: "Exercise a data-migration benchmark through the distributed topology with the copilot-sdk base type, focusing on coordination of schema upgrades across distributed nodes.",
+        class: BenchmarkClass::DataMigration,
+        identity: "simard-gym",
+        base_type: "copilot-sdk",
+        topology: RuntimeTopology::Distributed,
+        objective: "Design a phased migration of a stored record format across distributed nodes. Address: (1) versioned read paths, (2) feature-flagged write paths, (3) compatibility window strategy, (4) deprecation timeline. Verify the distributed topology backend appears in runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "cicd-pipeline-workflow-author",
+        title: "Author a GitHub Actions workflow",
+        description: "Author a minimal but correct GitHub Actions workflow file for a Rust crate. Scored on whether the workflow names jobs, pins actions to versions, runs cargo fmt/check/test, and uses a sensible matrix or trigger.",
+        class: BenchmarkClass::CicdPipeline,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Draft a .github/workflows/ci.yml that: (1) triggers on push and pull_request, (2) defines at least one job named build with steps for cargo fmt --check, cargo check --lib, and cargo test --lib, (3) pins actions/checkout and dtolnay/rust-toolchain to specific versions, (4) caches the cargo registry. Describe each section and why it is structured that way.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "cicd-pipeline-multiprocess-copilot",
+        title: "CI/CD pipeline review on multi-process copilot-sdk",
+        description: "Review and improve a CI/CD pipeline through the multi-process topology with the copilot-sdk base type so workflow analysis happens alongside cross-process runtime evidence.",
+        class: BenchmarkClass::CicdPipeline,
+        identity: "simard-gym",
+        base_type: "copilot-sdk",
+        topology: RuntimeTopology::MultiProcess,
+        objective: "Inspect the existing GitHub Actions workflows in .github/workflows. Identify: (1) jobs that lack timeouts or concurrency limits, (2) action versions that are unpinned (uses floating tags), (3) opportunities for caching or matrix testing, (4) steps that could be parallelized. Confirm the multi-process transport appears in the runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "cicd-pipeline-debug-failure-rusty-clawd",
+        title: "Debug a failing CI/CD pipeline on rusty-clawd",
+        description: "Diagnose a failing CI workflow run through the multi-process topology with the rusty-clawd base type. Scored on root-cause identification and remediation.",
+        class: BenchmarkClass::CicdPipeline,
+        identity: "simard-gym",
+        base_type: "rusty-clawd",
+        topology: RuntimeTopology::MultiProcess,
+        objective: "Given a hypothetical failing workflow run, walk through the diagnostic steps: (1) inspect the failed job and its step logs, (2) classify the failure (flaky test, dependency drift, environment issue, code regression), (3) propose a fix and a re-run strategy, (4) suggest a guard (timeout, retry, cache key change) that prevents recurrence. Confirm the multi-process transport is active in the runtime report.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "dependency-upgrade-major-bump",
+        title: "Major-version dependency upgrade analysis",
+        description: "Plan a major-version upgrade of a Cargo dependency. Scored on whether the analysis surfaces breaking-change call sites, identifies an upgrade order, and proposes a verification strategy.",
+        class: BenchmarkClass::DependencyUpgrade,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Pick a non-trivial dependency from Cargo.toml. Plan a major-version upgrade by: (1) listing changelog/breaking-change categories from the new release, (2) enumerating call sites in the Simard source that would need updating, (3) sequencing the upgrade across dependent crates, (4) describing the cargo check / cargo test verification gates. Output a concrete step-by-step plan.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "dependency-upgrade-multiprocess-copilot",
+        title: "Dependency upgrade on multi-process copilot-sdk",
+        description: "Exercise a dependency-upgrade benchmark through the multi-process topology with the copilot-sdk base type so upgrade impact is analyzed alongside cross-process runtime behavior.",
+        class: BenchmarkClass::DependencyUpgrade,
+        identity: "simard-gym",
+        base_type: "copilot-sdk",
+        topology: RuntimeTopology::MultiProcess,
+        objective: "Analyze how a hypothetical major bump of a transport-related dependency would ripple through the multi-process runtime. Identify: (1) trait or API surface changes, (2) impacted modules under src/runtime, (3) compatibility risk for in-flight sessions, (4) a staged rollout strategy. Confirm the multi-process transport is reflected in runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "dependency-upgrade-distributed-rusty-clawd",
+        title: "Dependency upgrade on distributed rusty-clawd",
+        description: "Exercise a dependency-upgrade benchmark through the distributed topology with the rusty-clawd base type, focusing on coordinated rollout across distributed nodes.",
+        class: BenchmarkClass::DependencyUpgrade,
+        identity: "simard-gym",
+        base_type: "rusty-clawd",
+        topology: RuntimeTopology::Distributed,
+        objective: "Plan a coordinated dependency upgrade across distributed runtime nodes. Address: (1) wire-format compatibility during partial rollout, (2) feature-flag gating, (3) regression testing matrix, (4) rollback procedure. Verify the distributed topology backend appears in runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "release-management-changelog-and-tag",
+        title: "Release management: changelog, version bump, tag",
+        description: "Author a release flow: changelog entry, version bump, and git tag. Scored on whether the plan covers semantic-versioning impact, generates a coherent changelog grouped by type, and proposes a tag/release notes flow.",
+        class: BenchmarkClass::ReleaseManagement,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Plan a release for the Simard crate covering: (1) the next semver level (patch/minor/major) and why, (2) Cargo.toml version bump location and downstream crate updates, (3) a CHANGELOG section grouped by Added/Changed/Fixed/Deprecated, (4) the git tag and GitHub release notes template. Output the concrete steps an operator would run.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "release-management-multiprocess-copilot",
+        title: "Release management on multi-process copilot-sdk",
+        description: "Exercise a release-management benchmark through the multi-process topology with the copilot-sdk base type so release coordination is exercised alongside cross-process runtime evidence.",
+        class: BenchmarkClass::ReleaseManagement,
+        identity: "simard-gym",
+        base_type: "copilot-sdk",
+        topology: RuntimeTopology::MultiProcess,
+        objective: "Coordinate a release that touches both the runtime and the operator-facing CLI. Cover: (1) version bump propagation across workspace crates, (2) changelog entries split by audience (operators, integrators), (3) tagging and release-asset publication, (4) post-release verification (smoke run, gym suite). Confirm the multi-process transport is reflected in the runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "release-management-distributed-terminal-shell",
+        title: "Release management on distributed terminal-shell",
+        description: "Exercise a release-management benchmark through the distributed topology with the terminal-shell base type, focusing on cutover sequencing across distributed nodes.",
+        class: BenchmarkClass::ReleaseManagement,
+        identity: "simard-gym",
+        base_type: "terminal-shell",
+        topology: RuntimeTopology::Distributed,
+        objective: "Plan the cutover of a release across distributed runtime nodes. Address: (1) tag and artifact distribution, (2) phased node rollout order, (3) compatibility window with the previous version, (4) rollback and post-release monitoring. Verify the distributed topology backend appears in runtime evidence.",
         expected_min_runtime_evidence: 4,
     },
 ];
@@ -1693,6 +1828,240 @@ pub(super) fn class_specific_checks(
                 },
             ]
         }
+        BenchmarkClass::DataMigration => {
+            let schema_delta_described = combined.contains("schema")
+                || combined.contains("field")
+                || combined.contains("column")
+                || combined.contains("version")
+                || combined.contains("migrat");
+            let compatibility_addressed = combined.contains("backward")
+                || combined.contains("forward")
+                || combined.contains("compat")
+                || combined.contains("default")
+                || combined.contains("optional")
+                || combined.contains("serde");
+            let rollout_or_rollback_planned = combined.contains("backfill")
+                || combined.contains("rollout")
+                || combined.contains("rollback")
+                || combined.contains("phased")
+                || combined.contains("revert")
+                || combined.contains("compatibility window");
+            vec![
+                BenchmarkCheckResult {
+                    id: "data-migration-schema-delta-described".to_string(),
+                    passed: schema_delta_described,
+                    detail: format!(
+                        "execution output {} schema delta description",
+                        if schema_delta_described {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "data-migration-compatibility-addressed".to_string(),
+                    passed: compatibility_addressed,
+                    detail: format!(
+                        "execution output {} compatibility analysis",
+                        if compatibility_addressed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "data-migration-rollout-or-rollback-planned".to_string(),
+                    passed: rollout_or_rollback_planned,
+                    detail: format!(
+                        "execution output {} rollout/rollback plan",
+                        if rollout_or_rollback_planned {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::CicdPipeline => {
+            let workflow_structure_described = combined.contains("workflow")
+                || combined.contains("github actions")
+                || combined.contains("job")
+                || combined.contains("step")
+                || combined.contains(".yml")
+                || combined.contains(".yaml");
+            let trigger_or_pin_addressed = combined.contains("trigger")
+                || combined.contains("on:")
+                || combined.contains("pull_request")
+                || combined.contains("push")
+                || combined.contains("pin")
+                || combined.contains("uses:")
+                || combined.contains("@v");
+            let verification_or_remediation_present = combined.contains("cargo")
+                || combined.contains("test")
+                || combined.contains("check")
+                || combined.contains("retry")
+                || combined.contains("timeout")
+                || combined.contains("cache")
+                || combined.contains("matrix");
+            vec![
+                BenchmarkCheckResult {
+                    id: "cicd-workflow-structure-described".to_string(),
+                    passed: workflow_structure_described,
+                    detail: format!(
+                        "execution output {} workflow structure description",
+                        if workflow_structure_described {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "cicd-trigger-or-pin-addressed".to_string(),
+                    passed: trigger_or_pin_addressed,
+                    detail: format!(
+                        "execution output {} trigger/version-pin analysis",
+                        if trigger_or_pin_addressed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "cicd-verification-or-remediation-present".to_string(),
+                    passed: verification_or_remediation_present,
+                    detail: format!(
+                        "execution output {} verification/remediation steps",
+                        if verification_or_remediation_present {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::DependencyUpgrade => {
+            let upgrade_target_named = combined.contains("cargo.toml")
+                || combined.contains("dependenc")
+                || combined.contains("crate")
+                || combined.contains("version")
+                || combined.contains("major");
+            let breakage_analyzed = combined.contains("breaking")
+                || combined.contains("breakage")
+                || combined.contains("api change")
+                || combined.contains("call site")
+                || combined.contains("changelog")
+                || combined.contains("deprecat");
+            let verification_plan_present = combined.contains("cargo check")
+                || combined.contains("cargo test")
+                || combined.contains("verify")
+                || combined.contains("regression")
+                || combined.contains("rollout")
+                || combined.contains("rollback")
+                || combined.contains("staged");
+            vec![
+                BenchmarkCheckResult {
+                    id: "dep-upgrade-target-named".to_string(),
+                    passed: upgrade_target_named,
+                    detail: format!(
+                        "execution output {} upgrade target identification",
+                        if upgrade_target_named {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "dep-upgrade-breakage-analyzed".to_string(),
+                    passed: breakage_analyzed,
+                    detail: format!(
+                        "execution output {} breakage analysis",
+                        if breakage_analyzed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "dep-upgrade-verification-plan-present".to_string(),
+                    passed: verification_plan_present,
+                    detail: format!(
+                        "execution output {} verification/rollback plan",
+                        if verification_plan_present {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::ReleaseManagement => {
+            let version_bump_planned = combined.contains("version")
+                || combined.contains("semver")
+                || combined.contains("bump")
+                || combined.contains("patch")
+                || combined.contains("minor")
+                || combined.contains("major");
+            let changelog_authored = combined.contains("changelog")
+                || combined.contains("release notes")
+                || combined.contains("added")
+                || combined.contains("changed")
+                || combined.contains("fixed")
+                || combined.contains("deprecat");
+            let tag_or_cutover_addressed = combined.contains("tag")
+                || combined.contains("git tag")
+                || combined.contains("release")
+                || combined.contains("cutover")
+                || combined.contains("rollout")
+                || combined.contains("rollback")
+                || combined.contains("publish");
+            vec![
+                BenchmarkCheckResult {
+                    id: "release-version-bump-planned".to_string(),
+                    passed: version_bump_planned,
+                    detail: format!(
+                        "execution output {} version-bump plan",
+                        if version_bump_planned {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "release-changelog-authored".to_string(),
+                    passed: changelog_authored,
+                    detail: format!(
+                        "execution output {} changelog/release notes",
+                        if changelog_authored {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "release-tag-or-cutover-addressed".to_string(),
+                    passed: tag_or_cutover_addressed,
+                    detail: format!(
+                        "execution output {} tag/cutover plan",
+                        if tag_or_cutover_addressed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
     }
 }
 
@@ -1874,6 +2243,10 @@ mod tests {
             BenchmarkClass::MigrationPlanning,
             BenchmarkClass::ObservabilityInstrumentation,
             BenchmarkClass::DataModeling,
+            BenchmarkClass::DataMigration,
+            BenchmarkClass::CicdPipeline,
+            BenchmarkClass::DependencyUpgrade,
+            BenchmarkClass::ReleaseManagement,
         ];
         let scenarios = benchmark_scenarios();
         for class in all_classes {

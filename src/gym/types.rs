@@ -26,6 +26,10 @@ pub enum BenchmarkClass {
     MigrationPlanning,
     ObservabilityInstrumentation,
     DataModeling,
+    DataMigration,
+    CicdPipeline,
+    DependencyUpgrade,
+    ReleaseManagement,
 }
 
 impl Display for BenchmarkClass {
@@ -50,6 +54,10 @@ impl Display for BenchmarkClass {
             Self::MigrationPlanning => "migration-planning",
             Self::ObservabilityInstrumentation => "observability-instrumentation",
             Self::DataModeling => "data-modeling",
+            Self::DataMigration => "data-migration",
+            Self::CicdPipeline => "cicd-pipeline",
+            Self::DependencyUpgrade => "dependency-upgrade",
+            Self::ReleaseManagement => "release-management",
         };
         f.write_str(label)
     }
@@ -270,6 +278,16 @@ mod tests {
             "observability-instrumentation"
         );
         assert_eq!(BenchmarkClass::DataModeling.to_string(), "data-modeling");
+        assert_eq!(BenchmarkClass::DataMigration.to_string(), "data-migration");
+        assert_eq!(BenchmarkClass::CicdPipeline.to_string(), "cicd-pipeline");
+        assert_eq!(
+            BenchmarkClass::DependencyUpgrade.to_string(),
+            "dependency-upgrade"
+        );
+        assert_eq!(
+            BenchmarkClass::ReleaseManagement.to_string(),
+            "release-management"
+        );
     }
 
     #[test]
