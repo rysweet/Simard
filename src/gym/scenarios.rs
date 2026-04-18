@@ -4,7 +4,7 @@ use crate::runtime::RuntimeTopology;
 
 use super::types::{BenchmarkCheckResult, BenchmarkClass, BenchmarkScenario};
 
-const BENCHMARK_SCENARIOS: [BenchmarkScenario; 79] = [
+const BENCHMARK_SCENARIOS: [BenchmarkScenario; 88] = [
     BenchmarkScenario {
         id: "repo-exploration-local",
         title: "Repo exploration on local harness",
@@ -892,6 +892,106 @@ const BENCHMARK_SCENARIOS: [BenchmarkScenario; 79] = [
         base_type: "terminal-shell",
         topology: RuntimeTopology::Distributed,
         objective: "Plan the cutover of a release across distributed runtime nodes. Address: (1) tag and artifact distribution, (2) phased node rollout order, (3) compatibility window with the previous version, (4) rollback and post-release monitoring. Verify the distributed topology backend appears in runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    // --- Wave 8: AccessibilityReview / InternationalizationReview / IncidentResponse ---
+    BenchmarkScenario {
+        id: "a11y-aria-audit-local",
+        title: "Accessibility review: ARIA and semantic markup audit",
+        description: "Audit a sample UI surface for ARIA role correctness, alt text, label association, and screen reader friendliness on the single-process local harness.",
+        class: BenchmarkClass::AccessibilityReview,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Audit a UI surface for accessibility. Cover: (1) ARIA roles, states, and properties used (or missing), (2) image alt text and form label associations, (3) screen reader landmark structure, (4) cite at least one specific WCAG 2.1 success criterion (e.g., 1.1.1, 4.1.2). Propose concrete remediations.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "a11y-keyboard-nav-multiprocess-copilot",
+        title: "Accessibility review: keyboard navigation on multi-process copilot-sdk",
+        description: "Review keyboard navigation, focus order, and visible focus indicators through the multi-process topology with the copilot-sdk base type.",
+        class: BenchmarkClass::AccessibilityReview,
+        identity: "simard-gym",
+        base_type: "copilot-sdk",
+        topology: RuntimeTopology::MultiProcess,
+        objective: "Review keyboard navigation across an interactive surface. Cover: (1) tab/shift-tab focus order, (2) visible focus indicator and contrast against adjacent colors, (3) keyboard traps and skip-to-content affordances, (4) WCAG success criteria 2.1.1, 2.4.3, and 2.4.7. Propose remediations and confirm the multi-process transport appears in runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "a11y-color-contrast-distributed-terminal",
+        title: "Accessibility review: color contrast on distributed terminal-shell",
+        description: "Audit color contrast ratios and non-color affordances across themes through the distributed topology with the terminal-shell base type.",
+        class: BenchmarkClass::AccessibilityReview,
+        identity: "simard-gym",
+        base_type: "terminal-shell",
+        topology: RuntimeTopology::Distributed,
+        objective: "Audit color usage for accessibility. Cover: (1) computed contrast ratios for foreground/background pairs against WCAG AA (4.5:1 normal, 3:1 large) and AAA targets, (2) non-color affordances for status (icons, text), (3) high-contrast/dark theme parity, (4) cite WCAG 1.4.3 and 1.4.11. Propose remediations and confirm the distributed topology backend appears in runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "i18n-string-extraction-local",
+        title: "Internationalization review: hardcoded string extraction",
+        description: "Audit a module for hardcoded user-facing strings and propose an extraction-to-message-catalog plan on the single-process local harness.",
+        class: BenchmarkClass::InternationalizationReview,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Find user-facing hardcoded strings and design a localization plan. Cover: (1) inventory of hardcoded message literals and their call sites, (2) proposed message catalog format (e.g., ICU MessageFormat, gettext .po, fluent .ftl), (3) translation key naming convention and fallback locale strategy, (4) at least one example before/after for a non-trivial message.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "i18n-locale-routing-multiprocess-rusty-clawd",
+        title: "Internationalization review: locale routing on multi-process rusty-clawd",
+        description: "Design locale negotiation, fallback, and per-request locale routing through the multi-process topology with the rusty-clawd base type.",
+        class: BenchmarkClass::InternationalizationReview,
+        identity: "simard-gym",
+        base_type: "rusty-clawd",
+        topology: RuntimeTopology::MultiProcess,
+        objective: "Design locale routing for a multi-process service. Cover: (1) locale negotiation from Accept-Language and explicit user preference, (2) language tag normalization (BCP 47, e.g., en-US, pt-BR) and CLDR-backed fallback chain, (3) per-request locale propagation across processes, (4) cache key partitioning by locale. Confirm the multi-process transport appears in runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "i18n-pluralization-rtl-distributed-copilot",
+        title: "Internationalization review: pluralization and RTL on distributed copilot-sdk",
+        description: "Address plural rules, bidirectional (RTL) layout, and locale-aware number/date/currency formatting through the distributed topology with the copilot-sdk base type.",
+        class: BenchmarkClass::InternationalizationReview,
+        identity: "simard-gym",
+        base_type: "copilot-sdk",
+        topology: RuntimeTopology::Distributed,
+        objective: "Address advanced i18n concerns. Cover: (1) CLDR plural categories (zero/one/two/few/many/other) and how messages express them, (2) RTL/bidi layout mirroring for languages like Arabic and Hebrew, (3) locale-aware date format, number format, and currency format, (4) at least one concrete example per concern. Confirm the distributed topology backend appears in runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "incident-response-postmortem-local",
+        title: "Incident response: blameless postmortem authoring",
+        description: "Author a blameless postmortem for a simulated production incident on the single-process local harness.",
+        class: BenchmarkClass::IncidentResponse,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Author a blameless postmortem. Cover: (1) reconstructed incident timeline (alert paged, mitigation started, resolved), (2) root cause and contributing factors distinguished from triggers, (3) customer impact and severity, (4) prioritized follow-up action items with owners. Avoid blame; focus on systemic prevention.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "incident-response-runbook-multiprocess-terminal",
+        title: "Incident response: runbook authoring on multi-process terminal-shell",
+        description: "Draft an operational runbook for a recurring failure mode through the multi-process topology with the terminal-shell base type.",
+        class: BenchmarkClass::IncidentResponse,
+        identity: "simard-gym",
+        base_type: "terminal-shell",
+        topology: RuntimeTopology::MultiProcess,
+        objective: "Draft a runbook for an on-call responder. Cover: (1) detection signals and alert query, (2) step-by-step triage and mitigation commands, (3) escalation path and communication template, (4) verification and rollback steps. Confirm the multi-process transport appears in runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "incident-response-pager-rotation-distributed-copilot",
+        title: "Incident response: pager rotation and follow-up on distributed copilot-sdk",
+        description: "Plan an on-call pager rotation, incident command structure, and follow-up tracking through the distributed topology with the copilot-sdk base type.",
+        class: BenchmarkClass::IncidentResponse,
+        identity: "simard-gym",
+        base_type: "copilot-sdk",
+        topology: RuntimeTopology::Distributed,
+        objective: "Plan distributed incident response. Cover: (1) on-call pager rotation and handoff procedure, (2) incident commander/scribe/communications role assignments, (3) cross-region escalation and runbook distribution, (4) postmortem follow-up tracking and prevention metrics. Confirm the distributed topology backend appears in runtime evidence.",
         expected_min_runtime_evidence: 4,
     },
 ];
@@ -2062,6 +2162,208 @@ pub(super) fn class_specific_checks(
                 },
             ]
         }
+        BenchmarkClass::AccessibilityReview => {
+            let a11y_issues_identified = combined.contains("aria")
+                || combined.contains("alt text")
+                || combined.contains("alt-text")
+                || combined.contains("label")
+                || combined.contains("screen reader")
+                || combined.contains("focus")
+                || combined.contains("contrast")
+                || combined.contains("keyboard");
+            let wcag_or_standard_cited = combined.contains("wcag")
+                || combined.contains("level a")
+                || combined.contains("level aa")
+                || combined.contains("level aaa")
+                || combined.contains("success criterion")
+                || combined.contains("1.1.1")
+                || combined.contains("1.4.3")
+                || combined.contains("1.4.11")
+                || combined.contains("2.1.1")
+                || combined.contains("2.4.3")
+                || combined.contains("2.4.7")
+                || combined.contains("4.1.2");
+            let remediation_proposed = combined.contains("remediat")
+                || combined.contains("fix")
+                || combined.contains("add ")
+                || combined.contains("replace")
+                || combined.contains("suggest")
+                || combined.contains("recommend")
+                || combined.contains("improve");
+            vec![
+                BenchmarkCheckResult {
+                    id: "a11y-issues-identified".to_string(),
+                    passed: a11y_issues_identified,
+                    detail: format!(
+                        "execution output {} accessibility issue identification",
+                        if a11y_issues_identified {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "a11y-wcag-cited".to_string(),
+                    passed: wcag_or_standard_cited,
+                    detail: format!(
+                        "execution output {} WCAG/standard citation",
+                        if wcag_or_standard_cited {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "a11y-remediation-proposed".to_string(),
+                    passed: remediation_proposed,
+                    detail: format!(
+                        "execution output {} accessibility remediation",
+                        if remediation_proposed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::InternationalizationReview => {
+            let localizable_strings_identified = combined.contains("hardcoded")
+                || combined.contains("string literal")
+                || combined.contains("message catalog")
+                || combined.contains("translat")
+                || combined.contains("l10n")
+                || combined.contains("i18n")
+                || combined.contains("localiz")
+                || combined.contains("message key");
+            let locale_handling_described = combined.contains("locale")
+                || combined.contains("language tag")
+                || combined.contains("bcp 47")
+                || combined.contains("bcp-47")
+                || combined.contains("accept-language")
+                || combined.contains("fallback")
+                || combined.contains("cldr")
+                || combined.contains("en-us")
+                || combined.contains("pt-br")
+                || combined.contains("region");
+            let pluralization_or_format_addressed = combined.contains("plural")
+                || combined.contains("rtl")
+                || combined.contains("bidi")
+                || combined.contains("date format")
+                || combined.contains("number format")
+                || combined.contains("currency")
+                || combined.contains("icu")
+                || combined.contains("messageformat")
+                || combined.contains("fluent")
+                || combined.contains("gettext");
+            vec![
+                BenchmarkCheckResult {
+                    id: "i18n-localizable-strings-identified".to_string(),
+                    passed: localizable_strings_identified,
+                    detail: format!(
+                        "execution output {} localizable string identification",
+                        if localizable_strings_identified {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "i18n-locale-handling-described".to_string(),
+                    passed: locale_handling_described,
+                    detail: format!(
+                        "execution output {} locale-handling description",
+                        if locale_handling_described {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "i18n-pluralization-or-format-addressed".to_string(),
+                    passed: pluralization_or_format_addressed,
+                    detail: format!(
+                        "execution output {} pluralization/format coverage",
+                        if pluralization_or_format_addressed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::IncidentResponse => {
+            let timeline_reconstructed = combined.contains("timeline")
+                || combined.contains("sequence")
+                || combined.contains("when ")
+                || combined.contains("started at")
+                || combined.contains("alert")
+                || combined.contains("paged")
+                || combined.contains("detected")
+                || combined.contains("resolved at");
+            let root_cause_or_contributing_identified = combined.contains("root cause")
+                || combined.contains("root-cause")
+                || combined.contains("contributing")
+                || combined.contains("trigger")
+                || combined.contains("cascade")
+                || combined.contains("fault")
+                || combined.contains("latent")
+                || combined.contains("blameless");
+            let mitigation_or_followup_proposed = combined.contains("mitigat")
+                || combined.contains("action item")
+                || combined.contains("follow-up")
+                || combined.contains("followup")
+                || combined.contains("runbook")
+                || combined.contains("postmortem")
+                || combined.contains("post-mortem")
+                || combined.contains("prevention")
+                || combined.contains("escalation")
+                || combined.contains("on-call")
+                || combined.contains("oncall");
+            vec![
+                BenchmarkCheckResult {
+                    id: "incident-timeline-reconstructed".to_string(),
+                    passed: timeline_reconstructed,
+                    detail: format!(
+                        "execution output {} incident timeline reconstruction",
+                        if timeline_reconstructed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "incident-root-cause-or-contributing-identified".to_string(),
+                    passed: root_cause_or_contributing_identified,
+                    detail: format!(
+                        "execution output {} root cause/contributing factor analysis",
+                        if root_cause_or_contributing_identified {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "incident-mitigation-or-followup-proposed".to_string(),
+                    passed: mitigation_or_followup_proposed,
+                    detail: format!(
+                        "execution output {} mitigation/follow-up proposal",
+                        if mitigation_or_followup_proposed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
     }
 }
 
@@ -2143,6 +2445,26 @@ mod tests {
             (BenchmarkClass::PerformanceAnalysis, "performance-analysis"),
             (BenchmarkClass::SecurityAudit, "security-audit"),
             (BenchmarkClass::ApiDesign, "api-design"),
+            (BenchmarkClass::CodeReview, "code-review"),
+            (BenchmarkClass::Debugging, "debugging"),
+            (BenchmarkClass::ConfigManagement, "config-management"),
+            (BenchmarkClass::ConcurrencyAnalysis, "concurrency-analysis"),
+            (BenchmarkClass::MigrationPlanning, "migration-planning"),
+            (
+                BenchmarkClass::ObservabilityInstrumentation,
+                "observability-instrumentation",
+            ),
+            (BenchmarkClass::DataModeling, "data-modeling"),
+            (BenchmarkClass::DataMigration, "data-migration"),
+            (BenchmarkClass::CicdPipeline, "cicd-pipeline"),
+            (BenchmarkClass::DependencyUpgrade, "dependency-upgrade"),
+            (BenchmarkClass::ReleaseManagement, "release-management"),
+            (BenchmarkClass::AccessibilityReview, "accessibility-review"),
+            (
+                BenchmarkClass::InternationalizationReview,
+                "internationalization-review",
+            ),
+            (BenchmarkClass::IncidentResponse, "incident-response"),
         ];
         for (class, label) in classes {
             assert_eq!(class.to_string(), label);
@@ -2247,6 +2569,9 @@ mod tests {
             BenchmarkClass::CicdPipeline,
             BenchmarkClass::DependencyUpgrade,
             BenchmarkClass::ReleaseManagement,
+            BenchmarkClass::AccessibilityReview,
+            BenchmarkClass::InternationalizationReview,
+            BenchmarkClass::IncidentResponse,
         ];
         let scenarios = benchmark_scenarios();
         for class in all_classes {
