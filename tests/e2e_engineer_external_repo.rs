@@ -121,6 +121,13 @@ fn ooda_daemon_seeds_five_goals() {
         return;
     }
 
+    // OODA daemon requires an LLM session; skip in CI environments that lack
+    // ANTHROPIC_API_KEY or gh auth for Copilot SDK.
+    if stderr.contains("No API key found") || stderr.contains("LLM session but open() failed") {
+        eprintln!("SKIP: no LLM provider available (CI environment)");
+        return;
+    }
+
     assert!(
         stderr.contains("seeded 5 default goal"),
         "OODA daemon should seed 5 default goals:\n{stderr}"
