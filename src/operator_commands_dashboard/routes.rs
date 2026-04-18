@@ -1654,14 +1654,16 @@ async fn get_hosts() -> Json<Value> {
     // Discover available VMs via `azlin list --json` (best-effort, with timeout).
     let discovered: Vec<Value> = tokio::task::spawn_blocking(|| {
         let output = std::process::Command::new("azlin")
-            .args(["list", "--json"])
+            .args(["list", "--output", "json"])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .output();
         match output {
             Ok(o) if o.status.success() => {
                 let raw = String::from_utf8_lossy(&o.stdout);
-                serde_json::from_str::<Vec<Value>>(&raw).unwrap_or_default()
+                // azlin may print version warnings before JSON — find the first '['
+                let json_start = raw.find('[').unwrap_or(0);
+                serde_json::from_str::<Vec<Value>>(&raw[json_start..]).unwrap_or_default()
             }
             _ => Vec::new(),
         }
