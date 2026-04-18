@@ -8,6 +8,8 @@ owner: simard
 
 # Simard documentation
 
+Simard is the **Rust successor to [Python amplihack](https://github.com/rysweet/amplihack)**. The intent is for Simard to become a drop-in replacement: the same agentic-coding capabilities, delivered as a single static Rust binary. Today Simard implements the core engineer/meeting/goal-curation/improvement-curation/gym/OODA loops natively, but does not yet cover the full amplihack command and skill surface — see the parity issues [#896](https://github.com/rysweet/Simard/issues/896), [#897](https://github.com/rysweet/Simard/issues/897), and [#898](https://github.com/rysweet/Simard/issues/898).
+
 `simard` is the canonical operator-facing CLI.
 
 The shipped command tree covers `engineer`, `meeting`, `goal-curation`, `improvement-curation`, `gym`, `review`, and `bootstrap` from one binary, including the read-only `engineer read` audit companion and the bounded `engineer terminal*` session surfaces. The legacy `simard_operator_probe` and `simard-gym` binaries remain available as compatibility surfaces while operators migrate, but the primary product surface is now `simard ...`.

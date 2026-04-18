@@ -8,7 +8,13 @@ Named after [Suzanne Simard](https://en.wikipedia.org/wiki/Suzanne_Simard), the 
 
 Simard is a terminal-native engineering agent built in Rust. She operates like a disciplined software engineer: she understands codebases, works through tasks in explicit sessions, preserves useful memory, evaluates herself against benchmarks, and improves through structured review loops.
 
-Simard is part of the [amplihack](https://github.com/rysweet/amplihack) ecosystem of agentic coding tools.
+### Relationship to Python amplihack
+
+Simard is the **Rust successor to [Python amplihack](https://github.com/rysweet/amplihack)**. The intent is for Simard to become a drop-in replacement: the same agentic-coding capabilities, delivered as a single static Rust binary, with no Python runtime or `pip install` step required.
+
+That goal is **not yet fully met**. Today Simard implements the core engineer/meeting/goal-curation/improvement-curation/gym/OODA loops natively in Rust, but does not yet cover the full amplihack command surface (37 slash commands) or skill catalog (117 skills). Parity work is tracked in the [parity matrix](docs/reference/parity-matrix.md) and in issues [#896](https://github.com/rysweet/Simard/issues/896), [#897](https://github.com/rysweet/Simard/issues/897), and [#898](https://github.com/rysweet/Simard/issues/898).
+
+If you are a current Python amplihack user: see [Migrating from Python amplihack](#migrating-from-python-amplihack) below for the command map.
 
 ## Install
 
@@ -47,6 +53,22 @@ cargo build --release
 ```bash
 cargo install --git https://github.com/rysweet/Simard.git
 ```
+
+## Migrating from Python amplihack
+
+Simard's CLI is grouped by product mode rather than slash commands. Common amplihack workflows map as follows. Items marked **TBD** are not yet implemented natively in Simard — see the [parity audit (#898)](https://github.com/rysweet/Simard/issues/898) for status and to request prioritization.
+
+| Python amplihack                  | Simard equivalent                                     | Status            |
+| --------------------------------- | ----------------------------------------------------- | ----------------- |
+| `/dev <task>`                     | `simard engineer terminal <topology> <objective>`     | parity            |
+| `/improve <area>`                 | `simard improvement-curation run <base> <topo> <obj>` | parity            |
+| `/analyze <target>`               | `simard engineer read <topology>` + meeting review    | partial           |
+| `/investigation <topic>`          | `simard meeting repl <topic>`                         | partial           |
+| `/customize`                      | direct edits to `prompt_assets/` + recompile          | partial           |
+| skills auto-routing (117 skills)  | curated set of native Rust subcommands                | partial — see #898 |
+| `amplihack install`               | `simard install` or `npx github:rysweet/Simard install` | parity          |
+
+If your workflow is not covered above, please open an issue referencing #898 so it lands in the parity matrix.
 
 ## Quick Start
 
