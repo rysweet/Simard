@@ -19,6 +19,7 @@ pub fn decide(priorities: &[Priority], config: &OodaConfig) -> SimardResult<Vec<
         let kind = match priority.goal_id.as_str() {
             "__memory__" => ActionKind::ConsolidateMemory,
             "__improvement__" => ActionKind::RunImprovement,
+            "__poll_activity__" => ActionKind::PollDeveloperActivity,
             _ => ActionKind::AdvanceGoal,
         };
         actions.push(PlannedAction {

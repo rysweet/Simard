@@ -96,5 +96,8 @@ fn dispatch_one(
         ActionKind::RunGymEval => simple_actions::dispatch_run_gym_eval(action, bridges),
         ActionKind::BuildSkill => simple_actions::dispatch_build_skill(action, bridges),
         ActionKind::LaunchSession => session::dispatch_launch_session(action),
+        ActionKind::PollDeveloperActivity => {
+            simple_actions::dispatch_poll_developer_activity(action, bridges)
+        }
     }
 }

@@ -103,6 +103,28 @@ pub(super) fn dispatch_build_skill(action: &PlannedAction, bridges: &OodaBridges
     }
 }
 
+/// PollDeveloperActivity: fetch recent GitHub activity for tracked developers
+/// and store noteworthy events as semantic facts in cognitive memory.
+pub(super) fn dispatch_poll_developer_activity(
+    action: &PlannedAction,
+    bridges: &OodaBridges,
+) -> ActionOutcome {
+    use crate::research_tracker::{
+        default_developer_watches, poll_all_developer_activity, summarize_poll_results,
+    };
+
+    let watches = default_developer_watches();
+    let results = poll_all_developer_activity(&watches, &*bridges.memory, 5);
+    let summary = summarize_poll_results(&results);
+    let total_events: usize = results.iter().map(|r| r.events.len()).sum();
+
+    make_outcome(
+        action,
+        true,
+        format!("activity poll complete ({total_events} events): {summary}"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use crate::goal_curation::GoalBoard;
