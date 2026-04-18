@@ -27,6 +27,15 @@ pub struct SubordinateProgress {
     pub heartbeat_epoch: u64,
     /// Final outcome, if the goal is complete.
     pub outcome: Option<String>,
+    /// Number of git commits produced by this subordinate.
+    #[serde(default)]
+    pub commits_produced: u32,
+    /// Number of pull requests created by this subordinate.
+    #[serde(default)]
+    pub prs_produced: u32,
+    /// Exit status code from the subordinate process (None if still running).
+    #[serde(default)]
+    pub exit_status: Option<i32>,
 }
 
 impl Display for SubordinateProgress {
@@ -57,6 +66,9 @@ impl SubordinateProgress {
             last_action: last_action.into(),
             heartbeat_epoch: epoch,
             outcome: None,
+            commits_produced: 0,
+            prs_produced: 0,
+            exit_status: None,
         })
     }
 
@@ -64,6 +76,25 @@ impl SubordinateProgress {
     pub fn with_outcome(mut self, outcome: impl Into<String>) -> Self {
         self.outcome = Some(outcome.into());
         self
+    }
+
+    /// Record the number of commits and PRs produced by this subordinate.
+    pub fn with_artifacts(mut self, commits: u32, prs: u32) -> Self {
+        self.commits_produced = commits;
+        self.prs_produced = prs;
+        self
+    }
+
+    /// Record the exit status of the subordinate process.
+    pub fn with_exit_status(mut self, code: i32) -> Self {
+        self.exit_status = Some(code);
+        self
+    }
+
+    /// Whether this subordinate produced any meaningful output artifacts
+    /// (at least one commit or PR).
+    pub fn has_artifacts(&self) -> bool {
+        self.commits_produced > 0 || self.prs_produced > 0
     }
 }
 
@@ -81,6 +112,9 @@ mod tests {
             last_action: "run tests".to_string(),
             heartbeat_epoch: 1700000000,
             outcome: None,
+            commits_produced: 0,
+            prs_produced: 0,
+            exit_status: None,
         };
         let display = format!("{p}");
         assert!(display.contains("agent-1"));
@@ -99,6 +133,9 @@ mod tests {
             last_action: "init".to_string(),
             heartbeat_epoch: 1700000000,
             outcome: Some("success".to_string()),
+            commits_produced: 0,
+            prs_produced: 0,
+            exit_status: None,
         };
         let json = serde_json::to_string(&p).unwrap();
         let back: SubordinateProgress = serde_json::from_str(&json).unwrap();
@@ -115,6 +152,9 @@ mod tests {
             last_action: "done".to_string(),
             heartbeat_epoch: 100,
             outcome: None,
+            commits_produced: 0,
+            prs_produced: 0,
+            exit_status: None,
         };
         let p2 = p.with_outcome("completed successfully");
         assert_eq!(p2.outcome, Some("completed successfully".to_string()));
@@ -143,6 +183,9 @@ mod tests {
             last_action: "".to_string(),
             heartbeat_epoch: 0,
             outcome: None,
+            commits_produced: 0,
+            prs_produced: 0,
+            exit_status: None,
         };
         let json = serde_json::to_string(&p).unwrap();
         assert!(json.contains("\"outcome\":null"));

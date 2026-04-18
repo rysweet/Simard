@@ -179,6 +179,9 @@ mod tests {
             last_action: "init".to_string(),
             heartbeat_epoch: 1,
             outcome: None,
+            commits_produced: 0,
+            prs_produced: 0,
+            exit_status: None,
         };
         let result = report_progress("a", &progress, &bridge);
         assert!(result.is_ok());
@@ -195,6 +198,9 @@ mod tests {
             last_action: "x".to_string(),
             heartbeat_epoch: 0,
             outcome: None,
+            commits_produced: 0,
+            prs_produced: 0,
+            exit_status: None,
         };
         let result = report_progress("a", &progress, &bridge);
         assert!(result.is_err());
