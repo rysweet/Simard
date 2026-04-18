@@ -835,17 +835,54 @@ async fn workboard() -> Json<Value> {
 
     // --- 5. Task memory from cognitive memory ---
     let mut facts_count = 0u64;
-    let mut recent_facts: Vec<String> = Vec::new();
+    let mut recent_facts: Vec<Value> = Vec::new();
+    let mut working_memory: Vec<Value> = Vec::new();
+    let mut cognitive_stats: Option<Value> = None;
 
     if let Ok(mem) = NativeCognitiveMemory::open_read_only(&state_root) {
+        // Cognitive statistics
         if let Ok(stats) = mem.get_statistics() {
             facts_count = stats.semantic_count;
+            cognitive_stats = Some(json!({
+                "sensory_count": stats.sensory_count,
+                "working_count": stats.working_count,
+                "episodic_count": stats.episodic_count,
+                "semantic_count": stats.semantic_count,
+                "procedural_count": stats.procedural_count,
+                "prospective_count": stats.prospective_count,
+                "total": stats.total(),
+            }));
         }
-        for tag in &["action", "goal", "decision", "episode"] {
-            if let Ok(facts) = mem.search_facts(tag, 5, 0.0) {
+
+        // Working memory slots for each active goal
+        if let Some(board) = &goal_board {
+            for goal in &board.active {
+                if let Ok(slots) = mem.get_working(&goal.id) {
+                    for slot in slots {
+                        working_memory.push(json!({
+                            "id": slot.node_id,
+                            "slot_type": slot.slot_type,
+                            "content": slot.content,
+                            "task_id": slot.task_id,
+                            "relevance": slot.relevance,
+                        }));
+                    }
+                }
+            }
+        }
+
+        // Recent semantic facts (search across common tags, collect up to 20)
+        for tag in &["action", "goal", "decision", "episode", "observation", "insight"] {
+            if let Ok(facts) = mem.search_facts(tag, 10, 0.0) {
                 for fact in facts {
-                    if recent_facts.len() < 10 {
-                        recent_facts.push(fact.content.clone());
+                    if recent_facts.len() < 20 {
+                        recent_facts.push(json!({
+                            "id": fact.node_id,
+                            "concept": fact.concept,
+                            "content": fact.content,
+                            "confidence": fact.confidence,
+                            "tags": fact.tags,
+                        }));
                     }
                 }
             }
@@ -859,10 +896,12 @@ async fn workboard() -> Json<Value> {
         "goals": goals_json,
         "spawned_engineers": spawned_engineers,
         "recent_actions": recent_actions,
+        "working_memory": working_memory,
         "task_memory": {
             "facts_count": facts_count,
             "recent_facts": recent_facts,
         },
+        "cognitive_statistics": cognitive_stats,
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
 }
@@ -2071,44 +2110,6 @@ const LOGIN_HTML: &str = r#"<!DOCTYPE html>
     <div class="error" id="error">Invalid code. Check terminal output.</div>
   </div>
 
-  <div class="tab-content" id="tab-workboard">
-    <div id="wb-header" style="display:flex;align-items:center;gap:1.5rem;margin-bottom:1rem;flex-wrap:wrap">
-      <div id="wb-cycle-indicator" style="display:flex;align-items:center;gap:.5rem">
-        <span id="wb-phase-dot" style="width:12px;height:12px;border-radius:50%;display:inline-block;background:#8b949e"></span>
-        <span id="wb-cycle-label" style="font-weight:700;color:var(--accent)">Cycle —</span>
-        <span id="wb-phase-label" style="color:#8b949e;font-size:.85rem"></span>
-      </div>
-      <div style="color:#8b949e;font-size:.85rem"><span id="wb-uptime">—</span> uptime</div>
-      <div style="color:#8b949e;font-size:.85rem">Next cycle: <span id="wb-eta" style="color:var(--fg);font-weight:600">—</span></div>
-      <button class="btn" onclick="fetchWorkboard()">Refresh</button>
-    </div>
-
-    <h3 style="color:var(--accent);margin-bottom:.5rem;font-size:.95rem">Goals</h3>
-    <div id="wb-kanban" style="display:grid;grid-template-columns:repeat(4,1fr);gap:.75rem;margin-bottom:1.25rem">
-      <div class="card" style="min-height:80px"><h2 style="font-size:.85rem">Queued</h2><div id="wb-col-queued"></div></div>
-      <div class="card" style="min-height:80px"><h2 style="font-size:.85rem">In Progress</h2><div id="wb-col-inprogress"></div></div>
-      <div class="card" style="min-height:80px"><h2 style="font-size:.85rem">Blocked</h2><div id="wb-col-blocked"></div></div>
-      <div class="card" style="min-height:80px"><h2 style="font-size:.85rem">Done</h2><div id="wb-col-done"></div></div>
-    </div>
-
-    <div class="grid" style="margin-bottom:1.25rem">
-      <div class="card">
-        <h2>Active Engineers</h2>
-        <div id="wb-engineers"><span style="color:#8b949e">No spawned engineers</span></div>
-      </div>
-      <div class="card">
-        <h2>Recent Actions</h2>
-        <div id="wb-actions" style="max-height:300px;overflow-y:auto"><span style="color:#8b949e">No recent actions</span></div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2 style="cursor:pointer" onclick="document.getElementById('wb-facts-body').style.display=document.getElementById('wb-facts-body').style.display==='none'?'block':'none'">Task Memory <span style="font-weight:normal;color:#8b949e;font-size:.8rem" id="wb-facts-count">0 facts</span> <span style="font-size:.75rem;color:#8b949e">▾</span></h2>
-      <div id="wb-facts-body">
-        <div id="wb-facts-list" style="font-size:.85rem;color:#8b949e">No facts loaded</div>
-      </div>
-    </div>
-  </div>
 
 
   <script>
@@ -2325,6 +2326,57 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         <textarea id="chat-input" placeholder="Type a message… (/close to end session)"></textarea>
         <button id="chat-send" onclick="sendChat()">Send</button>
       </div>
+    </div>
+  </div>
+
+  <div class="tab-content" id="tab-workboard">
+    <div id="wb-header" style="display:flex;align-items:center;gap:1.5rem;margin-bottom:1rem;flex-wrap:wrap">
+      <div id="wb-cycle-indicator" style="display:flex;align-items:center;gap:.5rem">
+        <span id="wb-phase-dot" style="width:12px;height:12px;border-radius:50%;display:inline-block;background:#8b949e"></span>
+        <span id="wb-cycle-label" style="font-weight:700;color:var(--accent)">Cycle —</span>
+        <span id="wb-phase-label" style="color:#8b949e;font-size:.85rem"></span>
+      </div>
+      <div style="color:#8b949e;font-size:.85rem"><span id="wb-uptime">—</span> uptime</div>
+      <div style="color:#8b949e;font-size:.85rem">Next cycle: <span id="wb-eta" style="color:var(--fg);font-weight:600">—</span></div>
+      <button class="btn" onclick="fetchWorkboard()">Refresh</button>
+    </div>
+
+    <h3 style="color:var(--accent);margin-bottom:.5rem;font-size:.95rem">Goals</h3>
+    <div id="wb-kanban" style="display:grid;grid-template-columns:repeat(4,1fr);gap:.75rem;margin-bottom:1.25rem">
+      <div class="card" style="min-height:80px"><h2 style="font-size:.85rem">Queued</h2><div id="wb-col-queued"></div></div>
+      <div class="card" style="min-height:80px"><h2 style="font-size:.85rem">In Progress</h2><div id="wb-col-inprogress"></div></div>
+      <div class="card" style="min-height:80px"><h2 style="font-size:.85rem">Blocked</h2><div id="wb-col-blocked"></div></div>
+      <div class="card" style="min-height:80px"><h2 style="font-size:.85rem">Done</h2><div id="wb-col-done"></div></div>
+    </div>
+
+    <div class="grid" style="margin-bottom:1.25rem">
+      <div class="card">
+        <h2>Active Engineers</h2>
+        <div id="wb-engineers"><span style="color:#8b949e">No spawned engineers</span></div>
+      </div>
+      <div class="card">
+        <h2>Recent Actions</h2>
+        <div id="wb-actions" style="max-height:300px;overflow-y:auto"><span style="color:#8b949e">No recent actions</span></div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:1.25rem">
+      <h2 style="cursor:pointer" onclick="document.getElementById('wb-wm-body').style.display=document.getElementById('wb-wm-body').style.display==='none'?'block':'none'">Working Memory <span style="font-weight:normal;color:#8b949e;font-size:.8rem" id="wb-wm-count">0 slots</span> <span style="font-size:.75rem;color:#8b949e">▾</span></h2>
+      <div id="wb-wm-body">
+        <div id="wb-wm-list" style="font-size:.85rem;color:#8b949e">No active working memory</div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:1.25rem">
+      <h2 style="cursor:pointer" onclick="document.getElementById('wb-facts-body').style.display=document.getElementById('wb-facts-body').style.display==='none'?'block':'none'">Task Memory <span style="font-weight:normal;color:#8b949e;font-size:.8rem" id="wb-facts-count">0 facts</span> <span style="font-size:.75rem;color:#8b949e">▾</span></h2>
+      <div id="wb-facts-body">
+        <div id="wb-facts-list" style="font-size:.85rem;color:#8b949e">No facts loaded</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Cognitive Statistics</h2>
+      <div id="wb-cog-stats" style="font-size:.85rem;color:#8b949e">Loading…</div>
     </div>
   </div>
 
@@ -2828,12 +2880,32 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
             </div>`;
           }).join('');
         }else{document.getElementById('wb-actions').innerHTML='<span style="color:#8b949e;font-size:.85rem">No recent actions</span>';}
-        // Task memory
+        // Task memory (rich facts)
         const tm=d.task_memory||{};
         document.getElementById('wb-facts-count').textContent=(tm.facts_count||0)+' facts';
         if(tm.recent_facts?.length){
-          document.getElementById('wb-facts-list').innerHTML=tm.recent_facts.map(f=>'<div style="padding:.2rem 0;border-bottom:1px solid var(--border)">'+esc(f)+'</div>').join('');
+          document.getElementById('wb-facts-list').innerHTML=tm.recent_facts.map(f=>{
+            const conf=typeof f.confidence==='number'?(' <span style="color:#8b949e;font-size:.75rem">('+Math.round(f.confidence*100)+'%)</span>'):'';
+            const tags=(f.tags||[]).map(t=>'<span style="background:var(--border);padding:0 .3rem;border-radius:3px;font-size:.7rem;margin-left:.3rem">'+esc(t)+'</span>').join('');
+            return'<div style="padding:.25rem 0;border-bottom:1px solid var(--border)"><strong style="color:var(--accent);font-size:.8rem">'+esc(f.concept||'')+'</strong>'+conf+tags+'<div>'+esc(f.content||'')+'</div></div>';
+          }).join('');
         }else{document.getElementById('wb-facts-list').innerHTML='<span style="color:#8b949e">No recent facts in memory</span>';}
+        // Working memory
+        const wm=d.working_memory||[];
+        document.getElementById('wb-wm-count').textContent=wm.length+' slots';
+        if(wm.length){
+          document.getElementById('wb-wm-list').innerHTML=wm.map(s=>{
+            return'<div style="padding:.25rem 0;border-bottom:1px solid var(--border)"><span style="color:var(--accent);font-weight:600;font-size:.8rem">'+esc(s.slot_type)+'</span> <span style="color:#8b949e;font-size:.75rem">['+esc(s.task_id)+'] rel='+((s.relevance||0).toFixed(2))+'</span><div>'+esc(s.content)+'</div></div>';
+          }).join('');
+        }else{document.getElementById('wb-wm-list').innerHTML='<span style="color:#8b949e">No active working memory</span>';}
+        // Cognitive statistics
+        const cs=d.cognitive_statistics;
+        if(cs){
+          document.getElementById('wb-cog-stats').innerHTML=[
+            ['Sensory',cs.sensory_count],['Working',cs.working_count],['Episodic',cs.episodic_count],
+            ['Semantic',cs.semantic_count],['Procedural',cs.procedural_count],['Prospective',cs.prospective_count],['Total',cs.total]
+          ].map(([k,v])=>'<span style="margin-right:1rem"><strong>'+k+':</strong> '+(v||0)+'</span>').join('');
+        }else{document.getElementById('wb-cog-stats').innerHTML='<span style="color:#8b949e">No cognitive memory available</span>';}
       }catch(e){document.getElementById('wb-engineers').innerHTML='<span class="err">Failed to load workboard data</span>';}
     }
 
