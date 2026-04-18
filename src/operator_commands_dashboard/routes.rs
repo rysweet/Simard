@@ -2805,6 +2805,13 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     </div>
   </div>
 
+  <div class="tab-content" id="tab-thinking">
+    <div class="card">
+      <h2>OODA Internal Reasoning <button class="btn" onclick="fetchThinking()">Refresh</button></h2>
+      <div id="thinking-timeline"><span class="loading">Loading…</span></div>
+    </div>
+  </div>
+
   <script>
     /* --- Helpers --- */
     function fmtB(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';return(b/1048576).toFixed(1)+' MB';}
