@@ -4,7 +4,7 @@ use crate::runtime::RuntimeTopology;
 
 use super::types::{BenchmarkCheckResult, BenchmarkClass, BenchmarkScenario};
 
-const BENCHMARK_SCENARIOS: [BenchmarkScenario; 100] = [
+const BENCHMARK_SCENARIOS: [BenchmarkScenario; 118] = [
     BenchmarkScenario {
         id: "repo-exploration-local",
         title: "Repo exploration on local harness",
@@ -1125,6 +1125,206 @@ const BENCHMARK_SCENARIOS: [BenchmarkScenario; 100] = [
         base_type: "rusty-clawd",
         topology: RuntimeTopology::Distributed,
         objective: "Design a zero-downtime streaming backfill for migrating data across stores. Cover: (1) dual-write strategy: new writes go to both old and new stores during migration, (2) backfill cursor: track progress through historical records with resumable checkpoints, (3) consistency verification: compare record counts and checksums between stores, (4) cutover procedure: switch reads to the new store and decommission the old one. Confirm the distributed topology backend appears in runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    // --- Wave 10: DatabaseSchemaChange / CachingStrategy / FeatureFlagging /
+    // RateLimiting / EventSourcing / ChaosEngineering ---
+    BenchmarkScenario {
+        id: "db-schema-additive-migration-local",
+        title: "Database schema change: additive migration on local harness",
+        description: "Plan an additive (backward-compatible) schema migration that adds a new optional column and backfills it on the single-process local harness.",
+        class: BenchmarkClass::DatabaseSchemaChange,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Plan an additive schema migration. Cover: (1) the forward migration DDL adding a nullable column with a safe default, (2) application-level dual-read/dual-write phase so old and new code can coexist, (3) backfill strategy for existing rows in chunks with progress tracking, (4) the rollback plan and how to detect partial failures. Avoid destructive operations.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "db-schema-destructive-migration-multiprocess-terminal",
+        title: "Database schema change: destructive column drop on multi-process terminal-shell",
+        description: "Plan a multi-phase destructive schema change that removes a deprecated column without breaking in-flight clients through the multi-process topology with the terminal-shell base type.",
+        class: BenchmarkClass::DatabaseSchemaChange,
+        identity: "simard-gym",
+        base_type: "terminal-shell",
+        topology: RuntimeTopology::MultiProcess,
+        objective: "Plan a destructive schema migration to drop a deprecated column. Cover: (1) expand/contract phasing: stop writing the column, stop reading the column, then drop it in a separate release, (2) per-version compatibility matrix showing which app versions tolerate which schema states, (3) verification queries to prove no live reader/writer remains, (4) rollback considerations and why drops are typically irreversible. Confirm the multi-process transport appears in runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "db-schema-online-index-distributed-copilot",
+        title: "Database schema change: online index build on distributed copilot-sdk",
+        description: "Design an online index creation strategy that avoids long table locks on a high-traffic table through the distributed topology with the copilot-sdk base type.",
+        class: BenchmarkClass::DatabaseSchemaChange,
+        identity: "simard-gym",
+        base_type: "copilot-sdk",
+        topology: RuntimeTopology::Distributed,
+        objective: "Design an online schema change that adds an index without downtime. Cover: (1) choice of online/concurrent index build (e.g., CREATE INDEX CONCURRENTLY in Postgres or pt-online-schema-change in MySQL), (2) lock-acquisition risk and how to minimize blocking, (3) replica lag monitoring and pause-on-lag policy during the build, (4) verification that the index is valid and being used by the planner. Confirm the distributed topology backend appears in runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "cache-aside-strategy-local",
+        title: "Caching strategy: cache-aside pattern on local harness",
+        description: "Design a cache-aside (lazy-load) caching layer for a read-heavy lookup on the single-process local harness.",
+        class: BenchmarkClass::CachingStrategy,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Design a cache-aside read-through cache. Cover: (1) the read path: check cache, on miss load from source-of-truth and populate cache, (2) TTL selection and rationale tying freshness requirements to acceptable staleness, (3) negative-result caching to avoid stampedes on missing keys, (4) thundering-herd mitigation (singleflight/request coalescing) on concurrent misses.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "cache-write-through-multiprocess-rusty-clawd",
+        title: "Caching strategy: write-through cache on multi-process rusty-clawd",
+        description: "Design a write-through caching layer that keeps cache and primary store synchronously consistent through the multi-process topology with the rusty-clawd base type.",
+        class: BenchmarkClass::CachingStrategy,
+        identity: "simard-gym",
+        base_type: "rusty-clawd",
+        topology: RuntimeTopology::MultiProcess,
+        objective: "Design a write-through cache. Cover: (1) the write path: synchronous update of cache and source-of-truth in a single logical operation, (2) failure handling when one of cache or source-of-truth fails (compensating actions, retry policy), (3) consistency guarantees offered to readers and edge cases under concurrent writers, (4) trade-off analysis vs write-back and cache-aside for this workload. Confirm the multi-process transport appears in runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "cache-invalidation-distributed-copilot",
+        title: "Caching strategy: invalidation policy on distributed copilot-sdk",
+        description: "Design a cache-invalidation policy for a multi-region distributed cache with eventual consistency through the distributed topology with the copilot-sdk base type.",
+        class: BenchmarkClass::CachingStrategy,
+        identity: "simard-gym",
+        base_type: "copilot-sdk",
+        topology: RuntimeTopology::Distributed,
+        objective: "Design cache invalidation across regions. Cover: (1) invalidation channel (pub/sub topic or change-data-capture stream) carrying invalidation events, (2) keyspace versioning or epoch tagging so stale entries are detectable on read, (3) bounded-staleness SLO and how it is measured, (4) handling partition or subscriber lag without serving indefinitely stale entries. Confirm the distributed topology backend appears in runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "feature-flag-percentage-rollout-local",
+        title: "Feature flagging: percentage rollout on local harness",
+        description: "Design a percentage-based progressive rollout for a new feature flag on the single-process local harness.",
+        class: BenchmarkClass::FeatureFlagging,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Design a percentage-based feature rollout. Cover: (1) deterministic bucketing function (e.g., hash(user_id) mod 100) so a user's bucket is stable across requests, (2) ramp schedule (1% -> 10% -> 50% -> 100%) with health-check gates between steps, (3) telemetry needed to compare flagged-on vs flagged-off cohorts, (4) safe default behavior when the flag service is unreachable.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "feature-flag-kill-switch-multiprocess-terminal",
+        title: "Feature flagging: emergency kill switch on multi-process terminal-shell",
+        description: "Design an emergency disable switch that can rapidly turn off a misbehaving feature across all instances through the multi-process topology with the terminal-shell base type.",
+        class: BenchmarkClass::FeatureFlagging,
+        identity: "simard-gym",
+        base_type: "terminal-shell",
+        topology: RuntimeTopology::MultiProcess,
+        objective: "Design an emergency feature kill switch. Cover: (1) propagation latency budget from operator action to all processes seeing the new flag value, (2) fail-safe default when the flag store is unreachable (e.g., last-known-good cached locally), (3) audit trail for who flipped the switch, when, and why, (4) post-flip verification (metrics that should immediately move) and the procedure for re-enabling. Confirm the multi-process transport appears in runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "feature-flag-cohort-experiment-distributed-copilot",
+        title: "Feature flagging: cohort experiment on distributed copilot-sdk",
+        description: "Design a cohort-based A/B experiment with stable user bucketing and result analysis through the distributed topology with the copilot-sdk base type.",
+        class: BenchmarkClass::FeatureFlagging,
+        identity: "simard-gym",
+        base_type: "copilot-sdk",
+        topology: RuntimeTopology::Distributed,
+        objective: "Design an A/B cohort experiment behind a flag. Cover: (1) cohort assignment that is stable across sessions and devices for the same user, (2) primary success metric and at least one guardrail metric (e.g., latency, error rate) that can stop the experiment, (3) exposure logging so cohort membership at decision time is recoverable for analysis, (4) statistical stopping rule (sample size or significance threshold) to declare a winner. Confirm the distributed topology backend appears in runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "rate-limit-token-bucket-local",
+        title: "Rate limiting: token bucket on local harness",
+        description: "Design a per-key token-bucket rate limiter for a single-instance API on the single-process local harness.",
+        class: BenchmarkClass::RateLimiting,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Design a token-bucket rate limiter. Cover: (1) bucket parameters (capacity, refill rate) and how to choose them from a target steady-state RPS and acceptable burst, (2) per-key state representation in memory (e.g., last-refill timestamp + token count), (3) the response on rejection (HTTP 429 plus Retry-After header semantics), (4) at least one concrete numeric example: bucket of N tokens, refill R/s, burst behavior over time.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "rate-limit-sliding-window-multiprocess-copilot",
+        title: "Rate limiting: sliding window on multi-process copilot-sdk",
+        description: "Design a sliding-window rate limiter that smooths bursts across window boundaries through the multi-process topology with the copilot-sdk base type.",
+        class: BenchmarkClass::RateLimiting,
+        identity: "simard-gym",
+        base_type: "copilot-sdk",
+        topology: RuntimeTopology::MultiProcess,
+        objective: "Design a sliding-window rate limiter. Cover: (1) the chosen variant (sliding-log vs sliding-window-counter) and the trade-off in memory vs precision, (2) how the algorithm avoids the boundary-burst problem of fixed windows, (3) per-key state size and eviction policy for inactive keys, (4) the response on rejection including a quota header (e.g., X-RateLimit-Remaining, X-RateLimit-Reset). Confirm the multi-process transport appears in runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "rate-limit-distributed-quota-distributed-rusty-clawd",
+        title: "Rate limiting: distributed quota on distributed rusty-clawd",
+        description: "Design a distributed quota system that enforces a global request budget across many instances through the distributed topology with the rusty-clawd base type.",
+        class: BenchmarkClass::RateLimiting,
+        identity: "simard-gym",
+        base_type: "rusty-clawd",
+        topology: RuntimeTopology::Distributed,
+        objective: "Design a distributed quota enforcer. Cover: (1) coordination model (centralized counter store such as Redis vs lease-based local sub-quotas), (2) consistency vs latency trade-off and the bounded over-allow allowance under network partitions, (3) per-instance fallback policy when the central store is unreachable (fail-open vs fail-closed and why), (4) how cross-region quota is partitioned and rebalanced. Confirm the distributed topology backend appears in runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "event-sourcing-store-design-local",
+        title: "Event sourcing: event store design on local harness",
+        description: "Design an append-only event store schema and event envelope for a small bounded context on the single-process local harness.",
+        class: BenchmarkClass::EventSourcing,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Design an event store. Cover: (1) the event envelope (event_id, aggregate_id, sequence_number, event_type, payload, occurred_at, schema_version), (2) the append-only storage layout and the unique constraint that enforces per-aggregate ordering, (3) optimistic concurrency on append using expected sequence numbers, (4) at least one example aggregate with two event types and the resulting event log.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "event-sourcing-projection-rebuild-multiprocess-terminal",
+        title: "Event sourcing: projection rebuild on multi-process terminal-shell",
+        description: "Design a procedure to rebuild a read-model projection from the event log without downtime through the multi-process topology with the terminal-shell base type.",
+        class: BenchmarkClass::EventSourcing,
+        identity: "simard-gym",
+        base_type: "terminal-shell",
+        topology: RuntimeTopology::MultiProcess,
+        objective: "Design a projection-rebuild process. Cover: (1) build a new projection version side-by-side from the start of the event log while the old version still serves reads, (2) checkpointing strategy so a long rebuild can resume after a crash, (3) catch-up phase that consumes events appended during the rebuild before cutover, (4) atomic cutover that swaps reads to the new projection with a documented rollback path. Confirm the multi-process transport appears in runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "event-sourcing-cross-region-replay-distributed-copilot",
+        title: "Event sourcing: cross-region replay on distributed copilot-sdk",
+        description: "Design event replay and replication across regions for disaster recovery and read-scaling through the distributed topology with the copilot-sdk base type.",
+        class: BenchmarkClass::EventSourcing,
+        identity: "simard-gym",
+        base_type: "copilot-sdk",
+        topology: RuntimeTopology::Distributed,
+        objective: "Design cross-region event replication. Cover: (1) global sequence ordering vs per-aggregate ordering and which guarantees are preserved across regions, (2) idempotent consumer design so replays do not double-apply effects, (3) handling event-schema evolution during replay (upcasters or versioned handlers), (4) recovery objective (RPO/RTO) and how the replay procedure satisfies it. Confirm the distributed topology backend appears in runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "chaos-blast-radius-analysis-local",
+        title: "Chaos engineering: blast-radius analysis on local harness",
+        description: "Perform a blast-radius analysis for a candidate chaos experiment before any fault is injected on the single-process local harness.",
+        class: BenchmarkClass::ChaosEngineering,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Perform a blast-radius analysis for a proposed chaos experiment. Cover: (1) the steady-state hypothesis (what metric defines normal) and the abort threshold that halts the experiment, (2) the minimum viable scope (single instance, single shard) and the planned escalation if results are clean, (3) explicit list of users, data, and downstream services that could be impacted, (4) the rollback procedure and on-call sign-off requirements before the experiment runs.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "chaos-fault-injection-multiprocess-rusty-clawd",
+        title: "Chaos engineering: fault injection plan on multi-process rusty-clawd",
+        description: "Design a fault-injection experiment that introduces controlled latency and packet loss between processes through the multi-process topology with the rusty-clawd base type.",
+        class: BenchmarkClass::ChaosEngineering,
+        identity: "simard-gym",
+        base_type: "rusty-clawd",
+        topology: RuntimeTopology::MultiProcess,
+        objective: "Design a fault-injection experiment. Cover: (1) the specific faults injected (e.g., +200ms latency, 1% packet loss, dependency error responses) and the tooling used, (2) the steady-state hypothesis and the failure-mode hypothesis being tested, (3) blast-radius controls (target subset, time bound, automatic abort signal), (4) the observability needed to attribute observed effects to the injected fault rather than coincidence. Confirm the multi-process transport appears in runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "chaos-game-day-distributed-terminal",
+        title: "Chaos engineering: game day exercise on distributed terminal-shell",
+        description: "Plan a cross-team game day that exercises a regional outage and validates failover through the distributed topology with the terminal-shell base type.",
+        class: BenchmarkClass::ChaosEngineering,
+        identity: "simard-gym",
+        base_type: "terminal-shell",
+        topology: RuntimeTopology::Distributed,
+        objective: "Plan a game day exercise that simulates a regional failure. Cover: (1) the scenario script (which region is taken offline, how, and for how long), (2) participant roles (incident commander, scribe, operators per service) and the communication channel, (3) success criteria tied to recovery objectives (RPO/RTO) and a measurable abort signal, (4) the post-exercise debrief format that produces concrete action items and a blameless write-up. Confirm the distributed topology backend appears in runtime evidence.",
         expected_min_runtime_evidence: 4,
     },
 ];
@@ -2497,6 +2697,377 @@ pub(super) fn class_specific_checks(
                 },
             ]
         }
+        BenchmarkClass::DatabaseSchemaChange => {
+            let migration_plan_described = combined.contains("migration")
+                || combined.contains("schema change")
+                || combined.contains("ddl")
+                || combined.contains("alter table")
+                || combined.contains("add column")
+                || combined.contains("drop column")
+                || combined.contains("create index");
+            let compatibility_addressed = combined.contains("backward")
+                || combined.contains("compatib")
+                || combined.contains("expand/contract")
+                || combined.contains("expand-contract")
+                || combined.contains("dual-write")
+                || combined.contains("dual write")
+                || combined.contains("dual-read")
+                || combined.contains("nullable")
+                || combined.contains("default value")
+                || combined.contains("phase");
+            let rollback_or_safety_addressed = combined.contains("rollback")
+                || combined.contains("revert")
+                || combined.contains("backfill")
+                || combined.contains("online")
+                || combined.contains("concurrently")
+                || combined.contains("downtime")
+                || combined.contains("lock")
+                || combined.contains("replica");
+            vec![
+                BenchmarkCheckResult {
+                    id: "schema-migration-plan-described".to_string(),
+                    passed: migration_plan_described,
+                    detail: format!(
+                        "execution output {} schema migration plan",
+                        if migration_plan_described {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "schema-compatibility-addressed".to_string(),
+                    passed: compatibility_addressed,
+                    detail: format!(
+                        "execution output {} compatibility/phasing discussion",
+                        if compatibility_addressed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "schema-rollback-or-safety-addressed".to_string(),
+                    passed: rollback_or_safety_addressed,
+                    detail: format!(
+                        "execution output {} rollback/safety considerations",
+                        if rollback_or_safety_addressed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::CachingStrategy => {
+            let cache_pattern_named = combined.contains("cache-aside")
+                || combined.contains("cache aside")
+                || combined.contains("write-through")
+                || combined.contains("write through")
+                || combined.contains("write-back")
+                || combined.contains("read-through")
+                || combined.contains("lazy load")
+                || combined.contains("lazy-load");
+            let invalidation_or_ttl_addressed = combined.contains("ttl")
+                || combined.contains("invalidat")
+                || combined.contains("eviction")
+                || combined.contains("expir")
+                || combined.contains("staleness")
+                || combined.contains("freshness")
+                || combined.contains("epoch")
+                || combined.contains("version");
+            let consistency_or_stampede_addressed = combined.contains("stampede")
+                || combined.contains("thundering")
+                || combined.contains("singleflight")
+                || combined.contains("coalescing")
+                || combined.contains("consisten")
+                || combined.contains("hit rate")
+                || combined.contains("hit ratio")
+                || combined.contains("miss");
+            vec![
+                BenchmarkCheckResult {
+                    id: "cache-pattern-named".to_string(),
+                    passed: cache_pattern_named,
+                    detail: format!(
+                        "execution output {} a named caching pattern",
+                        if cache_pattern_named { "includes" } else { "lacks" }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "cache-invalidation-or-ttl-addressed".to_string(),
+                    passed: invalidation_or_ttl_addressed,
+                    detail: format!(
+                        "execution output {} invalidation/TTL discussion",
+                        if invalidation_or_ttl_addressed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "cache-consistency-or-stampede-addressed".to_string(),
+                    passed: consistency_or_stampede_addressed,
+                    detail: format!(
+                        "execution output {} consistency/stampede discussion",
+                        if consistency_or_stampede_addressed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::FeatureFlagging => {
+            let flag_mechanism_described = combined.contains("feature flag")
+                || combined.contains("feature-flag")
+                || combined.contains("toggle")
+                || combined.contains("kill switch")
+                || combined.contains("kill-switch")
+                || combined.contains("flag store")
+                || combined.contains("rollout");
+            let rollout_or_cohort_addressed = combined.contains("percentage")
+                || combined.contains("cohort")
+                || combined.contains("bucket")
+                || combined.contains("ramp")
+                || combined.contains("gradual")
+                || combined.contains("a/b")
+                || combined.contains("experiment")
+                || combined.contains("hash");
+            let safety_or_default_addressed = combined.contains("default")
+                || combined.contains("fail-safe")
+                || combined.contains("fail safe")
+                || combined.contains("fail-open")
+                || combined.contains("fail-closed")
+                || combined.contains("rollback")
+                || combined.contains("guardrail")
+                || combined.contains("audit");
+            vec![
+                BenchmarkCheckResult {
+                    id: "feature-flag-mechanism-described".to_string(),
+                    passed: flag_mechanism_described,
+                    detail: format!(
+                        "execution output {} feature flag mechanism",
+                        if flag_mechanism_described {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "feature-flag-rollout-or-cohort-addressed".to_string(),
+                    passed: rollout_or_cohort_addressed,
+                    detail: format!(
+                        "execution output {} rollout/cohort strategy",
+                        if rollout_or_cohort_addressed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "feature-flag-safety-or-default-addressed".to_string(),
+                    passed: safety_or_default_addressed,
+                    detail: format!(
+                        "execution output {} safe-default/guardrail discussion",
+                        if safety_or_default_addressed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::RateLimiting => {
+            let algorithm_named = combined.contains("token bucket")
+                || combined.contains("token-bucket")
+                || combined.contains("leaky bucket")
+                || combined.contains("leaky-bucket")
+                || combined.contains("sliding window")
+                || combined.contains("sliding-window")
+                || combined.contains("fixed window")
+                || combined.contains("fixed-window");
+            let limits_or_quota_addressed = combined.contains("rps")
+                || combined.contains("requests per")
+                || combined.contains("quota")
+                || combined.contains("burst")
+                || combined.contains("capacity")
+                || combined.contains("refill")
+                || combined.contains("per-key")
+                || combined.contains("per key");
+            let rejection_or_distribution_addressed = combined.contains("429")
+                || combined.contains("retry-after")
+                || combined.contains("retry after")
+                || combined.contains("x-ratelimit")
+                || combined.contains("backoff")
+                || combined.contains("reject")
+                || combined.contains("distribut")
+                || combined.contains("redis")
+                || combined.contains("central");
+            vec![
+                BenchmarkCheckResult {
+                    id: "rate-limit-algorithm-named".to_string(),
+                    passed: algorithm_named,
+                    detail: format!(
+                        "execution output {} a named rate-limit algorithm",
+                        if algorithm_named { "includes" } else { "lacks" }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "rate-limit-limits-or-quota-addressed".to_string(),
+                    passed: limits_or_quota_addressed,
+                    detail: format!(
+                        "execution output {} concrete limits/quota parameters",
+                        if limits_or_quota_addressed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "rate-limit-rejection-or-distribution-addressed".to_string(),
+                    passed: rejection_or_distribution_addressed,
+                    detail: format!(
+                        "execution output {} rejection/distribution handling",
+                        if rejection_or_distribution_addressed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::EventSourcing => {
+            let event_store_described = combined.contains("event store")
+                || combined.contains("event-store")
+                || combined.contains("event log")
+                || combined.contains("event-log")
+                || combined.contains("append-only")
+                || combined.contains("append only")
+                || combined.contains("aggregate")
+                || combined.contains("event sourc");
+            let projection_or_replay_addressed = combined.contains("projection")
+                || combined.contains("read model")
+                || combined.contains("read-model")
+                || combined.contains("replay")
+                || combined.contains("rebuild")
+                || combined.contains("catch-up")
+                || combined.contains("catch up");
+            let consistency_or_versioning_addressed = combined.contains("idempot")
+                || combined.contains("sequence")
+                || combined.contains("ordering")
+                || combined.contains("schema version")
+                || combined.contains("upcast")
+                || combined.contains("checkpoint")
+                || combined.contains("optimistic concurrency")
+                || combined.contains("snapshot");
+            vec![
+                BenchmarkCheckResult {
+                    id: "event-store-described".to_string(),
+                    passed: event_store_described,
+                    detail: format!(
+                        "execution output {} event store/log description",
+                        if event_store_described { "includes" } else { "lacks" }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "event-projection-or-replay-addressed".to_string(),
+                    passed: projection_or_replay_addressed,
+                    detail: format!(
+                        "execution output {} projection/replay discussion",
+                        if projection_or_replay_addressed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "event-consistency-or-versioning-addressed".to_string(),
+                    passed: consistency_or_versioning_addressed,
+                    detail: format!(
+                        "execution output {} consistency/versioning discussion",
+                        if consistency_or_versioning_addressed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::ChaosEngineering => {
+            let experiment_or_fault_described = combined.contains("chaos")
+                || combined.contains("fault injection")
+                || combined.contains("fault-injection")
+                || combined.contains("game day")
+                || combined.contains("game-day")
+                || combined.contains("experiment")
+                || combined.contains("inject");
+            let blast_radius_addressed = combined.contains("blast radius")
+                || combined.contains("blast-radius")
+                || combined.contains("scope")
+                || combined.contains("subset")
+                || combined.contains("canary")
+                || combined.contains("minimum viable")
+                || combined.contains("limit");
+            let hypothesis_or_safety_addressed = combined.contains("hypothesis")
+                || combined.contains("steady state")
+                || combined.contains("steady-state")
+                || combined.contains("abort")
+                || combined.contains("rollback")
+                || combined.contains("guardrail")
+                || combined.contains("kill switch")
+                || combined.contains("kill-switch")
+                || combined.contains("threshold");
+            vec![
+                BenchmarkCheckResult {
+                    id: "chaos-experiment-or-fault-described".to_string(),
+                    passed: experiment_or_fault_described,
+                    detail: format!(
+                        "execution output {} chaos experiment/fault description",
+                        if experiment_or_fault_described {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "chaos-blast-radius-addressed".to_string(),
+                    passed: blast_radius_addressed,
+                    detail: format!(
+                        "execution output {} blast-radius/scope discussion",
+                        if blast_radius_addressed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "chaos-hypothesis-or-safety-addressed".to_string(),
+                    passed: hypothesis_or_safety_addressed,
+                    detail: format!(
+                        "execution output {} hypothesis/abort/safety discussion",
+                        if hypothesis_or_safety_addressed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
     }
 }
 
@@ -2598,6 +3169,15 @@ mod tests {
                 "internationalization-review",
             ),
             (BenchmarkClass::IncidentResponse, "incident-response"),
+            (
+                BenchmarkClass::DatabaseSchemaChange,
+                "database-schema-change",
+            ),
+            (BenchmarkClass::CachingStrategy, "caching-strategy"),
+            (BenchmarkClass::FeatureFlagging, "feature-flagging"),
+            (BenchmarkClass::RateLimiting, "rate-limiting"),
+            (BenchmarkClass::EventSourcing, "event-sourcing"),
+            (BenchmarkClass::ChaosEngineering, "chaos-engineering"),
         ];
         for (class, label) in classes {
             assert_eq!(class.to_string(), label);
@@ -2705,6 +3285,12 @@ mod tests {
             BenchmarkClass::AccessibilityReview,
             BenchmarkClass::InternationalizationReview,
             BenchmarkClass::IncidentResponse,
+            BenchmarkClass::DatabaseSchemaChange,
+            BenchmarkClass::CachingStrategy,
+            BenchmarkClass::FeatureFlagging,
+            BenchmarkClass::RateLimiting,
+            BenchmarkClass::EventSourcing,
+            BenchmarkClass::ChaosEngineering,
         ];
         let scenarios = benchmark_scenarios();
         for class in all_classes {
