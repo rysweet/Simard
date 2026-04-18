@@ -143,6 +143,89 @@ pub fn is_goal_complete(progress: &SubordinateProgress) -> bool {
     progress.outcome.is_some()
 }
 
+/// Check the worktree for commits produced by a subordinate since spawn time.
+///
+/// Returns the number of commits found after `since_epoch` on the current
+/// branch in the subordinate's worktree.
+pub fn count_commits_since(
+    worktree_path: &std::path::Path,
+    since_epoch: u64,
+) -> u32 {
+    let since_str = format!("@{{{since_epoch}}}");
+    let output = Command::new("git")
+        .args(["log", "--oneline", "--after", &since_str])
+        .current_dir(worktree_path)
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            stdout.lines().filter(|l| !l.trim().is_empty()).count() as u32
+        }
+        _ => 0,
+    }
+}
+
+/// Check if any open PRs exist from the subordinate's branch.
+///
+/// Returns the number of open PRs found from the current branch in the
+/// subordinate's worktree.
+pub fn count_open_prs(worktree_path: &std::path::Path) -> u32 {
+    let branch_output = Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(worktree_path)
+        .output();
+
+    let branch = match branch_output {
+        Ok(o) if o.status.success() => {
+            let b = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if b.is_empty() { return 0; }
+            b
+        }
+        _ => return 0,
+    };
+
+    let pr_output = Command::new("gh")
+        .args(["pr", "list", "--head", &branch, "--state", "open", "--json", "number"])
+        .current_dir(worktree_path)
+        .output();
+
+    match pr_output {
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            // Count JSON array entries — each `"number":` is one PR.
+            text.matches("\"number\"").count() as u32
+        }
+        _ => 0,
+    }
+}
+
+/// Validate that a subordinate produced output artifacts (commits or PRs).
+///
+/// Logs clear warnings when a subordinate exits without producing any
+/// artifacts. Returns `(commits, prs)` counts.
+pub fn validate_subordinate_artifacts(
+    handle: &SubordinateHandle,
+) -> (u32, u32) {
+    let commits = count_commits_since(&handle.worktree_path, handle.spawn_time);
+    let prs = count_open_prs(&handle.worktree_path);
+
+    if commits == 0 && prs == 0 {
+        eprintln!(
+            "[simard] WARNING: subordinate '{}' (pid={}) exited with no commits and no PRs \
+             — goal '{}' produced no output artifacts",
+            handle.agent_name, handle.pid, handle.goal,
+        );
+    } else {
+        eprintln!(
+            "[simard] subordinate '{}' artifact check: {} commit(s), {} PR(s)",
+            handle.agent_name, commits, prs,
+        );
+    }
+
+    (commits, prs)
+}
+
 /// Get the current unix epoch in seconds.
 pub(super) fn current_epoch_seconds() -> SimardResult<u64> {
     let duration = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| {
@@ -178,6 +261,9 @@ mod tests {
             last_action: "finished".to_string(),
             heartbeat_epoch: 0,
             outcome: Some("success".to_string()),
+            commits_produced: 0,
+            prs_produced: 0,
+            exit_status: None,
         };
         assert!(is_goal_complete(&progress));
     }
@@ -192,6 +278,9 @@ mod tests {
             last_action: "coding".to_string(),
             heartbeat_epoch: 0,
             outcome: None,
+            commits_produced: 0,
+            prs_produced: 0,
+            exit_status: None,
         };
         assert!(!is_goal_complete(&progress));
     }
@@ -228,5 +317,115 @@ mod tests {
         };
         let result = kill_subordinate(&mut handle);
         assert!(result.is_err());
+    }
+
+    // -- has_artifacts --
+
+    #[test]
+    fn has_artifacts_true_with_commits() {
+        let p = SubordinateProgress {
+            sub_id: "a".to_string(),
+            phase: "done".to_string(),
+            steps_completed: 1,
+            steps_total: 1,
+            last_action: "committed".to_string(),
+            heartbeat_epoch: 0,
+            outcome: Some("success".to_string()),
+            commits_produced: 3,
+            prs_produced: 0,
+            exit_status: Some(0),
+        };
+        assert!(p.has_artifacts());
+    }
+
+    #[test]
+    fn has_artifacts_true_with_prs() {
+        let p = SubordinateProgress {
+            sub_id: "b".to_string(),
+            phase: "done".to_string(),
+            steps_completed: 1,
+            steps_total: 1,
+            last_action: "pr created".to_string(),
+            heartbeat_epoch: 0,
+            outcome: Some("success".to_string()),
+            commits_produced: 0,
+            prs_produced: 1,
+            exit_status: Some(0),
+        };
+        assert!(p.has_artifacts());
+    }
+
+    #[test]
+    fn has_artifacts_false_when_empty() {
+        let p = SubordinateProgress {
+            sub_id: "c".to_string(),
+            phase: "done".to_string(),
+            steps_completed: 1,
+            steps_total: 1,
+            last_action: "exited".to_string(),
+            heartbeat_epoch: 0,
+            outcome: Some("success".to_string()),
+            commits_produced: 0,
+            prs_produced: 0,
+            exit_status: Some(0),
+        };
+        assert!(!p.has_artifacts());
+    }
+
+    // -- with_artifacts / with_exit_status --
+
+    #[test]
+    fn with_artifacts_sets_counts() {
+        let p = SubordinateProgress {
+            sub_id: "d".to_string(),
+            phase: "done".to_string(),
+            steps_completed: 1,
+            steps_total: 1,
+            last_action: "done".to_string(),
+            heartbeat_epoch: 0,
+            outcome: None,
+            commits_produced: 0,
+            prs_produced: 0,
+            exit_status: None,
+        };
+        let p2 = p.with_artifacts(5, 2);
+        assert_eq!(p2.commits_produced, 5);
+        assert_eq!(p2.prs_produced, 2);
+    }
+
+    #[test]
+    fn with_exit_status_sets_code() {
+        let p = SubordinateProgress {
+            sub_id: "e".to_string(),
+            phase: "done".to_string(),
+            steps_completed: 1,
+            steps_total: 1,
+            last_action: "done".to_string(),
+            heartbeat_epoch: 0,
+            outcome: None,
+            commits_produced: 0,
+            prs_produced: 0,
+            exit_status: None,
+        };
+        let p2 = p.with_exit_status(42);
+        assert_eq!(p2.exit_status, Some(42));
+    }
+
+    // -- validate_subordinate_artifacts --
+
+    #[test]
+    fn validate_artifacts_returns_zero_for_nonexistent_path() {
+        let handle = SubordinateHandle {
+            pid: 0,
+            agent_name: "test".to_string(),
+            goal: "goal".to_string(),
+            worktree_path: std::path::PathBuf::from("/nonexistent/path/12345"),
+            spawn_time: 0,
+            retry_count: 0,
+            killed: false,
+        };
+        let (commits, prs) = validate_subordinate_artifacts(&handle);
+        assert_eq!(commits, 0);
+        assert_eq!(prs, 0);
     }
 }

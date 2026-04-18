@@ -81,7 +81,8 @@ pub(super) fn dispatch_advance_goal(
     )
 }
 
-/// Advance a goal that has a subordinate assigned by checking heartbeat.
+/// Advance a goal that has a subordinate assigned by checking heartbeat
+/// and validating output artifacts.
 fn advance_goal_with_subordinate(
     action: &PlannedAction,
     bridges: &mut OodaBridges,
@@ -102,7 +103,18 @@ fn advance_goal_with_subordinate(
 
     match check_heartbeat(&handle, &*bridges.memory) {
         Ok(HeartbeatStatus::Alive { phase, .. }) => {
-            // Subordinate is alive; update goal to in-progress if not already.
+            // Check if subordinate reported completion with an outcome.
+            if let Ok(Some(progress)) =
+                crate::agent_goal_assignment::poll_progress(sub_name, &*bridges.memory)
+                && progress.outcome.is_some()
+            {
+                // Subordinate claims completion — validate artifacts.
+                return validate_subordinate_completion(
+                    action, state, goal_id, sub_name, &progress,
+                );
+            }
+
+            // Subordinate is alive and still working.
             let new_progress = GoalProgress::InProgress { percent: 50 };
             let _ = update_goal_progress(&mut state.active_goals, goal_id, new_progress);
             make_outcome(
@@ -113,23 +125,73 @@ fn advance_goal_with_subordinate(
                 ),
             )
         }
-        Ok(HeartbeatStatus::Stale { seconds_since }) => make_outcome(
-            action,
-            false,
-            format!(
-                "subordinate '{sub_name}' stale ({seconds_since}s), goal '{goal_id}' may need reassignment"
-            ),
-        ),
-        Ok(HeartbeatStatus::Dead) => {
-            let _ = update_goal_progress(
-                &mut state.active_goals,
-                goal_id,
-                GoalProgress::Blocked(format!("subordinate '{sub_name}' is dead")),
+        Ok(HeartbeatStatus::Stale { seconds_since }) => {
+            // Subordinate is stale — check if it left behind any artifacts
+            // before marking as failed.
+            if let Ok(Some(progress)) =
+                crate::agent_goal_assignment::poll_progress(sub_name, &*bridges.memory)
+                && progress.outcome.is_some()
+            {
+                return validate_subordinate_completion(
+                    action, state, goal_id, sub_name, &progress,
+                );
+            }
+
+            eprintln!(
+                "[simard] WARNING: subordinate '{sub_name}' stale ({seconds_since}s) \
+                 with no completion outcome — goal '{goal_id}' needs reassignment"
             );
             make_outcome(
                 action,
                 false,
-                format!("subordinate '{sub_name}' is dead, goal '{goal_id}' blocked"),
+                format!(
+                    "subordinate '{sub_name}' stale ({seconds_since}s) with no artifacts, \
+                     goal '{goal_id}' needs reassignment"
+                ),
+            )
+        }
+        Ok(HeartbeatStatus::Dead) => {
+            // Subordinate is dead — check if it produced anything before dying.
+            if let Ok(Some(progress)) =
+                crate::agent_goal_assignment::poll_progress(sub_name, &*bridges.memory)
+            {
+                if progress.outcome.is_some() {
+                    return validate_subordinate_completion(
+                        action, state, goal_id, sub_name, &progress,
+                    );
+                }
+                // Subordinate reported progress but no outcome — silent exit.
+                eprintln!(
+                    "[simard] WARNING: subordinate '{sub_name}' died without reporting \
+                     an outcome — last phase='{}', last action='{}', \
+                     exit_status={:?}, commits={}, prs={}",
+                    progress.phase,
+                    progress.last_action,
+                    progress.exit_status,
+                    progress.commits_produced,
+                    progress.prs_produced,
+                );
+            } else {
+                eprintln!(
+                    "[simard] WARNING: subordinate '{sub_name}' is dead with no progress \
+                     reports at all — it may have exited immediately without doing any work"
+                );
+            }
+
+            let _ = update_goal_progress(
+                &mut state.active_goals,
+                goal_id,
+                GoalProgress::Blocked(format!(
+                    "subordinate '{sub_name}' exited without producing commits or PRs"
+                )),
+            );
+            make_outcome(
+                action,
+                false,
+                format!(
+                    "subordinate '{sub_name}' exited with no output artifacts, \
+                     goal '{goal_id}' marked failed for retry"
+                ),
             )
         }
         Err(e) => make_outcome(
@@ -137,6 +199,65 @@ fn advance_goal_with_subordinate(
             false,
             format!("heartbeat check failed for subordinate '{sub_name}': {e}"),
         ),
+    }
+}
+
+/// Validate that a subordinate's claimed completion produced real artifacts.
+///
+/// If the subordinate reports success but has zero commits and zero PRs,
+/// the action is marked as failed so the OODA cycle can retry with a
+/// different approach.
+fn validate_subordinate_completion(
+    action: &PlannedAction,
+    state: &mut OodaState,
+    goal_id: &str,
+    sub_name: &str,
+    progress: &crate::agent_goal_assignment::SubordinateProgress,
+) -> ActionOutcome {
+    let has_artifacts = progress.has_artifacts();
+    let outcome_text = progress.outcome.as_deref().unwrap_or("unknown");
+
+    if has_artifacts {
+        let new_progress = GoalProgress::Completed;
+        let _ = update_goal_progress(&mut state.active_goals, goal_id, new_progress);
+        eprintln!(
+            "[simard] subordinate '{sub_name}' completed goal '{goal_id}' — \
+             {} commit(s), {} PR(s), outcome='{outcome_text}'",
+            progress.commits_produced, progress.prs_produced,
+        );
+        make_outcome(
+            action,
+            true,
+            format!(
+                "subordinate '{sub_name}' completed goal '{goal_id}' with \
+                 {} commit(s) and {} PR(s)",
+                progress.commits_produced, progress.prs_produced,
+            ),
+        )
+    } else {
+        // Subordinate claims success but produced nothing — this is the
+        // silent exit bug (issue #905). Mark as failed for retry.
+        eprintln!(
+            "[simard] WARNING: subordinate '{sub_name}' reported outcome \
+             '{outcome_text}' for goal '{goal_id}' but produced 0 commits \
+             and 0 PRs — marking as failed for OODA retry"
+        );
+        let _ = update_goal_progress(
+            &mut state.active_goals,
+            goal_id,
+            GoalProgress::Blocked(format!(
+                "subordinate '{sub_name}' exited with outcome '{outcome_text}' \
+                 but produced no commits or PRs"
+            )),
+        );
+        make_outcome(
+            action,
+            false,
+            format!(
+                "subordinate '{sub_name}' claimed '{outcome_text}' for goal '{goal_id}' \
+                 but produced 0 commits and 0 PRs — action failed, eligible for retry"
+            ),
+        )
     }
 }
 
@@ -205,8 +326,77 @@ mod tests {
             description: "advance".into(),
         };
         let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
-        // No progress facts in memory means Dead heartbeat.
+        // No progress facts in memory means Dead heartbeat — should report no artifacts.
         assert!(!outcomes[0].success);
-        assert!(outcomes[0].detail.contains("dead"));
+        assert!(
+            outcomes[0].detail.contains("no output artifacts"),
+            "expected 'no output artifacts' in detail, got: {}",
+            outcomes[0].detail
+        );
+    }
+
+    #[test]
+    fn validate_subordinate_completion_with_artifacts_succeeds() {
+        let progress = crate::agent_goal_assignment::SubordinateProgress {
+            sub_id: "sub-ok".to_string(),
+            phase: "done".to_string(),
+            steps_completed: 5,
+            steps_total: 5,
+            last_action: "pushed PR".to_string(),
+            heartbeat_epoch: 1000,
+            outcome: Some("success".to_string()),
+            commits_produced: 3,
+            prs_produced: 1,
+            exit_status: Some(0),
+        };
+        let board = board_with_goal("g1", GoalProgress::InProgress { percent: 50 }, None);
+        let mut state = OodaState::new(board);
+        let action = PlannedAction {
+            kind: ActionKind::AdvanceGoal,
+            goal_id: Some("g1".into()),
+            description: "advance".into(),
+        };
+        let outcome =
+            super::validate_subordinate_completion(&action, &mut state, "g1", "sub-ok", &progress);
+        assert!(outcome.success, "should succeed with artifacts: {}", outcome.detail);
+        assert!(outcome.detail.contains("3 commit(s)"));
+        assert!(outcome.detail.contains("1 PR(s)"));
+    }
+
+    #[test]
+    fn validate_subordinate_completion_without_artifacts_fails() {
+        let progress = crate::agent_goal_assignment::SubordinateProgress {
+            sub_id: "sub-empty".to_string(),
+            phase: "done".to_string(),
+            steps_completed: 5,
+            steps_total: 5,
+            last_action: "exited".to_string(),
+            heartbeat_epoch: 1000,
+            outcome: Some("success".to_string()),
+            commits_produced: 0,
+            prs_produced: 0,
+            exit_status: Some(0),
+        };
+        let board = board_with_goal("g1", GoalProgress::InProgress { percent: 50 }, None);
+        let mut state = OodaState::new(board);
+        let action = PlannedAction {
+            kind: ActionKind::AdvanceGoal,
+            goal_id: Some("g1".into()),
+            description: "advance".into(),
+        };
+        let outcome = super::validate_subordinate_completion(
+            &action,
+            &mut state,
+            "g1",
+            "sub-empty",
+            &progress,
+        );
+        assert!(
+            !outcome.success,
+            "should fail when no artifacts: {}",
+            outcome.detail
+        );
+        assert!(outcome.detail.contains("0 commits"));
+        assert!(outcome.detail.contains("0 PRs"));
     }
 }

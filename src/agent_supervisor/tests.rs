@@ -145,6 +145,9 @@ fn is_goal_complete_checks_outcome() {
         last_action: "done".to_string(),
         heartbeat_epoch: 12345,
         outcome: None,
+        commits_produced: 0,
+        prs_produced: 0,
+        exit_status: None,
     };
     assert!(!is_goal_complete(&p));
 

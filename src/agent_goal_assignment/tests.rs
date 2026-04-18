@@ -47,6 +47,9 @@ fn bridge_with_progress_fact() -> CognitiveMemoryBridge {
         last_action: "testing".to_string(),
         heartbeat_epoch: 2000,
         outcome: None,
+        commits_produced: 0,
+        prs_produced: 0,
+        exit_status: None,
     };
     let content = serde_json::to_string(&progress).unwrap();
     let transport =
@@ -126,6 +129,9 @@ fn progress_display_is_readable() {
         last_action: "ran tests".to_string(),
         heartbeat_epoch: 1000,
         outcome: None,
+        commits_produced: 0,
+        prs_produced: 0,
+        exit_status: None,
     };
     let display = p.to_string();
     assert!(display.contains("test-1"));
@@ -142,6 +148,9 @@ fn progress_display_includes_all_fields() {
         last_action: "initialized".to_string(),
         heartbeat_epoch: 999,
         outcome: None,
+        commits_produced: 0,
+        prs_produced: 0,
+        exit_status: None,
     };
     let display = p.to_string();
     assert!(display.contains("alpha"));
@@ -162,6 +171,9 @@ fn progress_serialization_round_trips() {
         last_action: "compiled".to_string(),
         heartbeat_epoch: 12345,
         outcome: Some("success".to_string()),
+        commits_produced: 0,
+        prs_produced: 0,
+        exit_status: None,
     };
     let json = serde_json::to_string(&p).expect("serialize");
     let p2: SubordinateProgress = serde_json::from_str(&json).expect("deserialize");
@@ -178,6 +190,9 @@ fn progress_serialization_with_none_outcome() {
         last_action: "none".to_string(),
         heartbeat_epoch: 0,
         outcome: None,
+        commits_produced: 0,
+        prs_produced: 0,
+        exit_status: None,
     };
     let json = serde_json::to_string(&p).unwrap();
     assert!(json.contains("\"outcome\":null"));
@@ -209,6 +224,9 @@ fn progress_with_outcome_sets_field() {
         last_action: "done".to_string(),
         heartbeat_epoch: 12345,
         outcome: None,
+        commits_produced: 0,
+        prs_produced: 0,
+        exit_status: None,
     };
     let p2 = p.with_outcome("all tests passed");
     assert_eq!(p2.outcome, Some("all tests passed".to_string()));
@@ -224,6 +242,9 @@ fn progress_with_outcome_preserves_other_fields() {
         last_action: "running".to_string(),
         heartbeat_epoch: 500,
         outcome: None,
+        commits_produced: 0,
+        prs_produced: 0,
+        exit_status: None,
     };
     let p2 = p.with_outcome("done");
     assert_eq!(p2.sub_id, "b");
@@ -244,6 +265,9 @@ fn progress_with_outcome_overwrites_existing_outcome() {
         last_action: "done".to_string(),
         heartbeat_epoch: 100,
         outcome: Some("old".to_string()),
+        commits_produced: 0,
+        prs_produced: 0,
+        exit_status: None,
     };
     let p2 = p.with_outcome("new");
     assert_eq!(p2.outcome, Some("new".to_string()));
@@ -287,6 +311,9 @@ fn report_progress_succeeds_with_mock_bridge() {
         last_action: "compiled".to_string(),
         heartbeat_epoch: 1000,
         outcome: None,
+        commits_produced: 0,
+        prs_produced: 0,
+        exit_status: None,
     };
     let result = report_progress("agent-1", &progress, &bridge);
     assert!(result.is_ok());
