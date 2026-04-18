@@ -44,6 +44,7 @@ pub fn build_router() -> Router {
         .route("/api/traces", get(traces))
         .route("/api/activity", get(activity))
         .route("/api/workboard", get(workboard))
+        .route("/api/current-work", get(current_work))
         .route("/ws/chat", get(ws_chat_handler))
         .route("/api/login", post(login))
         .route("/login", get(login_page))
@@ -864,6 +865,167 @@ async fn workboard() -> Json<Value> {
         },
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
+}
+
+/// Real-time snapshot of what Simard is doing right now.
+///
+/// Composes data from `daemon_health.json` (cycle/phase), `goal_records.json`
+/// (active goals), and the agent registry (spawned engineers).
+async fn current_work() -> Json<Value> {
+    let health_path = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/var/tmp"))
+        .join("simard")
+        .join("daemon_health.json");
+
+    let daemon_health: Option<Value> = std::fs::read_to_string(&health_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
+
+    let cycle_number = daemon_health
+        .as_ref()
+        .and_then(|h| h.get("cycle_number"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let cycle_phase = daemon_health
+        .as_ref()
+        .and_then(|h| h.get("cycle_phase"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let cycle_phase_display = {
+        let mut chars = cycle_phase.chars();
+        match chars.next() {
+            Some(c) => format!("{}{}", c.to_uppercase(), chars.as_str()),
+            None => "Unknown".to_string(),
+        }
+    };
+
+    let cycle_start_epoch = daemon_health
+        .as_ref()
+        .and_then(|h| h.get("cycle_start_epoch"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let now_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let uptime_seconds = if cycle_start_epoch > 0 {
+        now_epoch.saturating_sub(cycle_start_epoch)
+    } else {
+        0
+    };
+
+    let interval_secs = daemon_health
+        .as_ref()
+        .and_then(|h| h.get("interval_secs"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(300);
+
+    let last_cycle_summary = daemon_health
+        .as_ref()
+        .and_then(|h| h.get("last_cycle_summary"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let cycle_duration_secs = daemon_health
+        .as_ref()
+        .and_then(|h| h.get("cycle_duration_secs"))
+        .and_then(|v| v.as_u64());
+
+    let next_cycle_eta_seconds = if cycle_phase == "sleep" {
+        if let Some(dur) = cycle_duration_secs {
+            let next_start = cycle_start_epoch + dur + interval_secs;
+            next_start.saturating_sub(now_epoch)
+        } else {
+            interval_secs
+        }
+    } else {
+        0
+    };
+
+    // Active goals from goal_records.json
+    let state_root = resolve_state_root();
+    let goal_path = state_root.join("goal_records.json");
+    let active_goals: Vec<Value> = std::fs::read_to_string(&goal_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<GoalBoard>(&content).ok())
+        .map(|board| {
+            board
+                .active
+                .iter()
+                .map(|g| {
+                    let (status_str, blocker) = match &g.status {
+                        crate::goal_curation::GoalProgress::NotStarted => {
+                            ("not_started".to_string(), None)
+                        }
+                        crate::goal_curation::GoalProgress::InProgress { percent } => {
+                            (format!("in_progress({}%)", percent), None)
+                        }
+                        crate::goal_curation::GoalProgress::Blocked(reason) => {
+                            ("blocked".to_string(), Some(reason.clone()))
+                        }
+                        crate::goal_curation::GoalProgress::Completed => {
+                            ("completed".to_string(), None)
+                        }
+                    };
+                    let mut goal_json = json!({
+                        "name": g.id,
+                        "description": g.description,
+                        "status": status_str,
+                        "priority": g.priority,
+                    });
+                    if let Some(b) = blocker {
+                        goal_json["blocker"] = json!(b);
+                    }
+                    if let Some(ref assignee) = g.assigned_to {
+                        goal_json["assigned_to"] = json!(assignee);
+                    }
+                    goal_json
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Spawned engineers from agent registry
+    let reg = FileBackedAgentRegistry::new(&state_root);
+    let spawned_engineers: Vec<Value> = reg
+        .list()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| {
+            let alive = is_pid_alive(entry.pid);
+            json!({
+                "id": entry.id,
+                "pid": entry.pid,
+                "role": entry.role,
+                "host": entry.host,
+                "state": format!("{:?}", entry.state),
+                "alive": alive,
+                "start_time": entry.start_time.to_rfc3339(),
+                "last_heartbeat": entry.last_heartbeat.to_rfc3339(),
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "cycle_number": cycle_number,
+        "cycle_phase": cycle_phase_display,
+        "uptime_seconds": uptime_seconds,
+        "active_goals": active_goals,
+        "spawned_engineers": spawned_engineers,
+        "last_cycle_summary": last_cycle_summary,
+        "next_cycle_eta_seconds": next_cycle_eta_seconds,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    }))
+}
+
+fn is_pid_alive(pid: u32) -> bool {
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
 }
 
 /// Run a `gh` CLI command and parse JSON output, returning a `Value`.
