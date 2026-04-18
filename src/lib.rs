@@ -91,6 +91,7 @@ pub mod self_relaunch_semaphore;
 pub mod session;
 pub mod session_builder;
 pub mod skill_builder;
+pub mod skill_catalog;
 pub mod terminal_engineer_bridge;
 mod terminal_session;
 #[doc(hidden)]
@@ -319,6 +320,7 @@ pub use skill_builder::{
     SkillTemplate, extract_skill_candidates, generate_skill_definition, install_skill,
     list_installed_skills,
 };
+pub use skill_catalog::{BundledSkill, SkillCatalog, SkillMeta};
 pub use terminal_engineer_bridge::{
     ENGINEER_HANDOFF_FILE_NAME, ENGINEER_MODE_BOUNDARY, SHARED_DEFAULT_STATE_ROOT_SOURCE,
     SHARED_EXPLICIT_STATE_ROOT_SOURCE, TERMINAL_HANDOFF_FILE_NAME, TERMINAL_MODE_BOUNDARY,
