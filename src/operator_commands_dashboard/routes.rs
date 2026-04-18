@@ -45,6 +45,7 @@ pub fn build_router() -> Router {
         .route("/api/activity", get(activity))
         .route("/api/workboard", get(workboard))
         .route("/api/current-work", get(current_work))
+        .route("/api/ooda-thinking", get(ooda_thinking))
         .route("/ws/chat", get(ws_chat_handler))
         .route("/api/login", post(login))
         .route("/login", get(login_page))
@@ -2034,6 +2035,57 @@ async fn memory_metrics() -> Json<Value> {
     }))
 }
 
+async fn ooda_thinking() -> Json<Value> {
+    let state_root = resolve_state_root();
+    let dir = state_root.join("cycle_reports");
+    let mut reports = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        let mut paths: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+        paths.sort_by(|a, b| {
+            let num = |p: &std::fs::DirEntry| -> u32 {
+                p.file_name()
+                    .to_str()
+                    .unwrap_or("")
+                    .strip_prefix("cycle_")
+                    .unwrap_or("")
+                    .strip_suffix(".json")
+                    .unwrap_or("")
+                    .parse()
+                    .unwrap_or(0)
+            };
+            num(b).cmp(&num(a))
+        });
+
+        for entry in paths.into_iter().take(20) {
+            if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                if let Ok(val) = serde_json::from_str::<Value>(&content) {
+                    reports.push(val);
+                } else {
+                    // Legacy one-line summary
+                    let cycle_num = entry
+                        .file_name()
+                        .to_str()
+                        .unwrap_or("")
+                        .strip_prefix("cycle_")
+                        .unwrap_or("")
+                        .strip_suffix(".json")
+                        .unwrap_or("")
+                        .parse::<u32>()
+                        .unwrap_or(0);
+                    reports.push(json!({
+                        "cycle_number": cycle_num,
+                        "summary": content.trim(),
+                        "legacy": true,
+                    }));
+                }
+            }
+        }
+    }
+
+    Json(json!({ "reports": reports }))
+}
+
 fn resolve_state_root() -> std::path::PathBuf {
     std::env::var("SIMARD_STATE_ROOT")
         .map(std::path::PathBuf::from)
@@ -2173,6 +2225,27 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     .badge{display:inline-block;padding:.15rem .5rem;border-radius:10px;font-size:.75rem;font-weight:600;background:#1f6feb33;color:var(--accent)}
     .btn{background:var(--accent);color:#0d1117;border:none;border-radius:4px;padding:.2rem .6rem;cursor:pointer;font-size:.8rem;float:right}
     .btn:hover{opacity:.9}
+    .thinking-cycle{border:1px solid var(--border);border-radius:8px;padding:1rem;margin-bottom:1rem;background:var(--card)}
+    .thinking-cycle.legacy{opacity:0.7}
+    .cycle-header{display:flex;align-items:center;gap:.75rem;margin-bottom:.75rem;padding-bottom:.5rem;border-bottom:1px solid var(--border)}
+    .cycle-num{font-weight:700;font-size:1rem;color:var(--accent)}
+    .cycle-summary-inline{font-size:.85rem;color:#8b949e}
+    .cycle-badge{font-size:.7rem;padding:2px 6px;border-radius:4px;background:#21262d;color:#8b949e}
+    .phase{margin-bottom:.75rem;padding-left:1rem;border-left:3px solid var(--border)}
+    .phase.observe{border-left-color:var(--accent)}
+    .phase.orient{border-left-color:var(--yellow)}
+    .phase.decide{border-left-color:#a371f7}
+    .phase.act{border-left-color:var(--green)}
+    .phase-label{font-weight:600;font-size:.9rem;margin-bottom:.3rem}
+    .phase-content{font-size:.85rem;color:#c9d1d9}
+    .phase-content div{margin-bottom:.2rem}
+    .goal-line{padding-left:.5rem;color:#8b949e}
+    .priority-line{padding-left:.5rem}
+    .urgency{margin-right:.3rem}
+    .outcome{padding:.4rem;border-radius:4px;margin-bottom:.3rem}
+    .outcome.success{background:rgba(63,185,80,0.1)}
+    .outcome.failure{background:rgba(248,81,73,0.1)}
+    .outcome-detail{font-size:.8rem;color:#8b949e;margin-top:.2rem;padding-left:1rem;font-family:monospace;white-space:pre-wrap;max-height:100px;overflow-y:auto}
   </style>
 </head>
 <body>
@@ -2194,6 +2267,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     <div class="tab" data-tab="costs">Costs</div>
     <div class="tab" data-tab="chat">Chat</div>
     <div class="tab" data-tab="workboard">Whiteboard</div>
+    <div class="tab" data-tab="thinking">🧠 Thinking</div>
   </div>
 
   <div class="tab-content active" id="tab-overview">
@@ -2380,6 +2454,13 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     </div>
   </div>
 
+  <div class="tab-content" id="tab-thinking">
+    <div class="card">
+      <h2>OODA Internal Reasoning <button class="btn" onclick="fetchThinking()">Refresh</button></h2>
+      <div id="thinking-timeline"><span class="loading">Loading…</span></div>
+    </div>
+  </div>
+
   <script>
     /* --- Helpers --- */
     function fmtB(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';return(b/1048576).toFixed(1)+' MB';}
@@ -2425,6 +2506,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         if(tab.dataset.tab==='traces') fetchTraces();
         if(tab.dataset.tab==='chat') initChat();
         if(tab.dataset.tab==='workboard') {fetchWorkboard();tabRefreshTimers.wb=setInterval(fetchWorkboard,30000);}
+        if(tab.dataset.tab==='thinking') {fetchThinking();tabRefreshTimers.thinking=setInterval(fetchThinking,30000);}
       });
     });
     setInterval(()=>{document.getElementById('clock').textContent=new Date().toLocaleString()},1000);
@@ -2960,6 +3042,74 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           ].map(([k,v])=>'<span style="margin-right:1rem"><strong>'+k+':</strong> '+(v||0)+'</span>').join('');
         }else{document.getElementById('wb-cog-stats').innerHTML='<span style="color:#8b949e">No cognitive memory available</span>';}
       }catch(e){document.getElementById('wb-engineers').innerHTML='<span class="err">Failed to load workboard data</span>';}
+    }
+
+    /* --- Thinking --- */
+    async function fetchThinking(){
+      try{
+        const r=await fetch('/api/ooda-thinking');
+        const d=await r.json();
+        const el=document.getElementById('thinking-timeline');
+        if(!d.reports?.length){el.innerHTML='<span style="color:#8b949e">No cycle reports yet. The OODA daemon generates these during autonomous work.</span>';return;}
+        el.innerHTML=d.reports.map(rpt=>{
+          if(rpt.legacy){
+            return `<div class="thinking-cycle legacy">
+              <div class="cycle-header"><span class="cycle-num">Cycle #${rpt.cycle_number}</span><span class="cycle-badge">legacy</span></div>
+              <div class="cycle-summary">${esc(rpt.summary)}</div>
+            </div>`;
+          }
+          const phases=[];
+          if(rpt.observation){
+            const obs=rpt.observation;
+            phases.push(`<div class="phase observe">
+              <div class="phase-label">👁 Observe</div>
+              <div class="phase-content">
+                <div>${obs.goal_count} goals tracked</div>
+                ${obs.goals?.map(g=>`<div class="goal-line">• ${esc(g.id)}: ${esc(g.progress)}</div>`).join('')||''}
+                ${obs.gym_health?`<div>Gym: ${(obs.gym_health.pass_rate*100).toFixed(0)}% pass rate (${obs.gym_health.scenario_count} scenarios)</div>`:''}
+                ${obs.environment?`<div>Env: ${obs.environment.open_issues} issues, ${obs.environment.recent_commits} recent commits${obs.environment.git_status?'':' (clean)'}</div>`:''}
+              </div>
+            </div>`);
+          }
+          if(rpt.priorities?.length){
+            phases.push(`<div class="phase orient">
+              <div class="phase-label">🧭 Orient</div>
+              <div class="phase-content">
+                ${rpt.priorities.map(p=>`<div class="priority-line">
+                  <span class="urgency" style="color:${p.urgency>0.7?'var(--red)':p.urgency>0.4?'var(--yellow)':'var(--green)'}">●</span>
+                  <strong>${esc(p.goal_id)}</strong> (urgency: ${p.urgency.toFixed(2)}) — ${esc(p.reason)}
+                </div>`).join('')}
+              </div>
+            </div>`);
+          }
+          if(rpt.planned_actions?.length){
+            phases.push(`<div class="phase decide">
+              <div class="phase-label">🎯 Decide</div>
+              <div class="phase-content">
+                ${rpt.planned_actions.map(a=>`<div>→ <code>${esc(a.kind)}</code> ${a.goal_id?'['+esc(a.goal_id)+']':''} ${esc(a.description)}</div>`).join('')}
+              </div>
+            </div>`);
+          }
+          if(rpt.outcomes?.length){
+            phases.push(`<div class="phase act">
+              <div class="phase-label">⚡ Act</div>
+              <div class="phase-content">
+                ${rpt.outcomes.map(o=>`<div class="outcome ${o.success?'success':'failure'}">
+                  ${o.success?'✅':'❌'} <code>${esc(o.action_kind)}</code> — ${esc(o.action_description)}
+                  <div class="outcome-detail">${esc((o.detail||'').substring(0,300))}${(o.detail||'').length>300?'…':''}</div>
+                </div>`).join('')}
+              </div>
+            </div>`);
+          }
+          return `<div class="thinking-cycle">
+            <div class="cycle-header">
+              <span class="cycle-num">Cycle #${rpt.cycle_number}</span>
+              <span class="cycle-summary-inline">${esc(rpt.summary||'')}</span>
+            </div>
+            <div class="cycle-phases">${phases.join('')}</div>
+          </div>`;
+        }).join('');
+      }catch(e){document.getElementById('thinking-timeline').innerHTML='<span class="err">Failed to load: '+esc(e.toString())+'</span>';}
     }
 
     /* --- Init --- */
