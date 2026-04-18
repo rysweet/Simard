@@ -17,26 +17,17 @@ fn load_meeting_system_prompt() -> String {
 
 /// Launch the native cognitive memory backend for meeting mode.
 ///
-/// Attempts read-write first (needed for storing meeting outcomes).
-/// Falls back to read-only if the DB is locked by the OODA daemon,
-/// so meetings can still access existing memory for context enrichment.
+/// Opens the DB in **read-only** mode to avoid conflicting with the OODA
+/// daemon, which is the sole writer.  The meeting REPL only reads memory
+/// (search_facts for live context, get_statistics for the greeting banner).
+/// Meeting outcomes are persisted to disk (markdown export, transcript).
 fn launch_real_meeting_bridge() -> Result<Box<dyn CognitiveMemoryOps>, Box<dyn std::error::Error>> {
     let state_root = BuildLock::default_state_root();
     let _ = std::fs::create_dir_all(&state_root);
-    match NativeCognitiveMemory::open(&state_root) {
-        Ok(mem) => Ok(Box::new(mem)),
-        Err(rw_err) => {
-            eprintln!(
-                "[simard] cognitive memory read-write open failed (likely locked by OODA daemon): {rw_err}"
-            );
-            eprintln!(
-                "[simard] falling back to read-only mode — meeting outcomes will be saved to disk only"
-            );
-            let mem = NativeCognitiveMemory::open_read_only(&state_root)
-                .map_err(|e| format!("cognitive memory failed to open even read-only: {e}"))?;
-            Ok(Box::new(mem))
-        }
-    }
+    let mem = NativeCognitiveMemory::open_read_only(&state_root).map_err(|e| {
+        format!("cognitive memory read-only open failed (is the OODA daemon running?): {e}")
+    })?;
+    Ok(Box::new(mem))
 }
 
 /// Open an agent session for the meeting REPL using the standard base type
@@ -59,7 +50,7 @@ fn open_meeting_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeSes
 /// Entry point for the `simard meeting` CLI command.
 pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::Error>> {
     let bridge = launch_real_meeting_bridge()?;
-    eprintln!("  Memory: cognitive bridge active (LadybugDB backend)");
+    eprintln!("  Memory: cognitive bridge active (LadybugDB read-only)");
 
     print_greeting_banner(Some(&*bridge));
 
