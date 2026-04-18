@@ -158,7 +158,7 @@ pub(crate) fn select_shell_command(objective: &str, note: &str) -> Option<Select
 }
 
 pub(crate) fn select_git_commit(objective: &str, note: &str) -> SelectedEngineerAction {
-    let message = {
+    let raw_message = {
         let lower = objective.to_lowercase();
         if let Some(idx) = lower.find("commit ") {
             objective[idx + 7..].trim().to_string()
@@ -166,6 +166,7 @@ pub(crate) fn select_git_commit(objective: &str, note: &str) -> SelectedEngineer
             objective.to_string()
         }
     };
+    let message = sanitize_commit_message(&raw_message);
     SelectedEngineerAction {
         label: "git-commit".to_string(),
         rationale: format!(
@@ -221,11 +222,41 @@ pub(crate) fn select_open_issue(
     })
 }
 
+/// Strip characters that are dangerous in shell arguments or would produce
+/// malformed CLI commands when embedded in `--title` / `-m` values.
+fn strip_shell_unsafe(input: &str) -> String {
+    input
+        .chars()
+        .filter(|c| {
+            !matches!(
+                c,
+                '`' | '$'
+                    | '\\'
+                    | '"'
+                    | '\''
+                    | '|'
+                    | ';'
+                    | '&'
+                    | '<'
+                    | '>'
+                    | '('
+                    | ')'
+                    | '{'
+                    | '}'
+                    | '!'
+                    | '\0'
+            )
+        })
+        .collect()
+}
+
 /// Sanitize an objective string for use as a GitHub issue title.
 ///
-/// Strips newlines, collapses whitespace, and truncates to a reasonable length.
+/// Strips newlines, removes shell-unsafe characters, collapses whitespace,
+/// and truncates to a reasonable length.
 pub(crate) fn sanitize_issue_title(raw: &str) -> String {
-    let single_line: String = raw
+    let cleaned = strip_shell_unsafe(raw);
+    let single_line: String = cleaned
         .chars()
         .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
         .collect::<String>()
@@ -240,6 +271,31 @@ pub(crate) fn sanitize_issue_title(raw: &str) -> String {
         // Cut at the last word boundary to avoid mid-word truncation.
         match truncated.rfind(' ') {
             Some(pos) if pos > MAX_ISSUE_TITLE_LEN / 2 => format!("{}…", &truncated[..pos]),
+            _ => format!("{truncated}…"),
+        }
+    }
+}
+
+/// Sanitize a commit message: strip newlines, remove shell-unsafe characters,
+/// collapse whitespace, and truncate.
+const MAX_COMMIT_MESSAGE_LEN: usize = 256;
+
+pub(crate) fn sanitize_commit_message(raw: &str) -> String {
+    let cleaned = strip_shell_unsafe(raw);
+    let single_line: String = cleaned
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if single_line.len() <= MAX_COMMIT_MESSAGE_LEN {
+        single_line
+    } else {
+        let truncated = &single_line[..MAX_COMMIT_MESSAGE_LEN];
+        match truncated.rfind(' ') {
+            Some(pos) if pos > MAX_COMMIT_MESSAGE_LEN / 2 => format!("{}…", &truncated[..pos]),
             _ => format!("{truncated}…"),
         }
     }
@@ -519,6 +575,75 @@ mod tests {
         assert_eq!(title, "line one line two line three");
         assert!(!title.contains('\n'));
         assert!(!title.contains('\r'));
+    }
+
+    #[test]
+    fn sanitize_issue_title_strips_shell_unsafe_chars() {
+        let raw = "Create `feature` with $(whoami) and \"quotes\"";
+        let title = sanitize_issue_title(raw);
+        assert!(!title.contains('`'));
+        assert!(!title.contains('$'));
+        assert!(!title.contains('"'));
+        assert!(!title.contains('('));
+        assert!(!title.contains(')'));
+        assert_eq!(title, "Create feature with whoami and quotes");
+    }
+
+    #[test]
+    fn sanitize_issue_title_handles_non_json_llm_output() {
+        // Simulates raw non-JSON LLM output with markdown and code blocks
+        let raw = "```json\n{\"error\": \"parse failed\"}\n```\nSome `code` here; rm -rf /";
+        let title = sanitize_issue_title(raw);
+        assert!(!title.contains('\n'));
+        assert!(!title.contains('`'));
+        assert!(!title.contains(';'));
+        assert!(!title.contains('"'));
+    }
+
+    #[test]
+    fn sanitize_issue_title_handles_pipe_and_redirect() {
+        let raw = "Fix bug | echo pwned > /etc/passwd";
+        let title = sanitize_issue_title(raw);
+        assert!(!title.contains('|'));
+        assert!(!title.contains('>'));
+        assert_eq!(title, "Fix bug echo pwned /etc/passwd");
+    }
+
+    #[test]
+    fn sanitize_commit_message_strips_newlines_and_shell_chars() {
+        let raw = "fix: update `config`\nwith $(cmd) injection";
+        let msg = sanitize_commit_message(raw);
+        assert!(!msg.contains('\n'));
+        assert!(!msg.contains('`'));
+        assert!(!msg.contains('$'));
+        assert!(!msg.contains('('));
+        assert_eq!(msg, "fix: update config with cmd injection");
+    }
+
+    #[test]
+    fn sanitize_commit_message_truncates_long_input() {
+        let long = "word ".repeat(200);
+        let msg = sanitize_commit_message(&long);
+        assert!(msg.len() <= MAX_COMMIT_MESSAGE_LEN + "…".len());
+    }
+
+    #[test]
+    fn select_git_commit_sanitizes_message() {
+        let action = select_git_commit("commit Fix `bug`\nwith $(exploit)", "");
+        let msg = &action.argv[3];
+        assert!(!msg.contains('\n'));
+        assert!(!msg.contains('`'));
+        assert!(!msg.contains('$'));
+    }
+
+    #[test]
+    fn select_open_issue_sanitizes_shell_chars_in_title() {
+        let action = select_open_issue("Report a `bug` with $(cmd)", "").unwrap();
+        let title_idx = action.argv.iter().position(|a| a == "--title").unwrap() + 1;
+        let title = &action.argv[title_idx];
+        assert!(!title.contains('`'));
+        assert!(!title.contains('$'));
+        assert!(!title.contains('('));
     }
 
     #[test]
