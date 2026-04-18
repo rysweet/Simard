@@ -374,6 +374,39 @@ pub(crate) fn select_cargo_action(objective: &str, note: &str) -> SelectedEngine
     }
 }
 
+/// Check whether a keyword-analyzed action is achievable given the current
+/// objective and context. Returns `true` when the action is safe to proceed
+/// with, `false` when it should be demoted to a safe default.
+pub(crate) fn is_keyword_action_achievable(action: &AnalyzedAction, objective: &str) -> bool {
+    match action {
+        // These are always safe — they don't mutate the repo.
+        AnalyzedAction::ReadOnlyScan | AnalyzedAction::CargoTest => true,
+        // OpenIssue: only valid when the objective explicitly asks to *create* / *open* an issue,
+        // not when "issue" appears as a reference (e.g. "fix issue #891").
+        AnalyzedAction::OpenIssue => {
+            let lower = objective.to_lowercase();
+            (lower.contains("open") || lower.contains("file") || lower.contains("report"))
+                && (lower.contains("issue") || lower.contains("bug"))
+        }
+        // GitCommit: only valid when the objective is specifically about committing.
+        AnalyzedAction::GitCommit => {
+            let lower = objective.to_lowercase();
+            lower.contains("commit") || lower.contains("save changes")
+        }
+        // CreateFile / AppendToFile: need a discernible file path in the objective.
+        AnalyzedAction::CreateFile | AnalyzedAction::AppendToFile => {
+            extract_file_path_from_objective(objective).is_some()
+        }
+        // StructuredTextReplace: needs edit-like directives.
+        AnalyzedAction::StructuredTextReplace => {
+            let lower = objective.to_lowercase();
+            lower.contains("replace") || lower.contains("edit-file") || lower.contains("update")
+        }
+        // RunShellCommand: needs an extractable command.
+        AnalyzedAction::RunShellCommand => extract_command_from_objective(objective).is_some(),
+    }
+}
+
 pub(crate) fn select_engineer_action(
     inspection: &RepoInspection,
     objective: &str,
@@ -386,10 +419,23 @@ pub(crate) fn select_engineer_action(
 
     // LLM-based planning. If unavailable, use keyword analysis as the
     // base strategy — keyword analysis is the foundational
-    // implementation, LLM planning is an enhancement).
+    // implementation, LLM planning is an enhancement.
     let mut plan_parse_failed = false;
     let analyzed = match crate::engineer_plan::plan_objective(objective, inspection) {
-        Ok(plan) if !plan.steps().is_empty() => plan.steps()[0].action.clone(),
+        Ok(plan) if !plan.steps().is_empty() => {
+            let action = &plan.steps()[0].action;
+            // Validate that the LLM-chosen action is a known variant we can handle.
+            if is_keyword_action_achievable(action, objective) {
+                action.clone()
+            } else {
+                tracing::warn!(
+                    "LLM plan selected action {:?} which is not achievable for this objective; \
+                     using keyword analysis instead",
+                    action
+                );
+                super::types::analyze_objective(objective)
+            }
+        }
         Ok(_) => {
             tracing::debug!("LLM plan returned empty steps, using keyword analysis");
             super::types::analyze_objective(objective)
@@ -401,17 +447,21 @@ pub(crate) fn select_engineer_action(
         }
     };
 
-    // When LLM plan parsing failed and keyword analysis matched "issue"
-    // in the objective text (e.g. "fix issue #835"), do NOT create a
-    // GitHub issue — the user did not intend to open one.  Demote to a
-    // read-only scan so the loop stays safe.
-    if plan_parse_failed && matches!(analyzed, AnalyzedAction::OpenIssue) {
+    // When plan parsing failed, validate that the keyword-analyzed action is
+    // actually achievable. Keyword matching can trigger on incidental words
+    // (e.g. "issue" in "fix issue #835" → OpenIssue).
+    let analyzed = if plan_parse_failed && !is_keyword_action_achievable(&analyzed, objective) {
         tracing::warn!(
-            "suppressed OpenIssue action after plan parse failure — \
-             keyword matched 'issue' in objective but intent is ambiguous"
+            "suppressed {:?} action after plan parse failure — \
+             keyword matched but action is not achievable for this objective; \
+             defaulting to safe action",
+            analyzed
         );
-        return Ok(select_cargo_action(objective, &note));
-    }
+        // Use ReadOnlyScan as the safe default action.
+        AnalyzedAction::ReadOnlyScan
+    } else {
+        analyzed
+    };
 
     match analyzed {
         AnalyzedAction::CreateFile => {
