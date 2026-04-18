@@ -25,9 +25,11 @@ pub fn build_router() -> Router {
         .route("/api/goals", get(goals).post(add_goal))
         .route("/api/goals/seed", post(seed_goals))
         .route("/api/goals/promote/{id}", post(promote_backlog_item))
+        .route("/api/goals/demote/{id}", post(demote_goal))
         .route("/api/goals/{id}", delete(remove_goal))
         .route("/api/goals/{id}/status", put(update_goal_status))
         .route("/api/distributed", get(distributed))
+        .route("/api/vm/vacate", post(vacate_vm))
         .route(
             "/api/hosts",
             get(get_hosts).post(add_host).delete(remove_host),
@@ -313,6 +315,16 @@ async fn goals() -> Json<Value> {
         for tag in &["goal", "action", "decision"] {
             if let Ok(facts) = mem.search_facts(tag, 20, 0.0) {
                 for fact in facts {
+                    // Skip goal-board snapshots — they contain the entire
+                    // serialized GoalBoard, not individual backlog items.
+                    if fact.concept.contains("snapshot") || fact.concept.contains("goal-board") {
+                        continue;
+                    }
+                    // Skip facts whose content looks like serialized JSON objects
+                    let trimmed = fact.content.trim();
+                    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                        continue;
+                    }
                     let already_listed = active
                         .iter()
                         .chain(backlog.iter())
@@ -571,6 +583,34 @@ async fn promote_backlog_item(Path(id): Path<String>) -> Json<Value> {
         assigned_to: None,
     current_activity: None,
     wip_refs: vec![],
+    });
+
+    match std::fs::write(
+        &goal_path,
+        serde_json::to_string_pretty(&board).unwrap_or_default(),
+    ) {
+        Ok(_) => Json(json!({"status": "ok"})),
+        Err(e) => Json(json!({"error": format!("{e}")})),
+    }
+}
+
+async fn demote_goal(Path(id): Path<String>) -> Json<Value> {
+    let state_root = resolve_state_root();
+    let goal_path = state_root.join("goal_records.json");
+    let content = std::fs::read_to_string(&goal_path).unwrap_or_default();
+    let mut board = serde_json::from_str::<GoalBoard>(&content).unwrap_or_default();
+
+    let pos = board.active.iter().position(|g| g.id == id);
+    let goal = match pos {
+        Some(i) => board.active.remove(i),
+        None => return Json(json!({"error": "active goal not found"})),
+    };
+
+    board.backlog.push(BacklogItem {
+        id: goal.id,
+        description: goal.description,
+        source: "demoted".to_string(),
+        score: 0.0,
     });
 
     match std::fs::write(
@@ -1570,8 +1610,97 @@ async fn distributed() -> Json<Value> {
         },
         "remote_vms": [vm_info],
         "topology": "distributed",
+        "hive_mind": {
+            "protocol": "DHT+bloom gossip (peer-to-peer)",
+            "status": "standalone",
+            "peers": 0,
+            "facts_shared": 0,
+            "note": "No external message bus required — hive-mind uses direct peer gossip for memory replication",
+        },
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
+}
+
+/// Vacate a remote VM: stop Simard processes and export memory snapshot.
+///
+/// Steps:
+/// 1. Connect via azlin and stop simard-ooda service
+/// 2. Kill any remaining simard/cargo processes
+/// 3. Export cognitive memory snapshot (if available)
+/// 4. Remove from configured hosts
+async fn vacate_vm(Json(body): Json<Value>) -> Json<Value> {
+    let vm_name = body
+        .get("vm_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if vm_name.is_empty() {
+        return Json(json!({"error": "vm_name is required"}));
+    }
+
+    // Run vacate script via azlin connect
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        tokio::task::spawn_blocking({
+            let vm = vm_name.to_string();
+            move || {
+                // Step 1: Stop simard-ooda service and kill processes
+                let stop_script = r#"
+                    systemctl --user stop simard-ooda 2>/dev/null || true
+                    pkill -f 'simard ooda' 2>/dev/null || true
+                    sleep 2
+                    REMAINING=$(pgrep -c -f simard 2>/dev/null || echo 0)
+                    echo "REMAINING_PROCS=$REMAINING"
+                    echo "VACATE_STATUS=ok"
+                "#;
+
+                let output = std::process::Command::new("systemd-run")
+                    .args(["--user", "--pipe", "--quiet", "azlin", "connect", &vm, "--no-tmux", "--", "bash", "-c", stop_script])
+                    .output();
+
+                match output {
+                    Ok(o) => {
+                        let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+                        let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+                        let combined = format!("{}\n{}", stdout, stderr);
+                        if combined.contains("VACATE_STATUS=ok") {
+                            let remaining = combined
+                                .lines()
+                                .find_map(|l| l.strip_prefix("REMAINING_PROCS="))
+                                .and_then(|v| v.trim().parse::<u32>().ok())
+                                .unwrap_or(0);
+                            Ok((remaining, combined))
+                        } else {
+                            Err(format!(
+                                "vacate script did not report success. stdout: {}",
+                                &stdout[..stdout.len().min(500)]
+                            ))
+                        }
+                    }
+                    Err(e) => Err(format!("Failed to run azlin connect: {e}")),
+                }
+            }
+        }),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(Ok((remaining, _output)))) => {
+            // Remove from configured hosts
+            let mut hosts = load_hosts();
+            hosts.retain(|h| h.get("name").and_then(|v| v.as_str()) != Some(vm_name));
+            let _ = save_hosts(&hosts);
+
+            let msg = if remaining == 0 {
+                format!("All processes stopped on {vm_name}.")
+            } else {
+                format!("{remaining} process(es) still running on {vm_name} — may need manual cleanup.")
+            };
+            Json(json!({"status": "ok", "message": msg, "remaining_processes": remaining}))
+        }
+        Ok(Ok(Err(e))) => Json(json!({"error": e})),
+        Ok(Err(e)) => Json(json!({"error": format!("task join error: {e}")})),
+        Err(_) => Json(json!({"error": "Vacate timed out after 60s — the VM may be unreachable"})),
+    }
 }
 
 /// Strip ANSI escape sequences (CSI, OSC, and single-char escapes) so that
@@ -2114,11 +2243,28 @@ async fn logs() -> Json<Value> {
         }
     }
 
+    // Collect cycle reports for the logs tab
+    let mut cycle_reports: Vec<Value> = Vec::new();
+    let cycle_dir = state_root.join("cycle_reports");
+    if let Ok(entries) = std::fs::read_dir(&cycle_dir) {
+        let mut files: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+        files.sort_by_key(|e| e.path());
+        for entry in files.into_iter() {
+            let path = entry.path();
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(report) = serde_json::from_str::<Value>(&content) {
+                    cycle_reports.push(report);
+                }
+            }
+        }
+    }
+
     Json(json!({
         "daemon_log_lines": combined_log,
         "ooda_transcripts": transcripts,
         "terminal_transcripts": terminal_transcripts,
         "cost_log_lines": cost_log,
+        "cycle_reports": cycle_reports,
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
 }
@@ -2558,7 +2704,9 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     #issues-list li{padding:.3rem 0;border-bottom:1px solid var(--border)}
     #issues-list li:last-child{border-bottom:none}
     .issue-num{color:var(--accent);font-weight:600;margin-right:.5rem}
-    .loading{color:#8b949e;font-style:italic}
+    .loading{color:#8b949e;font-style:italic;display:inline-flex;align-items:center;gap:.5rem}
+    .loading::before{content:'';width:1rem;height:1rem;border:2px solid #30363d;border-top-color:#58a6ff;border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0}
+    @keyframes spin{to{transform:rotate(360deg)}}
     .log-box{background:#010409;border:1px solid var(--border);border-radius:6px;padding:.75rem;font-family:'SF Mono','Fira Code',monospace;font-size:.8rem;max-height:500px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;line-height:1.4;color:#8b949e}
     .transcript-item{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:.75rem;margin-bottom:.5rem}
     .transcript-item h3{font-size:.85rem;color:var(--accent);margin-bottom:.4rem}
@@ -2613,6 +2761,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     <h1>🌲 Simard Dashboard</h1>
     <div style="display:flex;align-items:center;gap:1rem">
       <span id="header-version" style="font-size:.75rem;color:#8b949e"></span>
+      <a href="https://github.com/rysweet/Simard" target="_blank" style="color:#8b949e;text-decoration:none;font-size:.85rem;padding:.2rem .4rem" title="Source on GitHub">⟨/⟩ Source</a>
       <a href="https://github.com/rysweet/Simard/releases/latest" target="_blank" style="color:#3fb950;text-decoration:none;font-size:.85rem;border:1px solid #3fb950;padding:.2rem .6rem;border-radius:4px">📦 Releases</a>
       <span id="clock" style="color:#8b949e;font-size:.85rem"></span>
     </div>
@@ -2737,13 +2886,13 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
   <div class="tab-content" id="tab-memory">
     <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem">
-      <button id="mem-view-graph" class="btn" style="opacity:1" onclick="setMemView('graph')">Graph View</button>
-      <button id="mem-view-search" class="btn" style="opacity:.5" onclick="setMemView('search')">Search View</button>
+      <h2 style="margin:0">Memory</h2>
       <span id="mem-graph-stats" style="color:#8b949e;font-size:.8rem;margin-left:auto"></span>
+      <button class="btn" onclick="fetchMemoryGraph()" style="font-size:.75rem">Refresh Graph</button>
     </div>
 
     <div id="mem-graph-panel">
-      <div class="card" style="margin-bottom:1rem;padding:.75rem">
+      <div class="card" style="margin-bottom:.5rem;padding:.5rem .75rem">
         <div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:center;font-size:.8rem">
           <label style="color:#f0883e"><input type="checkbox" class="mem-filter" data-type="WorkingMemory" checked> Working</label>
           <label style="color:#58a6ff"><input type="checkbox" class="mem-filter" data-type="SemanticFact" checked> Semantic</label>
@@ -2751,12 +2900,11 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           <label style="color:#a371f7"><input type="checkbox" class="mem-filter" data-type="ProceduralMemory" checked> Procedural</label>
           <label style="color:#d29922"><input type="checkbox" class="mem-filter" data-type="ProspectiveMemory" checked> Prospective</label>
           <label style="color:#8b949e"><input type="checkbox" class="mem-filter" data-type="SensoryBuffer" checked> Sensory</label>
-          <button class="btn" onclick="fetchMemoryGraph()" style="margin-left:auto">Refresh</button>
         </div>
       </div>
       <div style="display:flex;gap:1rem">
-        <div class="card" style="flex:1;padding:0;position:relative;min-height:500px">
-          <canvas id="mem-graph-canvas" style="width:100%;height:500px;display:block;cursor:grab"></canvas>
+        <div class="card" style="flex:1;padding:0;position:relative;min-height:60vh">
+          <canvas id="mem-graph-canvas" style="width:100%;height:60vh;display:block;cursor:grab"></canvas>
           <div id="mem-graph-tooltip" style="display:none;position:absolute;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:.5rem .75rem;font-size:.8rem;max-width:320px;pointer-events:none;z-index:10;word-break:break-word"></div>
         </div>
         <div id="mem-graph-detail" class="card" style="width:280px;display:none">
@@ -2766,19 +2914,17 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       </div>
     </div>
 
-    <div id="mem-search-panel" style="display:none">
-      <div class="grid">
-        <div class="card"><h2>Memory Overview</h2><div id="mem-overview"><span class="loading">Loading…</span></div></div>
-        <div class="card"><h2>Memory Files</h2><div id="mem-files"><span class="loading">Loading…</span></div></div>
-      </div>
-      <div class="card" style="margin-top:1rem">
+    <div style="display:flex;gap:1rem;margin-top:1rem">
+      <div class="card" style="flex:1">
         <h2>Memory Search</h2>
-        <div style="display:flex;gap:.5rem;align-items:center;margin-bottom:1rem">
+        <div style="display:flex;gap:.5rem;align-items:center;margin-bottom:.75rem">
           <input id="mem-search-input" placeholder="Search memories…" style="flex:1;padding:6px;background:#1a1a2e;border:1px solid #333;color:#e0e0e0;border-radius:4px">
           <button class="btn" onclick="searchMemory()">Search</button>
         </div>
         <div id="mem-search-results"></div>
       </div>
+      <div class="card" style="flex:1"><h2>Memory Overview</h2><div id="mem-overview"><span class="loading">Loading…</span></div></div>
+      <div class="card" style="flex:1"><h2>Memory Files</h2><div id="mem-files"><span class="loading">Loading…</span></div></div>
     </div>
   </div>
 
@@ -2919,7 +3065,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         clearTabTimers();
         if(tab.dataset.tab==='logs') {fetchLogs();tabRefreshTimers.logs=setInterval(fetchLogs,15000);}
         if(tab.dataset.tab==='processes') {fetchProcessTree();tabRefreshTimers.proc=setInterval(fetchProcessTree,15000);}
-        if(tab.dataset.tab==='memory') {fetchMemoryGraph();}
+        if(tab.dataset.tab==='memory') {fetchMemoryGraph();fetchMemory();}
 
         if(tab.dataset.tab==='goals') fetchGoals();
         if(tab.dataset.tab==='costs') fetchCosts();
@@ -3069,20 +3215,29 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
     async function fetchProcessTree() {
       try {
-        const d=await apiFetch('/api/process-tree');
+        const d=await apiFetch('/api/processes');
         const container = document.getElementById('proc-tree-container');
         const summary = document.getElementById('proc-tree-summary');
         if (!container) return;
-        if (d.root) {
-          if (summary) summary.textContent = `${d.total_processes || '?'} process(es) · ${d.total_memory_mb || '?'} MB total — updated ${timeAgo(d.timestamp)}`;
-          container.innerHTML = '<div class="proc-tree">' + renderTreeNode(d.root, true, 0) + '</div>';
+        const procs = d.processes || [];
+        if (procs.length) {
+          if (summary) summary.textContent = `${procs.length} process(es) — updated ${timeAgo(d.timestamp)}`;
+          container.innerHTML = '<div class="proc-tree">' + procs.map(p => {
+            const cmd = esc(p.full_args || p.command || '');
+            const cmdDisplay = cmd.length > 100 ? cmd.substring(0, 97) + '…' : cmd;
+            return `<div class="proc-node"><div class="proc-row">
+              <span class="proc-pid">${esc(p.pid)}</span>
+              <span class="proc-state running">up ${esc(p.uptime||'?')}</span>
+              <span class="proc-cmd" title="${cmd}">${cmdDisplay}</span>
+            </div></div>`;
+          }).join('') + '</div>';
         } else {
           if (summary) summary.textContent = d.timestamp ? `Updated ${timeAgo(d.timestamp)}` : '';
-          container.innerHTML = '<span style="color:#8b949e">No process tree available. Is the daemon running?</span>';
+          container.innerHTML = '<span style="color:#8b949e">No Simard-related processes found. Is the daemon running?</span>';
         }
       } catch(e) {
         const c = document.getElementById('proc-tree-container');
-        if (c) c.innerHTML = '<span class="err">Failed to load process tree</span>';
+        if (c) c.innerHTML = '<span class="err">Failed to load process tree: ' + esc(e.toString()) + '</span>';
       }
     }
 
@@ -3130,12 +3285,23 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         document.getElementById('cluster-topology').innerHTML=`
           <div class="stat"><span class="label">Topology</span><span class="value">${esc(d.topology)}</span></div>
           <div class="stat"><span class="label">Local Host</span><span class="value">${esc(d.local?.hostname||'?')}</span></div>
+          <div class="stat"><span class="label">Memory Sync</span><span class="value">${esc(d.hive_mind?.protocol||'DHT+bloom gossip')}</span></div>
+          <div class="stat"><span class="label">Hive Status</span><span class="value ${d.hive_mind?.status==='active'?'ok':'warn'}">${esc(d.hive_mind?.status||'standalone')}</span></div>
+          ${d.hive_mind?.peers!=null?`<div class="stat"><span class="label">Peers</span><span class="value">${d.hive_mind.peers}</span></div>`:''}
+          ${d.hive_mind?.facts_shared!=null?`<div class="stat"><span class="label">Facts Shared</span><span class="value">${d.hive_mind.facts_shared}</span></div>`:''}
           <div class="stat"><span class="label">Updated</span><span class="value">${timeAgo(d.timestamp)}</span></div>`;
         if(d.remote_vms?.length){
           document.getElementById('remote-vms').innerHTML=d.remote_vms.map(vm=>{
             const sc=vm.status==='reachable'?'ok':(vm.status==='unreachable'?'err':'warn');
+            const hasWorkloads=(vm.simard_processes||0)>0||(vm.cargo_processes||0)>0;
             return`<div style="border:1px solid var(--border);border-radius:6px;padding:1rem;margin-bottom:.75rem">
-              <h3 style="margin:0 0 .5rem 0;color:var(--accent)">${esc(vm.vm_name)} <span class="${sc}" style="font-size:.85rem">${esc(vm.status)}</span></h3>
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <h3 style="margin:0 0 .5rem 0;color:var(--accent)">${esc(vm.vm_name)} <span class="${sc}" style="font-size:.85rem">${esc(vm.status)}</span></h3>
+                <div style="display:flex;gap:.5rem">
+                  ${hasWorkloads?`<button class="btn" style="font-size:.75rem;padding:2px 8px" onclick="vacateVM('${esc(vm.vm_name)}')">🚚 Vacate</button>`:''}
+                  <button class="btn" style="font-size:.75rem;padding:2px 8px;color:#f85149" onclick="removeVM('${esc(vm.vm_name)}')">✕ Remove</button>
+                </div>
+              </div>
               ${vm.hostname?`<div class="stat"><span class="label">Hostname</span><span class="value">${esc(vm.hostname)}</span></div>`:''}
               ${vm.uptime?`<div class="stat"><span class="label">Uptime</span><span class="value">${esc(vm.uptime)}</span></div>`:''}
               ${vm.load_avg?`<div class="stat"><span class="label">Load</span><span class="value">${esc(vm.load_avg)}</span></div>`:''}
@@ -3149,6 +3315,30 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
             </div>`;}).join('');
         }else{document.getElementById('remote-vms').innerHTML='<span style="color:#8b949e">No remote VMs configured. Add hosts below.</span>';}
       }catch(e){document.getElementById('cluster-topology').innerHTML='<span class="err">Failed to query distributed status — check network and azlin</span>';}
+    }
+    async function vacateVM(vmName){
+      if(!confirm(`Vacate "${vmName}"? This will:\n1. Stop all Simard processes on the VM\n2. Export cognitive memory snapshot\n3. Transfer workloads to this host\n\nProceed?`))return;
+      const el=document.getElementById('remote-vms');
+      const origHtml=el.innerHTML;
+      el.innerHTML=`<span class="loading">Vacating ${esc(vmName)}… stopping processes and exporting memory</span>`;
+      try{
+        const d=await apiFetch('/api/vm/vacate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vm_name:vmName})});
+        if(d.status==='ok'){
+          el.innerHTML=`<div class="ok" style="padding:1rem">✓ ${esc(vmName)} vacated. ${d.message||''}</div>`;
+          setTimeout(fetchDistributed,3000);
+        }else{
+          el.innerHTML=origHtml;
+          alert('Vacate failed: '+(d.error||'unknown error'));
+        }
+      }catch(e){el.innerHTML=origHtml;alert('Vacate error: '+e);}
+    }
+    async function removeVM(vmName){
+      if(!confirm(`Remove "${vmName}" from the cluster? This only removes it from the dashboard — it does not deallocate the Azure VM.`))return;
+      try{
+        await apiFetch('/api/hosts',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:vmName})});
+        fetchDistributed();
+        fetchHosts();
+      }catch(e){alert('Remove error: '+e);}
     }
     async function fetchHosts(){
       try{
@@ -3246,8 +3436,9 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
               <td>${esc(g.status)}</td>
               <td>${wipHtml}</td>
               <td>
-                <button class="btn" style="font-size:.7rem;padding:2px 6px" onclick="removeGoal('${esc(g.id)}')">✕</button>
+                <button class="btn" style="font-size:.7rem;padding:2px 6px" onclick="demoteGoal('${esc(g.id)}')">▼ Backlog</button>
                 <button class="btn" style="font-size:.7rem;padding:2px 6px;margin-left:4px" onclick="updateGoalStatus('${esc(g.id)}')">Status</button>
+                <button class="btn" style="font-size:.7rem;padding:2px 6px;margin-left:4px;color:#f85149" onclick="removeGoal('${esc(g.id)}')">✕</button>
               </td>
             </tr>`;}).join('')}
           </table>
@@ -3314,6 +3505,15 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       }catch(e){alert('Error: '+e);}
     }
 
+    async function demoteGoal(id){
+      if(!confirm('Move "'+id+'" to backlog?'))return;
+      try{
+        const d=await apiFetch('/api/goals/demote/'+encodeURIComponent(id),{method:'POST'});
+        if(d.status==='ok')fetchGoals();
+        else alert(d.error||'Failed');
+      }catch(e){alert('Error: '+e);}
+    }
+
     async function updateGoalStatus(id){
       const status=prompt('New status (not-started, in-progress, blocked, completed):');
       if(!status)return;
@@ -3375,15 +3575,6 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     let mgDrag=null,mgPinned=null;
     let mgOffX=0,mgOffY=0,mgScale=1,mgPanX=0,mgPanY=0;
     const mgColors={WorkingMemory:'#f0883e',SemanticFact:'#58a6ff',EpisodicMemory:'#3fb950',ProceduralMemory:'#a371f7',ProspectiveMemory:'#d29922',SensoryBuffer:'#8b949e'};
-
-    function setMemView(v){
-      document.getElementById('mem-graph-panel').style.display=v==='graph'?'block':'none';
-      document.getElementById('mem-search-panel').style.display=v==='search'?'block':'none';
-      document.getElementById('mem-view-graph').style.opacity=v==='graph'?'1':'.5';
-      document.getElementById('mem-view-search').style.opacity=v==='search'?'1':'.5';
-      if(v==='graph') fetchMemoryGraph();
-      if(v==='search') fetchMemory();
-    }
 
     function mgApplyFilters(){
       const checks={};
@@ -3473,7 +3664,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         const a=nodeMap[e.source],b=nodeMap[e.target];
         if(!a||!b)return;
         ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);
-        ctx.strokeStyle='#30363d';ctx.lineWidth=1;ctx.stroke();
+        ctx.strokeStyle='rgba(88,166,255,0.35)';ctx.lineWidth=1.5;ctx.stroke();
       });
       const r=8;
       mgFiltered.forEach(n=>{
