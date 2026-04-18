@@ -15,7 +15,7 @@ use crate::session::{SessionId, SessionPhase, SessionRecord};
 
 #[test]
 fn benchmark_scenarios_returns_nine_scenarios() {
-    assert_eq!(benchmark_scenarios().len(), 35);
+    assert_eq!(benchmark_scenarios().len(), 47);
 }
 
 #[test]
@@ -691,6 +691,10 @@ fn benchmark_scenarios_each_class_has_at_least_two() {
     assert!(count(BenchmarkClass::Refactoring) >= 2);
     assert!(count(BenchmarkClass::DependencyAnalysis) >= 2);
     assert!(count(BenchmarkClass::ErrorHandling) >= 2);
+    assert!(count(BenchmarkClass::ConcurrencyAnalysis) >= 3);
+    assert!(count(BenchmarkClass::MigrationPlanning) >= 3);
+    assert!(count(BenchmarkClass::ObservabilityInstrumentation) >= 3);
+    assert!(count(BenchmarkClass::DataModeling) >= 3);
 }
 
 #[test]

@@ -29,6 +29,19 @@ fn benchmark_class_display_all_variants() {
     );
     assert_eq!(BenchmarkClass::SecurityAudit.to_string(), "security-audit");
     assert_eq!(BenchmarkClass::ApiDesign.to_string(), "api-design");
+    assert_eq!(
+        BenchmarkClass::ConcurrencyAnalysis.to_string(),
+        "concurrency-analysis"
+    );
+    assert_eq!(
+        BenchmarkClass::MigrationPlanning.to_string(),
+        "migration-planning"
+    );
+    assert_eq!(
+        BenchmarkClass::ObservabilityInstrumentation.to_string(),
+        "observability-instrumentation"
+    );
+    assert_eq!(BenchmarkClass::DataModeling.to_string(), "data-modeling");
 }
 
 #[test]

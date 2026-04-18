@@ -4,7 +4,7 @@ use crate::runtime::RuntimeTopology;
 
 use super::types::{BenchmarkCheckResult, BenchmarkClass, BenchmarkScenario};
 
-const BENCHMARK_SCENARIOS: [BenchmarkScenario; 35] = [
+const BENCHMARK_SCENARIOS: [BenchmarkScenario; 47] = [
     BenchmarkScenario {
         id: "repo-exploration-local",
         title: "Repo exploration on local harness",
@@ -396,6 +396,142 @@ const BENCHMARK_SCENARIOS: [BenchmarkScenario; 35] = [
         base_type: "local-harness",
         topology: RuntimeTopology::SingleProcess,
         objective: "Plan the addition of a new variant to an existing enum in the Simard codebase (e.g., a new BenchmarkClass or RuntimeTopology variant). Describe: (1) the enum to modify and the new variant name, (2) every match expression across the codebase that handles this enum (list file and line for each), (3) what the new arm should do in each match, (4) any Display, Serialize, or other trait implementations that need updating. Verify the plan would result in a compiling codebase with no unhandled match arms.",
+        expected_min_runtime_evidence: 3,
+    },
+    // --- Wave 5: ConcurrencyAnalysis scenarios ---
+    BenchmarkScenario {
+        id: "concurrency-shared-state-audit",
+        title: "Audit shared mutable state for race conditions",
+        description: "Identify shared mutable state (Arc<Mutex<_>>, Arc<RwLock<_>>, statics) and assess for race conditions, deadlock potential, and lock ordering. Scored on completeness of finding lock sites and quality of risk classification.",
+        class: BenchmarkClass::ConcurrencyAnalysis,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Scan the Simard codebase for shared mutable concurrency primitives: Arc<Mutex<T>>, Arc<RwLock<T>>, AtomicBool/AtomicUsize, lazy_static or once_cell statics, and channel constructions. For each finding: (1) identify the file and line, (2) describe what data is shared and which threads access it, (3) classify deadlock risk based on lock acquisition order across call sites, (4) note any guard scopes that hold locks across await points or expensive operations. Produce a prioritized list of at least three findings.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "concurrency-async-await-review",
+        title: "Review async/await usage for cancellation safety",
+        description: "Review async functions for cancellation-safety, blocking calls inside async contexts, and improper Send/Sync bounds. Scored on identifying real cancellation hazards and proposing concrete corrections.",
+        class: BenchmarkClass::ConcurrencyAnalysis,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Identify async functions in the Simard codebase. For each: (1) check whether any blocking I/O (std::fs, std::net, blocking channels) is invoked inside the async body, (2) look for select! or join! sites where a future may be dropped mid-await and assess whether partial state is left behind, (3) check that types crossed across .await are Send when used in spawned tasks, (4) recommend spawn_blocking, tokio::fs, or restructured state-machines as appropriate. Produce a structured cancellation-safety report covering at least three async functions.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "concurrency-channel-topology",
+        title: "Map channel topology and backpressure semantics",
+        description: "Map the channel topology of a runtime/transport module: producers, consumers, bounded vs unbounded channels, and how backpressure or drops are handled. Scored on accuracy of the topology map and quality of backpressure analysis.",
+        class: BenchmarkClass::ConcurrencyAnalysis,
+        identity: "simard-gym",
+        base_type: "rusty-clawd",
+        topology: RuntimeTopology::MultiProcess,
+        objective: "Analyze channel usage in the Simard runtime/transport modules. Identify every mpsc/oneshot/broadcast channel construction. For each: (1) record sender/receiver locations, (2) note bounded capacity vs unbounded, (3) describe what happens on send failure (panic, log, drop, retry), (4) describe what happens when the receiver lags or disconnects. Build a structured channel-topology table summarizing producers, consumers, and backpressure strategy. Recommend any places where unbounded channels could grow without bound under load.",
+        expected_min_runtime_evidence: 4,
+    },
+    // --- Wave 5: MigrationPlanning scenarios ---
+    BenchmarkScenario {
+        id: "migration-schema-version-upgrade",
+        title: "Plan a backwards-compatible schema version upgrade",
+        description: "Plan a backwards-compatible upgrade of a serialized data schema, including a forward/backward migration strategy and a rollout sequence. Scored on completeness of compatibility analysis and concreteness of the rollout plan.",
+        class: BenchmarkClass::MigrationPlanning,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Pick a serialized data structure in the Simard codebase (e.g., a report struct, a snapshot, a session record) and plan adding a new optional field while remaining backwards compatible with existing on-disk JSON. Describe: (1) the struct, file, and current serde behavior, (2) the proposed serde defaults or version tag, (3) reader and writer code changes required, (4) a rollout sequence (deploy readers first, then writers), (5) a rollback story if a regression is detected. Produce a structured migration plan.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "migration-dependency-major-bump",
+        title: "Plan a major-version dependency bump",
+        description: "Plan a major-version bump for a key dependency: identify breaking changes, scope the affected call sites, and define an incremental migration path. Scored on accuracy of breaking-change identification and realism of the migration path.",
+        class: BenchmarkClass::MigrationPlanning,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Choose a dependency in the Simard Cargo.toml that has a recent major-version release. Describe a migration plan that covers: (1) the documented breaking changes between current and target versions, (2) every call site in the Simard codebase that touches the changed API surface, (3) the order in which modules should be migrated to keep the build green throughout, (4) compatibility shims or wrapper functions that may be needed mid-migration, (5) rollback criteria. Produce a structured upgrade plan with at least three migration steps.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "migration-module-reorganization",
+        title: "Plan a module reorganization without API breakage",
+        description: "Plan a module reorganization that splits an oversized module into smaller cohesive modules while preserving the public API surface. Scored on whether the boundary cuts are cohesive and whether re-exports preserve external compatibility.",
+        class: BenchmarkClass::MigrationPlanning,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Identify a module in the Simard src/ tree that has grown to handle multiple distinct responsibilities. Plan a split into smaller modules that: (1) describes the new submodule names and their responsibilities, (2) lists which items move where, (3) defines the re-exports needed in the original module path so external callers see no break, (4) describes the order of commits that keeps each intermediate state compiling, (5) notes any tests that must move alongside the items. Produce a step-by-step migration plan.",
+        expected_min_runtime_evidence: 3,
+    },
+    // --- Wave 5: ObservabilityInstrumentation scenarios ---
+    BenchmarkScenario {
+        id: "observability-tracing-coverage",
+        title: "Audit tracing/log coverage on critical paths",
+        description: "Audit tracing or log coverage on critical execution paths, identifying silent failure modes and gaps where an operator would be unable to diagnose issues. Scored on coverage gaps identified and quality of suggested instrumentation points.",
+        class: BenchmarkClass::ObservabilityInstrumentation,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze the Simard codebase for tracing or log coverage on critical paths (runtime startup, session execution, benchmark reporting). For each path: (1) list functions that are silent on entry/exit, (2) note error branches that swallow context without a log, (3) identify long-running operations with no progress signal, (4) propose specific instrumentation (tracing::info!, tracing::span!, structured fields) with concrete log messages and field names. Produce a prioritized instrumentation backlog of at least three items.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "observability-metric-design",
+        title: "Design metrics for a critical subsystem",
+        description: "Design a small set of metrics (counters, gauges, histograms) that would let an operator detect regressions in a critical subsystem. Scored on whether the metric set is minimal, observable, and ties to clear failure modes.",
+        class: BenchmarkClass::ObservabilityInstrumentation,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Choose a critical subsystem in the Simard codebase (gym executor, runtime supervisor, transport, or self_improve cycle). Design a minimal metric set covering: (1) at least one counter for occurrence-rate signals (e.g., scenarios completed, errors raised), (2) at least one gauge for current state (e.g., active sessions, queue depth), (3) at least one histogram for latency or size distributions. For each metric, give name, label dimensions, sampling strategy, and the alert threshold an operator would use. Produce a structured metrics design document.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "observability-error-context-enrichment",
+        title: "Enrich error context for operator diagnostics",
+        description: "Identify error sites where the produced message lacks the context an operator needs to diagnose the issue, and propose enriched error construction. Scored on clarity of the proposed enrichments and how directly they unblock root-cause analysis.",
+        class: BenchmarkClass::ObservabilityInstrumentation,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Scan SimardError construction sites (and other Result::Err returns) in the Simard codebase. For each finding: (1) record the file and line, (2) note what surrounding context (input id, file path, attempt number, related session id) is currently dropped, (3) propose an enriched error variant or context-attaching wrapper that exposes that context, (4) describe how an operator would use the enriched message during incident response. Produce at least three concrete enrichment proposals.",
+        expected_min_runtime_evidence: 3,
+    },
+    // --- Wave 5: DataModeling scenarios ---
+    BenchmarkScenario {
+        id: "data-modeling-newtype-opportunities",
+        title: "Identify newtype opportunities for primitive obsession",
+        description: "Identify primitive obsession in function signatures (raw String, u64, bool parameters where domain types would clarify intent) and propose newtype wrappers. Scored on whether suggested newtypes meaningfully reduce ambiguity at call sites.",
+        class: BenchmarkClass::DataModeling,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Scan public function and struct signatures in the Simard codebase for primitive-obsession patterns: multiple String, u64, or bool parameters where the meaning is positional only. For each finding: (1) record the function and signature, (2) describe the ambiguity at call sites, (3) propose a newtype wrapper with name and underlying representation, (4) sketch the migration impact (which call sites and tests change). Produce a prioritized list of at least three newtype proposals.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "data-modeling-illegal-states-unrepresentable",
+        title: "Make illegal states unrepresentable",
+        description: "Identify structs whose field invariants are enforced only at runtime and propose type-level changes that make illegal combinations unrepresentable. Scored on whether the proposed types prevent the targeted invalid states without overly constraining valid use.",
+        class: BenchmarkClass::DataModeling,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Pick a struct in the Simard codebase whose validity depends on relationships between Option fields, paired bool flags, or mutually exclusive states. Describe: (1) the struct and the invariant currently enforced at runtime, (2) at least one combination of field values that would be invalid but currently typechecks, (3) a refactor using sum types (enums with payloads) or typestate parameters that makes those combinations unrepresentable, (4) the impact on existing constructors and consumers. Produce a structured before/after design.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "data-modeling-serde-stability",
+        title: "Audit serde representations for forward compatibility",
+        description: "Audit serde-derived types for forward-compatibility hazards: field renames, missing #[serde(default)], non-exhaustive enums serialized as plain variants. Scored on whether identified hazards would actually break wire compatibility.",
+        class: BenchmarkClass::DataModeling,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Inspect serde-derived structs and enums in the Simard codebase. For each: (1) list fields that are required at deserialization (no default and not Option) and would break if removed, (2) note enum variants that lack #[serde(other)] or fallback handling, (3) flag any kebab-case/camelCase rename mismatches that would break older consumers, (4) recommend defensive annotations (#[serde(default)], #[serde(rename)], #[non_exhaustive]) to improve forward compatibility. Produce a prioritized stability audit covering at least three types.",
         expected_min_runtime_evidence: 3,
     },
 ];
@@ -967,6 +1103,215 @@ pub(super) fn class_specific_checks(
                 },
             ]
         }
+        BenchmarkClass::ConcurrencyAnalysis => {
+            let primitives_identified = combined.contains("mutex")
+                || combined.contains("rwlock")
+                || combined.contains("atomic")
+                || combined.contains("channel")
+                || combined.contains("arc<");
+            let hazard_classified = combined.contains("deadlock")
+                || combined.contains("race")
+                || combined.contains("contention")
+                || combined.contains("backpressure")
+                || combined.contains("cancellation");
+            let mitigation_proposed = combined.contains("spawn_blocking")
+                || combined.contains("bounded")
+                || combined.contains("lock order")
+                || combined.contains("send")
+                || combined.contains("sync")
+                || combined.contains("await");
+            vec![
+                BenchmarkCheckResult {
+                    id: "concurrency-primitives-identified".to_string(),
+                    passed: primitives_identified,
+                    detail: format!(
+                        "execution output {} concurrency primitive references",
+                        if primitives_identified {
+                            "contains"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "concurrency-hazard-classified".to_string(),
+                    passed: hazard_classified,
+                    detail: format!(
+                        "execution output {} hazard classification",
+                        if hazard_classified {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "concurrency-mitigation-proposed".to_string(),
+                    passed: mitigation_proposed,
+                    detail: format!(
+                        "execution output {} mitigation guidance",
+                        if mitigation_proposed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::MigrationPlanning => {
+            let scope_identified = combined.contains("schema")
+                || combined.contains("dependency")
+                || combined.contains("module")
+                || combined.contains("upgrade")
+                || combined.contains("migration");
+            let compatibility_addressed = combined.contains("backward")
+                || combined.contains("backwards")
+                || combined.contains("forward")
+                || combined.contains("compatib")
+                || combined.contains("default");
+            let rollout_described = combined.contains("rollout")
+                || combined.contains("step")
+                || combined.contains("phase")
+                || combined.contains("rollback")
+                || combined.contains("sequence");
+            vec![
+                BenchmarkCheckResult {
+                    id: "migration-scope-identified".to_string(),
+                    passed: scope_identified,
+                    detail: format!(
+                        "execution output {} migration scope",
+                        if scope_identified {
+                            "identifies"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "migration-compatibility-addressed".to_string(),
+                    passed: compatibility_addressed,
+                    detail: format!(
+                        "execution output {} compatibility analysis",
+                        if compatibility_addressed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "migration-rollout-described".to_string(),
+                    passed: rollout_described,
+                    detail: format!(
+                        "execution output {} rollout/rollback plan",
+                        if rollout_described {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::ObservabilityInstrumentation => {
+            let coverage_assessed = combined.contains("tracing")
+                || combined.contains("log")
+                || combined.contains("span")
+                || combined.contains("instrument")
+                || combined.contains("observ");
+            let signal_proposed = combined.contains("metric")
+                || combined.contains("counter")
+                || combined.contains("gauge")
+                || combined.contains("histogram")
+                || combined.contains("event");
+            let actionability_present = combined.contains("alert")
+                || combined.contains("operator")
+                || combined.contains("diagnos")
+                || combined.contains("context")
+                || combined.contains("threshold");
+            vec![
+                BenchmarkCheckResult {
+                    id: "observability-coverage-assessed".to_string(),
+                    passed: coverage_assessed,
+                    detail: format!(
+                        "execution output {} tracing/log coverage analysis",
+                        if coverage_assessed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "observability-signal-proposed".to_string(),
+                    passed: signal_proposed,
+                    detail: format!(
+                        "execution output {} signal/metric proposals",
+                        if signal_proposed { "includes" } else { "lacks" }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "observability-actionability-present".to_string(),
+                    passed: actionability_present,
+                    detail: format!(
+                        "execution output {} operator-actionable guidance",
+                        if actionability_present {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::DataModeling => {
+            let domain_types_discussed = combined.contains("newtype")
+                || combined.contains("struct")
+                || combined.contains("enum")
+                || combined.contains("type")
+                || combined.contains("wrapper");
+            let invariants_named = combined.contains("invariant")
+                || combined.contains("illegal")
+                || combined.contains("valid")
+                || combined.contains("state")
+                || combined.contains("constraint");
+            let refactor_sketched = combined.contains("refactor")
+                || combined.contains("migrat")
+                || combined.contains("before")
+                || combined.contains("after")
+                || combined.contains("propose");
+            vec![
+                BenchmarkCheckResult {
+                    id: "data-modeling-types-discussed".to_string(),
+                    passed: domain_types_discussed,
+                    detail: format!(
+                        "execution output {} domain-type discussion",
+                        if domain_types_discussed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "data-modeling-invariants-named".to_string(),
+                    passed: invariants_named,
+                    detail: format!(
+                        "execution output {} invariant/state discussion",
+                        if invariants_named { "includes" } else { "lacks" }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "data-modeling-refactor-sketched".to_string(),
+                    passed: refactor_sketched,
+                    detail: format!(
+                        "execution output {} refactor sketch",
+                        if refactor_sketched { "includes" } else { "lacks" }
+                    ),
+                },
+            ]
+        }
     }
 }
 
@@ -1048,6 +1393,13 @@ mod tests {
             (BenchmarkClass::PerformanceAnalysis, "performance-analysis"),
             (BenchmarkClass::SecurityAudit, "security-audit"),
             (BenchmarkClass::ApiDesign, "api-design"),
+            (BenchmarkClass::ConcurrencyAnalysis, "concurrency-analysis"),
+            (BenchmarkClass::MigrationPlanning, "migration-planning"),
+            (
+                BenchmarkClass::ObservabilityInstrumentation,
+                "observability-instrumentation",
+            ),
+            (BenchmarkClass::DataModeling, "data-modeling"),
         ];
         for (class, label) in classes {
             assert_eq!(class.to_string(), label);
@@ -1124,7 +1476,7 @@ mod tests {
         }
     }
 
-    // --- BenchmarkClass: all 12 classes covered by at least one scenario ---
+    // --- BenchmarkClass: all 16 classes covered by at least one scenario ---
 
     #[test]
     fn every_benchmark_class_has_at_least_one_scenario() {
@@ -1141,6 +1493,10 @@ mod tests {
             BenchmarkClass::PerformanceAnalysis,
             BenchmarkClass::SecurityAudit,
             BenchmarkClass::ApiDesign,
+            BenchmarkClass::ConcurrencyAnalysis,
+            BenchmarkClass::MigrationPlanning,
+            BenchmarkClass::ObservabilityInstrumentation,
+            BenchmarkClass::DataModeling,
         ];
         let scenarios = benchmark_scenarios();
         for class in all_classes {
