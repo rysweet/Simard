@@ -15,7 +15,7 @@ use crate::session::{SessionId, SessionPhase, SessionRecord};
 
 #[test]
 fn benchmark_scenarios_returns_nine_scenarios() {
-    assert_eq!(benchmark_scenarios().len(), 67);
+    assert_eq!(benchmark_scenarios().len(), 76);
 }
 
 #[test]
@@ -80,6 +80,9 @@ fn benchmark_scenarios_covers_all_classes() {
     assert!(has_class(BenchmarkClass::MigrationPlanning));
     assert!(has_class(BenchmarkClass::ObservabilityInstrumentation));
     assert!(has_class(BenchmarkClass::DataModeling));
+    assert!(has_class(BenchmarkClass::PerformanceOptimization));
+    assert!(has_class(BenchmarkClass::RefactoringLargeModule));
+    assert!(has_class(BenchmarkClass::DataPipelineEtl));
 }
 
 // --- resolve_benchmark_scenario ---
@@ -701,6 +704,9 @@ fn benchmark_scenarios_each_class_has_at_least_two() {
     assert!(count(BenchmarkClass::Refactoring) >= 2);
     assert!(count(BenchmarkClass::DependencyAnalysis) >= 2);
     assert!(count(BenchmarkClass::ErrorHandling) >= 2);
+    assert!(count(BenchmarkClass::PerformanceOptimization) >= 2);
+    assert!(count(BenchmarkClass::RefactoringLargeModule) >= 2);
+    assert!(count(BenchmarkClass::DataPipelineEtl) >= 2);
 }
 
 #[test]
@@ -835,4 +841,148 @@ fn benchmark_scenarios_distributed_topology_coverage() {
         distributed >= 1,
         "need at least 1 Distributed scenario, got {distributed}"
     );
+}
+
+// -- PerformanceOptimization checks --
+
+#[test]
+fn class_checks_performance_optimization_passes_with_keywords() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::PerformanceOptimization,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome(
+        "profiled the gym module and found a hotspot in the dispatch loop",
+        "applied a memoization cache plus rayon parallelism on the hot path",
+        "throughput improved with a measured 35% latency reduction in benchmark",
+    );
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 3);
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "perf-opt-hotspot-identified" && c.passed)
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "perf-opt-optimization-applied" && c.passed)
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "perf-opt-improvement-quantified" && c.passed)
+    );
+}
+
+#[test]
+fn class_checks_performance_optimization_fails_without_keywords() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::PerformanceOptimization,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome("nothing", "bland text", "empty");
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 3);
+    for check in &checks {
+        assert!(!check.passed, "check '{}' should have failed", check.id);
+    }
+}
+
+// -- RefactoringLargeModule checks --
+
+#[test]
+fn class_checks_refactoring_large_module_passes_with_keywords() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::RefactoringLargeModule,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome(
+        "split the god-module into three submodules with clear responsibility boundaries",
+        "extracted a dispatch trait so the abstraction can be swapped via a polymorphism point",
+        "wired the concrete backend through constructor injection to invert the dependency",
+    );
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 3);
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "refactor-large-module-decomposed" && c.passed)
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "refactor-large-trait-extracted" && c.passed)
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "refactor-large-dependencies-inverted" && c.passed)
+    );
+}
+
+#[test]
+fn class_checks_refactoring_large_module_fails_without_keywords() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::RefactoringLargeModule,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome("nothing", "bland text", "empty");
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 3);
+    for check in &checks {
+        assert!(!check.passed, "check '{}' should have failed", check.id);
+    }
+}
+
+// -- DataPipelineEtl checks --
+
+#[test]
+fn class_checks_data_pipeline_etl_passes_with_keywords() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::DataPipelineEtl,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome(
+        "defined a schema with three columns for the evidence ETL pipeline",
+        "applied a streaming transform that filters and aggregates each batch",
+        "designed the import pipeline from the evidence source into the external sink",
+    );
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 3);
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "data-pipeline-schema-defined" && c.passed)
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "data-pipeline-transform-applied" && c.passed)
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "data-pipeline-io-handled" && c.passed)
+    );
+}
+
+#[test]
+fn class_checks_data_pipeline_etl_fails_without_keywords() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::DataPipelineEtl,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome("nothing", "bland text", "empty");
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 3);
+    for check in &checks {
+        assert!(!check.passed, "check '{}' should have failed", check.id);
+    }
 }

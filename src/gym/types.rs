@@ -26,6 +26,9 @@ pub enum BenchmarkClass {
     MigrationPlanning,
     ObservabilityInstrumentation,
     DataModeling,
+    PerformanceOptimization,
+    RefactoringLargeModule,
+    DataPipelineEtl,
 }
 
 impl Display for BenchmarkClass {
@@ -50,6 +53,9 @@ impl Display for BenchmarkClass {
             Self::MigrationPlanning => "migration-planning",
             Self::ObservabilityInstrumentation => "observability-instrumentation",
             Self::DataModeling => "data-modeling",
+            Self::PerformanceOptimization => "performance-optimization",
+            Self::RefactoringLargeModule => "refactoring-large-module",
+            Self::DataPipelineEtl => "data-pipeline-etl",
         };
         f.write_str(label)
     }
@@ -270,6 +276,18 @@ mod tests {
             "observability-instrumentation"
         );
         assert_eq!(BenchmarkClass::DataModeling.to_string(), "data-modeling");
+        assert_eq!(
+            BenchmarkClass::PerformanceOptimization.to_string(),
+            "performance-optimization"
+        );
+        assert_eq!(
+            BenchmarkClass::RefactoringLargeModule.to_string(),
+            "refactoring-large-module"
+        );
+        assert_eq!(
+            BenchmarkClass::DataPipelineEtl.to_string(),
+            "data-pipeline-etl"
+        );
     }
 
     #[test]

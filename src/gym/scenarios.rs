@@ -4,7 +4,7 @@ use crate::runtime::RuntimeTopology;
 
 use super::types::{BenchmarkCheckResult, BenchmarkClass, BenchmarkScenario};
 
-const BENCHMARK_SCENARIOS: [BenchmarkScenario; 67] = [
+const BENCHMARK_SCENARIOS: [BenchmarkScenario; 76] = [
     BenchmarkScenario {
         id: "repo-exploration-local",
         title: "Repo exploration on local harness",
@@ -758,6 +758,106 @@ const BENCHMARK_SCENARIOS: [BenchmarkScenario; 67] = [
         topology: RuntimeTopology::MultiProcess,
         objective: "Perform a structured code review of the gym executor module. Evaluate: (1) function length and complexity, (2) error handling consistency, (3) naming conventions, (4) separation of concerns. Verify multi-process transport is active in the runtime report.",
         expected_min_runtime_evidence: 4,
+    },
+    // --- Wave 9 (issue #903): performance optimization, large refactors, data pipeline ETL ---
+    BenchmarkScenario {
+        id: "perf-opt-allocation-reduction",
+        title: "Reduce allocations in a hot helper",
+        description: "Identify a small hot helper in the gym module that allocates more than necessary (e.g. repeated to_string, intermediate Vec) and propose an allocation-light alternative. Scored on whether the proposal references concrete allocation sources and a concrete optimization technique.",
+        class: BenchmarkClass::PerformanceOptimization,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Inspect class_specific_checks in src/gym/scenarios.rs. Identify at least one repeated allocation pattern (e.g. format!/to_string in a loop, intermediate Vec). Propose a concrete refactor (cow, slice, pre-sized buffer, arena, etc.) and quantify the expected allocation reduction. Reference the hot path and the optimization technique by name.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "perf-opt-async-parallelism-multiprocess",
+        title: "Async/parallelism win on multi-process copilot-sdk",
+        description: "Exercise a performance-optimization benchmark that proposes converting a sequential bottleneck to a parallel/async pipeline. Runs through the multi-process topology with the copilot-sdk base type.",
+        class: BenchmarkClass::PerformanceOptimization,
+        identity: "simard-gym",
+        base_type: "copilot-sdk",
+        topology: RuntimeTopology::MultiProcess,
+        objective: "Identify a place in the gym executor where independent scenario evaluations run sequentially. Propose a parallel or async pipeline (rayon, tokio join_all, channel fan-out) and estimate the speedup as a throughput or latency improvement. Confirm the multi-process transport backend appears in the runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "perf-opt-hotspot-profiling-distributed",
+        title: "Hotspot profiling on distributed rusty-clawd",
+        description: "Exercise a profiling-driven hotspot identification benchmark through the distributed topology with the rusty-clawd base type. Scored on whether the proposal references profiling tooling, a hot path, and a quantified improvement.",
+        class: BenchmarkClass::PerformanceOptimization,
+        identity: "simard-gym",
+        base_type: "rusty-clawd",
+        topology: RuntimeTopology::Distributed,
+        objective: "Use a profiling-shaped analysis (flamegraph, perf, cargo bench/criterion) to argue which gym scenario evaluation is the hottest. Identify the hot path, propose an optimization (cache, memoize, parallel), and quantify the expected speedup or latency drop in milliseconds. Confirm the distributed transport backend appears in the runtime evidence.",
+        expected_min_runtime_evidence: 5,
+    },
+    BenchmarkScenario {
+        id: "refactor-large-god-module-split",
+        title: "Split a god-module into focused submodules",
+        description: "Identify an oversized module in the Simard codebase and propose a decomposition into focused submodules with clear responsibilities. Scored on whether the proposal names the module, the new submodule boundaries, and the responsibility of each.",
+        class: BenchmarkClass::RefactoringLargeModule,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Inspect src/gym/scenarios.rs. Argue whether it qualifies as a god-module (>1500 LOC mixing data, dispatch, and tests). Propose a split into at least three focused submodules with named responsibilities, and describe the boundary each new submodule would own. Reference the existing module by path.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "refactor-large-extract-traits-multiprocess",
+        title: "Extract traits from a large module on multi-process terminal-shell",
+        description: "Exercise a large-module refactoring benchmark that extracts a trait/interface to break implementation coupling. Runs through the multi-process topology with the terminal-shell base type.",
+        class: BenchmarkClass::RefactoringLargeModule,
+        identity: "simard-gym",
+        base_type: "terminal-shell",
+        topology: RuntimeTopology::MultiProcess,
+        objective: "working-directory: .\ncommand: sh -c 'printf \"refactor-ready\\n\"; while IFS= read -r line; do if [ \"$line\" = \"plan\" ]; then printf \"trait-extracted\\n\"; elif [ \"$line\" = \"exit\" ]; then printf \"refactor-bye\\n\"; break; else printf \"echo:%s\\n\" \"$line\"; fi; done'\nwait-for: refactor-ready\ninput: plan\nwait-for: trait-extracted\ninput: exit\nwait-for: refactor-bye",
+        expected_min_runtime_evidence: 6,
+    },
+    BenchmarkScenario {
+        id: "refactor-large-dependency-inversion-distributed",
+        title: "Dependency inversion on distributed copilot-sdk",
+        description: "Exercise a large-module refactoring benchmark that applies dependency inversion to decouple a high-level orchestrator from a concrete backend. Runs through the distributed topology with the copilot-sdk base type.",
+        class: BenchmarkClass::RefactoringLargeModule,
+        identity: "simard-gym",
+        base_type: "copilot-sdk",
+        topology: RuntimeTopology::Distributed,
+        objective: "Identify a place in the runtime/gym layer where a high-level module depends on a concrete backend type rather than an abstraction. Propose a dependency-inversion refactor: extract a trait, wire the concrete backend through constructor injection, and explain how the decoupling preserves behavior. Confirm the distributed transport backend appears in the runtime evidence.",
+        expected_min_runtime_evidence: 5,
+    },
+    BenchmarkScenario {
+        id: "data-pipeline-schema-migration",
+        title: "Plan a schema migration for an evidence record table",
+        description: "Plan a backward-compatible schema migration for a persisted evidence record. Scored on whether the plan names the table/struct, lists added/removed columns or fields, and describes a forward/backward compatibility strategy.",
+        class: BenchmarkClass::DataPipelineEtl,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Inspect the persisted evidence/memory record types in src/handoff and src/memory. Propose a backward-compatible schema migration (add a nullable field, deprecate an existing one) suitable for an ETL pipeline that loads historical records into a new sink. List the added/removed fields, the migration steps, and the forward/backward compatibility strategy.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "data-pipeline-batch-import-export-multiprocess",
+        title: "Batch import/export on multi-process rusty-clawd",
+        description: "Exercise a data-pipeline ETL benchmark that designs a batch import/export round trip for evidence records. Runs through the multi-process topology with the rusty-clawd base type.",
+        class: BenchmarkClass::DataPipelineEtl,
+        identity: "simard-gym",
+        base_type: "rusty-clawd",
+        topology: RuntimeTopology::MultiProcess,
+        objective: "Design a batch import/export pipeline for evidence records: extract from the evidence store, transform into an ETL-friendly schema, and load into an external sink (file, db). Specify batch size, error handling, and the source/sink boundaries. Confirm the multi-process transport backend appears in the runtime evidence.",
+        expected_min_runtime_evidence: 5,
+    },
+    BenchmarkScenario {
+        id: "data-pipeline-streaming-transform-distributed",
+        title: "Streaming transform on distributed copilot-sdk",
+        description: "Exercise a data-pipeline ETL benchmark that designs a streaming transform stage over evidence records. Runs through the distributed topology with the copilot-sdk base type.",
+        class: BenchmarkClass::DataPipelineEtl,
+        identity: "simard-gym",
+        base_type: "copilot-sdk",
+        topology: RuntimeTopology::Distributed,
+        objective: "Design a streaming transform stage that maps and filters evidence records as they are produced. Specify the source, the per-record transform (map/filter/aggregate), and the downstream sink. Discuss back-pressure and ordering guarantees. Confirm the distributed transport backend appears in the runtime evidence.",
+        expected_min_runtime_evidence: 5,
     },
 ];
 
@@ -1693,6 +1793,172 @@ pub(super) fn class_specific_checks(
                 },
             ]
         }
+        BenchmarkClass::PerformanceOptimization => {
+            let hotspot_identified = combined.contains("hotspot")
+                || combined.contains("hot path")
+                || combined.contains("hot spot")
+                || combined.contains("profil")
+                || combined.contains("flamegraph")
+                || combined.contains("bottleneck");
+            let optimization_applied = combined.contains("alloc")
+                || combined.contains("memoiz")
+                || combined.contains("cache")
+                || combined.contains("pool")
+                || combined.contains("parallel")
+                || combined.contains("async")
+                || combined.contains("rayon")
+                || combined.contains("zero-copy");
+            let improvement_quantified = combined.contains("throughput")
+                || combined.contains("latency")
+                || combined.contains("speedup")
+                || combined.contains("faster")
+                || combined.contains("benchmark")
+                || combined.contains("criterion")
+                || combined.contains("ms")
+                || combined.contains("%");
+            vec![
+                BenchmarkCheckResult {
+                    id: "perf-opt-hotspot-identified".to_string(),
+                    passed: hotspot_identified,
+                    detail: format!(
+                        "execution output {} hotspot identification",
+                        if hotspot_identified {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "perf-opt-optimization-applied".to_string(),
+                    passed: optimization_applied,
+                    detail: format!(
+                        "execution output {} concrete optimization technique",
+                        if optimization_applied {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "perf-opt-improvement-quantified".to_string(),
+                    passed: improvement_quantified,
+                    detail: format!(
+                        "execution output {} quantified improvement",
+                        if improvement_quantified {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::RefactoringLargeModule => {
+            let module_decomposed = combined.contains("split")
+                || combined.contains("extract")
+                || combined.contains("decompose")
+                || combined.contains("submodule")
+                || combined.contains("boundary")
+                || combined.contains("responsib");
+            let trait_extracted = combined.contains("trait")
+                || combined.contains("interface")
+                || combined.contains("impl ")
+                || combined.contains("abstraction")
+                || combined.contains("polymorph");
+            let dependencies_inverted = combined.contains("depend")
+                || combined.contains("inject")
+                || combined.contains("inversion")
+                || combined.contains("decouple")
+                || combined.contains("wire")
+                || combined.contains("constructor");
+            vec![
+                BenchmarkCheckResult {
+                    id: "refactor-large-module-decomposed".to_string(),
+                    passed: module_decomposed,
+                    detail: format!(
+                        "execution output {} module decomposition",
+                        if module_decomposed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "refactor-large-trait-extracted".to_string(),
+                    passed: trait_extracted,
+                    detail: format!(
+                        "execution output {} trait/interface extraction",
+                        if trait_extracted { "includes" } else { "lacks" }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "refactor-large-dependencies-inverted".to_string(),
+                    passed: dependencies_inverted,
+                    detail: format!(
+                        "execution output {} dependency inversion",
+                        if dependencies_inverted {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::DataPipelineEtl => {
+            let schema_defined = combined.contains("schema")
+                || combined.contains("table")
+                || combined.contains("column")
+                || combined.contains("field")
+                || combined.contains("etl")
+                || combined.contains("pipeline");
+            let transform_applied = combined.contains("transform")
+                || combined.contains("map")
+                || combined.contains("filter")
+                || combined.contains("aggregate")
+                || combined.contains("batch")
+                || combined.contains("stream");
+            let io_handled = combined.contains("import")
+                || combined.contains("export")
+                || combined.contains("load")
+                || combined.contains("extract")
+                || combined.contains("ingest")
+                || combined.contains("sink")
+                || combined.contains("source");
+            vec![
+                BenchmarkCheckResult {
+                    id: "data-pipeline-schema-defined".to_string(),
+                    passed: schema_defined,
+                    detail: format!(
+                        "execution output {} schema/pipeline definition",
+                        if schema_defined { "includes" } else { "lacks" }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "data-pipeline-transform-applied".to_string(),
+                    passed: transform_applied,
+                    detail: format!(
+                        "execution output {} transform stage",
+                        if transform_applied {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "data-pipeline-io-handled".to_string(),
+                    passed: io_handled,
+                    detail: format!(
+                        "execution output {} import/export handling",
+                        if io_handled { "includes" } else { "lacks" }
+                    ),
+                },
+            ]
+        }
     }
 }
 
@@ -1774,6 +2040,25 @@ mod tests {
             (BenchmarkClass::PerformanceAnalysis, "performance-analysis"),
             (BenchmarkClass::SecurityAudit, "security-audit"),
             (BenchmarkClass::ApiDesign, "api-design"),
+            (BenchmarkClass::CodeReview, "code-review"),
+            (BenchmarkClass::Debugging, "debugging"),
+            (BenchmarkClass::ConfigManagement, "config-management"),
+            (BenchmarkClass::ConcurrencyAnalysis, "concurrency-analysis"),
+            (BenchmarkClass::MigrationPlanning, "migration-planning"),
+            (
+                BenchmarkClass::ObservabilityInstrumentation,
+                "observability-instrumentation",
+            ),
+            (BenchmarkClass::DataModeling, "data-modeling"),
+            (
+                BenchmarkClass::PerformanceOptimization,
+                "performance-optimization",
+            ),
+            (
+                BenchmarkClass::RefactoringLargeModule,
+                "refactoring-large-module",
+            ),
+            (BenchmarkClass::DataPipelineEtl, "data-pipeline-etl"),
         ];
         for (class, label) in classes {
             assert_eq!(class.to_string(), label);
@@ -1874,6 +2159,9 @@ mod tests {
             BenchmarkClass::MigrationPlanning,
             BenchmarkClass::ObservabilityInstrumentation,
             BenchmarkClass::DataModeling,
+            BenchmarkClass::PerformanceOptimization,
+            BenchmarkClass::RefactoringLargeModule,
+            BenchmarkClass::DataPipelineEtl,
         ];
         let scenarios = benchmark_scenarios();
         for class in all_classes {
