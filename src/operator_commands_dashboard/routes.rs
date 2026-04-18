@@ -2515,7 +2515,7 @@ const LOGIN_HTML: &str = r#"<!DOCTYPE html>
     document.getElementById('login-form').addEventListener('submit', async (e) => {
       e.preventDefault();
       const code = document.getElementById('code').value;
-      const r = await apiFetch('/api/login', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({code}) });
+      const r = await fetch('/api/login', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({code}) });
       if (r.ok) { window.location.href = '/'; }
       else { document.getElementById('error').style.display = 'block'; }
     });
