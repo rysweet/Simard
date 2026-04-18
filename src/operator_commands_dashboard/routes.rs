@@ -1643,7 +1643,30 @@ fn save_hosts(hosts: &[Value]) -> std::io::Result<()> {
 }
 
 async fn get_hosts() -> Json<Value> {
-    Json(json!({ "hosts": load_hosts() }))
+    let configured = load_hosts();
+
+    // Discover available VMs via `azlin list --json` (best-effort, with timeout).
+    let discovered: Vec<Value> = tokio::task::spawn_blocking(|| {
+        let output = std::process::Command::new("azlin")
+            .args(["list", "--json"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+        match output {
+            Ok(o) if o.status.success() => {
+                let raw = String::from_utf8_lossy(&o.stdout);
+                serde_json::from_str::<Vec<Value>>(&raw).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        }
+    })
+    .await
+    .unwrap_or_default();
+
+    Json(json!({
+        "hosts": configured,
+        "discovered": discovered,
+    }))
 }
 
 async fn add_host(Json(body): Json<Value>) -> Json<Value> {
@@ -3116,18 +3139,53 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       try{
         const r=await fetch('/api/hosts');const d=await r.json();
         const el=document.getElementById('hosts-list');
-        if(!d.hosts?.length){el.innerHTML='<span style="color:#8b949e">No hosts configured. Add a VM name below.</span>';return;}
-        el.innerHTML=d.hosts.map(h=>{
-          const name=esc(h.name||'');
-          return`<div style="display:flex;align-items:center;gap:0.5rem;padding:4px 0;border-bottom:1px solid var(--border)">
-            <span style="flex:1"><strong>${name}</strong> <span style="color:#8b949e">(${esc(h.resource_group||'default')})</span> <span style="color:#8b949e;font-size:.75rem">${timeAgo(h.added_at)}</span></span>
-            <button class="btn" style="padding:2px 8px;font-size:.8rem" data-host="${name}">Remove</button>
-          </div>`;
-        }).join('');
+        let html='';
+
+        // Discovered VMs from azlin
+        const discovered=d.discovered||[];
+        const configuredNames=new Set((d.hosts||[]).map(h=>h.name));
+        if(discovered.length){
+          html+=`<div style="margin-bottom:.75rem"><div style="font-weight:600;font-size:.85rem;margin-bottom:.4rem;color:var(--accent)">Available VMs (${discovered.length})</div>`;
+          html+=`<table class="proc-table"><tr><th>Name</th><th>Location</th><th>Resource Group</th><th>Status</th><th></th></tr>`;
+          html+=discovered.map(vm=>{
+            const name=esc(vm.name||vm.Name||'');
+            const loc=esc(vm.location||vm.Location||'');
+            const rg=esc(vm.resourceGroup||vm.resource_group||vm.ResourceGroup||'');
+            const isConfigured=configuredNames.has(vm.name||vm.Name||'');
+            return`<tr>
+              <td><strong>${name}</strong></td>
+              <td>${loc}</td>
+              <td style="font-size:.8rem;color:#8b949e">${rg}</td>
+              <td>${isConfigured?'<span class="ok">configured</span>':'<span style="color:#8b949e">available</span>'}</td>
+              <td>${!isConfigured?`<button class="btn" style="font-size:.7rem;padding:2px 6px" onclick="quickAddHost('${name}','${rg}')">+ Add</button>`:''}</td>
+            </tr>`;
+          }).join('');
+          html+=`</table></div>`;
+        }
+
+        // Configured hosts
+        if(d.hosts?.length){
+          html+=`<div style="margin-top:.5rem"><div style="font-weight:600;font-size:.85rem;margin-bottom:.4rem">Configured Hosts (${d.hosts.length})</div>`;
+          html+=d.hosts.map(h=>{
+            const name=esc(h.name||'');
+            return`<div style="display:flex;align-items:center;gap:0.5rem;padding:4px 0;border-bottom:1px solid var(--border)">
+              <span style="flex:1"><strong>${name}</strong> <span style="color:#8b949e">(${esc(h.resource_group||'default')})</span> <span style="color:#8b949e;font-size:.75rem">${timeAgo(h.added_at)}</span></span>
+              <button class="btn" style="padding:2px 8px;font-size:.8rem" data-host="${name}">Remove</button>
+            </div>`;
+          }).join('');
+          html+=`</div>`;
+        }
+
+        if(!html){html='<span style="color:#8b949e">No hosts discovered or configured. Ensure azlin is installed, or add a VM name below.</span>';}
+        el.innerHTML=html;
         el.querySelectorAll('button[data-host]').forEach(btn=>{
           btn.addEventListener('click',()=>removeHost(btn.dataset.host));
         });
-      }catch(e){}
+      }catch(e){document.getElementById('hosts-list').innerHTML='<span class="err">Failed to load hosts</span>';}
+    }
+    function quickAddHost(name,rg){
+      fetch('/api/hosts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,resource_group:rg||'rysweet-linux-vm-pool'})})
+        .then(r=>r.json()).then(d=>{if(d.status==='ok')fetchHosts();else alert(d.error||'Failed');}).catch(e=>alert('Error: '+e));
     }
     async function addHost(){
       const name=document.getElementById('host-name').value.trim();
