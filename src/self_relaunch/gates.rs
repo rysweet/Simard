@@ -161,7 +161,6 @@ fn truncate_output(s: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::self_relaunch::default_gates;
 
     #[test]
     fn smoke_gate_handles_missing_binary() {
@@ -290,13 +289,24 @@ mod tests {
 
     #[test]
     fn verify_canary_runs_all_gates_without_short_circuit() {
+        // Use a curated gate list (excludes RelaunchGate::UnitTest, which
+        // would recursively invoke `cargo test` and run for 30+ minutes
+        // when this test itself is executed under `cargo test`).
         let config = RelaunchConfig::default();
-        let gates = default_gates();
+        let gates = [
+            RelaunchGate::Smoke,
+            RelaunchGate::GymBaseline,
+            RelaunchGate::BridgeHealth,
+        ];
         let results = verify_canary(Path::new("/no-such-binary-99999"), &gates, &config).unwrap();
         assert_eq!(
             results.len(),
-            4,
-            "should run all 4 gates even if first fails"
+            3,
+            "should run all 3 selected gates even if first fails"
+        );
+        assert!(
+            results.iter().all(|r| !r.passed),
+            "all gates should fail for missing binary"
         );
     }
 

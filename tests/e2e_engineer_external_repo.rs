@@ -29,8 +29,13 @@ fn engineer_loop_inspects_external_repo() {
     // Use Simard's own repo (smaller, always available) to test external inspection.
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
 
-    let output = Command::new(simard_binary())
+    // Wrap in `timeout` so a hung engineer loop cannot stall CI for the
+    // full job timeout. 30s is plenty for a read-only scan even on cold
+    // cache; if the binary truly hangs we want to see it fail visibly.
+    let output = Command::new("timeout")
         .args([
+            "30",
+            simard_binary().to_str().unwrap(),
             "engineer",
             "run",
             "single-process",
