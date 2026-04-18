@@ -952,31 +952,29 @@ async fn activity() -> Json<Value> {
     let state_root = resolve_state_root();
     let recent_cycles = read_recent_cycle_reports(&state_root, 10);
 
-    // --- 3. Open PRs by Simard ---
-    let open_prs = run_gh_json(&[
-        "pr",
-        "list",
-        "--author",
-        "@me",
-        "--state",
-        "open",
-        "--json",
-        "number,title,url,createdAt,headRefName",
-    ])
-    .await;
-
-    // --- 4. Issues assigned to Simard ---
-    let assigned_issues = run_gh_json(&[
-        "issue",
-        "list",
-        "--assignee",
-        "@me",
-        "--state",
-        "open",
-        "--json",
-        "number,title,url,labels",
-    ])
-    .await;
+    // --- 3. Open PRs & assigned issues (concurrent) ---
+    let (open_prs, assigned_issues) = tokio::join!(
+        run_gh_json(&[
+            "pr",
+            "list",
+            "--author",
+            "@me",
+            "--state",
+            "open",
+            "--json",
+            "number,title,url,createdAt,headRefName",
+        ]),
+        run_gh_json(&[
+            "issue",
+            "list",
+            "--assignee",
+            "@me",
+            "--state",
+            "open",
+            "--json",
+            "number,title,url,labels",
+        ])
+    );
 
     Json(json!({
         "daemon": {
@@ -2340,23 +2338,82 @@ async fn processes() -> Json<Value> {
         .await;
 
     let mut procs: Vec<Value> = Vec::new();
+    let mut root_pid: Option<String> = None;
 
     if let Ok(o) = output {
         let text = String::from_utf8_lossy(&o.stdout);
+
+        // Phase 1: Parse every process into a row.
+        struct PsRow {
+            pid: String,
+            ppid: String,
+            etime: String,
+            comm: String,
+            full_args: String,
+        }
+        let mut all_rows: Vec<PsRow> = Vec::new();
+        // Map parent-pid -> indices of direct children for fast descendant walk.
+        let mut children_map: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
+
         for line in text.lines().skip(1) {
-            let lower = line.to_lowercase();
-            if (lower.contains("simard") || lower.contains("ooda") || lower.contains("copilot"))
-                && !lower.contains("ps axo")
-            {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 5 {
-                    procs.push(json!({
-                        "pid": parts[0],
-                        "ppid": parts[1],
-                        "uptime": parts[2],
-                        "command": parts[3],
-                        "full_args": parts[4..].join(" "),
-                    }));
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 5 {
+                let idx = all_rows.len();
+                let row = PsRow {
+                    pid: parts[0].to_string(),
+                    ppid: parts[1].to_string(),
+                    etime: parts[2].to_string(),
+                    comm: parts[3].to_string(),
+                    full_args: parts[4..].join(" "),
+                };
+                children_map
+                    .entry(row.ppid.clone())
+                    .or_default()
+                    .push(idx);
+                all_rows.push(row);
+            }
+        }
+
+        // Phase 2: Locate the OODA daemon – the process whose args contain
+        // "simard" AND "ooda" AND "run" (i.e. `simard ooda run`).
+        let mut ooda_idx: Option<usize> = None;
+        for (i, row) in all_rows.iter().enumerate() {
+            let lower = row.full_args.to_lowercase();
+            if lower.contains("simard") && lower.contains("ooda") && lower.contains("run") {
+                ooda_idx = Some(i);
+                break;
+            }
+        }
+
+        // Phase 3: BFS from the OODA daemon to collect it + all descendants.
+        if let Some(start) = ooda_idx {
+            let mut queue: std::collections::VecDeque<usize> =
+                std::collections::VecDeque::new();
+            let mut visited: std::collections::HashSet<usize> =
+                std::collections::HashSet::new();
+            queue.push_back(start);
+            visited.insert(start);
+            root_pid = Some(all_rows[start].pid.clone());
+
+            while let Some(idx) = queue.pop_front() {
+                let row = &all_rows[idx];
+                let is_root = idx == start;
+                procs.push(json!({
+                    "pid": row.pid,
+                    "ppid": row.ppid,
+                    "uptime": row.etime,
+                    "command": row.comm,
+                    "full_args": row.full_args,
+                    "is_ooda_root": is_root,
+                }));
+
+                if let Some(kids) = children_map.get(&row.pid) {
+                    for &child_idx in kids {
+                        if visited.insert(child_idx) {
+                            queue.push_back(child_idx);
+                        }
+                    }
                 }
             }
         }
@@ -2365,6 +2422,7 @@ async fn processes() -> Json<Value> {
     Json(json!({
         "processes": procs,
         "count": procs.len(),
+        "root_pid": root_pid,
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
 }
@@ -2884,6 +2942,10 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       <h2>Cost Ledger <button class="btn" onclick="copyLogContent('cost-log-box')">📋 Copy</button></h2>
       <div id="cost-log-box" class="log-box" style="max-height:200px"><span class="loading">Loading…</span></div>
     </div>
+    <div class="card" style="margin-bottom:1rem">
+      <h2>Cycle Reports</h2>
+      <div id="cycle-reports"><span class="loading">Loading…</span></div>
+    </div>
     <h2 style="color:var(--accent);font-size:1rem;margin-bottom:.5rem">OODA Transcripts</h2>
     <div id="ooda-transcripts"><span class="loading">Loading…</span></div>
     <h2 style="color:var(--accent);font-size:1rem;margin:.75rem 0 .5rem">Terminal Session Transcripts</h2>
@@ -3130,6 +3192,13 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         const heartbeat=daemon.last_heartbeat?timeAgo(daemon.last_heartbeat):'never';
         const cycle=daemon.current_cycle||'?';
 
+        // Staleness check: if heartbeat is >10 min old, daemon may be hung
+        let isStale=false;
+        if(isRunning && daemon.last_heartbeat){
+          const hbAge=Date.now()-new Date(daemon.last_heartbeat).getTime();
+          isStale=hbAge>10*60*1000;
+        }
+
         // Extract actual actions from the most recent structured cycle report
         let latestActions=[];
         const cycles=d.recent_cycles||[];
@@ -3154,8 +3223,8 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
         el.innerHTML=`
           <div style="display:flex;gap:2rem;flex-wrap:wrap;align-items:center;margin-bottom:.75rem">
-            <div><span style="font-size:1.5rem;${isRunning?'':'filter:grayscale(1)'}">${isRunning?'🟢':'🔴'}</span> <strong style="font-size:1.1rem">${isRunning?'OODA Loop Active':'Agent Stopped'}</strong></div>
-            <div style="color:#8b949e">Cycle <strong style="color:var(--fg)">#${cycle}</strong> · Last heartbeat <strong style="color:var(--fg)">${heartbeat}</strong></div>
+            <div><span style="font-size:1.5rem;${isRunning&&!isStale?'':'filter:grayscale(1)'}">${isRunning?(isStale?'🟡':'🟢'):'🔴'}</span> <strong style="font-size:1.1rem">${isRunning?(isStale?'Agent Stale':'OODA Loop Active'):'Agent Stopped'}</strong></div>
+            <div style="color:#8b949e">Cycle <strong style="color:var(--fg)">#${cycle}</strong> · Last heartbeat <strong style="color:var(--fg)">${heartbeat}</strong>${isStale?' <span style="color:var(--yellow)">(>10 min ago)</span>':''}</div>
           </div>
           ${currentFocus?`<div style="margin-bottom:.75rem"><span style="color:#8b949e">🎯 Top Priority:</span> ${currentFocus}</div>`:''}
           ${latestActions.length?`
@@ -3207,6 +3276,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           actEl.innerHTML='<span style="color:#8b949e">No structured action history yet. The OODA daemon records actions each cycle.</span>';
         }
       }catch(e){
+        console.warn('fetchAgentOverview failed:', e);
         const el=document.getElementById('agent-live-status');
         if(el) el.innerHTML='<span class="err">Failed to load agent status</span>';
       }
@@ -3331,11 +3401,15 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         if (!container) return;
         const procs = d.processes || [];
         if (procs.length) {
-          if (summary) summary.textContent = `${procs.length} process(es) — updated ${timeAgo(d.timestamp)}`;
+          const rootLabel = d.root_pid ? ` — OODA daemon PID ${d.root_pid}` : '';
+          if (summary) summary.textContent = `${procs.length} process(es)${rootLabel} — updated ${timeAgo(d.timestamp)}`;
           // Build tree from flat list using ppid
           const byPid = {};
           procs.forEach(p => { byPid[p.pid] = { ...p, children: [] }; });
           const roots = [];
+          // The OODA root's ppid won't be in our set, so it becomes a root.
+          // Any other process whose ppid isn't in our set is also a root,
+          // but with the descendant-walk backend this should only be the daemon.
           procs.forEach(p => {
             const node = byPid[p.pid];
             if (p.ppid && byPid[p.ppid]) {
@@ -3350,11 +3424,15 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
             const toggle = hasKids
               ? `<span class="proc-toggle" onclick="this.parentElement.parentElement.querySelector('.proc-kids').classList.toggle('collapsed');this.textContent=this.textContent==='▼'?'▶':'▼'" style="cursor:pointer;user-select:none;width:1em;display:inline-block">▼</span>`
               : `<span style="width:1em;display:inline-block;color:#484f58">·</span>`;
+            const isRoot = n.is_ooda_root === true;
+            const label = isRoot ? '🤖 Simard OODA Daemon' : '';
             const cmd = esc(n.full_args || n.command || '');
             const cmdShort = cmd.length > 90 ? cmd.substring(0,87)+'…' : cmd;
+            const rootBadge = isRoot ? `<span style="background:#238636;color:#fff;padding:1px 6px;border-radius:4px;font-size:.75rem;margin-right:4px">${label}</span>` : '';
             let html = `<div class="proc-row" style="padding-left:${indent}px">
               ${toggle}
               <span class="proc-pid">${esc(n.pid)}</span>
+              ${rootBadge}
               <span class="proc-uptime" style="color:#8b949e;font-size:.8rem;min-width:80px">${esc(n.uptime||'')}</span>
               <span class="proc-cmd" title="${cmd}" style="color:#c9d1d9">${cmdShort}</span>
             </div>`;
@@ -3525,7 +3603,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     }
     function quickAddHost(name,rg){
       apiFetch('/api/hosts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,resource_group:rg||'rysweet-linux-vm-pool'})})
-        .then(d=>{if(d.status==='ok')fetchHosts();else alert(d.error||'Failed');}).catch(e=>alert('Error: '+e));
+        .then(d=>{if(d.status==='ok'){fetchHosts();fetchDistributed();}else alert(d.error||'Failed');}).catch(e=>alert('Error: '+e));
     }
     async function addHost(){
       const name=document.getElementById('host-name').value.trim();
@@ -3536,6 +3614,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         document.getElementById('host-status').textContent=d.status==='ok'?'Added ✓':'Error: '+(d.error||'');
         document.getElementById('host-name').value='';
         fetchHosts();
+        fetchDistributed();
         setTimeout(()=>document.getElementById('host-status').textContent='',3000);
       }catch(e){document.getElementById('host-status').textContent='Network error';}
     }
@@ -3543,6 +3622,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       if(!confirm('Remove host "'+name+'"?'))return;
       await apiFetch('/api/hosts',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
       fetchHosts();
+      fetchDistributed();
     }
     fetchHosts();
 
