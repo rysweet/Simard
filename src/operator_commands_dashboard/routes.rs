@@ -2700,17 +2700,49 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
   </div>
 
   <div class="tab-content" id="tab-memory">
-    <div class="grid">
-      <div class="card"><h2>Memory Overview</h2><div id="mem-overview"><span class="loading">Loading…</span></div></div>
-      <div class="card"><h2>Memory Files</h2><div id="mem-files"><span class="loading">Loading…</span></div></div>
+    <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem">
+      <button id="mem-view-graph" class="btn" style="opacity:1" onclick="setMemView('graph')">Graph View</button>
+      <button id="mem-view-search" class="btn" style="opacity:.5" onclick="setMemView('search')">Search View</button>
+      <span id="mem-graph-stats" style="color:#8b949e;font-size:.8rem;margin-left:auto"></span>
     </div>
-    <div class="card" style="margin-top:1rem">
-      <h2>Memory Search</h2>
-      <div style="display:flex;gap:.5rem;align-items:center;margin-bottom:1rem">
-        <input id="mem-search-input" placeholder="Search memories…" style="flex:1;padding:6px;background:#1a1a2e;border:1px solid #333;color:#e0e0e0;border-radius:4px">
-        <button class="btn" onclick="searchMemory()">Search</button>
+
+    <div id="mem-graph-panel">
+      <div class="card" style="margin-bottom:1rem;padding:.75rem">
+        <div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:center;font-size:.8rem">
+          <label style="color:#f0883e"><input type="checkbox" class="mem-filter" data-type="WorkingMemory" checked> Working</label>
+          <label style="color:#58a6ff"><input type="checkbox" class="mem-filter" data-type="SemanticFact" checked> Semantic</label>
+          <label style="color:#3fb950"><input type="checkbox" class="mem-filter" data-type="EpisodicMemory" checked> Episodic</label>
+          <label style="color:#a371f7"><input type="checkbox" class="mem-filter" data-type="ProceduralMemory" checked> Procedural</label>
+          <label style="color:#d29922"><input type="checkbox" class="mem-filter" data-type="ProspectiveMemory" checked> Prospective</label>
+          <label style="color:#8b949e"><input type="checkbox" class="mem-filter" data-type="SensoryBuffer" checked> Sensory</label>
+          <button class="btn" onclick="fetchMemoryGraph()" style="margin-left:auto">Refresh</button>
+        </div>
       </div>
-      <div id="mem-search-results"></div>
+      <div style="display:flex;gap:1rem">
+        <div class="card" style="flex:1;padding:0;position:relative;min-height:500px">
+          <canvas id="mem-graph-canvas" style="width:100%;height:500px;display:block;cursor:grab"></canvas>
+          <div id="mem-graph-tooltip" style="display:none;position:absolute;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:.5rem .75rem;font-size:.8rem;max-width:320px;pointer-events:none;z-index:10;word-break:break-word"></div>
+        </div>
+        <div id="mem-graph-detail" class="card" style="width:280px;display:none">
+          <h2 id="mg-detail-title">Node Details</h2>
+          <div id="mg-detail-body"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="mem-search-panel" style="display:none">
+      <div class="grid">
+        <div class="card"><h2>Memory Overview</h2><div id="mem-overview"><span class="loading">Loading…</span></div></div>
+        <div class="card"><h2>Memory Files</h2><div id="mem-files"><span class="loading">Loading…</span></div></div>
+      </div>
+      <div class="card" style="margin-top:1rem">
+        <h2>Memory Search</h2>
+        <div style="display:flex;gap:.5rem;align-items:center;margin-bottom:1rem">
+          <input id="mem-search-input" placeholder="Search memories…" style="flex:1;padding:6px;background:#1a1a2e;border:1px solid #333;color:#e0e0e0;border-radius:4px">
+          <button class="btn" onclick="searchMemory()">Search</button>
+        </div>
+        <div id="mem-search-results"></div>
+      </div>
     </div>
   </div>
 
@@ -2850,7 +2882,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         clearTabTimers();
         if(tab.dataset.tab==='logs') {fetchLogs();tabRefreshTimers.logs=setInterval(fetchLogs,15000);}
         if(tab.dataset.tab==='processes') {fetchProcessTree();tabRefreshTimers.proc=setInterval(fetchProcessTree,15000);}
-        if(tab.dataset.tab==='memory') fetchMemory();
+        if(tab.dataset.tab==='memory') {fetchMemoryGraph();}
 
         if(tab.dataset.tab==='goals') fetchGoals();
         if(tab.dataset.tab==='costs') fetchCosts();
@@ -3261,6 +3293,183 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     }
     document.getElementById('mem-search-input')?.addEventListener('keypress',e=>{if(e.key==='Enter')searchMemory();});
 
+    /* --- Memory Graph Visualization --- */
+    let mgNodes=[],mgEdges=[],mgFiltered=[],mgFilteredEdges=[];
+    let mgDrag=null,mgPinned=null;
+    let mgOffX=0,mgOffY=0,mgScale=1,mgPanX=0,mgPanY=0;
+    const mgColors={WorkingMemory:'#f0883e',SemanticFact:'#58a6ff',EpisodicMemory:'#3fb950',ProceduralMemory:'#a371f7',ProspectiveMemory:'#d29922',SensoryBuffer:'#8b949e'};
+
+    function setMemView(v){
+      document.getElementById('mem-graph-panel').style.display=v==='graph'?'block':'none';
+      document.getElementById('mem-search-panel').style.display=v==='search'?'block':'none';
+      document.getElementById('mem-view-graph').style.opacity=v==='graph'?'1':'.5';
+      document.getElementById('mem-view-search').style.opacity=v==='search'?'1':'.5';
+      if(v==='graph') fetchMemoryGraph();
+      if(v==='search') fetchMemory();
+    }
+
+    function mgApplyFilters(){
+      const checks={};
+      document.querySelectorAll('.mem-filter').forEach(cb=>{checks[cb.dataset.type]=cb.checked;});
+      mgFiltered=mgNodes.filter(n=>checks[n.type]!==false);
+      const ids=new Set(mgFiltered.map(n=>n.id));
+      mgFilteredEdges=mgEdges.filter(e=>ids.has(e.source)&&ids.has(e.target));
+      mgRender();
+    }
+    document.querySelectorAll('.mem-filter').forEach(cb=>cb.addEventListener('change',mgApplyFilters));
+
+    async function fetchMemoryGraph(){
+      try{
+        const r=await fetch('/api/memory/graph');const d=await r.json();
+        if(d.error){document.getElementById('mem-graph-stats').textContent='Error: '+d.error;return;}
+        const s=d.stats||{};
+        document.getElementById('mem-graph-stats').textContent=
+          'W:'+(s.working||0)+' S:'+(s.semantic||0)+' E:'+(s.episodic||0)+' P:'+(s.procedural||0)+' Pr:'+(s.prospective||0)+' Se:'+(s.sensory||0);
+        mgNodes=(d.nodes||[]);mgEdges=(d.edges||[]);
+        mgInitLayout();mgApplyFilters();mgSimulate();
+      }catch(e){document.getElementById('mem-graph-stats').textContent='Load failed';}
+    }
+
+    function mgInitLayout(){
+      const canvas=document.getElementById('mem-graph-canvas');
+      const w=canvas.clientWidth||800,h=canvas.clientHeight||500;
+      mgPanX=0;mgPanY=0;mgScale=1;
+      const n=mgNodes.length||1;
+      mgNodes.forEach((nd,i)=>{
+        const angle=(2*Math.PI*i)/n;
+        const radius=Math.min(w,h)*0.3;
+        nd.x=w/2+radius*Math.cos(angle);
+        nd.y=h/2+radius*Math.sin(angle);
+        nd.vx=0;nd.vy=0;nd.pinned=false;
+      });
+    }
+
+    function mgSimulate(){
+      const canvas=document.getElementById('mem-graph-canvas');
+      const dt=0.3,repulsion=800,springLen=100,springK=0.02,gravity=0.01,damping=0.85;
+      const cx=(canvas.clientWidth||800)/2,cy=(canvas.clientHeight||500)/2;
+      for(let iter=0;iter<120;iter++){
+        for(let i=0;i<mgFiltered.length;i++){
+          if(mgFiltered[i].pinned)continue;
+          let fx=0,fy=0;
+          for(let j=0;j<mgFiltered.length;j++){
+            if(i===j)continue;
+            let dx=mgFiltered[i].x-mgFiltered[j].x,dy=mgFiltered[i].y-mgFiltered[j].y;
+            let dist=Math.sqrt(dx*dx+dy*dy)||1;
+            let f=repulsion/(dist*dist);
+            fx+=f*dx/dist;fy+=f*dy/dist;
+          }
+          fx+=(cx-mgFiltered[i].x)*gravity;
+          fy+=(cy-mgFiltered[i].y)*gravity;
+          mgFiltered[i].vx=(mgFiltered[i].vx+fx*dt)*damping;
+          mgFiltered[i].vy=(mgFiltered[i].vy+fy*dt)*damping;
+          mgFiltered[i].x+=mgFiltered[i].vx*dt;
+          mgFiltered[i].y+=mgFiltered[i].vy*dt;
+        }
+        const nodeMap={};mgFiltered.forEach(n=>{nodeMap[n.id]=n;});
+        mgFilteredEdges.forEach(e=>{
+          const a=nodeMap[e.source],b=nodeMap[e.target];
+          if(!a||!b)return;
+          let dx=b.x-a.x,dy=b.y-a.y;
+          let dist=Math.sqrt(dx*dx+dy*dy)||1;
+          let f=(dist-springLen)*springK;
+          let fx2=f*dx/dist,fy2=f*dy/dist;
+          if(!a.pinned){a.vx+=fx2*dt;a.vy+=fy2*dt;}
+          if(!b.pinned){b.vx-=fx2*dt;b.vy-=fy2*dt;}
+        });
+      }
+      mgRender();
+    }
+
+    function mgRender(){
+      const canvas=document.getElementById('mem-graph-canvas');
+      if(!canvas)return;
+      canvas.width=canvas.clientWidth*(window.devicePixelRatio||1);
+      canvas.height=canvas.clientHeight*(window.devicePixelRatio||1);
+      const ctx=canvas.getContext('2d');
+      const dpr=window.devicePixelRatio||1;
+      ctx.scale(dpr,dpr);
+      ctx.clearRect(0,0,canvas.clientWidth,canvas.clientHeight);
+      ctx.save();ctx.translate(mgPanX,mgPanY);ctx.scale(mgScale,mgScale);
+      const nodeMap={};mgFiltered.forEach(n=>{nodeMap[n.id]=n;});
+      mgFilteredEdges.forEach(e=>{
+        const a=nodeMap[e.source],b=nodeMap[e.target];
+        if(!a||!b)return;
+        ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);
+        ctx.strokeStyle='#30363d';ctx.lineWidth=1;ctx.stroke();
+      });
+      const r=8;
+      mgFiltered.forEach(n=>{
+        ctx.beginPath();ctx.arc(n.x,n.y,n===mgPinned?r+3:r,0,Math.PI*2);
+        ctx.fillStyle=mgColors[n.type]||'#8b949e';
+        if(n===mgPinned){ctx.lineWidth=2;ctx.strokeStyle='#fff';ctx.stroke();}
+        ctx.fill();
+        const lbl=n.label||'';
+        if(lbl.length>0&&mgScale>0.5){
+          ctx.fillStyle='#c9d1d9';ctx.font='10px sans-serif';ctx.textAlign='center';
+          ctx.fillText(lbl.substring(0,30),n.x,n.y-r-4);
+        }
+      });
+      ctx.restore();
+    }
+
+    (function(){
+      const mgCanvas=document.getElementById('mem-graph-canvas');
+      if(!mgCanvas)return;
+      function mgHitTest(mx,my){
+        const x=(mx-mgPanX)/mgScale,y=(my-mgPanY)/mgScale;
+        for(const n of mgFiltered){if((n.x-x)**2+(n.y-y)**2<144)return n;}
+        return null;
+      }
+      mgCanvas.addEventListener('mousemove',function(e){
+        const rect=mgCanvas.getBoundingClientRect();
+        const mx=e.clientX-rect.left,my=e.clientY-rect.top;
+        if(mgDrag){mgDrag.x=(mx-mgOffX-mgPanX)/mgScale;mgDrag.y=(my-mgOffY-mgPanY)/mgScale;mgRender();return;}
+        const node=mgHitTest(mx,my);
+        const tip=document.getElementById('mem-graph-tooltip');
+        if(node){
+          mgCanvas.style.cursor='pointer';tip.style.display='block';
+          tip.style.left=Math.min(mx+12,mgCanvas.clientWidth-330)+'px';tip.style.top=(my+12)+'px';
+          tip.innerHTML='<strong style="color:'+(mgColors[node.type]||'#ccc')+'">'+esc(node.type)+'</strong><br>'+esc((node.content||'').substring(0,200));
+        }else{mgCanvas.style.cursor='grab';tip.style.display='none';}
+      });
+      mgCanvas.addEventListener('mousedown',function(e){
+        const rect=mgCanvas.getBoundingClientRect();const mx=e.clientX-rect.left,my=e.clientY-rect.top;
+        const node=mgHitTest(mx,my);
+        if(node){mgDrag=node;mgCanvas.style.cursor='grabbing';mgOffX=mx-node.x*mgScale-mgPanX;mgOffY=my-node.y*mgScale-mgPanY;}
+        else{
+          const startPX=mgPanX,startPY=mgPanY,sx=e.clientX,sy=e.clientY;
+          function onMove(ev){mgPanX=startPX+(ev.clientX-sx);mgPanY=startPY+(ev.clientY-sy);mgRender();}
+          function onUp(){window.removeEventListener('mousemove',onMove);window.removeEventListener('mouseup',onUp);}
+          window.addEventListener('mousemove',onMove);window.addEventListener('mouseup',onUp);
+        }
+      });
+      mgCanvas.addEventListener('mouseup',function(){mgDrag=null;mgCanvas.style.cursor='grab';});
+      mgCanvas.addEventListener('click',function(e){
+        const rect=mgCanvas.getBoundingClientRect();const node=mgHitTest(e.clientX-rect.left,e.clientY-rect.top);
+        if(node){
+          mgPinned=node;node.pinned=true;
+          document.getElementById('mem-graph-detail').style.display='block';
+          document.getElementById('mg-detail-title').textContent=node.type;
+          document.getElementById('mg-detail-body').innerHTML=
+            '<div class="stat"><span class="label">ID</span><span class="value" style="font-size:.75rem;word-break:break-all">'+esc(node.id)+'</span></div>'+
+            '<div class="stat"><span class="label">Label</span><span class="value">'+esc(node.label)+'</span></div>'+
+            '<div style="margin-top:.5rem;font-size:.8rem;color:#c9d1d9;white-space:pre-wrap;max-height:300px;overflow-y:auto">'+esc(node.content||'')+'</div>';
+          mgRender();
+        }else{
+          if(mgPinned){mgPinned.pinned=false;mgPinned=null;}
+          document.getElementById('mem-graph-detail').style.display='none';mgRender();
+        }
+      });
+      mgCanvas.addEventListener('wheel',function(e){
+        e.preventDefault();const rect=mgCanvas.getBoundingClientRect();
+        const mx=e.clientX-rect.left,my=e.clientY-rect.top;
+        const factor=e.deltaY<0?1.1:0.9;
+        mgPanX=mx-(mx-mgPanX)*factor;mgPanY=my-(my-mgPanY)*factor;
+        mgScale*=factor;mgRender();
+      },{passive:false});
+    })();
+
     /* --- Costs --- */
     function fmtLabel(k){
       const map={
@@ -3573,6 +3782,8 @@ mod tests {
         assert!(INDEX_HTML.contains("Whiteboard"));
         assert!(INDEX_HTML.contains("/api/issues"));
         assert!(INDEX_HTML.contains("fetchStatus"));
+        assert!(INDEX_HTML.contains("mem-graph-canvas"));
+        assert!(INDEX_HTML.contains("fetchMemoryGraph"));
     }
 
     #[test]
