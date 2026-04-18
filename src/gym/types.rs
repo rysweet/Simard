@@ -30,6 +30,9 @@ pub enum BenchmarkClass {
     CicdPipeline,
     DependencyUpgrade,
     ReleaseManagement,
+    AccessibilityReview,
+    InternationalizationReview,
+    IncidentResponse,
 }
 
 impl Display for BenchmarkClass {
@@ -58,6 +61,9 @@ impl Display for BenchmarkClass {
             Self::CicdPipeline => "cicd-pipeline",
             Self::DependencyUpgrade => "dependency-upgrade",
             Self::ReleaseManagement => "release-management",
+            Self::AccessibilityReview => "accessibility-review",
+            Self::InternationalizationReview => "internationalization-review",
+            Self::IncidentResponse => "incident-response",
         };
         f.write_str(label)
     }
@@ -287,6 +293,18 @@ mod tests {
         assert_eq!(
             BenchmarkClass::ReleaseManagement.to_string(),
             "release-management"
+        );
+        assert_eq!(
+            BenchmarkClass::AccessibilityReview.to_string(),
+            "accessibility-review"
+        );
+        assert_eq!(
+            BenchmarkClass::InternationalizationReview.to_string(),
+            "internationalization-review"
+        );
+        assert_eq!(
+            BenchmarkClass::IncidentResponse.to_string(),
+            "incident-response"
         );
     }
 
