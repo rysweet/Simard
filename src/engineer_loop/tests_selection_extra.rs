@@ -163,3 +163,82 @@ fn select_git_commit_argv_starts_with_git() {
     assert_eq!(action.argv[0], "git");
     assert_eq!(action.argv[1], "commit");
 }
+
+// ── is_keyword_action_achievable ────────────────────────────────
+
+#[test]
+fn keyword_action_readonly_always_achievable() {
+    assert!(is_keyword_action_achievable(
+        &AnalyzedAction::ReadOnlyScan,
+        "any objective"
+    ));
+}
+
+#[test]
+fn keyword_action_cargo_test_always_achievable() {
+    assert!(is_keyword_action_achievable(
+        &AnalyzedAction::CargoTest,
+        "any objective"
+    ));
+}
+
+#[test]
+fn keyword_action_open_issue_rejected_for_fix_issue_ref() {
+    // "fix issue #891" mentions "issue" but the user does NOT want to open one.
+    assert!(!is_keyword_action_achievable(
+        &AnalyzedAction::OpenIssue,
+        "fix issue #891 in the planner"
+    ));
+}
+
+#[test]
+fn keyword_action_open_issue_accepted_for_explicit_open() {
+    assert!(is_keyword_action_achievable(
+        &AnalyzedAction::OpenIssue,
+        "open an issue about the broken CI"
+    ));
+}
+
+#[test]
+fn keyword_action_open_issue_accepted_for_file_bug() {
+    assert!(is_keyword_action_achievable(
+        &AnalyzedAction::OpenIssue,
+        "file a bug about memory leak"
+    ));
+}
+
+#[test]
+fn keyword_action_create_file_needs_path() {
+    assert!(is_keyword_action_achievable(
+        &AnalyzedAction::CreateFile,
+        "create file src/new_module.rs"
+    ));
+    assert!(!is_keyword_action_achievable(
+        &AnalyzedAction::CreateFile,
+        "create a plan for the project"
+    ));
+}
+
+#[test]
+fn keyword_action_git_commit_needs_commit_keyword() {
+    assert!(is_keyword_action_achievable(
+        &AnalyzedAction::GitCommit,
+        "commit the changes"
+    ));
+    assert!(!is_keyword_action_achievable(
+        &AnalyzedAction::GitCommit,
+        "investigate the problem"
+    ));
+}
+
+#[test]
+fn keyword_action_shell_command_needs_extractable_command() {
+    assert!(is_keyword_action_achievable(
+        &AnalyzedAction::RunShellCommand,
+        "run cargo check"
+    ));
+    assert!(!is_keyword_action_achievable(
+        &AnalyzedAction::RunShellCommand,
+        "check if the tests pass"
+    ));
+}

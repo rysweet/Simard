@@ -94,22 +94,71 @@ fn build_planning_prompt(objective: &str, inspection: &RepoInspection) -> String
     )
 }
 
+/// Attempt to locate a JSON array within a mixed text/JSON response.
+///
+/// LLMs sometimes wrap valid JSON in markdown fences, prose preambles, or
+/// trailing commentary.  This function tries progressively looser extraction
+/// strategies:
+///   1. Direct parse of the full (trimmed) text.
+///   2. Strip markdown ```json … ``` fences.
+///   3. Find the first `[` … last `]` substring and parse that.
+///
+/// Returns `Err(PlanningUnavailable)` only when none of these strategies
+/// produce a valid `Vec<PlanStep>`.
 fn parse_plan_response(text: &str) -> SimardResult<Plan> {
     let trimmed = text.trim();
-    let json_text = if trimmed.starts_with("```") {
-        let inner = trimmed
-            .strip_prefix("```json")
-            .or_else(|| trimmed.strip_prefix("```"))
-            .unwrap_or(trimmed);
-        inner.strip_suffix("```").unwrap_or(inner).trim()
+
+    // Strategy 1: direct parse
+    if let Ok(steps) = serde_json::from_str::<Vec<PlanStep>>(trimmed) {
+        return Ok(Plan::new(steps));
+    }
+
+    // Strategy 2: strip markdown fences
+    let defenced = strip_markdown_fences(trimmed);
+    if defenced != trimmed {
+        if let Ok(steps) = serde_json::from_str::<Vec<PlanStep>>(defenced) {
+            return Ok(Plan::new(steps));
+        }
+    }
+
+    // Strategy 3: locate outermost JSON array brackets
+    if let Some(json_text) = extract_json_array(trimmed) {
+        if let Ok(steps) = serde_json::from_str::<Vec<PlanStep>>(json_text) {
+            tracing::info!(
+                "recovered JSON plan from mixed LLM response ({} bytes of surrounding text stripped)",
+                trimmed.len() - json_text.len()
+            );
+            return Ok(Plan::new(steps));
+        }
+    }
+
+    Err(SimardError::PlanningUnavailable {
+        reason: format!(
+            "failed to parse LLM plan response after trying direct, fenced, and bracket-extraction strategies. \
+             Response begins with: {:?}",
+            &trimmed[..trimmed.len().min(120)]
+        ),
+    })
+}
+
+/// Remove markdown code fences from text. Handles ```json and bare ```.
+fn strip_markdown_fences(text: &str) -> &str {
+    let inner = text
+        .strip_prefix("```json")
+        .or_else(|| text.strip_prefix("```"))
+        .unwrap_or(text);
+    inner.strip_suffix("```").unwrap_or(inner).trim()
+}
+
+/// Find the first `[` and last `]` in the text and return the substring.
+fn extract_json_array(text: &str) -> Option<&str> {
+    let start = text.find('[')?;
+    let end = text.rfind(']')?;
+    if end > start {
+        Some(&text[start..=end])
     } else {
-        trimmed
-    };
-    let steps: Vec<PlanStep> =
-        serde_json::from_str(json_text).map_err(|e| SimardError::PlanningUnavailable {
-            reason: format!("failed to parse LLM plan response: {e}"),
-        })?;
-    Ok(Plan::new(steps))
+        None
+    }
 }
 
 /// Ask the LLM for a multi-step plan to accomplish `objective`.
@@ -305,12 +354,83 @@ mod tests {
 
     #[test]
     fn parse_plan_response_invalid_json() {
-        match parse_plan_response("not json").unwrap_err() {
+        match parse_plan_response("not json at all").unwrap_err() {
             SimardError::PlanningUnavailable { reason } => {
                 assert!(reason.contains("failed to parse"))
             }
             other => panic!("expected PlanningUnavailable, got: {other}"),
         }
+    }
+
+    #[test]
+    fn parse_plan_response_json_with_prose_preamble() {
+        let mixed = r#"Here is my plan for you:
+
+[{"action":"cargo_test","target":".","expected_outcome":"pass","verification_command":"cargo test"}]
+
+I hope this helps!"#;
+        let plan = parse_plan_response(mixed).unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan.steps()[0].action, AnalyzedAction::CargoTest);
+    }
+
+    #[test]
+    fn parse_plan_response_json_with_trailing_explanation() {
+        let mixed = r#"[{"action":"read_only_scan","target":".","expected_outcome":"ok","verification_command":"ls"}]
+This plan inspects the repository without making changes."#;
+        let plan = parse_plan_response(mixed).unwrap();
+        assert_eq!(plan.steps()[0].action, AnalyzedAction::ReadOnlyScan);
+    }
+
+    #[test]
+    fn parse_plan_response_completely_non_json() {
+        let prose = "I think you should run cargo test and then check the results manually.";
+        assert!(parse_plan_response(prose).is_err());
+    }
+
+    #[test]
+    fn parse_plan_response_error_includes_response_preview() {
+        let bad = "This is not valid JSON and contains no brackets";
+        match parse_plan_response(bad).unwrap_err() {
+            SimardError::PlanningUnavailable { reason } => {
+                assert!(reason.contains("bracket-extraction"));
+                assert!(reason.contains("Response begins with"));
+            }
+            other => panic!("expected PlanningUnavailable, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn strip_markdown_fences_with_json_tag() {
+        let input = "```json\n{\"key\": 1}\n```";
+        assert_eq!(strip_markdown_fences(input), "{\"key\": 1}");
+    }
+
+    #[test]
+    fn strip_markdown_fences_bare() {
+        let input = "```\ncontent\n```";
+        assert_eq!(strip_markdown_fences(input), "content");
+    }
+
+    #[test]
+    fn strip_markdown_fences_no_fences() {
+        assert_eq!(strip_markdown_fences("plain text"), "plain text");
+    }
+
+    #[test]
+    fn extract_json_array_from_mixed_text() {
+        let text = "Here is the plan: [{\"a\":1}] end.";
+        assert_eq!(extract_json_array(text), Some("[{\"a\":1}]"));
+    }
+
+    #[test]
+    fn extract_json_array_no_brackets() {
+        assert_eq!(extract_json_array("no brackets here"), None);
+    }
+
+    #[test]
+    fn extract_json_array_reversed_brackets() {
+        assert_eq!(extract_json_array("]before["), None);
     }
 
     #[test]
