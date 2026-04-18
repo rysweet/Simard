@@ -1299,7 +1299,11 @@ pub(super) fn class_specific_checks(
                     passed: invariants_named,
                     detail: format!(
                         "execution output {} invariant/state discussion",
-                        if invariants_named { "includes" } else { "lacks" }
+                        if invariants_named {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
                     ),
                 },
                 BenchmarkCheckResult {
@@ -1307,7 +1311,11 @@ pub(super) fn class_specific_checks(
                     passed: refactor_sketched,
                     detail: format!(
                         "execution output {} refactor sketch",
-                        if refactor_sketched { "includes" } else { "lacks" }
+                        if refactor_sketched {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
                     ),
                 },
             ]
