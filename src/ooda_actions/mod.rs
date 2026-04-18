@@ -101,5 +101,6 @@ fn dispatch_one(
         ActionKind::PollDeveloperActivity => {
             simple_actions::dispatch_poll_developer_activity(action, bridges)
         }
+        ActionKind::ExtractIdeas => simple_actions::dispatch_extract_ideas(action, bridges),
     }
 }
