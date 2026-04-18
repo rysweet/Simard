@@ -4,7 +4,7 @@ use super::types::{
     AnalyzedAction, AppendToFileRequest, CreateFileRequest, EngineerActionKind, GitCommitRequest,
     OpenIssueRequest, RepoInspection, SelectedEngineerAction, ShellCommandRequest,
     StructuredEditRequest, extract_command_from_objective, extract_file_path_from_objective,
-    parse_structured_edit_request, validate_repo_relative_path,
+    is_prose_fragment, parse_structured_edit_request, validate_repo_relative_path,
 };
 
 use super::SHELL_COMMAND_ALLOWLIST;
@@ -388,10 +388,21 @@ pub(crate) fn is_keyword_action_achievable(action: &AnalyzedAction, objective: &
             (lower.contains("open") || lower.contains("file") || lower.contains("report"))
                 && (lower.contains("issue") || lower.contains("bug"))
         }
-        // GitCommit: only valid when the objective is specifically about committing.
+        // GitCommit: only valid when the objective is specifically about committing,
+        // and the text after "commit" is not a prose fragment.
         AnalyzedAction::GitCommit => {
             let lower = objective.to_lowercase();
-            lower.contains("commit") || lower.contains("save changes")
+            if !(lower.contains("commit") || lower.contains("save changes")) {
+                return false;
+            }
+            // Reject if the message portion is prose (e.g. "commit -m and open PR against #890.")
+            if let Some(idx) = lower.find("commit ") {
+                let after_commit = &objective[idx + 7..];
+                if is_prose_fragment(after_commit) {
+                    return false;
+                }
+            }
+            true
         }
         // CreateFile / AppendToFile: need a discernible file path in the objective.
         AnalyzedAction::CreateFile | AnalyzedAction::AppendToFile => {
@@ -402,7 +413,7 @@ pub(crate) fn is_keyword_action_achievable(action: &AnalyzedAction, objective: &
             let lower = objective.to_lowercase();
             lower.contains("replace") || lower.contains("edit-file") || lower.contains("update")
         }
-        // RunShellCommand: needs an extractable command.
+        // RunShellCommand: needs an extractable command that is not a prose fragment.
         AnalyzedAction::RunShellCommand => extract_command_from_objective(objective).is_some(),
     }
 }
@@ -420,7 +431,7 @@ pub(crate) fn select_engineer_action(
     // LLM-based planning. If unavailable, use keyword analysis as the
     // base strategy — keyword analysis is the foundational
     // implementation, LLM planning is an enhancement.
-    let mut plan_parse_failed = false;
+    let mut used_keyword_analysis = false;
     let analyzed = match crate::engineer_plan::plan_objective(objective, inspection) {
         Ok(plan) if !plan.steps().is_empty() => {
             let action = &plan.steps()[0].action;
@@ -433,31 +444,32 @@ pub(crate) fn select_engineer_action(
                      using keyword analysis instead",
                     action
                 );
+                used_keyword_analysis = true;
                 super::types::analyze_objective(objective)
             }
         }
         Ok(_) => {
             tracing::debug!("LLM plan returned empty steps, using keyword analysis");
+            used_keyword_analysis = true;
             super::types::analyze_objective(objective)
         }
         Err(e) => {
             tracing::warn!("LLM planning failed: {e} — using keyword analysis");
-            plan_parse_failed = true;
+            used_keyword_analysis = true;
             super::types::analyze_objective(objective)
         }
     };
 
-    // When plan parsing failed, validate that the keyword-analyzed action is
-    // actually achievable. Keyword matching can trigger on incidental words
-    // (e.g. "issue" in "fix issue #835" → OpenIssue).
-    let analyzed = if plan_parse_failed && !is_keyword_action_achievable(&analyzed, objective) {
+    // Always validate keyword-analyzed actions. Keyword matching can trigger
+    // on incidental words (e.g. "issue" in "fix issue #835" → OpenIssue,
+    // or "run" in "run the migration and open PR" → RunShellCommand with
+    // prose fragments as the argv).
+    let analyzed = if used_keyword_analysis && !is_keyword_action_achievable(&analyzed, objective) {
         tracing::warn!(
-            "suppressed {:?} action after plan parse failure — \
-             keyword matched but action is not achievable for this objective; \
-             defaulting to safe action",
+            "suppressed {:?} action — keyword matched but action is not \
+             achievable for this objective; defaulting to safe action",
             analyzed
         );
-        // Use ReadOnlyScan as the safe default action.
         AnalyzedAction::ReadOnlyScan
     } else {
         analyzed

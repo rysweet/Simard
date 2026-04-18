@@ -173,6 +173,45 @@ pub fn analyze_objective(objective: &str) -> AnalyzedAction {
     }
 }
 
+/// Words that indicate the extracted text is natural-language prose rather
+/// than a real shell command.  Checked as whole whitespace-delimited tokens.
+const PROSE_SIGNAL_WORDS: &[&str] = &[
+    "and", "or", "but", "then", "also", "should", "would", "could", "please",
+    "the", "this", "that", "with", "from", "into", "about", "against", "after",
+    "before", "because", "since", "while", "although", "however", "therefore",
+    "furthermore", "additionally", "shall", "will", "might", "must",
+];
+
+/// Returns `true` when `text` looks like a natural-language prose fragment
+/// rather than a structured shell command.
+pub(crate) fn is_prose_fragment(text: &str) -> bool {
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    if tokens.is_empty() {
+        return true;
+    }
+
+    // Sentence-ending punctuation anywhere in the tokens is a strong signal.
+    if tokens.iter().any(|t| t.ends_with('.') || t.ends_with('?') || t.ends_with('!')) {
+        return true;
+    }
+
+    // If more than a third of the tokens are prose signal words, it's prose.
+    let prose_count = tokens
+        .iter()
+        .filter(|t| PROSE_SIGNAL_WORDS.contains(&t.to_lowercase().as_str()))
+        .count();
+    if tokens.len() >= 3 && prose_count * 3 >= tokens.len() {
+        return true;
+    }
+
+    // Issue/PR references like "#890" in the middle of a "command" are prose.
+    if tokens.iter().skip(1).any(|t| t.starts_with('#') && t.len() > 1) {
+        return true;
+    }
+
+    false
+}
+
 pub(crate) fn extract_command_from_objective(objective: &str) -> Option<Vec<String>> {
     let lower = objective.to_lowercase();
     let rest = if let Some(idx) = lower.find("run ") {
@@ -183,7 +222,16 @@ pub(crate) fn extract_command_from_objective(objective: &str) -> Option<Vec<Stri
         return None;
     };
     let argv: Vec<String> = rest.split_whitespace().map(String::from).collect();
-    if argv.is_empty() { None } else { Some(argv) }
+    if argv.is_empty() {
+        return None;
+    }
+
+    // Reject if the extracted text looks like prose rather than a command.
+    if is_prose_fragment(rest) {
+        return None;
+    }
+
+    Some(argv)
 }
 
 pub(crate) fn extract_file_path_from_objective(objective: &str) -> Option<String> {
@@ -399,6 +447,67 @@ mod tests {
     #[test]
     fn extract_command_from_objective_no_match() {
         assert!(extract_command_from_objective("just some text").is_none());
+    }
+
+    #[test]
+    fn extract_command_rejects_prose_with_period() {
+        // Issue #912: prose fragments like "git commit -m and open PR against #890."
+        // should not be treated as shell commands.
+        assert!(extract_command_from_objective(
+            "run git commit -m and open PR against #890."
+        ).is_none());
+    }
+
+    #[test]
+    fn extract_command_rejects_prose_with_conjunctions() {
+        assert!(extract_command_from_objective(
+            "run the migration and then deploy"
+        ).is_none());
+    }
+
+    #[test]
+    fn extract_command_rejects_prose_with_issue_ref() {
+        assert!(extract_command_from_objective(
+            "execute the fix for #123 in the planner"
+        ).is_none());
+    }
+
+    #[test]
+    fn extract_command_accepts_real_commands() {
+        let argv = extract_command_from_objective("run cargo test --all").unwrap();
+        assert_eq!(argv, vec!["cargo", "test", "--all"]);
+        let argv = extract_command_from_objective("run git status").unwrap();
+        assert_eq!(argv, vec!["git", "status"]);
+    }
+
+    #[test]
+    fn is_prose_fragment_detects_sentence_ending() {
+        assert!(is_prose_fragment("commit -m and open PR against #890."));
+        assert!(is_prose_fragment("what should we do?"));
+        assert!(is_prose_fragment("stop the process!"));
+    }
+
+    #[test]
+    fn is_prose_fragment_detects_conjunctions() {
+        assert!(is_prose_fragment("the migration and then deploy"));
+    }
+
+    #[test]
+    fn is_prose_fragment_detects_issue_refs() {
+        assert!(is_prose_fragment("the fix for #123 in the planner"));
+    }
+
+    #[test]
+    fn is_prose_fragment_allows_real_commands() {
+        assert!(!is_prose_fragment("cargo test --all"));
+        assert!(!is_prose_fragment("git status"));
+        assert!(!is_prose_fragment("gh issue list"));
+    }
+
+    #[test]
+    fn is_prose_fragment_empty_is_prose() {
+        assert!(is_prose_fragment(""));
+        assert!(is_prose_fragment("   "));
     }
 
     #[test]
