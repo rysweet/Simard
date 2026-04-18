@@ -2365,7 +2365,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         activeTab=tab.dataset.tab;
         clearTabTimers();
         if(tab.dataset.tab==='logs') {fetchLogs();tabRefreshTimers.logs=setInterval(fetchLogs,15000);}
-        if(tab.dataset.tab==='processes') {fetchProcesses();tabRefreshTimers.proc=setInterval(fetchProcesses,10000);}
+        if(tab.dataset.tab==='processes') {fetchProcessTree();tabRefreshTimers.proc=setInterval(fetchProcessTree,15000);}
         if(tab.dataset.tab==='memory') fetchMemory();
 
         if(tab.dataset.tab==='goals') fetchGoals();
@@ -2432,7 +2432,19 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
               <h3>${esc(t.name)} <span class="badge">${fmtB(t.size_bytes)}</span></h3>
               <div class="log-box" style="max-height:200px">${esc((t.preview_lines||[]).join('\n'))||'(empty)'}</div>
             </div>`).join('');
-        }else{tEl.innerHTML='<span style="color:#8b949e">No OODA transcripts found in state root. Run the OODA daemon to generate transcripts.</span>';}
+        }else{tEl.innerHTML='<span style="color:#8b949e">No OODA transcripts found in state root.</span>';}
+        // Render cycle reports
+        const crEl=document.getElementById('cycle-reports');
+        if(d.cycle_reports?.length){
+          crEl.innerHTML=d.cycle_reports.map(c=>{
+            const num=c.cycle_number;
+            const text=c.summary||JSON.stringify(c.report||{});
+            return`<div class="transcript-item">
+              <h3>Cycle #${num}</h3>
+              <div class="log-box" style="max-height:100px">${esc(text)}</div>
+            </div>`;
+          }).join('');
+        }else{crEl.innerHTML='<span style="color:#8b949e">No cycle reports found. Run the OODA daemon to generate cycle data.</span>';}
         const ttEl=document.getElementById('terminal-transcripts');
         if(d.terminal_transcripts?.length){
           ttEl.innerHTML=d.terminal_transcripts.map(t=>`
