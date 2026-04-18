@@ -2335,7 +2335,7 @@ async fn read_journal_logs() -> Vec<String> {
 
 async fn processes() -> Json<Value> {
     let output = tokio::process::Command::new("ps")
-        .args(["axo", "pid,etime,comm,args"])
+        .args(["axo", "pid,ppid,etime,comm,args"])
         .output()
         .await;
 
@@ -2349,12 +2349,13 @@ async fn processes() -> Json<Value> {
                 && !lower.contains("ps axo")
             {
                 let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 4 {
+                if parts.len() >= 5 {
                     procs.push(json!({
                         "pid": parts[0],
-                        "uptime": parts[1],
-                        "command": parts[2],
-                        "full_args": parts[3..].join(" "),
+                        "ppid": parts[1],
+                        "uptime": parts[2],
+                        "command": parts[3],
+                        "full_args": parts[4..].join(" "),
                     }));
                 }
             }
@@ -2714,6 +2715,12 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     .proc-table th{text-align:left;color:#8b949e;padding:.4rem .6rem;border-bottom:1px solid var(--border)}
     .proc-table td{padding:.4rem .6rem;border-bottom:1px solid var(--border)}
     .proc-table tr:last-child td{border-bottom:none}
+    .proc-tree .proc-row{display:flex;gap:.5rem;align-items:baseline;padding:.25rem .5rem;border-bottom:1px solid var(--border);font-family:monospace;font-size:.82rem}
+    .proc-tree .proc-row:hover{background:rgba(88,166,255,0.05)}
+    .proc-tree .proc-pid{color:var(--accent);min-width:4rem;font-weight:600}
+    .proc-tree .proc-uptime{min-width:6rem}
+    .proc-tree .proc-kids.collapsed{display:none}
+    .proc-tree .proc-kids{border-left:1px solid #30363d;margin-left:8px}
     #chat-messages{background:#010409;border:1px solid var(--border);border-radius:6px;padding:.75rem;height:400px;overflow-y:auto;font-size:.9rem;margin-bottom:.75rem}
     .chat-msg{margin-bottom:.5rem} .chat-msg .role{font-weight:700;margin-right:.5rem}
     .chat-msg .role.user{color:var(--accent)} .chat-msg .role.system{color:var(--yellow)} .chat-msg .role.assistant{color:var(--green)}
@@ -2780,7 +2787,19 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
   </div>
 
   <div class="tab-content active" id="tab-overview">
+    <div class="card" style="margin-bottom:1rem;border:1px solid #238636;background:linear-gradient(135deg,#0d1117,#0f1a12)">
+      <h2 style="color:#3fb950;margin-bottom:.75rem">🤖 Simard — Autonomous Agent</h2>
+      <div id="agent-live-status"><span class="loading">Loading agent status…</span></div>
+    </div>
     <div class="grid">
+      <div class="card">
+        <h2>Recent Actions <button class="btn" onclick="fetchStatus()" style="font-size:.75rem">Refresh</button></h2>
+        <div id="recent-actions-list"><span class="loading">Loading…</span></div>
+      </div>
+      <div class="card">
+        <h2>Open PRs</h2>
+        <div id="open-prs-list"><span class="loading">Loading…</span></div>
+      </div>
       <div class="card"><h2>System Status</h2><div id="status"><span class="loading">Loading…</span></div></div>
       <div class="card"><h2>Open Issues</h2><ul id="issues-list"><li class="loading">Loading…</li></ul></div>
       <div class="card">
@@ -3102,6 +3121,97 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       }catch(e){document.getElementById('status').innerHTML='<span class="err">Failed to reach /api/status — is the dashboard server running?</span>';}
     }
 
+    async function fetchAgentOverview(){
+      try{
+        const d=await apiFetch('/api/activity');
+        const el=document.getElementById('agent-live-status');
+        const daemon=d.daemon||{};
+        const isRunning=daemon.status==='healthy';
+        const heartbeat=daemon.last_heartbeat?timeAgo(daemon.last_heartbeat):'never';
+        const cycle=daemon.current_cycle||'?';
+
+        // Extract actual actions from the most recent structured cycle report
+        let latestActions=[];
+        const cycles=d.recent_cycles||[];
+        for(const c of cycles){
+          const rpt=c.report||{};
+          if(rpt.outcomes?.length){
+            latestActions=rpt.outcomes;
+            break;
+          }
+        }
+
+        // Find what the agent is currently working on from latest priorities
+        let currentFocus='';
+        for(const c of cycles){
+          const rpt=c.report||{};
+          if(rpt.priorities?.length){
+            const top=rpt.priorities[0];
+            currentFocus=`<strong>${esc(top.goal_id)}</strong> — ${esc(top.reason)} <span style="color:${top.urgency>0.7?'var(--red)':top.urgency>0.4?'var(--yellow)':'var(--green)'}">urgency ${top.urgency.toFixed(2)}</span>`;
+            break;
+          }
+        }
+
+        el.innerHTML=`
+          <div style="display:flex;gap:2rem;flex-wrap:wrap;align-items:center;margin-bottom:.75rem">
+            <div><span style="font-size:1.5rem;${isRunning?'':'filter:grayscale(1)'}">${isRunning?'🟢':'🔴'}</span> <strong style="font-size:1.1rem">${isRunning?'OODA Loop Active':'Agent Stopped'}</strong></div>
+            <div style="color:#8b949e">Cycle <strong style="color:var(--fg)">#${cycle}</strong> · Last heartbeat <strong style="color:var(--fg)">${heartbeat}</strong></div>
+          </div>
+          ${currentFocus?`<div style="margin-bottom:.75rem"><span style="color:#8b949e">🎯 Top Priority:</span> ${currentFocus}</div>`:''}
+          ${latestActions.length?`
+            <div style="font-size:.85rem">
+              <div style="color:#8b949e;margin-bottom:.3rem;font-weight:600">Last Cycle Actions:</div>
+              ${latestActions.map(o=>`
+                <div style="padding:.2rem 0;display:flex;gap:.5rem;align-items:baseline">
+                  <span>${o.success?'✅':'❌'}</span>
+                  <code style="color:var(--accent)">${esc(o.action_kind||'')}</code>
+                  <span>${esc(o.action_description||'')}</span>
+                  ${o.detail?'<span style="color:#8b949e;font-size:.8rem;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block">'+esc(o.detail.substring(0,120))+'</span>':''}
+                </div>`).join('')}
+            </div>`:'<div style="color:#8b949e">No recent actions recorded.</div>'}`;
+
+        // Open PRs
+        const prs=d.open_prs||[];
+        const prEl=document.getElementById('open-prs-list');
+        if(prs.length){
+          prEl.innerHTML=prs.slice(0,8).map(pr=>`
+            <div style="padding:.3rem 0;border-bottom:1px solid var(--border);font-size:.85rem;display:flex;gap:.5rem;align-items:baseline">
+              <a href="${esc(pr.url)}" target="_blank" style="color:var(--accent);text-decoration:none;min-width:3rem">#${pr.number}</a>
+              <span style="flex:1">${esc(pr.title)}</span>
+              <span style="color:#8b949e;font-size:.75rem">${timeAgo(pr.createdAt)}</span>
+            </div>`).join('')+
+            (prs.length>8?`<div style="color:#8b949e;font-size:.8rem;margin-top:.3rem">+ ${prs.length-8} more</div>`:'');
+        }else{
+          prEl.innerHTML='<span style="color:#8b949e">No open PRs</span>';
+        }
+
+        // Recent actions from cycle outcomes
+        const actEl=document.getElementById('recent-actions-list');
+        let allActions=[];
+        for(const c of cycles.slice(0,5)){
+          const rpt=c.report||{};
+          const num=rpt.cycle_number||c.cycle_number||'?';
+          for(const o of (rpt.outcomes||[])){
+            allActions.push({cycle:num,...o});
+          }
+        }
+        if(allActions.length){
+          actEl.innerHTML=allActions.slice(0,15).map(a=>`
+            <div style="padding:.25rem 0;border-bottom:1px solid var(--border);font-size:.85rem;display:flex;gap:.5rem;align-items:baseline">
+              <span style="color:var(--accent);min-width:2rem;font-weight:600">#${a.cycle}</span>
+              <span>${a.success?'✅':'❌'}</span>
+              <code>${esc(a.action_kind||'')}</code>
+              <span style="flex:1">${esc(a.action_description||'')}</span>
+            </div>`).join('');
+        }else{
+          actEl.innerHTML='<span style="color:#8b949e">No structured action history yet. The OODA daemon records actions each cycle.</span>';
+        }
+      }catch(e){
+        const el=document.getElementById('agent-live-status');
+        if(el) el.innerHTML='<span class="err">Failed to load agent status</span>';
+      }
+    }
+
     /* --- Issues --- */
     async function fetchIssues(){
       try{
@@ -3222,15 +3332,40 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         const procs = d.processes || [];
         if (procs.length) {
           if (summary) summary.textContent = `${procs.length} process(es) — updated ${timeAgo(d.timestamp)}`;
-          container.innerHTML = '<div class="proc-tree">' + procs.map(p => {
-            const cmd = esc(p.full_args || p.command || '');
-            const cmdDisplay = cmd.length > 100 ? cmd.substring(0, 97) + '…' : cmd;
-            return `<div class="proc-node"><div class="proc-row">
-              <span class="proc-pid">${esc(p.pid)}</span>
-              <span class="proc-state running">up ${esc(p.uptime||'?')}</span>
-              <span class="proc-cmd" title="${cmd}">${cmdDisplay}</span>
-            </div></div>`;
-          }).join('') + '</div>';
+          // Build tree from flat list using ppid
+          const byPid = {};
+          procs.forEach(p => { byPid[p.pid] = { ...p, children: [] }; });
+          const roots = [];
+          procs.forEach(p => {
+            const node = byPid[p.pid];
+            if (p.ppid && byPid[p.ppid]) {
+              byPid[p.ppid].children.push(node);
+            } else {
+              roots.push(node);
+            }
+          });
+          function renderNode(n, depth) {
+            const indent = depth * 20;
+            const hasKids = n.children.length > 0;
+            const toggle = hasKids
+              ? `<span class="proc-toggle" onclick="this.parentElement.parentElement.querySelector('.proc-kids').classList.toggle('collapsed');this.textContent=this.textContent==='▼'?'▶':'▼'" style="cursor:pointer;user-select:none;width:1em;display:inline-block">▼</span>`
+              : `<span style="width:1em;display:inline-block;color:#484f58">·</span>`;
+            const cmd = esc(n.full_args || n.command || '');
+            const cmdShort = cmd.length > 90 ? cmd.substring(0,87)+'…' : cmd;
+            let html = `<div class="proc-row" style="padding-left:${indent}px">
+              ${toggle}
+              <span class="proc-pid">${esc(n.pid)}</span>
+              <span class="proc-uptime" style="color:#8b949e;font-size:.8rem;min-width:80px">${esc(n.uptime||'')}</span>
+              <span class="proc-cmd" title="${cmd}" style="color:#c9d1d9">${cmdShort}</span>
+            </div>`;
+            if (hasKids) {
+              html += '<div class="proc-kids">';
+              n.children.forEach(c => { html += renderNode(c, depth+1); });
+              html += '</div>';
+            }
+            return html;
+          }
+          container.innerHTML = '<div class="proc-tree">' + roots.map(r => renderNode(r, 0)).join('') + '</div>';
         } else {
           if (summary) summary.textContent = d.timestamp ? `Updated ${timeAgo(d.timestamp)}` : '';
           container.innerHTML = '<span style="color:#8b949e">No Simard-related processes found. Is the daemon running?</span>';
@@ -4012,7 +4147,8 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     }
 
     /* --- Init --- */
-    fetchStatus(); fetchIssues(); fetchDistributed();
+    fetchStatus(); fetchIssues(); fetchDistributed(); fetchAgentOverview();
+    setInterval(fetchAgentOverview,30000);
     setInterval(fetchStatus,30000);
     setInterval(fetchIssues,120000);
   </script>
