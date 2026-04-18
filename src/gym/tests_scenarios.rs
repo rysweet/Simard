@@ -76,6 +76,10 @@ fn benchmark_scenarios_covers_all_classes() {
     assert!(has_class(BenchmarkClass::CodeReview));
     assert!(has_class(BenchmarkClass::Debugging));
     assert!(has_class(BenchmarkClass::ConfigManagement));
+    assert!(has_class(BenchmarkClass::ConcurrencyAnalysis));
+    assert!(has_class(BenchmarkClass::MigrationPlanning));
+    assert!(has_class(BenchmarkClass::ObservabilityInstrumentation));
+    assert!(has_class(BenchmarkClass::DataModeling));
 }
 
 // --- resolve_benchmark_scenario ---
