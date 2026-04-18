@@ -11,7 +11,9 @@ mod simple_actions;
 mod verification;
 
 #[cfg(test)]
-mod test_helpers;
+pub(crate) mod test_helpers;
+#[cfg(test)]
+mod tests_dispatch;
 #[cfg(test)]
 mod tests_goal_session;
 

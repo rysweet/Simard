@@ -224,7 +224,7 @@ pub(crate) fn select_open_issue(
 /// Sanitize an objective string for use as a GitHub issue title.
 ///
 /// Strips newlines, collapses whitespace, and truncates to a reasonable length.
-fn sanitize_issue_title(raw: &str) -> String {
+pub(crate) fn sanitize_issue_title(raw: &str) -> String {
     let single_line: String = raw
         .chars()
         .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
