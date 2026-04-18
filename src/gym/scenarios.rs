@@ -4,7 +4,7 @@ use crate::runtime::RuntimeTopology;
 
 use super::types::{BenchmarkCheckResult, BenchmarkClass, BenchmarkScenario};
 
-const BENCHMARK_SCENARIOS: [BenchmarkScenario; 47] = [
+const BENCHMARK_SCENARIOS: [BenchmarkScenario; 59] = [
     BenchmarkScenario {
         id: "repo-exploration-local",
         title: "Repo exploration on local harness",
@@ -532,6 +532,142 @@ const BENCHMARK_SCENARIOS: [BenchmarkScenario; 47] = [
         base_type: "local-harness",
         topology: RuntimeTopology::SingleProcess,
         objective: "Audit the dependencies in Cargo.toml for the Simard project. For each dependency: (1) note the current version constraint, (2) identify whether the constraint is too tight (exact pin) or too loose (wildcard), (3) check whether the dependency is used in the codebase (search for use/extern crate statements), (4) flag any dev-dependencies that appear in normal dependencies or vice versa. Produce a dependency health report with update recommendations.",
+        expected_min_runtime_evidence: 3,
+    },
+    // --- Wave 5: ConcurrencyAnalysis scenarios ---
+    BenchmarkScenario {
+        id: "concurrency-race-condition-audit",
+        title: "Audit codebase for potential race conditions",
+        description: "Analyze shared mutable state and concurrent access patterns to identify potential race conditions in the runtime.",
+        class: BenchmarkClass::ConcurrencyAnalysis,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Scan the Simard codebase for shared mutable state accessed from multiple threads or async tasks. Identify: (1) all uses of Arc<Mutex<_>>, Arc<RwLock<_>>, and atomics, (2) whether any shared state is accessed without proper synchronization, (3) potential TOCTOU (time-of-check-time-of-use) patterns where a value is read and then acted upon without holding a lock, (4) whether any channel-based patterns could deadlock if the receiver is dropped. Produce a race condition risk assessment.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "concurrency-deadlock-analysis",
+        title: "Analyze lock ordering for deadlock potential",
+        description: "Examine lock acquisition patterns across the codebase to identify potential deadlock scenarios from inconsistent lock ordering.",
+        class: BenchmarkClass::ConcurrencyAnalysis,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze all mutex and rwlock usage in the Simard codebase for deadlock potential. Determine: (1) all lock types and where they are defined, (2) whether any code path acquires multiple locks and in what order, (3) whether async code holds locks across .await points (which can cause deadlocks with non-async-aware mutexes), (4) whether any lock guard is held longer than necessary. Produce a lock ordering analysis with deadlock risk ratings.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "concurrency-async-safety-review",
+        title: "Review async task safety and cancellation handling",
+        description: "Assess async task spawning patterns for proper cancellation handling, resource cleanup, and structured concurrency.",
+        class: BenchmarkClass::ConcurrencyAnalysis,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Review all async task spawning (tokio::spawn, tokio::task::spawn_blocking) in the Simard codebase. Assess: (1) whether spawned tasks have proper error handling for JoinError, (2) whether task cancellation is handled gracefully (e.g., select! branches with cleanup), (3) whether any spawned tasks hold resources that would leak on cancellation, (4) whether structured concurrency patterns (JoinSet, TaskTracker) are used where appropriate. Produce a task safety assessment.",
+        expected_min_runtime_evidence: 3,
+    },
+    // --- Wave 5: MigrationPlanning scenarios ---
+    BenchmarkScenario {
+        id: "migration-schema-evolution-plan",
+        title: "Plan schema evolution for runtime state",
+        description: "Design a migration strategy for evolving the runtime state serialization format while maintaining backward compatibility.",
+        class: BenchmarkClass::MigrationPlanning,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze the serialized state structures in the Simard codebase (RuntimeHandoffSnapshot, session state, memory records). Plan: (1) which fields are serialized and their current format, (2) what would break if a field were added, removed, or renamed, (3) whether serde attributes (default, skip_serializing_if, rename) are used to maintain compatibility, (4) a migration strategy for adding a new required field to RuntimeHandoffSnapshot without breaking existing serialized data. Produce a schema evolution plan.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "migration-api-versioning-strategy",
+        title: "Design API versioning strategy for public interfaces",
+        description: "Evaluate the public API surface and design a versioning strategy that supports backward-compatible evolution.",
+        class: BenchmarkClass::MigrationPlanning,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze the public API surface of the Simard codebase (pub functions, pub structs, pub traits). Plan: (1) which APIs are stable vs experimental, (2) which API changes would be breaking (removing fields, changing types, removing functions), (3) whether the current API uses any deprecation markers (#[deprecated]), (4) a versioning strategy for introducing a v2 of a core trait while maintaining the v1 interface. Produce an API migration roadmap.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "migration-dependency-upgrade-plan",
+        title: "Plan major dependency upgrade migration",
+        description: "Analyze the impact of upgrading a major dependency and produce a step-by-step migration plan.",
+        class: BenchmarkClass::MigrationPlanning,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze the Cargo.toml dependencies and select the most impactful major dependency (e.g., tokio, serde, or another core crate). Plan: (1) which modules directly depend on this crate, (2) which API changes a major version bump would introduce, (3) whether any transitive dependencies would conflict, (4) a step-by-step migration plan with intermediate checkpoints where the build can be verified. Produce a dependency upgrade migration plan.",
+        expected_min_runtime_evidence: 3,
+    },
+    // --- Wave 5: ObservabilityInstrumentation scenarios ---
+    BenchmarkScenario {
+        id: "observability-logging-audit",
+        title: "Audit logging coverage and consistency",
+        description: "Analyze logging statements across the codebase for coverage gaps, inconsistent log levels, and missing context.",
+        class: BenchmarkClass::ObservabilityInstrumentation,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Scan the Simard codebase for all logging statements (log::info!, log::warn!, log::error!, tracing::info!, etc.). Assess: (1) whether error paths consistently log before returning errors, (2) whether log levels are used appropriately (debug for verbose, info for milestones, warn for recoverable issues, error for failures), (3) whether log messages include sufficient context (identifiers, state values), (4) which modules lack any logging. Produce a logging coverage report with specific recommendations.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "observability-tracing-instrumentation",
+        title: "Design tracing instrumentation for request flows",
+        description: "Design a tracing strategy to instrument key request flows with spans, events, and context propagation.",
+        class: BenchmarkClass::ObservabilityInstrumentation,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze the key execution flows in the Simard codebase (session lifecycle, message handling, state transitions). Design: (1) where tracing spans should be placed to capture the full request lifecycle, (2) which fields should be recorded on each span (session_id, phase, objective), (3) whether existing instrumentation (if any) follows OpenTelemetry conventions, (4) how span context should propagate across async task boundaries. Produce a tracing instrumentation plan with specific code locations.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "observability-metrics-design",
+        title: "Design metrics collection for runtime health",
+        description: "Design a metrics collection strategy covering runtime health indicators, throughput, latency, and error rates.",
+        class: BenchmarkClass::ObservabilityInstrumentation,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze the Simard runtime for key health indicators that should be measured. Design: (1) which counters to track (sessions started, messages processed, errors encountered), (2) which histograms to track (session duration, message latency, state transition time), (3) which gauges to track (active sessions, queue depth, memory usage), (4) labeling strategy for dimensional metrics (by topology, by phase, by error type). Produce a metrics specification with metric names, types, and collection points.",
+        expected_min_runtime_evidence: 3,
+    },
+    // --- Wave 5: DataModeling scenarios ---
+    BenchmarkScenario {
+        id: "data-modeling-entity-relationship-map",
+        title: "Map entity relationships across domain types",
+        description: "Analyze domain types to produce an entity-relationship map showing ownership, references, and lifecycle dependencies.",
+        class: BenchmarkClass::DataModeling,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze the core domain types in the Simard codebase (session, runtime, memory, evidence, handoff structures). Map: (1) which types contain or reference other types (ownership vs borrowing), (2) lifecycle dependencies (which entities must exist before others can be created), (3) whether any circular references exist between types, (4) which types serve as aggregate roots vs value objects. Produce an entity-relationship diagram description with cardinality annotations.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "data-modeling-serialization-consistency",
+        title: "Audit serialization format consistency across types",
+        description: "Check that serialization conventions (field naming, optional handling, enum representation) are consistent across all serializable types.",
+        class: BenchmarkClass::DataModeling,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Audit all types that derive Serialize or Deserialize in the Simard codebase. Check: (1) whether serde rename conventions are consistent (kebab-case vs snake_case vs camelCase), (2) whether Option fields consistently use skip_serializing_if or not, (3) whether enum serialization is consistent (externally tagged vs internally tagged vs untagged), (4) whether any types use custom serializers that could produce surprising output. Produce a serialization consistency report.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "data-modeling-type-safety-assessment",
+        title: "Assess type safety of domain model boundaries",
+        description: "Evaluate whether the type system effectively prevents invalid states and enforces domain invariants at compile time.",
+        class: BenchmarkClass::DataModeling,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze the domain model types in the Simard codebase for type safety. Assess: (1) whether enums are used to represent finite state sets instead of stringly-typed fields, (2) whether newtypes or wrapper types prevent mixing up identifiers (session ID vs suite ID), (3) whether builder patterns or constructor functions enforce required fields, (4) whether any pub fields allow construction of invalid states. Produce a type safety assessment with specific improvement recommendations.",
         expected_min_runtime_evidence: 3,
     },
 ];
@@ -1256,6 +1392,218 @@ pub(super) fn class_specific_checks(
                 },
             ]
         }
+        BenchmarkClass::ConcurrencyAnalysis => {
+            let race_condition_analyzed = combined.contains("race")
+                || combined.contains("concurrent")
+                || combined.contains("shared")
+                || combined.contains("mutex")
+                || combined.contains("atomic");
+            let synchronization_assessed = combined.contains("lock")
+                || combined.contains("synchroniz")
+                || combined.contains("rwlock")
+                || combined.contains("channel")
+                || combined.contains("arc");
+            let safety_evaluated = combined.contains("deadlock")
+                || combined.contains("safe")
+                || combined.contains("cancel")
+                || combined.contains("await")
+                || combined.contains("spawn");
+            vec![
+                BenchmarkCheckResult {
+                    id: "concurrency-race-analyzed".to_string(),
+                    passed: race_condition_analyzed,
+                    detail: format!(
+                        "execution output {} race condition analysis",
+                        if race_condition_analyzed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "concurrency-sync-assessed".to_string(),
+                    passed: synchronization_assessed,
+                    detail: format!(
+                        "execution output {} synchronization assessment",
+                        if synchronization_assessed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "concurrency-safety-evaluated".to_string(),
+                    passed: safety_evaluated,
+                    detail: format!(
+                        "execution output {} concurrency safety evaluation",
+                        if safety_evaluated {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::MigrationPlanning => {
+            let migration_scope_defined = combined.contains("migrat")
+                || combined.contains("schema")
+                || combined.contains("version")
+                || combined.contains("upgrade")
+                || combined.contains("evolution");
+            let compatibility_assessed = combined.contains("compat")
+                || combined.contains("backward")
+                || combined.contains("breaking")
+                || combined.contains("deprecat")
+                || combined.contains("serde");
+            let plan_produced = combined.contains("step")
+                || combined.contains("plan")
+                || combined.contains("phase")
+                || combined.contains("roadmap")
+                || combined.contains("checkpoint");
+            vec![
+                BenchmarkCheckResult {
+                    id: "migration-scope-defined".to_string(),
+                    passed: migration_scope_defined,
+                    detail: format!(
+                        "execution output {} migration scope definition",
+                        if migration_scope_defined {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "migration-compatibility-assessed".to_string(),
+                    passed: compatibility_assessed,
+                    detail: format!(
+                        "execution output {} compatibility assessment",
+                        if compatibility_assessed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "migration-plan-produced".to_string(),
+                    passed: plan_produced,
+                    detail: format!(
+                        "execution output {} migration plan",
+                        if plan_produced { "includes" } else { "lacks" }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::ObservabilityInstrumentation => {
+            let instrumentation_analyzed = combined.contains("log")
+                || combined.contains("trac")
+                || combined.contains("metric")
+                || combined.contains("instrument")
+                || combined.contains("observab");
+            let coverage_assessed = combined.contains("coverage")
+                || combined.contains("gap")
+                || combined.contains("missing")
+                || combined.contains("module")
+                || combined.contains("path");
+            let recommendation_present = combined.contains("recommend")
+                || combined.contains("suggest")
+                || combined.contains("should")
+                || combined.contains("add")
+                || combined.contains("design");
+            vec![
+                BenchmarkCheckResult {
+                    id: "observability-instrumentation-analyzed".to_string(),
+                    passed: instrumentation_analyzed,
+                    detail: format!(
+                        "execution output {} instrumentation analysis",
+                        if instrumentation_analyzed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "observability-coverage-assessed".to_string(),
+                    passed: coverage_assessed,
+                    detail: format!(
+                        "execution output {} coverage assessment",
+                        if coverage_assessed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "observability-recommendation-present".to_string(),
+                    passed: recommendation_present,
+                    detail: format!(
+                        "execution output {} observability recommendations",
+                        if recommendation_present {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::DataModeling => {
+            let model_analyzed = combined.contains("type")
+                || combined.contains("struct")
+                || combined.contains("entity")
+                || combined.contains("field")
+                || combined.contains("schema");
+            let relationships_mapped = combined.contains("relation")
+                || combined.contains("reference")
+                || combined.contains("owner")
+                || combined.contains("contain")
+                || combined.contains("cardinality");
+            let quality_assessed = combined.contains("consisten")
+                || combined.contains("safety")
+                || combined.contains("invalid")
+                || combined.contains("invariant")
+                || combined.contains("newtype");
+            vec![
+                BenchmarkCheckResult {
+                    id: "data-model-analyzed".to_string(),
+                    passed: model_analyzed,
+                    detail: format!(
+                        "execution output {} data model analysis",
+                        if model_analyzed { "includes" } else { "lacks" }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "data-relationships-mapped".to_string(),
+                    passed: relationships_mapped,
+                    detail: format!(
+                        "execution output {} relationship mapping",
+                        if relationships_mapped {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "data-quality-assessed".to_string(),
+                    passed: quality_assessed,
+                    detail: format!(
+                        "execution output {} data quality assessment",
+                        if quality_assessed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
     }
 }
 
@@ -1433,6 +1781,10 @@ mod tests {
             BenchmarkClass::CodeReview,
             BenchmarkClass::Debugging,
             BenchmarkClass::ConfigManagement,
+            BenchmarkClass::ConcurrencyAnalysis,
+            BenchmarkClass::MigrationPlanning,
+            BenchmarkClass::ObservabilityInstrumentation,
+            BenchmarkClass::DataModeling,
         ];
         let scenarios = benchmark_scenarios();
         for class in all_classes {
