@@ -217,6 +217,25 @@ pub fn run_ooda_cycle(
         act_elapsed.as_secs_f64()
     );
 
+    // --- Update goal current_activity from outcomes ---
+    for outcome in &outcomes {
+        if let Some(goal_id) = &outcome.action.goal_id {
+            if let Some(goal) = state
+                .active_goals
+                .active
+                .iter_mut()
+                .find(|g| g.id == *goal_id)
+            {
+                let activity = if outcome.success {
+                    format!("{}: {}", outcome.action.kind, truncate_detail(&outcome.detail, 120))
+                } else {
+                    format!("{} (failed): {}", outcome.action.kind, truncate_detail(&outcome.detail, 120))
+                };
+                goal.current_activity = Some(activity);
+            }
+        }
+    }
+
     // --- Memory consolidation: execution (record per-action output) ---
     for outcome in &outcomes {
         if let Err(e) = memory_consolidation::execution_memory_operations(
@@ -369,4 +388,14 @@ pub fn run_ooda_cycle(
         planned_actions,
         outcomes,
     })
+}
+
+/// Truncate a detail string to max_len, appending "…" if truncated.
+fn truncate_detail(s: &str, max_len: usize) -> String {
+    let trimmed = s.trim();
+    if trimmed.len() <= max_len {
+        trimmed.to_string()
+    } else {
+        format!("{}…", &trimmed[..max_len])
+    }
 }

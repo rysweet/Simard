@@ -166,6 +166,8 @@ pub fn promote_to_active(
         priority,
         status: GoalProgress::NotStarted,
         assigned_to,
+        current_activity: None,
+        wip_refs: vec![],
     });
     Ok(())
 }
@@ -261,6 +263,8 @@ pub fn seed_default_board(board: &mut GoalBoard) -> usize {
             priority,
             status: GoalProgress::NotStarted,
             assigned_to: None,
+        current_activity: None,
+        wip_refs: vec![],
         });
     }
 
@@ -278,6 +282,8 @@ mod tests {
             priority,
             status: GoalProgress::NotStarted,
             assigned_to: None,
+        current_activity: None,
+        wip_refs: vec![],
         }
     }
 

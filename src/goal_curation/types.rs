@@ -27,6 +27,20 @@ impl Display for GoalProgress {
     }
 }
 
+/// A reference to work-in-progress associated with a goal.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WipRef {
+    /// Kind of reference: "pr", "issue", "branch", "session", "engineer"
+    pub kind: String,
+    /// Reference value: PR number, issue number, branch name, etc.
+    pub ref_id: String,
+    /// Human-readable label
+    pub label: String,
+    /// URL if available
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
 /// An active goal on the board. Active goals are limited to `MAX_ACTIVE_GOALS`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ActiveGoal {
@@ -35,6 +49,12 @@ pub struct ActiveGoal {
     pub priority: u32,
     pub status: GoalProgress,
     pub assigned_to: Option<String>,
+    /// Current activity summary — what's happening right now toward this goal.
+    #[serde(default)]
+    pub current_activity: Option<String>,
+    /// References to work-in-progress: PRs, issues, branches, sessions.
+    #[serde(default)]
+    pub wip_refs: Vec<WipRef>,
 }
 
 impl ActiveGoal {
@@ -191,6 +211,8 @@ mod tests {
             priority: 3,
             status: GoalProgress::NotStarted,
             assigned_to: None,
+        current_activity: None,
+        wip_refs: vec![],
         };
         let json = serde_json::to_string(&g).unwrap();
         let g2: ActiveGoal = serde_json::from_str(&json).unwrap();
@@ -261,6 +283,8 @@ mod tests {
                 priority: 1,
                 status: GoalProgress::NotStarted,
                 assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
             })
             .collect();
         let board = GoalBoard {
@@ -279,6 +303,8 @@ mod tests {
                 priority: 1,
                 status: GoalProgress::NotStarted,
                 assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
             })
             .collect();
         let board = GoalBoard {

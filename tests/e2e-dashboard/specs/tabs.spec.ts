@@ -2,13 +2,14 @@ import { test, expect } from '../fixtures/simard-dashboard';
 
 const ALL_TABS = [
   'overview',
-  'distributed',
   'goals',
   'traces',
   'logs',
   'processes',
   'memory',
   'costs',
+  'thinking',
+  'workboard',
   'chat',
 ] as const;
 
@@ -84,6 +85,55 @@ async function mockAllApis(page: import('@playwright/test').Page) {
   await page.route('**/api/registry', (route) => route.fulfill(emptyJson));
   await page.route('**/api/build-lock', (route) => route.fulfill(emptyObj));
   await page.route('**/api/metrics', (route) => route.fulfill(emptyObj));
+  await page.route('**/api/ooda-thinking', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ reports: [] }),
+    }),
+  );
+  await page.route('**/api/workboard', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        cycle: { number: 1, phase: 'idle', interval_secs: 300 },
+        goals: [],
+        spawned_engineers: [],
+        recent_actions: [],
+        task_memory: [],
+        working_memory: [],
+        cognitive_statistics: {},
+        uptime_seconds: 0,
+        timestamp: new Date().toISOString(),
+        next_cycle_eta_seconds: 60,
+      }),
+    }),
+  );
+  await page.route('**/api/process-tree', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        root: {
+          pid: 1,
+          name: 'simard',
+          command: 'simard ooda',
+          state: 'running',
+          cpu_pct: 0.5,
+          memory_mb: 64.0,
+          children: [],
+        },
+      }),
+    }),
+  );
+  await page.route('**/api/memory/graph', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ nodes: [], edges: [] }),
+    }),
+  );
 }
 
 test.describe('Tab Navigation @structural', () => {

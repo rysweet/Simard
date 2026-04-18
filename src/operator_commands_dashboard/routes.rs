@@ -268,6 +268,8 @@ async fn goals() -> Json<Value> {
                         "priority": g.priority,
                         "status": g.status.to_string(),
                         "assigned_to": g.assigned_to,
+                        "current_activity": g.current_activity,
+                        "wip_refs": g.wip_refs,
                     })
                 })
                 .collect();
@@ -456,6 +458,8 @@ async fn add_goal(Json(body): Json<Value>) -> Json<Value> {
             priority,
             status: GoalProgress::NotStarted,
             assigned_to: None,
+        current_activity: None,
+        wip_refs: vec![],
         });
     }
 
@@ -565,6 +569,8 @@ async fn promote_backlog_item(Path(id): Path<String>) -> Json<Value> {
         priority: 3,
         status: GoalProgress::NotStarted,
         assigned_to: None,
+    current_activity: None,
+    wip_refs: vec![],
     });
 
     match std::fs::write(
@@ -2720,6 +2726,11 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       <div id="proc-count" style="margin-bottom:.5rem;color:#8b949e;font-size:.85rem"></div>
       <div id="proc-table"><span class="loading">Loading…</span></div>
     </div>
+    <div class="card" style="margin-top:1rem">
+      <h2>Process Tree <button class="btn" onclick="fetchProcessTree()">Refresh</button></h2>
+      <div id="proc-tree-summary" style="margin-bottom:.5rem;color:#8b949e;font-size:.85rem"></div>
+      <div id="proc-tree-container"><span class="loading">Loading…</span></div>
+    </div>
   </div>
 
   <div class="tab-content" id="tab-memory">
@@ -2857,13 +2868,6 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     <div class="card">
       <h2>Cognitive Statistics</h2>
       <div id="wb-cog-stats" style="font-size:.85rem;color:#8b949e">Loading…</div>
-    </div>
-  </div>
-
-  <div class="tab-content" id="tab-thinking">
-    <div class="card">
-      <h2>OODA Internal Reasoning <button class="btn" onclick="fetchThinking()">Refresh</button></h2>
-      <div id="thinking-timeline"><span class="loading">Loading…</span></div>
     </div>
   </div>
 
@@ -3066,15 +3070,17 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         const d=await apiFetch('/api/process-tree');
         const container = document.getElementById('proc-tree-container');
         const summary = document.getElementById('proc-tree-summary');
+        if (!container) return;
         if (d.root) {
-          summary.textContent = `${d.total_processes} process(es) · ${d.total_memory_mb} MB total — updated ${timeAgo(d.timestamp)}`;
+          if (summary) summary.textContent = `${d.total_processes || '?'} process(es) · ${d.total_memory_mb || '?'} MB total — updated ${timeAgo(d.timestamp)}`;
           container.innerHTML = '<div class="proc-tree">' + renderTreeNode(d.root, true, 0) + '</div>';
         } else {
-          summary.textContent = `Updated ${timeAgo(d.timestamp)}`;
+          if (summary) summary.textContent = d.timestamp ? `Updated ${timeAgo(d.timestamp)}` : '';
           container.innerHTML = '<span style="color:#8b949e">No process tree available. Is the daemon running?</span>';
         }
       } catch(e) {
-        document.getElementById('proc-tree-container').innerHTML = '<span class="err">Failed to load process tree</span>';
+        const c = document.getElementById('proc-tree-container');
+        if (c) c.innerHTML = '<span class="err">Failed to load process tree</span>';
       }
     }
 
@@ -3219,18 +3225,29 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         const d=await apiFetch('/api/goals');
         if(d.active?.length){
           document.getElementById('goals-active').innerHTML=`<table class="proc-table">
-            <tr><th>Priority</th><th>ID</th><th>Description</th><th>Status</th><th>Assigned</th><th>Actions</th></tr>
-            ${d.active.map(g=>`<tr>
+            <tr><th>Priority</th><th>ID</th><th>Description</th><th>Status</th><th>Current Activity</th><th>Actions</th></tr>
+            ${d.active.map(g=>{
+              let wipHtml='—';
+              if(g.current_activity||g.wip_refs?.length){
+                let parts=[];
+                if(g.current_activity) parts.push('<div style="font-size:.8rem">'+esc(g.current_activity)+'</div>');
+                if(g.wip_refs?.length) parts.push(g.wip_refs.map(r=>{
+                  const icon=r.kind==='pr'?'🔀':r.kind==='issue'?'🐛':r.kind==='branch'?'🌿':r.kind==='session'?'💻':'📌';
+                  return r.url?'<a href="'+esc(r.url)+'" target="_blank" style="color:var(--accent);text-decoration:none;font-size:.8rem">'+icon+' '+esc(r.label)+'</a>':'<span style="font-size:.8rem">'+icon+' '+esc(r.label)+'</span>';
+                }).join('<br>'));
+                wipHtml=parts.join('');
+              }
+              return `<tr>
               <td style="text-align:center">${g.priority??'—'}</td>
               <td><code>${esc(g.id)}</code></td>
               <td>${esc(g.description)}</td>
               <td>${esc(g.status)}</td>
-              <td>${g.assigned_to?esc(g.assigned_to):'—'}</td>
+              <td>${wipHtml}</td>
               <td>
                 <button class="btn" style="font-size:.7rem;padding:2px 6px" onclick="removeGoal('${esc(g.id)}')">✕</button>
                 <button class="btn" style="font-size:.7rem;padding:2px 6px;margin-left:4px" onclick="updateGoalStatus('${esc(g.id)}')">Status</button>
               </td>
-            </tr>`).join('')}
+            </tr>`;}).join('')}
           </table>
           <div style="margin-top:.5rem;color:#8b949e;font-size:.8rem">${d.active_count} active goal(s)</div>`;
         }else{document.getElementById('goals-active').innerHTML='<span style="color:#8b949e">No active goals. Use "Seed Default Goals" or run the OODA daemon to generate goals from meetings.</span>';}

@@ -67,6 +67,8 @@ pub fn check_meeting_handoffs(
                 priority,
                 status: GoalProgress::NotStarted,
                 assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
             });
         } else {
             // Board full — route to backlog with score based on position.
@@ -354,6 +356,8 @@ mod tests {
                 priority: 1,
                 status: GoalProgress::NotStarted,
                 assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
             });
         }
         board.backlog.push(BacklogItem {

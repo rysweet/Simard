@@ -23,6 +23,8 @@ fn sample_goal(id: &str, priority: u32) -> ActiveGoal {
         priority,
         status: GoalProgress::NotStarted,
         assigned_to: None,
+    current_activity: None,
+    wip_refs: vec![],
     }
 }
 
@@ -84,6 +86,8 @@ fn rejects_zero_priority() {
             priority: 0,
             status: GoalProgress::NotStarted,
             assigned_to: None,
+        current_activity: None,
+        wip_refs: vec![],
         },
     )
     .unwrap_err();
@@ -161,6 +165,8 @@ fn rejects_empty_goal_id() {
             priority: 1,
             status: GoalProgress::NotStarted,
             assigned_to: None,
+        current_activity: None,
+        wip_refs: vec![],
         },
     )
     .unwrap_err();

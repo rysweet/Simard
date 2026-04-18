@@ -134,6 +134,8 @@ mod tests {
                 priority: 1,
                 status: GoalProgress::Blocked("dependency".to_string()),
                 assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
             },
             ActiveGoal {
                 id: "not-started".to_string(),
@@ -141,6 +143,8 @@ mod tests {
                 priority: 1,
                 status: GoalProgress::NotStarted,
                 assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
             },
         ];
         let board = make_board_with_goals(goals);
@@ -158,6 +162,8 @@ mod tests {
             priority: 1,
             status: GoalProgress::Completed,
             assigned_to: None,
+        current_activity: None,
+        wip_refs: vec![],
         }];
         let board = make_board_with_goals(goals);
         let obs = make_observation(EnvironmentSnapshot::default());
@@ -177,6 +183,8 @@ mod tests {
                 priority: 1,
                 status: GoalProgress::NotStarted,
                 assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
             },
             ActiveGoal {
                 id: "wip".to_string(),
@@ -184,6 +192,8 @@ mod tests {
                 priority: 1,
                 status: GoalProgress::InProgress { percent: 50 },
                 assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
             },
         ];
         let board = make_board_with_goals(goals);
@@ -203,6 +213,8 @@ mod tests {
                 priority: 1,
                 status: GoalProgress::InProgress { percent: 10 },
                 assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
             },
             ActiveGoal {
                 id: "late".to_string(),
@@ -210,6 +222,8 @@ mod tests {
                 priority: 1,
                 status: GoalProgress::InProgress { percent: 90 },
                 assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
             },
         ];
         let board = make_board_with_goals(goals);
@@ -228,6 +242,8 @@ mod tests {
             priority: 1,
             status: GoalProgress::InProgress { percent: 50 },
             assigned_to: None,
+        current_activity: None,
+        wip_refs: vec![],
         }];
         let board = make_board_with_goals(goals.clone());
         let env_with_issue = EnvironmentSnapshot {
@@ -251,6 +267,8 @@ mod tests {
             priority: 1,
             status: GoalProgress::InProgress { percent: 50 },
             assigned_to: None,
+        current_activity: None,
+        wip_refs: vec![],
         }];
         let board = make_board_with_goals(goals);
         let env_dirty = EnvironmentSnapshot {
@@ -273,6 +291,8 @@ mod tests {
             priority: 1,
             status: GoalProgress::NotStarted,
             assigned_to: None,
+        current_activity: None,
+        wip_refs: vec![],
         }];
         let board = make_board_with_goals(goals);
         let obs = Observation {
@@ -355,6 +375,8 @@ mod tests {
                 priority: 1,
                 status: GoalProgress::Completed,
                 assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
             },
             ActiveGoal {
                 id: "high".to_string(),
@@ -362,6 +384,8 @@ mod tests {
                 priority: 1,
                 status: GoalProgress::Blocked("x".to_string()),
                 assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
             },
             ActiveGoal {
                 id: "mid".to_string(),
@@ -369,6 +393,8 @@ mod tests {
                 priority: 1,
                 status: GoalProgress::NotStarted,
                 assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
             },
         ];
         let board = make_board_with_goals(goals);

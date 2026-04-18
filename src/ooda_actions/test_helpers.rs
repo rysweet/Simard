@@ -156,6 +156,8 @@ pub(crate) fn board_with_goal(
             priority: 1,
             status: progress,
             assigned_to: assigned.map(String::from),
+            current_activity: None,
+            wip_refs: vec![],
         },
     )
     .unwrap();
