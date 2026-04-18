@@ -15,7 +15,7 @@ use crate::session::{SessionId, SessionPhase, SessionRecord};
 
 #[test]
 fn benchmark_scenarios_returns_nine_scenarios() {
-    assert_eq!(benchmark_scenarios().len(), 67);
+    assert_eq!(benchmark_scenarios().len(), 79);
 }
 
 #[test]
@@ -80,6 +80,10 @@ fn benchmark_scenarios_covers_all_classes() {
     assert!(has_class(BenchmarkClass::MigrationPlanning));
     assert!(has_class(BenchmarkClass::ObservabilityInstrumentation));
     assert!(has_class(BenchmarkClass::DataModeling));
+    assert!(has_class(BenchmarkClass::DataMigration));
+    assert!(has_class(BenchmarkClass::CicdPipeline));
+    assert!(has_class(BenchmarkClass::DependencyUpgrade));
+    assert!(has_class(BenchmarkClass::ReleaseManagement));
 }
 
 // --- resolve_benchmark_scenario ---
@@ -701,6 +705,10 @@ fn benchmark_scenarios_each_class_has_at_least_two() {
     assert!(count(BenchmarkClass::Refactoring) >= 2);
     assert!(count(BenchmarkClass::DependencyAnalysis) >= 2);
     assert!(count(BenchmarkClass::ErrorHandling) >= 2);
+    assert!(count(BenchmarkClass::DataMigration) >= 2);
+    assert!(count(BenchmarkClass::CicdPipeline) >= 2);
+    assert!(count(BenchmarkClass::DependencyUpgrade) >= 2);
+    assert!(count(BenchmarkClass::ReleaseManagement) >= 2);
 }
 
 #[test]
@@ -835,4 +843,190 @@ fn benchmark_scenarios_distributed_topology_coverage() {
         distributed >= 1,
         "need at least 1 Distributed scenario, got {distributed}"
     );
+}
+
+// -- Wave 7: DataMigration / CicdPipeline / DependencyUpgrade / ReleaseManagement --
+
+#[test]
+fn class_checks_data_migration_passes_with_keywords() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::DataMigration,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome(
+        "schema delta adds optional field with serde default",
+        "backward compatibility preserved during phased rollout",
+        "rollback path documented if migration must be reverted",
+    );
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 3);
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "data-migration-schema-delta-described" && c.passed)
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "data-migration-compatibility-addressed" && c.passed)
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "data-migration-rollout-or-rollback-planned" && c.passed)
+    );
+}
+
+#[test]
+fn class_checks_data_migration_fails_without_keywords() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::DataMigration,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome("nothing", "bland text", "empty");
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 3);
+    for check in &checks {
+        assert!(!check.passed, "check '{}' should have failed", check.id);
+    }
+}
+
+#[test]
+fn class_checks_cicd_pipeline_passes_with_keywords() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::CicdPipeline,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome(
+        "drafted github actions workflow .yml with build job and steps",
+        "trigger on pull_request and push, pin uses: actions/checkout@v4",
+        "runs cargo check and cargo test with cache and matrix",
+    );
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 3);
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "cicd-workflow-structure-described" && c.passed)
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "cicd-trigger-or-pin-addressed" && c.passed)
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "cicd-verification-or-remediation-present" && c.passed)
+    );
+}
+
+#[test]
+fn class_checks_cicd_pipeline_fails_without_keywords() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::CicdPipeline,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome("nothing", "bland text", "empty");
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 3);
+    for check in &checks {
+        assert!(!check.passed, "check '{}' should have failed", check.id);
+    }
+}
+
+#[test]
+fn class_checks_dependency_upgrade_passes_with_keywords() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::DependencyUpgrade,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome(
+        "plan major version bump of crate in cargo.toml",
+        "changelog lists breaking api change at call site",
+        "verify with cargo check and cargo test, staged rollout with rollback",
+    );
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 3);
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "dep-upgrade-target-named" && c.passed)
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "dep-upgrade-breakage-analyzed" && c.passed)
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "dep-upgrade-verification-plan-present" && c.passed)
+    );
+}
+
+#[test]
+fn class_checks_dependency_upgrade_fails_without_keywords() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::DependencyUpgrade,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome("nothing", "bland text", "empty");
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 3);
+    for check in &checks {
+        assert!(!check.passed, "check '{}' should have failed", check.id);
+    }
+}
+
+#[test]
+fn class_checks_release_management_passes_with_keywords() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::ReleaseManagement,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome(
+        "semver minor version bump in cargo.toml",
+        "changelog grouped by added/changed/fixed for release notes",
+        "git tag and publish, with rollback path",
+    );
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 3);
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "release-version-bump-planned" && c.passed)
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "release-changelog-authored" && c.passed)
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "release-tag-or-cutover-addressed" && c.passed)
+    );
+}
+
+#[test]
+fn class_checks_release_management_fails_without_keywords() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::ReleaseManagement,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome("nothing", "bland text", "empty");
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 3);
+    for check in &checks {
+        assert!(!check.passed, "check '{}' should have failed", check.id);
+    }
 }
