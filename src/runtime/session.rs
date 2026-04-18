@@ -54,6 +54,14 @@ impl RuntimeKernel {
         self.persist_session_summary(&mut session, &outcome, &context)?;
 
         // --- Memory consolidation: persistence at session end ---
+
+        // Flush any pending bridge writes before final persistence so that
+        // records that fell back to the local file store get one last retry.
+        let synced = self.ports.memory_store.flush_pending();
+        if synced > 0 {
+            eprintln!("[simard] session teardown: flushed {synced} pending memory records");
+        }
+
         if let Some(bridge) = &self.cognitive_bridge {
             // Flush working memory to episodes before final persistence.
             if let Err(e) =

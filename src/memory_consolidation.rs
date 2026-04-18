@@ -159,10 +159,17 @@ pub fn reflection_memory_operations(
     )?;
 
     // Store each extracted fact in semantic memory, deduplicating by concept
-    // so that repeated facts within the same session don't produce redundant entries.
+    // both within this session and across prior sessions.
     let mut seen_concepts = std::collections::HashSet::<String>::new();
     for fact in facts {
         if !seen_concepts.insert(fact.concept.clone()) {
+            continue;
+        }
+        // Cross-session dedup: skip if an existing fact has >= confidence.
+        let existing = bridge
+            .search_facts(&fact.concept, 5, fact.confidence)
+            .unwrap_or_default();
+        if existing.iter().any(|f| f.confidence >= fact.confidence) {
             continue;
         }
         bridge.store_fact(
@@ -385,8 +392,8 @@ mod tests {
             },
         ];
         reflection_memory_operations("transcript...", &facts, &test_session_id(), &bridge).unwrap();
-        // 1 store_episode + 2 store_fact = 3
-        assert_eq!(count.load(Ordering::SeqCst), 3);
+        // 1 store_episode + 2*(search_facts + store_fact) = 5
+        assert_eq!(count.load(Ordering::SeqCst), 5);
     }
 
     #[test]
@@ -405,8 +412,8 @@ mod tests {
             },
         ];
         reflection_memory_operations("transcript...", &facts, &test_session_id(), &bridge).unwrap();
-        // 1 store_episode + 1 store_fact (second duplicate skipped) = 2
-        assert_eq!(count.load(Ordering::SeqCst), 2);
+        // 1 store_episode + 1*(search_facts + store_fact) (second duplicate skipped) = 3
+        assert_eq!(count.load(Ordering::SeqCst), 3);
     }
 
     #[test]
