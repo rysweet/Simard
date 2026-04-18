@@ -56,6 +56,7 @@ pub mod memory_bridge_adapter;
 pub mod memory_cognitive;
 pub mod memory_consolidation;
 pub mod memory_hive;
+pub mod memory_ipc;
 pub mod memory_snapshot;
 pub mod metadata;
 pub mod ooda_actions;
@@ -111,7 +112,7 @@ pub use agent_registry::{
 pub use agent_roles::{AgentRole, identity_for_role, role_for_objective};
 pub use agent_supervisor::{
     HeartbeatStatus, SubordinateConfig, SubordinateHandle, check_heartbeat, kill_subordinate,
-    spawn_subordinate,
+    max_retries_per_goal, spawn_subordinate,
 };
 pub use base_type_claude_agent_sdk::claude_agent_sdk_adapter;
 pub use base_type_copilot::{CopilotAdapterConfig, CopilotSdkAdapter, parse_copilot_response};

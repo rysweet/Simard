@@ -59,6 +59,22 @@ fn rendered_output(output: &Output) -> String {
     format!("{stdout}{stderr}")
 }
 
+/// Returns true when the rendered output indicates the test cannot run
+/// because the CI environment lacks an LLM provider (no ANTHROPIC_API_KEY,
+/// no gh auth for Copilot SDK). Tests that drive the full engineer loop
+/// require a real LLM session and must skip in that case.
+fn skip_if_no_llm_provider(rendered: &str) -> bool {
+    if rendered.contains("No API key found")
+        || rendered.contains("LLM-based review is unavailable")
+        || rendered.contains("LLM session but open() failed")
+        || rendered.contains("base type 'review-pipeline-rustyclawd' failed")
+    {
+        eprintln!("SKIP: no LLM provider available (CI environment)");
+        return true;
+    }
+    false
+}
+
 fn run_command(cwd: &Path, argv: &[&str]) -> Output {
     let (program, args) = argv.split_first().expect("argv should include a program");
     let mut command = Command::new(program);
@@ -305,6 +321,10 @@ verify-contains: Current status: DONE";
         .output()
         .expect("engineer-loop edit probe should launch");
     let rendered = rendered_output(&output);
+
+    if skip_if_no_llm_provider(&rendered) {
+        return;
+    }
 
     assert!(
         output.status.success(),
@@ -598,6 +618,10 @@ verify-contains: /// Greets a person by name.";
         .output()
         .expect("doc comment edit probe should launch");
     let rendered = rendered_output(&output);
+
+    if skip_if_no_llm_provider(&rendered) {
+        return;
+    }
 
     assert!(
         output.status.success(),

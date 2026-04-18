@@ -659,7 +659,7 @@ fn read_recent_cycle_reports(state_root: &std::path::Path, n: usize) -> Vec<Valu
     }
 
     // Deduplicate by cycle number (prefer higher-numbered path if duplicates exist)
-    entries.sort_by(|a, b| b.0.cmp(&a.0));
+    entries.sort_by_key(|b| std::cmp::Reverse(b.0));
     entries.dedup_by_key(|e| e.0);
     entries.truncate(n);
 

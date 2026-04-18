@@ -4,9 +4,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::bridge_launcher::{find_python_dir, launch_gym_bridge, launch_knowledge_bridge};
-use crate::cognitive_memory::NativeCognitiveMemory;
+use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::goal_curation::load_goal_board;
 use crate::identity::OperatingMode;
+use crate::memory_ipc;
 use crate::ooda_loop::{
     OodaBridges, OodaConfig, OodaState, run_ooda_cycle, summarize_cycle_report,
 };
@@ -144,18 +145,48 @@ pub fn run_ooda_daemon(
         eprintln!("Warning: some dependencies could not be verified: {e}");
     }
 
-    let state_root = state_root_override.unwrap_or_else(|| {
-        PathBuf::from(std::env::var("SIMARD_STATE_ROOT").unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
-            format!("{home}/.simard/state")
-        }))
-    });
+    let state_root = state_root_override.unwrap_or_else(memory_ipc::default_state_root);
 
     std::fs::create_dir_all(&state_root)?;
 
     let python_dir = find_python_dir()?;
 
-    let memory = Box::new(NativeCognitiveMemory::open(&state_root)?);
+    // Reap any stale lock file from a prior crashed daemon before we open.
+    if let Err(e) = memory_ipc::reap_stale_open_lock(&state_root) {
+        eprintln!("[simard] OODA daemon: stale-lock reap failed: {e}");
+    }
+
+    let shared_mem: Arc<dyn CognitiveMemoryOps> =
+        Arc::new(NativeCognitiveMemory::open(&state_root)?);
+
+    // Spawn the memory IPC server so meetings and other clients can share
+    // this live DB handle without their own locks conflicting.
+    let socket_path = memory_ipc::default_socket_path();
+    let _memory_ipc_server = match memory_ipc::spawn_server(socket_path.clone(), shared_mem.clone())
+    {
+        Ok(h) => {
+            daemon_log(
+                &state_root,
+                &format!(
+                    "[simard] OODA daemon: memory IPC listening at {}",
+                    socket_path.display()
+                ),
+            );
+            Some(h)
+        }
+        Err(e) => {
+            daemon_log(
+                &state_root,
+                &format!(
+                    "[simard] OODA daemon: memory IPC server failed to start: {e} \
+                     (meetings will fall back to direct open)"
+                ),
+            );
+            None
+        }
+    };
+
+    let memory: Box<dyn CognitiveMemoryOps> = Box::new(memory_ipc::SharedMemory(shared_mem));
     let knowledge = launch_knowledge_bridge(&python_dir)?;
     let gym = launch_gym_bridge(&python_dir)?;
 

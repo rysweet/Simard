@@ -39,7 +39,14 @@ pub(crate) fn run_optional_review(
         return Ok(());
     }
 
-    let mut review_session = crate::review_pipeline::ReviewSession::open()?;
+    let mut review_session = match crate::review_pipeline::ReviewSession::open() {
+        Ok(s) => s,
+        // No session available (no API key, etc.) → review is honestly skipped
+        // per this function's contract. The action already happened; review is
+        // an optional safety net, not a hard gate.
+        Err(SimardError::ReviewUnavailable { .. }) => return Ok(()),
+        Err(e) => return Err(e),
+    };
 
     let diff_text = compute_diff_for_review(&inspection.repo_root, &action.selected.kind);
     if diff_text.is_empty() {

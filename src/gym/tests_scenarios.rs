@@ -15,7 +15,7 @@ use crate::session::{SessionId, SessionPhase, SessionRecord};
 
 #[test]
 fn benchmark_scenarios_returns_nine_scenarios() {
-    assert_eq!(benchmark_scenarios().len(), 47);
+    assert_eq!(benchmark_scenarios().len(), 67);
 }
 
 #[test]

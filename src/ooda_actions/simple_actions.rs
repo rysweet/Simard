@@ -287,6 +287,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn skill_min_usage_is_reasonable() {
         const {
             assert!(

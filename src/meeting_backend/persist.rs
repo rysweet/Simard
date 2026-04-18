@@ -1078,6 +1078,7 @@ pub fn find_template(name: &str) -> Option<&'static MeetingTemplate> {
 mod tests {
     use super::super::types::Role;
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn sanitize_basic() {
@@ -1397,6 +1398,7 @@ mod tests {
     // ── write_handoff completeness test ─────────────────────────────
 
     #[test]
+    #[serial]
     fn write_handoff_includes_structured_data() {
         let dir = tempfile::tempdir().unwrap();
         unsafe {
@@ -1466,6 +1468,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn write_handoff_empty_data_uses_defaults() {
         let dir = tempfile::tempdir().unwrap();
         unsafe {

@@ -313,7 +313,7 @@ impl NativeCognitiveMemory {
                 }
             }
         }
-        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+        candidates.sort_by_key(|b| std::cmp::Reverse(b.0));
         candidates.into_iter().next().map(|(_, p)| p)
     }
 
@@ -546,7 +546,7 @@ impl NativeCognitiveMemory {
                 }
             }
         }
-        backups.sort_by(|a, b| b.0.cmp(&a.0));
+        backups.sort_by_key(|b| std::cmp::Reverse(b.0));
         for (_, path) in backups.into_iter().skip(keep) {
             if let Err(e) = std::fs::remove_file(&path) {
                 eprintln!(
@@ -586,6 +586,19 @@ impl NativeCognitiveMemory {
                 path: lock_path,
                 reason: err.to_string(),
             });
+        }
+
+        // Record our pid so external tooling (and `memory_ipc::reap_stale_open_lock`)
+        // can tell whether the lock owner is still alive after an unclean exit.
+        {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&lock_path)
+            {
+                let _ = writeln!(f, "{}", std::process::id());
+            }
         }
 
         let result = f();

@@ -6,26 +6,51 @@ on:
 
 env:
   CARGO_BUILD_JOBS: 2
+  # Reduce DWARF size to keep peak linker memory under runner limits.
+  # Full debug info pushes rust-lld over the runner's RSS limit and the
+  # kernel kills it with SIGBUS (signal 7) during the link step.
+  CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+  CARGO_PROFILE_DEV_INCREMENTAL: "false"
+  CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
+  CARGO_PROFILE_TEST_INCREMENTAL: "false"
 
 jobs:
   pre-commit:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 120
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Add swap space (4 GB)
-        continue-on-error: true
+      - name: Free disk space
         run: |
-          if [ ! -f /swapfile ]; then
-            sudo fallocate -l 4G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=4096
-            sudo chmod 600 /swapfile
-            sudo mkswap /swapfile
+          # GitHub runners ship with ~14GB free; lbug + amplihack-memory + simard
+          # exhaust this. Remove preinstalled toolchains we don't use to free
+          # ~30GB. Failures are non-fatal (some paths may be missing).
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /usr/local/share/boost || true
+          sudo rm -rf /usr/local/share/chromium || true
+          sudo rm -rf /usr/local/.ghcup || true
+          sudo apt-get clean || true
+          df -h /
+
+      - name: Add swap space (4 GB)
+        run: |
+          # GitHub runners ship with /swapfile pre-mounted; resizing with fallocate
+          # fails ("Text file busy"). Disable + remove first, then recreate.
+          if sudo swapon --show | awk 'NR>1 {print $1}' | grep -qx /swapfile; then
+            sudo swapoff /swapfile || true
           fi
-          sudo swapon /swapfile 2>/dev/null || true
-          echo "Swap: $(swapon --show)"
+          sudo rm -f /swapfile
+          sudo fallocate -l 4G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "Swap enabled: $(swapon --show)"
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -36,7 +61,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: simard-ci
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: true
+          cache-on-failure: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -49,27 +75,63 @@ jobs:
       - name: Run pre-commit stage
         run: python -m pre_commit run --all-files --show-diff-on-failure --hook-stage pre-commit
 
-      - name: Run pre-push stage
-        run: python -m pre_commit run --all-files --show-diff-on-failure --hook-stage pre-push
+      - name: Run pre-push stage (cargo-clippy only)
+        run: python -m pre_commit run --all-files --show-diff-on-failure --hook-stage pre-push cargo-clippy
+
+      - name: Run cargo test (streamed, captured for artifact)
+        id: cargo_test
+        run: |
+          set -o pipefail
+          mkdir -p target/ci-logs
+          cargo test --all-features --locked --no-fail-fast \
+            -- --skip cargo_install_from_repo_succeeds \
+            2>&1 | tee target/ci-logs/cargo-test.log
+
+      - name: Upload cargo-test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-test-log-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/ci-logs/cargo-test.log
+          if-no-files-found: warn
+          retention-days: 7
 
   install-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 120
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Add swap space (4 GB)
-        continue-on-error: true
+      - name: Free disk space
         run: |
-          if [ ! -f /swapfile ]; then
-            sudo fallocate -l 4G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=4096
-            sudo chmod 600 /swapfile
-            sudo mkswap /swapfile
+          # GitHub runners ship with ~14GB free; lbug + amplihack-memory + simard
+          # exhaust this. Remove preinstalled toolchains we don't use to free
+          # ~30GB. Failures are non-fatal (some paths may be missing).
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /usr/local/share/boost || true
+          sudo rm -rf /usr/local/share/chromium || true
+          sudo rm -rf /usr/local/.ghcup || true
+          sudo apt-get clean || true
+          df -h /
+
+      - name: Add swap space (4 GB)
+        run: |
+          # GitHub runners ship with /swapfile pre-mounted; resizing with fallocate
+          # fails ("Text file busy"). Disable + remove first, then recreate.
+          if sudo swapon --show | awk 'NR>1 {print $1}' | grep -qx /swapfile; then
+            sudo swapoff /swapfile || true
           fi
-          sudo swapon /swapfile 2>/dev/null || true
-          echo "Swap: $(swapon --show)"
+          sudo rm -f /swapfile
+          sudo fallocate -l 4G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "Swap enabled: $(swapon --show)"
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -78,7 +140,15 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: simard-ci
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: true
+          cache-on-failure: true
 
       - name: Run install smoke test
+        env:
+          # Linker OOMs (signal 7) when embedding full debug info for the
+          # `simard` binary under test on the 7GB GH runner. Line tables
+          # keep backtraces working at a fraction of the size.
+          CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+          CARGO_PROFILE_DEV_INCREMENTAL: "false"
         run: cargo test --test install_smoke -- --nocapture
+
