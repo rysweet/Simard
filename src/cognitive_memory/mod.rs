@@ -313,7 +313,7 @@ impl NativeCognitiveMemory {
                 }
             }
         }
-        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+        candidates.sort_by_key(|b| std::cmp::Reverse(b.0));
         candidates.into_iter().next().map(|(_, p)| p)
     }
 
@@ -546,7 +546,7 @@ impl NativeCognitiveMemory {
                 }
             }
         }
-        backups.sort_by(|a, b| b.0.cmp(&a.0));
+        backups.sort_by_key(|b| std::cmp::Reverse(b.0));
         for (_, path) in backups.into_iter().skip(keep) {
             if let Err(e) = std::fs::remove_file(&path) {
                 eprintln!(
