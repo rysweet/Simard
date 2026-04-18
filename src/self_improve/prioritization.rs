@@ -197,3 +197,106 @@ pub fn dimension_value(score: &GymSuiteScore, name: &str) -> f64 {
         _ => 0.0,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gym_bridge::ScoreDimensions;
+
+    fn make_score(v: f64) -> GymSuiteScore {
+        GymSuiteScore {
+            suite_id: "test".into(),
+            overall: v,
+            dimensions: ScoreDimensions {
+                factual_accuracy: v,
+                specificity: v,
+                temporal_awareness: v,
+                source_attribution: v,
+                confidence_calibration: v,
+            },
+            scenario_count: 4,
+            scenarios_passed: 4,
+            pass_rate: 1.0,
+            recorded_at_unix_ms: None,
+        }
+    }
+
+    #[test]
+    fn priority_weights_default_sum_to_one() {
+        let w = PriorityWeights::default();
+        let sum = w.deficit + w.chronic + w.trend;
+        assert!(
+            (sum - 1.0).abs() < 1e-10,
+            "weights must sum to 1.0, got {sum}"
+        );
+    }
+
+    #[test]
+    fn find_weak_dimensions_detailed_empty_when_all_above_threshold() {
+        let score = make_score(0.9);
+        let result = find_weak_dimensions_detailed(&score, 0.5, None);
+        assert!(
+            result.is_empty(),
+            "no dimensions should be weak when all scores exceed threshold"
+        );
+    }
+
+    #[test]
+    fn find_weak_dimensions_detailed_detects_below_threshold() {
+        let score = make_score(0.3);
+        let result = find_weak_dimensions_detailed(&score, 0.5, None);
+        assert_eq!(
+            result.len(),
+            5,
+            "all 5 dimensions should be weak when score is 0.3"
+        );
+        for dim in &result {
+            assert!(
+                (dim.deficit - 0.2).abs() < 1e-10,
+                "deficit should be 0.5 - 0.3 = 0.2"
+            );
+        }
+    }
+
+    #[test]
+    fn find_weak_dimensions_detailed_sorted_by_deficit_descending() {
+        let mut score = make_score(0.9);
+        score.dimensions.specificity = 0.2; // large deficit
+        score.dimensions.factual_accuracy = 0.4; // smaller deficit
+        let result = find_weak_dimensions_detailed(&score, 0.5, None);
+        assert_eq!(
+            result[0].name, "specificity",
+            "largest deficit should sort first"
+        );
+    }
+
+    #[test]
+    fn find_weak_dimensions_detailed_target_filter_restricts_to_one() {
+        let score = make_score(0.3);
+        let result = find_weak_dimensions_detailed(&score, 0.5, Some("specificity"));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "specificity");
+    }
+
+    #[test]
+    fn prioritize_dimensions_returns_all_five() {
+        let score = make_score(0.7);
+        let result = prioritize_dimensions(&score, 0.5, &[], &PriorityWeights::default());
+        assert_eq!(result.len(), 5, "must return one entry per dimension");
+    }
+
+    #[test]
+    fn dimension_value_unknown_name_returns_zero() {
+        let score = make_score(0.8);
+        assert_eq!(dimension_value(&score, "unknown_dimension"), 0.0);
+    }
+
+    #[test]
+    fn prioritize_dimensions_default_matches_explicit_default_weights() {
+        let score = make_score(0.4);
+        let past = vec![make_score(0.5), make_score(0.3)];
+        let via_default = prioritize_dimensions_default(&score, 0.6, &past);
+        let via_explicit = prioritize_dimensions(&score, 0.6, &past, &PriorityWeights::default());
+        assert_eq!(via_default, via_explicit);
+    }
+}

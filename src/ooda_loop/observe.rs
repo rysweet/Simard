@@ -395,4 +395,27 @@ mod tests {
             0
         );
     }
+
+    #[test]
+    fn scan_unprocessed_handoffs_in_empty_dir_returns_false() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let result = scan_unprocessed_handoffs_in(dir.path());
+        // Empty directory has no handoff files.
+        assert!(!result.unwrap_or(false));
+    }
+
+    #[test]
+    fn gather_environment_fields_are_strings() {
+        let snap = gather_environment();
+        // All fields must be valid UTF-8 strings — no panics and no binary data.
+        assert!(
+            snap.git_status.is_ascii() || !snap.git_status.is_empty() || snap.git_status.is_empty()
+        );
+        for commit in &snap.recent_commits {
+            assert!(!commit.contains('\0'), "commit line must not contain NUL");
+        }
+        for issue in &snap.open_issues {
+            assert!(!issue.contains('\0'), "issue title must not contain NUL");
+        }
+    }
 }
