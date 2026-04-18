@@ -4,7 +4,7 @@ use crate::runtime::RuntimeTopology;
 
 use super::types::{BenchmarkCheckResult, BenchmarkClass, BenchmarkScenario};
 
-const BENCHMARK_SCENARIOS: [BenchmarkScenario; 35] = [
+const BENCHMARK_SCENARIOS: [BenchmarkScenario; 47] = [
     BenchmarkScenario {
         id: "repo-exploration-local",
         title: "Repo exploration on local harness",
@@ -396,6 +396,142 @@ const BENCHMARK_SCENARIOS: [BenchmarkScenario; 35] = [
         base_type: "local-harness",
         topology: RuntimeTopology::SingleProcess,
         objective: "Plan the addition of a new variant to an existing enum in the Simard codebase (e.g., a new BenchmarkClass or RuntimeTopology variant). Describe: (1) the enum to modify and the new variant name, (2) every match expression across the codebase that handles this enum (list file and line for each), (3) what the new arm should do in each match, (4) any Display, Serialize, or other trait implementations that need updating. Verify the plan would result in a compiling codebase with no unhandled match arms.",
+        expected_min_runtime_evidence: 3,
+    },
+    // --- Wave 4: CodeReview scenarios ---
+    BenchmarkScenario {
+        id: "code-review-public-api-surface",
+        title: "Review public API surface for consistency",
+        description: "Perform a code review of the public API surface in a Rust module, checking for naming consistency, documentation coverage, and type safety patterns.",
+        class: BenchmarkClass::CodeReview,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Review the public API surface of src/gym/types.rs. Evaluate: (1) naming consistency across public structs and enums (snake_case fields, PascalCase types), (2) documentation coverage — which public items lack doc comments, (3) derive macro consistency — whether all serializable types derive the same set of traits, (4) type safety — whether any fields use String where an enum or newtype would be more appropriate. Produce a structured review with findings and severity ratings.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "code-review-error-propagation",
+        title: "Review error propagation patterns in module",
+        description: "Audit a module for correct error propagation using Result types, ensuring no silent error swallowing and consistent use of the ? operator.",
+        class: BenchmarkClass::CodeReview,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Review error propagation in src/gym/executor.rs. Check: (1) all fallible operations return Result, (2) unwrap/expect calls are justified with comments or used only in test code, (3) error context is preserved when converting between error types, (4) the ? operator is used consistently instead of manual match-on-Result patterns. List each finding with file location and recommended fix.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "code-review-test-quality",
+        title: "Review test quality and coverage gaps",
+        description: "Evaluate the quality of existing tests in a module, checking for assertion quality, edge case coverage, and test isolation.",
+        class: BenchmarkClass::CodeReview,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Review the test quality in src/gym/tests_scenarios.rs. Evaluate: (1) whether tests use specific assertions (assert_eq!) rather than boolean checks (assert!), (2) whether edge cases are covered (empty input, boundary values), (3) whether tests are isolated and do not depend on ordering, (4) whether test names clearly describe what is being tested. Produce a quality report with improvement suggestions.",
+        expected_min_runtime_evidence: 3,
+    },
+    // --- Wave 4: Debugging scenarios ---
+    BenchmarkScenario {
+        id: "debugging-trace-error-origin",
+        title: "Trace an error to its origin across modules",
+        description: "Given an error type, trace its construction sites and propagation path through the codebase to identify where and why it originates.",
+        class: BenchmarkClass::Debugging,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Trace the SimardError::BenchmarkScenarioNotFound variant through the Simard codebase. Identify: (1) where this error variant is defined, (2) every location where it is constructed (list file and line), (3) how it propagates through the call stack (which functions return it via ?), (4) where it is ultimately handled or displayed. Produce a propagation diagram showing the full error flow.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "debugging-type-mismatch",
+        title: "Diagnose a hypothetical type mismatch scenario",
+        description: "Analyze a function signature to identify potential type mismatch issues that could arise from callers passing incorrect argument types.",
+        class: BenchmarkClass::Debugging,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze the function `resolve_benchmark_scenario(scenario_id: &str)` in src/gym/scenarios.rs. Determine: (1) all call sites that invoke this function, (2) what types the callers pass (literal, String::as_str, format! result, etc.), (3) whether any caller could accidentally pass an owned String where &str is expected and what the compiler behavior would be, (4) whether the error message provides enough context to debug a wrong-id issue. Suggest diagnostic improvements.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "debugging-runtime-state-inspection",
+        title: "Inspect runtime state transitions for correctness",
+        description: "Examine the state machine transitions in the runtime lifecycle to verify all state transitions are valid and no illegal transitions are possible.",
+        class: BenchmarkClass::Debugging,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Inspect the RuntimeState enum and its transitions in the Simard codebase. Determine: (1) all valid states and their meaning, (2) what triggers each state transition, (3) whether any code path could produce an invalid state transition (e.g., going from Stopped back to Running), (4) whether state transitions are logged or observable for debugging. Produce a state transition table with validity annotations.",
+        expected_min_runtime_evidence: 4,
+    },
+    // --- Wave 4: ConfigManagement scenarios ---
+    BenchmarkScenario {
+        id: "config-management-cargo-feature-audit",
+        title: "Audit Cargo feature flags for correctness",
+        description: "Analyze the Cargo.toml feature flags to ensure they are correctly defined, documented, and do not create conflicting configurations.",
+        class: BenchmarkClass::ConfigManagement,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Audit the Cargo.toml file(s) in the Simard repository. Determine: (1) all defined feature flags and their purpose, (2) which features enable optional dependencies, (3) whether any features conflict or create impossible configurations, (4) whether the default feature set is appropriate for common use cases. Produce a feature matrix showing which capabilities each feature enables.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "config-management-env-var-inventory",
+        title: "Inventory environment variable usage",
+        description: "Scan the codebase for environment variable reads and produce a complete inventory of expected configuration, defaults, and validation.",
+        class: BenchmarkClass::ConfigManagement,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Scan the Simard codebase for all environment variable access (env!, option_env!, std::env::var, std::env::var_os). For each variable found: (1) name, (2) where it is read (file and line), (3) whether a default is provided if missing, (4) whether the value is validated after reading. Produce a configuration inventory table and flag any variables that lack defaults or validation.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "config-management-topology-matrix",
+        title: "Validate topology configuration combinations",
+        description: "Analyze the RuntimeTopology enum and its configuration paths to verify all topology variants produce valid, functional configurations.",
+        class: BenchmarkClass::ConfigManagement,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Analyze the RuntimeTopology enum and how each variant configures the runtime in src/gym/mod.rs (runtime_ports_for_topology function). For each topology: (1) list which backends are selected (transport, mesh, supervisor), (2) verify the configuration is internally consistent (e.g., MultiProcess uses loopback transport), (3) identify any topology that lacks test coverage, (4) determine whether adding a new topology variant would require changes beyond this function. Produce a topology configuration matrix.",
+        expected_min_runtime_evidence: 3,
+    },
+    // --- Wave 4: expand thin classes ---
+    BenchmarkScenario {
+        id: "session-quality-memory-export",
+        title: "Session quality: memory export completeness",
+        description: "Verify that a session exports complete and well-structured memory records that preserve the session context for future reference.",
+        class: BenchmarkClass::SessionQuality,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Run a bounded engineering session and evaluate the quality of exported memory records. Check: (1) memory records have meaningful keys (not auto-generated UUIDs), (2) memory scopes are correctly assigned (session vs global), (3) at least one memory record captures the session objective, (4) exported records are sufficient to reconstruct what happened in the session. Produce a memory quality assessment.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "error-handling-custom-error-design",
+        title: "Evaluate custom error type design",
+        description: "Assess the design quality of a custom error enum, checking for informative variants, Display implementations, and From conversions.",
+        class: BenchmarkClass::ErrorHandling,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Evaluate the SimardError enum design in the Simard codebase. Assess: (1) whether each variant carries enough context for diagnostic messages, (2) whether the Display implementation produces actionable error messages, (3) whether From conversions exist for common upstream error types (io::Error, serde_json::Error, etc.), (4) whether error variants follow Rust naming conventions. Produce a design quality report with specific improvement suggestions.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "dependency-analysis-version-audit",
+        title: "Audit dependency versions for staleness",
+        description: "Analyze Cargo.toml dependencies to identify outdated, yanked, or unnecessarily pinned versions and recommend updates.",
+        class: BenchmarkClass::DependencyAnalysis,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Audit the dependencies in Cargo.toml for the Simard project. For each dependency: (1) note the current version constraint, (2) identify whether the constraint is too tight (exact pin) or too loose (wildcard), (3) check whether the dependency is used in the codebase (search for use/extern crate statements), (4) flag any dev-dependencies that appear in normal dependencies or vice versa. Produce a dependency health report with update recommendations.",
         expected_min_runtime_evidence: 3,
     },
 ];
@@ -967,6 +1103,159 @@ pub(super) fn class_specific_checks(
                 },
             ]
         }
+        BenchmarkClass::CodeReview => {
+            let review_findings = combined.contains("finding")
+                || combined.contains("issue")
+                || combined.contains("concern")
+                || combined.contains("inconsisten")
+                || combined.contains("review");
+            let severity_assessed = combined.contains("severity")
+                || combined.contains("critical")
+                || combined.contains("minor")
+                || combined.contains("major")
+                || combined.contains("nit");
+            let fix_suggested = combined.contains("suggest")
+                || combined.contains("recommend")
+                || combined.contains("fix")
+                || combined.contains("improv")
+                || combined.contains("should");
+            vec![
+                BenchmarkCheckResult {
+                    id: "review-findings-present".to_string(),
+                    passed: review_findings,
+                    detail: format!(
+                        "execution output {} review findings",
+                        if review_findings { "includes" } else { "lacks" }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "review-severity-assessed".to_string(),
+                    passed: severity_assessed,
+                    detail: format!(
+                        "execution output {} severity assessment",
+                        if severity_assessed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "review-fix-suggested".to_string(),
+                    passed: fix_suggested,
+                    detail: format!(
+                        "execution output {} fix suggestions",
+                        if fix_suggested { "includes" } else { "lacks" }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::Debugging => {
+            let root_cause_traced = combined.contains("trace")
+                || combined.contains("origin")
+                || combined.contains("root cause")
+                || combined.contains("source of")
+                || combined.contains("caused by");
+            let call_path_analyzed = combined.contains("call")
+                || combined.contains("stack")
+                || combined.contains("propagat")
+                || combined.contains("invoked")
+                || combined.contains("transition");
+            let diagnostic_suggested = combined.contains("diagnostic")
+                || combined.contains("debug")
+                || combined.contains("log")
+                || combined.contains("inspect")
+                || combined.contains("breakpoint");
+            vec![
+                BenchmarkCheckResult {
+                    id: "debug-root-cause-traced".to_string(),
+                    passed: root_cause_traced,
+                    detail: format!(
+                        "execution output {} root cause tracing",
+                        if root_cause_traced {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "debug-call-path-analyzed".to_string(),
+                    passed: call_path_analyzed,
+                    detail: format!(
+                        "execution output {} call path analysis",
+                        if call_path_analyzed {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "debug-diagnostic-suggested".to_string(),
+                    passed: diagnostic_suggested,
+                    detail: format!(
+                        "execution output {} diagnostic suggestions",
+                        if diagnostic_suggested {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+            ]
+        }
+        BenchmarkClass::ConfigManagement => {
+            let config_inventoried = combined.contains("config")
+                || combined.contains("feature")
+                || combined.contains("env")
+                || combined.contains("cargo.toml")
+                || combined.contains("setting");
+            let validation_checked = combined.contains("valid")
+                || combined.contains("default")
+                || combined.contains("missing")
+                || combined.contains("required")
+                || combined.contains("optional");
+            let matrix_produced = combined.contains("matrix")
+                || combined.contains("table")
+                || combined.contains("inventory")
+                || combined.contains("summary")
+                || combined.contains("report");
+            vec![
+                BenchmarkCheckResult {
+                    id: "config-inventoried".to_string(),
+                    passed: config_inventoried,
+                    detail: format!(
+                        "execution output {} configuration inventory",
+                        if config_inventoried {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "config-validation-checked".to_string(),
+                    passed: validation_checked,
+                    detail: format!(
+                        "execution output {} validation assessment",
+                        if validation_checked {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
+                    ),
+                },
+                BenchmarkCheckResult {
+                    id: "config-matrix-produced".to_string(),
+                    passed: matrix_produced,
+                    detail: format!(
+                        "execution output {} configuration matrix",
+                        if matrix_produced { "includes" } else { "lacks" }
+                    ),
+                },
+            ]
+        }
     }
 }
 
@@ -1141,6 +1430,9 @@ mod tests {
             BenchmarkClass::PerformanceAnalysis,
             BenchmarkClass::SecurityAudit,
             BenchmarkClass::ApiDesign,
+            BenchmarkClass::CodeReview,
+            BenchmarkClass::Debugging,
+            BenchmarkClass::ConfigManagement,
         ];
         let scenarios = benchmark_scenarios();
         for class in all_classes {
