@@ -1,3 +1,4 @@
+mod command_context;
 mod dispatch;
 mod evidence;
 mod format;
@@ -26,7 +27,9 @@ pub use crate::operator_commands_terminal::{
 };
 
 // Re-export pub items from sub-modules.
-pub use dispatch::{dispatch_legacy_gym_cli, dispatch_operator_probe, gym_usage};
+pub use dispatch::{
+    dispatch_legacy_gym_cli, dispatch_operator_probe, dispatch_probe_with_context, gym_usage,
+};
 pub use probe::{run_bootstrap_probe, run_copilot_submit_probe, run_handoff_probe};
 
 // Re-export pub(crate) items from sub-modules so callers using
@@ -51,3 +54,5 @@ pub(crate) use state_root::{
     resolved_terminal_read_state_root,
 };
 pub(crate) use validation::{validated_engineer_read_artifacts, validated_terminal_read_artifacts};
+
+pub use command_context::{CommandContext, CommandContextBuilder};
