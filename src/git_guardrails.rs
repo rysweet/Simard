@@ -96,9 +96,25 @@ pub fn check_git_safety(workspace: &Path, args: &[&str]) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    // Tests in this module mutate process-global SIMARD_GIT_* env vars.
+    // Cargo runs unit tests in parallel by default, so a Mutex is used
+    // to serialize them and prevent the disabled-everywhere flag from
+    // leaking into block_* tests.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn reset_env() {
+        unsafe {
+            std::env::remove_var("SIMARD_GIT_GUARDRAILS");
+            std::env::remove_var("SIMARD_GIT_PROTECTED_REPOS");
+        }
+    }
 
     #[test]
     fn blocks_force_push() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
         let result = check_git_safety(
             &PathBuf::from("/home/user/src/repo"),
             &["push", "--force", "origin", "main"],
@@ -109,14 +125,16 @@ mod tests {
 
     #[test]
     fn blocks_reset_hard() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
         let result = check_git_safety(&PathBuf::from("/tmp/repo"), &["reset", "--hard", "HEAD~1"]);
         assert!(result.is_err());
     }
 
     #[test]
     fn allows_normal_push() {
-        unsafe { std::env::set_var("SIMARD_GIT_GUARDRAILS", "enabled") };
-        unsafe { std::env::remove_var("SIMARD_GIT_PROTECTED_REPOS") };
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
         let result = check_git_safety(
             &PathBuf::from("/tmp/repo"),
             &["push", "origin", "feature-branch"],
@@ -126,23 +144,29 @@ mod tests {
 
     #[test]
     fn allows_commit() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
         let result = check_git_safety(&PathBuf::from("/tmp/repo"), &["commit", "-m", "fix: stuff"]);
         assert!(result.is_ok());
     }
 
     #[test]
     fn disabled_allows_everything() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
         unsafe { std::env::set_var("SIMARD_GIT_GUARDRAILS", "disabled") };
         let result = check_git_safety(
             &PathBuf::from("/tmp/repo"),
             &["push", "--force", "origin", "main"],
         );
         assert!(result.is_ok());
-        unsafe { std::env::set_var("SIMARD_GIT_GUARDRAILS", "enabled") };
+        reset_env();
     }
 
     #[test]
     fn blocks_delete_main_branch() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
         let result = check_git_safety(&PathBuf::from("/tmp/repo"), &["branch", "-D", "main"]);
         assert!(result.is_err());
     }
