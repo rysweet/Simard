@@ -43,6 +43,7 @@ pub fn build_router() -> Router {
         .route("/api/memory/search", post(memory_search))
         .route("/api/traces", get(traces))
         .route("/api/activity", get(activity))
+        .route("/api/workboard", get(workboard))
         .route("/ws/chat", get(ws_chat_handler))
         .route("/api/login", post(login))
         .route("/login", get(login_page))
@@ -615,6 +616,252 @@ async fn activity() -> Json<Value> {
         "recent_cycles": recent_cycles,
         "open_prs": open_prs,
         "assigned_issues": assigned_issues,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    }))
+}
+
+
+// ---------------------------------------------------------------------------
+// Workboard API — aggregated view of Simard's current mental state
+// ---------------------------------------------------------------------------
+
+async fn workboard() -> Json<Value> {
+    let state_root = resolve_state_root();
+
+    // --- 1. Daemon health → cycle info ---
+    let health_path = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/var/tmp"))
+        .join("simard")
+        .join("daemon_health.json");
+
+    let daemon_health: Option<Value> = std::fs::read_to_string(&health_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
+
+    let cycle_number = daemon_health
+        .as_ref()
+        .and_then(|h| h.get("cycle_number"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let cycle_phase = daemon_health
+        .as_ref()
+        .and_then(|h| h.get("cycle_phase"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let cycle_start_epoch = daemon_health
+        .as_ref()
+        .and_then(|h| h.get("cycle_start_epoch"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let interval_secs = daemon_health
+        .as_ref()
+        .and_then(|h| h.get("interval_secs"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(300);
+
+    let health_timestamp = daemon_health
+        .as_ref()
+        .and_then(|h| h.get("timestamp"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let now_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let cycle_duration_ms = if cycle_start_epoch > 0 {
+        (now_epoch.saturating_sub(cycle_start_epoch)) * 1000
+    } else {
+        0
+    };
+
+    // ETA: if sleeping, estimate time remaining until next cycle
+    let next_cycle_eta_seconds = if cycle_phase == "sleep" {
+        let cycle_dur = daemon_health
+            .as_ref()
+            .and_then(|h| h.get("cycle_duration_secs"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let cycle_end = cycle_start_epoch + cycle_dur;
+        let next_start = cycle_end + interval_secs;
+        next_start.saturating_sub(now_epoch)
+    } else {
+        0
+    };
+
+    let uptime_seconds = if !health_timestamp.is_empty() {
+        if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&health_timestamp) {
+            let age = chrono::Utc::now().signed_duration_since(ts);
+            (cycle_number * interval_secs).max(age.num_seconds().unsigned_abs())
+        } else {
+            cycle_number * interval_secs
+        }
+    } else {
+        0
+    };
+
+    let started_at_str = if cycle_start_epoch > 0 {
+        chrono::DateTime::from_timestamp(cycle_start_epoch as i64, 0)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    let cycle_info = json!({
+        "number": cycle_number,
+        "phase": cycle_phase,
+        "started_at": started_at_str,
+        "duration_ms": cycle_duration_ms,
+    });
+
+    // --- 2. Goals with enriched status ---
+    let goal_path = state_root.join("goal_records.json");
+    let goal_content = std::fs::read_to_string(&goal_path).unwrap_or_default();
+    let goal_board = serde_json::from_str::<GoalBoard>(&goal_content).ok();
+
+    let goals_json: Vec<Value> = goal_board
+        .as_ref()
+        .map(|board| {
+            board
+                .active
+                .iter()
+                .map(|g| {
+                    let (status_str, progress_pct) = match &g.status {
+                        crate::goal_curation::GoalProgress::NotStarted => {
+                            ("queued".to_string(), 0u32)
+                        }
+                        crate::goal_curation::GoalProgress::InProgress { percent } => {
+                            ("in_progress".to_string(), *percent)
+                        }
+                        crate::goal_curation::GoalProgress::Blocked(reason) => {
+                            (format!("blocked: {reason}"), 0)
+                        }
+                        crate::goal_curation::GoalProgress::Completed => {
+                            ("done".to_string(), 100)
+                        }
+                    };
+                    json!({
+                        "name": g.id,
+                        "description": g.description,
+                        "status": status_str,
+                        "progress_pct": progress_pct,
+                        "priority": g.priority,
+                        "assigned_to": g.assigned_to,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // --- 3. Spawned engineers from agent registry ---
+    let reg = FileBackedAgentRegistry::new(&state_root);
+    let spawned_engineers: Vec<Value> = reg
+        .list()
+        .unwrap_or_default()
+        .iter()
+        .map(|e| {
+            let alive = std::path::Path::new(&format!("/proc/{}", e.pid)).exists();
+            json!({
+                "pid": e.pid,
+                "task": format!("{} ({})", e.role, e.id),
+                "alive": alive,
+                "state": format!("{:?}", e.state),
+                "started_at": e.start_time.to_rfc3339(),
+                "last_heartbeat": e.last_heartbeat.to_rfc3339(),
+            })
+        })
+        .collect();
+
+    // --- 4. Recent actions from cycle reports ---
+    let recent_reports = read_recent_cycle_reports(&state_root, 5);
+    let mut recent_actions: Vec<Value> = Vec::new();
+
+    // Include current cycle's actions from daemon_health
+    if let Some(actions) = daemon_health
+        .as_ref()
+        .and_then(|h| h.get("actions_taken"))
+        .and_then(|v| v.as_str())
+    {
+        if !actions.is_empty() {
+            recent_actions.push(json!({
+                "cycle": cycle_number,
+                "action": "current",
+                "target": "",
+                "result": actions,
+                "at": health_timestamp,
+            }));
+        }
+    }
+
+    for report in &recent_reports {
+        let cycle_num = report
+            .get("cycle_number")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        if let Some(summary) = report.get("summary").and_then(|v| v.as_str()) {
+            recent_actions.push(json!({
+                "cycle": cycle_num,
+                "action": "cycle-summary",
+                "target": "",
+                "result": summary,
+                "at": "",
+            }));
+        } else if let Some(rpt) = report.get("report") {
+            let summary_text = rpt
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .or_else(|| rpt.get("actions_taken").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            if !summary_text.is_empty() {
+                recent_actions.push(json!({
+                    "cycle": cycle_num,
+                    "action": "cycle-summary",
+                    "target": "",
+                    "result": summary_text,
+                    "at": rpt.get("timestamp").and_then(|t| t.as_str()).unwrap_or(""),
+                }));
+            }
+        }
+    }
+    recent_actions.truncate(10);
+
+    // --- 5. Task memory from cognitive memory ---
+    let mut facts_count = 0u64;
+    let mut recent_facts: Vec<String> = Vec::new();
+
+    if let Ok(mem) = NativeCognitiveMemory::open_read_only(&state_root) {
+        if let Ok(stats) = mem.get_statistics() {
+            facts_count = stats.semantic_count;
+        }
+        for tag in &["action", "goal", "decision", "episode"] {
+            if let Ok(facts) = mem.search_facts(tag, 5, 0.0) {
+                for fact in facts {
+                    if recent_facts.len() < 10 {
+                        recent_facts.push(fact.content.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    Json(json!({
+        "cycle": cycle_info,
+        "uptime_seconds": uptime_seconds,
+        "next_cycle_eta_seconds": next_cycle_eta_seconds,
+        "goals": goals_json,
+        "spawned_engineers": spawned_engineers,
+        "recent_actions": recent_actions,
+        "task_memory": {
+            "facts_count": facts_count,
+            "recent_facts": recent_facts,
+        },
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
 }
@@ -1661,6 +1908,47 @@ const LOGIN_HTML: &str = r#"<!DOCTYPE html>
     </form>
     <div class="error" id="error">Invalid code. Check terminal output.</div>
   </div>
+
+  <div class="tab-content" id="tab-workboard">
+    <div id="wb-header" style="display:flex;align-items:center;gap:1.5rem;margin-bottom:1rem;flex-wrap:wrap">
+      <div id="wb-cycle-indicator" style="display:flex;align-items:center;gap:.5rem">
+        <span id="wb-phase-dot" style="width:12px;height:12px;border-radius:50%;display:inline-block;background:#8b949e"></span>
+        <span id="wb-cycle-label" style="font-weight:700;color:var(--accent)">Cycle —</span>
+        <span id="wb-phase-label" style="color:#8b949e;font-size:.85rem"></span>
+      </div>
+      <div style="color:#8b949e;font-size:.85rem"><span id="wb-uptime">—</span> uptime</div>
+      <div style="color:#8b949e;font-size:.85rem">Next cycle: <span id="wb-eta" style="color:var(--fg);font-weight:600">—</span></div>
+      <button class="btn" onclick="fetchWorkboard()">Refresh</button>
+    </div>
+
+    <h3 style="color:var(--accent);margin-bottom:.5rem;font-size:.95rem">Goals</h3>
+    <div id="wb-kanban" style="display:grid;grid-template-columns:repeat(4,1fr);gap:.75rem;margin-bottom:1.25rem">
+      <div class="card" style="min-height:80px"><h2 style="font-size:.85rem">Queued</h2><div id="wb-col-queued"></div></div>
+      <div class="card" style="min-height:80px"><h2 style="font-size:.85rem">In Progress</h2><div id="wb-col-inprogress"></div></div>
+      <div class="card" style="min-height:80px"><h2 style="font-size:.85rem">Blocked</h2><div id="wb-col-blocked"></div></div>
+      <div class="card" style="min-height:80px"><h2 style="font-size:.85rem">Done</h2><div id="wb-col-done"></div></div>
+    </div>
+
+    <div class="grid" style="margin-bottom:1.25rem">
+      <div class="card">
+        <h2>Active Engineers</h2>
+        <div id="wb-engineers"><span style="color:#8b949e">No spawned engineers</span></div>
+      </div>
+      <div class="card">
+        <h2>Recent Actions</h2>
+        <div id="wb-actions" style="max-height:300px;overflow-y:auto"><span style="color:#8b949e">No recent actions</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 style="cursor:pointer" onclick="document.getElementById('wb-facts-body').style.display=document.getElementById('wb-facts-body').style.display==='none'?'block':'none'">Task Memory <span style="font-weight:normal;color:#8b949e;font-size:.8rem" id="wb-facts-count">0 facts</span> <span style="font-size:.75rem;color:#8b949e">▾</span></h2>
+      <div id="wb-facts-body">
+        <div id="wb-facts-list" style="font-size:.85rem;color:#8b949e">No facts loaded</div>
+      </div>
+    </div>
+  </div>
+
+
   <script>
     document.getElementById('login-form').addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -1742,6 +2030,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     <div class="tab" data-tab="memory">Memory</div>
     <div class="tab" data-tab="costs">Costs</div>
     <div class="tab" data-tab="chat">Chat</div>
+    <div class="tab" data-tab="workboard">Whiteboard</div>
   </div>
 
   <div class="tab-content active" id="tab-overview">
@@ -1921,6 +2210,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         if(tab.dataset.tab==='costs') fetchCosts();
         if(tab.dataset.tab==='traces') fetchTraces();
         if(tab.dataset.tab==='chat') initChat();
+        if(tab.dataset.tab==='workboard') {fetchWorkboard();tabRefreshTimers.wb=setInterval(fetchWorkboard,30000);}
       });
     });
     setInterval(()=>{document.getElementById('clock').textContent=new Date().toLocaleString()},1000);
@@ -2314,6 +2604,77 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChat();}
     });
 
+
+    /* --- Workboard --- */
+    const phaseColors={act:'var(--green)',orient:'var(--yellow)',observe:'var(--accent)',decide:'#a371f7',sleep:'#8b949e',unknown:'#8b949e'};
+    function fmtDuration(s){if(s<60)return s+'s';const m=Math.floor(s/60);if(m<60)return m+'m '+s%60+'s';const h=Math.floor(m/60);return h+'h '+m%60+'m';}
+    function wbGoalCard(g){
+      const pct=g.progress_pct||0;
+      const barColor=g.status==='done'?'var(--green)':g.status.startsWith('blocked')?'var(--red)':'var(--accent)';
+      return`<div style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:.6rem;margin-bottom:.5rem">
+        <div style="font-weight:600;font-size:.85rem;margin-bottom:.3rem">${esc(g.name)}</div>
+        <div style="font-size:.75rem;color:#8b949e;margin-bottom:.4rem">${esc(g.description||'')}</div>
+        <div style="background:#21262d;border-radius:3px;height:6px;margin-bottom:.3rem">
+          <div style="background:${barColor};height:100%;border-radius:3px;width:${pct}%;transition:width .3s"></div>
+        </div>
+        <div style="font-size:.7rem;color:#8b949e">${pct}% complete${g.assigned_to?' · '+esc(g.assigned_to):''}</div>
+      </div>`;
+    }
+    async function fetchWorkboard(){
+      try{
+        const r=await fetch('/api/workboard'); const d=await r.json();
+        // Header
+        const phase=d.cycle?.phase||'unknown';
+        document.getElementById('wb-phase-dot').style.background=phaseColors[phase]||phaseColors.unknown;
+        document.getElementById('wb-cycle-label').textContent='Cycle #'+(d.cycle?.number||'—');
+        document.getElementById('wb-phase-label').textContent=phase;
+        document.getElementById('wb-uptime').textContent=fmtDuration(d.uptime_seconds||0);
+        document.getElementById('wb-eta').textContent=d.next_cycle_eta_seconds>0?fmtDuration(d.next_cycle_eta_seconds):'now';
+        // Kanban columns
+        const cols={queued:[],in_progress:[],blocked:[],done:[]};
+        (d.goals||[]).forEach(g=>{
+          if(g.status==='done') cols.done.push(g);
+          else if(g.status==='queued') cols.queued.push(g);
+          else if(g.status.startsWith('blocked')) cols.blocked.push(g);
+          else cols.in_progress.push(g);
+        });
+        document.getElementById('wb-col-queued').innerHTML=cols.queued.length?cols.queued.map(wbGoalCard).join(''):'<span style="color:#8b949e;font-size:.8rem">—</span>';
+        document.getElementById('wb-col-inprogress').innerHTML=cols.in_progress.length?cols.in_progress.map(wbGoalCard).join(''):'<span style="color:#8b949e;font-size:.8rem">—</span>';
+        document.getElementById('wb-col-blocked').innerHTML=cols.blocked.length?cols.blocked.map(wbGoalCard).join(''):'<span style="color:#8b949e;font-size:.8rem">—</span>';
+        document.getElementById('wb-col-done').innerHTML=cols.done.length?cols.done.map(wbGoalCard).join(''):'<span style="color:#8b949e;font-size:.8rem">—</span>';
+        // Engineers
+        if(d.spawned_engineers?.length){
+          document.getElementById('wb-engineers').innerHTML=d.spawned_engineers.map(e=>{
+            const sc=e.alive?'ok':'err';
+            return`<div style="display:flex;align-items:center;gap:.75rem;padding:.4rem 0;border-bottom:1px solid var(--border)">
+              <span class="${sc}" style="font-weight:600">PID ${e.pid}</span>
+              <span style="flex:1">${esc(e.task)}</span>
+              <span class="${sc}" style="font-size:.8rem">${e.alive?'alive':'exited'}</span>
+              <span style="color:#8b949e;font-size:.75rem">${timeAgo(e.started_at)}</span>
+            </div>`;
+          }).join('');
+        }else{document.getElementById('wb-engineers').innerHTML='<span style="color:#8b949e;font-size:.85rem">No spawned engineers</span>';}
+        // Recent actions timeline
+        if(d.recent_actions?.length){
+          document.getElementById('wb-actions').innerHTML=d.recent_actions.map(a=>{
+            const isCurrent=a.action==='current';
+            return`<div style="display:flex;gap:.5rem;padding:.35rem 0;border-bottom:1px solid var(--border);font-size:.85rem">
+              <span style="color:var(--accent);min-width:2.5rem;font-weight:600">#${a.cycle}</span>
+              <span style="min-width:5rem;color:${isCurrent?'var(--green)':'#8b949e'}">${esc(a.action)}</span>
+              <span style="flex:1">${esc(a.result)}</span>
+              ${a.at?'<span style="color:#8b949e;font-size:.75rem">'+timeAgo(a.at)+'</span>':''}
+            </div>`;
+          }).join('');
+        }else{document.getElementById('wb-actions').innerHTML='<span style="color:#8b949e;font-size:.85rem">No recent actions</span>';}
+        // Task memory
+        const tm=d.task_memory||{};
+        document.getElementById('wb-facts-count').textContent=(tm.facts_count||0)+' facts';
+        if(tm.recent_facts?.length){
+          document.getElementById('wb-facts-list').innerHTML=tm.recent_facts.map(f=>'<div style="padding:.2rem 0;border-bottom:1px solid var(--border)">'+esc(f)+'</div>').join('');
+        }else{document.getElementById('wb-facts-list').innerHTML='<span style="color:#8b949e">No recent facts in memory</span>';}
+      }catch(e){document.getElementById('wb-engineers').innerHTML='<span class="err">Failed to load workboard data</span>';}
+    }
+
     /* --- Init --- */
     fetchStatus(); fetchIssues(); fetchDistributed();
     setInterval(fetchStatus,30000);
@@ -2347,6 +2708,8 @@ mod tests {
     fn index_html_contains_dashboard_structure() {
         assert!(INDEX_HTML.contains("Simard Dashboard"));
         assert!(INDEX_HTML.contains("/api/status"));
+        assert!(INDEX_HTML.contains("/api/workboard"));
+        assert!(INDEX_HTML.contains("Whiteboard"));
         assert!(INDEX_HTML.contains("/api/issues"));
         assert!(INDEX_HTML.contains("fetchStatus"));
     }
