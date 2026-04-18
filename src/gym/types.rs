@@ -33,6 +33,12 @@ pub enum BenchmarkClass {
     AccessibilityReview,
     InternationalizationReview,
     IncidentResponse,
+    DatabaseSchemaChange,
+    CachingStrategy,
+    FeatureFlagging,
+    RateLimiting,
+    EventSourcing,
+    ChaosEngineering,
 }
 
 impl Display for BenchmarkClass {
@@ -64,6 +70,12 @@ impl Display for BenchmarkClass {
             Self::AccessibilityReview => "accessibility-review",
             Self::InternationalizationReview => "internationalization-review",
             Self::IncidentResponse => "incident-response",
+            Self::DatabaseSchemaChange => "database-schema-change",
+            Self::CachingStrategy => "caching-strategy",
+            Self::FeatureFlagging => "feature-flagging",
+            Self::RateLimiting => "rate-limiting",
+            Self::EventSourcing => "event-sourcing",
+            Self::ChaosEngineering => "chaos-engineering",
         };
         f.write_str(label)
     }
