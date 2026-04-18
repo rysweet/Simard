@@ -2475,19 +2475,60 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     document.getElementById('log-filter')?.addEventListener('input',applyLogFilter);
     document.getElementById('log-level-filter')?.addEventListener('change',applyLogFilter);
 
-    /* --- Processes --- */
-    async function fetchProcesses(){
-      try{
-        const r=await fetch('/api/processes'); const d=await r.json();
-        document.getElementById('proc-count').textContent=`${d.count} process(es) detected — updated ${timeAgo(d.timestamp)}`;
-        if(d.processes?.length){
-          document.getElementById('proc-table').innerHTML=`
-            <table class="proc-table">
-              <tr><th>PID</th><th>Uptime</th><th>Command</th><th>Arguments</th></tr>
-              ${d.processes.map(p=>`<tr><td>${esc(p.pid)}</td><td>${esc(p.uptime)}</td><td>${esc(p.command)}</td><td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(p.full_args)}">${esc(p.full_args)}</td></tr>`).join('')}
-            </table>`;
-        }else{document.getElementById('proc-table').innerHTML='<span style="color:#8b949e">No Simard/OODA/Copilot processes found. Is the daemon running?</span>';}
-      }catch(e){document.getElementById('proc-table').innerHTML='<span class="err">Failed to load — check /api/processes</span>';}
+    /* --- Process Tree --- */
+    function renderTreeNode(node, isLast, depth) {
+      if (!node) return '';
+      const hasChildren = node.children && node.children.length > 0;
+      const toggleCls = hasChildren ? 'proc-toggle' : 'proc-toggle leaf';
+      const toggleChar = hasChildren ? '▼' : '·';
+      const stateClass = (node.state || 'unknown').replace(/\s+/g, '-');
+      const cmdDisplay = esc(node.command || '').length > 80
+        ? esc(node.command).substring(0, 77) + '…'
+        : esc(node.command || '');
+      let html = `<div class="proc-node" data-pid="${node.pid}">
+        <div class="proc-row">
+          <span class="${toggleCls}" onclick="toggleProcChildren(this)">${toggleChar}</span>
+          <span class="proc-pid">${node.pid}</span>
+          <span class="proc-state ${stateClass}">${esc(node.state)}</span>
+          <span class="proc-cpu">${node.cpu_pct?.toFixed(1) ?? '—'}%</span>
+          <span class="proc-mem">${node.memory_mb != null ? node.memory_mb.toFixed(1) + 'M' : '—'}</span>
+          <span class="proc-cmd" title="${esc(node.command)}">${cmdDisplay}</span>
+        </div>`;
+      if (hasChildren) {
+        html += '<div class="proc-children">';
+        node.children.forEach((child, i) => {
+          html += renderTreeNode(child, i === node.children.length - 1, depth + 1);
+        });
+        html += '</div>';
+      }
+      html += '</div>';
+      return html;
+    }
+
+    function toggleProcChildren(el) {
+      const node = el.closest('.proc-node');
+      const childDiv = node.querySelector(':scope > .proc-children');
+      if (!childDiv) return;
+      const collapsed = childDiv.classList.toggle('collapsed');
+      el.textContent = collapsed ? '▶' : '▼';
+    }
+
+    async function fetchProcessTree() {
+      try {
+        const r = await fetch('/api/process-tree');
+        const d = await r.json();
+        const container = document.getElementById('proc-tree-container');
+        const summary = document.getElementById('proc-tree-summary');
+        if (d.root) {
+          summary.textContent = `${d.total_processes} process(es) · ${d.total_memory_mb} MB total — updated ${timeAgo(d.timestamp)}`;
+          container.innerHTML = '<div class="proc-tree">' + renderTreeNode(d.root, true, 0) + '</div>';
+        } else {
+          summary.textContent = `Updated ${timeAgo(d.timestamp)}`;
+          container.innerHTML = '<span style="color:#8b949e">No process tree available. Is the daemon running?</span>';
+        }
+      } catch(e) {
+        document.getElementById('proc-tree-container').innerHTML = '<span class="err">Failed to load process tree</span>';
+      }
     }
 
     /* --- Memory --- */
