@@ -75,8 +75,26 @@ jobs:
       - name: Run pre-commit stage
         run: python -m pre_commit run --all-files --show-diff-on-failure --hook-stage pre-commit
 
-      - name: Run pre-push stage
-        run: python -m pre_commit run --all-files --show-diff-on-failure --hook-stage pre-push
+      - name: Run pre-push stage (cargo-clippy only)
+        run: python -m pre_commit run --all-files --show-diff-on-failure --hook-stage pre-push cargo-clippy
+
+      - name: Run cargo test (streamed, captured for artifact)
+        id: cargo_test
+        run: |
+          set -o pipefail
+          mkdir -p target/ci-logs
+          cargo test --all-features --locked --no-fail-fast \
+            -- --skip cargo_install_from_repo_succeeds \
+            2>&1 | tee target/ci-logs/cargo-test.log
+
+      - name: Upload cargo-test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-test-log-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/ci-logs/cargo-test.log
+          if-no-files-found: warn
+          retention-days: 7
 
   install-smoke:
     runs-on: ubuntu-latest
