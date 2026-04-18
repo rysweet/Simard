@@ -1,16 +1,77 @@
 /// Persist cycle report to `<state_root>/cycle_reports/cycle_<N>.json`.
+///
+/// Writes a structured JSON report so the dashboard can display
+/// the full OODA internal reasoning for each cycle.
 pub(super) fn persist_cycle_report(
     state_root: &std::path::Path,
     report: &crate::ooda_loop::CycleReport,
 ) {
+    use serde_json::json;
+
     let dir = state_root.join("cycle_reports");
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
     let path = dir.join(format!("cycle_{}.json", report.cycle_number));
-    let summary = crate::ooda_loop::summarize_cycle_report(report);
-    // Write a lightweight summary rather than serializing the full report.
-    let _ = std::fs::write(&path, summary);
+
+    let structured = json!({
+        "cycle_number": report.cycle_number,
+        "summary": crate::ooda_loop::summarize_cycle_report(report),
+        "observation": {
+            "goal_count": report.observation.goal_statuses.len(),
+            "goals": report.observation.goal_statuses.iter().map(|g| {
+                json!({
+                    "id": g.id,
+                    "description": g.description,
+                    "progress": g.progress.to_string(),
+                })
+            }).collect::<Vec<_>>(),
+            "gym_health": report.observation.gym_health.as_ref().map(|g| {
+                json!({
+                    "overall": g.overall,
+                    "pass_rate": g.pass_rate,
+                    "scenario_count": g.scenario_count,
+                })
+            }),
+            "memory_stats": {
+                "sensory_count": report.observation.memory_stats.sensory_count,
+                "working_count": report.observation.memory_stats.working_count,
+                "episodic_count": report.observation.memory_stats.episodic_count,
+                "semantic_count": report.observation.memory_stats.semantic_count,
+                "procedural_count": report.observation.memory_stats.procedural_count,
+                "prospective_count": report.observation.memory_stats.prospective_count,
+            },
+            "environment": {
+                "git_status": report.observation.environment.git_status,
+                "open_issues": report.observation.environment.open_issues.len(),
+                "recent_commits": report.observation.environment.recent_commits.len(),
+            },
+        },
+        "priorities": report.priorities.iter().map(|p| {
+            json!({
+                "goal_id": p.goal_id,
+                "urgency": p.urgency,
+                "reason": p.reason,
+            })
+        }).collect::<Vec<_>>(),
+        "planned_actions": report.planned_actions.iter().map(|a| {
+            json!({
+                "kind": a.kind.to_string(),
+                "goal_id": a.goal_id,
+                "description": a.description,
+            })
+        }).collect::<Vec<_>>(),
+        "outcomes": report.outcomes.iter().map(|o| {
+            json!({
+                "action_kind": o.action.kind.to_string(),
+                "action_description": o.action.description,
+                "success": o.success,
+                "detail": o.detail,
+            })
+        }).collect::<Vec<_>>(),
+    });
+
+    let _ = std::fs::write(&path, serde_json::to_string_pretty(&structured).unwrap_or_default());
 }
 
 /// Persist cycle results to cognitive memory as an episodic record.
