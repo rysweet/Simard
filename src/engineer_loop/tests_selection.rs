@@ -145,7 +145,7 @@ fn select_git_commit_argv_contains_git_commit_m() {
 
 #[test]
 fn select_open_issue_builds_action_with_title() {
-    let action = select_open_issue("fix the login page", "");
+    let action = select_open_issue("fix the login page", "").unwrap();
     assert_eq!(action.label, "open-issue");
     assert!(action.argv.contains(&"gh".to_string()));
     match &action.kind {
@@ -160,7 +160,7 @@ fn select_open_issue_builds_action_with_title() {
 
 #[test]
 fn select_open_issue_note_appears_in_rationale() {
-    let action = select_open_issue("test", " [extra]");
+    let action = select_open_issue("test", " [extra]").unwrap();
     assert!(action.rationale.contains("[extra]"));
 }
 
