@@ -8,7 +8,7 @@ doc_type: howto
 related:
   - ./run-ooda-daemon.md
   - ../reference/simard-cli.md
-  - ../../prompt_assets/simard/goal_session_objective.md
+  - https://github.com/rysweet/Simard/blob/main/prompt_assets/simard/goal_session_objective.md
 ---
 
 # How OODA spawns engineer agents
@@ -228,7 +228,7 @@ Each cycle report includes:
 
 - [How to run the OODA daemon](./run-ooda-daemon.md)
 - [Simard CLI reference](../reference/simard-cli.md)
-- [Goal session objective prompt](../../prompt_assets/simard/goal_session_objective.md)
+- [Goal session objective prompt](https://github.com/rysweet/Simard/blob/main/prompt_assets/simard/goal_session_objective.md)
 - Source: `src/agent_supervisor/lifecycle.rs` (`spawn_subordinate`)
 - Source: `src/agent_supervisor/types.rs` (`SubordinateConfig::validate`)
 - Source: `src/identity_composition.rs` (`max_subordinate_depth`,
