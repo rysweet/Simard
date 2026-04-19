@@ -481,3 +481,159 @@ mod tests {
         assert_eq!(prs, 0);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Zombie reaper
+// ---------------------------------------------------------------------------
+//
+// The OODA daemon spawns subordinate engineer processes whose `Child` handles
+// are dropped without `wait()`. Without intervention, the kernel keeps those
+// exited children as `<defunct>` entries indefinitely. `reap_zombies` is
+// invoked once per OODA cycle to harvest exit statuses non-blockingly via
+// `waitpid(-1, ..., WNOHANG)`.
+
+/// Non-blockingly reap any exited child processes of the calling process.
+///
+/// Returns the number of children reaped during this call. On non-Unix
+/// platforms this is a no-op that always returns `0`.
+///
+/// EINTR handling: the loop terminates on any `-1` return regardless of
+/// `errno`. A missed reap on signal interruption is harmless because the
+/// next OODA cycle (typically seconds later) will pick it up; retrying
+/// inside the loop risks unbounded iteration.
+#[cfg(unix)]
+pub fn reap_zombies() -> usize {
+    let mut reaped: usize = 0;
+    loop {
+        let mut status: libc::c_int = 0;
+        // SAFETY: `waitpid` with pid = -1 and WNOHANG is a non-blocking call
+        // that inspects the kernel's child-process table for the calling
+        // process. The `status` pointer points to a stack-allocated c_int we
+        // own. No invariants beyond standard POSIX semantics are required.
+        let pid = unsafe { libc::waitpid(-1, &mut status as *mut libc::c_int, libc::WNOHANG) };
+        if pid > 0 {
+            reaped += 1;
+            continue;
+        }
+        // pid == 0: children exist but none have exited.
+        // pid == -1: no children remain (ECHILD) or interrupted (EINTR).
+        // In all non-positive cases, stop polling this cycle.
+        break;
+    }
+    reaped
+}
+
+#[cfg(not(unix))]
+pub fn reap_zombies() -> usize {
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Zombie reaper tests (TDD: these tests describe the contract for
+// `reap_zombies`, which prevents <defunct> child accumulation in the
+// long-running OODA daemon).
+// ---------------------------------------------------------------------------
+
+#[cfg(all(test, unix))]
+mod reaper_tests {
+    use super::reap_zombies;
+    use std::process::Command;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    /// Drain any pre-existing zombies left behind by other tests in the same
+    /// process so each test starts from a clean baseline.
+    fn drain() {
+        for _ in 0..32 {
+            if reap_zombies() == 0 {
+                break;
+            }
+        }
+    }
+
+    /// Spawn `/bin/true`, drop its `Child` handle without `wait()`, and wait
+    /// (up to ~2s) for the kernel to mark the process as exited. Returns when
+    /// the child has had time to become a zombie.
+    fn spawn_short_lived_unwaited() {
+        let child = Command::new("true")
+            .spawn()
+            .expect("spawn /bin/true should succeed on unix");
+        // Intentionally drop without wait() — this is the bug pattern the
+        // reaper must clean up.
+        drop(child);
+        // Give the kernel a moment to transition the child to <defunct>.
+        thread::sleep(Duration::from_millis(150));
+    }
+
+    #[test]
+    fn reaps_dropped_child_within_one_cycle() {
+        drain();
+        spawn_short_lived_unwaited();
+
+        // Poll briefly to tolerate slow CI scheduling — but the contract is
+        // "reaped within one OODA cycle", so a single call should typically
+        // suffice. Bound the wait to 2s.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut total = 0usize;
+        loop {
+            total += reap_zombies();
+            if total >= 1 || Instant::now() >= deadline {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            total >= 1,
+            "reap_zombies() must reap the dropped child within one cycle (got {total})",
+        );
+    }
+
+    #[test]
+    fn idempotent_when_no_zombies() {
+        drain();
+        // With no unwaited children, two consecutive calls must both return 0.
+        let first = reap_zombies();
+        let second = reap_zombies();
+        assert_eq!(first, 0, "expected 0 reaps on quiescent process, got {first}");
+        assert_eq!(
+            second, 0,
+            "second call must also return 0 (idempotent), got {second}",
+        );
+    }
+
+    #[test]
+    fn never_blocks_when_live_child_exists() {
+        drain();
+        // Spawn a child that lives longer than the call to reap_zombies.
+        // WNOHANG must guarantee non-blocking behaviour even when a child
+        // exists but has not exited.
+        let mut child = Command::new("sleep")
+            .arg("2")
+            .spawn()
+            .expect("spawn /bin/sleep should succeed on unix");
+
+        let start = Instant::now();
+        let _ = reap_zombies();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "reap_zombies() must not block on live children (took {elapsed:?})",
+        );
+
+        // Cleanup: kill and wait the live child so it doesn't leak into other
+        // tests in the same process.
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+#[cfg(all(test, not(unix)))]
+mod reaper_stub_tests {
+    use super::reap_zombies;
+
+    #[test]
+    fn stub_returns_zero() {
+        assert_eq!(reap_zombies(), 0);
+    }
+}

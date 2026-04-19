@@ -283,6 +283,17 @@ pub fn run_ooda_daemon(
     let mut cycles_run = 0u32;
 
     loop {
+        // Reap any zombie engineer subprocesses from the previous cycle's
+        // spawns before doing anything else. Non-blocking; logs only when
+        // a positive count was reaped to keep steady-state logs clean.
+        let reaped = crate::agent_supervisor::reap_zombies();
+        if reaped > 0 {
+            daemon_log(
+                &state_root,
+                &format!("[simard] reaped {reaped} zombie engineer process(es)"),
+            );
+        }
+
         // Check for shutdown signal at the top of each iteration.
         if shutdown.load(Ordering::SeqCst) {
             daemon_log(
