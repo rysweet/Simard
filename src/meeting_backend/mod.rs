@@ -35,6 +35,11 @@ const RECENT_WINDOW: usize = 30;
 /// Maximum time to wait for LLM summary generation before falling back.
 const SUMMARY_TIMEOUT: Duration = Duration::from_secs(90);
 
+/// Sentinel content returned when the LLM yields no usable text after
+/// sanitisation. Surfacing this to the dashboard is preferable to an empty
+/// bubble — operators can see that the turn completed but produced nothing.
+pub const EMPTY_RESPONSE_SENTINEL: &str = "[empty response]";
+
 /// The unified meeting backend.
 ///
 /// Maintains conversation state, delegates to an LLM agent, and handles
@@ -136,7 +141,14 @@ impl MeetingBackend {
                 return Err(e);
             }
         };
-        let response_text = extract_response(&outcome);
+        let response_text = {
+            let extracted = extract_response(&outcome);
+            if extracted.trim().is_empty() {
+                EMPTY_RESPONSE_SENTINEL.to_string()
+            } else {
+                extracted
+            }
+        };
 
         // Append assistant response
         self.push_message(Role::Assistant, response_text.clone());
@@ -844,6 +856,18 @@ mod tests {
 
         let result = backend.send_message("hello");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn send_message_returns_sentinel_when_response_empty() {
+        // Whitespace-only LLM output sanitises to empty; backend must
+        // surface the explicit sentinel rather than an empty bubble.
+        let agent = MockAgent::new("   \n\n   ");
+        let mut backend =
+            MeetingBackend::new_session("Test", Box::new(agent), None, String::new());
+        let resp = backend.send_message("ping").unwrap();
+        assert_eq!(resp.content, EMPTY_RESPONSE_SENTINEL);
+        assert_eq!(resp.message_count, 2);
     }
 
     #[test]

@@ -62,16 +62,83 @@ pub(super) fn persist_cycle_report(
             })
         }).collect::<Vec<_>>(),
         "outcomes": report.outcomes.iter().map(|o| {
-            json!({
+            let mut entry = json!({
                 "action_kind": o.action.kind.to_string(),
                 "action_description": o.action.description,
                 "success": o.success,
                 "detail": o.detail,
-            })
+            });
+            if let Some(spawn) = extract_spawn_engineer_outcome(&o.detail, o.success) {
+                if let Some(map) = entry.as_object_mut() {
+                    map.insert("spawn_engineer".to_string(), spawn);
+                }
+            }
+            entry
         }).collect::<Vec<_>>(),
     });
 
     let _ = std::fs::write(&path, serde_json::to_string_pretty(&structured).unwrap_or_default());
+}
+
+/// Extract structured spawn_engineer outcome fields from an action's free-form
+/// detail string.
+///
+/// The OODA goal-action dispatcher emits human-readable detail messages such
+/// as `"spawn_engineer dispatched: agent='engineer-g1-1700', task='fix bug'
+/// (goal 'g1', pid=1234)"`. Issue #946 surfaces these on the dashboard
+/// Thinking tab, so we re-parse those messages back into structured fields:
+///
+/// - `subordinate_agent`: the agent name (used to build the agent-log link)
+/// - `task_summary`: the LLM-supplied task text (truncated upstream)
+/// - `last_action`: short verb describing what happened (`dispatched`,
+///   `skipped`, `denied`, `failed`)
+/// - `status`: live-status indicator (`live`, `skipped`, `denied`, `failed`)
+///
+/// Returns `None` when the detail does not reference `spawn_engineer`, so
+/// callers can attach the structured block only when meaningful.
+pub(crate) fn extract_spawn_engineer_outcome(detail: &str, success: bool) -> Option<serde_json::Value> {
+    if !detail.contains("spawn_engineer") {
+        return None;
+    }
+
+    let (last_action, status) = if detail.contains("spawn_engineer dispatched") {
+        ("dispatched", if success { "live" } else { "failed" })
+    } else if detail.contains("spawn_engineer skipped") {
+        ("skipped", "skipped")
+    } else if detail.contains("spawn_engineer denied") {
+        ("denied", "denied")
+    } else if detail.contains("spawn_engineer failed") {
+        ("failed", "failed")
+    } else if detail.contains("spawn_engineer requested") {
+        ("requested", if success { "pending" } else { "failed" })
+    } else {
+        ("unknown", if success { "ok" } else { "failed" })
+    };
+
+    let subordinate_agent = extract_quoted_after(detail, "agent=")
+        .or_else(|| extract_quoted_after(detail, "subordinate "));
+    let task_summary = extract_quoted_after(detail, "task=");
+    let goal_id = extract_quoted_after(detail, "goal ");
+
+    Some(serde_json::json!({
+        "subordinate_agent": subordinate_agent,
+        "task_summary": task_summary,
+        "goal_id": goal_id,
+        "last_action": last_action,
+        "status": status,
+    }))
+}
+
+/// Pull the contents of the next single-quoted string that follows `prefix`
+/// in `text`. Returns `None` if either the prefix or the closing quote is
+/// missing. Used by [`extract_spawn_engineer_outcome`] to recover structured
+/// data from the human-readable outcome detail strings.
+fn extract_quoted_after(text: &str, prefix: &str) -> Option<String> {
+    let idx = text.find(prefix)?;
+    let after = &text[idx + prefix.len()..];
+    let after = after.strip_prefix('\'').unwrap_or(after);
+    let end = after.find('\'')?;
+    Some(after[..end].to_string())
 }
 
 /// Persist cycle results to cognitive memory as an episodic record.
@@ -234,5 +301,64 @@ mod tests {
         let report = minimal_report(99);
         persist_cycle_report(&nested, &report);
         assert!(nested.join("cycle_reports/cycle_99.json").exists());
+    }
+
+    #[test]
+    fn extract_spawn_engineer_dispatched_detail() {
+        let detail =
+            "spawn_engineer dispatched: agent='engineer-g1-1700', task='fix the auth bug' (goal 'g1', pid=1234)";
+        let v = extract_spawn_engineer_outcome(detail, true).expect("should detect");
+        assert_eq!(v["last_action"], "dispatched");
+        assert_eq!(v["status"], "live");
+        assert_eq!(v["subordinate_agent"], "engineer-g1-1700");
+        assert_eq!(v["task_summary"], "fix the auth bug");
+        assert_eq!(v["goal_id"], "g1");
+    }
+
+    #[test]
+    fn extract_spawn_engineer_skipped_detail() {
+        let detail = "spawn_engineer skipped: goal 'g1' already assigned to subordinate 'engineer-g1-old'";
+        let v = extract_spawn_engineer_outcome(detail, true).expect("should detect");
+        assert_eq!(v["last_action"], "skipped");
+        assert_eq!(v["status"], "skipped");
+        assert_eq!(v["goal_id"], "g1");
+    }
+
+    #[test]
+    fn extract_spawn_engineer_denied_detail() {
+        let detail =
+            "spawn_engineer denied for goal 'g2': subordinate depth 2 >= configured limit 2";
+        let v = extract_spawn_engineer_outcome(detail, false).expect("should detect");
+        assert_eq!(v["last_action"], "denied");
+        assert_eq!(v["status"], "denied");
+        assert_eq!(v["goal_id"], "g2");
+    }
+
+    #[test]
+    fn extract_spawn_engineer_returns_none_for_unrelated_detail() {
+        assert!(extract_spawn_engineer_outcome("consolidated 20 episodes", true).is_none());
+    }
+
+    #[test]
+    fn persist_cycle_report_includes_spawn_engineer_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut report = minimal_report(7);
+        report.outcomes.push(ActionOutcome {
+            action: PlannedAction {
+                kind: ActionKind::AdvanceGoal,
+                goal_id: Some("g1".to_string()),
+                description: "advance g1".to_string(),
+            },
+            success: true,
+            detail:
+                "spawn_engineer dispatched: agent='engineer-g1-9', task='do things' (goal 'g1', pid=42)"
+                    .to_string(),
+        });
+        persist_cycle_report(dir.path(), &report);
+        let content =
+            std::fs::read_to_string(dir.path().join("cycle_reports/cycle_7.json")).unwrap();
+        assert!(content.contains("\"spawn_engineer\""));
+        assert!(content.contains("engineer-g1-9"));
+        assert!(content.contains("\"status\": \"live\""));
     }
 }
