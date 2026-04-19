@@ -21,6 +21,19 @@ pub(crate) struct CommandOutput {
     pub(crate) stderr: String,
 }
 
+/// Collapse newline (`\n`) and carriage-return (`\r`) characters in `input`
+/// to single spaces, then trim whitespace from both ends. Used to keep argv
+/// segments single-line so they pass the `run_command` validator. See
+/// issue #943.
+fn collapse_to_single_line(input: &str) -> String {
+    input
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
 pub(crate) fn timeout_for_command(argv: &[&str]) -> Duration {
     if argv.first().is_some_and(|cmd| *cmd == "cargo") {
         Duration::from_secs(CARGO_COMMAND_TIMEOUT_SECS)
@@ -335,15 +348,26 @@ pub(crate) fn execute_engineer_action(
             })
         }
         EngineerActionKind::OpenIssue(ref req) => {
+            // Defensively collapse newlines/CR in title and body so we never
+            // emit an argv segment that the run_command validator would
+            // reject ("argv-only command segments must be non-empty
+            // single-line values"). See issue #943.
+            let title = collapse_to_single_line(&req.title);
+            let body = collapse_to_single_line(&req.body);
             let mut argv_owned: Vec<String> = vec![
                 "gh".to_string(),
                 "issue".to_string(),
                 "create".to_string(),
                 "--title".to_string(),
-                req.title.clone(),
-                "--body".to_string(),
-                req.body.clone(),
+                title,
             ];
+            // Only include --body when we actually have a body. An empty
+            // body would produce an empty argv segment that fails the
+            // single-line/non-empty validator above.
+            if !body.is_empty() {
+                argv_owned.push("--body".to_string());
+                argv_owned.push(body);
+            }
             for label in &req.labels {
                 argv_owned.push("--label".to_string());
                 argv_owned.push(label.clone());

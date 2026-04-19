@@ -709,6 +709,43 @@ mod tests {
     }
 
     #[test]
+    fn select_open_issue_multiline_task_yields_argv_with_no_newlines_or_empties() {
+        // Regression for issue #943: keyword-fallback planner used to emit
+        // `gh issue create --title <multi-line task> --body ''` which the
+        // argv-only validator in execution::run_command rejects with
+        // "argv-only command segments must be non-empty single-line values".
+        let multi_line = "Investigate planner crash\nand fix it\r\nplease";
+        let action = select_open_issue(multi_line, "").unwrap();
+        for segment in &action.argv {
+            assert!(
+                !segment.is_empty(),
+                "argv segment must not be empty: {:?}",
+                action.argv
+            );
+            assert!(
+                !segment.contains('\n'),
+                "argv segment must not contain '\\n': {segment:?}"
+            );
+            assert!(
+                !segment.contains('\r'),
+                "argv segment must not contain '\\r': {segment:?}"
+            );
+        }
+        // The empty-body pair must not appear in the planner's argv.
+        assert!(
+            !action.argv.iter().any(|s| s == "--body"),
+            "planner argv must not include --body for an empty body: {:?}",
+            action.argv
+        );
+        // Sanity: title is single-line and non-empty.
+        let title_idx = action.argv.iter().position(|a| a == "--title").unwrap() + 1;
+        let title = &action.argv[title_idx];
+        assert!(!title.is_empty());
+        assert!(!title.contains('\n'));
+        assert!(!title.contains('\r'));
+    }
+
+    #[test]
     fn select_cargo_action_detects_test() {
         let action = select_cargo_action("run tests", "");
         assert_eq!(action.label, "cargo-test");
