@@ -1710,6 +1710,9 @@ async fn distributed() -> Json<Value> {
             "facts_shared": 0,
             "note": "No external message bus required — hive-mind uses direct peer gossip for memory replication",
         },
+        // Additive: per-issue WS-4. Surfaces in-process event bus stats from
+        // `HiveEventBus::global()`. Older clients ignore the unknown key.
+        "event_bus": crate::hive_event_bus::HiveEventBus::global().stats_snapshot(),
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
 }
@@ -3981,6 +3984,26 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       document.getElementById('cluster-topology').innerHTML='<span class="loading">Querying remote VMs… (this may take 10-30s)</span>';
       try{
         const d=await apiFetch('/api/distributed');
+        const eb=d.event_bus;
+        const emDash='\u2014';
+        const fmtTs=v=>(v==null?emDash:v);
+        const fmtRate=v=>(v==null?'0':(Math.round(v*100)/100).toString());
+        let ebBlock='';
+        if(eb){
+          const topics=eb.topics||{};
+          const rows=Object.keys(topics).sort().map(name=>{
+            const t=topics[name]||{};
+            return `<li data-testid="event-bus-topic-${esc(name)}">${esc(name)}: ${t.subscribers||0} subs, ${fmtRate(t.events_per_min)}/min, last ${esc(fmtTs(t.last_event_timestamp))}</li>`;
+          }).join('');
+          ebBlock=`
+          <div class="event-bus-stats" style="margin-top:1rem;padding-top:.75rem;border-top:1px solid var(--border)">
+            <h3 style="margin:0 0 .5rem 0;color:var(--accent);font-size:1rem">Event Bus</h3>
+            <div class="stat" data-testid="event-bus-total-subscribers"><span class="label">Subscribers</span><span class="value">${eb.total_subscribers||0}</span></div>
+            <div class="stat" data-testid="event-bus-events-per-min"><span class="label">Events/min</span><span class="value">${fmtRate(eb.events_per_min)}</span></div>
+            <div class="stat" data-testid="event-bus-last-event"><span class="label">Last event</span><span class="value">${esc(fmtTs(eb.last_event_timestamp))}</span></div>
+            <ul style="margin:.5rem 0 0 1rem;padding:0;font-size:.85rem;color:#8b949e">${rows}</ul>
+          </div>`;
+        }
         document.getElementById('cluster-topology').innerHTML=`
           <div class="stat"><span class="label">Topology</span><span class="value">${esc(d.topology)}</span></div>
           <div class="stat"><span class="label">Local Host</span><span class="value">${esc(d.local?.hostname||'?')}</span></div>
@@ -3988,7 +4011,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           <div class="stat"><span class="label">Hive Status</span><span class="value ${d.hive_mind?.status==='active'?'ok':'warn'}">${esc(d.hive_mind?.status||'standalone')}</span></div>
           ${d.hive_mind?.peers!=null?`<div class="stat"><span class="label">Peers</span><span class="value">${d.hive_mind.peers}</span></div>`:''}
           ${d.hive_mind?.facts_shared!=null?`<div class="stat"><span class="label">Facts Shared</span><span class="value">${d.hive_mind.facts_shared}</span></div>`:''}
-          <div class="stat"><span class="label">Updated</span><span class="value">${timeAgo(d.timestamp)}</span></div>`;
+          <div class="stat"><span class="label">Updated</span><span class="value">${timeAgo(d.timestamp)}</span></div>${ebBlock}`;
         if(d.remote_vms?.length){
           document.getElementById('remote-vms').innerHTML=d.remote_vms.map(vm=>{
             const sc=vm.status==='reachable'?'ok':(vm.status==='unreachable'?'err':'warn');

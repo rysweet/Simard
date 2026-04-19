@@ -35,7 +35,16 @@ async function mockAllApis(page: import('@playwright/test').Page) {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ topology: [], vms: [] }),
+      body: JSON.stringify({
+        topology: [],
+        vms: [],
+        event_bus: {
+          topics: {},
+          total_subscribers: 0,
+          events_per_min: 0.0,
+          last_event_timestamp: null,
+        },
+      }),
     }),
   );
   await page.route('**/api/hosts', (route) => route.fulfill(emptyJson));

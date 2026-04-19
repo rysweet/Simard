@@ -6,11 +6,28 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
 /// Default broadcast channel capacity (per design spec).
 pub const DEFAULT_CAPACITY: usize = 1024;
+
+/// Rolling window over which `events_per_min` is computed (5 minutes).
+const RATE_WINDOW: Duration = Duration::from_secs(5 * 60);
+
+/// Statically known topics surfaced by `/api/distributed`'s `event_bus` key.
+/// New `HiveEventKind` variants must extend this list (and `topic()`) to be
+/// surfaced as zeroed entries when silent.
+pub const KNOWN_TOPICS: &[&str] = &[
+    "fact_promoted",
+    "fact_imported",
+    "node_joined",
+    "node_left",
+    "memory_sync_requested",
+];
 
 /// Typed enum of hive event variants. Marked non-exhaustive to allow
 /// additive evolution without breaking downstream matches.
@@ -40,6 +57,137 @@ impl HiveEventEnvelope {
             id: Uuid::now_v7(),
             timestamp: Utc::now(),
             kind,
+        }
+    }
+}
+
+impl HiveEventKind {
+    /// Stable, lower-snake-case topic name for this event variant.
+    ///
+    /// Used by [`HiveEventBus`] stats and `/api/distributed`'s `event_bus`
+    /// key. Adding a new variant must extend this match and [`KNOWN_TOPICS`].
+    pub fn topic(&self) -> &'static str {
+        match self {
+            HiveEventKind::FactPromoted { .. } => "fact_promoted",
+            HiveEventKind::FactImported { .. } => "fact_imported",
+            HiveEventKind::NodeJoined { .. } => "node_joined",
+            HiveEventKind::NodeLeft { .. } => "node_left",
+            HiveEventKind::MemorySyncRequested { .. } => "memory_sync_requested",
+        }
+    }
+}
+
+/// Per-topic stats snapshot returned by [`HiveEventBus::stats_snapshot`].
+///
+/// `subscribers` reflects the bus's global broadcast receiver count
+/// (Tokio `broadcast` is fanout: every receiver sees every event regardless
+/// of topic, so per-topic split is intentionally identical to the global
+/// count).
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
+pub struct TopicStatsSnapshot {
+    pub subscribers: usize,
+    pub events_per_min: f64,
+    pub last_event_timestamp: Option<DateTime<Utc>>,
+}
+
+/// Whole-bus stats snapshot returned by [`HiveEventBus::stats_snapshot`].
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
+pub struct BusStatsSnapshot {
+    pub topics: BTreeMap<String, TopicStatsSnapshot>,
+    pub total_subscribers: usize,
+    pub events_per_min: f64,
+    pub last_event_timestamp: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Default)]
+struct TopicState {
+    /// Sliding-window of recent publish instants, pruned on every read & write.
+    recent: VecDeque<Instant>,
+    last_event: Option<DateTime<Utc>>,
+}
+
+impl TopicState {
+    /// Drop entries older than [`RATE_WINDOW`].
+    fn prune(&mut self, now: Instant) {
+        while let Some(&front) = self.recent.front() {
+            if now.saturating_duration_since(front) > RATE_WINDOW {
+                self.recent.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct BusStatsInner {
+    /// Per-topic ring buffers. Keyed by `&'static str` from
+    /// [`HiveEventKind::topic`] (or `"unknown"` for future variants that have
+    /// not yet been wired into [`KNOWN_TOPICS`]).
+    topics: BTreeMap<&'static str, TopicState>,
+}
+
+/// Process-cheap, mutex-guarded stats accumulator. Critical sections are
+/// `VecDeque::push_back` + `Option` write; no I/O, microseconds in steady state.
+#[derive(Debug, Default)]
+pub(crate) struct BusStats {
+    inner: Mutex<BusStatsInner>,
+}
+
+impl BusStats {
+    fn record(&self, topic: &'static str, ts: DateTime<Utc>) {
+        let now = Instant::now();
+        // Recover from a poisoned mutex so a panic in another thread cannot
+        // permanently break stats recording.
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = g.topics.entry(topic).or_default();
+        entry.prune(now);
+        entry.recent.push_back(now);
+        entry.last_event = Some(ts);
+    }
+
+    fn snapshot(&self, subscriber_count: usize) -> BusStatsSnapshot {
+        let now = Instant::now();
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Prune all topics first so reads observe a freshly-trimmed window.
+        for state in g.topics.values_mut() {
+            state.prune(now);
+        }
+
+        let mut topics: BTreeMap<String, TopicStatsSnapshot> = BTreeMap::new();
+        // Seed all known topics with zeroed defaults so the wire format is
+        // stable even before any events have been published.
+        for &k in KNOWN_TOPICS {
+            topics.insert(
+                k.to_string(),
+                TopicStatsSnapshot {
+                    subscribers: subscriber_count,
+                    events_per_min: 0.0,
+                    last_event_timestamp: None,
+                },
+            );
+        }
+        // Overlay actual recorded state (handles unknown topics too).
+        for (name, state) in g.topics.iter() {
+            topics.insert(
+                (*name).to_string(),
+                TopicStatsSnapshot {
+                    subscribers: subscriber_count,
+                    events_per_min: state.recent.len() as f64 / 5.0,
+                    last_event_timestamp: state.last_event,
+                },
+            );
+        }
+
+        let agg_count: usize = g.topics.values().map(|s| s.recent.len()).sum();
+        let last = g.topics.values().filter_map(|s| s.last_event).max();
+
+        BusStatsSnapshot {
+            topics,
+            total_subscribers: subscriber_count,
+            events_per_min: agg_count as f64 / 5.0,
+            last_event_timestamp: last,
         }
     }
 }
@@ -74,11 +222,12 @@ impl std::error::Error for BusError {}
 
 /// In-process pub/sub bus wrapping `tokio::sync::broadcast`.
 ///
-/// Cloning the bus shares the underlying broadcast channel.
+/// Cloning the bus shares the underlying broadcast channel and stats store.
 #[derive(Debug, Clone)]
 pub struct HiveEventBus {
     sender: broadcast::Sender<HiveEventEnvelope>,
     capacity: usize,
+    stats: Arc<BusStats>,
 }
 
 impl HiveEventBus {
@@ -91,7 +240,11 @@ impl HiveEventBus {
     pub fn with_capacity(capacity: usize) -> Self {
         assert!(capacity > 0, "HiveEventBus capacity must be > 0");
         let (sender, _) = broadcast::channel(capacity);
-        Self { sender, capacity }
+        Self {
+            sender,
+            capacity,
+            stats: Arc::new(BusStats::default()),
+        }
     }
 
     /// Create a bus from an explicit config.
@@ -99,13 +252,27 @@ impl HiveEventBus {
         Self::with_capacity(config.capacity)
     }
 
+    /// Process-wide default bus, lazily initialised on first call.
+    ///
+    /// Used by the operator dashboard's `/api/distributed` handler so that
+    /// `event_bus` stats can be surfaced without threading a bus handle
+    /// through every call site. Production code that needs to publish should
+    /// use this accessor; tests construct their own bus via [`Self::new`] to
+    /// keep stats isolated.
+    pub fn global() -> &'static HiveEventBus {
+        static GLOBAL: OnceLock<HiveEventBus> = OnceLock::new();
+        GLOBAL.get_or_init(HiveEventBus::new)
+    }
+
     /// Publish an event. Returns the number of subscribers that received it.
     /// Returns `0` when there are currently no subscribers (no error).
     ///
     /// The envelope is constructed exactly once and the broadcast channel
-    /// clones it per delivery.
+    /// clones it per delivery. Stats are recorded before broadcast so a slow
+    /// subscriber cannot delay observability.
     pub fn publish(&self, kind: HiveEventKind) -> usize {
         let envelope = HiveEventEnvelope::new(kind);
+        self.stats.record(envelope.kind.topic(), envelope.timestamp);
         match self.sender.send(envelope) {
             Ok(n) => n,
             // No active receivers is not an error condition for this bus.
@@ -128,6 +295,13 @@ impl HiveEventBus {
     /// by the underlying tokio broadcast channel).
     pub fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    /// Snapshot of current subscriber count, per-topic event rate (over the
+    /// last 5 minutes) and last-event timestamp. Pure read; safe to call
+    /// from request handlers.
+    pub fn stats_snapshot(&self) -> BusStatsSnapshot {
+        self.stats.snapshot(self.subscriber_count())
     }
 }
 
@@ -392,5 +566,174 @@ mod tests {
 
         let env = rx.recv().await.expect("recv");
         assert_eq!(env.kind, sample_kind());
+    }
+
+    // =========================================================================
+    // WS-4 — BusStats / stats_snapshot() contract (TDD: FAILING until P1 lands)
+    // =========================================================================
+    // These tests pin the additive observability contract surfaced via
+    // `/api/distributed`'s `event_bus` key. They reference symbols that do not
+    // yet exist; compilation must fail until Step 8 (P1) implements them.
+    //
+    // Contract under test:
+    //   - `HiveEventKind::topic(&self) -> &'static str` for all known variants.
+    //   - `HiveEventBus::stats_snapshot() -> BusStatsSnapshot`.
+    //   - Snapshot lists all 5 known topics with zeroed defaults when silent.
+    //   - `events_per_min` = count_in_last_5_min / 5.0.
+    //   - `last_event_timestamp` is `Some(_)` after a publish, `None` otherwise.
+    //   - Aggregate `total_subscribers` reflects active receiver count.
+    //   - Aggregate `events_per_min` equals the sum of per-topic rates.
+
+    const KNOWN_TOPICS: &[&str] = &[
+        "fact_promoted",
+        "fact_imported",
+        "node_joined",
+        "node_left",
+        "memory_sync_requested",
+    ];
+
+    #[test]
+    fn topic_str_for_each_known_kind() {
+        // Round-trips each known variant through `.topic()`.
+        let pairs: &[(HiveEventKind, &str)] = &[
+            (HiveEventKind::FactPromoted { fact_id: "x".into() }, "fact_promoted"),
+            (
+                HiveEventKind::FactImported { fact_id: "x".into(), source: "s".into() },
+                "fact_imported",
+            ),
+            (HiveEventKind::NodeJoined { node_id: "n".into() }, "node_joined"),
+            (HiveEventKind::NodeLeft { node_id: "n".into() }, "node_left"),
+            (HiveEventKind::MemorySyncRequested { node_id: "n".into() }, "memory_sync_requested"),
+        ];
+        for (kind, expected) in pairs {
+            assert_eq!(kind.topic(), *expected, "topic mismatch for {kind:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn stats_snapshot_lists_all_known_topics_zeroed_when_silent() {
+        let bus = HiveEventBus::new();
+        let snap = bus.stats_snapshot();
+
+        for t in KNOWN_TOPICS {
+            let entry = snap
+                .topics
+                .get(*t)
+                .unwrap_or_else(|| panic!("missing topic key '{t}' in snapshot"));
+            assert_eq!(entry.events_per_min, 0.0, "silent topic '{t}' rate must be 0");
+            assert!(
+                entry.last_event_timestamp.is_none(),
+                "silent topic '{t}' last_event must be None",
+            );
+        }
+        assert!(snap.last_event_timestamp.is_none());
+        assert_eq!(snap.events_per_min, 0.0);
+    }
+
+    #[tokio::test]
+    async fn stats_snapshot_records_publish_timestamp_and_rate() {
+        let bus = HiveEventBus::new();
+        let _rx = bus.subscribe();
+
+        let before = Utc::now();
+        bus.publish(HiveEventKind::FactPromoted { fact_id: "f1".into() });
+        bus.publish(HiveEventKind::FactPromoted { fact_id: "f2".into() });
+        let after = Utc::now();
+
+        let snap = bus.stats_snapshot();
+        let topic = snap
+            .topics
+            .get("fact_promoted")
+            .expect("fact_promoted entry must exist");
+
+        // Rate: 2 events over a 5-minute window = 0.4/min.
+        assert!(
+            (topic.events_per_min - 0.4).abs() < 1e-9,
+            "expected 0.4/min, got {}",
+            topic.events_per_min,
+        );
+
+        let ts = topic
+            .last_event_timestamp
+            .expect("last_event_timestamp must be Some after publish");
+        assert!(ts >= before && ts <= after, "timestamp out of window: {ts}");
+
+        // Aggregate last_event must equal the most recent topic timestamp.
+        let agg_ts = snap
+            .last_event_timestamp
+            .expect("aggregate last_event must be Some");
+        assert_eq!(agg_ts, ts);
+    }
+
+    #[tokio::test]
+    async fn stats_snapshot_aggregate_rate_equals_sum_of_topic_rates() {
+        let bus = HiveEventBus::new();
+        let _rx = bus.subscribe();
+
+        bus.publish(HiveEventKind::FactPromoted { fact_id: "a".into() });
+        bus.publish(HiveEventKind::NodeJoined { node_id: "n1".into() });
+        bus.publish(HiveEventKind::NodeJoined { node_id: "n2".into() });
+
+        let snap = bus.stats_snapshot();
+        let sum: f64 = snap.topics.values().map(|t| t.events_per_min).sum();
+        assert!(
+            (snap.events_per_min - sum).abs() < 1e-9,
+            "aggregate {} must equal sum {}",
+            snap.events_per_min,
+            sum,
+        );
+    }
+
+    #[tokio::test]
+    async fn stats_snapshot_total_subscribers_reflects_receivers() {
+        let bus = HiveEventBus::new();
+        let snap0 = bus.stats_snapshot();
+        let baseline = snap0.total_subscribers;
+
+        let r1 = bus.subscribe();
+        let r2 = bus.subscribe();
+        let snap2 = bus.stats_snapshot();
+        assert_eq!(snap2.total_subscribers, baseline + 2);
+
+        // Per-topic `subscribers` reflects the global broadcast count
+        // (Tokio broadcast is fanout; per-topic split is documented honestly).
+        for t in KNOWN_TOPICS {
+            let entry = snap2.topics.get(*t).expect("topic key");
+            assert_eq!(entry.subscribers, snap2.total_subscribers);
+        }
+
+        drop(r1);
+        drop(r2);
+        let snap3 = bus.stats_snapshot();
+        assert_eq!(snap3.total_subscribers, baseline);
+    }
+
+    #[test]
+    fn stats_snapshot_serializes_to_expected_json_shape() {
+        // Build a snapshot via the public API and validate the JSON layout
+        // matches the documented `/api/distributed` `event_bus` contract.
+        let bus = HiveEventBus::new();
+        let snap = bus.stats_snapshot();
+        let v = serde_json::to_value(&snap).expect("serialize snapshot");
+
+        assert!(v.get("topics").and_then(|x| x.as_object()).is_some(),
+            "snapshot must have 'topics' object");
+        assert!(v.get("total_subscribers").and_then(|x| x.as_u64()).is_some(),
+            "snapshot must have 'total_subscribers' u64");
+        assert!(v.get("events_per_min").and_then(|x| x.as_f64()).is_some(),
+            "snapshot must have 'events_per_min' f64");
+        // last_event_timestamp may be null OR a string.
+        assert!(v.get("last_event_timestamp").is_some(),
+            "snapshot must include 'last_event_timestamp' key");
+
+        let topics = v.get("topics").unwrap().as_object().unwrap();
+        for t in KNOWN_TOPICS {
+            let entry = topics
+                .get(*t)
+                .unwrap_or_else(|| panic!("missing topic '{t}' in JSON shape"));
+            assert!(entry.get("subscribers").and_then(|x| x.as_u64()).is_some());
+            assert!(entry.get("events_per_min").and_then(|x| x.as_f64()).is_some());
+            assert!(entry.get("last_event_timestamp").is_some());
+        }
     }
 }
