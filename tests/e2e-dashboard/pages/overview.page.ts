@@ -8,6 +8,12 @@ export class OverviewPage {
   readonly issuesCard: Locator;
   readonly issuesList: Locator;
   readonly tabs: Locator;
+  readonly agentLiveStatusCard: Locator;
+  readonly agentLiveStatus: Locator;
+  readonly recentActionsCard: Locator;
+  readonly recentActionsList: Locator;
+  readonly openPrsCard: Locator;
+  readonly openPrsList: Locator;
 
   constructor(page: Page) {
     this.page = page;
@@ -17,6 +23,12 @@ export class OverviewPage {
     this.issuesCard = page.locator('#tab-overview .card:has(#issues-list)');
     this.issuesList = page.locator('#issues-list');
     this.tabs = page.locator('.tab');
+    this.agentLiveStatusCard = page.locator('#tab-overview .card:has(#agent-live-status)');
+    this.agentLiveStatus = page.locator('#agent-live-status');
+    this.recentActionsCard = page.locator('#tab-overview .card:has(#recent-actions-list)');
+    this.recentActionsList = page.locator('#recent-actions-list');
+    this.openPrsCard = page.locator('#tab-overview .card:has(#open-prs-list)');
+    this.openPrsList = page.locator('#open-prs-list');
   }
 
   async getTabNames(): Promise<string[]> {
