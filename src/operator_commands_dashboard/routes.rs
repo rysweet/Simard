@@ -43,6 +43,7 @@ pub fn build_router() -> Router {
                 .delete(registry_deregister),
         )
         .route("/api/registry/reap", post(registry_reap))
+        .route("/api/agent-graph", get(agent_graph))
         .route("/api/build-lock", get(build_lock_status))
         .route("/api/build-lock/release", post(build_lock_force_release))
         .route("/api/memory", get(memory_metrics))
@@ -1941,7 +1942,39 @@ fn open_dashboard_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeS
 }
 
 async fn ws_chat_handler(ws: WebSocketUpgrade) -> response::Response {
-    ws.on_upgrade(handle_ws_chat)
+    ws.on_upgrade(handle_ws_chat_safe)
+}
+
+/// Panic-safe wrapper around `handle_ws_chat`.
+///
+/// A websocket chat session that panics in agent code, transcript parsing, or
+/// persistence must not take down the dashboard server. Each synchronous
+/// blocking step inside `handle_ws_chat` is already executed via
+/// `tokio::task::spawn_blocking`, which converts panics into `JoinError`s. We
+/// additionally wrap every blocking closure with `std::panic::catch_unwind`
+/// (see `safe_block`) so panics are surfaced as user-visible error messages
+/// rather than crashing the chat task.
+async fn handle_ws_chat_safe(socket: WebSocket) {
+    handle_ws_chat(socket).await
+}
+
+/// Run a blocking closure under `std::panic::catch_unwind`, mapping panics to
+/// a `String` error so callers can render them in chat instead of crashing.
+fn safe_block<T>(label: &'static str, f: impl FnOnce() -> T + std::panic::UnwindSafe) -> Result<T, String> {
+    match std::panic::catch_unwind(f) {
+        Ok(v) => Ok(v),
+        Err(payload) => {
+            let msg = if let Some(s) = payload.downcast_ref::<&'static str>() {
+                (*s).to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic".to_string()
+            };
+            eprintln!("[simard][PANIC] ws_chat {label}: {msg}");
+            Err(format!("{label} panicked: {msg}"))
+        }
+    }
 }
 
 async fn handle_ws_chat(mut socket: WebSocket) {
@@ -2012,13 +2045,24 @@ async fn handle_ws_chat(mut socket: WebSocket) {
                 match cmd {
                     MeetingCommand::Close => {
                         // Close runs synchronous LLM call — use spawn_blocking
-                        let summary = tokio::task::spawn_blocking(move || backend.close()).await;
+                        // wrapped with catch_unwind so a panic inside summary
+                        // generation surfaces as a chat message, not a crash.
+                        let summary = tokio::task::spawn_blocking(move || {
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                                backend.close()
+                            }))
+                        })
+                        .await;
                         let recap = match summary {
-                            Ok(Ok(s)) => format!(
+                            Ok(Ok(Ok(s))) => format!(
                                 "Meeting closed. {} messages. Summary: {}",
                                 s.message_count, s.summary_text
                             ),
-                            Ok(Err(e)) => format!("Meeting closed with error: {e}"),
+                            Ok(Ok(Err(e))) => format!("Meeting closed with error: {e}"),
+                            Ok(Err(_panic)) => {
+                                eprintln!("[simard][PANIC] ws_chat close panicked");
+                                "Meeting close failed: internal panic (recovered)".to_string()
+                            }
                             Err(e) => format!("Meeting close failed: {e}"),
                         };
                         let _ = socket
@@ -2140,13 +2184,17 @@ async fn handle_ws_chat(mut socket: WebSocket) {
                     }
                     MeetingCommand::Conversation(user_text) => {
                         // send_message is synchronous — use spawn_blocking
+                        // wrapped with catch_unwind so a panic in the agent
+                        // doesn't crash the chat task.
                         let result = tokio::task::spawn_blocking(move || {
-                            let resp = backend.send_message(&user_text);
-                            (backend, resp)
+                            let outcome = std::panic::catch_unwind(
+                                std::panic::AssertUnwindSafe(|| backend.send_message(&user_text)),
+                            );
+                            (backend, outcome)
                         })
                         .await;
                         match result {
-                            Ok((returned_backend, Ok(resp))) => {
+                            Ok((returned_backend, Ok(Ok(resp)))) => {
                                 backend = returned_backend;
                                 let _ = socket
                                     .send(Message::Text(
@@ -2156,11 +2204,22 @@ async fn handle_ws_chat(mut socket: WebSocket) {
                                     ))
                                     .await;
                             }
-                            Ok((returned_backend, Err(e))) => {
+                            Ok((returned_backend, Ok(Err(e)))) => {
                                 backend = returned_backend;
                                 let _ = socket
                                     .send(Message::Text(
                                         json!({"role":"system","content": format!("[error: {e}]")})
+                                            .to_string()
+                                            .into(),
+                                    ))
+                                    .await;
+                            }
+                            Ok((returned_backend, Err(_panic))) => {
+                                eprintln!("[simard][PANIC] ws_chat send_message panicked");
+                                backend = returned_backend;
+                                let _ = socket
+                                    .send(Message::Text(
+                                        json!({"role":"system","content":"[error: agent panicked — recovered, conversation continues]"})
                                             .to_string()
                                             .into(),
                                     ))
@@ -2514,6 +2573,88 @@ async fn registry_reap() -> Json<Value> {
     match reg.reap_dead() {
         Ok(count) => Json(json!({"ok": true, "reaped": count})),
         Err(e) => Json(json!({"ok": false, "error": e.to_string()})),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Agent Graph API (#951)
+// Returns force-directed-friendly topology: OODA -> engineers -> sessions.
+// Pure builder is unit-tested; HTTP handler sources live data from the
+// existing FileBackedAgentRegistry.
+// ---------------------------------------------------------------------------
+
+/// Classify an agent role into one of three layers used by the dashboard
+/// graph visualization. Returns ("ooda" | "engineer" | "session").
+fn classify_agent_layer(role: &str) -> &'static str {
+    let r = role.to_ascii_lowercase();
+    if r.contains("ooda") || r.contains("operator") || r.contains("supervisor") {
+        "ooda"
+    } else if r.contains("engineer") || r.contains("planner") || r.contains("builder") {
+        "engineer"
+    } else {
+        "session"
+    }
+}
+
+/// Build a {nodes, edges} graph value from registry entries. Edges connect
+/// every OODA node to every engineer, and every engineer to every session,
+/// matching the OODA -> engineers -> sessions topology requested in #951.
+fn build_agent_graph(entries: &[crate::agent_registry::AgentEntry]) -> Value {
+    let mut nodes = Vec::with_capacity(entries.len());
+    let mut ooda_ids: Vec<&str> = Vec::new();
+    let mut engineer_ids: Vec<&str> = Vec::new();
+    let mut session_ids: Vec<&str> = Vec::new();
+
+    for e in entries {
+        let layer = classify_agent_layer(&e.role);
+        nodes.push(json!({
+            "id": e.id,
+            "type": layer,
+            "role": e.role,
+            "host": e.host,
+            "pid": e.pid,
+            "state": format!("{:?}", e.state),
+        }));
+        match layer {
+            "ooda" => ooda_ids.push(&e.id),
+            "engineer" => engineer_ids.push(&e.id),
+            _ => session_ids.push(&e.id),
+        }
+    }
+
+    let mut edges = Vec::new();
+    for o in &ooda_ids {
+        for eng in &engineer_ids {
+            edges.push(json!({"src": o, "dst": eng}));
+        }
+    }
+    for eng in &engineer_ids {
+        for s in &session_ids {
+            edges.push(json!({"src": eng, "dst": s}));
+        }
+    }
+
+    json!({
+        "nodes": nodes,
+        "edges": edges,
+        "layers": {
+            "ooda": ooda_ids.len(),
+            "engineer": engineer_ids.len(),
+            "session": session_ids.len(),
+        },
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    })
+}
+
+async fn agent_graph() -> Json<Value> {
+    let reg = FileBackedAgentRegistry::new(&resolve_state_root());
+    match reg.list() {
+        Ok(entries) => Json(build_agent_graph(&entries)),
+        Err(e) => Json(json!({
+            "error": e.to_string(),
+            "nodes": [],
+            "edges": [],
+        })),
     }
 }
 
@@ -4469,10 +4610,25 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
             phases.push(`<div class="phase act">
               <div class="phase-label">⚡ Act</div>
               <div class="phase-content">
-                ${rpt.outcomes.map(o=>`<div class="outcome ${o.success?'success':'failure'}">
-                  ${o.success?'✅':'❌'} <code>${esc(o.action_kind)}</code> — ${esc(o.action_description)}
-                  <div class="outcome-detail">${esc((o.detail||'').substring(0,300))}${(o.detail||'').length>300?'…':''}</div>
-                </div>`).join('')}
+                ${rpt.outcomes.map(o=>{
+                  const se=o.spawn_engineer;
+                  let seBlock='';
+                  if(se){
+                    const statusColor=se.status==='live'?'var(--green)':se.status==='skipped'?'var(--yellow)':se.status==='denied'?'var(--yellow)':'var(--red)';
+                    const agent=se.subordinate_agent;
+                    const agentLink=agent?`<a href='javascript:void(0)' onclick="openAgentLog('${esc(agent)}');return false;"><code>${esc(agent)}</code></a>`:'<em>(no agent)</em>';
+                    seBlock=`<div class="spawn-engineer-block" style="margin-top:.35rem;padding:.4rem .55rem;border-left:3px solid ${statusColor};background:rgba(255,255,255,0.03);border-radius:4px">
+                      <div><span style="color:${statusColor}">●</span> <strong>spawn_engineer</strong> · ${esc(se.last_action||'')} · <span style="color:${statusColor}">${esc(se.status||'')}</span></div>
+                      <div>subordinate: ${agentLink}${se.goal_id?` · goal <code>${esc(se.goal_id)}</code>`:''}</div>
+                      ${se.task_summary?`<div>task: ${esc(se.task_summary)}</div>`:''}
+                    </div>`;
+                  }
+                  return `<div class="outcome ${o.success?'success':'failure'}">
+                    ${o.success?'✅':'❌'} <code>${esc(o.action_kind)}</code> — ${esc(o.action_description)}
+                    <div class="outcome-detail">${esc((o.detail||'').substring(0,300))}${(o.detail||'').length>300?'…':''}</div>
+                    ${seBlock}
+                  </div>`;
+                }).join('')}
               </div>
             </div>`);
           }
@@ -4490,6 +4646,18 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     /* --- Agent log terminal (issue #947) --- */
     let agentLogTerm = null;
     let agentLogWS = null;
+    /* Issue #946: jump from a Thinking-tab spawn_engineer outcome straight to
+       the agent terminal viewer. Switches tabs, populates the agent-name
+       input, and clicks Connect. */
+    function openAgentLog(name){
+      const tab = document.querySelector('.tab[data-tab="terminal"]');
+      if(tab) tab.click();
+      const input = document.getElementById('agent-log-name');
+      if(input) input.value = name || '';
+      // initAgentLogTerminal is invoked by the tab click handler; defer
+      // connect a tick so xterm has been mounted.
+      setTimeout(()=>{ try{ connectAgentLog(); }catch(e){} }, 50);
+    }
     function setAgentLogStatus(text, color){
       const el = document.getElementById('agent-log-status');
       if(!el) return;
@@ -4772,5 +4940,69 @@ mod tests {
             WS_AGENT_LOG_ROUTE.starts_with("/ws/agent_log/"),
             "WS_AGENT_LOG_ROUTE should be the agent log WS path; got {WS_AGENT_LOG_ROUTE:?}"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue #951 — Agent graph endpoint tests.
+    // ---------------------------------------------------------------------
+
+    fn make_entry(id: &str, role: &str) -> crate::agent_registry::AgentEntry {
+        crate::agent_registry::AgentEntry {
+            id: id.to_string(),
+            pid: 1,
+            host: "localhost".to_string(),
+            start_time: chrono::Utc::now(),
+            last_heartbeat: chrono::Utc::now(),
+            state: crate::agent_registry::AgentState::Running,
+            role: role.to_string(),
+            resources: crate::agent_registry::ResourceUsage {
+                rss_bytes: None,
+                cpu_percent: None,
+            },
+        }
+    }
+
+    #[test]
+    fn classify_agent_layer_buckets_roles() {
+        assert_eq!(classify_agent_layer("ooda-loop"), "ooda");
+        assert_eq!(classify_agent_layer("operator"), "ooda");
+        assert_eq!(classify_agent_layer("agent_supervisor"), "ooda");
+        assert_eq!(classify_agent_layer("engineer"), "engineer");
+        assert_eq!(classify_agent_layer("planner"), "engineer");
+        assert_eq!(classify_agent_layer("builder"), "engineer");
+        assert_eq!(classify_agent_layer("session-42"), "session");
+        assert_eq!(classify_agent_layer("anything-else"), "session");
+    }
+
+    #[test]
+    fn build_agent_graph_emits_layered_topology() {
+        let entries = vec![
+            make_entry("o1", "ooda"),
+            make_entry("e1", "engineer"),
+            make_entry("e2", "engineer"),
+            make_entry("s1", "session"),
+            make_entry("s2", "session"),
+        ];
+        let graph = build_agent_graph(&entries);
+
+        let nodes = graph["nodes"].as_array().expect("nodes array");
+        assert_eq!(nodes.len(), 5);
+        assert!(nodes.iter().all(|n| n.get("id").is_some() && n.get("type").is_some()));
+
+        // OODA -> 2 engineers (2 edges) + each engineer -> 2 sessions (4 edges) = 6
+        let edges = graph["edges"].as_array().expect("edges array");
+        assert_eq!(edges.len(), 6);
+        assert!(edges.iter().all(|e| e.get("src").is_some() && e.get("dst").is_some()));
+
+        assert_eq!(graph["layers"]["ooda"], 1);
+        assert_eq!(graph["layers"]["engineer"], 2);
+        assert_eq!(graph["layers"]["session"], 2);
+    }
+
+    #[test]
+    fn build_agent_graph_handles_empty_input() {
+        let graph = build_agent_graph(&[]);
+        assert_eq!(graph["nodes"].as_array().unwrap().len(), 0);
+        assert_eq!(graph["edges"].as_array().unwrap().len(), 0);
     }
 }

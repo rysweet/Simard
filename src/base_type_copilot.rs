@@ -352,6 +352,7 @@ fn extract_response_from_transcript(transcript: &str) -> String {
             || trimmed.contains("amplihack copilot")
             || trimmed.starts_with("Script started on")
             || trimmed.starts_with("bash-") && trimmed.contains("$") && trimmed.contains("cat ")
+            || is_transcript_noise_line(trimmed)
         {
             response_start = i + 1;
         }
@@ -384,7 +385,8 @@ fn extract_response_from_transcript(transcript: &str) -> String {
                     || t.contains("amplihack copilot")
                     || t.contains("SIMARD_PROMPT_FILE")
                     || t == "exit"
-                    || t.ends_with("$ exit"))
+                    || t.ends_with("$ exit")
+                    || is_transcript_noise_line(t))
             })
             .copied()
             .collect::<Vec<_>>()
@@ -393,10 +395,63 @@ fn extract_response_from_transcript(transcript: &str) -> String {
 
     lines[response_start..response_end]
         .iter()
-        .filter(|l| !l.trim().is_empty())
+        .filter(|l| {
+            let t = l.trim();
+            !t.is_empty() && !is_transcript_noise_line(t)
+        })
         .copied()
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Detect transcript lines that are infrastructure artefacts rather than
+/// conversational LLM output.
+///
+/// Filters:
+///   * Shell `time` builtin output: `real 0m1.234s`, `user 0m0.123s`, `sys ...`
+///   * Hook telemetry: `Staged ... hook`, `Loaded hook`, `Hook fired:`
+///   * File-system artefacts emitted by tool plumbing: `Created file ...`,
+///     `Modified file ...`, `Deleted file ...`, `Wrote file ...`
+fn is_transcript_noise_line(trimmed: &str) -> bool {
+    // Shell `time` builtin output (POSIX format: "real\t0m1.234s")
+    for prefix in ["real\t", "real ", "user\t", "user ", "sys\t", "sys "] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            // Looks like `0m1.234s` or `1.234s` — digit-led, ends with 's'
+            let rest = rest.trim_start();
+            if rest.ends_with('s')
+                && rest.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+            {
+                return true;
+            }
+        }
+    }
+    // Hook telemetry lines
+    if (trimmed.contains("hook") || trimmed.contains("Hook"))
+        && (trimmed.starts_with("Staged")
+            || trimmed.starts_with("Loaded")
+            || trimmed.starts_with("Unloaded")
+            || trimmed.starts_with("Hook fired")
+            || trimmed.starts_with("Hook:")
+            || trimmed.starts_with("[hook]"))
+    {
+        return true;
+    }
+    // File-system artefacts from tool plumbing
+    for prefix in [
+        "Created file ",
+        "Created file:",
+        "Modified file ",
+        "Modified file:",
+        "Deleted file ",
+        "Deleted file:",
+        "Wrote file ",
+        "Wrote file:",
+    ] {
+        if trimmed.starts_with(prefix) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Parse copilot response text and extract a turn context summary for
@@ -645,5 +700,46 @@ Script done on 2025-04-07 02:56:00+00:00";
         let evidence = vec!["selected-base-type=copilot-test".to_string()];
         let response = extract_copilot_response_from_evidence(&evidence);
         assert!(response.is_empty());
+    }
+
+    #[test]
+    fn extract_response_from_transcript_filters_shell_timing_and_hooks() {
+        let transcript = "\
+Script started on 2025-04-07 02:55:00+00:00
+bash-5.2$ SIMARD_PROMPT_FILE=$(mktemp) && cat \"$SIMARD_PROMPT_FILE\" | amplihack copilot --subprocess-safe ; exit
+Staged pre-tool hook: validate.sh
+Loaded hook: post_response
+Hook fired: telemetry
+Created file /tmp/foo.txt
+Modified file src/lib.rs
+Wrote file: README.md
+Hello, I am the actual response.
+real\t0m1.234s
+user\t0m0.123s
+sys\t0m0.456s
+Total usage est: 0.012
+bash-5.2$ exit
+Script done on 2025-04-07 02:56:00+00:00";
+        let response = extract_response_from_transcript(transcript);
+        assert!(
+            response.contains("Hello, I am the actual response."),
+            "real response must survive: got {response:?}"
+        );
+        for noise in [
+            "Staged pre-tool hook",
+            "Loaded hook",
+            "Hook fired",
+            "Created file",
+            "Modified file",
+            "Wrote file",
+            "real\t0m",
+            "user\t0m",
+            "sys\t0m",
+        ] {
+            assert!(
+                !response.contains(noise),
+                "noise marker {noise:?} should be filtered, got: {response:?}"
+            );
+        }
     }
 }
