@@ -9,10 +9,13 @@
 //! semantic facts in the hive, never raw IPC.
 
 mod lifecycle;
+pub mod tmux;
 mod types;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_tmux;
 
 /// Maximum retries per goal before the supervisor gives up.
 const MAX_RETRIES_PER_GOAL: u32 = 5;

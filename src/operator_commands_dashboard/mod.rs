@@ -1,5 +1,8 @@
 mod auth;
-mod routes;
+pub(crate) mod routes;
+
+#[cfg(test)]
+mod tests_attach;
 
 use std::net::SocketAddr;
 

@@ -10,7 +10,7 @@ Replace the sections below with information about your project.
 
 ---
 
-## Project: issue-996-ws-2-create-fresh-worktree-off-main-on-branch-fixr
+## Project: issue-1015-ws-2-subagent-tmux-tracking-on-fresh-worktree-off
 
 ## Overview
 

@@ -26,6 +26,7 @@ fn test_handle() -> SubordinateHandle {
         spawn_time: 1_700_000_000,
         retry_count: 0,
         killed: false,
+        session_name: String::new(),
     }
 }
 
