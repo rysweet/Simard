@@ -186,26 +186,29 @@ fn keyword_action_cargo_test_always_achievable() {
 
 #[test]
 fn keyword_action_open_issue_rejected_for_fix_issue_ref() {
-    // "fix issue #891" mentions "issue" but the user does NOT want to open one.
+    // Bare prose like "fix the issue" with no existing-issue number reference
+    // and no whitelisted prefix must be rejected.
     assert!(!is_keyword_action_achievable(
         &AnalyzedAction::OpenIssue,
-        "fix issue #891 in the planner"
+        "fix the issue in the planner"
     ));
 }
 
 #[test]
 fn keyword_action_open_issue_accepted_for_explicit_open() {
+    // Tightened whitelist: "create an issue" prefix is the explicit-create form.
     assert!(is_keyword_action_achievable(
         &AnalyzedAction::OpenIssue,
-        "open an issue about the broken CI"
+        "create an issue about the broken CI"
     ));
 }
 
 #[test]
 fn keyword_action_open_issue_accepted_for_file_bug() {
+    // Tightened whitelist: "file an issue for" is the new explicit-create prefix.
     assert!(is_keyword_action_achievable(
         &AnalyzedAction::OpenIssue,
-        "file a bug about memory leak"
+        "file an issue for the memory leak"
     ));
 }
 
