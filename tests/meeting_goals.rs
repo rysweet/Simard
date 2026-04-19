@@ -47,6 +47,8 @@ fn sample_active(id: &str, priority: u32) -> ActiveGoal {
         priority,
         status: GoalProgress::NotStarted,
         assigned_to: None,
+        current_activity: None,
+        wip_refs: vec![],
     }
 }
 
@@ -303,6 +305,8 @@ fn meeting_decisions_feed_goal_board() {
                 priority: (i + 1) as u32,
                 status: GoalProgress::NotStarted,
                 assigned_to: None,
+                current_activity: None,
+                wip_refs: vec![],
             },
         )
         .unwrap();

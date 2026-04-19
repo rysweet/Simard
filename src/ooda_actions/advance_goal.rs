@@ -3,7 +3,9 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::agent_roles::AgentRole;
-use crate::agent_supervisor::{HeartbeatStatus, SubordinateConfig, check_heartbeat, spawn_subordinate};
+use crate::agent_supervisor::{
+    HeartbeatStatus, SubordinateConfig, check_heartbeat, spawn_subordinate,
+};
 use crate::goal_curation::{GoalProgress, update_goal_progress};
 use crate::identity_composition::max_subordinate_depth;
 use crate::ooda_loop::{ActionOutcome, OodaBridges, OodaState, PlannedAction};
@@ -68,12 +70,8 @@ pub(super) fn dispatch_advance_goal(
 
     // If a base-type session is available, use run_turn for real agent work.
     if let Some(ref mut session) = bridges.session {
-        let result = super::goal_session::advance_goal_with_session(
-            action,
-            session.as_mut(),
-            state,
-            &goal,
-        );
+        let result =
+            super::goal_session::advance_goal_with_session(action, session.as_mut(), state, &goal);
 
         // For spawn_engineer the dispatcher must perform the actual fork
         // (it owns the state mutation needed to set goal.assigned_to).
@@ -218,15 +216,11 @@ fn dispatch_spawn_engineer(
             )
         }
         Err(e) => {
-            eprintln!(
-                "[simard] spawn_engineer FAILED for goal '{goal_id}': {e}"
-            );
+            eprintln!("[simard] spawn_engineer FAILED for goal '{goal_id}': {e}");
             make_outcome(
                 action,
                 false,
-                format!(
-                    "spawn_engineer failed for goal '{goal_id}': {e}"
-                ),
+                format!("spawn_engineer failed for goal '{goal_id}': {e}"),
             )
         }
     }
@@ -536,7 +530,11 @@ mod tests {
         };
         let outcome =
             super::validate_subordinate_completion(&action, &mut state, "g1", "sub-ok", &progress);
-        assert!(outcome.success, "should succeed with artifacts: {}", outcome.detail);
+        assert!(
+            outcome.success,
+            "should succeed with artifacts: {}",
+            outcome.detail
+        );
         assert!(outcome.detail.contains("3 commit(s)"));
         assert!(outcome.detail.contains("1 PR(s)"));
     }

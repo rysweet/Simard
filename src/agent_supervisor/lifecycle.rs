@@ -696,7 +696,10 @@ mod reaper_tests {
         // With no unwaited children, two consecutive calls must both return 0.
         let first = reap_zombies();
         let second = reap_zombies();
-        assert_eq!(first, 0, "expected 0 reaps on quiescent process, got {first}");
+        assert_eq!(
+            first, 0,
+            "expected 0 reaps on quiescent process, got {first}"
+        );
         assert_eq!(
             second, 0,
             "second call must also return 0 (idempotent), got {second}",

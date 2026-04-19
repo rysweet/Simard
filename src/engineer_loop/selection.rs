@@ -223,12 +223,12 @@ pub(crate) fn extract_existing_issue_number(objective: &str) -> Option<u64> {
         if bytes[i] == b'#' {
             // HTML numeric character reference guard: reject `&#...`.
             let preceded_by_amp = i > 0 && bytes[i - 1] == b'&';
-            if !preceded_by_amp {
-                if let Some((n, end)) = parse_digits(bytes, i + 1) {
-                    if !is_alnum_byte(bytes.get(end).copied()) && n != 0 {
-                        consider(i, n);
-                    }
-                }
+            if !preceded_by_amp
+                && let Some((n, end)) = parse_digits(bytes, i + 1)
+                && !is_alnum_byte(bytes.get(end).copied())
+                && n != 0
+            {
+                consider(i, n);
             }
         }
         i += 1;
@@ -269,10 +269,11 @@ pub(crate) fn extract_existing_issue_number(objective: &str) -> Option<u64> {
                     p += 1;
                 }
             }
-            if let Some((n, dend)) = parse_digits(bytes, p) {
-                if !is_alnum_byte(bytes.get(dend).copied()) && n != 0 {
-                    consider(start, n);
-                }
+            if let Some((n, dend)) = parse_digits(bytes, p)
+                && !is_alnum_byte(bytes.get(dend).copied())
+                && n != 0
+            {
+                consider(start, n);
             }
         }
         search_from = start + needle.len();
@@ -307,9 +308,7 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || needle.len() > haystack.len() {
         return None;
     }
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// True when `lower_bytes[at..]` begins with `kw` AND the byte after `kw`
@@ -1020,10 +1019,7 @@ mod tests {
     #[test]
     fn extract_existing_issue_number_picks_earliest_across_patterns() {
         // `issue 42` appears before `#7` → 42 wins.
-        assert_eq!(
-            extract_existing_issue_number("issue 42 fixes #7"),
-            Some(42)
-        );
+        assert_eq!(extract_existing_issue_number("issue 42 fixes #7"), Some(42));
         // `#7` appears before `issue 42` → 7 wins.
         assert_eq!(
             extract_existing_issue_number("see #7 about issue 42"),

@@ -201,7 +201,9 @@ pub struct HiveEventBusConfig {
 
 impl Default for HiveEventBusConfig {
     fn default() -> Self {
-        Self { capacity: DEFAULT_CAPACITY }
+        Self {
+            capacity: DEFAULT_CAPACITY,
+        }
     }
 }
 
@@ -273,11 +275,7 @@ impl HiveEventBus {
     pub fn publish(&self, kind: HiveEventKind) -> usize {
         let envelope = HiveEventEnvelope::new(kind);
         self.stats.record(envelope.kind.topic(), envelope.timestamp);
-        match self.sender.send(envelope) {
-            Ok(n) => n,
-            // No active receivers is not an error condition for this bus.
-            Err(_) => 0,
-        }
+        self.sender.send(envelope).unwrap_or(0)
     }
 
     /// Subscribe to future events. Late subscribers do not receive events
@@ -325,7 +323,9 @@ mod tests {
     use tokio::time::timeout;
 
     fn sample_kind() -> HiveEventKind {
-        HiveEventKind::FactPromoted { fact_id: "fact-1".into() }
+        HiveEventKind::FactPromoted {
+            fact_id: "fact-1".into(),
+        }
     }
 
     // --- Envelope construction (I0) ----------------------------------------
@@ -392,7 +392,9 @@ mod tests {
         let mut rx2 = bus.subscribe();
         let mut rx3 = bus.subscribe();
 
-        let kind = HiveEventKind::NodeJoined { node_id: "n42".into() };
+        let kind = HiveEventKind::NodeJoined {
+            node_id: "n42".into(),
+        };
         let n = bus.publish(kind.clone());
         assert_eq!(n, 3, "all three simulated nodes must receive");
 
@@ -452,7 +454,9 @@ mod tests {
 
         // Overflow: publish more than capacity without draining slow.
         for i in 0..10 {
-            bus.publish(HiveEventKind::FactPromoted { fact_id: format!("f{i}") });
+            bus.publish(HiveEventKind::FactPromoted {
+                fact_id: format!("f{i}"),
+            });
         }
 
         match slow.recv().await {
@@ -480,11 +484,22 @@ mod tests {
     #[test]
     fn all_event_kinds_serde_round_trip() {
         let kinds = vec![
-            HiveEventKind::FactPromoted { fact_id: "a".into() },
-            HiveEventKind::FactImported { fact_id: "b".into(), source: "s".into() },
-            HiveEventKind::NodeJoined { node_id: "n1".into() },
-            HiveEventKind::NodeLeft { node_id: "n2".into() },
-            HiveEventKind::MemorySyncRequested { node_id: "n3".into() },
+            HiveEventKind::FactPromoted {
+                fact_id: "a".into(),
+            },
+            HiveEventKind::FactImported {
+                fact_id: "b".into(),
+                source: "s".into(),
+            },
+            HiveEventKind::NodeJoined {
+                node_id: "n1".into(),
+            },
+            HiveEventKind::NodeLeft {
+                node_id: "n2".into(),
+            },
+            HiveEventKind::MemorySyncRequested {
+                node_id: "n3".into(),
+            },
         ];
         for k in kinds {
             let env = HiveEventEnvelope::new(k.clone());
@@ -527,7 +542,10 @@ mod tests {
             match timeout(Duration::from_secs(2), rx.recv()).await {
                 Ok(Ok(_)) => received += 1,
                 Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
-                    panic!("subscriber lagged with capacity {} >= total {total}", bus.capacity())
+                    panic!(
+                        "subscriber lagged with capacity {} >= total {total}",
+                        bus.capacity()
+                    )
                 }
                 Ok(Err(e)) => panic!("recv err: {e:?}"),
                 Err(_) => panic!("timeout after receiving {received}/{total}"),
@@ -596,14 +614,37 @@ mod tests {
     fn topic_str_for_each_known_kind() {
         // Round-trips each known variant through `.topic()`.
         let pairs: &[(HiveEventKind, &str)] = &[
-            (HiveEventKind::FactPromoted { fact_id: "x".into() }, "fact_promoted"),
             (
-                HiveEventKind::FactImported { fact_id: "x".into(), source: "s".into() },
+                HiveEventKind::FactPromoted {
+                    fact_id: "x".into(),
+                },
+                "fact_promoted",
+            ),
+            (
+                HiveEventKind::FactImported {
+                    fact_id: "x".into(),
+                    source: "s".into(),
+                },
                 "fact_imported",
             ),
-            (HiveEventKind::NodeJoined { node_id: "n".into() }, "node_joined"),
-            (HiveEventKind::NodeLeft { node_id: "n".into() }, "node_left"),
-            (HiveEventKind::MemorySyncRequested { node_id: "n".into() }, "memory_sync_requested"),
+            (
+                HiveEventKind::NodeJoined {
+                    node_id: "n".into(),
+                },
+                "node_joined",
+            ),
+            (
+                HiveEventKind::NodeLeft {
+                    node_id: "n".into(),
+                },
+                "node_left",
+            ),
+            (
+                HiveEventKind::MemorySyncRequested {
+                    node_id: "n".into(),
+                },
+                "memory_sync_requested",
+            ),
         ];
         for (kind, expected) in pairs {
             assert_eq!(kind.topic(), *expected, "topic mismatch for {kind:?}");
@@ -620,7 +661,10 @@ mod tests {
                 .topics
                 .get(*t)
                 .unwrap_or_else(|| panic!("missing topic key '{t}' in snapshot"));
-            assert_eq!(entry.events_per_min, 0.0, "silent topic '{t}' rate must be 0");
+            assert_eq!(
+                entry.events_per_min, 0.0,
+                "silent topic '{t}' rate must be 0"
+            );
             assert!(
                 entry.last_event_timestamp.is_none(),
                 "silent topic '{t}' last_event must be None",
@@ -636,8 +680,12 @@ mod tests {
         let _rx = bus.subscribe();
 
         let before = Utc::now();
-        bus.publish(HiveEventKind::FactPromoted { fact_id: "f1".into() });
-        bus.publish(HiveEventKind::FactPromoted { fact_id: "f2".into() });
+        bus.publish(HiveEventKind::FactPromoted {
+            fact_id: "f1".into(),
+        });
+        bus.publish(HiveEventKind::FactPromoted {
+            fact_id: "f2".into(),
+        });
         let after = Utc::now();
 
         let snap = bus.stats_snapshot();
@@ -670,9 +718,15 @@ mod tests {
         let bus = HiveEventBus::new();
         let _rx = bus.subscribe();
 
-        bus.publish(HiveEventKind::FactPromoted { fact_id: "a".into() });
-        bus.publish(HiveEventKind::NodeJoined { node_id: "n1".into() });
-        bus.publish(HiveEventKind::NodeJoined { node_id: "n2".into() });
+        bus.publish(HiveEventKind::FactPromoted {
+            fact_id: "a".into(),
+        });
+        bus.publish(HiveEventKind::NodeJoined {
+            node_id: "n1".into(),
+        });
+        bus.publish(HiveEventKind::NodeJoined {
+            node_id: "n2".into(),
+        });
 
         let snap = bus.stats_snapshot();
         let sum: f64 = snap.topics.values().map(|t| t.events_per_min).sum();
@@ -716,15 +770,25 @@ mod tests {
         let snap = bus.stats_snapshot();
         let v = serde_json::to_value(&snap).expect("serialize snapshot");
 
-        assert!(v.get("topics").and_then(|x| x.as_object()).is_some(),
-            "snapshot must have 'topics' object");
-        assert!(v.get("total_subscribers").and_then(|x| x.as_u64()).is_some(),
-            "snapshot must have 'total_subscribers' u64");
-        assert!(v.get("events_per_min").and_then(|x| x.as_f64()).is_some(),
-            "snapshot must have 'events_per_min' f64");
+        assert!(
+            v.get("topics").and_then(|x| x.as_object()).is_some(),
+            "snapshot must have 'topics' object"
+        );
+        assert!(
+            v.get("total_subscribers")
+                .and_then(|x| x.as_u64())
+                .is_some(),
+            "snapshot must have 'total_subscribers' u64"
+        );
+        assert!(
+            v.get("events_per_min").and_then(|x| x.as_f64()).is_some(),
+            "snapshot must have 'events_per_min' f64"
+        );
         // last_event_timestamp may be null OR a string.
-        assert!(v.get("last_event_timestamp").is_some(),
-            "snapshot must include 'last_event_timestamp' key");
+        assert!(
+            v.get("last_event_timestamp").is_some(),
+            "snapshot must include 'last_event_timestamp' key"
+        );
 
         let topics = v.get("topics").unwrap().as_object().unwrap();
         for t in KNOWN_TOPICS {
@@ -732,7 +796,12 @@ mod tests {
                 .get(*t)
                 .unwrap_or_else(|| panic!("missing topic '{t}' in JSON shape"));
             assert!(entry.get("subscribers").and_then(|x| x.as_u64()).is_some());
-            assert!(entry.get("events_per_min").and_then(|x| x.as_f64()).is_some());
+            assert!(
+                entry
+                    .get("events_per_min")
+                    .and_then(|x| x.as_f64())
+                    .is_some()
+            );
             assert!(entry.get("last_event_timestamp").is_some());
         }
     }

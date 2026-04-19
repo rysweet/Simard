@@ -77,7 +77,7 @@ test.describe('Dashboard Overview @structural', () => {
     expect(text).toContain('Test issue');
   });
 
-  test('all 10 tabs are present', async () => {
+  test('all 11 tabs are present', async () => {
     const names = await overview.getTabNames();
     expect(names).toEqual([
       'Overview',
@@ -90,6 +90,7 @@ test.describe('Dashboard Overview @structural', () => {
       'Chat',
       'Whiteboard',
       '🧠 Thinking',
+      'Terminal',
     ]);
   });
 });

@@ -824,12 +824,12 @@ async fn memory_graph() -> Json<Value> {
             if other["type"] == "WorkingMemory" {
                 continue;
             }
-            if let Some(oid) = other["id"].as_str() {
-                if let Some(src) = other["source_id"].as_str() {
-                    if !src.is_empty() && src == wn.1 {
-                        edges.push(json!({"source": wn.0, "target": oid, "type": "REFERENCES"}));
-                    }
-                }
+            if let Some(oid) = other["id"].as_str()
+                && let Some(src) = other["source_id"].as_str()
+                && !src.is_empty()
+                && src == wn.1
+            {
+                edges.push(json!({"source": wn.0, "target": oid, "type": "REFERENCES"}));
             }
         }
     }
@@ -1185,16 +1185,15 @@ async fn workboard() -> Json<Value> {
         .as_ref()
         .and_then(|h| h.get("actions_taken"))
         .and_then(|v| v.as_str())
+        && !actions.is_empty()
     {
-        if !actions.is_empty() {
-            recent_actions.push(json!({
-                "cycle": cycle_number,
-                "action": "current",
-                "target": "",
-                "result": actions,
-                "at": health_timestamp,
-            }));
-        }
+        recent_actions.push(json!({
+            "cycle": cycle_number,
+            "action": "current",
+            "target": "",
+            "result": actions,
+            "at": health_timestamp,
+        }));
     }
 
     for report in &recent_reports {
@@ -1521,10 +1520,7 @@ fn format_recent_actions_for_cycle(cycle_num: u64, report: &Value) -> Vec<Value>
         && !planned.is_empty()
     {
         for a in planned {
-            let kind = a
-                .get("kind")
-                .and_then(|v| v.as_str())
-                .unwrap_or("action");
+            let kind = a.get("kind").and_then(|v| v.as_str()).unwrap_or("action");
             let desc = a
                 .get("description")
                 .and_then(|v| v.as_str())
@@ -1771,17 +1767,15 @@ async fn distributed() -> Json<Value> {
             .and_then(|s| s.as_str())
             .map(|s| s == probe_vm_name)
             .unwrap_or(false)
-    }) {
-        if let Value::Object(probe_map) = &vm_info {
-            if let Value::Object(entry_map) = entry {
-                for (k, val) in probe_map {
-                    // Don't overwrite the canonical fields sourced from hosts.json
-                    if k == "vm_name" || k == "resource_group" {
-                        continue;
-                    }
-                    entry_map.insert(k.clone(), val.clone());
-                }
+    }) && let Value::Object(probe_map) = &vm_info
+        && let Value::Object(entry_map) = entry
+    {
+        for (k, val) in probe_map {
+            // Don't overwrite the canonical fields sourced from hosts.json
+            if k == "vm_name" || k == "resource_group" {
+                continue;
             }
+            entry_map.insert(k.clone(), val.clone());
         }
     }
 
@@ -2379,9 +2373,7 @@ fn is_local_host(a: &str, b: &str) -> bool {
     if a.is_empty() || b.is_empty() {
         return false;
     }
-    let short = |s: &str| -> String {
-        s.split('.').next().unwrap_or("").to_ascii_lowercase()
-    };
+    let short = |s: &str| -> String { s.split('.').next().unwrap_or("").to_ascii_lowercase() };
     let sa = short(a);
     let sb = short(b);
     !sa.is_empty() && sa == sb
@@ -2410,11 +2402,8 @@ fn host_entry_name(entry: &Value) -> &str {
 /// **Security: This is a UI hint only — MUST NOT be used for authorization
 /// decisions.** Hostnames are user-controlled and easily spoofed.
 fn tag_local_membership(hosts: &mut [Value], cluster_members: &[String], local_hostname: &str) {
-    let in_cluster = |name: &str| -> bool {
-        cluster_members
-            .iter()
-            .any(|m| is_local_host(m, name))
-    };
+    let in_cluster =
+        |name: &str| -> bool { cluster_members.iter().any(|m| is_local_host(m, name)) };
     for entry in hosts.iter_mut() {
         let name = host_entry_name(entry).to_string();
         let joined = is_local_host(local_hostname, &name) && in_cluster(&name);
@@ -2783,9 +2772,10 @@ async fn handle_ws_chat(mut socket: WebSocket) {
                         // wrapped with catch_unwind so a panic in the agent
                         // doesn't crash the chat task.
                         let result = tokio::task::spawn_blocking(move || {
-                            let outcome = std::panic::catch_unwind(
-                                std::panic::AssertUnwindSafe(|| backend.send_message(&user_text)),
-                            );
+                            let outcome =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    backend.send_message(&user_text)
+                                }));
                             (backend, outcome)
                         })
                         .await;
@@ -2942,10 +2932,10 @@ async fn logs() -> Json<Value> {
         files.sort_by_key(|e| e.path());
         for entry in files.into_iter() {
             let path = entry.path();
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Ok(report) = serde_json::from_str::<Value>(&content) {
-                    cycle_reports.push(report);
-                }
+            if let Ok(content) = std::fs::read_to_string(&path)
+                && let Ok(report) = serde_json::from_str::<Value>(&content)
+            {
+                cycle_reports.push(report);
             }
         }
     }
@@ -4396,7 +4386,7 @@ pub(crate) const INDEX_HTML: &str = r#"<!DOCTYPE html>
               <span style="color:var(--accent);min-width:2rem;font-weight:600">#${a.cycle}</span>
               <span>${a.success?'✅':'❌'}</span>
               <code>${esc(a.action_kind||'')}</code>
-              <span style="flex:1">${renderActionDetail((function(){var arr=Array.from(a.detail||'');var d=arr.length>200?arr.slice(0,200).join('')+'…':arr.join('');return d||a.action_description||'';})())}</span>
+              <span style="flex:1">${(function(){var desc=a.action_description||'';var arr=Array.from(a.detail||'');var d=arr.length>200?arr.slice(0,200).join('')+'…':arr.join('');var parts=[];if(desc)parts.push('<strong>'+esc(desc)+'</strong>');if(d&&d!==desc)parts.push(renderActionDetail(d));return parts.join(' — ')||'<span style="color:#8b949e">(no detail)</span>';})()}</span>
             </div>`).join('');
         }else{
           actEl.innerHTML='<span style="color:#8b949e">No structured action history yet. The OODA daemon records actions each cycle.</span>';
@@ -5583,6 +5573,7 @@ pub(crate) const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
 /// Truncate an outcome detail string to at most `max` Unicode scalar values,
 /// appending an ellipsis (`…`) when truncation occurs. Char-aware (UTF-8 safe).
+#[allow(dead_code)]
 fn truncate_outcome_detail(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
@@ -5699,7 +5690,10 @@ mod tests {
     #[test]
     fn is_local_host_non_match() {
         assert!(!is_local_host("myhost", "otherhost"));
-        assert!(!is_local_host("myhost.example.com", "otherhost.example.com"));
+        assert!(!is_local_host(
+            "myhost.example.com",
+            "otherhost.example.com"
+        ));
         assert!(!is_local_host("host1", "host2"));
     }
 
@@ -5724,24 +5718,48 @@ mod tests {
 
         tag_local_membership(&mut hosts, &cluster_members, local_hostname);
 
-        assert_eq!(hosts[0]["is_local"], serde_json::Value::Bool(true), "vm-a matches local hostname AND is in cluster -> joined");
-        assert_eq!(hosts[1]["is_local"], serde_json::Value::Bool(false), "vm-b is in cluster but is not local -> not joined");
-        assert_eq!(hosts[2]["is_local"], serde_json::Value::Bool(false), "vm-c is neither local nor in cluster");
+        assert_eq!(
+            hosts[0]["is_local"],
+            serde_json::Value::Bool(true),
+            "vm-a matches local hostname AND is in cluster -> joined"
+        );
+        assert_eq!(
+            hosts[1]["is_local"],
+            serde_json::Value::Bool(false),
+            "vm-b is in cluster but is not local -> not joined"
+        );
+        assert_eq!(
+            hosts[2]["is_local"],
+            serde_json::Value::Bool(false),
+            "vm-c is neither local nor in cluster"
+        );
 
         // Local hostname matches an entry, but that entry is NOT in cluster_members.
         let mut hosts2 = vec![serde_json::json!({"name": "vm-x"})];
         tag_local_membership(&mut hosts2, &cluster_members, "vm-x");
-        assert_eq!(hosts2[0]["is_local"], serde_json::Value::Bool(false), "vm-x matches local but is not a cluster member -> not joined");
+        assert_eq!(
+            hosts2[0]["is_local"],
+            serde_json::Value::Bool(false),
+            "vm-x matches local but is not a cluster member -> not joined"
+        );
 
         // Capitalized "Name" key (azlin discovered VMs) is also recognized.
         let mut discovered = vec![serde_json::json!({"Name": "VM-A"})];
         tag_local_membership(&mut discovered, &cluster_members, "vm-a");
-        assert_eq!(discovered[0]["is_local"], serde_json::Value::Bool(true), "Capitalized Name field should also be matched");
+        assert_eq!(
+            discovered[0]["is_local"],
+            serde_json::Value::Bool(true),
+            "Capitalized Name field should also be matched"
+        );
 
         // Empty local hostname must never produce a match (guards bad /etc/hostname reads).
         let mut hosts3 = vec![serde_json::json!({"name": "vm-a"})];
         tag_local_membership(&mut hosts3, &cluster_members, "");
-        assert_eq!(hosts3[0]["is_local"], serde_json::Value::Bool(false), "Empty local hostname must not produce a match");
+        assert_eq!(
+            hosts3[0]["is_local"],
+            serde_json::Value::Bool(false),
+            "Empty local hostname must not produce a match"
+        );
     }
 
     #[test]
@@ -5951,7 +5969,7 @@ mod tests {
         );
         assert_eq!(sanitize_agent_name("a"), Some("a".to_string()));
         // Exactly 64 chars (boundary).
-        let max_len: String = std::iter::repeat('x').take(64).collect();
+        let max_len: String = std::iter::repeat_n('x', 64).collect();
         assert_eq!(sanitize_agent_name(&max_len), Some(max_len.clone()));
     }
 
@@ -5959,7 +5977,7 @@ mod tests {
     fn sanitize_agent_name_rejects_invalid_names() {
         assert_eq!(sanitize_agent_name(""), None);
         // 65 chars (boundary).
-        let too_long: String = std::iter::repeat('x').take(65).collect();
+        let too_long: String = std::iter::repeat_n('x', 65).collect();
         assert_eq!(sanitize_agent_name(&too_long), None);
         // Path traversal attempts (INV-7): every disallowed byte must reject.
         assert_eq!(sanitize_agent_name(".."), None);
@@ -6090,12 +6108,20 @@ mod tests {
 
         let nodes = graph["nodes"].as_array().expect("nodes array");
         assert_eq!(nodes.len(), 5);
-        assert!(nodes.iter().all(|n| n.get("id").is_some() && n.get("type").is_some()));
+        assert!(
+            nodes
+                .iter()
+                .all(|n| n.get("id").is_some() && n.get("type").is_some())
+        );
 
         // OODA -> 2 engineers (2 edges) + each engineer -> 2 sessions (4 edges) = 6
         let edges = graph["edges"].as_array().expect("edges array");
         assert_eq!(edges.len(), 6);
-        assert!(edges.iter().all(|e| e.get("src").is_some() && e.get("dst").is_some()));
+        assert!(
+            edges
+                .iter()
+                .all(|e| e.get("src").is_some() && e.get("dst").is_some())
+        );
 
         assert_eq!(graph["layers"]["ooda"], 1);
         assert_eq!(graph["layers"]["engineer"], 2);
@@ -6234,9 +6260,9 @@ mod tests {
     fn parse_tmux_sessions_malformed() {
         let input = concat!(
             "good\t1700000000\t1\t2\n",
-            "too\tfew\tfields\n",                  // 3 fields — skip
-            "bad-created\tNaN\t0\t1\n",            // created not int — skip
-            "bad-windows\t1700000000\t0\tabc\n",   // windows not uint — skip
+            "too\tfew\tfields\n",                // 3 fields — skip
+            "bad-created\tNaN\t0\t1\n",          // created not int — skip
+            "bad-windows\t1700000000\t0\tabc\n", // windows not uint — skip
             "another-good\t1700001000\t0\t5\n",
             "trailing-tabs\t1700002000\t1\t1\t\t\n", // extra empties — also skip
             "\n",                                    // blank

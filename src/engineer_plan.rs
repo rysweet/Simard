@@ -129,14 +129,14 @@ fn parse_plan_response(text: &str) -> SimardResult<Plan> {
     // Strategy 3: locate outermost JSON array brackets in the preamble-skipped
     // slice. This also recovers responses where an earlier `{` in the preamble
     // would otherwise misanchor strategies 1 and 2.
-    if let Some(json_text) = extract_json_array(skipped) {
-        if let Ok(steps) = serde_json::from_str::<Vec<PlanStep>>(json_text) {
-            tracing::info!(
-                "recovered JSON plan from mixed LLM response ({} bytes of surrounding text stripped)",
-                trimmed.len() - json_text.len()
-            );
-            return Ok(Plan::new(steps));
-        }
+    if let Some(json_text) = extract_json_array(skipped)
+        && let Ok(steps) = serde_json::from_str::<Vec<PlanStep>>(json_text)
+    {
+        tracing::info!(
+            "recovered JSON plan from mixed LLM response ({} bytes of surrounding text stripped)",
+            trimmed.len() - json_text.len()
+        );
+        return Ok(Plan::new(steps));
     }
 
     Err(SimardError::PlanningUnavailable {
@@ -544,8 +544,7 @@ This plan inspects the repository without making changes."#;
                    \"expected_outcome\":\"pass\",\
                    \"verification_command\":\"cargo test\"}]\n\
                    ```";
-        let plan =
-            parse_plan_response(raw).expect("preamble + fenced JSON must parse");
+        let plan = parse_plan_response(raw).expect("preamble + fenced JSON must parse");
         assert_eq!(plan.len(), 1);
         assert_eq!(plan.steps()[0].action, AnalyzedAction::CargoTest);
     }

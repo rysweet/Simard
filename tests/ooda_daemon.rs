@@ -105,6 +105,8 @@ fn board_with_active_goals() -> GoalBoard {
             priority: 1,
             status: GoalProgress::NotStarted,
             assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
         },
     )
     .unwrap();
@@ -116,6 +118,8 @@ fn board_with_active_goals() -> GoalBoard {
             priority: 2,
             status: GoalProgress::InProgress { percent: 30 },
             assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
         },
     )
     .unwrap();
@@ -352,6 +356,8 @@ fn goal_objective_contains_goal_id_and_description() {
         priority: 1,
         status: GoalProgress::InProgress { percent: 30 },
         assigned_to: None,
+        current_activity: None,
+        wip_refs: vec![],
     };
 
     // This is the format the daemon should use when constructing objectives

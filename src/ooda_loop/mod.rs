@@ -218,30 +218,33 @@ pub fn run_ooda_cycle(
     );
 
     // --- WS-2: poll subagent tmux sessions and GC ended entries (>24h) ---
-    if let Err(e) = crate::subagent_sessions::poll_and_gc(
-        &crate::subagent_sessions::TmuxProbe,
-    ) {
-        eprintln!(
-            "[simard] OODA cycle: subagent_sessions poll/gc failed: {e}"
-        );
+    if let Err(e) = crate::subagent_sessions::poll_and_gc(&crate::subagent_sessions::TmuxProbe) {
+        eprintln!("[simard] OODA cycle: subagent_sessions poll/gc failed: {e}");
     }
 
     // --- Update goal current_activity from outcomes ---
     for outcome in &outcomes {
-        if let Some(goal_id) = &outcome.action.goal_id {
-            if let Some(goal) = state
+        if let Some(goal_id) = &outcome.action.goal_id
+            && let Some(goal) = state
                 .active_goals
                 .active
                 .iter_mut()
                 .find(|g| g.id == *goal_id)
-            {
-                let activity = if outcome.success {
-                    format!("{}: {}", outcome.action.kind, truncate_detail(&outcome.detail, 120))
-                } else {
-                    format!("{} (failed): {}", outcome.action.kind, truncate_detail(&outcome.detail, 120))
-                };
-                goal.current_activity = Some(activity);
-            }
+        {
+            let activity = if outcome.success {
+                format!(
+                    "{}: {}",
+                    outcome.action.kind,
+                    truncate_detail(&outcome.detail, 120)
+                )
+            } else {
+                format!(
+                    "{} (failed): {}",
+                    outcome.action.kind,
+                    truncate_detail(&outcome.detail, 120)
+                )
+            };
+            goal.current_activity = Some(activity);
         }
     }
 

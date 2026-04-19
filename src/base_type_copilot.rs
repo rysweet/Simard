@@ -419,7 +419,11 @@ fn is_transcript_noise_line(trimmed: &str) -> bool {
             // Looks like `0m1.234s` or `1.234s` — digit-led, ends with 's'
             let rest = rest.trim_start();
             if rest.ends_with('s')
-                && rest.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+                && rest
+                    .chars()
+                    .next()
+                    .map(|c| c.is_ascii_digit())
+                    .unwrap_or(false)
             {
                 return true;
             }
