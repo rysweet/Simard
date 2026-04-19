@@ -1904,6 +1904,43 @@ fn is_local_host(a: &str, b: &str) -> bool {
     !sa.is_empty() && sa == sb
 }
 
+/// Extract the host "name" field from a host entry, accepting either lowercase
+/// `name` (from `hosts.json`) or capitalized `Name` (from some `azlin list` outputs).
+fn host_entry_name(entry: &Value) -> &str {
+    entry
+        .get("name")
+        .and_then(|v| v.as_str())
+        .or_else(|| entry.get("Name").and_then(|v| v.as_str()))
+        .unwrap_or("")
+}
+
+/// Tag each Azlin host entry in `hosts` with `is_local: true` when:
+///   1. the local hostname matches the entry's name (short, case-insensitive), and
+///   2. the entry also appears in `cluster_members` (i.e. it has actually joined
+///      the cluster, not just been listed by azlin).
+///
+/// `cluster_members` is the list of host-name strings reported as currently
+/// joined to the cluster (e.g. configured remote VMs from `hosts.json`). The
+/// `local_hostname` is injected so this function is unit-testable without
+/// depending on `/etc/hostname`.
+///
+/// **Security: This is a UI hint only — MUST NOT be used for authorization
+/// decisions.** Hostnames are user-controlled and easily spoofed.
+fn tag_local_membership(hosts: &mut [Value], cluster_members: &[String], local_hostname: &str) {
+    let in_cluster = |name: &str| -> bool {
+        cluster_members
+            .iter()
+            .any(|m| is_local_host(m, name))
+    };
+    for entry in hosts.iter_mut() {
+        let name = host_entry_name(entry).to_string();
+        let joined = is_local_host(local_hostname, &name) && in_cluster(&name);
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert("is_local".to_string(), Value::Bool(joined));
+        }
+    }
+}
+
 async fn get_hosts() -> Json<Value> {
     let mut configured = load_hosts();
 
@@ -1931,29 +1968,18 @@ async fn get_hosts() -> Json<Value> {
     // render a "joined" badge. UI hint only — do not use for authorization.
     let local = crate::agent_registry::hostname();
 
-    for entry in configured.iter_mut() {
-        if let Some(obj) = entry.as_object_mut() {
-            let name = obj
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            obj.insert("is_local".to_string(), Value::Bool(is_local_host(&local, &name)));
-        }
-    }
+    // Cluster members = configured hosts from hosts.json (the canonical
+    // membership list). A host is shown as "joined" only when the local
+    // hostname matches a member of this list — i.e. localhost has actually
+    // joined the cluster, not merely been discovered by `azlin list`.
+    let cluster_members: Vec<String> = configured
+        .iter()
+        .map(|e| host_entry_name(e).to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
 
-    for entry in discovered.iter_mut() {
-        if let Some(obj) = entry.as_object_mut() {
-            // azlin output may use "name" or "Name"
-            let name = obj
-                .get("name")
-                .and_then(|v| v.as_str())
-                .or_else(|| obj.get("Name").and_then(|v| v.as_str()))
-                .unwrap_or("")
-                .to_string();
-            obj.insert("is_local".to_string(), Value::Bool(is_local_host(&local, &name)));
-        }
-    }
+    tag_local_membership(&mut configured, &cluster_members, &local);
+    tag_local_membership(&mut discovered, &cluster_members, &local);
 
     Json(json!({
         "hosts": configured,
@@ -4915,6 +4941,40 @@ mod tests {
         assert!(!is_local_host("", "myhost"));
         assert!(!is_local_host("myhost", ""));
         assert!(!is_local_host("", ""));
+    }
+
+    #[test]
+    fn tag_local_membership_marks_only_local_when_in_cluster() {
+        // Three Azlin hosts; cluster membership lists vm-a and vm-b.
+        // Local hostname is vm-a (with FQDN suffix to exercise short-name match).
+        let mut hosts = vec![
+            serde_json::json!({"name": "vm-a", "resource_group": "rg1"}),
+            serde_json::json!({"name": "vm-b", "resource_group": "rg1"}),
+            serde_json::json!({"name": "vm-c", "resource_group": "rg2"}),
+        ];
+        let cluster_members: Vec<String> = vec!["vm-a".into(), "vm-b".into()];
+        let local_hostname = "VM-A.internal.example.com";
+
+        tag_local_membership(&mut hosts, &cluster_members, local_hostname);
+
+        assert_eq!(hosts[0]["is_local"], serde_json::Value::Bool(true), "vm-a matches local hostname AND is in cluster -> joined");
+        assert_eq!(hosts[1]["is_local"], serde_json::Value::Bool(false), "vm-b is in cluster but is not local -> not joined");
+        assert_eq!(hosts[2]["is_local"], serde_json::Value::Bool(false), "vm-c is neither local nor in cluster");
+
+        // Local hostname matches an entry, but that entry is NOT in cluster_members.
+        let mut hosts2 = vec![serde_json::json!({"name": "vm-x"})];
+        tag_local_membership(&mut hosts2, &cluster_members, "vm-x");
+        assert_eq!(hosts2[0]["is_local"], serde_json::Value::Bool(false), "vm-x matches local but is not a cluster member -> not joined");
+
+        // Capitalized "Name" key (azlin discovered VMs) is also recognized.
+        let mut discovered = vec![serde_json::json!({"Name": "VM-A"})];
+        tag_local_membership(&mut discovered, &cluster_members, "vm-a");
+        assert_eq!(discovered[0]["is_local"], serde_json::Value::Bool(true), "Capitalized Name field should also be matched");
+
+        // Empty local hostname must never produce a match (guards bad /etc/hostname reads).
+        let mut hosts3 = vec![serde_json::json!({"name": "vm-a"})];
+        tag_local_membership(&mut hosts3, &cluster_members, "");
+        assert_eq!(hosts3[0]["is_local"], serde_json::Value::Bool(false), "Empty local hostname must not produce a match");
     }
 
     #[test]
