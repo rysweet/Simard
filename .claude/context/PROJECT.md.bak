@@ -10,7 +10,7 @@ Replace the sections below with information about your project.
 
 ---
 
-## Project: issue-957-priorityblocking-fix-issue-943-in-srcengineerloops
+## Project: issue-996-ws-2-create-fresh-worktree-off-main-on-branch-fixr
 
 ## Overview
 
