@@ -1520,6 +1520,39 @@ fn read_recent_cycle_reports(state_root: &std::path::Path, n: usize) -> Vec<Valu
         .collect()
 }
 
+/// Map the configured hosts list (the canonical source used by the Cluster
+/// Topology panel via `load_hosts()`) into the entries rendered by the
+/// Remote VMs panel.
+///
+/// Pure function — no I/O, no SSH, no filesystem access. Each input host
+/// produces exactly one output entry with `vm_name` taken from `host.name`,
+/// `resource_group` from `host.resource_group` (empty string if absent), and
+/// `status` initialized to `"unknown"`. The caller is responsible for
+/// enriching individual entries with probe data (e.g., `check_vm.sh`).
+///
+/// Empty input yields empty output; the frontend renders this as
+/// "No remote VMs configured".
+fn remote_vms_from_hosts(hosts: &[Value]) -> Vec<Value> {
+    hosts
+        .iter()
+        .filter_map(|h| {
+            let name = h.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if name.is_empty() {
+                return None;
+            }
+            let resource_group = h
+                .get("resource_group")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            Some(json!({
+                "vm_name": name,
+                "resource_group": resource_group,
+                "status": "unknown",
+            }))
+        })
+        .collect()
+}
+
 async fn distributed() -> Json<Value> {
     // Query the Simard VM status via azlin connect with a timeout so the
     // dashboard doesn't hang if the bastion is slow.
@@ -1548,7 +1581,7 @@ async fn distributed() -> Json<Value> {
 
     let mut vm_info = json!({
         "vm_name": "Simard",
-        "resource_group": "rysweet-linux-vm-pool",
+        "resource_group": "",
         "status": "unknown",
     });
 
@@ -1629,12 +1662,46 @@ async fn distributed() -> Json<Value> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
+    // Build the Remote VMs panel from the same canonical source as the
+    // Cluster Topology panel (`load_hosts()` → ~/.simard/hosts.json), so the
+    // two panels never disagree. Then enrich the entry whose vm_name matches
+    // the probe target ("Simard", historically) with the probe results.
+    // Hosts not covered by the probe keep status: "unknown". Probe data for
+    // a vm_name not present in the configured hosts is discarded.
+    let hosts = tokio::task::spawn_blocking(load_hosts)
+        .await
+        .unwrap_or_default();
+    let mut remote_vms = remote_vms_from_hosts(&hosts);
+    let probe_vm_name = vm_info
+        .get("vm_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if let Some(entry) = remote_vms.iter_mut().find(|v| {
+        v.get("vm_name")
+            .and_then(|s| s.as_str())
+            .map(|s| s == probe_vm_name)
+            .unwrap_or(false)
+    }) {
+        if let Value::Object(probe_map) = &vm_info {
+            if let Value::Object(entry_map) = entry {
+                for (k, val) in probe_map {
+                    // Don't overwrite the canonical fields sourced from hosts.json
+                    if k == "vm_name" || k == "resource_group" {
+                        continue;
+                    }
+                    entry_map.insert(k.clone(), val.clone());
+                }
+            }
+        }
+    }
+
     Json(json!({
         "local": {
             "hostname": local_host,
             "type": "dev-machine",
         },
-        "remote_vms": [vm_info],
+        "remote_vms": remote_vms,
         "topology": "distributed",
         "hive_mind": {
             "protocol": "DHT+bloom gossip (peer-to-peer)",
@@ -4690,6 +4757,47 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_vms_panel_matches_configured_hosts() {
+        use std::collections::BTreeSet;
+
+        let hosts = vec![
+            serde_json::json!({"name": "vm-alpha", "resource_group": "rg1"}),
+            serde_json::json!({"name": "vm-beta",  "resource_group": "rg2"}),
+        ];
+
+        let remote_vms = remote_vms_from_hosts(&hosts);
+
+        let host_names: BTreeSet<String> = hosts
+            .iter()
+            .filter_map(|h| h.get("name").and_then(|v| v.as_str()).map(String::from))
+            .collect();
+        let vm_names: BTreeSet<String> = remote_vms
+            .iter()
+            .filter_map(|v| v.get("vm_name").and_then(|x| x.as_str()).map(String::from))
+            .collect();
+
+        assert_eq!(
+            host_names, vm_names,
+            "Remote VMs panel must agree with configured hosts (Cluster Topology source)"
+        );
+        assert!(
+            !vm_names.contains("Simard"),
+            "Hardcoded 'Simard' default must not appear unless explicitly configured"
+        );
+
+        // Empty hosts -> empty remote_vms (frontend renders 'No remote VMs configured').
+        let empty: Vec<serde_json::Value> = Vec::new();
+        assert!(remote_vms_from_hosts(&empty).is_empty());
+
+        // Each entry has expected fields with safe defaults.
+        for vm in &remote_vms {
+            assert!(vm.get("vm_name").and_then(|v| v.as_str()).is_some());
+            assert!(vm.get("resource_group").is_some());
+            assert!(vm.get("status").is_some());
+        }
+    }
 
     #[test]
     fn build_router_creates_valid_router() {
