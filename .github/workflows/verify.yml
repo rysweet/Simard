@@ -152,3 +152,76 @@ jobs:
           CARGO_PROFILE_DEV_INCREMENTAL: "false"
         run: cargo test --test install_smoke -- --nocapture
 
+
+  e2e-dashboard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /usr/local/share/boost || true
+          sudo apt-get clean || true
+          df -h /
+
+      - name: Add swap space (4 GB)
+        run: |
+          if sudo swapon --show | awk 'NR>1 {print $1}' | grep -qx /swapfile; then
+            sudo swapoff /swapfile || true
+          fi
+          sudo rm -f /swapfile
+          sudo fallocate -l 4G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: simard-ci
+          save-if: false
+          cache-on-failure: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers (chromium)
+        run: npx playwright install --with-deps chromium
+
+      - name: Build simard release binary
+        run: cargo build --release --locked --bin simard --jobs 2
+
+      - name: Run structural Playwright suite
+        env:
+          SIMARD_BIN: ${{ github.workspace }}/target/release/simard
+          CI: '1'
+        run: npm run test:e2e:structural
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            playwright-report
+            test-results
+          if-no-files-found: ignore
+          retention-days: 7
