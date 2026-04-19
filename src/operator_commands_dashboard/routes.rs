@@ -54,6 +54,7 @@ pub fn build_router() -> Router {
         .route("/api/workboard", get(workboard))
         .route("/api/current-work", get(current_work))
         .route("/api/ooda-thinking", get(ooda_thinking))
+        .route("/api/subagent-sessions", get(subagent_sessions))
         .route("/ws/chat", get(ws_chat_handler))
         .route(WS_AGENT_LOG_ROUTE, get(ws_agent_log_handler))
         .route("/api/azlin/tmux-sessions", get(azlin_tmux_sessions))
@@ -3710,7 +3711,32 @@ const LOGIN_HTML: &str = r#"<!DOCTYPE html>
 </html>
 "#;
 
-const INDEX_HTML: &str = r#"<!DOCTYPE html>
+/// WS-2: list live and recently-ended subagent tmux sessions.
+///
+/// Returns `{ live: [...], recently_ended: [...] }` sorted by `created_at`
+/// descending. The dashboard polls this every 5s to populate the Subagent
+/// Sessions card and to drive Attach deep-links in the Recent Actions feed.
+async fn subagent_sessions() -> Json<Value> {
+    let reg = crate::subagent_sessions::load();
+    let mut live: Vec<&crate::subagent_sessions::SubagentSession> = reg
+        .sessions
+        .iter()
+        .filter(|s| s.ended_at.is_none())
+        .collect();
+    let mut ended: Vec<&crate::subagent_sessions::SubagentSession> = reg
+        .sessions
+        .iter()
+        .filter(|s| s.ended_at.is_some())
+        .collect();
+    live.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    ended.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Json(json!({
+        "live": live,
+        "recently_ended": ended,
+    }))
+}
+
+pub(crate) const INDEX_HTML: &str = r#"<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -4094,6 +4120,18 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       </div>
       <div id="xterm-host" style="height:60vh;background:#000;border:1px solid var(--border);border-radius:6px;padding:.25rem"></div>
     </div>
+    <div class="card" style="max-width:980px" id="subagent-sessions">
+      <h2>Subagent Sessions</h2>
+      <div style="background:#1a1a2e;border:1px solid #333;border-radius:6px;padding:.6rem;margin-bottom:.75rem;font-size:.8rem;color:#8b949e">
+        Live and recently-ended engineer subprocesses tracked via tmux.
+        Click <strong>Attach</strong> to copy the <code>tmux attach</code>
+        command for the corresponding <code>simard-engineer-&lt;id&gt;</code>
+        session.
+      </div>
+      <div id="subagent-sessions-list">
+        <span style="color:#8b949e;font-size:.85rem">Loading…</span>
+      </div>
+    </div>
 
     <section id="azlin-sessions-panel" class="card" style="max-width:980px;margin-top:1rem">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem">
@@ -4144,6 +4182,78 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       );
     }
 
+    /* --- WS-2: Subagent tmux session registry (cached client-side) --- */
+    let subagentSessionsCache={live:[],recently_ended:[],byId:{}};
+    function rebuildSubagentIndex(){
+      const idx={};
+      for(const s of (subagentSessionsCache.live||[])){idx[s.agent_id]=s;}
+      for(const s of (subagentSessionsCache.recently_ended||[])){if(!idx[s.agent_id])idx[s.agent_id]=s;}
+      subagentSessionsCache.byId=idx;
+    }
+    async function fetchSubagentSessions(){
+      try{
+        const d=await apiFetch('/api/subagent-sessions');
+        subagentSessionsCache.live=d.live||[];
+        subagentSessionsCache.recently_ended=d.recently_ended||[];
+        rebuildSubagentIndex();
+        renderSubagentSessions();
+      }catch(e){
+        const el=document.getElementById('subagent-sessions-list');
+        if(el) el.innerHTML='<span class="err">Failed to load subagent sessions: '+esc(e.message||e)+'</span>';
+      }
+    }
+    function attachCommandFor(s){
+      if(s.host && s.host!=='local'){
+        return 'ssh '+s.host+' -t tmux attach -t '+s.session_name;
+      }
+      return 'tmux attach -t '+s.session_name;
+    }
+    function renderSubagentSessions(){
+      const el=document.getElementById('subagent-sessions-list');
+      if(!el) return;
+      const live=subagentSessionsCache.live||[];
+      const ended=subagentSessionsCache.recently_ended||[];
+      if(!live.length && !ended.length){
+        el.innerHTML='<span style="color:#8b949e;font-size:.85rem">No subagent sessions tracked yet.</span>';
+        return;
+      }
+      const row=(s,status)=>{
+        const cmd=attachCommandFor(s);
+        return '<div style="display:flex;gap:.5rem;align-items:baseline;padding:.35rem 0;border-bottom:1px solid var(--border);font-size:.85rem">'
+          +'<code style="min-width:14rem">'+esc(s.agent_id)+'</code>'
+          +'<span style="color:#8b949e;min-width:8rem">'+esc(s.goal_id||'')+'</span>'
+          +'<span class="'+(status==='live'?'ok':'warn')+'" style="min-width:5rem">'+status+'</span>'
+          +'<span style="flex:1;color:#8b949e;font-size:.75rem">pid '+s.pid+' · '+esc(s.host||'local')+'</span>'
+          +'<button class="btn attach-btn" data-cmd="'+esc(cmd)+'" onclick="copyAttachCmd(this)">Attach →</button>'
+          +'</div>';
+      };
+      el.innerHTML=live.map(s=>row(s,'live')).join('')+ended.map(s=>row(s,'ended')).join('');
+    }
+    function copyAttachCmd(btn){
+      const cmd=btn.getAttribute('data-cmd')||'';
+      navigator.clipboard.writeText(cmd).then(()=>{
+        const prev=btn.textContent;btn.textContent='Copied!';
+        setTimeout(()=>{btn.textContent=prev;},900);
+      },()=>{});
+    }
+    /* Shared renderer for Recent Actions outcome.detail strings.
+       Detects agent='engineer-...' references and, when a matching tmux
+       session is in the registry cache, swaps the literal substring for an
+       inline Attach button. Returns an HTML string (caller already escaped
+       the detail). */
+    function renderActionDetail(detail){
+      const safe=esc(detail||'');
+      const re=/agent='(engineer-[A-Za-z0-9_-]+)'/;
+      const m=safe.match(re);
+      if(!m) return safe;
+      const agentId=m[1];
+      const session=subagentSessionsCache.byId[agentId];
+      if(!session) return safe;
+      const cmd=attachCommandFor(session);
+      const btn=' <button class="btn attach-btn" data-cmd="'+esc(cmd)+'" onclick="copyAttachCmd(this)" style="font-size:.7rem;padding:.05rem .35rem;margin-left:.25rem">Attach →</button>';
+      return safe.replace(m[0], m[0]+btn);
+    }
+
     /* --- Active tab tracking for auto-refresh --- */
     let activeTab='overview';
     let tabRefreshTimers={};
@@ -4169,7 +4279,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         if(tab.dataset.tab==='chat') initChat();
         if(tab.dataset.tab==='workboard') {fetchWorkboard();tabRefreshTimers.wb=setInterval(fetchWorkboard,30000);}
         if(tab.dataset.tab==='thinking') {fetchThinking();tabRefreshTimers.thinking=setInterval(fetchThinking,30000);}
-        if(tab.dataset.tab==='terminal') { initAgentLogTerminal(); fetchTmuxSessions(); tabRefreshTimers.tmux=setInterval(fetchTmuxSessions,10000); }
+        if(tab.dataset.tab==='terminal') {initAgentLogTerminal();fetchSubagentSessions();tabRefreshTimers.subagent=setInterval(fetchSubagentSessions,5000);fetchTmuxSessions();tabRefreshTimers.tmux=setInterval(fetchTmuxSessions,10000);}
       });
     });
     setInterval(()=>{document.getElementById('clock').textContent=new Date().toLocaleString()},1000);
@@ -4286,7 +4396,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
               <span style="color:var(--accent);min-width:2rem;font-weight:600">#${a.cycle}</span>
               <span>${a.success?'✅':'❌'}</span>
               <code>${esc(a.action_kind||'')}</code>
-              <span style="flex:1">${esc((function(){var arr=Array.from(a.detail||'');var d=arr.length>200?arr.slice(0,200).join('')+'…':arr.join('');return d||a.action_description||'';})())}</span>
+              <span style="flex:1">${renderActionDetail((function(){var arr=Array.from(a.detail||'');var d=arr.length>200?arr.slice(0,200).join('')+'…':arr.join('');return d||a.action_description||'';})())}</span>
             </div>`).join('');
         }else{
           actEl.innerHTML='<span style="color:#8b949e">No structured action history yet. The OODA daemon records actions each cycle.</span>';
@@ -5161,7 +5271,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
             return`<div style="display:flex;gap:.5rem;padding:.35rem 0;border-bottom:1px solid var(--border);font-size:.85rem">
               <span style="color:var(--accent);min-width:2.5rem;font-weight:600">#${a.cycle}</span>
               <span style="min-width:5rem;color:${isCurrent?'var(--green)':'#8b949e'}">${esc(a.action)}</span>
-              <span style="flex:1">${esc(a.result)}</span>
+              <span style="flex:1">${renderActionDetail(a.result)}</span>
               ${a.at?'<span style="color:#8b949e;font-size:.75rem">'+timeAgo(a.at)+'</span>':''}
             </div>`;
           }).join('');

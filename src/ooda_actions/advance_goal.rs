@@ -175,6 +175,34 @@ fn dispatch_spawn_engineer(
                 g.assigned_to = Some(agent_name.clone());
             }
 
+            // WS-2: persist the tmux session into the dashboard registry so
+            // the Recent Actions feed can render Attach deep-links. Failures
+            // are logged but never block subagent execution.
+            if !handle.session_name.is_empty() {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                let record = crate::subagent_sessions::SubagentSession {
+                    agent_id: agent_name.clone(),
+                    session_name: handle.session_name.clone(),
+                    host: "local".to_string(),
+                    pid: handle.pid,
+                    created_at: now,
+                    ended_at: None,
+                    goal_id: goal_id.to_string(),
+                };
+                if let Err(e) = crate::subagent_sessions::record_spawn(record) {
+                    tracing::warn!(
+                        target: "simard::subagent_sessions",
+                        agent = %agent_name,
+                        session = %handle.session_name,
+                        error = %e,
+                        "failed to persist subagent session registry entry; spawn proceeds",
+                    );
+                }
+            }
+
             eprintln!(
                 "[simard] spawn_engineer dispatched: goal='{goal_id}', agent='{agent_name}', pid={}",
                 handle.pid,
@@ -248,6 +276,7 @@ fn advance_goal_with_subordinate(
         spawn_time: 0,
         retry_count: 0,
         killed: false,
+        session_name: String::new(),
     };
 
     match check_heartbeat(&handle, &*bridges.memory) {

@@ -101,6 +101,7 @@ fn test_handle(name: &str, goal: &str) -> SubordinateHandle {
         spawn_time: now_epoch(),
         retry_count: 0,
         killed: false,
+        session_name: String::new(),
     }
 }
 

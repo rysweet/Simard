@@ -8,7 +8,9 @@ use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 
 use super::STALE_THRESHOLD_SECONDS;
+use super::tmux::build_tmux_wrapped_command;
 use super::types::{HeartbeatStatus, SubordinateConfig, SubordinateHandle};
+use crate::subagent_sessions::session_name_for;
 
 /// Resolve the Simard state root the same way the dashboard does.
 ///
@@ -97,26 +99,123 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
         cmd.stdout(out).stderr(err);
     }
 
-    let child = cmd.spawn().map_err(|e| SimardError::BridgeSpawnFailed {
-        bridge: "subordinate".to_string(),
-        reason: format!(
-            "failed to spawn subordinate '{}' at '{}': {e}",
-            config.agent_name,
-            exe.display()
-        ),
-    })?;
+    // --- WS-2: Wrap inner command in a detached tmux session when tmux is
+    //     available, so the dashboard can offer `tmux attach` deep-links.
+    //     If tmux is not on PATH, fall back to direct exec (preserves the
+    //     pre-WS-2 behavior).
+    let tmux_available = Command::new("tmux")
+        .arg("-V")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
 
-    let pid = child.id();
+    let session_name = session_name_for(&config.agent_name);
+    let log_path = supervisor_state_root()
+        .join("agent_logs")
+        .join(format!("{}.log", config.agent_name));
+
+    let (child_pid, applied_session_name) = if tmux_available {
+        // Build the inner argv (must mirror the direct-exec path above).
+        let inner_argv: Vec<String> = vec![
+            exe.to_string_lossy().into_owned(),
+            "engineer".to_string(),
+            "run".to_string(),
+            "single-process".to_string(),
+            config.worktree_path.to_string_lossy().into_owned(),
+            config.goal.clone(),
+        ];
+        let argv = build_tmux_wrapped_command(&session_name, &inner_argv, &log_path);
+
+        // Run the tmux command. `tmux new-session -d` returns immediately
+        // after the session is created; the inner shell runs detached inside.
+        let status = Command::new(&argv[0])
+            .args(&argv[1..])
+            .env("SIMARD_AGENT_NAME", &config.agent_name)
+            .env(
+                "SIMARD_SUBORDINATE_DEPTH",
+                (config.current_depth + 1).to_string(),
+            )
+            .env("CARGO_BUILD_JOBS", "4")
+            .current_dir(&config.worktree_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|e| SimardError::BridgeSpawnFailed {
+                bridge: "subordinate".to_string(),
+                reason: format!(
+                    "failed to spawn tmux-wrapped subordinate '{}': {e}",
+                    config.agent_name
+                ),
+            })?;
+
+        if !status.success() {
+            return Err(SimardError::BridgeSpawnFailed {
+                bridge: "subordinate".to_string(),
+                reason: format!(
+                    "tmux new-session for subordinate '{}' exited with {status}",
+                    config.agent_name
+                ),
+            });
+        }
+
+        // Query the engineer pid via the pane's pane_pid. Brief retry to
+        // allow the shell to fork its child.
+        let pid = query_pane_pid(&session_name).unwrap_or(0);
+        (pid, session_name.clone())
+    } else {
+        tracing::warn!(
+            target: "simard::supervisor",
+            agent = %config.agent_name,
+            "tmux not available; spawning subordinate directly (no attach support)",
+        );
+        let child = cmd.spawn().map_err(|e| SimardError::BridgeSpawnFailed {
+            bridge: "subordinate".to_string(),
+            reason: format!(
+                "failed to spawn subordinate '{}' at '{}': {e}",
+                config.agent_name,
+                exe.display()
+            ),
+        })?;
+        (child.id(), String::new())
+    };
 
     Ok(SubordinateHandle {
-        pid,
+        pid: child_pid,
         agent_name: config.agent_name.clone(),
         goal: config.goal.clone(),
         worktree_path: config.worktree_path.clone(),
         spawn_time: now,
         retry_count: 0,
         killed: false,
+        session_name: applied_session_name,
     })
+}
+
+/// Query the pane_pid (the engineer process) for a tmux session. Retries once
+/// after 100ms because `tmux new-session -d` returns before the inner shell
+/// has finished forking. Returns None if the session isn't queryable.
+fn query_pane_pid(session_name: &str) -> Option<u32> {
+    for attempt in 0..2 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let out = Command::new("tmux")
+            .args(["list-panes", "-t", session_name, "-F", "#{pane_pid}"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            continue;
+        }
+        let s = String::from_utf8_lossy(&out.stdout);
+        if let Some(line) = s.lines().next()
+            && let Ok(pid) = line.trim().parse::<u32>()
+        {
+            return Some(pid);
+        }
+    }
+    None
 }
 
 /// Check the heartbeat of a subordinate by polling progress from the hive.
@@ -349,6 +448,7 @@ mod tests {
             spawn_time: 0,
             retry_count: 0,
             killed: false,
+            session_name: String::new(),
         };
         // pid=0 means we won't actually send a signal to a real process.
         let result = kill_subordinate(&mut handle);
@@ -366,6 +466,7 @@ mod tests {
             spawn_time: 0,
             retry_count: 0,
             killed: true,
+            session_name: String::new(),
         };
         let result = kill_subordinate(&mut handle);
         assert!(result.is_err());
@@ -475,6 +576,7 @@ mod tests {
             spawn_time: 0,
             retry_count: 0,
             killed: false,
+            session_name: String::new(),
         };
         let (commits, prs) = validate_subordinate_artifacts(&handle);
         assert_eq!(commits, 0);

@@ -217,6 +217,15 @@ pub fn run_ooda_cycle(
         act_elapsed.as_secs_f64()
     );
 
+    // --- WS-2: poll subagent tmux sessions and GC ended entries (>24h) ---
+    if let Err(e) = crate::subagent_sessions::poll_and_gc(
+        &crate::subagent_sessions::TmuxProbe,
+    ) {
+        eprintln!(
+            "[simard] OODA cycle: subagent_sessions poll/gc failed: {e}"
+        );
+    }
+
     // --- Update goal current_activity from outcomes ---
     for outcome in &outcomes {
         if let Some(goal_id) = &outcome.action.goal_id {

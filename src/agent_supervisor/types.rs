@@ -76,6 +76,10 @@ pub struct SubordinateHandle {
     pub retry_count: u32,
     /// Whether the subordinate has been killed.
     pub killed: bool,
+    /// Name of the tmux session wrapping this subordinate (empty string if
+    /// no tmux wrapping was applied — e.g. tmux unavailable, test handles).
+    #[doc(hidden)]
+    pub session_name: String,
 }
 
 impl Display for SubordinateHandle {
@@ -170,6 +174,7 @@ mod tests {
             spawn_time: 1000,
             retry_count: 0,
             killed: false,
+            session_name: String::new(),
         }
     }
 
