@@ -3718,16 +3718,11 @@ const LOGIN_HTML: &str = r#"<!DOCTYPE html>
 /// Sessions card and to drive Attach deep-links in the Recent Actions feed.
 async fn subagent_sessions() -> Json<Value> {
     let reg = crate::subagent_sessions::load();
-    let mut live: Vec<&crate::subagent_sessions::SubagentSession> = reg
-        .sessions
-        .iter()
-        .filter(|s| s.ended_at.is_none())
-        .collect();
-    let mut ended: Vec<&crate::subagent_sessions::SubagentSession> = reg
-        .sessions
-        .iter()
-        .filter(|s| s.ended_at.is_some())
-        .collect();
+    // Single-pass partition: avoids two filter iterations over reg.sessions.
+    let (mut live, mut ended): (
+        Vec<&crate::subagent_sessions::SubagentSession>,
+        Vec<&crate::subagent_sessions::SubagentSession>,
+    ) = reg.sessions.iter().partition(|s| s.ended_at.is_none());
     live.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     ended.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     Json(json!({

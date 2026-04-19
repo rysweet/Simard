@@ -126,14 +126,22 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
 }
 
 /// Returns true when the `tmux` binary is available and reports a version.
+///
+/// The result is cached for the lifetime of the process via `OnceLock`:
+/// tmux availability does not change at runtime, and `spawn_subordinate`
+/// is on the hot path for engineer dispatch — re-forking `tmux -V` on
+/// every spawn would be wasted work.
 fn tmux_is_available() -> bool {
-    Command::new("tmux")
-        .arg("-V")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        Command::new("tmux")
+            .arg("-V")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    })
 }
 
 /// Spawn the subordinate inside a detached tmux session. Returns the
