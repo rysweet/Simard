@@ -56,7 +56,10 @@ impl SessionProbe for TmuxProbe {
 }
 
 /// Resolve the state root: `SIMARD_STATE_ROOT` env or `$HOME/.simard`.
-fn state_root() -> PathBuf {
+///
+/// Public so other modules (e.g. `agent_supervisor`) can resolve the same
+/// directory without duplicating the env/HOME fallback logic.
+pub fn state_root() -> PathBuf {
     if let Ok(v) = std::env::var("SIMARD_STATE_ROOT") {
         return PathBuf::from(v);
     }
@@ -69,7 +72,9 @@ pub fn registry_path() -> PathBuf {
     state_root().join("state").join("subagent_sessions.json")
 }
 
-fn now_epoch_seconds() -> i64 {
+/// Current unix time in seconds as `i64` (saturates to 0 on clock errors).
+/// Public so callers building registry rows use the same conversion.
+pub fn now_epoch_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

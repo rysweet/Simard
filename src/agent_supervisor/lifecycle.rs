@@ -10,21 +10,7 @@ use crate::error::{SimardError, SimardResult};
 use super::STALE_THRESHOLD_SECONDS;
 use super::tmux::build_tmux_wrapped_command;
 use super::types::{HeartbeatStatus, SubordinateConfig, SubordinateHandle};
-use crate::subagent_sessions::session_name_for;
-
-/// Resolve the Simard state root the same way the dashboard does.
-///
-/// Duplicated locally to avoid a cross-module dependency on the dashboard
-/// crate; both implementations honor `SIMARD_STATE_ROOT` then fall back to
-/// `$HOME/.simard`.
-fn supervisor_state_root() -> std::path::PathBuf {
-    std::env::var("SIMARD_STATE_ROOT")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
-            std::path::PathBuf::from(home).join(".simard")
-        })
-}
+use crate::subagent_sessions::{session_name_for, state_root as supervisor_state_root};
 
 /// Open (or create+append) the per-agent stdio log file at
 /// `<state_root>/agent_logs/<agent_name>.log` and return a clone-pair for
@@ -103,67 +89,13 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
     //     available, so the dashboard can offer `tmux attach` deep-links.
     //     If tmux is not on PATH, fall back to direct exec (preserves the
     //     pre-WS-2 behavior).
-    let tmux_available = Command::new("tmux")
-        .arg("-V")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-
     let session_name = session_name_for(&config.agent_name);
     let log_path = supervisor_state_root()
         .join("agent_logs")
         .join(format!("{}.log", config.agent_name));
 
-    let (child_pid, applied_session_name) = if tmux_available {
-        // Build the inner argv (must mirror the direct-exec path above).
-        let inner_argv: Vec<String> = vec![
-            exe.to_string_lossy().into_owned(),
-            "engineer".to_string(),
-            "run".to_string(),
-            "single-process".to_string(),
-            config.worktree_path.to_string_lossy().into_owned(),
-            config.goal.clone(),
-        ];
-        let argv = build_tmux_wrapped_command(&session_name, &inner_argv, &log_path);
-
-        // Run the tmux command. `tmux new-session -d` returns immediately
-        // after the session is created; the inner shell runs detached inside.
-        let status = Command::new(&argv[0])
-            .args(&argv[1..])
-            .env("SIMARD_AGENT_NAME", &config.agent_name)
-            .env(
-                "SIMARD_SUBORDINATE_DEPTH",
-                (config.current_depth + 1).to_string(),
-            )
-            .env("CARGO_BUILD_JOBS", "4")
-            .current_dir(&config.worktree_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map_err(|e| SimardError::BridgeSpawnFailed {
-                bridge: "subordinate".to_string(),
-                reason: format!(
-                    "failed to spawn tmux-wrapped subordinate '{}': {e}",
-                    config.agent_name
-                ),
-            })?;
-
-        if !status.success() {
-            return Err(SimardError::BridgeSpawnFailed {
-                bridge: "subordinate".to_string(),
-                reason: format!(
-                    "tmux new-session for subordinate '{}' exited with {status}",
-                    config.agent_name
-                ),
-            });
-        }
-
-        // Query the engineer pid via the pane's pane_pid. Brief retry to
-        // allow the shell to fork its child.
-        let pid = query_pane_pid(&session_name).unwrap_or(0);
-        (pid, session_name.clone())
+    let (child_pid, applied_session_name) = if tmux_is_available() {
+        spawn_via_tmux(&exe, config, &session_name, &log_path)?
     } else {
         tracing::warn!(
             target: "simard::supervisor",
@@ -191,6 +123,73 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
         killed: false,
         session_name: applied_session_name,
     })
+}
+
+/// Returns true when the `tmux` binary is available and reports a version.
+fn tmux_is_available() -> bool {
+    Command::new("tmux")
+        .arg("-V")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Spawn the subordinate inside a detached tmux session. Returns the
+/// engineer pane pid (or 0 if it could not be queried) and the session name.
+fn spawn_via_tmux(
+    exe: &std::path::Path,
+    config: &SubordinateConfig,
+    session_name: &str,
+    log_path: &std::path::Path,
+) -> SimardResult<(u32, String)> {
+    // Inner argv must mirror the direct-exec path in `spawn_subordinate`.
+    let inner_argv: Vec<String> = vec![
+        exe.to_string_lossy().into_owned(),
+        "engineer".to_string(),
+        "run".to_string(),
+        "single-process".to_string(),
+        config.worktree_path.to_string_lossy().into_owned(),
+        config.goal.clone(),
+    ];
+    let argv = build_tmux_wrapped_command(session_name, &inner_argv, log_path);
+
+    // `tmux new-session -d` returns immediately after the session is
+    // created; the inner shell runs detached inside.
+    let status = Command::new(&argv[0])
+        .args(&argv[1..])
+        .env("SIMARD_AGENT_NAME", &config.agent_name)
+        .env(
+            "SIMARD_SUBORDINATE_DEPTH",
+            (config.current_depth + 1).to_string(),
+        )
+        .env("CARGO_BUILD_JOBS", "4")
+        .current_dir(&config.worktree_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| SimardError::BridgeSpawnFailed {
+            bridge: "subordinate".to_string(),
+            reason: format!(
+                "failed to spawn tmux-wrapped subordinate '{}': {e}",
+                config.agent_name
+            ),
+        })?;
+
+    if !status.success() {
+        return Err(SimardError::BridgeSpawnFailed {
+            bridge: "subordinate".to_string(),
+            reason: format!(
+                "tmux new-session for subordinate '{}' exited with {status}",
+                config.agent_name
+            ),
+        });
+    }
+
+    // Query the engineer pid via the pane's pane_pid (with a brief retry).
+    let pid = query_pane_pid(session_name).unwrap_or(0);
+    Ok((pid, session_name.to_string()))
 }
 
 /// Query the pane_pid (the engineer process) for a tmux session. Retries once

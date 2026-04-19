@@ -1,7 +1,5 @@
 //! AdvanceGoal dispatch — routing, subordinate heartbeat, and session-based advancement.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use crate::agent_roles::AgentRole;
 use crate::agent_supervisor::{HeartbeatStatus, SubordinateConfig, check_heartbeat, spawn_subordinate};
 use crate::goal_curation::{GoalProgress, update_goal_progress};
@@ -179,16 +177,12 @@ fn dispatch_spawn_engineer(
             // the Recent Actions feed can render Attach deep-links. Failures
             // are logged but never block subagent execution.
             if !handle.session_name.is_empty() {
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
                 let record = crate::subagent_sessions::SubagentSession {
                     agent_id: agent_name.clone(),
                     session_name: handle.session_name.clone(),
                     host: "local".to_string(),
                     pid: handle.pid,
-                    created_at: now,
+                    created_at: crate::subagent_sessions::now_epoch_seconds(),
                     ended_at: None,
                     goal_id: goal_id.to_string(),
                 };
@@ -237,10 +231,7 @@ fn dispatch_spawn_engineer(
 /// The epoch suffix prevents collisions when a goal's previous engineer
 /// died and a fresh one needs to be spawned in the same process.
 fn build_engineer_name(goal_id: &str) -> String {
-    let epoch = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let epoch = crate::subagent_sessions::now_epoch_seconds();
     format!("engineer-{goal_id}-{epoch}")
 }
 
