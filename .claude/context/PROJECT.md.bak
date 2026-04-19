@@ -10,7 +10,7 @@ Replace the sections below with information about your project.
 
 ---
 
-## Project: main
+## Project: issue-929-wire-simard-ooda-daemon-to-spawn-engineer-agents-i
 
 ## Overview
 

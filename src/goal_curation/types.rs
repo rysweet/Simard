@@ -183,6 +183,8 @@ mod tests {
             priority: 1,
             status: GoalProgress::InProgress { percent: 75 },
             assigned_to: Some("team-a".to_string()),
+            current_activity: None,
+            wip_refs: vec![],
         }
     }
 
