@@ -34,6 +34,53 @@ fn collapse_to_single_line(input: &str) -> String {
         .to_string()
 }
 
+/// Build a sanitized argv for `gh issue create`. The returned argv is
+/// guaranteed to contain both `--title` and `--body` flags. Title and body
+/// are collapsed to single-line values (run_command rejects multiline argv
+/// segments per issue #943). When the body would otherwise be empty, a
+/// placeholder string referencing the originating goal id and agent log
+/// path is substituted so `--body` is always present (issue #1011).
+pub(crate) fn sanitize_issue_create_args(
+    title: &str,
+    body: &str,
+    labels: &[String],
+    goal_id: Option<&str>,
+    agent: Option<&str>,
+) -> Vec<String> {
+    let mut sanitized_title = collapse_to_single_line(title);
+    if sanitized_title.is_empty() {
+        sanitized_title = "(untitled issue spawned by OODA daemon)".to_string();
+    }
+    let sanitized_body_raw = collapse_to_single_line(body);
+    let sanitized_body = if sanitized_body_raw.is_empty() {
+        let goal = goal_id.unwrap_or("unknown");
+        let agent_name = agent.unwrap_or("unknown");
+        format!(
+            "_(spawned by OODA daemon for goal: {goal}; see ~/.simard/agent_logs/{agent_name}.log)_"
+        )
+    } else {
+        sanitized_body_raw
+    };
+    let mut argv_owned: Vec<String> = vec![
+        "gh".to_string(),
+        "issue".to_string(),
+        "create".to_string(),
+        "--title".to_string(),
+        sanitized_title,
+        "--body".to_string(),
+        sanitized_body,
+    ];
+    for label in labels {
+        let label_clean = collapse_to_single_line(label);
+        if label_clean.is_empty() {
+            continue;
+        }
+        argv_owned.push("--label".to_string());
+        argv_owned.push(label_clean);
+    }
+    argv_owned
+}
+
 pub(crate) fn timeout_for_command(argv: &[&str]) -> Duration {
     if argv.first().is_some_and(|cmd| *cmd == "cargo") {
         Duration::from_secs(CARGO_COMMAND_TIMEOUT_SECS)
@@ -348,30 +395,13 @@ pub(crate) fn execute_engineer_action(
             })
         }
         EngineerActionKind::OpenIssue(ref req) => {
-            // Defensively collapse newlines/CR in title and body so we never
-            // emit an argv segment that the run_command validator would
-            // reject ("argv-only command segments must be non-empty
-            // single-line values"). See issue #943.
-            let title = collapse_to_single_line(&req.title);
-            let body = collapse_to_single_line(&req.body);
-            let mut argv_owned: Vec<String> = vec![
-                "gh".to_string(),
-                "issue".to_string(),
-                "create".to_string(),
-                "--title".to_string(),
-                title,
-            ];
-            // Only include --body when we actually have a body. An empty
-            // body would produce an empty argv segment that fails the
-            // single-line/non-empty validator above.
-            if !body.is_empty() {
-                argv_owned.push("--body".to_string());
-                argv_owned.push(body);
-            }
-            for label in &req.labels {
-                argv_owned.push("--label".to_string());
-                argv_owned.push(label.clone());
-            }
+            let argv_owned = sanitize_issue_create_args(
+                &req.title,
+                &req.body,
+                &req.labels,
+                None,
+                None,
+            );
             let argv_refs: Vec<&str> = argv_owned.iter().map(String::as_str).collect();
             let output = run_command(repo_root, &argv_refs)?;
             Ok(ExecutedEngineerAction {
@@ -472,5 +502,173 @@ mod tests {
     fn run_command_rejects_empty_segments() {
         let result = run_command(Path::new("."), &["echo", ""]);
         assert!(result.is_err());
+    }
+
+    fn assert_has_flag_with_value(argv: &[String], flag: &str) {
+        let pos = argv.iter().position(|a| a == flag);
+        assert!(pos.is_some(), "expected flag {flag} in argv: {argv:?}");
+        let idx = pos.unwrap();
+        assert!(
+            idx + 1 < argv.len(),
+            "flag {flag} at end of argv with no value: {argv:?}"
+        );
+        assert!(
+            !argv[idx + 1].is_empty(),
+            "value for {flag} is empty in argv: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn sanitize_issue_create_args_always_includes_title_and_body_empty_body() {
+        let argv = sanitize_issue_create_args(
+            "fix the thing",
+            "",
+            &[],
+            Some("goal-42"),
+            Some("engineer-1"),
+        );
+        assert_eq!(argv[0], "gh");
+        assert_eq!(argv[1], "issue");
+        assert_eq!(argv[2], "create");
+        assert_has_flag_with_value(&argv, "--title");
+        assert_has_flag_with_value(&argv, "--body");
+        let body_idx = argv.iter().position(|a| a == "--body").unwrap();
+        assert!(argv[body_idx + 1].contains("goal-42"));
+        assert!(argv[body_idx + 1].contains("engineer-1"));
+        assert!(argv[body_idx + 1].contains("~/.simard/agent_logs/"));
+    }
+
+    #[test]
+    fn sanitize_issue_create_args_whitespace_body_uses_placeholder() {
+        let argv = sanitize_issue_create_args("title", "   \n\t  ", &[], None, None);
+        assert_has_flag_with_value(&argv, "--body");
+        let body_idx = argv.iter().position(|a| a == "--body").unwrap();
+        assert!(argv[body_idx + 1].contains("unknown"));
+        assert!(argv[body_idx + 1].starts_with("_(spawned by OODA daemon"));
+    }
+
+    #[test]
+    fn sanitize_issue_create_args_multiline_title_collapsed() {
+        let argv = sanitize_issue_create_args(
+            "line one\nline two\rline three",
+            "body content",
+            &[],
+            None,
+            None,
+        );
+        assert_has_flag_with_value(&argv, "--title");
+        let title_idx = argv.iter().position(|a| a == "--title").unwrap();
+        let title_val = &argv[title_idx + 1];
+        assert!(!title_val.contains('\n'));
+        assert!(!title_val.contains('\r'));
+        assert!(title_val.contains("line one"));
+        assert!(title_val.contains("line two"));
+        assert!(title_val.contains("line three"));
+        assert_has_flag_with_value(&argv, "--body");
+    }
+
+    #[test]
+    fn sanitize_issue_create_args_special_chars_preserved() {
+        let title = "fix: $weird `chars` & \"quotes\" <html> 中文";
+        let body = "body with !@#$%^&*()_+-={}[]|\\:;'<>,.?/ symbols";
+        let argv = sanitize_issue_create_args(title, body, &[], None, None);
+        let title_idx = argv.iter().position(|a| a == "--title").unwrap();
+        let body_idx = argv.iter().position(|a| a == "--body").unwrap();
+        assert_eq!(&argv[title_idx + 1], title);
+        assert_eq!(&argv[body_idx + 1], body);
+        assert_has_flag_with_value(&argv, "--title");
+        assert_has_flag_with_value(&argv, "--body");
+    }
+
+    #[test]
+    fn sanitize_issue_create_args_with_labels_preserves_order() {
+        let argv = sanitize_issue_create_args(
+            "t",
+            "b",
+            &["bug".to_string(), "p1".to_string()],
+            None,
+            None,
+        );
+        assert_has_flag_with_value(&argv, "--title");
+        assert_has_flag_with_value(&argv, "--body");
+        let label_positions: Vec<usize> = argv
+            .iter()
+            .enumerate()
+            .filter_map(|(i, a)| if a == "--label" { Some(i) } else { None })
+            .collect();
+        assert_eq!(label_positions.len(), 2);
+        assert_eq!(argv[label_positions[0] + 1], "bug");
+        assert_eq!(argv[label_positions[1] + 1], "p1");
+    }
+
+    #[test]
+    fn sanitize_issue_create_args_empty_title_substituted() {
+        let argv = sanitize_issue_create_args("   ", "body", &[], None, None);
+        assert_has_flag_with_value(&argv, "--title");
+        let title_idx = argv.iter().position(|a| a == "--title").unwrap();
+        assert!(!argv[title_idx + 1].is_empty());
+    }
+
+    #[test]
+    fn sanitize_issue_create_args_parses_under_gh_help() {
+        // Integration test: confirm gh CLI accepts the sanitized argv
+        // shape. We append --help so gh prints help and exits 0 without
+        // actually creating an issue. Skipped gracefully if gh is missing.
+        use std::process::Command;
+        let gh_available = Command::new("gh")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !gh_available {
+            eprintln!("skipping: gh CLI not available in test environment");
+            return;
+        }
+        let argv = sanitize_issue_create_args(
+            "test title",
+            "",
+            &["bug".to_string()],
+            Some("goal-1"),
+            Some("agent-1"),
+        );
+        // argv[0] is "gh"; pass the rest plus --help
+        let mut cmd = Command::new(&argv[0]);
+        cmd.args(&argv[1..]);
+        cmd.arg("--help");
+        let output = cmd.output().expect("failed to invoke gh");
+        assert!(
+            output.status.success(),
+            "gh failed to parse sanitized argv {:?}: stderr={}",
+            argv,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn sanitize_issue_create_args_passes_run_command_validator() {
+        // Validator rejects empty or multi-line argv segments. Sanitized
+        // output must satisfy it for any input.
+        let cases: Vec<(&str, &str)> = vec![
+            ("", ""),
+            ("multi\nline\ntitle", ""),
+            ("t", "multi\nline\nbody"),
+            ("\r\n", "\n\r"),
+            ("normal title", "normal body"),
+        ];
+        for (title, body) in cases {
+            let argv = sanitize_issue_create_args(title, body, &[], Some("g"), Some("a"));
+            for seg in &argv {
+                assert!(
+                    !seg.is_empty(),
+                    "empty argv segment for inputs ({title:?}, {body:?}): {argv:?}"
+                );
+                assert!(
+                    !seg.contains('\n') && !seg.contains('\r'),
+                    "multi-line argv segment for inputs ({title:?}, {body:?}): {argv:?}"
+                );
+            }
+            assert!(argv.iter().any(|a| a == "--title"));
+            assert!(argv.iter().any(|a| a == "--body"));
+        }
     }
 }
