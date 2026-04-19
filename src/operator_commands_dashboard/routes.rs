@@ -1942,39 +1942,7 @@ fn open_dashboard_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeS
 }
 
 async fn ws_chat_handler(ws: WebSocketUpgrade) -> response::Response {
-    ws.on_upgrade(handle_ws_chat_safe)
-}
-
-/// Panic-safe wrapper around `handle_ws_chat`.
-///
-/// A websocket chat session that panics in agent code, transcript parsing, or
-/// persistence must not take down the dashboard server. Each synchronous
-/// blocking step inside `handle_ws_chat` is already executed via
-/// `tokio::task::spawn_blocking`, which converts panics into `JoinError`s. We
-/// additionally wrap every blocking closure with `std::panic::catch_unwind`
-/// (see `safe_block`) so panics are surfaced as user-visible error messages
-/// rather than crashing the chat task.
-async fn handle_ws_chat_safe(socket: WebSocket) {
-    handle_ws_chat(socket).await
-}
-
-/// Run a blocking closure under `std::panic::catch_unwind`, mapping panics to
-/// a `String` error so callers can render them in chat instead of crashing.
-fn safe_block<T>(label: &'static str, f: impl FnOnce() -> T + std::panic::UnwindSafe) -> Result<T, String> {
-    match std::panic::catch_unwind(f) {
-        Ok(v) => Ok(v),
-        Err(payload) => {
-            let msg = if let Some(s) = payload.downcast_ref::<&'static str>() {
-                (*s).to_string()
-            } else if let Some(s) = payload.downcast_ref::<String>() {
-                s.clone()
-            } else {
-                "unknown panic".to_string()
-            };
-            eprintln!("[simard][PANIC] ws_chat {label}: {msg}");
-            Err(format!("{label} panicked: {msg}"))
-        }
-    }
+    ws.on_upgrade(handle_ws_chat)
 }
 
 async fn handle_ws_chat(mut socket: WebSocket) {
