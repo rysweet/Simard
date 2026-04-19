@@ -36,11 +36,7 @@ fn open_agent_log(agent_name: &str) -> Option<(Stdio, Stdio)> {
         return None;
     }
     let path = dir.join(format!("{agent_name}.log"));
-    let file = match OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
+    let file = match OpenOptions::new().create(true).append(true).open(&path) {
         Ok(f) => f,
         Err(e) => {
             tracing::warn!(target: "simard::supervisor", agent = %agent_name, path = %path.display(), error = %e, "failed to open agent log; falling back to inherited stdio");
@@ -204,10 +200,7 @@ pub fn is_goal_complete(progress: &SubordinateProgress) -> bool {
 ///
 /// Returns the number of commits found after `since_epoch` on the current
 /// branch in the subordinate's worktree.
-pub fn count_commits_since(
-    worktree_path: &std::path::Path,
-    since_epoch: u64,
-) -> u32 {
+pub fn count_commits_since(worktree_path: &std::path::Path, since_epoch: u64) -> u32 {
     let since_str = format!("@{{{since_epoch}}}");
     let output = Command::new("git")
         .args(["log", "--oneline", "--after", &since_str])
@@ -236,14 +229,18 @@ pub fn count_open_prs(worktree_path: &std::path::Path) -> u32 {
     let branch = match branch_output {
         Ok(o) if o.status.success() => {
             let b = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if b.is_empty() { return 0; }
+            if b.is_empty() {
+                return 0;
+            }
             b
         }
         _ => return 0,
     };
 
     let pr_output = Command::new("gh")
-        .args(["pr", "list", "--head", &branch, "--state", "open", "--json", "number"])
+        .args([
+            "pr", "list", "--head", &branch, "--state", "open", "--json", "number",
+        ])
         .current_dir(worktree_path)
         .output();
 
@@ -261,9 +258,7 @@ pub fn count_open_prs(worktree_path: &std::path::Path) -> u32 {
 ///
 /// Logs clear warnings when a subordinate exits without producing any
 /// artifacts. Returns `(commits, prs)` counts.
-pub fn validate_subordinate_artifacts(
-    handle: &SubordinateHandle,
-) -> (u32, u32) {
+pub fn validate_subordinate_artifacts(handle: &SubordinateHandle) -> (u32, u32) {
     let commits = count_commits_since(&handle.worktree_path, handle.spawn_time);
     let prs = count_open_prs(&handle.worktree_path);
 

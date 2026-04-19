@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use super::auth::{require_auth, try_login};
 use crate::agent_registry::{AgentRegistry, FileBackedAgentRegistry};
 use crate::build_lock::BuildLock;
-use crate::cognitive_memory::{as_f64, as_i64, as_str, CognitiveMemoryOps, NativeCognitiveMemory};
+use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory, as_f64, as_i64, as_str};
 use crate::error::{SimardError, SimardResult};
 use crate::goal_curation::{ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS};
 use crate::goals::{GoalRecord, goal_slug};
@@ -428,7 +428,6 @@ async fn seed_goals() -> Json<Value> {
     }
 }
 
-
 async fn add_goal(Json(body): Json<Value>) -> Json<Value> {
     let state_root = resolve_state_root();
     let goal_path = state_root.join("goal_records.json");
@@ -461,18 +460,15 @@ async fn add_goal(Json(body): Json<Value>) -> Json<Value> {
                 MAX_ACTIVE_GOALS
             )}));
         }
-        let priority = body
-            .get("priority")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(3) as u32;
+        let priority = body.get("priority").and_then(|v| v.as_u64()).unwrap_or(3) as u32;
         board.active.push(ActiveGoal {
             id: id.clone(),
             description: desc,
             priority,
             status: GoalProgress::NotStarted,
             assigned_to: None,
-        current_activity: None,
-        wip_refs: vec![],
+            current_activity: None,
+            wip_refs: vec![],
         });
     }
 
@@ -582,8 +578,8 @@ async fn promote_backlog_item(Path(id): Path<String>) -> Json<Value> {
         priority: 3,
         status: GoalProgress::NotStarted,
         assigned_to: None,
-    current_activity: None,
-    wip_refs: vec![],
+        current_activity: None,
+        wip_refs: vec![],
     });
 
     match std::fs::write(
@@ -697,16 +693,19 @@ async fn memory_graph() -> Json<Value> {
     let mut nodes: Vec<Value> = Vec::new();
     let mut edges: Vec<Value> = Vec::new();
 
-    let query_rows = |cypher: &str| -> Vec<Vec<lbug::Value>> {
-        mem.query(cypher).unwrap_or_default()
-    };
+    let query_rows =
+        |cypher: &str| -> Vec<Vec<lbug::Value>> { mem.query(cypher).unwrap_or_default() };
 
     for row in query_rows(
         "MATCH (w:WorkingMemory) RETURN w.id, w.slot_type, w.content, w.task_id, w.relevance LIMIT 100",
     ) {
         if let Some(id) = row.first().and_then(as_str) {
             let content = row.get(2).and_then(as_str).unwrap_or("");
-            let label = if content.len() > 60 { format!("{}…", &content[..60]) } else { content.to_string() };
+            let label = if content.len() > 60 {
+                format!("{}…", &content[..60])
+            } else {
+                content.to_string()
+            };
             nodes.push(json!({
                 "id": id, "type": "WorkingMemory", "label": label,
                 "content": content,
@@ -723,8 +722,14 @@ async fn memory_graph() -> Json<Value> {
             let concept = row.get(1).and_then(as_str).unwrap_or("");
             let content = row.get(2).and_then(as_str).unwrap_or("");
             let label = if concept.is_empty() {
-                if content.len() > 60 { format!("{}…", &content[..60]) } else { content.to_string() }
-            } else { concept.to_string() };
+                if content.len() > 60 {
+                    format!("{}…", &content[..60])
+                } else {
+                    content.to_string()
+                }
+            } else {
+                concept.to_string()
+            };
             nodes.push(json!({
                 "id": id, "type": "SemanticFact", "label": label,
                 "content": content, "confidence": row.get(3).and_then(as_f64).unwrap_or(0.0),
@@ -738,7 +743,11 @@ async fn memory_graph() -> Json<Value> {
     ) {
         if let Some(id) = row.first().and_then(as_str) {
             let content = row.get(1).and_then(as_str).unwrap_or("");
-            let label = if content.len() > 60 { format!("{}…", &content[..60]) } else { content.to_string() };
+            let label = if content.len() > 60 {
+                format!("{}…", &content[..60])
+            } else {
+                content.to_string()
+            };
             nodes.push(json!({
                 "id": id, "type": "EpisodicMemory", "label": label,
                 "content": content,
@@ -790,17 +799,24 @@ async fn memory_graph() -> Json<Value> {
     }
 
     // Infer edges: link WorkingMemory to nodes sharing the same task_id via source_id
-    let working_nodes: Vec<(String, String)> = nodes.iter()
+    let working_nodes: Vec<(String, String)> = nodes
+        .iter()
         .filter(|n| n["type"] == "WorkingMemory")
         .filter_map(|n| {
             let id = n["id"].as_str()?.to_string();
             let tid = n["task_id"].as_str()?.to_string();
-            if tid.is_empty() { None } else { Some((id, tid)) }
+            if tid.is_empty() {
+                None
+            } else {
+                Some((id, tid))
+            }
         })
         .collect();
     for wn in &working_nodes {
         for other in &nodes {
-            if other["type"] == "WorkingMemory" { continue; }
+            if other["type"] == "WorkingMemory" {
+                continue;
+            }
             if let Some(oid) = other["id"].as_str() {
                 if let Some(src) = other["source_id"].as_str() {
                     if !src.is_empty() && src == wn.1 {
@@ -812,9 +828,15 @@ async fn memory_graph() -> Json<Value> {
     }
 
     // Link episodes with sequential temporal indices
-    let mut episode_ids: Vec<(String, i64)> = nodes.iter()
+    let mut episode_ids: Vec<(String, i64)> = nodes
+        .iter()
         .filter(|n| n["type"] == "EpisodicMemory")
-        .filter_map(|n| Some((n["id"].as_str()?.to_string(), n["temporal_index"].as_i64().unwrap_or(0))))
+        .filter_map(|n| {
+            Some((
+                n["id"].as_str()?.to_string(),
+                n["temporal_index"].as_i64().unwrap_or(0),
+            ))
+        })
         .collect();
     episode_ids.sort_by_key(|e| e.1);
     for pair in episode_ids.windows(2) {
@@ -991,7 +1013,6 @@ async fn activity() -> Json<Value> {
     }))
 }
 
-
 // ---------------------------------------------------------------------------
 // Workboard API — aggregated view of Simard's current mental state
 // ---------------------------------------------------------------------------
@@ -1114,9 +1135,7 @@ async fn workboard() -> Json<Value> {
                         crate::goal_curation::GoalProgress::Blocked(reason) => {
                             (format!("blocked: {reason}"), 0)
                         }
-                        crate::goal_curation::GoalProgress::Completed => {
-                            ("done".to_string(), 100)
-                        }
+                        crate::goal_curation::GoalProgress::Completed => ("done".to_string(), 100),
                     };
                     json!({
                         "name": g.id,
@@ -1242,7 +1261,14 @@ async fn workboard() -> Json<Value> {
         }
 
         // Recent semantic facts (search across common tags, collect up to 20)
-        for tag in &["action", "goal", "decision", "episode", "observation", "insight"] {
+        for tag in &[
+            "action",
+            "goal",
+            "decision",
+            "episode",
+            "observation",
+            "insight",
+        ] {
             if let Ok(facts) = mem.search_facts(tag, 10, 0.0) {
                 for fact in facts {
                     if recent_facts.len() < 20 {
@@ -1628,10 +1654,7 @@ async fn distributed() -> Json<Value> {
 /// 3. Export cognitive memory snapshot (if available)
 /// 4. Remove from configured hosts
 async fn vacate_vm(Json(body): Json<Value>) -> Json<Value> {
-    let vm_name = body
-        .get("vm_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let vm_name = body.get("vm_name").and_then(|v| v.as_str()).unwrap_or("");
     if vm_name.is_empty() {
         return Json(json!({"error": "vm_name is required"}));
     }
@@ -1653,7 +1676,19 @@ async fn vacate_vm(Json(body): Json<Value>) -> Json<Value> {
                 "#;
 
                 let output = std::process::Command::new("systemd-run")
-                    .args(["--user", "--pipe", "--quiet", "azlin", "connect", &vm, "--no-tmux", "--", "bash", "-c", stop_script])
+                    .args([
+                        "--user",
+                        "--pipe",
+                        "--quiet",
+                        "azlin",
+                        "connect",
+                        &vm,
+                        "--no-tmux",
+                        "--",
+                        "bash",
+                        "-c",
+                        stop_script,
+                    ])
                     .output();
 
                 match output {
@@ -1692,7 +1727,9 @@ async fn vacate_vm(Json(body): Json<Value>) -> Json<Value> {
             let msg = if remaining == 0 {
                 format!("All processes stopped on {vm_name}.")
             } else {
-                format!("{remaining} process(es) still running on {vm_name} — may need manual cleanup.")
+                format!(
+                    "{remaining} process(es) still running on {vm_name} — may need manual cleanup."
+                )
             };
             Json(json!({"status": "ok", "message": msg, "remaining_processes": remaining}))
         }
@@ -2368,10 +2405,7 @@ async fn processes() -> Json<Value> {
                     comm: parts[3].to_string(),
                     full_args: parts[4..].join(" "),
                 };
-                children_map
-                    .entry(row.ppid.clone())
-                    .or_default()
-                    .push(idx);
+                children_map.entry(row.ppid.clone()).or_default().push(idx);
                 all_rows.push(row);
             }
         }
@@ -2389,10 +2423,8 @@ async fn processes() -> Json<Value> {
 
         // Phase 3: BFS from the OODA daemon to collect it + all descendants.
         if let Some(start) = ooda_idx {
-            let mut queue: std::collections::VecDeque<usize> =
-                std::collections::VecDeque::new();
-            let mut visited: std::collections::HashSet<usize> =
-                std::collections::HashSet::new();
+            let mut queue: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+            let mut visited: std::collections::HashSet<usize> = std::collections::HashSet::new();
             queue.push_back(start);
             visited.insert(start);
             root_pid = Some(all_rows[start].pid.clone());
@@ -2774,9 +2806,7 @@ async fn handle_agent_log_ws(mut socket: WebSocket, path: std::path::PathBuf) {
 
     loop {
         // If the client sent anything (typically a close), drain it.
-        if let Ok(maybe_msg) =
-            tokio::time::timeout(Duration::from_millis(1), socket.recv()).await
-        {
+        if let Ok(maybe_msg) = tokio::time::timeout(Duration::from_millis(1), socket.recv()).await {
             match maybe_msg {
                 Some(Ok(Message::Close(_))) | None => return,
                 Some(Err(_)) => return,
@@ -4642,14 +4672,8 @@ mod tests {
     #[test]
     fn sanitize_agent_name_accepts_valid_names() {
         // Allow-list: ^[A-Za-z0-9_-]{1,64}$
-        assert_eq!(
-            sanitize_agent_name("planner"),
-            Some("planner".to_string())
-        );
-        assert_eq!(
-            sanitize_agent_name("agent_1"),
-            Some("agent_1".to_string())
-        );
+        assert_eq!(sanitize_agent_name("planner"), Some("planner".to_string()));
+        assert_eq!(sanitize_agent_name("agent_1"), Some("agent_1".to_string()));
         assert_eq!(
             sanitize_agent_name("Agent-42"),
             Some("Agent-42".to_string())
