@@ -228,7 +228,7 @@ jobs:
         # per issue #948). Other structural specs (chat-lifecycle, multi-turn)
         # require an LLM backend that is intentionally not provisioned in CI;
         # they are validated separately when credentials are available.
-        run: npx playwright test --config tests/e2e-dashboard/playwright.config.ts --project structural tests/e2e-dashboard/specs/overview.spec.ts
+        run: npx playwright test --config=tests/e2e-dashboard/playwright.config.ts --project=structural tests/e2e-dashboard/specs/overview.spec.ts
 
       - name: Upload Playwright report on failure
         if: failure()
