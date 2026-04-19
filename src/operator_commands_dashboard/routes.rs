@@ -3640,7 +3640,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
               <span style="color:var(--accent);min-width:2rem;font-weight:600">#${a.cycle}</span>
               <span>${a.success?'✅':'❌'}</span>
               <code>${esc(a.action_kind||'')}</code>
-              <span style="flex:1">${esc(a.action_description||'')}</span>
+              <span style="flex:1">${esc((function(){var arr=Array.from(a.detail||'');var d=arr.length>200?arr.slice(0,200).join('')+'…':arr.join('');return d||a.action_description||'';})())}</span>
             </div>`).join('');
         }else{
           actEl.innerHTML='<span style="color:#8b949e">No structured action history yet. The OODA daemon records actions each cycle.</span>';
@@ -4687,6 +4687,18 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
 </html>
 "#;
 
+/// Truncate an outcome detail string to at most `max` Unicode scalar values,
+/// appending an ellipsis (`…`) when truncation occurs. Char-aware (UTF-8 safe).
+fn truncate_outcome_detail(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max).collect();
+        out.push('…');
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4972,5 +4984,68 @@ mod tests {
         let graph = build_agent_graph(&[]);
         assert_eq!(graph["nodes"].as_array().unwrap().len(), 0);
         assert_eq!(graph["edges"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn truncate_short_unchanged() {
+        assert_eq!(truncate_outcome_detail("hello", 200), "hello");
+    }
+
+    #[test]
+    fn truncate_exactly_200_unchanged() {
+        let s = "x".repeat(200);
+        let out = truncate_outcome_detail(&s, 200);
+        assert_eq!(out, s);
+        assert_eq!(out.chars().count(), 200);
+    }
+
+    #[test]
+    fn truncate_201_truncated_with_ellipsis() {
+        let s = "x".repeat(201);
+        let out = truncate_outcome_detail(&s, 200);
+        assert_eq!(out.chars().count(), 201); // 200 + ellipsis
+        assert!(out.ends_with('…'));
+        assert_eq!(out.chars().filter(|&c| c == 'x').count(), 200);
+    }
+
+    #[test]
+    fn truncate_utf8_boundary_safe() {
+        // 250 emoji (4-byte UTF-8 each) — must not panic and must truncate by codepoint.
+        let s: String = "🎉".repeat(250);
+        let out = truncate_outcome_detail(&s, 200);
+        assert_eq!(out.chars().count(), 201);
+        assert!(out.ends_with('…'));
+        assert_eq!(out.chars().filter(|&c| c == '🎉').count(), 200);
+    }
+
+    #[test]
+    fn truncate_accented_chars() {
+        let s: String = "é".repeat(250);
+        let out = truncate_outcome_detail(&s, 200);
+        assert_eq!(out.chars().count(), 201);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_combining_chars_no_panic() {
+        // base 'e' + combining acute U+0301 repeated; must not panic.
+        let unit = "e\u{0301}";
+        let s: String = unit.repeat(150); // 300 codepoints
+        let out = truncate_outcome_detail(&s, 200);
+        assert_eq!(out.chars().count(), 201);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_empty_returns_empty() {
+        assert_eq!(truncate_outcome_detail("", 200), "");
+    }
+
+    #[test]
+    fn truncate_with_zero_max() {
+        // Defensive: zero-max on non-empty returns just the ellipsis;
+        // empty input returns empty.
+        assert_eq!(truncate_outcome_detail("hi", 0), "…");
+        assert_eq!(truncate_outcome_detail("", 0), "");
     }
 }
