@@ -1,6 +1,6 @@
 //! Subordinate spawning, heartbeat checking, and termination.
 
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::agent_goal_assignment::{SubordinateProgress, poll_progress};
@@ -10,11 +10,60 @@ use crate::error::{SimardError, SimardResult};
 use super::STALE_THRESHOLD_SECONDS;
 use super::types::{HeartbeatStatus, SubordinateConfig, SubordinateHandle};
 
+/// Resolve the Simard state root the same way the dashboard does.
+///
+/// Duplicated locally to avoid a cross-module dependency on the dashboard
+/// crate; both implementations honor `SIMARD_STATE_ROOT` then fall back to
+/// `$HOME/.simard`.
+fn supervisor_state_root() -> std::path::PathBuf {
+    std::env::var("SIMARD_STATE_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
+            std::path::PathBuf::from(home).join(".simard")
+        })
+}
+
+/// Open (or create+append) the per-agent stdio log file at
+/// `<state_root>/agent_logs/<agent_name>.log` and return a clone-pair for
+/// stdout/stderr. Returns `None` on any I/O error so callers can fail-open
+/// (inherit stdio) rather than blocking spawn.
+fn open_agent_log(agent_name: &str) -> Option<(Stdio, Stdio)> {
+    use std::fs::{OpenOptions, create_dir_all};
+    let dir = supervisor_state_root().join("agent_logs");
+    if let Err(e) = create_dir_all(&dir) {
+        tracing::warn!(target: "simard::supervisor", agent = %agent_name, error = %e, "failed to create agent_logs dir; falling back to inherited stdio");
+        return None;
+    }
+    let path = dir.join(format!("{agent_name}.log"));
+    let file = match OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!(target: "simard::supervisor", agent = %agent_name, path = %path.display(), error = %e, "failed to open agent log; falling back to inherited stdio");
+            return None;
+        }
+    };
+    let cloned = match file.try_clone() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(target: "simard::supervisor", agent = %agent_name, error = %e, "failed to clone agent log fd; falling back to inherited stdio");
+            return None;
+        }
+    };
+    Some((Stdio::from(file), Stdio::from(cloned)))
+}
+
 /// Spawn a subordinate agent as a real child process.
 ///
 /// Forks a new Simard process via `Command::new(current_exe())` in the
 /// given worktree, passing `--agent-name`, `--goal`, and `--depth` as
 /// arguments. The child process inherits the parent's environment.
+///
+/// stdout and stderr are redirected to
+/// `<state_root>/agent_logs/<agent_name>.log` (append mode) so the
+/// dashboard's `/ws/agent_log/{agent_name}` endpoint can tail the live
+/// output. If the log file cannot be opened the spawn proceeds with
+/// inherited stdio (fail-open, see `open_agent_log`).
 ///
 /// The function validates the configuration (depth limits, non-empty
 /// fields) before spawning.
@@ -29,8 +78,8 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
         reason: format!("cannot resolve current executable: {e}"),
     })?;
 
-    let child = Command::new(&exe)
-        .arg("engineer")
+    let mut cmd = Command::new(&exe);
+    cmd.arg("engineer")
         .arg("run")
         .arg("single-process")
         .arg(&config.worktree_path)
@@ -42,16 +91,20 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
         )
         // Limit concurrent cargo parallelism per agent to prevent OOM (issue #373).
         .env("CARGO_BUILD_JOBS", "4")
-        .current_dir(&config.worktree_path)
-        .spawn()
-        .map_err(|e| SimardError::BridgeSpawnFailed {
-            bridge: "subordinate".to_string(),
-            reason: format!(
-                "failed to spawn subordinate '{}' at '{}': {e}",
-                config.agent_name,
-                exe.display()
-            ),
-        })?;
+        .current_dir(&config.worktree_path);
+
+    if let Some((out, err)) = open_agent_log(&config.agent_name) {
+        cmd.stdout(out).stderr(err);
+    }
+
+    let child = cmd.spawn().map_err(|e| SimardError::BridgeSpawnFailed {
+        bridge: "subordinate".to_string(),
+        reason: format!(
+            "failed to spawn subordinate '{}' at '{}': {e}",
+            config.agent_name,
+            exe.display()
+        ),
+    })?;
 
     let pid = child.id();
 
@@ -147,10 +200,7 @@ pub fn is_goal_complete(progress: &SubordinateProgress) -> bool {
 ///
 /// Returns the number of commits found after `since_epoch` on the current
 /// branch in the subordinate's worktree.
-pub fn count_commits_since(
-    worktree_path: &std::path::Path,
-    since_epoch: u64,
-) -> u32 {
+pub fn count_commits_since(worktree_path: &std::path::Path, since_epoch: u64) -> u32 {
     let since_str = format!("@{{{since_epoch}}}");
     let output = Command::new("git")
         .args(["log", "--oneline", "--after", &since_str])
@@ -179,14 +229,18 @@ pub fn count_open_prs(worktree_path: &std::path::Path) -> u32 {
     let branch = match branch_output {
         Ok(o) if o.status.success() => {
             let b = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if b.is_empty() { return 0; }
+            if b.is_empty() {
+                return 0;
+            }
             b
         }
         _ => return 0,
     };
 
     let pr_output = Command::new("gh")
-        .args(["pr", "list", "--head", &branch, "--state", "open", "--json", "number"])
+        .args([
+            "pr", "list", "--head", &branch, "--state", "open", "--json", "number",
+        ])
         .current_dir(worktree_path)
         .output();
 
@@ -204,9 +258,7 @@ pub fn count_open_prs(worktree_path: &std::path::Path) -> u32 {
 ///
 /// Logs clear warnings when a subordinate exits without producing any
 /// artifacts. Returns `(commits, prs)` counts.
-pub fn validate_subordinate_artifacts(
-    handle: &SubordinateHandle,
-) -> (u32, u32) {
+pub fn validate_subordinate_artifacts(handle: &SubordinateHandle) -> (u32, u32) {
     let commits = count_commits_since(&handle.worktree_path, handle.spawn_time);
     let prs = count_open_prs(&handle.worktree_path);
 
