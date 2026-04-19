@@ -25,7 +25,7 @@ const STALE_THRESHOLD_SECONDS: u64 = 1800;
 // Re-export all public items so `crate::agent_supervisor::X` still works.
 pub use lifecycle::{
     check_heartbeat, count_commits_since, count_open_prs, is_goal_complete, kill_subordinate,
-    spawn_subordinate, validate_subordinate_artifacts,
+    reap_zombies, spawn_subordinate, validate_subordinate_artifacts,
 };
 pub use types::{
     HeartbeatStatus, SubordinateConfig, SubordinateHandle, max_retries_per_goal,
