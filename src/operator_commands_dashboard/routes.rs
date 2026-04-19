@@ -54,6 +54,7 @@ pub fn build_router() -> Router {
         .route("/api/current-work", get(current_work))
         .route("/api/ooda-thinking", get(ooda_thinking))
         .route("/ws/chat", get(ws_chat_handler))
+        .route(WS_AGENT_LOG_ROUTE, get(ws_agent_log_handler))
         .route("/api/login", post(login))
         .route("/login", get(login_page))
         .route("/", get(index))
@@ -2655,6 +2656,212 @@ fn resolve_state_root() -> std::path::PathBuf {
         })
 }
 
+// ---------------------------------------------------------------------------
+// Issue #947 — Agent terminal widget: WS endpoint, sanitizer, and tail loop.
+// ---------------------------------------------------------------------------
+
+/// WebSocket route path for tailing per-agent stdout/stderr logs.
+///
+/// Registered inside the `require_auth` middleware scope by `build_router`.
+pub(crate) const WS_AGENT_LOG_ROUTE: &str = "/ws/agent_log/{agent_name}";
+
+/// Validate `agent_name` against allow-list `^[A-Za-z0-9_-]{1,64}$`.
+///
+/// This is the sole defense against path traversal (INV-7): any byte that is
+/// not in the allow-list (including `/`, `\`, `.`, NUL, control chars, and
+/// non-ASCII) causes rejection with `None`. No filesystem-side canonicalization
+/// is performed — the regex shape is sufficient to keep names confined to a
+/// single path component within `agent_logs/`.
+pub(crate) fn sanitize_agent_name(name: &str) -> Option<String> {
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || bytes.len() > 64 {
+        return None;
+    }
+    for &b in bytes {
+        let ok = b.is_ascii_alphanumeric() || b == b'_' || b == b'-';
+        if !ok {
+            return None;
+        }
+    }
+    Some(name.to_string())
+}
+
+/// Build the per-agent log file path: `<state_root>/agent_logs/<name>.log`.
+///
+/// Caller is responsible for sanitizing `name` first via
+/// [`sanitize_agent_name`]. Combined with the allow-list, the resulting path
+/// is guaranteed to be a direct child of `<state_root>/agent_logs/`.
+pub(crate) fn agent_log_path(state_root: &std::path::Path, name: &str) -> std::path::PathBuf {
+    state_root.join("agent_logs").join(format!("{name}.log"))
+}
+
+async fn ws_agent_log_handler(
+    Path(agent_name): Path<String>,
+    ws: WebSocketUpgrade,
+) -> response::Response {
+    let Some(safe) = sanitize_agent_name(&agent_name) else {
+        return response::Response::builder()
+            .status(400)
+            .header("content-type", "text/plain; charset=utf-8")
+            .body(axum::body::Body::from(
+                "invalid agent_name: must match ^[A-Za-z0-9_-]{1,64}$",
+            ))
+            .unwrap();
+    };
+    let path = agent_log_path(&resolve_state_root(), &safe);
+    ws.on_upgrade(move |socket| handle_agent_log_ws(socket, path))
+}
+
+/// Maximum number of lines sent during the initial backfill.
+const AGENT_LOG_BACKFILL_LINES: usize = 200;
+/// Maximum bytes read per polling tick (DoS bound on burst writes).
+const AGENT_LOG_MAX_TICK_BYTES: u64 = 1_048_576; // 1 MiB
+/// Polling interval for new bytes appended to the log.
+const AGENT_LOG_TICK_MS: u64 = 200;
+/// Maximum time to wait for the log file to appear before giving up.
+const AGENT_LOG_WAIT_TIMEOUT_MS: u64 = 30_000;
+
+async fn handle_agent_log_ws(mut socket: WebSocket, path: std::path::PathBuf) {
+    use std::io::SeekFrom;
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    use tokio::time::{Duration, sleep};
+
+    // Phase 1: wait for the log file to appear (supervisor may not have
+    // spawned the agent yet). Poll every tick up to the timeout.
+    let waited_ms = wait_for_file(&path).await;
+    if waited_ms.is_none() {
+        let _ = socket
+            .send(Message::Text(
+                "[simard] no log file for this agent yet (timed out waiting). The agent may not be running.\n"
+                    .to_string()
+                    .into(),
+            ))
+            .await;
+        let _ = socket.send(Message::Close(None)).await;
+        return;
+    }
+
+    // Phase 2: backfill the last N lines using the existing helper, so the
+    // viewer immediately sees recent context.
+    let path_str = path.to_string_lossy().to_string();
+    let backfill = read_tail(&path_str, AGENT_LOG_BACKFILL_LINES).unwrap_or_default();
+    for line in backfill {
+        if socket
+            .send(Message::Text(format!("{line}\n").into()))
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+
+    // Phase 3: stream new appends. Open the file and seek to its current end
+    // so we don't double-deliver the backfill lines.
+    let mut file = match tokio::fs::OpenOptions::new().read(true).open(&path).await {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = socket
+                .send(Message::Text(
+                    format!("[simard] could not open log: {e}\n").into(),
+                ))
+                .await;
+            return;
+        }
+    };
+    let mut pos = file.seek(SeekFrom::End(0)).await.unwrap_or(0);
+    // Buffer trailing partial line until we see its newline.
+    let mut partial: Vec<u8> = Vec::new();
+
+    loop {
+        // If the client sent anything (typically a close), drain it.
+        if let Ok(maybe_msg) =
+            tokio::time::timeout(Duration::from_millis(1), socket.recv()).await
+        {
+            match maybe_msg {
+                Some(Ok(Message::Close(_))) | None => return,
+                Some(Err(_)) => return,
+                _ => {} // ignore other inbound frames (server→client only)
+            }
+        }
+
+        // Detect truncation/rotation: if file shrinks below our position,
+        // reset to start and drop any partial line buffered.
+        let len = match tokio::fs::metadata(&path).await {
+            Ok(m) => m.len(),
+            Err(_) => {
+                // Transient stat failure — try again next tick.
+                sleep(Duration::from_millis(AGENT_LOG_TICK_MS)).await;
+                continue;
+            }
+        };
+        if len < pos {
+            partial.clear();
+            pos = 0;
+            let _ = socket
+                .send(Message::Text(
+                    "[simard] log file truncated; resetting tail position\n"
+                        .to_string()
+                        .into(),
+                ))
+                .await;
+        }
+
+        let available = len.saturating_sub(pos);
+        if available > 0 {
+            let to_read = available.min(AGENT_LOG_MAX_TICK_BYTES);
+            if file.seek(SeekFrom::Start(pos)).await.is_err() {
+                sleep(Duration::from_millis(AGENT_LOG_TICK_MS)).await;
+                continue;
+            }
+            let mut buf = vec![0u8; to_read as usize];
+            match file.read_exact(&mut buf).await {
+                Ok(_) => {
+                    pos += to_read;
+                    partial.extend_from_slice(&buf);
+                    // Emit one frame per complete line.
+                    while let Some(nl) = partial.iter().position(|&b| b == b'\n') {
+                        let line_bytes = partial.drain(..=nl).collect::<Vec<u8>>();
+                        // Strip trailing \n (and \r if present) for the frame;
+                        // the client adds its own line break via writeln.
+                        let mut line = String::from_utf8_lossy(&line_bytes).into_owned();
+                        if line.ends_with('\n') {
+                            line.pop();
+                        }
+                        if line.ends_with('\r') {
+                            line.pop();
+                        }
+                        if socket.send(Message::Text(line.into())).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+                Err(_) => {
+                    sleep(Duration::from_millis(AGENT_LOG_TICK_MS)).await;
+                    continue;
+                }
+            }
+        } else {
+            sleep(Duration::from_millis(AGENT_LOG_TICK_MS)).await;
+        }
+    }
+}
+
+/// Poll for `path` to exist. Returns `Some(elapsed_ms)` on success or `None`
+/// if the timeout is reached.
+async fn wait_for_file(path: &std::path::Path) -> Option<u64> {
+    use tokio::time::{Duration, Instant, sleep};
+    let start = Instant::now();
+    loop {
+        if tokio::fs::metadata(path).await.is_ok() {
+            return Some(start.elapsed().as_millis() as u64);
+        }
+        if start.elapsed() >= Duration::from_millis(AGENT_LOG_WAIT_TIMEOUT_MS) {
+            return None;
+        }
+        sleep(Duration::from_millis(AGENT_LOG_TICK_MS)).await;
+    }
+}
+
 fn file_metrics(path: &std::path::Path) -> (u64, Option<String>) {
     match std::fs::metadata(path) {
         Ok(m) => {
@@ -2743,6 +2950,8 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Simard Dashboard v2</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
   <style>
     :root { --bg:#0d1117; --fg:#c9d1d9; --accent:#58a6ff; --card:#161b22; --border:#30363d; --green:#3fb950; --yellow:#d29922; --red:#f85149; }
     *{margin:0;padding:0;box-sizing:border-box}
@@ -2842,6 +3051,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     <div class="tab" data-tab="chat">Chat</div>
     <div class="tab" data-tab="workboard">Whiteboard</div>
     <div class="tab" data-tab="thinking">🧠 Thinking</div>
+    <div class="tab" data-tab="terminal">Terminal</div>
   </div>
 
   <div class="tab-content active" id="tab-overview">
@@ -3100,6 +3310,26 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     </div>
   </div>
 
+  <div class="tab-content" id="tab-terminal">
+    <div class="card" style="max-width:980px">
+      <h2>Agent Terminal</h2>
+      <div style="background:#1a1a2e;border:1px solid #333;border-radius:6px;padding:.6rem;margin-bottom:.75rem;font-size:.8rem;color:#8b949e">
+        Stream the live stdout/stderr of a running subordinate agent. The viewer
+        reconnects each time you click <strong>Connect</strong>; close the WS
+        with <strong>Disconnect</strong>.
+      </div>
+      <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.75rem">
+        <label for="agent-log-name" style="color:#8b949e;font-size:.85rem">Agent name</label>
+        <input id="agent-log-name" type="text" placeholder="e.g. planner" maxlength="64"
+               style="padding:.35rem .5rem;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-family:monospace;min-width:14rem">
+        <button class="btn" id="agent-log-connect" onclick="connectAgentLog()">Connect</button>
+        <button class="btn" id="agent-log-disconnect" onclick="disconnectAgentLog()">Disconnect</button>
+        <span id="agent-log-status" style="color:#8b949e;font-size:.85rem">Not connected</span>
+      </div>
+      <div id="xterm-host" style="height:60vh;background:#000;border:1px solid var(--border);border-radius:6px;padding:.25rem"></div>
+    </div>
+  </div>
+
   <script>
     /* --- Helpers --- */
     function fmtB(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';return(b/1048576).toFixed(1)+' MB';}
@@ -3154,6 +3384,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         if(tab.dataset.tab==='chat') initChat();
         if(tab.dataset.tab==='workboard') {fetchWorkboard();tabRefreshTimers.wb=setInterval(fetchWorkboard,30000);}
         if(tab.dataset.tab==='thinking') {fetchThinking();tabRefreshTimers.thinking=setInterval(fetchThinking,30000);}
+        if(tab.dataset.tab==='terminal') initAgentLogTerminal();
       });
     });
     setInterval(()=>{document.getElementById('clock').textContent=new Date().toLocaleString()},1000);
@@ -4226,6 +4457,60 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       }catch(e){document.getElementById('thinking-timeline').innerHTML='<span class="err">Failed to load: '+esc(e.toString())+'</span>';}
     }
 
+    /* --- Agent log terminal (issue #947) --- */
+    let agentLogTerm = null;
+    let agentLogWS = null;
+    function setAgentLogStatus(text, color){
+      const el = document.getElementById('agent-log-status');
+      if(!el) return;
+      el.textContent = text;
+      el.style.color = color || '#8b949e';
+    }
+    function initAgentLogTerminal(){
+      if(agentLogTerm) return;
+      if(typeof Terminal === 'undefined'){
+        setAgentLogStatus('xterm.js failed to load (CDN unreachable)', '#f85149');
+        return;
+      }
+      agentLogTerm = new Terminal({
+        convertEol: true,
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+        fontSize: 13,
+        theme: { background: '#000000', foreground: '#c9d1d9' },
+      });
+      agentLogTerm.open(document.getElementById('xterm-host'));
+    }
+    function connectAgentLog(){
+      initAgentLogTerminal();
+      if(!agentLogTerm) return;
+      const raw = (document.getElementById('agent-log-name').value || '').trim();
+      // Client-side allow-list mirrors the server sanitizer (^[A-Za-z0-9_-]{1,64}$).
+      if(!/^[A-Za-z0-9_-]{1,64}$/.test(raw)){
+        setAgentLogStatus('invalid agent name (allowed: letters, digits, _ and -, up to 64 chars)', '#f85149');
+        return;
+      }
+      if(agentLogWS){ try { agentLogWS.close(); } catch(_) {} agentLogWS = null; }
+      agentLogTerm.clear();
+      const proto = (window.location.protocol === 'https:') ? 'wss:' : 'ws:';
+      const url = proto + '//' + window.location.host + '/ws/agent_log/' + encodeURIComponent(raw);
+      setAgentLogStatus('connecting…', '#d29922');
+      let ws;
+      try { ws = new WebSocket(url); }
+      catch(e){ setAgentLogStatus('connect failed: ' + (e && e.message || e), '#f85149'); return; }
+      agentLogWS = ws;
+      ws.onopen = () => setAgentLogStatus('● connected to ' + raw, '#3fb950');
+      ws.onmessage = (ev) => {
+        // Plain text frames; one frame per line (server already stripped \n).
+        if(typeof ev.data === 'string' && agentLogTerm){ agentLogTerm.writeln(ev.data); }
+      };
+      ws.onerror = () => setAgentLogStatus('socket error', '#f85149');
+      ws.onclose = () => { setAgentLogStatus('disconnected', '#8b949e'); if(agentLogWS === ws) agentLogWS = null; };
+    }
+    function disconnectAgentLog(){
+      if(agentLogWS){ try { agentLogWS.close(); } catch(_) {} agentLogWS = null; }
+      setAgentLogStatus('disconnected', '#8b949e');
+    }
+
     /* --- Init --- */
     fetchStatus(); fetchIssues(); fetchDistributed(); fetchAgentOverview();
     setInterval(fetchAgentOverview,30000);
@@ -4345,5 +4630,123 @@ mod tests {
         // gh is unlikely to succeed without auth in test; verify graceful handling
         let result = run_gh_json(&["pr", "list", "--json", "number"]).await;
         assert!(result.is_array());
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue #947 — Agent terminal widget tests (TDD: written before impl).
+    // These tests define the contract for `sanitize_agent_name`,
+    // `agent_log_path`, the WS route registration, and the inline HTML
+    // additions for the Terminal tab.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn sanitize_agent_name_accepts_valid_names() {
+        // Allow-list: ^[A-Za-z0-9_-]{1,64}$
+        assert_eq!(
+            sanitize_agent_name("planner"),
+            Some("planner".to_string())
+        );
+        assert_eq!(
+            sanitize_agent_name("agent_1"),
+            Some("agent_1".to_string())
+        );
+        assert_eq!(
+            sanitize_agent_name("Agent-42"),
+            Some("Agent-42".to_string())
+        );
+        assert_eq!(sanitize_agent_name("a"), Some("a".to_string()));
+        // Exactly 64 chars (boundary).
+        let max_len: String = std::iter::repeat('x').take(64).collect();
+        assert_eq!(sanitize_agent_name(&max_len), Some(max_len.clone()));
+    }
+
+    #[test]
+    fn sanitize_agent_name_rejects_invalid_names() {
+        assert_eq!(sanitize_agent_name(""), None);
+        // 65 chars (boundary).
+        let too_long: String = std::iter::repeat('x').take(65).collect();
+        assert_eq!(sanitize_agent_name(&too_long), None);
+        // Path traversal attempts (INV-7): every disallowed byte must reject.
+        assert_eq!(sanitize_agent_name(".."), None);
+        assert_eq!(sanitize_agent_name("../etc/passwd"), None);
+        assert_eq!(sanitize_agent_name("a/b"), None);
+        assert_eq!(sanitize_agent_name("a\\b"), None);
+        assert_eq!(sanitize_agent_name("a.b"), None);
+        assert_eq!(sanitize_agent_name("a b"), None);
+        assert_eq!(sanitize_agent_name("a\0b"), None);
+        assert_eq!(sanitize_agent_name("a\nb"), None);
+        assert_eq!(sanitize_agent_name("café"), None);
+        assert_eq!(sanitize_agent_name("a:b"), None);
+        assert_eq!(sanitize_agent_name("a;b"), None);
+        assert_eq!(sanitize_agent_name("a*b"), None);
+    }
+
+    #[test]
+    fn agent_log_path_layout_under_state_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let p = agent_log_path(root, "planner");
+        assert_eq!(p, root.join("agent_logs").join("planner.log"));
+    }
+
+    #[test]
+    fn agent_log_path_does_not_escape_state_root_for_valid_names() {
+        // INV-7: any name that passed the sanitizer must produce a path
+        // strictly inside <state_root>/agent_logs/.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let log_dir = root.join("agent_logs");
+        for name in ["planner", "agent_1", "Agent-42", "a", "abc-_123"] {
+            let p = agent_log_path(root, name);
+            assert!(
+                p.starts_with(&log_dir),
+                "agent_log_path({name:?}) = {p:?} escaped {log_dir:?}"
+            );
+            let expected = format!("{name}.log");
+            assert_eq!(
+                p.file_name().and_then(|n| n.to_str()),
+                Some(expected.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn index_html_contains_terminal_tab_and_xterm() {
+        // Tab button + pane.
+        assert!(
+            INDEX_HTML.contains("Terminal"),
+            "Index HTML should include a Terminal tab label"
+        );
+        assert!(
+            INDEX_HTML.contains("tab-terminal"),
+            "Index HTML should include a tab-terminal pane id"
+        );
+        assert!(
+            INDEX_HTML.contains("xterm-host"),
+            "Index HTML should include the xterm-host container"
+        );
+        // xterm.js pinned to 5.3.0 from jsdelivr CDN (per design).
+        assert!(
+            INDEX_HTML.contains("xterm@5.3.0"),
+            "Index HTML should pin xterm.js to version 5.3.0"
+        );
+        // WS endpoint path is referenced by the client JS.
+        assert!(
+            INDEX_HTML.contains("/ws/agent_log/"),
+            "Index HTML should reference the /ws/agent_log/ endpoint"
+        );
+    }
+
+    #[test]
+    fn build_router_registers_ws_agent_log_route() {
+        // Smoke-check: build_router constructs without panic and references
+        // the new route. Axum's Router does not expose its route table for
+        // direct inspection in stable, so we assert via build success and
+        // a marker constant exposed by the module.
+        let _router = build_router();
+        assert!(
+            WS_AGENT_LOG_ROUTE.starts_with("/ws/agent_log/"),
+            "WS_AGENT_LOG_ROUTE should be the agent log WS path; got {WS_AGENT_LOG_ROUTE:?}"
+        );
     }
 }
