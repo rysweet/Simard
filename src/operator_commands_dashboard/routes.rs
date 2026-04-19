@@ -1536,7 +1536,11 @@ fn remote_vms_from_hosts(hosts: &[Value]) -> Vec<Value> {
     hosts
         .iter()
         .filter_map(|h| {
-            let name = h.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            // Use the same name-extraction helper as the Cluster Topology
+            // panel (`host_entry_name`) so the two panels never disagree on
+            // which entries are present — including entries that use the
+            // legacy "Name" capitalization.
+            let name = host_entry_name(h);
             if name.is_empty() {
                 return None;
             }
@@ -4907,6 +4911,44 @@ mod tests {
             assert!(vm.get("resource_group").is_some());
             assert!(vm.get("status").is_some());
         }
+    }
+
+    /// Config-validation: the Remote VMs panel and the Cluster Topology panel
+    /// MUST derive their VM identifier set from the same canonical source
+    /// (`load_hosts()` → ~/.simard/hosts.json). Regression guard for the bug
+    /// where Remote VMs displayed a stale hard-coded list while Topology read
+    /// the live config. Mirrors how `distributed()` (Remote VMs) and
+    /// `get_hosts()` (Topology) extract names from the same hosts vector.
+    #[test]
+    fn remote_vms_and_topology_agree_on_vm_set() {
+        use std::collections::BTreeSet;
+
+        // Includes the "Name" alias variant accepted by host_entry_name to
+        // ensure both extractors handle every shape load_hosts() may yield.
+        let hosts = vec![
+            serde_json::json!({"name": "vm-alpha", "resource_group": "rg1"}),
+            serde_json::json!({"name": "vm-beta",  "resource_group": "rg2"}),
+            serde_json::json!({"Name": "vm-gamma", "resource_group": "rg3"}),
+        ];
+
+        // Topology side: get_hosts() builds cluster_members via host_entry_name.
+        let topology_set: BTreeSet<String> = hosts
+            .iter()
+            .map(|e| host_entry_name(e).to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        // Remote VMs side: distributed() builds entries via remote_vms_from_hosts.
+        let remote_vms_set: BTreeSet<String> = remote_vms_from_hosts(&hosts)
+            .iter()
+            .filter_map(|v| v.get("vm_name").and_then(|x| x.as_str()).map(String::from))
+            .collect();
+
+        assert_eq!(
+            topology_set, remote_vms_set,
+            "Remote VMs panel and Cluster Topology panel must report the same VM set \
+             when fed the same load_hosts() output"
+        );
     }
 
     #[test]
