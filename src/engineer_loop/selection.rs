@@ -189,10 +189,177 @@ pub(crate) fn select_git_commit(objective: &str, note: &str) -> SelectedEngineer
 /// Maximum length for a GitHub issue title created by the engineer loop.
 const MAX_ISSUE_TITLE_LEN: usize = 256;
 
+/// Maximum digits to scan for an issue number. u64::MAX is 20 digits;
+/// 21+ digits cannot fit and are rejected as overflow without `from_str` cost.
+const MAX_ISSUE_DIGITS: usize = 20;
+
+/// Scan an objective string for a reference to an existing GitHub issue
+/// number. Returns the earliest non-zero issue number found across two
+/// patterns:
+///
+/// - Pattern A: `#<digits>` — but rejected when the `#` is preceded by `&`
+///   (HTML numeric character reference like `&#915;`) or when the digit run
+///   is followed by an ASCII alphanumeric character.
+/// - Pattern B: `issue` (case-insensitive) followed by ASCII whitespace,
+///   then optionally `#`, `number `, or `id `, then `<digits>` with the
+///   same word-boundary guard at the end.
+///
+/// The scanner is single-pass linear — no regex, no backtracking. Digit
+/// runs are capped at `MAX_ISSUE_DIGITS` to bound input cost. Zero is
+/// rejected because GitHub issue numbers start at 1.
+pub(crate) fn extract_existing_issue_number(objective: &str) -> Option<u64> {
+    let bytes = objective.as_bytes();
+    let mut earliest: Option<(usize, u64)> = None;
+
+    let mut consider = |start: usize, n: u64| {
+        if earliest.map(|(s, _)| start < s).unwrap_or(true) {
+            earliest = Some((start, n));
+        }
+    };
+
+    // Pattern A: `#<digits>` with HTML-entity guard and trailing word-boundary.
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'#' {
+            // HTML numeric character reference guard: reject `&#...`.
+            let preceded_by_amp = i > 0 && bytes[i - 1] == b'&';
+            if !preceded_by_amp {
+                if let Some((n, end)) = parse_digits(bytes, i + 1) {
+                    if !is_alnum_byte(bytes.get(end).copied()) && n != 0 {
+                        consider(i, n);
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+
+    // Pattern B: `issue` (case-insensitive) + ws + optional `#` / `number ` / `id ` + digits.
+    let lower = objective.to_ascii_lowercase();
+    let lower_bytes = lower.as_bytes();
+    let needle = b"issue";
+    let mut search_from = 0;
+    while let Some(rel) = find_subslice(&lower_bytes[search_from..], needle) {
+        let start = search_from + rel;
+        let end_word = start + needle.len();
+        // Require a leading word-boundary: previous byte must not be alnum.
+        let leading_ok = start == 0 || !is_alnum_byte(Some(bytes[start - 1]));
+        // Require ASCII whitespace immediately after `issue`.
+        let trailing_ok = bytes
+            .get(end_word)
+            .map(|&b| b.is_ascii_whitespace())
+            .unwrap_or(false);
+        if leading_ok && trailing_ok {
+            // Skip the whitespace run.
+            let mut p = end_word;
+            while p < bytes.len() && bytes[p].is_ascii_whitespace() {
+                p += 1;
+            }
+            // Optional `#`, `number `, or `id ` qualifier.
+            if p < bytes.len() && bytes[p] == b'#' {
+                p += 1;
+            } else if try_consume_keyword(lower_bytes, p, b"number") {
+                p += b"number".len();
+                while p < bytes.len() && bytes[p].is_ascii_whitespace() {
+                    p += 1;
+                }
+            } else if try_consume_keyword(lower_bytes, p, b"id") {
+                p += b"id".len();
+                while p < bytes.len() && bytes[p].is_ascii_whitespace() {
+                    p += 1;
+                }
+            }
+            if let Some((n, dend)) = parse_digits(bytes, p) {
+                if !is_alnum_byte(bytes.get(dend).copied()) && n != 0 {
+                    consider(start, n);
+                }
+            }
+        }
+        search_from = start + needle.len();
+    }
+
+    earliest.map(|(_, n)| n)
+}
+
+fn is_alnum_byte(b: Option<u8>) -> bool {
+    matches!(b, Some(c) if c.is_ascii_alphanumeric())
+}
+
+fn parse_digits(bytes: &[u8], start: usize) -> Option<(u64, usize)> {
+    let mut end = start;
+    while end < bytes.len() && bytes[end].is_ascii_digit() && (end - start) < MAX_ISSUE_DIGITS {
+        end += 1;
+    }
+    if end == start {
+        return None;
+    }
+    // If the digit run is bounded by MAX_ISSUE_DIGITS but more digits follow,
+    // treat as overflow and reject.
+    if end < bytes.len() && bytes[end].is_ascii_digit() {
+        return None;
+    }
+    let s = std::str::from_utf8(&bytes[start..end]).ok()?;
+    let n: u64 = s.parse().ok()?;
+    Some((n, end))
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|w| w == needle)
+}
+
+/// True when `lower_bytes[at..]` begins with `kw` AND the byte after `kw`
+/// is ASCII whitespace (so `number` matches but `numbered` does not).
+fn try_consume_keyword(lower_bytes: &[u8], at: usize, kw: &[u8]) -> bool {
+    if at + kw.len() > lower_bytes.len() {
+        return false;
+    }
+    if &lower_bytes[at..at + kw.len()] != kw {
+        return false;
+    }
+    lower_bytes
+        .get(at + kw.len())
+        .map(|&b| b.is_ascii_whitespace())
+        .unwrap_or(false)
+}
+
 pub(crate) fn select_open_issue(
     objective: &str,
     note: &str,
 ) -> SimardResult<SelectedEngineerAction> {
+    // If the objective references an existing issue number, do NOT create a
+    // new issue. Instead emit a read-only `gh issue view <N>` step so the
+    // engineer loop verifies the issue exists and proceeds to implementation.
+    if let Some(n) = extract_existing_issue_number(objective) {
+        let n_str = n.to_string();
+        return Ok(SelectedEngineerAction {
+            label: "verify-existing-issue".to_string(),
+            rationale: format!(
+                "Objective references existing issue #{n}; verifying instead of creating.{note}"
+            ),
+            argv: vec![
+                "gh".to_string(),
+                "issue".to_string(),
+                "view".to_string(),
+                n_str,
+            ],
+            plan_summary: format!("Verify existing GitHub issue #{n} via gh CLI."),
+            verification_steps: vec![format!(
+                "confirm `gh issue view {n}` returns issue metadata (exit 0)"
+            )],
+            expected_changed_files: Vec::new(),
+            kind: EngineerActionKind::OpenIssue(OpenIssueRequest {
+                title: format!("verify existing issue #{n}"),
+                body: String::new(),
+                labels: Vec::new(),
+            }),
+        });
+    }
+
     let title = sanitize_issue_title(objective);
 
     if title.is_empty() {
@@ -381,12 +548,18 @@ pub(crate) fn is_keyword_action_achievable(action: &AnalyzedAction, objective: &
     match action {
         // These are always safe — they don't mutate the repo.
         AnalyzedAction::ReadOnlyScan | AnalyzedAction::CargoTest => true,
-        // OpenIssue: only valid when the objective explicitly asks to *create* / *open* an issue,
-        // not when "issue" appears as a reference (e.g. "fix issue #891").
+        // OpenIssue: only valid when the objective explicitly asks to *create* an issue
+        // via a known prefix, OR references an existing issue number (which routes to
+        // the verify path in `select_open_issue`). Bare prose like "Report a bug" or
+        // "fix the issue" no longer qualifies.
         AnalyzedAction::OpenIssue => {
-            let lower = objective.to_lowercase();
-            (lower.contains("open") || lower.contains("file") || lower.contains("report"))
-                && (lower.contains("issue") || lower.contains("bug"))
+            if extract_existing_issue_number(objective).is_some() {
+                return true;
+            }
+            let lower = objective.trim_start().to_lowercase();
+            lower.starts_with("track ")
+                || lower.starts_with("file an issue for")
+                || lower.starts_with("create an issue")
         }
         // GitCommit: only valid when the objective is specifically about committing,
         // and the text after "commit" is not a prose fragment.
@@ -770,5 +943,233 @@ mod tests {
 
         let action = select_shell_command("run python script.py", "");
         assert!(action.is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // WS-B: extract_existing_issue_number + verify-path tests (TDD)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn extract_existing_issue_number_matches_hash_form() {
+        assert_eq!(extract_existing_issue_number("fix #915 now"), Some(915));
+        assert_eq!(extract_existing_issue_number("see #1"), Some(1));
+        assert_eq!(extract_existing_issue_number("#42"), Some(42));
+    }
+
+    #[test]
+    fn extract_existing_issue_number_matches_issue_word_form() {
+        assert_eq!(extract_existing_issue_number("fix issue 915"), Some(915));
+        assert_eq!(extract_existing_issue_number("fix issue #915"), Some(915));
+        assert_eq!(
+            extract_existing_issue_number("address issue number 42 today"),
+            Some(42)
+        );
+        assert_eq!(
+            extract_existing_issue_number("close issue id 7 finally"),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn extract_existing_issue_number_is_case_insensitive() {
+        assert_eq!(extract_existing_issue_number("Fix ISSUE 915"), Some(915));
+        assert_eq!(extract_existing_issue_number("Issue Number 42"), Some(42));
+        assert_eq!(extract_existing_issue_number("ISSUE ID 7"), Some(7));
+    }
+
+    #[test]
+    fn extract_existing_issue_number_rejects_html_entity() {
+        // `&#915;` is an HTML numeric character reference, not an issue ref.
+        assert_eq!(extract_existing_issue_number("text &#915; more"), None);
+    }
+
+    #[test]
+    fn extract_existing_issue_number_rejects_embedded_alphanumeric() {
+        // `foo#915bar` and `915abc` should not match.
+        assert_eq!(extract_existing_issue_number("foo#915bar"), None);
+        assert_eq!(extract_existing_issue_number("see #915abc"), None);
+    }
+
+    #[test]
+    fn extract_existing_issue_number_rejects_zero() {
+        assert_eq!(extract_existing_issue_number("see #0"), None);
+        assert_eq!(extract_existing_issue_number("issue 0"), None);
+    }
+
+    #[test]
+    fn extract_existing_issue_number_rejects_overflow() {
+        // u64::MAX is 20 digits; 21 digits cannot fit.
+        let huge = "see #999999999999999999999 here";
+        assert_eq!(extract_existing_issue_number(huge), None);
+    }
+
+    #[test]
+    fn extract_existing_issue_number_requires_separator_after_issue() {
+        // `issuenumber42` is not "issue" + separator + N.
+        assert_eq!(extract_existing_issue_number("issuenumber42"), None);
+        assert_eq!(extract_existing_issue_number("subissue 5"), None);
+    }
+
+    #[test]
+    fn extract_existing_issue_number_returns_none_when_absent() {
+        assert_eq!(extract_existing_issue_number(""), None);
+        assert_eq!(extract_existing_issue_number("just some prose"), None);
+        assert_eq!(extract_existing_issue_number("version 1.2.3"), None);
+    }
+
+    #[test]
+    fn extract_existing_issue_number_picks_earliest_across_patterns() {
+        // `issue 42` appears before `#7` → 42 wins.
+        assert_eq!(
+            extract_existing_issue_number("issue 42 fixes #7"),
+            Some(42)
+        );
+        // `#7` appears before `issue 42` → 7 wins.
+        assert_eq!(
+            extract_existing_issue_number("see #7 about issue 42"),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn select_open_issue_emits_verify_path_for_hash_reference() {
+        let action = select_open_issue("add-more-gym-benchmark-scenarios for #915", "")
+            .expect("verify path should not error");
+        assert_eq!(action.label, "verify-existing-issue");
+        assert_eq!(
+            action.argv,
+            vec![
+                "gh".to_string(),
+                "issue".to_string(),
+                "view".to_string(),
+                "915".to_string(),
+            ]
+        );
+        assert!(
+            !action.argv.iter().any(|a| a == "create"),
+            "verify path must not contain `create`: {:?}",
+            action.argv
+        );
+    }
+
+    #[test]
+    fn select_open_issue_emits_verify_path_for_issue_word_reference() {
+        let action = select_open_issue("address issue 915 with new scenarios", "")
+            .expect("verify path should not error");
+        assert_eq!(action.label, "verify-existing-issue");
+        assert_eq!(action.argv[0], "gh");
+        assert_eq!(action.argv[1], "issue");
+        assert_eq!(action.argv[2], "view");
+        assert_eq!(action.argv[3], "915");
+    }
+
+    #[test]
+    fn select_open_issue_verify_path_uses_open_issue_kind() {
+        let action = select_open_issue("fix issue #915", "").unwrap();
+        match action.kind {
+            EngineerActionKind::OpenIssue(req) => {
+                assert!(req.body.is_empty(), "verify-path body must be empty");
+                assert!(
+                    req.title.contains("915"),
+                    "title should reference the issue number for trace clarity: {}",
+                    req.title
+                );
+            }
+            other => panic!("expected OpenIssue kind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_open_issue_create_path_preserved_when_no_issue_number() {
+        // No issue number reference → original create-path behavior must hold.
+        let action = select_open_issue("file an issue for the new crash", "").unwrap();
+        assert_eq!(action.label, "open-issue");
+        assert!(action.argv.contains(&"create".to_string()));
+        assert!(action.argv.contains(&"--title".to_string()));
+        assert!(!action.argv.contains(&"view".to_string()));
+    }
+
+    // ------------------------------------------------------------------
+    // is_keyword_action_achievable: tightened OpenIssue gate
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn keyword_gate_open_issue_accepts_track_prefix() {
+        assert!(is_keyword_action_achievable(
+            &AnalyzedAction::OpenIssue,
+            "track the flaky build failures"
+        ));
+    }
+
+    #[test]
+    fn keyword_gate_open_issue_accepts_file_an_issue_for_prefix() {
+        assert!(is_keyword_action_achievable(
+            &AnalyzedAction::OpenIssue,
+            "file an issue for the planner regression"
+        ));
+    }
+
+    #[test]
+    fn keyword_gate_open_issue_accepts_create_an_issue_prefix() {
+        assert!(is_keyword_action_achievable(
+            &AnalyzedAction::OpenIssue,
+            "create an issue about the broken loop"
+        ));
+    }
+
+    #[test]
+    fn keyword_gate_open_issue_accepts_existing_issue_reference() {
+        // Existing-issue references route through the verify path → achievable.
+        assert!(is_keyword_action_achievable(
+            &AnalyzedAction::OpenIssue,
+            "add-more-gym-benchmark-scenarios for issue #915"
+        ));
+        assert!(is_keyword_action_achievable(
+            &AnalyzedAction::OpenIssue,
+            "fix issue 891 before release"
+        ));
+    }
+
+    #[test]
+    fn keyword_gate_open_issue_is_case_insensitive_for_whitelist() {
+        assert!(is_keyword_action_achievable(
+            &AnalyzedAction::OpenIssue,
+            "Track the flaky build"
+        ));
+        assert!(is_keyword_action_achievable(
+            &AnalyzedAction::OpenIssue,
+            "  File an issue for X"
+        ));
+        assert!(is_keyword_action_achievable(
+            &AnalyzedAction::OpenIssue,
+            "CREATE AN ISSUE about Y"
+        ));
+    }
+
+    #[test]
+    fn keyword_gate_open_issue_rejects_unrelated_prose() {
+        // "Report a bug" no longer matches the tightened whitelist
+        // and contains no existing-issue reference.
+        assert!(!is_keyword_action_achievable(
+            &AnalyzedAction::OpenIssue,
+            "Report a bug"
+        ));
+        assert!(!is_keyword_action_achievable(
+            &AnalyzedAction::OpenIssue,
+            "open the documentation"
+        ));
+        assert!(!is_keyword_action_achievable(
+            &AnalyzedAction::OpenIssue,
+            "investigate the planner"
+        ));
+    }
+
+    #[test]
+    fn keyword_gate_open_issue_rejects_track_as_substring() {
+        // "track" must be the leading word, not embedded.
+        assert!(!is_keyword_action_achievable(
+            &AnalyzedAction::OpenIssue,
+            "backtrack the change"
+        ));
     }
 }
