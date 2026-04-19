@@ -107,22 +107,29 @@ fn build_planning_prompt(objective: &str, inspection: &RepoInspection) -> String
 /// produce a valid `Vec<PlanStep>`.
 fn parse_plan_response(text: &str) -> SimardResult<Plan> {
     let trimmed = text.trim();
+    let skipped = skip_preamble(trimmed);
 
-    // Strategy 1: direct parse
-    if let Ok(steps) = serde_json::from_str::<Vec<PlanStep>>(trimmed) {
+    // Strategy 1: direct parse (after skipping any non-JSON preamble such as
+    // the Copilot SDK adapter dispatch metadata line — see issue #944).
+    if let Ok(steps) = serde_json::from_str::<Vec<PlanStep>>(skipped) {
         return Ok(Plan::new(steps));
     }
 
-    // Strategy 2: strip markdown fences
-    let defenced = strip_markdown_fences(trimmed);
-    if defenced != trimmed {
-        if let Ok(steps) = serde_json::from_str::<Vec<PlanStep>>(defenced) {
+    // Strategy 2: strip markdown fences. Re-apply preamble skipping after
+    // defencing to handle preamble-then-fence sequences like
+    // "Here is the plan:\n```json\n[...]\n```".
+    let defenced = strip_markdown_fences(skipped);
+    if defenced != skipped {
+        let defenced_skipped = skip_preamble(defenced);
+        if let Ok(steps) = serde_json::from_str::<Vec<PlanStep>>(defenced_skipped) {
             return Ok(Plan::new(steps));
         }
     }
 
-    // Strategy 3: locate outermost JSON array brackets
-    if let Some(json_text) = extract_json_array(trimmed) {
+    // Strategy 3: locate outermost JSON array brackets in the preamble-skipped
+    // slice. This also recovers responses where an earlier `{` in the preamble
+    // would otherwise misanchor strategies 1 and 2.
+    if let Some(json_text) = extract_json_array(skipped) {
         if let Ok(steps) = serde_json::from_str::<Vec<PlanStep>>(json_text) {
             tracing::info!(
                 "recovered JSON plan from mixed LLM response ({} bytes of surrounding text stripped)",
@@ -139,6 +146,23 @@ fn parse_plan_response(text: &str) -> SimardResult<Plan> {
             &trimmed[..trimmed.len().min(120)]
         ),
     })
+}
+
+/// Skip any non-JSON preamble at the start of `s` by advancing to the
+/// earliest `[` or `{`. Returns the original slice when neither delimiter
+/// is present. Used to tolerate adapter dispatch lines (e.g. the Copilot SDK
+/// "Copilot SDK adapter dispatched objective-metadata via …" prefix from
+/// issue #944) before JSON plan payloads.
+fn skip_preamble(s: &str) -> &str {
+    let bracket = s.find('[');
+    let brace = s.find('{');
+    let pos = match (bracket, brace) {
+        (Some(b), Some(c)) => b.min(c),
+        (Some(b), None) => b,
+        (None, Some(c)) => c,
+        (None, None) => return s,
+    };
+    &s[pos..]
 }
 
 /// Remove markdown code fences from text. Handles ```json and bare ```.
@@ -491,6 +515,94 @@ This plan inspects the repository without making changes."#;
         let r2 = execute_plan(&Plan::new(Vec::new()), Path::new("/tmp"));
         assert!(!r2.stopped_early);
         assert!(r2.completed.is_empty());
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue #944: LLM plan parser must skip preamble (e.g. Copilot SDK
+    // adapter dispatch metadata) before each parsing strategy.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn parse_plan_response_skips_copilot_sdk_preamble() {
+        let raw = "Copilot SDK adapter dispatched objective-metadata via \
+                   'gh-copilot' on 'gpt-5' (turn 3).\n\
+                   [{\"action\":\"read_only_scan\",\"target\":\"logs\",\
+                   \"expected_outcome\":\"checked\",\
+                   \"verification_command\":\"ls\"}]";
+        let plan = parse_plan_response(raw).expect("preamble must be skipped");
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan.steps()[0].action, AnalyzedAction::ReadOnlyScan);
+        assert_eq!(plan.steps()[0].target, "logs");
+    }
+
+    #[test]
+    fn parse_plan_response_skips_preamble_with_fenced_json() {
+        let raw = "Copilot SDK adapter dispatched objective-metadata via \
+                   'gh-copilot' on 'gpt-5' (turn 3).\n\
+                   ```json\n\
+                   [{\"action\":\"cargo_test\",\"target\":\".\",\
+                   \"expected_outcome\":\"pass\",\
+                   \"verification_command\":\"cargo test\"}]\n\
+                   ```";
+        let plan =
+            parse_plan_response(raw).expect("preamble + fenced JSON must parse");
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan.steps()[0].action, AnalyzedAction::CargoTest);
+    }
+
+    #[test]
+    fn skip_preamble_is_noop_on_clean_json_array() {
+        let s = "[{\"a\":1}]";
+        assert_eq!(skip_preamble(s), s);
+    }
+
+    #[test]
+    fn skip_preamble_is_noop_on_clean_json_object() {
+        let s = "{\"a\":1}";
+        assert_eq!(skip_preamble(s), s);
+    }
+
+    #[test]
+    fn skip_preamble_returns_original_when_no_brackets() {
+        let s = "no json delimiters here at all";
+        assert_eq!(skip_preamble(s), s);
+    }
+
+    #[test]
+    fn skip_preamble_finds_earliest_of_array_or_object() {
+        // Array delimiter appears first → return slice from '['.
+        assert_eq!(
+            skip_preamble("preamble [1,2,3] then {x:1}"),
+            "[1,2,3] then {x:1}"
+        );
+        // Object delimiter appears first → return slice from '{'.
+        assert_eq!(
+            skip_preamble("preamble {x:1} then [1,2,3]"),
+            "{x:1} then [1,2,3]"
+        );
+    }
+
+    #[test]
+    fn skip_preamble_handles_brace_in_preamble_before_array() {
+        // Preamble itself contains '{'; helper anchors at the earlier '{'.
+        // Strategy 3 (bracket-extraction) provides the recovery fallback,
+        // so the overall parse still succeeds.
+        let raw = "Status: {ok}\n\
+                   [{\"action\":\"read_only_scan\",\"target\":\".\",\
+                   \"expected_outcome\":\"ok\",\
+                   \"verification_command\":\"ls\"}]";
+        let plan = parse_plan_response(raw)
+            .expect("bracket-extraction must recover from brace-bearing preamble");
+        assert_eq!(plan.len(), 1);
+    }
+
+    #[test]
+    fn parse_plan_response_skips_preamble_for_direct_strategy() {
+        // Even with no fences and no trailing prose, direct strategy must
+        // succeed once preamble is skipped.
+        let raw = "preamble text\n[]";
+        let plan = parse_plan_response(raw).expect("must parse empty array after preamble");
+        assert!(plan.is_empty());
     }
 
     #[test]
