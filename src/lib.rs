@@ -38,6 +38,7 @@ pub mod gym_bridge;
 pub mod gym_history;
 pub mod gym_scoring;
 pub mod handoff;
+pub mod hive_event_bus;
 pub mod identity;
 pub mod identity_auth;
 pub mod identity_composition;
