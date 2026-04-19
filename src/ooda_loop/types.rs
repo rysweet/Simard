@@ -269,6 +269,8 @@ mod tests {
             priority: 1,
             status: GoalProgress::NotStarted,
             assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
         });
         let state = OodaState::new(board);
         assert_eq!(state.active_goals.active.len(), 1);
@@ -284,6 +286,8 @@ mod tests {
             priority: 2,
             status: GoalProgress::InProgress { percent: 50 },
             assigned_to: Some("engineer".to_string()),
+            current_activity: None,
+            wip_refs: vec![],
         };
         let snapshot = GoalSnapshot::from(&goal);
         assert_eq!(snapshot.id, "g-1");
@@ -302,6 +306,8 @@ mod tests {
             priority: 1,
             status: GoalProgress::Blocked("dependency missing".to_string()),
             assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
         };
         let snapshot = GoalSnapshot::from(&goal);
         assert!(matches!(snapshot.progress, GoalProgress::Blocked(_)));

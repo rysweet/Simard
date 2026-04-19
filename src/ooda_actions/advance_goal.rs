@@ -1,9 +1,14 @@
 //! AdvanceGoal dispatch — routing, subordinate heartbeat, and session-based advancement.
 
-use crate::agent_supervisor::{HeartbeatStatus, check_heartbeat};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::agent_roles::AgentRole;
+use crate::agent_supervisor::{HeartbeatStatus, SubordinateConfig, check_heartbeat, spawn_subordinate};
 use crate::goal_curation::{GoalProgress, update_goal_progress};
+use crate::identity_composition::max_subordinate_depth;
 use crate::ooda_loop::{ActionOutcome, OodaBridges, OodaState, PlannedAction};
 
+use super::goal_session::GoalAction;
 use super::make_outcome;
 
 /// AdvanceGoal: progress the target goal on the board.
@@ -63,12 +68,20 @@ pub(super) fn dispatch_advance_goal(
 
     // If a base-type session is available, use run_turn for real agent work.
     if let Some(ref mut session) = bridges.session {
-        return super::goal_session::advance_goal_with_session(
+        let result = super::goal_session::advance_goal_with_session(
             action,
             session.as_mut(),
             state,
             &goal,
         );
+
+        // For spawn_engineer the dispatcher must perform the actual fork
+        // (it owns the state mutation needed to set goal.assigned_to).
+        if let Some(GoalAction::SpawnEngineer { task, files: _ }) = result.action {
+            return dispatch_spawn_engineer(action, state, &goal_id, &task);
+        }
+
+        return result.outcome;
     }
 
     // No session = cannot advance. Fail visibly per PHILOSOPHY.md.
@@ -79,6 +92,142 @@ pub(super) fn dispatch_advance_goal(
             "goal '{goal_id}' cannot advance: no LLM session available. Check SIMARD_LLM_PROVIDER and auth config."
         ),
     )
+}
+
+/// Spawn a subordinate engineer for a goal that the LLM picked
+/// `spawn_engineer` for, then mutate the active board to record the
+/// assignment.
+///
+/// Honours `SIMARD_SUBORDINATE_DEPTH` vs. `SIMARD_MAX_SUBORDINATE_DEPTH`
+/// so a recursing supervisor does not spawn forever.
+fn dispatch_spawn_engineer(
+    action: &PlannedAction,
+    state: &mut OodaState,
+    goal_id: &str,
+    task: &str,
+) -> ActionOutcome {
+    // Re-check assignment under exclusive state borrow to prevent a
+    // double-spawn race (two cycles parsing spawn_engineer back-to-back).
+    if let Some(g) = state.active_goals.active.iter().find(|g| g.id == goal_id)
+        && g.assigned_to.is_some()
+    {
+        return make_outcome(
+            action,
+            true,
+            format!(
+                "spawn_engineer skipped: goal '{goal_id}' already assigned to subordinate '{}'",
+                g.assigned_to.as_deref().unwrap_or("?"),
+            ),
+        );
+    }
+
+    // Recursion guard. Default current depth = 0 (top-level supervisor).
+    let current_depth: u32 = std::env::var("SIMARD_SUBORDINATE_DEPTH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let depth_limit = max_subordinate_depth();
+    if depth_limit < u32::MAX && current_depth >= depth_limit {
+        eprintln!(
+            "[simard] spawn_engineer DENIED for goal '{goal_id}': depth {current_depth} >= limit {depth_limit}"
+        );
+        return make_outcome(
+            action,
+            false,
+            format!(
+                "spawn_engineer denied for goal '{goal_id}': subordinate depth {current_depth} >= configured limit {depth_limit}"
+            ),
+        );
+    }
+
+    let agent_name = build_engineer_name(goal_id);
+    let worktree_path = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(e) => {
+            return make_outcome(
+                action,
+                false,
+                format!(
+                    "spawn_engineer failed for goal '{goal_id}': cannot resolve current_dir: {e}"
+                ),
+            );
+        }
+    };
+
+    let config = SubordinateConfig {
+        agent_name: agent_name.clone(),
+        goal: task.to_string(),
+        role: AgentRole::Engineer,
+        worktree_path,
+        current_depth,
+    };
+
+    match spawn_subordinate(&config) {
+        Ok(handle) => {
+            // Record the assignment so subsequent cycles take the
+            // heartbeat-checking path instead of re-spawning.
+            if let Some(g) = state
+                .active_goals
+                .active
+                .iter_mut()
+                .find(|g| g.id == goal_id)
+            {
+                g.assigned_to = Some(agent_name.clone());
+            }
+
+            eprintln!(
+                "[simard] spawn_engineer dispatched: goal='{goal_id}', agent='{agent_name}', pid={}",
+                handle.pid,
+            );
+            make_outcome(
+                action,
+                true,
+                format!(
+                    "spawn_engineer dispatched: agent='{agent_name}', task='{}' (goal '{goal_id}', pid={})",
+                    truncate_for_log(task),
+                    handle.pid,
+                ),
+            )
+        }
+        Err(e) => {
+            eprintln!(
+                "[simard] spawn_engineer FAILED for goal '{goal_id}': {e}"
+            );
+            make_outcome(
+                action,
+                false,
+                format!(
+                    "spawn_engineer failed for goal '{goal_id}': {e}"
+                ),
+            )
+        }
+    }
+}
+
+/// Build a unique subordinate agent name for a goal.
+///
+/// The epoch suffix prevents collisions when a goal's previous engineer
+/// died and a fresh one needs to be spawned in the same process.
+fn build_engineer_name(goal_id: &str) -> String {
+    let epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("engineer-{goal_id}-{epoch}")
+}
+
+/// Truncate a user-derived string for safe inclusion in outcome detail / logs.
+fn truncate_for_log(s: &str) -> String {
+    const MAX: usize = 256;
+    if s.len() <= MAX {
+        s.to_string()
+    } else {
+        let mut end = MAX;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &s[..end])
+    }
 }
 
 /// Advance a goal that has a subordinate assigned by checking heartbeat
