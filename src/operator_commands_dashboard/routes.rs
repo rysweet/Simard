@@ -56,6 +56,11 @@ pub fn build_router() -> Router {
         .route("/api/ooda-thinking", get(ooda_thinking))
         .route("/ws/chat", get(ws_chat_handler))
         .route(WS_AGENT_LOG_ROUTE, get(ws_agent_log_handler))
+        .route("/api/azlin/tmux-sessions", get(azlin_tmux_sessions))
+        .route(
+            "/ws/tmux_attach/{host}/{session}",
+            get(ws_tmux_attach_handler),
+        )
         .route("/api/login", post(login))
         .route("/login", get(login_page))
         .route("/", get(index))
@@ -1967,6 +1972,400 @@ fn save_hosts(hosts: &[Value]) -> std::io::Result<()> {
     )
 }
 
+// =====================================================================
+// WS-1 AZLIN-TMUX-SESSIONS-LIST
+//
+// Provides a per-host tmux-session listing companion panel for the
+// existing Terminal tab. Reuses:
+//   * `load_hosts()` — canonical `~/.simard/hosts.json` source
+//   * `azlin connect <host> --no-tmux -- <cmd>` — same exec channel as
+//     `distributed()` host-status code (no new SSH transport)
+// =====================================================================
+
+/// One tmux session as parsed from
+/// `tmux list-sessions -F '#S\t#{session_created}\t#{session_attached}\t#{session_windows}'`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct TmuxSession {
+    pub name: String,
+    pub created: i64,
+    pub attached: bool,
+    pub windows: u32,
+}
+
+/// Pure parser: tab-split rows, exactly 4 fields, types validated.
+/// Tolerates trailing newlines, blank lines, "no server running" stderr,
+/// and silently skips any malformed row.
+pub(crate) fn parse_tmux_sessions(input: &str) -> Vec<TmuxSession> {
+    let mut out = Vec::new();
+    for raw_line in input.lines() {
+        let line = raw_line.trim_end_matches('\r');
+        if line.trim().is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() != 4 {
+            continue;
+        }
+        let name = fields[0].trim();
+        if name.is_empty() {
+            continue;
+        }
+        let Ok(created) = fields[1].trim().parse::<i64>() else {
+            continue;
+        };
+        let attached = match fields[2].trim() {
+            "1" => true,
+            "0" => false,
+            _ => continue,
+        };
+        let Ok(windows) = fields[3].trim().parse::<u32>() else {
+            continue;
+        };
+        out.push(TmuxSession {
+            name: name.to_string(),
+            created,
+            attached,
+            windows,
+        });
+    }
+    out
+}
+
+/// Per-host tmux timeout (seconds). Matches the spirit of `distributed()`'s
+/// short-bound exec; 5 s is enough for `tmux list-sessions` over azlin.
+const TMUX_LIST_TIMEOUT_SECS: u64 = 5;
+
+/// Validate a host or tmux-session name for use in route paths and shell
+/// args. Allow-list: `^[A-Za-z0-9_.-]{1,64}$`. Returns the input on success.
+fn sanitize_tmux_ident(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() || bytes.len() > 64 {
+        return None;
+    }
+    for &b in bytes {
+        let ok = b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.';
+        if !ok {
+            return None;
+        }
+    }
+    Some(s.to_string())
+}
+
+/// Run `tmux list-sessions` on a single host via the same azlin exec
+/// channel used by `distributed()`. Returns (reachable, sessions, error).
+///
+/// Reachability semantics:
+///   * exec OK + parsed sessions (possibly empty) → reachable=true
+///   * exit ≠ 0 with empty stdout (typical "no server running") → reachable=true, sessions=[]
+///   * spawn error / timeout / non-empty stderr without stdout → reachable=false
+fn run_tmux_list_for_host(host: &str) -> (bool, Vec<TmuxSession>, Option<String>) {
+    use std::process::Command;
+    let host_owned = host.to_string();
+    let output = Command::new("systemd-run")
+        .args([
+            "--user",
+            "--pipe",
+            "--quiet",
+            "azlin",
+            "connect",
+            &host_owned,
+            "--no-tmux",
+            "--",
+            "tmux",
+            "list-sessions",
+            "-F",
+            "#S\t#{session_created}\t#{session_attached}\t#{session_windows}",
+        ])
+        .output();
+
+    let output = match output {
+        Ok(o) => o,
+        Err(e) => return (false, vec![], Some(format!("spawn failed: {e}"))),
+    };
+
+    let stdout_raw = String::from_utf8_lossy(&output.stdout);
+    let stderr_raw = String::from_utf8_lossy(&output.stderr);
+    // azlin connect --no-tmux can route remote stdout to local stderr when
+    // run without a TTY (rysweet/azlin#980); strip ANSI on both streams.
+    let stdout = strip_ansi_codes(&stdout_raw);
+    let stderr = strip_ansi_codes(&stderr_raw);
+
+    // Pick whichever stream actually carries tmux's table (tab-separated rows).
+    let haystack = if stdout.contains('\t') {
+        stdout.clone()
+    } else if stderr.contains('\t') {
+        stderr.clone()
+    } else {
+        stdout.clone()
+    };
+
+    let sessions = parse_tmux_sessions(&haystack);
+
+    if !sessions.is_empty() {
+        return (true, sessions, None);
+    }
+
+    // No parsed rows. Distinguish "tmux up, no server" (reachable=true) from
+    // unreachable host. The `tmux: no server running` message is the canonical
+    // marker; anything else with empty stdout means we never got past azlin.
+    let combined_lower = format!("{stdout}\n{stderr}").to_lowercase();
+    if combined_lower.contains("no server running") {
+        return (true, vec![], None);
+    }
+
+    if output.status.success() && stdout.trim().is_empty() && stderr.trim().is_empty() {
+        // azlin returned cleanly with no data — treat as reachable, no sessions.
+        return (true, vec![], None);
+    }
+
+    let mut err = stderr.trim().to_string();
+    if err.is_empty() {
+        err = stdout.trim().to_string();
+    }
+    if err.is_empty() {
+        err = format!("azlin connect exited with status {}", output.status);
+    }
+    let truncated: String = err.chars().take(256).collect();
+    (false, vec![], Some(truncated))
+}
+
+/// GET `/api/azlin/tmux-sessions` — snapshot of tmux sessions across all
+/// configured hosts. Always returns 200; per-host failures encoded inline.
+async fn azlin_tmux_sessions() -> Json<Value> {
+    let hosts = tokio::task::spawn_blocking(load_hosts)
+        .await
+        .unwrap_or_default();
+
+    let mut tasks = tokio::task::JoinSet::new();
+    for entry in &hosts {
+        let name = host_entry_name(entry).to_string();
+        if name.is_empty() {
+            continue;
+        }
+        // Defense-in-depth: only attempt hosts whose name passes the same
+        // allow-list we apply on the WS attach path.
+        if sanitize_tmux_ident(&name).is_none() {
+            tasks.spawn(async move {
+                json!({
+                    "host": name,
+                    "reachable": false,
+                    "sessions": [],
+                    "error": "host name failed validation (allowed: A-Z a-z 0-9 _ . -)",
+                })
+            });
+            continue;
+        }
+        tasks.spawn(async move {
+            let host_for_blocking = name.clone();
+            let res = tokio::time::timeout(
+                std::time::Duration::from_secs(TMUX_LIST_TIMEOUT_SECS),
+                tokio::task::spawn_blocking(move || run_tmux_list_for_host(&host_for_blocking)),
+            )
+            .await;
+            match res {
+                Ok(Ok((reachable, sessions, err))) => json!({
+                    "host": name,
+                    "reachable": reachable,
+                    "sessions": sessions,
+                    "error": err,
+                }),
+                Ok(Err(e)) => json!({
+                    "host": name,
+                    "reachable": false,
+                    "sessions": [],
+                    "error": format!("task join error: {e}"),
+                }),
+                Err(_) => json!({
+                    "host": name,
+                    "reachable": false,
+                    "sessions": [],
+                    "error": format!("timed out after {TMUX_LIST_TIMEOUT_SECS}s"),
+                }),
+            }
+        });
+    }
+
+    let mut results: Vec<Value> = Vec::new();
+    while let Some(r) = tasks.join_next().await {
+        if let Ok(v) = r {
+            results.push(v);
+        }
+    }
+    // Stable ordering by host name so the UI doesn't shuffle on each refresh.
+    results.sort_by(|a, b| {
+        a.get("host")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .cmp(b.get("host").and_then(|v| v.as_str()).unwrap_or(""))
+    });
+
+    Json(json!({
+        "hosts": results,
+        "refreshed_at": chrono::Utc::now().to_rfc3339(),
+    }))
+}
+
+/// GET `/ws/tmux_attach/{host}/{session}` — WebSocket bridging xterm.js to
+/// `azlin connect <host> --no-tmux -- tmux attach -t <session>`. The same
+/// azlin exec channel as the snapshot route — no new SSH path.
+async fn ws_tmux_attach_handler(
+    Path((host, session)): Path<(String, String)>,
+    ws: WebSocketUpgrade,
+) -> response::Response {
+    let Some(safe_host) = sanitize_tmux_ident(&host) else {
+        return response::Response::builder()
+            .status(400)
+            .header("content-type", "text/plain; charset=utf-8")
+            .body(axum::body::Body::from(
+                "invalid host: must match ^[A-Za-z0-9_.-]{1,64}$",
+            ))
+            .unwrap();
+    };
+    let Some(safe_session) = sanitize_tmux_ident(&session) else {
+        return response::Response::builder()
+            .status(400)
+            .header("content-type", "text/plain; charset=utf-8")
+            .body(axum::body::Body::from(
+                "invalid session: must match ^[A-Za-z0-9_.-]{1,64}$",
+            ))
+            .unwrap();
+    };
+
+    // Host whitelist: must appear in load_hosts(). Prevents arbitrary-host
+    // exec via crafted URL.
+    let hosts = tokio::task::spawn_blocking(load_hosts)
+        .await
+        .unwrap_or_default();
+    let known = hosts
+        .iter()
+        .any(|h| host_entry_name(h) == safe_host.as_str());
+    if !known {
+        return response::Response::builder()
+            .status(404)
+            .header("content-type", "text/plain; charset=utf-8")
+            .body(axum::body::Body::from(format!(
+                "unknown host '{safe_host}': not in configured hosts",
+            )))
+            .unwrap();
+    }
+
+    ws.on_upgrade(move |socket| handle_tmux_attach_ws(socket, safe_host, safe_session))
+}
+
+async fn handle_tmux_attach_ws(mut socket: WebSocket, host: String, session: String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::process::Command;
+
+    let mut child = match Command::new("systemd-run")
+        .args([
+            "--user",
+            "--pipe",
+            "--quiet",
+            "azlin",
+            "connect",
+            &host,
+            "--no-tmux",
+            "--",
+            "tmux",
+            "attach",
+            "-t",
+            &session,
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = socket
+                .send(Message::Text(
+                    format!("[simard] failed to spawn azlin connect: {e}\n").into(),
+                ))
+                .await;
+            let _ = socket.send(Message::Close(None)).await;
+            return;
+        }
+    };
+
+    let mut stdin = match child.stdin.take() {
+        Some(s) => s,
+        None => {
+            let _ = socket
+                .send(Message::Text(
+                    "[simard] internal error: child stdin unavailable\n".into(),
+                ))
+                .await;
+            return;
+        }
+    };
+    let mut stdout = match child.stdout.take() {
+        Some(s) => s,
+        None => {
+            let _ = socket
+                .send(Message::Text(
+                    "[simard] internal error: child stdout unavailable\n".into(),
+                ))
+                .await;
+            return;
+        }
+    };
+    let mut stderr = child.stderr.take();
+
+    // Single-task duplex: tokio::select! on stdout reads vs ws inbound frames.
+    // No socket split required (avoids depending on futures_util directly).
+    let mut buf = vec![0u8; 4096];
+    loop {
+        tokio::select! {
+            // Child stdout → ws (binary; raw passthrough preserves ANSI).
+            n = stdout.read(&mut buf) => {
+                match n {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let chunk = buf[..n].to_vec();
+                        if socket.send(Message::Binary(chunk.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            // ws → child stdin.
+            inbound = socket.recv() => {
+                match inbound {
+                    Some(Ok(Message::Text(t))) => {
+                        if stdin.write_all(t.as_bytes()).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Binary(b))) => {
+                        if stdin.write_all(&b).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Err(_)) => break,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Drain stderr (best-effort) and forward as a final text frame.
+    if let Some(mut err) = stderr.take() {
+        let mut errbuf = Vec::new();
+        let _ = err.read_to_end(&mut errbuf).await;
+        if !errbuf.is_empty() {
+            let text = String::from_utf8_lossy(&errbuf).to_string();
+            let _ = socket.send(Message::Text(text.into())).await;
+        }
+    }
+    let _ = socket.send(Message::Close(None)).await;
+    let _ = stdin.shutdown().await;
+    let _ = child.kill().await;
+}
+
 /// Compare two hostnames as short, case-insensitive names.
 ///
 /// Strips the first dot onward (FQDN suffix) on both sides and lowercases
@@ -3695,6 +4094,25 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       </div>
       <div id="xterm-host" style="height:60vh;background:#000;border:1px solid var(--border);border-radius:6px;padding:.25rem"></div>
     </div>
+
+    <section id="azlin-sessions-panel" class="card" style="max-width:980px;margin-top:1rem">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem">
+        <h2 style="margin:0">Azlin Tmux Sessions</h2>
+        <div style="display:flex;gap:.5rem;align-items:center;font-size:.85rem;color:#8b949e">
+          <span>Last refreshed:</span>
+          <span id="tmux-last-refreshed" data-testid="tmux-last-refreshed">—</span>
+          <button class="btn" data-testid="tmux-refresh" onclick="fetchTmuxSessions()">Refresh</button>
+        </div>
+      </div>
+      <div style="background:#1a1a2e;border:1px solid #333;border-radius:6px;padding:.6rem;margin-top:.6rem;font-size:.8rem;color:#8b949e">
+        Per-host listing of <code>tmux list-sessions</code> across configured azlin hosts.
+        Click <strong>Open</strong> to attach a session into the terminal viewer above.
+        Auto-refreshes every 10 s while this tab is active.
+      </div>
+      <div id="tmux-sessions-body" style="margin-top:.6rem">
+        <div style="color:#8b949e;font-size:.85rem">Loading…</div>
+      </div>
+    </section>
   </div>
 
   <script>
@@ -3751,7 +4169,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         if(tab.dataset.tab==='chat') initChat();
         if(tab.dataset.tab==='workboard') {fetchWorkboard();tabRefreshTimers.wb=setInterval(fetchWorkboard,30000);}
         if(tab.dataset.tab==='thinking') {fetchThinking();tabRefreshTimers.thinking=setInterval(fetchThinking,30000);}
-        if(tab.dataset.tab==='terminal') initAgentLogTerminal();
+        if(tab.dataset.tab==='terminal') { initAgentLogTerminal(); fetchTmuxSessions(); tabRefreshTimers.tmux=setInterval(fetchTmuxSessions,10000); }
       });
     });
     setInterval(()=>{document.getElementById('clock').textContent=new Date().toLocaleString()},1000);
@@ -4925,6 +5343,124 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       setAgentLogStatus('disconnected', '#8b949e');
     }
 
+    /* --- Azlin tmux sessions panel (WS-1) --- */
+    function fmtUnixTs(ts){
+      if(typeof ts !== 'number' || !isFinite(ts) || ts <= 0) return '—';
+      try { return new Date(ts*1000).toLocaleString(); } catch(_) { return String(ts); }
+    }
+    async function fetchTmuxSessions(){
+      const body = document.getElementById('tmux-sessions-body');
+      if(!body) return;
+      try {
+        const data = await apiFetch('/api/azlin/tmux-sessions');
+        const hosts = Array.isArray(data.hosts) ? data.hosts : [];
+        if(hosts.length === 0){
+          body.innerHTML = '<div style="color:#8b949e;font-size:.85rem">No configured hosts.</div>';
+        } else {
+          body.innerHTML = hosts.map(h => renderTmuxHost(h)).join('');
+        }
+        const ts = document.getElementById('tmux-last-refreshed');
+        if(ts) ts.textContent = data.refreshed_at ? new Date(data.refreshed_at).toLocaleString() : new Date().toLocaleString();
+      } catch(e) {
+        body.innerHTML = '<div style="color:#f85149;font-size:.85rem">Failed to load tmux sessions: '+esc(e.message||e)+'</div>';
+      }
+    }
+    function renderTmuxHost(h){
+      const host = String(h.host || '');
+      const reachable = !!h.reachable;
+      const sessions = Array.isArray(h.sessions) ? h.sessions : [];
+      const errText = h.error ? String(h.error) : '';
+      const headerColor = reachable ? '#3fb950' : '#f85149';
+      const status = reachable ? '● reachable' : '○ unreachable';
+      let inner;
+      if(!reachable){
+        inner = '<div style="color:#8b949e;font-size:.85rem;padding:.5rem">'
+              + (errText ? esc(errText) : 'host unreachable')
+              + '</div>';
+      } else if(sessions.length === 0){
+        inner = '<div style="color:#8b949e;font-size:.85rem;padding:.5rem">No tmux sessions on this host.</div>';
+      } else {
+        const rows = sessions.map(s => {
+          const name = String(s.name || '');
+          const created = fmtUnixTs(s.created);
+          const attached = s.attached ? '✓' : '—';
+          const wins = (s.windows == null) ? '—' : String(s.windows);
+          const tid = 'tmux-open-'+host+'-'+name;
+          return '<tr>'
+               + '<td style="padding:.3rem .5rem;font-family:monospace">'+esc(name)+'</td>'
+               + '<td style="padding:.3rem .5rem;color:#8b949e">'+esc(created)+'</td>'
+               + '<td style="padding:.3rem .5rem;text-align:center">'+attached+'</td>'
+               + '<td style="padding:.3rem .5rem;text-align:right">'+esc(wins)+'</td>'
+               + '<td style="padding:.3rem .5rem;text-align:right">'
+               +   '<button class="btn" data-testid="'+esc(tid)+'" '
+               +     'onclick="openTmuxAttach('+JSON.stringify(host)+','+JSON.stringify(name)+')">Open</button>'
+               + '</td>'
+               + '</tr>';
+        }).join('');
+        inner = '<table data-testid="tmux-table-'+esc(host)+'" '
+              + 'style="width:100%;border-collapse:collapse;font-size:.88rem">'
+              + '<thead><tr style="border-bottom:1px solid var(--border);color:#8b949e;text-align:left">'
+              + '<th style="padding:.3rem .5rem">Session</th>'
+              + '<th style="padding:.3rem .5rem">Created</th>'
+              + '<th style="padding:.3rem .5rem;text-align:center">Attached?</th>'
+              + '<th style="padding:.3rem .5rem;text-align:right">Windows</th>'
+              + '<th style="padding:.3rem .5rem;text-align:right">Action</th>'
+              + '</tr></thead><tbody>'
+              + rows
+              + '</tbody></table>';
+      }
+      // For unreachable hosts, also expose the host-keyed testid on the wrapper so
+      // e2e tests can find error text without a sessions table.
+      const wrapperTid = reachable ? '' : ' data-testid="tmux-table-'+esc(host)+'"';
+      return '<div'+wrapperTid+' style="margin-top:.6rem;border:1px solid var(--border);border-radius:6px;overflow:hidden">'
+           + '<div style="background:#1a1a2e;padding:.4rem .6rem;display:flex;justify-content:space-between;align-items:center">'
+           +   '<strong style="font-family:monospace">'+esc(host)+'</strong>'
+           +   '<span style="color:'+headerColor+';font-size:.85rem">'+status+'</span>'
+           + '</div>'
+           + inner
+           + '</div>';
+    }
+    function openTmuxAttach(host, session){
+      // Validate identifier shape client-side (mirror of server allow-list).
+      const re = /^[A-Za-z0-9_.-]{1,64}$/;
+      if(!re.test(host) || !re.test(session)){
+        setAgentLogStatus('invalid host or session name', '#f85149');
+        return;
+      }
+      initAgentLogTerminal();
+      if(!agentLogTerm) return;
+      // Tear down any existing agent-log WS before reusing the xterm instance.
+      if(agentLogWS){ try { agentLogWS.close(); } catch(_) {} agentLogWS = null; }
+      agentLogTerm.clear();
+      // Surface the attached target in the existing status row.
+      const nameInput = document.getElementById('agent-log-name');
+      if(nameInput) nameInput.value = host + ':' + session;
+      setAgentLogStatus('attaching to '+host+':'+session+'…', '#d29922');
+      const proto = (window.location.protocol === 'https:') ? 'wss:' : 'ws:';
+      const url = proto + '//' + window.location.host
+                + '/ws/tmux_attach/' + encodeURIComponent(host)
+                + '/' + encodeURIComponent(session);
+      let ws;
+      try { ws = new WebSocket(url); ws.binaryType = 'arraybuffer'; }
+      catch(e){ setAgentLogStatus('connect failed: '+(e&&e.message||e), '#f85149'); return; }
+      agentLogWS = ws;
+      ws.onopen = () => setAgentLogStatus('attached: '+host+':'+session, '#3fb950');
+      ws.onmessage = (ev) => {
+        if(!agentLogTerm) return;
+        if(typeof ev.data === 'string'){
+          agentLogTerm.write(ev.data);
+        } else if(ev.data instanceof ArrayBuffer){
+          const bytes = new Uint8Array(ev.data);
+          // Pass raw bytes through xterm so ANSI escapes render correctly.
+          let s = '';
+          for(let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+          agentLogTerm.write(s);
+        }
+      };
+      ws.onerror = () => setAgentLogStatus('socket error', '#f85149');
+      ws.onclose = () => { setAgentLogStatus('detached', '#8b949e'); if(agentLogWS === ws) agentLogWS = null; };
+    }
+
     /* --- Init --- */
     fetchStatus(); fetchIssues(); fetchDistributed(); fetchAgentOverview();
     setInterval(fetchAgentOverview,30000);
@@ -5524,5 +6060,140 @@ mod tests {
         // empty input returns empty.
         assert_eq!(truncate_outcome_detail("hi", 0), "…");
         assert_eq!(truncate_outcome_detail("", 0), "");
+    }
+
+    // ---------------------------------------------------------------------
+    // WS-1 AZLIN-TMUX-SESSIONS-LIST — TDD tests (Step 7).
+    //
+    // These tests specify the contract for `parse_tmux_sessions` (the pure
+    // parser used by `/api/azlin/tmux-sessions`) and for host enumeration
+    // (which MUST go through `load_hosts()` so the panel agrees with the
+    // Cluster Topology / Remote VMs source).
+    //
+    // They are expected to FAIL TO COMPILE until the implementation lands
+    // (Step 8): symbols `parse_tmux_sessions` and `TmuxSession` do not yet
+    // exist. That compile failure IS the failing test.
+    // ---------------------------------------------------------------------
+
+    /// Basic happy-path: 3 sessions, mixed `attached`. Verifies field types
+    /// and tab-separated parse of `#S\t#{session_created}\t#{session_attached}\t#{session_windows}`.
+    #[test]
+    fn parse_tmux_sessions_basic() {
+        let input = "main\t1700000000\t1\t3\nwork\t1700000500\t0\t1\nidle\t1700000999\t0\t2\n";
+        let out = parse_tmux_sessions(input);
+        assert_eq!(out.len(), 3, "should parse 3 well-formed rows");
+
+        assert_eq!(out[0].name, "main");
+        assert_eq!(out[0].created, 1_700_000_000_i64);
+        assert!(out[0].attached);
+        assert_eq!(out[0].windows, 3_u32);
+
+        assert_eq!(out[1].name, "work");
+        assert!(!out[1].attached);
+        assert_eq!(out[1].windows, 1);
+
+        assert_eq!(out[2].name, "idle");
+        assert!(!out[2].attached);
+        assert_eq!(out[2].windows, 2);
+    }
+
+    /// Empty input → empty vec (no panic, no synthetic row).
+    #[test]
+    fn parse_tmux_sessions_empty() {
+        assert!(parse_tmux_sessions("").is_empty());
+        assert!(parse_tmux_sessions("\n").is_empty());
+        assert!(parse_tmux_sessions("\n\n  \n").is_empty());
+    }
+
+    /// `tmux: no server running` exits 1 with empty stdout; the route maps
+    /// that to `reachable:true, sessions:[]`. The parser itself just needs
+    /// to handle the typical stderr-style content gracefully (no panic, no
+    /// rows). The route layer is responsible for the reachable flag.
+    #[test]
+    fn parse_tmux_sessions_no_server() {
+        // Real-world: tmux writes "no server running on /tmp/tmux-1000/default"
+        // to stderr and stdout is empty. But if a wrapper conflates streams,
+        // the parser must still return [] (no tabs ⇒ malformed ⇒ skipped).
+        assert!(parse_tmux_sessions("no server running on /tmp/tmux-1000/default\n").is_empty());
+        assert!(parse_tmux_sessions("").is_empty());
+    }
+
+    /// Malformed rows (wrong field count, non-numeric created/windows,
+    /// non-0/1 attached) are skipped; valid rows survive.
+    #[test]
+    fn parse_tmux_sessions_malformed() {
+        let input = concat!(
+            "good\t1700000000\t1\t2\n",
+            "too\tfew\tfields\n",                  // 3 fields — skip
+            "bad-created\tNaN\t0\t1\n",            // created not int — skip
+            "bad-windows\t1700000000\t0\tabc\n",   // windows not uint — skip
+            "another-good\t1700001000\t0\t5\n",
+            "trailing-tabs\t1700002000\t1\t1\t\t\n", // extra empties — also skip
+            "\n",                                    // blank
+        );
+        let out = parse_tmux_sessions(input);
+        assert_eq!(out.len(), 2, "only the two well-formed rows should survive");
+        assert_eq!(out[0].name, "good");
+        assert_eq!(out[1].name, "another-good");
+        assert_eq!(out[1].windows, 5);
+    }
+
+    /// Host enumeration MUST go through `load_hosts()` (the canonical
+    /// `~/.simard/hosts.json` reader). Setting `HOME` to a tempdir with a
+    /// synthetic `hosts.json` and calling `load_hosts()` must yield exactly
+    /// the synthetic entries — proving the tmux route would see the same
+    /// host set as the Topology / Remote-VMs panels.
+    #[test]
+    fn host_enumeration_reads_load_hosts() {
+        use std::io::Write;
+
+        // Use a unique tempdir to avoid races with other tests touching HOME.
+        let tmp = std::env::temp_dir().join(format!(
+            "simard-tmux-tdd-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(tmp.join(".simard")).expect("mkdir");
+        let mut f = std::fs::File::create(tmp.join(".simard").join("hosts.json"))
+            .expect("create hosts.json");
+        writeln!(
+            f,
+            r#"[{{"name":"vm-tmux-1","resource_group":"rg-x"}},{{"name":"vm-tmux-2","resource_group":"rg-y"}}]"#
+        )
+        .expect("write");
+
+        // SAFETY: tests in this module share a process; we save & restore HOME.
+        let prev_home = std::env::var("HOME").ok();
+        // Rust 2024: env mutation is unsafe.
+        // The compile-time gate makes the unsafe block harmless when not on edition 2024.
+        unsafe {
+            std::env::set_var("HOME", &tmp);
+        }
+
+        let hosts = load_hosts();
+
+        // Restore HOME before assertions so a panic doesn't leak state.
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        let names: Vec<String> = hosts
+            .iter()
+            .map(|h| host_entry_name(h).to_string())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["vm-tmux-1".to_string(), "vm-tmux-2".to_string()],
+            "tmux-sessions route MUST enumerate via load_hosts() (canonical source)"
+        );
+
+        // Cleanup tempdir (best-effort).
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
