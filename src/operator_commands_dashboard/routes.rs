@@ -1196,30 +1196,7 @@ async fn workboard() -> Json<Value> {
             .get("cycle_number")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
-        if let Some(summary) = report.get("summary").and_then(|v| v.as_str()) {
-            recent_actions.push(json!({
-                "cycle": cycle_num,
-                "action": "cycle-summary",
-                "target": "",
-                "result": summary,
-                "at": "",
-            }));
-        } else if let Some(rpt) = report.get("report") {
-            let summary_text = rpt
-                .get("summary")
-                .and_then(|v| v.as_str())
-                .or_else(|| rpt.get("actions_taken").and_then(|v| v.as_str()))
-                .unwrap_or("");
-            if !summary_text.is_empty() {
-                recent_actions.push(json!({
-                    "cycle": cycle_num,
-                    "action": "cycle-summary",
-                    "target": "",
-                    "result": summary_text,
-                    "at": rpt.get("timestamp").and_then(|t| t.as_str()).unwrap_or(""),
-                }));
-            }
-        }
+        recent_actions.extend(format_recent_actions_for_cycle(cycle_num, report));
     }
     recent_actions.truncate(10);
 
@@ -1476,6 +1453,108 @@ async fn run_gh_json(args: &[&str]) -> Value {
 }
 
 /// Read the most recent N cycle report files from disk.
+/// Truncates `s` to at most `max` Unicode characters, appending `…` if the
+/// string was shortened. Pure helper; no allocation when no truncation needed.
+fn truncate_with_ellipsis(s: &str, max: usize) -> String {
+    let mut chars = s.chars();
+    let head: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
+/// Builds the entries for the dashboard's "Recent Actions" panel from a
+/// single cycle report. Prefers `outcomes[].detail` (informative — e.g.
+/// "spawn_engineer dispatched: agent='…', task='…'"), truncated to 200
+/// characters with an ellipsis on overflow. Falls back to
+/// `outcomes[].action_description`, then to `planned_actions[].description`
+/// for older cycles that have no outcomes recorded, then to the cycle
+/// summary as a last resort.
+fn format_recent_actions_for_cycle(cycle_num: u64, report: &Value) -> Vec<Value> {
+    const MAX_LEN: usize = 200;
+
+    // The wrapper from `read_recent_cycle_reports` may put the parsed cycle
+    // JSON under `report` (parsed) or expose `summary` directly (plain text).
+    let rpt = report.get("report").unwrap_or(report);
+    let timestamp = rpt
+        .get("timestamp")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let mut out: Vec<Value> = Vec::new();
+
+    if let Some(outcomes) = rpt.get("outcomes").and_then(|v| v.as_array())
+        && !outcomes.is_empty()
+    {
+        for o in outcomes {
+            let kind = o
+                .get("action_kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("action");
+            let raw = o
+                .get("detail")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .or_else(|| o.get("action_description").and_then(|v| v.as_str()))
+                .unwrap_or("(no detail)");
+            out.push(json!({
+                "cycle": cycle_num,
+                "action": kind,
+                "target": "",
+                "result": truncate_with_ellipsis(raw, MAX_LEN),
+                "at": timestamp,
+            }));
+        }
+        return out;
+    }
+
+    if let Some(planned) = rpt.get("planned_actions").and_then(|v| v.as_array())
+        && !planned.is_empty()
+    {
+        for a in planned {
+            let kind = a
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("action");
+            let desc = a
+                .get("description")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("(no description)");
+            out.push(json!({
+                "cycle": cycle_num,
+                "action": kind,
+                "target": "",
+                "result": truncate_with_ellipsis(desc, MAX_LEN),
+                "at": timestamp,
+            }));
+        }
+        return out;
+    }
+
+    // Last resort: cycle summary text (top-level for plain-text reports,
+    // nested for parsed JSON reports).
+    let summary = report
+        .get("summary")
+        .and_then(|v| v.as_str())
+        .or_else(|| rpt.get("summary").and_then(|v| v.as_str()))
+        .or_else(|| rpt.get("actions_taken").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    if !summary.is_empty() {
+        out.push(json!({
+            "cycle": cycle_num,
+            "action": "cycle-summary",
+            "target": "",
+            "result": truncate_with_ellipsis(summary, MAX_LEN),
+            "at": timestamp,
+        }));
+    }
+    out
+}
+
 fn read_recent_cycle_reports(state_root: &std::path::Path, n: usize) -> Vec<Value> {
     // The daemon writes to `state_root/state/cycle_reports/` while
     // resolve_state_root() may return the parent. Check both locations.
@@ -5082,6 +5161,88 @@ mod tests {
         // gh is unlikely to succeed without auth in test; verify graceful handling
         let result = run_gh_json(&["pr", "list", "--json", "number"]).await;
         assert!(result.is_array());
+    }
+
+    #[test]
+    fn format_recent_actions_prefers_outcome_detail_truncated() {
+        let long: String = "x".repeat(250);
+        let report = json!({
+            "cycle_number": 103,
+            "report": {
+                "outcomes": [
+                    {"action_kind": "advance-goal", "action_description": "not yet started", "detail": long},
+                    {"action_kind": "advance-goal", "action_description": "not yet started", "detail": "short detail"}
+                ],
+                "planned_actions": [
+                    {"kind": "advance-goal", "description": "not yet started"}
+                ],
+                "summary": "should-not-show"
+            }
+        });
+        let entries = format_recent_actions_for_cycle(103, &report);
+        assert_eq!(entries.len(), 2);
+        let first = entries[0]["result"].as_str().unwrap();
+        // 200 chars + the trailing ellipsis
+        assert_eq!(first.chars().count(), 201);
+        assert!(first.ends_with('…'));
+        assert!(first.starts_with("xxxx"));
+        assert_eq!(entries[0]["action"], "advance-goal");
+        assert_eq!(entries[0]["cycle"], 103);
+        assert_eq!(entries[1]["result"], "short detail");
+    }
+
+    #[test]
+    fn format_recent_actions_outcome_short_detail_passthrough() {
+        let report = json!({
+            "report": {
+                "outcomes": [
+                    {"action_kind": "run-improvement", "detail": "improvement cycle ok"}
+                ]
+            }
+        });
+        let entries = format_recent_actions_for_cycle(7, &report);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["result"], "improvement cycle ok");
+        assert!(!entries[0]["result"].as_str().unwrap().ends_with('…'));
+    }
+
+    #[test]
+    fn format_recent_actions_falls_back_to_planned_actions_when_outcomes_empty() {
+        let report = json!({
+            "report": {
+                "outcomes": [],
+                "planned_actions": [
+                    {"kind": "advance-goal", "description": "kick off the work"}
+                ]
+            }
+        });
+        let entries = format_recent_actions_for_cycle(42, &report);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["action"], "advance-goal");
+        assert_eq!(entries[0]["result"], "kick off the work");
+    }
+
+    #[test]
+    fn format_recent_actions_sensible_default_when_both_missing() {
+        // Neither outcomes nor planned_actions present, but a summary exists.
+        let report = json!({
+            "report": {"summary": "OODA cycle #5: 0 actions"}
+        });
+        let entries = format_recent_actions_for_cycle(5, &report);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["action"], "cycle-summary");
+        assert_eq!(entries[0]["result"], "OODA cycle #5: 0 actions");
+
+        // Completely empty report yields no entries (no panic).
+        let empty = json!({"report": {}});
+        assert!(format_recent_actions_for_cycle(0, &empty).is_empty());
+
+        // Outcome with neither detail nor action_description still produces
+        // a sensible placeholder rather than dropping the row.
+        let bare = json!({"report": {"outcomes": [{"action_kind": "noop"}]}});
+        let entries = format_recent_actions_for_cycle(1, &bare);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["result"], "(no detail)");
     }
 
     // ---------------------------------------------------------------------
