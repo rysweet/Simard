@@ -179,7 +179,15 @@ fn kill_orphaned_cargo_processes(report: &mut CleanupReport) {
         };
         let cmd = parts[2..].join(" ");
 
-        if elapsed > threshold_seconds && cmd.contains("cargo") && cmd.contains("test") {
+        // Be precise: the process executable basename must be exactly "cargo",
+        // not just any path containing "cargo" (which matches /home/.../.cargo/
+        // and amplihack/recipe-runner-rs orchestrators that legitimately run
+        // for hours).
+        let exe_basename = parts[2].rsplit('/').next().unwrap_or("");
+        let is_cargo_invocation = exe_basename == "cargo"
+            && parts.get(3).map(|s| *s == "test" || *s == "build").unwrap_or(false);
+
+        if elapsed > threshold_seconds && is_cargo_invocation {
             eprintln!("  Killing orphaned cargo process pid={pid} (running {elapsed}s): {cmd}");
             let _ = Command::new("kill").arg(pid.to_string()).output();
             report.processes_killed += 1;
