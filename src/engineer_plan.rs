@@ -241,7 +241,12 @@ pub fn plan_objective(objective: &str, inspection: &RepoInspection) -> SimardRes
             reason: format!("LLM turn failed: {e}"),
         })?;
     let _ = session.close();
-    parse_plan_response(&outcome.plan)
+    // `outcome.plan` is adapter-emitted telemetry ("Copilot SDK adapter
+    // dispatched ... via 'amplihack copilot' on 'single-process' (turn N)").
+    // The actual LLM response text lives in `outcome.execution_summary`.
+    // Reading the wrong field here meant the planner parsed the telemetry
+    // string, failed, and silently degraded to keyword analysis (issue #1062).
+    parse_plan_response(&outcome.execution_summary)
 }
 
 /// Execute a plan sequentially, running each step's verification command.

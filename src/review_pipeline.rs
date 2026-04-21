@@ -135,7 +135,9 @@ pub fn review_diff(
         .map_err(|e| SimardError::ReviewUnavailable {
             reason: format!("LLM turn failed: {e}"),
         })?;
-    parse_review_response(&outcome.plan)
+    // Read execution_summary (the actual LLM text), not plan (adapter
+    // telemetry). See engineer_plan::plan_objective for context.
+    parse_review_response(&outcome.execution_summary)
 }
 
 /// Commit gate: returns `false` if any Bug or Security finding has
