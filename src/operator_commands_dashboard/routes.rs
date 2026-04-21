@@ -2540,13 +2540,23 @@ fn load_dashboard_meeting_prompt() -> SimardResult<String> {
 
 /// Open an agent session for the dashboard chat.
 /// Uses the same config-driven provider as the CLI meeting REPL
-/// (controlled by `SIMARD_LLM_PROVIDER`, defaults to RustyClawd).
+/// (resolved via `RuntimeConfig`: env var → `~/.simard/config.toml`).
 fn open_dashboard_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeSession>> {
-    match crate::session_builder::SessionBuilder::new(crate::identity::OperatingMode::Meeting)
-        .node_id("dashboard-chat")
-        .address("dashboard-chat://local")
-        .adapter_tag("meeting-dashboard")
-        .open()
+    let provider = match crate::session_builder::LlmProvider::resolve() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[simard] dashboard chat: LLM provider not configured: {e}");
+            return None;
+        }
+    };
+    match crate::session_builder::SessionBuilder::new(
+        crate::identity::OperatingMode::Meeting,
+        provider,
+    )
+    .node_id("dashboard-chat")
+    .address("dashboard-chat://local")
+    .adapter_tag("meeting-dashboard")
+    .open()
     {
         Ok(s) => Some(s),
         Err(e) => {

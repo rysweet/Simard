@@ -76,10 +76,17 @@ fn launch_real_meeting_bridge() -> Result<Box<dyn CognitiveMemoryOps>, Box<dyn s
 /// Open an agent session for the meeting REPL using the standard base type
 /// infrastructure.
 fn open_meeting_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeSession>> {
-    match crate::session_builder::SessionBuilder::new(OperatingMode::Meeting)
+    let provider = match crate::session_builder::LlmProvider::resolve() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[simard] meeting agent: LLM provider not configured: {e}");
+            return None;
+        }
+    };
+    match crate::session_builder::SessionBuilder::new(OperatingMode::Meeting, provider)
         .node_id("meeting-repl")
         .address("meeting-repl://local")
-        .adapter_tag("meeting-rustyclawd")
+        .adapter_tag("meeting")
         .open()
     {
         Ok(s) => Some(s),

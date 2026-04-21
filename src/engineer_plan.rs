@@ -12,7 +12,7 @@ use crate::base_types::BaseTypeTurnInput;
 use crate::engineer_loop::{AnalyzedAction, RepoInspection};
 use crate::error::{SimardError, SimardResult};
 use crate::identity::OperatingMode;
-use crate::session_builder::SessionBuilder;
+use crate::session_builder::{LlmProvider, SessionBuilder};
 
 /// A single step in an LLM-generated plan.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -221,13 +221,16 @@ fn extract_json_array(text: &str) -> Option<&str> {
 
 /// Ask the LLM for a multi-step plan to accomplish `objective`.
 ///
-/// Returns `Err(PlanningUnavailable)` when no LLM session can be opened or the
-/// response is unparseable.  Callers use keyword-based `analyze_objective`.
+/// Returns `Err(PlanningUnavailable)` when no LLM session can be opened
+/// or the response is unparseable. There is **no keyword fallback** —
+/// the cycle must report the planning failure rather than execute a
+/// fabricated plan.
 pub fn plan_objective(objective: &str, inspection: &RepoInspection) -> SimardResult<Plan> {
-    let mut session = SessionBuilder::new(OperatingMode::Engineer)
+    let provider = LlmProvider::resolve()?;
+    let mut session = SessionBuilder::new(OperatingMode::Engineer, provider)
         .node_id("engineer-planner")
         .address("engineer-planner://local")
-        .adapter_tag("engineer-planner-rustyclawd")
+        .adapter_tag("engineer-planner")
         .open()
         .map_err(|reason| SimardError::PlanningUnavailable { reason })?;
 
