@@ -215,6 +215,22 @@ impl BaseTypeSession for CopilotSdkSession {
             turn = self.turn_count,
             "Copilot adapter: received response"
         );
+        // No fallback: an empty response after stripping noise/footer lines
+        // means the Copilot CLI exited without producing a reply (auth
+        // failure, rate limit, transcript truncated, etc.). Surface that as
+        // an error rather than handing the caller an empty string or — worse
+        // — leaking the billing-summary footer as if it were the assistant's
+        // reply (issue #1062).
+        if response_text.trim().is_empty() {
+            return Err(SimardError::AdapterInvocationFailed {
+                base_type: self.descriptor.id.to_string(),
+                reason:
+                    "copilot returned no conversational content (auth failure, rate limit, or \
+                     truncated transcript). Run `gh auth status` and inspect the most recent \
+                     transcript in ~/.simard/agent_logs/."
+                        .to_string(),
+            });
+        }
 
         // Record cost estimate based on prompt/response character sizes.
         let prompt_chars = enriched_input.objective.len();
@@ -357,11 +373,7 @@ fn extract_response_from_transcript(transcript: &str) -> String {
             response_start = i + 1;
         }
         // Usage stats / session footer
-        if (trimmed.starts_with("Total usage est:")
-            || trimmed.starts_with("API time spent:")
-            || trimmed.starts_with("Total session time:"))
-            && response_end == lines.len()
-        {
+        if is_copilot_footer_line(trimmed) && response_end == lines.len() {
             response_end = i;
         }
         // Shell exit / script done
@@ -376,7 +388,7 @@ fn extract_response_from_transcript(transcript: &str) -> String {
 
     if response_start >= response_end {
         // Delimiters not found — strip known noise lines from PTY output
-        return lines
+        let stripped: String = lines
             .iter()
             .filter(|l| {
                 let t = l.trim();
@@ -386,22 +398,58 @@ fn extract_response_from_transcript(transcript: &str) -> String {
                     || t.contains("SIMARD_PROMPT_FILE")
                     || t == "exit"
                     || t.ends_with("$ exit")
+                    || is_copilot_footer_line(t)
                     || is_transcript_noise_line(t))
             })
             .copied()
             .collect::<Vec<_>>()
             .join("\n");
+        return stripped;
     }
 
-    lines[response_start..response_end]
+    let body: String = lines[response_start..response_end]
         .iter()
         .filter(|l| {
             let t = l.trim();
-            !t.is_empty() && !is_transcript_noise_line(t)
+            !t.is_empty() && !is_copilot_footer_line(t) && !is_transcript_noise_line(t)
         })
         .copied()
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    body
+}
+
+/// Recognize Copilot CLI session-footer / telemetry lines that must never
+/// appear in the extracted assistant response.
+///
+/// Includes both the legacy `Total usage est:` / `API time spent:` /
+/// `Total session time:` markers and the newer billing-summary footer
+/// emitted by Copilot CLI ≥1.x:
+///
+/// ```text
+/// Changes   +0 -0
+/// Requests  7.5 Premium (10s)
+/// ```
+///
+/// Without this guard the chat dashboard echoes the telemetry line back
+/// to the user as if it were the assistant's reply (issue #1062).
+fn is_copilot_footer_line(trimmed: &str) -> bool {
+    if trimmed.starts_with("Total usage est:")
+        || trimmed.starts_with("API time spent:")
+        || trimmed.starts_with("Total session time:")
+    {
+        return true;
+    }
+    // Newer Copilot CLI billing summary lines.
+    if trimmed.starts_with("Changes") && (trimmed.contains(" +") || trimmed.contains(" -")) {
+        return true;
+    }
+    if trimmed.starts_with("Requests")
+        && (trimmed.contains("Premium") || trimmed.contains("Free") || trimmed.contains('('))
+    {
+        return true;
+    }
+    false
 }
 
 /// Detect transcript lines that are infrastructure artefacts rather than
@@ -666,6 +714,67 @@ Script done on 2025-04-07 02:56:00+00:00";
     fn extract_response_from_transcript_handles_empty() {
         let response = extract_response_from_transcript("");
         assert!(response.is_empty() || response.trim().is_empty());
+    }
+
+    #[test]
+    fn extract_response_strips_new_copilot_billing_footer() {
+        // Regression for issue #1062 / dashboard chat bug: the new Copilot CLI
+        // emits a billing-summary footer that the parser previously leaked
+        // into the chat as if it were the assistant's reply.
+        let transcript = "\
+Script started on 2026-04-21 03:00:00+00:00
+bash-5.2$ SIMARD_PROMPT_FILE=$(mktemp) && amplihack copilot -p \"$(cat \"$SIMARD_PROMPT_FILE\")\" ; exit
+Hello from the assistant.
+Changes   +0 -0
+Requests  7.5 Premium (10s)
+bash-5.2$ exit
+Script done on 2026-04-21 03:00:17+00:00";
+        let response = extract_response_from_transcript(transcript);
+        assert!(
+            response.contains("Hello from the assistant"),
+            "should extract assistant content: got '{response}'"
+        );
+        assert!(
+            !response.contains("Changes"),
+            "Changes telemetry must be stripped: got '{response}'"
+        );
+        assert!(
+            !response.contains("Premium"),
+            "Requests/Premium telemetry must be stripped: got '{response}'"
+        );
+    }
+
+    #[test]
+    fn extract_response_returns_empty_when_only_telemetry_present() {
+        // When the Copilot CLI exits without producing conversational
+        // content (auth fail, rate limit, etc.) the transcript contains
+        // only the billing footer. Parser must NOT emit that footer as
+        // the response — it must return empty so the caller can fail loud.
+        let transcript = "\
+Script started on 2026-04-21 03:00:00+00:00
+bash-5.2$ amplihack copilot -p \"hi\" ; exit
+Changes   +0 -0
+Requests  7.5 Premium (17s)
+bash-5.2$ exit
+Script done on 2026-04-21 03:00:17+00:00";
+        let response = extract_response_from_transcript(transcript);
+        assert!(
+            response.trim().is_empty(),
+            "telemetry-only transcript must yield empty response, got '{response}'"
+        );
+    }
+
+    #[test]
+    fn copilot_footer_classifier_recognizes_legacy_and_new_formats() {
+        assert!(is_copilot_footer_line("Total usage est: 0.012"));
+        assert!(is_copilot_footer_line("API time spent: 1.2s"));
+        assert!(is_copilot_footer_line("Total session time: 17s"));
+        assert!(is_copilot_footer_line("Changes   +0 -0"));
+        assert!(is_copilot_footer_line("Changes +12 -3"));
+        assert!(is_copilot_footer_line("Requests  7.5 Premium (10s)"));
+        assert!(is_copilot_footer_line("Requests  3 Premium (8m 28s)"));
+        assert!(!is_copilot_footer_line("Hello from the assistant"));
+        assert!(!is_copilot_footer_line(""));
     }
 
     #[test]
