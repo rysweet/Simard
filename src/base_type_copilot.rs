@@ -503,7 +503,46 @@ fn is_transcript_noise_line(trimmed: &str) -> bool {
             return true;
         }
     }
+    // Amplihack CLI startup banners and version-update nags. These are
+    // wrapped in ANSI color codes by the CLI, so test against the
+    // ANSI-stripped form. The leading `ℹ` glyph amplihack prints is a
+    // multi-byte UTF-8 character, so we match on the substring after it.
+    let stripped = strip_ansi(trimmed);
+    let stripped_trim = stripped.trim();
+    let without_info_glyph = stripped_trim
+        .trim_start_matches(|c: char| !c.is_ascii() || c.is_whitespace())
+        .trim_start();
+    if stripped_trim.contains("amplihack is available")
+        || stripped_trim.starts_with("Run 'amplihack update'")
+        || without_info_glyph.starts_with("NODE_OPTIONS=")
+        || without_info_glyph.starts_with("amplihack ")
+        || stripped_trim.starts_with("amplihack: ")
+    {
+        return true;
+    }
     false
+}
+
+/// Remove ANSI escape sequences (CSI `\x1b[…m` color codes) from a line
+/// so noise-detection can match on the visible text alone.
+fn strip_ansi(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            // CSI: \x1b[ … final-byte-in-0x40..=0x7e
+            let mut j = i + 2;
+            while j < bytes.len() && !(0x40..=0x7e).contains(&bytes[j]) {
+                j += 1;
+            }
+            i = j.saturating_add(1);
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Parse copilot response text and extract a turn context summary for
@@ -854,5 +893,38 @@ Script done on 2025-04-07 02:56:00+00:00";
                 "noise marker {noise:?} should be filtered, got: {response:?}"
             );
         }
+    }
+
+    #[test]
+    fn extract_response_from_transcript_strips_amplihack_banners() {
+        let transcript = "\
+Script started on 2026-04-21 04:21:00+00:00
+bash-5.2$ SIMARD_PROMPT_FILE=$(mktemp) && cat \"$SIMARD_PROMPT_FILE\" | amplihack copilot --subprocess-safe ; exit
+\u{1b}[33mA newer version of amplihack is available (v0.7.61). Run 'amplihack update' to upgrade.\u{1b}[0m
+ℹ NODE_OPTIONS=--max-old-space-size=8192
+{\"steps\":[{\"action\":\"ReadOnlyScan\",\"description\":\"inspect repo\"}]}
+Total usage est: 0.012
+bash-5.2$ exit
+Script done on 2026-04-21 04:22:00+00:00";
+        let response = extract_response_from_transcript(transcript);
+        assert!(
+            response.contains("\"steps\""),
+            "JSON payload must survive: got {response:?}"
+        );
+        assert!(
+            !response.contains("amplihack is available"),
+            "version-update banner should be filtered, got: {response:?}"
+        );
+        assert!(
+            !response.contains("NODE_OPTIONS"),
+            "NODE_OPTIONS info line should be filtered, got: {response:?}"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_removes_csi_color_codes() {
+        assert_eq!(strip_ansi("\u{1b}[33mhello\u{1b}[0m"), "hello");
+        assert_eq!(strip_ansi("plain"), "plain");
+        assert_eq!(strip_ansi("\u{1b}[1;31mbold red\u{1b}[0m end"), "bold red end");
     }
 }
