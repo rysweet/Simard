@@ -8,7 +8,7 @@ owner: simard
 
 # Simard documentation
 
-Simard is the **Rust successor to [Python amplihack](https://github.com/rysweet/amplihack)**. The intent is for Simard to become a drop-in replacement: the same agentic-coding capabilities, delivered as a single static Rust binary. Today Simard implements the core engineer/meeting/goal-curation/improvement-curation/gym/OODA loops natively, but does not yet cover the full amplihack command and skill surface — see the parity issues [#896](https://github.com/rysweet/Simard/issues/896), [#897](https://github.com/rysweet/Simard/issues/897), and [#898](https://github.com/rysweet/Simard/issues/898).
+Simard is a terminal-native engineering identity, written in Rust, that drives and curates agentic coding systems. She composes work over a pluggable set of agent base types — including `local-harness`, `terminal-shell`, `rusty-clawd`, and `copilot-sdk` in v1, with Microsoft Agent Framework, Claude Code SDK, and amplihack / amplihack-rs as candidate substrates — and exposes five operating modes (engineer, meeting, goal-curation, improvement-curation, gym). For the full design contract, see [Specs/ProductArchitecture.md](../Specs/ProductArchitecture.md).
 
 `simard` is the canonical operator-facing CLI.
 
@@ -32,7 +32,6 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [Simard CLI reference](./reference/simard-cli.md) - Look up the shipped command tree, `engineer read` audit surface, and compatibility mappings.
 - [Runtime contracts reference](./reference/runtime-contracts.md) - Look up executable contracts, state-root guarantees, and the shipped engineer audit readback semantics.
 - [Base type adapters reference](./reference/base-type-adapters.md) - Look up the pluggable agent execution substrates, their capabilities, and topology support.
-- [Bridge wire protocol reference](./reference/bridge-wire-protocol.md) - Look up the JSON-line protocol for Rust-Python bridge communication.
 - [Meeting backend API reference](./reference/meeting-backend-api.md) - Rust API for the unified MeetingBackend.
 - [Concept: truthful runtime metadata](./concepts/truthful-runtime-metadata.md) - Read the design rationale behind the stricter runtime contract.
 
@@ -97,7 +96,6 @@ If you are changing architecture, start with the [architecture overview](./archi
 
 - [Architecture overview](./architecture/overview.md) - System diagram, core principles, component descriptions, and module map.
 - [Agent composition](./architecture/agent-composition.md) - How Simard composes subordinate agents with goal assignment, supervision, and crash recovery.
-- [Bridge pattern](./architecture/bridge-pattern.md) - Rust-Python subprocess bridges with circuit breaker fault tolerance.
 - [Cognitive memory](./architecture/cognitive-memory.md) - Six-type memory model, session lifecycle mapping, and hive mind integration.
 - [Implementation plan](./architecture/implementation-plan.md) - Phased roadmap with current status and quality gates.
 - [OODA meeting handoff integration](./architecture/ooda-meeting-handoff-integration.md) - Wire meeting handoffs into the OODA daemon and seed default goals (Issues #157, #158).
