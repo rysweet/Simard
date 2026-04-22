@@ -287,3 +287,4 @@ cargo run -- gym run repo-exploration-local
 ## License
 
 Private repository. See [rysweet/Simard](https://github.com/rysweet/Simard).
+<!-- workflow smoke test - safe to merge -->
