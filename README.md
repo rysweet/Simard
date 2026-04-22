@@ -1,149 +1,60 @@
 # Simard
 
-An autonomous engineer who drives and curates agentic coding systems.
+A terminal-native engineering agent who drives and curates agentic coding systems.
 
 Named after [Suzanne Simard](https://en.wikipedia.org/wiki/Suzanne_Simard), the scientist who discovered how trees communicate through underground fungal networks.
 
 ## What is Simard?
 
-Simard is a terminal-native engineering agent built in Rust. She operates like a disciplined software engineer: she understands codebases, works through tasks in explicit sessions, preserves useful memory, evaluates herself against benchmarks, and improves through structured review loops.
+Simard is a focused engineering runtime, written in Rust, that operates like a disciplined software engineer. She inspects local repositories, forms bounded plans with explicit verification, executes through terminal actions, records evidence, and improves through reviewable loops.
 
-### Relationship to Python amplihack
+Simard is **not** a wrapper around any single agent framework. She is a terminal-native identity with her own runtime, prompt assets, memory layers, and benchmark gym, and she composes work over a pluggable set of agent **base types** — backend execution substrates that include local harnesses, the GitHub Copilot SDK, Claude Code SDK, Microsoft Agent Framework, and the amplihack / amplihack-rs goal-seeking agent. Each substrate is one option among several; none of them define what Simard is.
 
-Simard is the **Rust successor to [Python amplihack](https://github.com/rysweet/amplihack)**. The intent is for Simard to become a drop-in replacement: the same agentic-coding capabilities, delivered as a single static Rust binary, with no Python runtime or `pip install` step required.
+For the full design contract, see [Specs/ProductArchitecture.md](Specs/ProductArchitecture.md).
 
-That goal is **not yet fully met**. Today Simard implements the core engineer/meeting/goal-curation/improvement-curation/gym/OODA loops natively in Rust, but does not yet cover the full amplihack command surface (37 slash commands) or skill catalog (117 skills). Parity work is tracked in the [parity matrix](docs/reference/parity-matrix.md) and in issues [#896](https://github.com/rysweet/Simard/issues/896), [#897](https://github.com/rysweet/Simard/issues/897), and [#898](https://github.com/rysweet/Simard/issues/898).
+## Operating Modes
 
-If you are a current Python amplihack user: see [Migrating from Python amplihack](#migrating-from-python-amplihack) below for the command map.
+Simard exposes five user-visible operating modes, each with its own success criteria, memory writes, and allowed actions. All five have shipped a v1 slice; honest scope notes are listed below.
 
-## Install
+| Mode | Purpose | v1 status |
+|------|---------|-----------|
+| **Engineer** | Accept a concrete task, inspect the repo, form a bounded plan, execute through terminal actions, and report outcomes with evidence. | v1 shipped — read-only repo inspection plus one narrow structured edit on a clean repo; bounded `engineer terminal*` session surfaces and the separate repo-grounded `engineer run` / `engineer read` audit companion are operator-visible. |
+| **Meeting** | Help humans think, decide, and record architecture or planning outcomes without silently drifting into implementation. | v1 shipped — CLI REPL and durable meeting record readback; explicit handoff into engineer mode through a shared `state-root`. |
+| **Goal-curation** | Curate a durable backlog and an explicit active top-5 goal list without pretending implementation work happened. | v1 shipped — durable goal register with active/backlog separation and read-only inspection. |
+| **Improvement-curation** | Consume persisted review findings, require explicit operator approval or deferral, and promote accepted improvements into durable priorities without mutating code. | v1 shipped — approve / defer / promote workflow with read-only state inspection. |
+| **Gym** | Run controlled benchmark tasks to measure capability, regressions, and improvement over time. | v1 shipped — benchmark scenarios, suite runs, and result comparison; benchmark catalog continues to grow. |
 
-### With npx (easiest)
+These are different operating modes, not cosmetic personas. Each mode owns its own command tree under the `simard` binary.
 
-Requires [GitHub CLI](https://cli.github.com/) authenticated with repo access.
+## Agent Base Types
 
-```bash
-# Run Simard directly
-npx github:rysweet/Simard meeting repl
+An agent base type is the underlying execution substrate an identity can build on. It is **not** the identity itself. Simard composes work over a pluggable set of base types and refuses to instantiate identities on substrates that cannot satisfy required capabilities.
 
-# Install the binary locally (~/.simard/bin)
-npx github:rysweet/Simard install
-```
+### Builtin base types (v1)
 
-### From GitHub Releases
+| Identifier | Description | Availability |
+|------------|-------------|--------------|
+| `local-harness` | In-process test harness for development and the truthful default for v1 aliases. | Always available |
+| `terminal-shell` | Local PTY-backed shell execution path. | Always available |
+| `rusty-clawd` | RustyClawd LLM + tool-calling session backend. | Requires `ANTHROPIC_API_KEY` |
+| `copilot-sdk` | Explicit alias of the local single-process harness implementation while the Copilot SDK adapter matures. | Always available |
 
-```bash
-# Download the latest release binary
-curl -L https://github.com/rysweet/Simard/releases/latest/download/simard-linux-x86_64.tar.gz | tar xz
-chmod +x simard
-sudo mv simard /usr/local/bin/
-```
+Unsupported or unregistered base-type / topology pairs fail visibly at bootstrap. v1 aliases continue to report the honest `local-harness` implementation identity behind them.
 
-### From Source
+### Candidate substrates
 
-```bash
-git clone https://github.com/rysweet/Simard.git
-cd Simard
-cargo build --release
-# Binary at target/release/simard
-```
+The architecture is designed for additional candidate substrates, each treated as one option among several rather than the definition of Simard:
 
-### With Cargo
+- Microsoft Agent Framework
+- GitHub Copilot SDK (full adapter, beyond the v1 alias)
+- Claude Code SDK
+- amplihack / amplihack-rs goal-seeking agent and its OODA loop
 
-```bash
-cargo install --git https://github.com/rysweet/Simard.git
-```
-
-## Migrating from Python amplihack
-
-Simard's CLI is grouped by product mode rather than slash commands. Common amplihack workflows map as follows. Items marked **TBD** are not yet implemented natively in Simard — see the [parity audit (#898)](https://github.com/rysweet/Simard/issues/898) for status and to request prioritization.
-
-| Python amplihack                  | Simard equivalent                                     | Status            |
-| --------------------------------- | ----------------------------------------------------- | ----------------- |
-| `/dev <task>`                     | `simard engineer terminal <topology> <objective>`     | parity            |
-| `/improve <area>`                 | `simard improvement-curation run <base> <topo> <obj>` | parity            |
-| `/analyze <target>`               | `simard engineer read <topology>` + meeting review    | partial           |
-| `/investigation <topic>`          | `simard meeting repl <topic>`                         | partial           |
-| `/customize`                      | direct edits to `prompt_assets/` + recompile          | partial           |
-| skills auto-routing (117 skills)  | curated set of native Rust subcommands                | partial — see #898 |
-| `amplihack install`               | `simard install` or `npx github:rysweet/Simard install` | parity          |
-
-If your workflow is not covered above, please open an issue referencing #898 so it lands in the parity matrix.
-
-## Quick Start
-
-```bash
-# Run an engineering session
-simard engineer run single-process /path/to/repo "improve test coverage"
-
-# Have a meeting with Simard
-simard meeting repl "weekly sync"
-
-# List gym benchmarks
-simard gym list
-
-# Run a benchmark
-simard gym run repo-exploration-local
-```
-
-## CLI Commands
-
-### Engineer Mode
-```bash
-simard engineer run <topology> <workspace-root> <objective>
-simard engineer terminal <topology> <objective>        # interactive PTY
-simard engineer copilot-submit <topology>              # submit to copilot
-simard engineer read <topology>                        # read last session
-```
-
-### Meeting Mode
-```bash
-simard meeting run <base-type> <topology> <objective>
-simard meeting repl <topic>                            # interactive REPL
-simard meeting read <base-type> <topology>             # read last meeting
-```
-
-### Goal Curation
-```bash
-simard goal-curation run <base-type> <topology> <objective>
-simard goal-curation read <base-type> <topology>
-```
-
-### Gym Benchmarks
-```bash
-simard gym list                        # list all scenarios
-simard gym run <scenario-id>           # run a scenario
-simard gym compare <scenario-id>       # compare results
-simard gym run-suite <suite-id>        # run a suite
-```
-
-### Self-Management
-```bash
-simard update                          # self-update to the latest release
-simard install                         # install binary to ~/.simard/bin
-```
-
-### Other Commands
-```bash
-simard improvement-curation run <base-type> <topology> <objective>
-simard review run <base-type> <topology> <objective>
-simard bootstrap run <identity> <base-type> <topology> <objective>
-```
-
-## Base Types
-
-Simard delegates work to agent runtimes through base types:
-
-| Base Type | Description | Status |
-|-----------|-------------|--------|
-| `rusty-clawd` | RustyClawd SDK — LLM + tool calling pipeline | Real (needs `ANTHROPIC_API_KEY`) |
-| `copilot-sdk` | amplihack copilot via PTY terminal | Real (needs `amplihack copilot`) |
-| `claude-agent-sdk` | Claude Code CLI as subprocess agent | Real (needs `claude` binary) |
-| `ms-agent-framework` | Microsoft Agent Framework | Real (needs `ms-agent-framework` or `python -m microsoft_agent_framework`) |
-| `local-harness` | Test adapter for development | Always available |
-| `terminal-shell` | Local PTY shell execution | Always available |
+Each candidate base type is added through a Rust adapter that declares an explicit capability contract (prompt override, tool / skill invocation, streaming, memory hooks, reflection, subagent spawning, normalized error classes). Identities declare required capabilities; the runtime refuses to instantiate identities on adapters that cannot satisfy them.
 
 ## Architecture
+
+The autonomous OODA daemon observes signals (issues, gym scores, meeting handoffs, memory), ranks priorities, decides on actions, and dispatches work through the same base-type adapters that operator-driven sessions use.
 
 ```mermaid
 graph TB
@@ -190,17 +101,11 @@ graph TB
     end
 
     subgraph BaseTypes["Agent Base Types"]
-        rustyclawd["RustyClawd"]
-        copilot["Copilot"]
-        claude["Claude SDK"]
-        ms_agent["MS Agent"]
-        harness["Test Harness"]
-    end
-
-    subgraph Bridges["Python Bridges (subprocess)"]
-        mem_bridge["Memory Bridge<br/>cognitive memory"]
-        know_bridge["Knowledge Bridge<br/>RAG · packs"]
-        gym_bridge["Gym Bridge<br/>scenario eval"]
+        harness["local-harness"]
+        shell["terminal-shell"]
+        rustyclawd["rusty-clawd"]
+        copilot["copilot-sdk"]
+        candidates["Candidate substrates<br/>MS Agent Framework · Claude Code SDK · amplihack-rs"]
     end
 
     subgraph Memory["Cognitive Memory"]
@@ -228,24 +133,18 @@ graph TB
     cmd_eng --> eng_loop
     cmd_meet --> meet_repl
     cmd_dash --> Dashboard
-    cmd_gym --> gym_bridge
+    cmd_gym --> self_imp
 
     act --> Actions
     adv_goal --> session
     run_eng --> eng_loop
     run_imp --> self_imp
-    run_gym --> gym_bridge
-    consol --> mem_bridge
-    research --> know_bridge
 
     eng_loop --> session
     meet_repl --> session
-    self_imp --> gym_bridge
-
     session --> bootstrap --> identity
     session --> BaseTypes
 
-    mem_bridge --> Memory
     meet_repl -.->|handoff| handoff_files
     eng_loop -.->|reads| handoff_files
     Daemon -.->|reads/writes| goals_store
@@ -257,16 +156,129 @@ graph TB
     style Dashboard fill:#4a3a1a,stroke:#a84,color:#fff
 ```
 
+The runtime ships as a single Rust binary. There is no Python runtime requirement and no `pip install` step.
+
+## Install
+
+### With npx (easiest)
+
+Requires [GitHub CLI](https://cli.github.com/) authenticated with repo access.
+
+```bash
+# Run Simard directly
+npx github:rysweet/Simard meeting repl
+
+# Install the binary locally (~/.simard/bin)
+npx github:rysweet/Simard install
+```
+
+### From GitHub Releases
+
+```bash
+# Download the latest release binary
+curl -L https://github.com/rysweet/Simard/releases/latest/download/simard-linux-x86_64.tar.gz | tar xz
+chmod +x simard
+sudo mv simard /usr/local/bin/
+```
+
+### From Source
+
+```bash
+git clone https://github.com/rysweet/Simard.git
+cd Simard
+cargo build --release
+# Binary at target/release/simard
+```
+
+### With Cargo
+
+```bash
+cargo install --git https://github.com/rysweet/Simard.git
+```
+
+## Quick Start
+
+```bash
+# Run an engineering session
+simard engineer run single-process /path/to/repo "improve test coverage"
+
+# Have a meeting with Simard
+simard meeting repl "weekly sync"
+
+# List gym benchmarks
+simard gym list
+
+# Run a benchmark
+simard gym run repo-exploration-local
+```
+
+## CLI Commands
+
+### Engineer mode
+```bash
+simard engineer run <topology> <workspace-root> <objective>
+simard engineer terminal <topology> <objective>        # interactive PTY
+simard engineer copilot-submit <topology>              # bounded local Copilot slice
+simard engineer read <topology>                        # read last session
+```
+
+### Meeting mode
+```bash
+simard meeting run <base-type> <topology> <objective>
+simard meeting repl <topic>                            # interactive REPL
+simard meeting read <base-type> <topology>             # read last meeting
+```
+
+### Goal-curation mode
+```bash
+simard goal-curation run <base-type> <topology> <objective>
+simard goal-curation read <base-type> <topology>
+```
+
+### Improvement-curation mode
+```bash
+simard improvement-curation run <base-type> <topology> <objective>
+```
+
+### Gym mode
+```bash
+simard gym list                        # list all scenarios
+simard gym run <scenario-id>           # run a scenario
+simard gym compare <scenario-id>       # compare results
+simard gym run-suite <suite-id>        # run a suite
+```
+
+### Self-management
+```bash
+simard update                          # self-update to the latest release
+simard install                         # install binary to ~/.simard/bin
+```
+
+### Other commands
+```bash
+simard review run <base-type> <topology> <objective>
+simard bootstrap run <identity> <base-type> <topology> <objective>
+```
 
 ## Configuration
 
 | Environment Variable | Purpose |
 |---------------------|---------|
-| `ANTHROPIC_API_KEY` | API key for RustyClawd base type |
-| `CLAUDE_CODE_BIN` | Path to claude binary (default: `claude`) |
-| `MS_AGENT_FRAMEWORK_BIN` | Path to MS Agent Framework binary |
-| `SIMARD_COPILOT_GH_ACCOUNT` | GitHub account for copilot auth (e.g., `rysweet_microsoft`) |
+| `ANTHROPIC_API_KEY` | API key for the `rusty-clawd` base type |
+| `SIMARD_LLM_PROVIDER` | Override the LLM provider selected from `~/.simard/config.toml` |
+| `SIMARD_COPILOT_GH_ACCOUNT` | GitHub account for Copilot auth (e.g., `rysweet_microsoft`) |
 | `SIMARD_COMMIT_GH_ACCOUNT` | GitHub account for git commits (e.g., `rysweet`) |
+
+Runtime configuration lives at `~/.simard/config.toml`. The runtime fails loudly when required configuration is missing — there are no silent defaults.
+
+## Repository Layout
+
+- `src/` — Rust runtime, CLI, modes, base-type adapters, memory layers, gym
+- `prompt_assets/` — versioned prompt files kept separate from runtime code
+- `Specs/ProductArchitecture.md` — the product architecture and design contract
+- `docs/` — operator and contributor documentation (mkdocs)
+- `tests/` — integration tests
+- `scripts/` — developer tooling (low-space builds, disk reclamation, etc.)
 
 ## Development
 
@@ -283,6 +295,19 @@ cargo fmt --all
 # Run a gym benchmark
 cargo run -- gym run repo-exploration-local
 ```
+
+Pre-commit and pre-push hooks enforce `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, and `cargo test --all-features --locked`.
+
+## Documentation
+
+- [Product architecture (PRD)](Specs/ProductArchitecture.md)
+- [Documentation index](docs/index.md)
+- [Architecture overview](docs/architecture/overview.md)
+- [Simard CLI reference](docs/reference/simard-cli.md)
+- [Runtime contracts reference](docs/reference/runtime-contracts.md)
+- [Base type adapters reference](docs/reference/base-type-adapters.md)
+- [Agent composition](docs/architecture/agent-composition.md)
+- [Truthful runtime metadata](docs/concepts/truthful-runtime-metadata.md)
 
 ## License
 
