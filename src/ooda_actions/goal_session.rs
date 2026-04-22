@@ -6,7 +6,6 @@ use crate::goal_curation::{GoalProgress, update_goal_progress};
 use crate::ooda_loop::{ActionOutcome, OodaState, PlannedAction};
 
 use super::make_outcome;
-use super::verification::{assess_progress_from_outcome, verify_claimed_actions};
 
 /// Maximum LLM response size accepted by [`parse_goal_action`] (64 KiB).
 ///
@@ -34,6 +33,10 @@ pub(super) enum GoalAction {
         task: String,
         #[serde(default)]
         files: Vec<String>,
+        /// Optional GitHub issue number this work advances. When present,
+        /// the engineer's task description is enriched with the issue body.
+        #[serde(default)]
+        issue: Option<u64>,
     },
     /// Skip this cycle for the supplied human-readable `reason`.
     Noop { reason: String },
@@ -41,6 +44,38 @@ pub(super) enum GoalAction {
     AssessOnly {
         assessment: String,
         progress_pct: u8,
+    },
+    /// Create a new GitHub issue against `rysweet/Simard` (or `repo` when
+    /// supplied). Orchestrator-owned: no engineer subprocess needed.
+    GhIssueCreate {
+        title: String,
+        body: String,
+        #[serde(default)]
+        repo: Option<String>,
+        #[serde(default)]
+        labels: Vec<String>,
+    },
+    /// Add a comment to an existing GitHub issue.
+    GhIssueComment {
+        issue: u64,
+        body: String,
+        #[serde(default)]
+        repo: Option<String>,
+    },
+    /// Close an existing GitHub issue with an optional comment explaining why.
+    GhIssueClose {
+        issue: u64,
+        #[serde(default)]
+        comment: Option<String>,
+        #[serde(default)]
+        repo: Option<String>,
+    },
+    /// Add a comment to an existing GitHub pull request.
+    GhPrComment {
+        pr: u64,
+        body: String,
+        #[serde(default)]
+        repo: Option<String>,
     },
 }
 
@@ -135,6 +170,14 @@ fn action_is_valid(action: &GoalAction) -> bool {
         }
         GoalAction::Noop { .. } => true,
         GoalAction::AssessOnly { progress_pct, .. } => *progress_pct <= 100,
+        GoalAction::GhIssueCreate { title, body, .. } => {
+            !title.trim().is_empty() && !title.contains('\n') && !body.trim().is_empty()
+        }
+        GoalAction::GhIssueComment { issue, body, .. } => {
+            *issue > 0 && !body.trim().is_empty()
+        }
+        GoalAction::GhIssueClose { issue, .. } => *issue > 0,
+        GoalAction::GhPrComment { pr, body, .. } => *pr > 0 && !body.trim().is_empty(),
     }
 }
 
@@ -433,57 +476,123 @@ pub(super) fn advance_goal_with_session(
                         action: parsed,
                     }
                 }
-                None => {
-                    // Legacy fallback: no structured JSON action found in
-                    // the LLM response. Fall back to PROGRESS-line scraping
-                    // and claim verification, but mark the outcome detail
-                    // so operators can see the parser failed.
-                    eprintln!(
-                        "[simard] WARN: goal-action parse failed for '{}'; falling back to legacy assessment path",
-                        goal.id,
-                    );
-
-                    let new_progress = assess_progress_from_outcome(&outcome, &goal.status);
-                    let verification = verify_claimed_actions(&outcome.execution_summary);
-                    let verified_count = verification.iter().filter(|v| v.verified).count();
-                    let claimed_count = verification.len();
-
-                    let _ = update_goal_progress(
-                        &mut state.active_goals,
-                        &goal.id,
-                        new_progress.clone(),
-                    );
-
-                    if !verification.is_empty() {
-                        eprintln!(
-                            "[simard] OODA action verification for '{}': {}/{} claims verified",
-                            goal.id, verified_count, claimed_count,
-                        );
-                        for v in &verification {
-                            eprintln!(
-                                "[simard]   {} {}: {}",
-                                if v.verified { "✓" } else { "✗" },
-                                v.claim_type,
-                                v.detail,
-                            );
-                        }
+                Some(GoalAction::GhIssueCreate {
+                    ref title,
+                    ref body,
+                    ref repo,
+                    ref labels,
+                }) => {
+                    let repo_arg = repo
+                        .as_deref()
+                        .unwrap_or("rysweet/Simard");
+                    let result = dispatch_gh_issue_create(repo_arg, title, body, labels);
+                    let detail = match result {
+                        Ok(ref url) => format!(
+                            "gh_issue_create succeeded for goal '{}': {} (title={})",
+                            goal.id,
+                            url,
+                            truncate_for_outcome(title),
+                        ),
+                        Err(ref e) => format!(
+                            "gh_issue_create FAILED for goal '{}': {} (title={})",
+                            goal.id,
+                            e,
+                            truncate_for_outcome(title),
+                        ),
+                    };
+                    eprintln!("[simard] OODA goal-action {detail}");
+                    GoalSessionResult {
+                        outcome: make_outcome(action, result.is_ok(), detail),
+                        action: parsed,
                     }
-
+                }
+                Some(GoalAction::GhIssueComment {
+                    issue,
+                    ref body,
+                    ref repo,
+                }) => {
+                    let repo_arg = repo.as_deref().unwrap_or("rysweet/Simard");
+                    let result = dispatch_gh_issue_comment(repo_arg, issue, body);
+                    let detail = match result {
+                        Ok(ref url) => format!(
+                            "gh_issue_comment succeeded for goal '{}': issue #{issue} {url}",
+                            goal.id,
+                        ),
+                        Err(ref e) => format!(
+                            "gh_issue_comment FAILED for goal '{}': issue #{issue}: {e}",
+                            goal.id,
+                        ),
+                    };
+                    eprintln!("[simard] OODA goal-action {detail}");
+                    GoalSessionResult {
+                        outcome: make_outcome(action, result.is_ok(), detail),
+                        action: parsed,
+                    }
+                }
+                Some(GoalAction::GhIssueClose {
+                    issue,
+                    ref comment,
+                    ref repo,
+                }) => {
+                    let repo_arg = repo.as_deref().unwrap_or("rysweet/Simard");
+                    let result = dispatch_gh_issue_close(repo_arg, issue, comment.as_deref());
+                    let detail = match result {
+                        Ok(()) => format!(
+                            "gh_issue_close succeeded for goal '{}': closed issue #{issue}",
+                            goal.id,
+                        ),
+                        Err(ref e) => format!(
+                            "gh_issue_close FAILED for goal '{}': issue #{issue}: {e}",
+                            goal.id,
+                        ),
+                    };
+                    eprintln!("[simard] OODA goal-action {detail}");
+                    GoalSessionResult {
+                        outcome: make_outcome(action, result.is_ok(), detail),
+                        action: parsed,
+                    }
+                }
+                Some(GoalAction::GhPrComment {
+                    pr,
+                    ref body,
+                    ref repo,
+                }) => {
+                    let repo_arg = repo.as_deref().unwrap_or("rysweet/Simard");
+                    let result = dispatch_gh_pr_comment(repo_arg, pr, body);
+                    let detail = match result {
+                        Ok(ref url) => format!(
+                            "gh_pr_comment succeeded for goal '{}': pr #{pr} {url}",
+                            goal.id,
+                        ),
+                        Err(ref e) => format!(
+                            "gh_pr_comment FAILED for goal '{}': pr #{pr}: {e}",
+                            goal.id,
+                        ),
+                    };
+                    eprintln!("[simard] OODA goal-action {detail}");
+                    GoalSessionResult {
+                        outcome: make_outcome(action, result.is_ok(), detail),
+                        action: parsed,
+                    }
+                }
+                None => {
+                    // FAIL LOUD per PHILOSOPHY.md: when the LLM returns prose
+                    // instead of the required JSON object, this is a planning
+                    // failure. We do NOT fall back to PROGRESS-line scraping —
+                    // that masked broken planning for months. Surface the
+                    // failure so the cooldown machinery can demote this goal.
+                    let raw = truncate_for_outcome(&outcome.execution_summary);
                     eprintln!(
-                        "[simard] OODA session result: advance-goal '{}': {}",
-                        goal.id, outcome.execution_summary
+                        "[simard] OODA goal-action PARSE FAILED for '{}': LLM returned non-JSON response: {}",
+                        goal.id, raw,
                     );
-
                     let detail = format!(
-                        "goal-action parse failed; fell back to legacy assessment for goal '{}' at {} (evidence={}, verified={}/{})",
+                        "goal-action parse failed for goal '{}': LLM did not emit a recognised JSON action (one of spawn_engineer / noop / assess_only / gh_issue_create / gh_issue_comment / gh_issue_close / gh_pr_comment). Raw response head: {}",
                         goal.id,
-                        new_progress,
-                        outcome.evidence.len(),
-                        verified_count,
-                        claimed_count,
+                        raw,
                     );
                     GoalSessionResult {
-                        outcome: make_outcome(action, true, detail),
+                        outcome: make_outcome(action, false, detail),
                         action: None,
                     }
                 }
@@ -498,6 +607,89 @@ pub(super) fn advance_goal_with_session(
             action: None,
         },
     }
+}
+
+// ─── Native gh CLI dispatchers ─────────────────────────────────────────
+//
+// Orchestrator-owned actions: Simard executes these directly instead of
+// spawning an engineer subprocess. This is the right boundary because each
+// action is a single bounded gh CLI call with a deterministic outcome —
+// engineer subprocesses are reserved for code-mutating work that needs the
+// inspect→plan→execute→verify→persist pipeline.
+
+/// Maximum bytes accepted from any single argv string passed to `gh`.
+/// Keeps a malformed/runaway LLM response from constructing a giant CLI.
+const GH_ARG_MAX_BYTES: usize = 32 * 1024;
+
+fn run_gh(args: &[&str]) -> Result<String, String> {
+    for a in args {
+        if a.len() > GH_ARG_MAX_BYTES {
+            return Err(format!(
+                "gh argument exceeds {GH_ARG_MAX_BYTES} bytes (got {})",
+                a.len()
+            ));
+        }
+    }
+    let output = std::process::Command::new("gh")
+        .args(args)
+        .output()
+        .map_err(|e| format!("failed to execute gh: {e}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(format!(
+            "gh exited with status {}: {stderr}",
+            output.status.code().unwrap_or(-1)
+        ))
+    }
+}
+
+fn dispatch_gh_issue_create(
+    repo: &str,
+    title: &str,
+    body: &str,
+    labels: &[String],
+) -> Result<String, String> {
+    let mut args: Vec<&str> = vec!["issue", "create", "--repo", repo, "--title", title, "--body", body];
+    let label_csv;
+    if !labels.is_empty() {
+        label_csv = labels.join(",");
+        args.push("--label");
+        args.push(&label_csv);
+    }
+    run_gh(&args)
+}
+
+fn dispatch_gh_issue_comment(repo: &str, issue: u64, body: &str) -> Result<String, String> {
+    let issue_str = issue.to_string();
+    run_gh(&[
+        "issue", "comment", &issue_str, "--repo", repo, "--body", body,
+    ])
+}
+
+fn dispatch_gh_issue_close(
+    repo: &str,
+    issue: u64,
+    comment: Option<&str>,
+) -> Result<(), String> {
+    let issue_str = issue.to_string();
+    if let Some(body) = comment
+        && !body.trim().is_empty()
+    {
+        let _ = run_gh(&[
+            "issue", "comment", &issue_str, "--repo", repo, "--body", body,
+        ])?;
+    }
+    let _ = run_gh(&["issue", "close", &issue_str, "--repo", repo])?;
+    Ok(())
+}
+
+fn dispatch_gh_pr_comment(repo: &str, pr: u64, body: &str) -> Result<String, String> {
+    let pr_str = pr.to_string();
+    run_gh(&[
+        "pr", "comment", &pr_str, "--repo", repo, "--body", body,
+    ])
 }
 
 #[cfg(test)]
@@ -620,7 +812,7 @@ mod tests {
         let response = r#"{"action": "spawn_engineer", "task": "fix the auth bug", "files": ["src/auth.rs", "src/lib.rs"]}"#;
         let parsed = parse_goal_action(response).expect("clean spawn_engineer JSON must parse");
         match parsed {
-            GoalAction::SpawnEngineer { task, files } => {
+            GoalAction::SpawnEngineer { task, files, .. } => {
                 assert_eq!(task, "fix the auth bug");
                 assert_eq!(
                     files,
@@ -636,7 +828,7 @@ mod tests {
         let response = r#"{"action": "spawn_engineer", "task": "do the thing"}"#;
         let parsed = parse_goal_action(response).expect("missing files should default to empty");
         match parsed {
-            GoalAction::SpawnEngineer { task, files } => {
+            GoalAction::SpawnEngineer { task, files, .. } => {
                 assert_eq!(task, "do the thing");
                 assert!(files.is_empty(), "files should default to empty Vec");
             }
@@ -921,6 +1113,7 @@ Hope that helps!"#;
         let c = GoalAction::SpawnEngineer {
             task: "x".into(),
             files: vec![],
+            issue: None,
         };
         assert_ne!(a, b);
         assert_ne!(b, c);

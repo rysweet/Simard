@@ -8,7 +8,6 @@ mod advance_goal;
 mod goal_session;
 mod session;
 mod simple_actions;
-mod verification;
 
 #[cfg(test)]
 pub(crate) mod test_helpers;
