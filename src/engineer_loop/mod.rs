@@ -52,7 +52,12 @@ pub(crate) const EXECUTION_SCOPE: &str = "local-only";
 pub(crate) const MAX_CARRIED_MEETING_DECISIONS: usize = 3;
 pub(crate) const GIT_COMMAND_TIMEOUT_SECS: u64 = 60;
 pub(crate) const CARGO_COMMAND_TIMEOUT_SECS: u64 = 120;
-pub(crate) const SHELL_COMMAND_ALLOWLIST: &[&str] = &["cargo", "git", "gh", "rustfmt", "clippy"];
+pub(crate) const SHELL_COMMAND_ALLOWLIST: &[&str] = &[
+    // Mutating / build / VCS — produce real work
+    "cargo", "git", "gh", "rustfmt", "clippy",
+    // Read-only inspection — safe for engineers to use during planning
+    "ls", "cat", "grep", "rg", "find", "wc", "head", "tail", "jq",
+];
 
 pub(crate) const CLEARED_GIT_ENV_VARS: &[&str] = &[
     "GIT_DIR",
