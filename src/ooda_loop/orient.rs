@@ -1,16 +1,29 @@
 //! Orient phase: rank goals by urgency, informed by environment context.
 
+use std::collections::HashMap;
+
 use crate::error::SimardResult;
 use crate::goal_curation::{GoalBoard, GoalProgress};
 
 use super::{Observation, Priority};
+
+/// Urgency penalty per consecutive failure on a goal. Five failures in a
+/// row drives any goal's urgency to 0 (deprioritised below everything else).
+const FAILURE_PENALTY_PER_CONSECUTIVE: f64 = 0.2;
 
 /// Orient: rank goals by urgency, informed by environment context.
 ///
 /// Base urgency: Blocked > not-started > in-progress > completed.
 /// Environment signals (dirty working tree, open issues mentioning a goal)
 /// can boost a goal's urgency so the OODA loop prioritises actionable work.
-pub fn orient(observation: &Observation, goals: &GoalBoard) -> SimardResult<Vec<Priority>> {
+/// Goals with consecutive failures are demoted by
+/// `FAILURE_PENALTY_PER_CONSECUTIVE * count` (clamped to ≥0) so the daemon
+/// stops burning budget retrying the same broken target.
+pub fn orient(
+    observation: &Observation,
+    goals: &GoalBoard,
+    failure_counts: &HashMap<String, u32>,
+) -> SimardResult<Vec<Priority>> {
     let env = &observation.environment;
     let has_dirty_tree = !env.git_status.is_empty();
 
@@ -43,6 +56,18 @@ pub fn orient(observation: &Observation, goals: &GoalBoard) -> SimardResult<Vec<
             if has_dirty_tree && matches!(g.status, GoalProgress::InProgress { .. }) {
                 urgency = (urgency + 0.05).min(1.0);
                 reason = format!("{reason}; dirty working tree");
+            }
+
+            // Demote chronically failing goals.
+            if let Some(&count) = failure_counts.get(&g.id)
+                && count > 0
+            {
+                let penalty = FAILURE_PENALTY_PER_CONSECUTIVE * count as f64;
+                let demoted = (urgency - penalty).max(0.0);
+                reason = format!(
+                    "{reason}; {count} consecutive failure(s) → urgency {urgency:.2} − {penalty:.2}"
+                );
+                urgency = demoted;
             }
 
             Priority {
@@ -149,7 +174,7 @@ mod tests {
         ];
         let board = make_board_with_goals(goals);
         let obs = make_observation(EnvironmentSnapshot::default());
-        let priorities = orient(&obs, &board).unwrap();
+        let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
         assert_eq!(priorities[0].goal_id, "blocked");
         assert!(priorities[0].urgency > priorities[1].urgency);
     }
@@ -167,7 +192,7 @@ mod tests {
         }];
         let board = make_board_with_goals(goals);
         let obs = make_observation(EnvironmentSnapshot::default());
-        let priorities = orient(&obs, &board).unwrap();
+        let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
         assert!(
             priorities[0].urgency < f64::EPSILON,
             "completed goals should have zero urgency"
@@ -198,7 +223,7 @@ mod tests {
         ];
         let board = make_board_with_goals(goals);
         let obs = make_observation(EnvironmentSnapshot::default());
-        let priorities = orient(&obs, &board).unwrap();
+        let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
         let new_prio = priorities.iter().find(|p| p.goal_id == "new").unwrap();
         let wip_prio = priorities.iter().find(|p| p.goal_id == "wip").unwrap();
         assert!(new_prio.urgency > wip_prio.urgency);
@@ -228,7 +253,7 @@ mod tests {
         ];
         let board = make_board_with_goals(goals);
         let obs = make_observation(EnvironmentSnapshot::default());
-        let priorities = orient(&obs, &board).unwrap();
+        let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
         let early = priorities.iter().find(|p| p.goal_id == "early").unwrap();
         let late = priorities.iter().find(|p| p.goal_id == "late").unwrap();
         assert!(early.urgency > late.urgency);
@@ -253,8 +278,8 @@ mod tests {
         };
         let env_without = EnvironmentSnapshot::default();
 
-        let prio_with = orient(&make_observation(env_with_issue), &board).unwrap();
-        let prio_without = orient(&make_observation(env_without), &board).unwrap();
+        let prio_with = orient(&make_observation(env_with_issue), &board, &std::collections::HashMap::new()).unwrap();
+        let prio_without = orient(&make_observation(env_without), &board, &std::collections::HashMap::new()).unwrap();
         assert!(prio_with[0].urgency > prio_without[0].urgency);
         assert!(prio_with[0].reason.contains("open issue"));
     }
@@ -277,8 +302,8 @@ mod tests {
             recent_commits: Vec::new(),
         };
         let env_clean = EnvironmentSnapshot::default();
-        let prio_dirty = orient(&make_observation(env_dirty), &board).unwrap();
-        let prio_clean = orient(&make_observation(env_clean), &board).unwrap();
+        let prio_dirty = orient(&make_observation(env_dirty), &board, &std::collections::HashMap::new()).unwrap();
+        let prio_clean = orient(&make_observation(env_clean), &board, &std::collections::HashMap::new()).unwrap();
         assert!(prio_dirty[0].urgency > prio_clean[0].urgency);
         assert!(prio_dirty[0].reason.contains("dirty"));
     }
@@ -305,7 +330,7 @@ mod tests {
             pending_improvements: Vec::new(),
             environment: EnvironmentSnapshot::default(),
         };
-        let priorities = orient(&obs, &board).unwrap();
+        let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
         assert!(
             priorities.iter().any(|p| p.goal_id == "__memory__"),
             "should add memory consolidation priority"
@@ -325,7 +350,7 @@ mod tests {
             pending_improvements: Vec::new(),
             environment: EnvironmentSnapshot::default(),
         };
-        let priorities = orient(&obs, &board).unwrap();
+        let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
         assert!(
             !priorities.iter().any(|p| p.goal_id == "__memory__"),
             "should not add memory priority at exactly 100"
@@ -342,7 +367,7 @@ mod tests {
             pending_improvements: Vec::new(),
             environment: EnvironmentSnapshot::default(),
         };
-        let priorities = orient(&obs, &board).unwrap();
+        let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
         assert!(
             priorities.iter().any(|p| p.goal_id == "__improvement__"),
             "should add improvement priority when gym < 70%"
@@ -359,7 +384,7 @@ mod tests {
             pending_improvements: Vec::new(),
             environment: EnvironmentSnapshot::default(),
         };
-        let priorities = orient(&obs, &board).unwrap();
+        let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
         assert!(
             !priorities.iter().any(|p| p.goal_id == "__improvement__"),
             "should not add improvement priority when gym >= 70%"
@@ -399,9 +424,77 @@ mod tests {
         ];
         let board = make_board_with_goals(goals);
         let obs = make_observation(EnvironmentSnapshot::default());
-        let priorities = orient(&obs, &board).unwrap();
+        let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
         for i in 0..priorities.len() - 1 {
             assert!(priorities[i].urgency >= priorities[i + 1].urgency);
         }
+    }
+
+    #[test]
+    fn orient_failure_cooldown_demotes_urgency() {
+        let goals = vec![ActiveGoal {
+            id: "broken-goal".to_string(),
+            description: "always fails".to_string(),
+            priority: 1,
+            status: GoalProgress::NotStarted, // base urgency 0.8
+            assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
+        }];
+        let board = make_board_with_goals(goals);
+        let obs = make_observation(EnvironmentSnapshot::default());
+
+        let mut counts = std::collections::HashMap::new();
+        counts.insert("broken-goal".to_string(), 3); // 3 × 0.2 = 0.6 penalty
+
+        let priorities = orient(&obs, &board, &counts).unwrap();
+        assert_eq!(priorities.len(), 1);
+        // 0.8 base − 0.6 penalty = 0.2
+        assert!(
+            (priorities[0].urgency - 0.2).abs() < 1e-9,
+            "expected urgency ≈ 0.2 after 3 failures, got {}",
+            priorities[0].urgency
+        );
+        assert!(priorities[0].reason.contains("3 consecutive failure"));
+    }
+
+    #[test]
+    fn orient_failure_cooldown_clamps_to_zero() {
+        let goals = vec![ActiveGoal {
+            id: "really-broken".to_string(),
+            description: "many failures".to_string(),
+            priority: 1,
+            status: GoalProgress::Blocked("flaky".to_string()), // base urgency 1.0
+            assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
+        }];
+        let board = make_board_with_goals(goals);
+        let obs = make_observation(EnvironmentSnapshot::default());
+
+        let mut counts = std::collections::HashMap::new();
+        counts.insert("really-broken".to_string(), 20); // huge penalty
+
+        let priorities = orient(&obs, &board, &counts).unwrap();
+        assert_eq!(priorities[0].urgency, 0.0);
+    }
+
+    #[test]
+    fn orient_no_demotion_when_failure_count_zero() {
+        let goals = vec![ActiveGoal {
+            id: "healthy-goal".to_string(),
+            description: "OK".to_string(),
+            priority: 1,
+            status: GoalProgress::NotStarted,
+            assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
+        }];
+        let board = make_board_with_goals(goals);
+        let obs = make_observation(EnvironmentSnapshot::default());
+        let counts = std::collections::HashMap::new();
+        let priorities = orient(&obs, &board, &counts).unwrap();
+        assert!((priorities[0].urgency - 0.8).abs() < 1e-9);
+        assert!(!priorities[0].reason.contains("consecutive failure"));
     }
 }

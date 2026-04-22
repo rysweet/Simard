@@ -139,6 +139,22 @@ pub(crate) fn select_append_to_file(
 
 pub(crate) fn select_shell_command(objective: &str, note: &str) -> Option<SelectedEngineerAction> {
     let argv = extract_command_from_objective(objective)?;
+    select_shell_command_from_argv(argv, note, "Objective")
+}
+
+/// Build a shell-command action from an explicit argv vector.
+///
+/// Used when the LLM-produced `PlanStep.target` already contains the
+/// concrete command, so we do not need to re-extract it from a prose
+/// objective. The allowlist is enforced identically.
+pub(crate) fn select_shell_command_from_argv(
+    argv: Vec<String>,
+    note: &str,
+    source_label: &str,
+) -> Option<SelectedEngineerAction> {
+    if argv.is_empty() {
+        return None;
+    }
     let first = argv.first().cloned().unwrap_or_default();
     if !SHELL_COMMAND_ALLOWLIST.contains(&first.as_str()) {
         return None;
@@ -146,7 +162,7 @@ pub(crate) fn select_shell_command(objective: &str, note: &str) -> Option<Select
     Some(SelectedEngineerAction {
         label: "run-shell-command".to_string(),
         rationale: format!(
-            "Objective requests running '{}', which is in the shell allowlist.{note}",
+            "{source_label} requests running '{}', which is in the shell allowlist.{note}",
             argv.join(" ")
         ),
         argv: argv.clone(),
@@ -155,6 +171,26 @@ pub(crate) fn select_shell_command(objective: &str, note: &str) -> Option<Select
         expected_changed_files: Vec::new(),
         kind: EngineerActionKind::RunShellCommand(ShellCommandRequest { argv }),
     })
+}
+
+/// Tokenise an LLM-supplied target string into argv.
+///
+/// LLMs emit shell-command targets in two common forms:
+///   * Plain space-separated argv (`"gh issue view 915"`).
+///   * Backtick- or quote-wrapped (`"`gh issue view 915`"`).
+///
+/// We strip surrounding backticks/quotes and split on whitespace. This
+/// is intentionally simple — the allowlist gate in
+/// `select_shell_command_from_argv` rejects anything that does not begin
+/// with a vetted binary, so adversarial parsing is not required here.
+pub(crate) fn tokenise_target_argv(target: &str) -> Vec<String> {
+    let trimmed = target.trim();
+    let unwrapped = trimmed
+        .trim_matches('`')
+        .trim_matches('\'')
+        .trim_matches('"')
+        .trim();
+    unwrapped.split_whitespace().map(String::from).collect()
 }
 
 pub(crate) fn select_git_commit(objective: &str, note: &str) -> SelectedEngineerAction {
@@ -543,7 +579,20 @@ pub(crate) fn select_cargo_action(objective: &str, note: &str) -> SelectedEngine
 /// Check whether a keyword-analyzed action is achievable given the current
 /// objective and context. Returns `true` when the action is safe to proceed
 /// with, `false` when it should be demoted to a safe default.
+#[allow(dead_code)] // retained for tests + back-compat callers
 pub(crate) fn is_keyword_action_achievable(action: &AnalyzedAction, objective: &str) -> bool {
+    is_action_achievable(action, objective, None)
+}
+
+/// Like [`is_keyword_action_achievable`] but also considers the LLM's
+/// explicit `PlanStep.target` field. RunShellCommand is achievable when
+/// the target tokenises to an allowlisted command, even if the objective
+/// itself is prose.
+pub(crate) fn is_action_achievable(
+    action: &AnalyzedAction,
+    objective: &str,
+    llm_target: Option<&str>,
+) -> bool {
     match action {
         // These are always safe — they don't mutate the repo.
         AnalyzedAction::ReadOnlyScan | AnalyzedAction::CargoTest => true,
@@ -576,8 +625,14 @@ pub(crate) fn is_keyword_action_achievable(action: &AnalyzedAction, objective: &
             }
             true
         }
-        // CreateFile / AppendToFile: need a discernible file path in the objective.
+        // CreateFile / AppendToFile: need a discernible file path in the objective
+        // OR in the LLM's target field.
         AnalyzedAction::CreateFile | AnalyzedAction::AppendToFile => {
+            if let Some(target) = llm_target
+                && !target.trim().is_empty()
+            {
+                return true;
+            }
             extract_file_path_from_objective(objective).is_some()
         }
         // StructuredTextReplace: needs edit-like directives.
@@ -585,8 +640,20 @@ pub(crate) fn is_keyword_action_achievable(action: &AnalyzedAction, objective: &
             let lower = objective.to_lowercase();
             lower.contains("replace") || lower.contains("edit-file") || lower.contains("update")
         }
-        // RunShellCommand: needs an extractable command that is not a prose fragment.
-        AnalyzedAction::RunShellCommand => extract_command_from_objective(objective).is_some(),
+        // RunShellCommand: achievable when either the LLM provided a target
+        // whose first token is allowlisted, or the objective contains an
+        // extractable allowlisted command.
+        AnalyzedAction::RunShellCommand => {
+            if let Some(target) = llm_target {
+                let argv = tokenise_target_argv(target);
+                if let Some(first) = argv.first()
+                    && SHELL_COMMAND_ALLOWLIST.contains(&first.as_str())
+                {
+                    return true;
+                }
+            }
+            extract_command_from_objective(objective).is_some()
+        }
     }
 }
 
@@ -607,22 +674,20 @@ pub(crate) fn select_engineer_action(
     // failure here propagates as PlanningUnavailable so the cycle reports a
     // real failure instead of fabricating progress.
     let plan = crate::engineer_plan::plan_objective(objective, inspection)?;
-    let analyzed = if let Some(step) = plan.steps().first() {
-        let action = &step.action;
-        if !is_keyword_action_achievable(action, objective) {
-            return Err(SimardError::PlanningUnavailable {
-                reason: format!(
-                    "LLM plan selected action {:?} which is not achievable for objective: {}",
-                    action, objective
-                ),
-            });
-        }
-        action.clone()
-    } else {
-        return Err(SimardError::PlanningUnavailable {
+    let first_step = plan.steps().first().cloned().ok_or_else(|| {
+        SimardError::PlanningUnavailable {
             reason: format!("LLM plan returned zero steps for objective: {objective}"),
+        }
+    })?;
+    let analyzed = first_step.action.clone();
+    if !is_action_achievable(&analyzed, objective, Some(&first_step.target)) {
+        return Err(SimardError::PlanningUnavailable {
+            reason: format!(
+                "LLM plan selected action {:?} with target {:?} which is not achievable for objective: {}",
+                analyzed, first_step.target, objective
+            ),
         });
-    };
+    }
 
     match analyzed {
         AnalyzedAction::CreateFile => {
@@ -636,9 +701,24 @@ pub(crate) fn select_engineer_action(
             }
         }
         AnalyzedAction::RunShellCommand => {
+            // Prefer the LLM's explicit target field — it already contains
+            // the concrete argv. Fall back to objective extraction only if
+            // the target is empty (older planner outputs).
+            let argv = tokenise_target_argv(&first_step.target);
+            if !argv.is_empty()
+                && let Some(action) = select_shell_command_from_argv(argv, &note, "LLM plan step")
+            {
+                return Ok(action);
+            }
             if let Some(action) = select_shell_command(objective, &note) {
                 return Ok(action);
             }
+            return Err(SimardError::PlanningUnavailable {
+                reason: format!(
+                    "LLM plan step selected RunShellCommand but target {:?} is empty or not in the shell allowlist (objective: {})",
+                    first_step.target, objective
+                ),
+            });
         }
         AnalyzedAction::GitCommit => return Ok(select_git_commit(objective, &note)),
         AnalyzedAction::OpenIssue => return select_open_issue(objective, &note),
@@ -1144,5 +1224,123 @@ mod tests {
             &AnalyzedAction::OpenIssue,
             "backtrack the change"
         ));
+    }
+
+    // ──────────────────────────────────────────────────────────
+    // Regression coverage for fix/planner-shape-and-backoff:
+    // selector now consumes PlanStep.target instead of re-extracting
+    // argv from prose. These tests pin the new behavior.
+    // ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn tokenise_target_argv_strips_backticks() {
+        let argv = tokenise_target_argv("`gh issue view 915`");
+        assert_eq!(argv, vec!["gh", "issue", "view", "915"]);
+    }
+
+    #[test]
+    fn tokenise_target_argv_strips_double_quotes() {
+        let argv = tokenise_target_argv("\"cargo check --lib\"");
+        assert_eq!(argv, vec!["cargo", "check", "--lib"]);
+    }
+
+    #[test]
+    fn tokenise_target_argv_strips_single_quotes() {
+        let argv = tokenise_target_argv("'git status'");
+        assert_eq!(argv, vec!["git", "status"]);
+    }
+
+    #[test]
+    fn tokenise_target_argv_handles_extra_whitespace() {
+        let argv = tokenise_target_argv("  gh   issue  view   915  ");
+        assert_eq!(argv, vec!["gh", "issue", "view", "915"]);
+    }
+
+    #[test]
+    fn tokenise_target_argv_empty_returns_empty() {
+        assert!(tokenise_target_argv("").is_empty());
+        assert!(tokenise_target_argv("   ").is_empty());
+        assert!(tokenise_target_argv("``").is_empty());
+    }
+
+    #[test]
+    fn select_shell_command_from_argv_accepts_gh() {
+        let action =
+            select_shell_command_from_argv(vec!["gh".into(), "issue".into(), "view".into(), "915".into()], "note", "test")
+                .expect("gh is allowlisted");
+        assert_eq!(action.argv[0], "gh");
+        assert_eq!(action.argv.len(), 4);
+    }
+
+    #[test]
+    fn select_shell_command_from_argv_rejects_non_allowlisted() {
+        let action = select_shell_command_from_argv(
+            vec!["curl".into(), "https://example.com".into()],
+            "note",
+            "test",
+        );
+        assert!(action.is_none(), "curl must not be allowlisted");
+    }
+
+    #[test]
+    fn select_shell_command_from_argv_rejects_empty_argv() {
+        assert!(select_shell_command_from_argv(vec![], "note", "test").is_none());
+    }
+
+    #[test]
+    fn is_action_achievable_runshell_with_llm_target_passes() {
+        // Objective is multi-paragraph prose that the keyword extractor
+        // would fail on, but the LLM provided a concrete allowlisted target.
+        let prose = "Investigate issue 915 thoroughly. Read its body. Comment on findings.\n\
+                     Several paragraphs of context. No literal command in this prose.";
+        assert!(is_action_achievable(
+            &AnalyzedAction::RunShellCommand,
+            prose,
+            Some("gh issue view 915"),
+        ));
+    }
+
+    #[test]
+    fn is_action_achievable_runshell_rejects_non_allowlisted_target() {
+        assert!(!is_action_achievable(
+            &AnalyzedAction::RunShellCommand,
+            "anything",
+            Some("curl https://evil.example.com"),
+        ));
+    }
+
+    #[test]
+    fn is_action_achievable_runshell_empty_target_falls_back_to_keyword_gate() {
+        // Empty target ⇒ behaves like the legacy gate over objective text.
+        let achievable_via_objective = is_action_achievable(
+            &AnalyzedAction::RunShellCommand,
+            "run cargo check",
+            Some(""),
+        );
+        let legacy = is_keyword_action_achievable(&AnalyzedAction::RunShellCommand, "run cargo check");
+        assert_eq!(achievable_via_objective, legacy);
+    }
+
+    #[test]
+    fn is_action_achievable_create_file_with_target() {
+        assert!(is_action_achievable(
+            &AnalyzedAction::CreateFile,
+            "objective without filename",
+            Some("src/foo.rs"),
+        ));
+    }
+
+    #[test]
+    fn is_action_achievable_create_file_empty_target() {
+        // Empty target ⇒ delegate to legacy gate on objective.
+        let result = is_action_achievable(
+            &AnalyzedAction::CreateFile,
+            "objective without filename",
+            Some(""),
+        );
+        assert_eq!(
+            result,
+            is_keyword_action_achievable(&AnalyzedAction::CreateFile, "objective without filename")
+        );
     }
 }

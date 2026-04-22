@@ -181,7 +181,7 @@ pub fn run_ooda_cycle(
     // --- Orient ---
     state.current_phase = OodaPhase::Orient;
     eprintln!("[simard] OODA cycle: entering Orient phase");
-    let priorities = orient(&observation, &state.active_goals)?;
+    let priorities = orient(&observation, &state.active_goals, &state.goal_failure_counts)?;
     eprintln!(
         "[simard] OODA cycle: Orient complete ({} priorities)",
         priorities.len()
@@ -224,27 +224,43 @@ pub fn run_ooda_cycle(
 
     // --- Update goal current_activity from outcomes ---
     for outcome in &outcomes {
-        if let Some(goal_id) = &outcome.action.goal_id
-            && let Some(goal) = state
+        if let Some(goal_id) = &outcome.action.goal_id {
+            // Update per-goal failure cooldown counter.
+            if outcome.success {
+                state.goal_failure_counts.remove(goal_id);
+            } else {
+                let entry = state
+                    .goal_failure_counts
+                    .entry(goal_id.clone())
+                    .or_insert(0);
+                *entry = entry.saturating_add(1);
+                eprintln!(
+                    "[simard] OODA cycle: goal '{goal_id}' consecutive failures = {} (cooldown will demote urgency)",
+                    *entry
+                );
+            }
+
+            if let Some(goal) = state
                 .active_goals
                 .active
                 .iter_mut()
                 .find(|g| g.id == *goal_id)
-        {
-            let activity = if outcome.success {
-                format!(
-                    "{}: {}",
-                    outcome.action.kind,
-                    truncate_detail(&outcome.detail, 120)
-                )
-            } else {
-                format!(
-                    "{} (failed): {}",
-                    outcome.action.kind,
-                    truncate_detail(&outcome.detail, 120)
-                )
-            };
-            goal.current_activity = Some(activity);
+            {
+                let activity = if outcome.success {
+                    format!(
+                        "{}: {}",
+                        outcome.action.kind,
+                        truncate_detail(&outcome.detail, 120)
+                    )
+                } else {
+                    format!(
+                        "{} (failed): {}",
+                        outcome.action.kind,
+                        truncate_detail(&outcome.detail, 120)
+                    )
+                };
+                goal.current_activity = Some(activity);
+            }
         }
     }
 
