@@ -129,10 +129,63 @@ fn try_parse_action(s: &str) -> Option<GoalAction> {
 /// Per-variant invariants beyond what serde enforces.
 fn action_is_valid(action: &GoalAction) -> bool {
     match action {
-        GoalAction::SpawnEngineer { task, .. } => !task.trim().is_empty(),
+        GoalAction::SpawnEngineer { task, .. } => {
+            let trimmed = task.trim();
+            !trimmed.is_empty() && !is_placeholder_echo(trimmed)
+        }
         GoalAction::Noop { .. } => true,
         GoalAction::AssessOnly { progress_pct, .. } => *progress_pct <= 100,
     }
+}
+
+/// Detect when the LLM echoed the schema-example placeholder verbatim
+/// instead of filling it in with a real task description.
+///
+/// Observed failure mode (2026-04-23, daemon 555909/556323 at ~0.5% goal
+/// throughput): the model returned
+/// `{"task": "<one-paragraph concrete task>", ...}` literally, which then
+/// propagated into `engineer_plan::plan_objective` as the objective and
+/// caused "LLM plan returned zero steps" every cycle.
+///
+/// Heuristic: any task that is entirely a `<...>` angle-bracketed token,
+/// or begins/ends with one of the known schema placeholders. Kept narrow
+/// on purpose — legitimate tasks may legitimately include angle brackets
+/// when citing HTML/generics, so we only reject whole-string templates.
+fn is_placeholder_echo(task: &str) -> bool {
+    // Strip surrounding quotes/backticks the LLM sometimes adds around
+    // the value even though the JSON string already terminates them.
+    let stripped = task
+        .trim()
+        .trim_matches(|c: char| c == '"' || c == '`' || c == '\'');
+
+    // Exact-match the schema placeholders we ship in prompt_assets.
+    const KNOWN_PLACEHOLDERS: &[&str] = &[
+        "<one-paragraph concrete task>",
+        "<short explanation of why no action is needed>",
+        "<short status>",
+        "<title>",
+        "<body>",
+        "<description>",
+    ];
+    if KNOWN_PLACEHOLDERS.contains(&stripped) {
+        return true;
+    }
+
+    // Whole-string angle-bracket token with generic meta words (e.g.
+    // `<your task here>`, `<TODO>`). Requires: starts with '<', ends
+    // with '>', contains only template-ish characters, and is short.
+    if stripped.starts_with('<')
+        && stripped.ends_with('>')
+        && stripped.len() < 120
+        && !stripped.contains("```")
+        && stripped[1..stripped.len().saturating_sub(1)]
+            .chars()
+            .all(|c| c.is_alphanumeric() || c.is_whitespace() || "-_/:.,".contains(c))
+    {
+        return true;
+    }
+
+    false
 }
 
 /// Scan a string starting at an opening `{` and return the byte offset
@@ -786,6 +839,42 @@ Hope that helps!"#;
         assert!(
             parse_goal_action(response).is_none(),
             "whitespace-only task must be rejected"
+        );
+    }
+
+    // -- placeholder-echo rejection (regression for daemon bug observed
+    //    2026-04-23: LLM returned the schema example verbatim and
+    //    poisoned the engineer loop with `<one-paragraph concrete task>`
+    //    as the objective for every cycle) ---------------------------
+
+    #[test]
+    fn parse_rejects_verbatim_schema_placeholder_task() {
+        let response = r#"{"action": "spawn_engineer", "task": "<one-paragraph concrete task>"}"#;
+        assert!(
+            parse_goal_action(response).is_none(),
+            "task that echoes the prompt's <one-paragraph concrete task> placeholder must be rejected"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_generic_angle_bracket_placeholder() {
+        let response = r#"{"action": "spawn_engineer", "task": "<your task here>"}"#;
+        assert!(
+            parse_goal_action(response).is_none(),
+            "generic angle-bracket placeholders like <your task here> must be rejected"
+        );
+    }
+
+    #[test]
+    fn parse_accepts_task_mentioning_angle_brackets_in_real_content() {
+        // Legitimate task that happens to include angle brackets (e.g. a
+        // generic type, HTML tag, or comparison operator). Must NOT be
+        // rejected — the placeholder filter is whole-string exact, not
+        // substring.
+        let response = r#"{"action": "spawn_engineer", "task": "Fix generic parser to handle Vec<String> type annotations in src/parser.rs around line 142"}"#;
+        assert!(
+            parse_goal_action(response).is_some(),
+            "real tasks that contain <...> substrings must still be accepted"
         );
     }
 
