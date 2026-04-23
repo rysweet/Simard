@@ -50,6 +50,16 @@ fn engineer_loop_inspects_external_repo() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let combined = format!("{stdout}\n{stderr}");
 
+    // Skip when the CI environment lacks an LLM provider — the simard binary
+    // now refuses to start without explicit SIMARD_LLM_PROVIDER configuration.
+    if combined.contains("missing required configuration 'SIMARD_LLM_PROVIDER'")
+        || combined.contains("No API key found")
+        || combined.contains("LLM session but open() failed")
+    {
+        eprintln!("SKIP: no LLM provider available (CI environment)");
+        return;
+    }
+
     // Engineer loop should at least complete inspection phase
     assert!(
         combined.contains("Simard") || combined.contains("workspace") || combined.contains("scan"),
@@ -123,7 +133,10 @@ fn ooda_daemon_seeds_five_goals() {
 
     // OODA daemon requires an LLM session; skip in CI environments that lack
     // ANTHROPIC_API_KEY or gh auth for Copilot SDK.
-    if stderr.contains("No API key found") || stderr.contains("LLM session but open() failed") {
+    if stderr.contains("No API key found")
+        || stderr.contains("LLM session but open() failed")
+        || stderr.contains("missing required configuration 'SIMARD_LLM_PROVIDER'")
+    {
         eprintln!("SKIP: no LLM provider available (CI environment)");
         return;
     }

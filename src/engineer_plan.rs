@@ -12,7 +12,7 @@ use crate::base_types::BaseTypeTurnInput;
 use crate::engineer_loop::{AnalyzedAction, RepoInspection};
 use crate::error::{SimardError, SimardResult};
 use crate::identity::OperatingMode;
-use crate::session_builder::SessionBuilder;
+use crate::session_builder::{LlmProvider, SessionBuilder};
 
 /// A single step in an LLM-generated plan.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -221,13 +221,16 @@ fn extract_json_array(text: &str) -> Option<&str> {
 
 /// Ask the LLM for a multi-step plan to accomplish `objective`.
 ///
-/// Returns `Err(PlanningUnavailable)` when no LLM session can be opened or the
-/// response is unparseable.  Callers use keyword-based `analyze_objective`.
+/// Returns `Err(PlanningUnavailable)` when no LLM session can be opened
+/// or the response is unparseable. There is **no keyword fallback** —
+/// the cycle must report the planning failure rather than execute a
+/// fabricated plan.
 pub fn plan_objective(objective: &str, inspection: &RepoInspection) -> SimardResult<Plan> {
-    let mut session = SessionBuilder::new(OperatingMode::Engineer)
+    let provider = LlmProvider::resolve()?;
+    let mut session = SessionBuilder::new(OperatingMode::Engineer, provider)
         .node_id("engineer-planner")
         .address("engineer-planner://local")
-        .adapter_tag("engineer-planner-rustyclawd")
+        .adapter_tag("engineer-planner")
         .open()
         .map_err(|reason| SimardError::PlanningUnavailable { reason })?;
 
@@ -238,7 +241,12 @@ pub fn plan_objective(objective: &str, inspection: &RepoInspection) -> SimardRes
             reason: format!("LLM turn failed: {e}"),
         })?;
     let _ = session.close();
-    parse_plan_response(&outcome.plan)
+    // `outcome.plan` is adapter-emitted telemetry ("Copilot SDK adapter
+    // dispatched ... via 'amplihack copilot' on 'single-process' (turn N)").
+    // The actual LLM response text lives in `outcome.execution_summary`.
+    // Reading the wrong field here meant the planner parsed the telemetry
+    // string, failed, and silently degraded to keyword analysis (issue #1062).
+    parse_plan_response(&outcome.execution_summary)
 }
 
 /// Execute a plan sequentially, running each step's verification command.

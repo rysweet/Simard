@@ -20,7 +20,7 @@ use simard::identity::OperatingMode;
 use simard::knowledge_bridge::KnowledgeBridge;
 use simard::memory_bridge::CognitiveMemoryBridge;
 use simard::ooda_loop::{ActionKind, OodaBridges, OodaConfig, OodaState, run_ooda_cycle};
-use simard::session_builder::SessionBuilder;
+use simard::session_builder::{LlmProvider, SessionBuilder};
 use simard::test_support::TestAdapter;
 
 // ---------------------------------------------------------------------------
@@ -134,7 +134,7 @@ fn board_with_active_goals() -> GoalBoard {
 fn session_builder_creates_ooda_session_request_with_correct_mode() {
     // The OODA daemon should use OperatingMode::Engineer (it's doing engineering work)
     // since there's no dedicated OODA mode. Verify the builder produces a valid request.
-    let builder = SessionBuilder::new(OperatingMode::Engineer)
+    let builder = SessionBuilder::new(OperatingMode::Engineer, LlmProvider::RustyClawd)
         .node_id("ooda-daemon")
         .address("ooda-daemon://local")
         .adapter_tag("ooda-rustyclawd");
@@ -162,7 +162,7 @@ fn test_adapter_session_runs_turn_for_goal_objective() {
     let adapter = TestAdapter::single_process("ooda-test").unwrap();
     use simard::base_types::BaseTypeFactory;
 
-    let request = SessionBuilder::new(OperatingMode::Engineer)
+    let request = SessionBuilder::new(OperatingMode::Engineer, LlmProvider::RustyClawd)
         .node_id("ooda-daemon")
         .address("ooda-daemon://local")
         .adapter_tag("ooda-test")
@@ -191,7 +191,7 @@ fn daemon_session_handles_multiple_goals_sequentially() {
     let adapter = TestAdapter::single_process("ooda-multi").unwrap();
     use simard::base_types::BaseTypeFactory;
 
-    let request = SessionBuilder::new(OperatingMode::Engineer)
+    let request = SessionBuilder::new(OperatingMode::Engineer, LlmProvider::RustyClawd)
         .node_id("ooda-daemon")
         .address("ooda-daemon://local")
         .adapter_tag("ooda-multi")
@@ -325,7 +325,7 @@ fn daemon_degrades_gracefully_when_no_provider() {
         std::env::remove_var("ANTHROPIC_API_KEY");
         std::env::set_var("SIMARD_LLM_PROVIDER", "rustyclawd");
     };
-    let session = SessionBuilder::new(OperatingMode::Engineer)
+    let session = SessionBuilder::new(OperatingMode::Engineer, LlmProvider::RustyClawd)
         .node_id("ooda-daemon")
         .address("ooda-daemon://local")
         .adapter_tag("nonexistent-adapter")

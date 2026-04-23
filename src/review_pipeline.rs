@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::base_types::BaseTypeTurnInput;
 use crate::error::{SimardError, SimardResult};
 use crate::identity::OperatingMode;
-use crate::session_builder::SessionBuilder;
+use crate::session_builder::{LlmProvider, SessionBuilder};
 
 /// Severity level of a review finding, ordered from least to most severe.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
@@ -75,10 +75,13 @@ pub struct ReviewSession {
 impl ReviewSession {
     /// Open a review LLM session. Returns an error if the adapter is unavailable.
     pub fn open() -> SimardResult<Self> {
-        let session = SessionBuilder::new(OperatingMode::Engineer)
+        let provider = LlmProvider::resolve().map_err(|e| SimardError::ReviewUnavailable {
+            reason: format!("LLM provider unavailable for review pipeline: {e}"),
+        })?;
+        let session = SessionBuilder::new(OperatingMode::Engineer, provider)
             .node_id("review-pipeline")
             .address("review-pipeline://local")
-            .adapter_tag("review-pipeline-rustyclawd")
+            .adapter_tag("review-pipeline")
             .open()
             .map_err(|e| SimardError::ReviewUnavailable {
                 reason: format!("review session open() failed: {e}"),
@@ -134,7 +137,9 @@ pub fn review_diff(
         .map_err(|e| SimardError::ReviewUnavailable {
             reason: format!("LLM turn failed: {e}"),
         })?;
-    parse_review_response(&outcome.plan)
+    // Read execution_summary (the actual LLM text), not plan (adapter
+    // telemetry). See engineer_plan::plan_objective for context.
+    parse_review_response(&outcome.execution_summary)
 }
 
 /// Commit gate: returns `false` if any Bug or Security finding has

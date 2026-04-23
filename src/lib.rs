@@ -82,6 +82,7 @@ pub mod research_tracker;
 pub mod review;
 pub mod review_pipeline;
 pub mod runtime;
+pub mod runtime_config;
 pub mod runtime_ipc;
 pub mod runtime_reflection;
 mod sanitization;

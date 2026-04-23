@@ -600,51 +600,28 @@ pub(crate) fn select_engineer_action(
         return select_structured_edit(inspection, edit_request, &note);
     }
 
-    // LLM-based planning. If unavailable, use keyword analysis as the
-    // base strategy — keyword analysis is the foundational
-    // implementation, LLM planning is an enhancement.
-    let mut used_keyword_analysis = false;
-    let analyzed = match crate::engineer_plan::plan_objective(objective, inspection) {
-        Ok(plan) if !plan.steps().is_empty() => {
-            let action = &plan.steps()[0].action;
-            // Validate that the LLM-chosen action is a known variant we can handle.
-            if is_keyword_action_achievable(action, objective) {
-                action.clone()
-            } else {
-                tracing::warn!(
-                    "LLM plan selected action {:?} which is not achievable for this objective; \
-                     using keyword analysis instead",
-                    action
-                );
-                used_keyword_analysis = true;
-                super::types::analyze_objective(objective)
-            }
+    // LLM-based planning is the ONLY planner. Per the project's no-fallback
+    // rule, keyword analysis is no longer used as a backstop: a parser
+    // failure or an LLM unavailability used to silently produce
+    // "verify-existing-issue #N" fake-success cycles (issue #1062). Any
+    // failure here propagates as PlanningUnavailable so the cycle reports a
+    // real failure instead of fabricating progress.
+    let plan = crate::engineer_plan::plan_objective(objective, inspection)?;
+    let analyzed = if let Some(step) = plan.steps().first() {
+        let action = &step.action;
+        if !is_keyword_action_achievable(action, objective) {
+            return Err(SimardError::PlanningUnavailable {
+                reason: format!(
+                    "LLM plan selected action {:?} which is not achievable for objective: {}",
+                    action, objective
+                ),
+            });
         }
-        Ok(_) => {
-            tracing::debug!("LLM plan returned empty steps, using keyword analysis");
-            used_keyword_analysis = true;
-            super::types::analyze_objective(objective)
-        }
-        Err(e) => {
-            tracing::warn!("LLM planning failed: {e} — using keyword analysis");
-            used_keyword_analysis = true;
-            super::types::analyze_objective(objective)
-        }
-    };
-
-    // Always validate keyword-analyzed actions. Keyword matching can trigger
-    // on incidental words (e.g. "issue" in "fix issue #835" → OpenIssue,
-    // or "run" in "run the migration and open PR" → RunShellCommand with
-    // prose fragments as the argv).
-    let analyzed = if used_keyword_analysis && !is_keyword_action_achievable(&analyzed, objective) {
-        tracing::warn!(
-            "suppressed {:?} action — keyword matched but action is not \
-             achievable for this objective; defaulting to safe action",
-            analyzed
-        );
-        AnalyzedAction::ReadOnlyScan
+        action.clone()
     } else {
-        analyzed
+        return Err(SimardError::PlanningUnavailable {
+            reason: format!("LLM plan returned zero steps for objective: {objective}"),
+        });
     };
 
     match analyzed {

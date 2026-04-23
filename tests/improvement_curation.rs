@@ -15,6 +15,24 @@ fn rendered_output(output: &Output) -> String {
     format!("{stdout}{stderr}")
 }
 
+/// Returns true when the rendered output indicates the test cannot run
+/// because the CI environment lacks a configured LLM provider.
+/// Mirrors tests/engineer_loop.rs::skip_if_no_llm_provider — duplicated
+/// because tests/ files compile as separate crates and there is no shared
+/// test-support crate.
+fn skip_if_no_llm_provider(rendered: &str) -> bool {
+    if rendered.contains("No API key found")
+        || rendered.contains("LLM-based review is unavailable")
+        || rendered.contains("LLM session but open() failed")
+        || rendered.contains("base type 'review-pipeline-rustyclawd' failed")
+        || rendered.contains("missing required configuration 'SIMARD_LLM_PROVIDER'")
+    {
+        eprintln!("SKIP: no LLM provider available (CI environment)");
+        return true;
+    }
+    false
+}
+
 struct TempDirGuard {
     path: PathBuf,
 }
@@ -114,6 +132,9 @@ approve: Promote this pattern into a repeatable benchmark | priority=2 | status=
         .expect("engineer loop probe should launch");
     let engineer_rendered = rendered_output(&engineer_output);
 
+    if skip_if_no_llm_provider(&engineer_rendered) {
+        return;
+    }
     assert!(
         engineer_output.status.success(),
         "engineer loop probe should succeed with promoted improvement goals:\n{engineer_rendered}"

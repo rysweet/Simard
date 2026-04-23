@@ -4,16 +4,24 @@
 //! shared [`SessionBuilder`] so meeting, engineer, and future modes construct
 //! sessions the same way.
 //!
-//! The LLM provider is selected by `SIMARD_LLM_PROVIDER` (env var or CLI flag):
+//! The LLM provider is selected by [`RuntimeConfig`] (env var
+//! `SIMARD_LLM_PROVIDER` ⟶ `~/.simard/config.toml` ⟶ explicit error):
 //!
 //! | Value         | Behaviour                                            |
 //! |---------------|------------------------------------------------------|
 //! | `copilot`     | Copilot SDK via `gh` auth                             |
-//! | `rustyclawd`  | RustyClawd / Anthropic (requires `ANTHROPIC_API_KEY`) **(default)** |
+//! | `rustyclawd`  | RustyClawd / Anthropic (requires `ANTHROPIC_API_KEY`) |
+//!
+//! There is **no silent default**. Callers must obtain an
+//! [`LlmProvider`] via [`LlmProvider::resolve`] (which goes through
+//! [`RuntimeConfig`]) or pass one explicitly.
+//!
+//! [`RuntimeConfig`]: crate::runtime_config::RuntimeConfig
 
 use crate::base_type_copilot::CopilotSdkAdapter;
 use crate::base_type_rustyclawd::RustyClawdAdapter;
 use crate::base_types::{BaseTypeFactory, BaseTypeSession, BaseTypeSessionRequest};
+use crate::error::SimardResult;
 use crate::identity::OperatingMode;
 use crate::prompt_assets::PromptAssetRef;
 use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeTopology};
@@ -24,18 +32,17 @@ use crate::session::SessionId;
 pub enum LlmProvider {
     /// GitHub Copilot SDK via `gh` auth.
     Copilot,
-    /// RustyClawd / Anthropic (requires `ANTHROPIC_API_KEY`). Default.
+    /// RustyClawd / Anthropic (requires `ANTHROPIC_API_KEY`).
     RustyClawd,
 }
 
 impl LlmProvider {
-    /// Read from `SIMARD_LLM_PROVIDER` env var.  Defaults to `RustyClawd`.
-    pub fn from_env() -> Self {
-        match std::env::var("SIMARD_LLM_PROVIDER").as_deref() {
-            Ok("copilot") => Self::Copilot,
-            // "rustyclawd" or anything else (including unset) → RustyClawd
-            _ => Self::RustyClawd,
-        }
+    /// Resolve the configured provider via [`RuntimeConfig`]: env var
+    /// `SIMARD_LLM_PROVIDER` first, then `~/.simard/config.toml`, then
+    /// an error. **No silent default** — a missing provider is an
+    /// operator error and must surface as such.
+    pub fn resolve() -> SimardResult<Self> {
+        Ok(crate::runtime_config::RuntimeConfig::load()?.llm_provider)
     }
 }
 
@@ -47,7 +54,7 @@ impl LlmProvider {
 /// # Example
 ///
 /// ```ignore
-/// let session = SessionBuilder::new(OperatingMode::Meeting)
+/// let session = SessionBuilder::new(OperatingMode::Meeting, LlmProvider::Copilot)
 ///     .node_id("meeting-repl")
 ///     .address("meeting-repl://local")
 ///     .adapter_tag("meeting")
@@ -64,13 +71,18 @@ pub struct SessionBuilder {
 }
 
 impl SessionBuilder {
-    /// Create a builder for the given operating mode.
+    /// Create a builder for the given operating mode and explicit
+    /// LLM provider.
     ///
-    /// Defaults:
+    /// The provider is **required** — there is no default. Production
+    /// callers should supply [`LlmProvider::resolve()?`] so the choice
+    /// flows from `RuntimeConfig`. Tests pass a literal variant.
+    ///
+    /// Defaults for other fields:
     /// - topology: `SingleProcess`
     /// - prompt_assets: empty
     /// - node_id / address / adapter_tag: must be set before calling `open`.
-    pub fn new(mode: OperatingMode) -> Self {
+    pub fn new(mode: OperatingMode, provider: LlmProvider) -> Self {
         Self {
             mode,
             topology: RuntimeTopology::SingleProcess,
@@ -78,7 +90,7 @@ impl SessionBuilder {
             node_id: String::new(),
             address: String::new(),
             adapter_tag: String::new(),
-            provider: LlmProvider::from_env(),
+            provider,
         }
     }
 
@@ -178,7 +190,7 @@ mod tests {
 
     #[test]
     fn build_request_populates_all_fields() {
-        let builder = SessionBuilder::new(OperatingMode::Meeting)
+        let builder = SessionBuilder::new(OperatingMode::Meeting, LlmProvider::RustyClawd)
             .node_id("test-node")
             .address("test://local")
             .adapter_tag("test-adapter");
@@ -194,34 +206,29 @@ mod tests {
 
     #[test]
     fn adapter_tag_strips_legacy_provider_suffix() {
-        let builder = SessionBuilder::new(OperatingMode::Meeting).adapter_tag("meeting-rustyclawd");
+        let builder = SessionBuilder::new(OperatingMode::Meeting, LlmProvider::RustyClawd)
+            .adapter_tag("meeting-rustyclawd");
         assert_eq!(builder.adapter_tag, "meeting");
 
-        let builder =
-            SessionBuilder::new(OperatingMode::Meeting).adapter_tag("review-pipeline-copilot");
+        let builder = SessionBuilder::new(OperatingMode::Meeting, LlmProvider::RustyClawd)
+            .adapter_tag("review-pipeline-copilot");
         assert_eq!(builder.adapter_tag, "review-pipeline");
 
-        let builder = SessionBuilder::new(OperatingMode::Meeting).adapter_tag("plain-tag");
+        let builder = SessionBuilder::new(OperatingMode::Meeting, LlmProvider::RustyClawd)
+            .adapter_tag("plain-tag");
         assert_eq!(builder.adapter_tag, "plain-tag");
     }
 
     #[test]
-    fn default_provider_is_rustyclawd() {
-        // Unless SIMARD_LLM_PROVIDER is set, default is RustyClawd.
-        unsafe { std::env::remove_var("SIMARD_LLM_PROVIDER") };
-        assert_eq!(LlmProvider::from_env(), LlmProvider::RustyClawd);
-    }
-
-    #[test]
     fn provider_override_is_respected() {
-        let builder =
-            SessionBuilder::new(OperatingMode::Engineer).provider(LlmProvider::RustyClawd);
+        let builder = SessionBuilder::new(OperatingMode::Engineer, LlmProvider::Copilot)
+            .provider(LlmProvider::RustyClawd);
         assert_eq!(builder.provider, LlmProvider::RustyClawd);
     }
 
     #[test]
     fn open_does_not_panic() {
-        let session = SessionBuilder::new(OperatingMode::Meeting)
+        let session = SessionBuilder::new(OperatingMode::Meeting, LlmProvider::RustyClawd)
             .node_id("test-node")
             .address("test://local")
             .adapter_tag("nonexistent-adapter")
@@ -233,7 +240,7 @@ mod tests {
 
     #[test]
     fn topology_override() {
-        let builder = SessionBuilder::new(OperatingMode::Engineer)
+        let builder = SessionBuilder::new(OperatingMode::Engineer, LlmProvider::RustyClawd)
             .topology(RuntimeTopology::SingleProcess)
             .node_id("eng")
             .address("eng://local")

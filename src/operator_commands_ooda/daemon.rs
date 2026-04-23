@@ -11,7 +11,8 @@ use crate::memory_ipc;
 use crate::ooda_loop::{
     OodaBridges, OodaConfig, OodaPhase, OodaState, run_ooda_cycle, summarize_cycle_report,
 };
-use crate::session_builder::SessionBuilder;
+use crate::runtime_config::RuntimeConfig;
+use crate::session_builder::{LlmProvider, SessionBuilder};
 
 use super::persistence::{persist_cycle_report, persist_cycle_to_memory};
 
@@ -190,8 +191,26 @@ pub fn run_ooda_daemon(
     let knowledge = launch_knowledge_bridge(&python_dir)?;
     let gym = launch_gym_bridge(&python_dir)?;
 
+    // One-time bootstrap: snapshot SIMARD_LLM_PROVIDER (if set in env)
+    // to <state_root>/config.toml so child processes (engineer subprocesses
+    // spawned via tmux, meeting REPLs, etc.) read the same configuration
+    // without env-var propagation through every wrapper.
+    match RuntimeConfig::bootstrap_from_env(&state_root) {
+        Ok(true) => daemon_log(
+            &state_root,
+            "[simard] OODA daemon: wrote ~/.simard/config.toml from environment",
+        ),
+        Ok(false) => {}
+        Err(e) => daemon_log(
+            &state_root,
+            &format!("[simard] OODA daemon: config bootstrap failed: {e}"),
+        ),
+    }
+
     // Open an LLM session for autonomous work. Required — no silent degradation.
-    let session = SessionBuilder::new(OperatingMode::Orchestrator)
+    let provider = LlmProvider::resolve()
+        .map_err(|e| format!("OODA daemon: LLM provider not configured: {e}"))?;
+    let session = SessionBuilder::new(OperatingMode::Orchestrator, provider)
         .node_id("ooda-daemon")
         .address("ooda-daemon://local")
         .adapter_tag("ooda")
