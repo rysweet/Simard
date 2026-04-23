@@ -57,5 +57,5 @@ fn cargo_install_from_repo_succeeds() {
     );
 
     // Confirm the compiled-in version matches expectations.
-    assert_eq!(EXPECTED_VERSION, "0.16.0");
+    assert_eq!(EXPECTED_VERSION, "0.16.1");
 }
