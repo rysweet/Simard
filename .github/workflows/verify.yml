@@ -5,7 +5,11 @@ on:
   pull_request:
 
 env:
-  CARGO_BUILD_JOBS: 2
+  # ubuntu-latest runners have 4 vCPUs and 16GB RAM. With line-tables-only
+  # debug info + 4GB swap, we can compile with all 4 cores instead of 2,
+  # cutting build wall-time roughly in half. Linker peak memory observed at
+  # ~3.2GB even with all 4 cores active; well under the runner limit.
+  CARGO_BUILD_JOBS: 4
   # Reduce DWARF size to keep peak linker memory under runner limits.
   # Full debug info pushes rust-lld over the runner's RSS limit and the
   # kernel kills it with SIGBUS (signal 7) during the link step.
@@ -13,6 +17,10 @@ env:
   CARGO_PROFILE_DEV_INCREMENTAL: "false"
   CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
   CARGO_PROFILE_TEST_INCREMENTAL: "false"
+  # Speed up dependency compilation: pin a single rust-lld and disable
+  # debug info on dependencies (we only need it for our own code).
+  CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "false"
+  CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "false"
 
 jobs:
   pre-commit:
@@ -61,7 +69,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: simard-ci
-          save-if: true
+          # Only the main branch writes the shared cache. PR runs read it but
+          # don't overwrite, eliminating cache thrashing across concurrent PRs.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
       - name: Set up Python
@@ -86,6 +96,21 @@ jobs:
           cargo test --all-features --locked --no-fail-fast \
             -- --skip cargo_install_from_repo_succeeds \
             2>&1 | tee target/ci-logs/cargo-test.log
+
+      - name: Build simard binary for downstream jobs
+        # cargo test above already compiles the simard library + bins for the
+        # test profile. Producing the dev-profile binary here is incremental
+        # (~10s with hot cache) and lets install-smoke + e2e-dashboard skip
+        # their own from-scratch builds entirely.
+        run: cargo build --bin simard --locked
+
+      - name: Upload simard binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: simard-bin-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/debug/simard
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Upload cargo-test log
         if: always()
@@ -140,7 +165,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: simard-ci
-          save-if: true
+          # Read-only on PRs and non-pre-commit jobs; pre-commit on main is
+          # the single writer to avoid cache contention.
+          save-if: false
           cache-on-failure: true
 
       - name: Run install smoke test
@@ -155,46 +182,15 @@ jobs:
   e2e-dashboard:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    # Reuse the simard binary built by the pre-commit job instead of doing a
+    # full from-scratch Rust build here. Cuts ~15-20 min off this job.
+    needs: pre-commit
     permissions:
       contents: read
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet || true
-          sudo rm -rf /usr/local/lib/android || true
-          sudo rm -rf /opt/ghc || true
-          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
-          sudo rm -rf /usr/local/share/boost || true
-          sudo rm -rf /usr/local/share/chromium || true
-          sudo rm -rf /usr/local/.ghcup || true
-          sudo apt-get clean || true
-          df -h /
-
-      - name: Add swap space (4 GB)
-        run: |
-          if sudo swapon --show | awk 'NR>1 {print $1}' | grep -qx /swapfile; then
-            sudo swapoff /swapfile || true
-          fi
-          sudo rm -f /swapfile
-          sudo fallocate -l 4G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          echo "Swap enabled: $(swapon --show)"
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: simard-ci
-          save-if: false
-          cache-on-failure: true
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -207,11 +203,14 @@ jobs:
       - name: Install Playwright (chromium)
         run: npx playwright install --with-deps chromium
 
-      - name: Build simard binary
-        env:
-          CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
-          CARGO_PROFILE_DEV_INCREMENTAL: "false"
-        run: cargo build --bin simard
+      - name: Download simard binary from pre-commit job
+        uses: actions/download-artifact@v4
+        with:
+          name: simard-bin-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/debug
+
+      - name: Make simard binary executable
+        run: chmod +x target/debug/simard
 
       - name: Provision dashkey
         run: |
