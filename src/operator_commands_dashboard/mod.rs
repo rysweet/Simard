@@ -4,6 +4,9 @@ pub(crate) mod routes;
 #[cfg(test)]
 mod tests_attach;
 
+#[cfg(test)]
+mod tests_stewardship;
+
 use std::net::SocketAddr;
 
 /// Initialize dashboard auth and print the login code to stderr.

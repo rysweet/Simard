@@ -62,6 +62,8 @@ pub fn build_router() -> Router {
             "/ws/tmux_attach/{host}/{session}",
             get(ws_tmux_attach_handler),
         )
+        .route("/api/stewardship", get(stewardship_handler))
+        .route("/api/self-understanding", get(self_understanding_handler))
         .route("/api/login", post(login))
         .route("/login", get(login_page))
         .route("/", get(index))
@@ -1968,6 +1970,198 @@ fn save_hosts(hosts: &[Value]) -> std::io::Result<()> {
 }
 
 // =====================================================================
+// Stewardship + Self-Understanding (issue #1172)
+//
+// Two fail-soft, auth-gated read-only endpoints surfacing existing local
+// substrate to the dashboard's Stewardship tab.
+//
+// Contract guarantees (pinned by tests_stewardship.rs):
+//   * Both handlers ALWAYS return 200 + a well-formed JSON envelope.
+//   * Missing / malformed / oversize input never panics; surfaced via
+//     a `warning` field that NEVER echoes raw file contents.
+//   * `stewardship_config_path` / `metrics_jsonl_path` re-resolve HOME on
+//     every call so per-test HOME overrides take effect.
+//   * Both routes are registered BEFORE the require_auth middleware layer
+//     in build_router(), inheriting authentication.
+// =====================================================================
+
+/// Maximum bytes read from stewardship.json. Files exceeding this are
+/// rejected with a warning to bound DoS risk.
+const STEWARDSHIP_MAX_BYTES: u64 = 1024 * 1024;
+
+/// Maximum bytes scanned (from EOF backwards) when tailing metrics.jsonl.
+const METRICS_TAIL_SCAN_BYTES: u64 = 1024 * 1024;
+
+/// Maximum metric lines returned from the tail.
+const METRICS_TAIL_MAX_LINES: usize = 20;
+
+const STEWARDSHIP_OVERSIZE_WARNING: &str =
+    "stewardship.json exceeds size limit (1 MiB); contents ignored";
+const STEWARDSHIP_MALFORMED_WARNING: &str =
+    "stewardship.json failed to parse as JSON; contents ignored";
+const STEWARDSHIP_SYMLINK_WARNING: &str =
+    "stewardship.json is a symlink or non-regular file; contents ignored";
+
+/// Process-start instant for `uptime_secs`. Initialized on first call.
+static SELF_UNDERSTANDING_START: std::sync::OnceLock<std::time::Instant> =
+    std::sync::OnceLock::new();
+
+fn home_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(
+        std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string()),
+    )
+}
+
+/// Path to `~/.simard/stewardship.json`. Re-resolved every call.
+pub(crate) fn stewardship_config_path() -> std::path::PathBuf {
+    home_dir().join(".simard").join("stewardship.json")
+}
+
+/// Path to `~/.simard/metrics/metrics.jsonl`. Re-resolved every call.
+pub(crate) fn metrics_jsonl_path() -> std::path::PathBuf {
+    home_dir()
+        .join(".simard")
+        .join("metrics")
+        .join("metrics.jsonl")
+}
+
+/// GET /api/stewardship — fail-soft read of `~/.simard/stewardship.json`.
+///
+/// Always returns 200 with `{"repos": [...], "warning"?: "..."}`. Missing
+/// file → empty repos. Malformed/oversize/symlink → empty repos + warning.
+/// Never echoes raw file bytes in the warning (info-disclosure defense).
+pub(crate) async fn stewardship_handler() -> Json<Value> {
+    let path = stewardship_config_path();
+
+    let meta = match std::fs::metadata(&path) {
+        Ok(m) => m,
+        Err(_) => {
+            // Missing file is the empty-state default; no warning surfaced.
+            return Json(json!({ "repos": [] }));
+        }
+    };
+
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        tracing::warn!(
+            path = %path.display(),
+            "stewardship.json rejected: symlink or non-regular file",
+        );
+        return Json(json!({
+            "repos": [],
+            "warning": STEWARDSHIP_SYMLINK_WARNING,
+        }));
+    }
+
+    if meta.len() > STEWARDSHIP_MAX_BYTES {
+        tracing::warn!(
+            path = %path.display(),
+            size = meta.len(),
+            limit = STEWARDSHIP_MAX_BYTES,
+            "stewardship.json exceeds size limit",
+        );
+        return Json(json!({
+            "repos": [],
+            "warning": STEWARDSHIP_OVERSIZE_WARNING,
+        }));
+    }
+
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "stewardship.json read failed");
+            return Json(json!({
+                "repos": [],
+                "warning": "stewardship.json could not be read",
+            }));
+        }
+    };
+
+    let parsed: Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "stewardship.json parse failed");
+            return Json(json!({
+                "repos": [],
+                "warning": STEWARDSHIP_MALFORMED_WARNING,
+            }));
+        }
+    };
+
+    // Accept either a top-level array (canonical seed format) or
+    // `{"repos": [...]}` envelope.
+    let repos = match parsed {
+        Value::Array(a) => a,
+        Value::Object(ref obj) => obj
+            .get("repos")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+
+    Json(json!({ "repos": repos }))
+}
+
+/// Read at most `cap` bytes from the END of `path` and return whatever
+/// complete line-suffixes can be recovered. Bounded; never OOMs.
+fn tail_bounded_lines(path: &std::path::Path, cap: u64) -> std::io::Result<Vec<String>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    let len = f.metadata()?.len();
+    let take = std::cmp::min(len, cap);
+    let start = len - take;
+    f.seek(SeekFrom::Start(start))?;
+    let mut buf = Vec::with_capacity(take as usize);
+    f.take(take).read_to_end(&mut buf)?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    // If we did not read from byte 0, the first partial line is suspect: drop it.
+    let mut lines: Vec<String> = text.lines().map(|s| s.to_string()).collect();
+    if start > 0 && !lines.is_empty() {
+        lines.remove(0);
+    }
+    Ok(lines)
+}
+
+/// GET /api/self-understanding — uptime + tail of metrics.jsonl + best-effort snapshot.
+///
+/// Always returns 200 with `{"uptime_secs": u64, "metrics": [...], "snapshot": null|object}`.
+/// `uptime_secs` is derived from a process-start `Instant`; never depends on
+/// any external file. Metrics tail is bounded (≤ 1 MiB scanned, ≤ 20 lines).
+pub(crate) async fn self_understanding_handler() -> Json<Value> {
+    let start = SELF_UNDERSTANDING_START.get_or_init(std::time::Instant::now);
+    let uptime_secs: u64 = start.elapsed().as_secs();
+
+    let path = metrics_jsonl_path();
+    let metrics: Vec<Value> = match tail_bounded_lines(&path, METRICS_TAIL_SCAN_BYTES) {
+        Ok(lines) => {
+            // Parse each line; skip malformed silently.
+            let parsed: Vec<Value> = lines
+                .iter()
+                .filter_map(|l| {
+                    let t = l.trim();
+                    if t.is_empty() {
+                        None
+                    } else {
+                        serde_json::from_str::<Value>(t).ok()
+                    }
+                })
+                .collect();
+            // Keep only the last N (most recent), preserving file order.
+            let n = parsed.len();
+            let take_from = n.saturating_sub(METRICS_TAIL_MAX_LINES);
+            parsed[take_from..].to_vec()
+        }
+        Err(_) => Vec::new(),
+    };
+
+    Json(json!({
+        "uptime_secs": uptime_secs,
+        "metrics": metrics,
+        "snapshot": Value::Null,
+    }))
+}
+
+// =====================================================================
 // WS-1 AZLIN-TMUX-SESSIONS-LIST
 //
 // Provides a per-host tmux-session listing companion panel for the
@@ -3832,6 +4026,7 @@ pub(crate) const INDEX_HTML: &str = r#"<!DOCTYPE html>
     <div class="tab" data-tab="workboard">Whiteboard</div>
     <div class="tab" data-tab="thinking">🧠 Thinking</div>
     <div class="tab" data-tab="terminal">Terminal</div>
+    <div class="tab" data-tab="stewardship">Stewardship</div>
   </div>
 
   <div class="tab-content active" id="tab-overview">
@@ -4141,6 +4336,30 @@ pub(crate) const INDEX_HTML: &str = r#"<!DOCTYPE html>
     </section>
   </div>
 
+  <div class="tab-content" id="tab-stewardship">
+    <div class="grid">
+      <div class="card">
+        <h2>Repos Under Stewardship <button class="btn" onclick="fetchStewardship()" style="font-size:.75rem">Refresh</button></h2>
+        <div style="background:#1a1a2e;border:1px solid #333;border-radius:6px;padding:.6rem;margin-bottom:.75rem;font-size:.8rem;color:#8b949e">
+          Sourced from <code>~/.simard/stewardship.json</code>. Edit that file to add or remove repos.
+        </div>
+        <div id="stewardship-warning" style="display:none;color:#d29922;font-size:.85rem;margin-bottom:.5rem"></div>
+        <div id="stewardship-body"><span class="loading">Loading…</span></div>
+      </div>
+      <div class="card">
+        <h2>Self-Understanding <button class="btn" onclick="fetchSelfUnderstanding()" style="font-size:.75rem">Refresh</button></h2>
+        <div style="background:#1a1a2e;border:1px solid #333;border-radius:6px;padding:.6rem;margin-bottom:.75rem;font-size:.8rem;color:#8b949e">
+          Surfaces process uptime + last 20 entries of <code>~/.simard/metrics/metrics.jsonl</code>.
+        </div>
+        <div style="font-size:.85rem;color:#8b949e;margin-bottom:.5rem">
+          Uptime: <span id="self-understanding-uptime" style="color:var(--fg);font-weight:600">—</span>
+        </div>
+        <div id="self-understanding-snapshot" style="font-size:.85rem;color:#8b949e;margin-bottom:.75rem"></div>
+        <div id="self-understanding-body"><span class="loading">Loading…</span></div>
+      </div>
+    </div>
+  </div>
+
   <script>
     /* --- Helpers --- */
     function fmtB(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';return(b/1048576).toFixed(1)+' MB';}
@@ -4268,6 +4487,7 @@ pub(crate) const INDEX_HTML: &str = r#"<!DOCTYPE html>
         if(tab.dataset.tab==='workboard') {fetchWorkboard();tabRefreshTimers.wb=setInterval(fetchWorkboard,30000);}
         if(tab.dataset.tab==='thinking') {fetchThinking();tabRefreshTimers.thinking=setInterval(fetchThinking,30000);}
         if(tab.dataset.tab==='terminal') {initAgentLogTerminal();fetchSubagentSessions();tabRefreshTimers.subagent=setInterval(fetchSubagentSessions,5000);fetchTmuxSessions();tabRefreshTimers.tmux=setInterval(fetchTmuxSessions,10000);}
+        if(tab.dataset.tab==='stewardship') {fetchStewardship();fetchSelfUnderstanding();}
       });
     });
     setInterval(()=>{document.getElementById('clock').textContent=new Date().toLocaleString()},1000);
@@ -5557,6 +5777,147 @@ pub(crate) const INDEX_HTML: &str = r#"<!DOCTYPE html>
       };
       ws.onerror = () => setAgentLogStatus('socket error', '#f85149');
       ws.onclose = () => { setAgentLogStatus('detached', '#8b949e'); if(agentLogWS === ws) agentLogWS = null; };
+    }
+
+    /* --- Stewardship + Self-Understanding (issue #1172) --- */
+    function fmtUptime(s){
+      if(typeof s!=='number'||!isFinite(s)||s<0) return String(s);
+      const h=Math.floor(s/3600), m=Math.floor((s%3600)/60), sec=Math.floor(s%60);
+      if(h>0) return h+'h '+m+'m';
+      if(m>0) return m+'m '+sec+'s';
+      return sec+'s';
+    }
+    async function fetchStewardship(){
+      const body=document.getElementById('stewardship-body');
+      const warn=document.getElementById('stewardship-warning');
+      if(warn){warn.style.display='none';warn.textContent='';}
+      try{
+        const d=await apiFetch('/api/stewardship');
+        const repos=Array.isArray(d&&d.repos)?d.repos:[];
+        if(d&&typeof d.warning==='string'&&warn){warn.textContent=d.warning;warn.style.display='block';}
+        // Clear via textContent (avoid innerHTML on dynamic data — XSS hardening).
+        body.textContent='';
+        if(repos.length===0){
+          const empty=document.createElement('div');
+          empty.style.color='#8b949e';
+          empty.style.fontSize='.85rem';
+          empty.textContent='No repos under stewardship. Add entries to ~/.simard/stewardship.json.';
+          body.appendChild(empty);
+          return;
+        }
+        const tbl=document.createElement('table');
+        tbl.style.width='100%';tbl.style.fontSize='.85rem';tbl.style.borderCollapse='collapse';
+        const head=document.createElement('thead');
+        const hr=document.createElement('tr');
+        ['Repo','Role','Last Activity','Notes'].forEach(label=>{
+          const th=document.createElement('th');
+          th.style.textAlign='left';th.style.padding='.3rem .5rem';th.style.color='#8b949e';
+          th.style.borderBottom='1px solid var(--border)';
+          th.textContent=label;
+          hr.appendChild(th);
+        });
+        head.appendChild(hr);
+        tbl.appendChild(head);
+        const tbody=document.createElement('tbody');
+        repos.forEach(r=>{
+          const tr=document.createElement('tr');
+          const fields=[
+            (r&&r.repo)||'',
+            (r&&r.role)||'',
+            (r&&r.last_activity)||'',
+            (r&&r.notes)||'',
+          ];
+          fields.forEach(v=>{
+            const td=document.createElement('td');
+            td.style.padding='.3rem .5rem';
+            td.style.borderBottom='1px solid var(--border)';
+            td.textContent=String(v);
+            tr.appendChild(td);
+          });
+          tbody.appendChild(tr);
+        });
+        tbl.appendChild(tbody);
+        body.appendChild(tbl);
+      }catch(e){
+        body.textContent='';
+        const errDiv=document.createElement('div');
+        errDiv.style.color='#f85149';errDiv.style.fontSize='.85rem';
+        errDiv.textContent='Failed to load stewardship: '+(e&&e.message?e.message:String(e));
+        body.appendChild(errDiv);
+      }
+    }
+    async function fetchSelfUnderstanding(){
+      const body=document.getElementById('self-understanding-body');
+      const upEl=document.getElementById('self-understanding-uptime');
+      const snapEl=document.getElementById('self-understanding-snapshot');
+      try{
+        const d=await apiFetch('/api/self-understanding');
+        const uptime=(d&&typeof d.uptime_secs==='number')?d.uptime_secs:0;
+        if(upEl){upEl.textContent=fmtUptime(uptime)+' ('+uptime+'s)';}
+        if(snapEl){
+          snapEl.textContent='';
+          const snap=d&&d.snapshot;
+          if(snap&&typeof snap==='object'){
+            const parts=[];
+            if(typeof snap.session_phase==='string') parts.push('phase: '+snap.session_phase);
+            if(typeof snap.topology_summary==='string') parts.push('topology: '+snap.topology_summary);
+            if(typeof snap.uptime_secs==='number') parts.push('snap_uptime: '+snap.uptime_secs+'s');
+            snapEl.textContent=parts.length?('Snapshot — '+parts.join(' · ')):'Snapshot — (no fields exposed)';
+          }else{
+            snapEl.textContent='Snapshot — unavailable';
+          }
+        }
+        const metrics=Array.isArray(d&&d.metrics)?d.metrics:[];
+        body.textContent='';
+        if(metrics.length===0){
+          const empty=document.createElement('div');
+          empty.style.color='#8b949e';empty.style.fontSize='.85rem';
+          empty.textContent='No metrics recorded yet (~/.simard/metrics/metrics.jsonl is empty or missing).';
+          body.appendChild(empty);
+          return;
+        }
+        const tbl=document.createElement('table');
+        tbl.style.width='100%';tbl.style.fontSize='.85rem';tbl.style.borderCollapse='collapse';
+        const head=document.createElement('thead');
+        const hr=document.createElement('tr');
+        ['Timestamp','Name','Value'].forEach(label=>{
+          const th=document.createElement('th');
+          th.style.textAlign='left';th.style.padding='.3rem .5rem';th.style.color='#8b949e';
+          th.style.borderBottom='1px solid var(--border)';
+          th.textContent=label;
+          hr.appendChild(th);
+        });
+        head.appendChild(hr);
+        tbl.appendChild(head);
+        const tbody=document.createElement('tbody');
+        // Show most-recent first.
+        metrics.slice().reverse().forEach(m=>{
+          const tr=document.createElement('tr');
+          const cells=[
+            (m&&m.timestamp)!=null?String(m.timestamp):'',
+            (m&&m.name)!=null?String(m.name):'',
+            (m&&m.value)!=null?String(m.value):'',
+          ];
+          cells.forEach(v=>{
+            const td=document.createElement('td');
+            td.style.padding='.3rem .5rem';
+            td.style.borderBottom='1px solid var(--border)';
+            td.textContent=v;
+            tr.appendChild(td);
+          });
+          tbody.appendChild(tr);
+        });
+        tbl.appendChild(tbody);
+        body.appendChild(tbl);
+      }catch(e){
+        if(upEl) upEl.textContent='—';
+        if(snapEl) snapEl.textContent='';
+        body.textContent='';
+        const errDiv=document.createElement('div');
+        errDiv.style.color='#f85149';errDiv.style.fontSize='.85rem';
+        errDiv.textContent='Failed to load self-understanding: '+(e&&e.message?e.message:String(e));
+        body.appendChild(errDiv);
+      }
     }
 
     /* --- Init --- */

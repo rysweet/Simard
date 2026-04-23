@@ -11,6 +11,7 @@ const ALL_TABS = [
   'thinking',
   'workboard',
   'chat',
+  'stewardship',
 ] as const;
 
 // Mock all API endpoints so tabs render without a live backend
@@ -141,6 +142,20 @@ async function mockAllApis(page: import('@playwright/test').Page) {
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({ nodes: [], edges: [] }),
+    }),
+  );
+  await page.route('**/api/stewardship', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ repos: [] }),
+    }),
+  );
+  await page.route('**/api/self-understanding', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ uptime_secs: 0, metrics: [], snapshot: null }),
     }),
   );
 }
