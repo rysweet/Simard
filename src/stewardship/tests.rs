@@ -27,11 +27,13 @@ use crate::stewardship::{
 
 // ─────────────────────────── FakeGhClient ───────────────────────────
 
+type SearchResponseMap =
+    std::collections::HashMap<(String, String), Result<Vec<GhIssue>, SimardError>>;
+
 #[derive(Default)]
 struct FakeGhClient {
     /// Pre-seeded responses for `search_issues`. Key: (repo, signature).
-    search_responses:
-        Mutex<std::collections::HashMap<(String, String), Result<Vec<GhIssue>, SimardError>>>,
+    search_responses: Mutex<SearchResponseMap>,
     /// Pre-seeded responses for `create_issue`. Key: repo.
     create_responses: Mutex<std::collections::HashMap<String, Result<GhIssue, SimardError>>>,
     /// Recorded calls.
