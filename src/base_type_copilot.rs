@@ -224,11 +224,10 @@ impl BaseTypeSession for CopilotSdkSession {
         if response_text.trim().is_empty() {
             return Err(SimardError::AdapterInvocationFailed {
                 base_type: self.descriptor.id.to_string(),
-                reason:
-                    "copilot returned no conversational content (auth failure, rate limit, or \
+                reason: "copilot returned no conversational content (auth failure, rate limit, or \
                      truncated transcript). Run `gh auth status` and inspect the most recent \
                      transcript in ~/.simard/agent_logs/."
-                        .to_string(),
+                    .to_string(),
             });
         }
 
@@ -925,6 +924,9 @@ Script done on 2026-04-21 04:22:00+00:00";
     fn strip_ansi_removes_csi_color_codes() {
         assert_eq!(strip_ansi("\u{1b}[33mhello\u{1b}[0m"), "hello");
         assert_eq!(strip_ansi("plain"), "plain");
-        assert_eq!(strip_ansi("\u{1b}[1;31mbold red\u{1b}[0m end"), "bold red end");
+        assert_eq!(
+            strip_ansi("\u{1b}[1;31mbold red\u{1b}[0m end"),
+            "bold red end"
+        );
     }
 }

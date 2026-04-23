@@ -61,20 +61,21 @@ impl RuntimeConfig {
     pub fn load_from(state_root: &Path) -> SimardResult<Self> {
         // 1. Env wins when set.
         if let Some(provider) = read_env_provider()? {
-            return Ok(Self { llm_provider: provider });
+            return Ok(Self {
+                llm_provider: provider,
+            });
         }
 
         // 2. Config file when present.
         let path = state_root.join(CONFIG_FILE_NAME);
         if path.exists() {
-            let body = std::fs::read_to_string(&path).map_err(|e| {
-                SimardError::PersistentStoreIo {
+            let body =
+                std::fs::read_to_string(&path).map_err(|e| SimardError::PersistentStoreIo {
                     store: "runtime_config".to_string(),
                     action: "read config.toml".to_string(),
                     path: path.clone(),
                     reason: e.to_string(),
-                }
-            })?;
+                })?;
             return Self::from_toml_str(&body);
         }
 
@@ -117,11 +118,10 @@ impl RuntimeConfig {
                 provider = Some(parse_provider("config.toml", value)?);
             }
         }
-        let llm_provider =
-            provider.ok_or_else(|| SimardError::MissingRequiredConfig {
-                key: "llm_provider".to_string(),
-                help: "config.toml present but missing `llm_provider` key".to_string(),
-            })?;
+        let llm_provider = provider.ok_or_else(|| SimardError::MissingRequiredConfig {
+            key: "llm_provider".to_string(),
+            help: "config.toml present but missing `llm_provider` key".to_string(),
+        })?;
         Ok(Self { llm_provider })
     }
 
@@ -155,15 +155,15 @@ impl RuntimeConfig {
         let Some(provider) = read_env_provider()? else {
             return Ok(false);
         };
-        std::fs::create_dir_all(state_root).map_err(|e| {
-            SimardError::PersistentStoreIo {
-                store: "runtime_config".to_string(),
-                action: "create state root".to_string(),
-                path: state_root.to_path_buf(),
-                reason: e.to_string(),
-            }
+        std::fs::create_dir_all(state_root).map_err(|e| SimardError::PersistentStoreIo {
+            store: "runtime_config".to_string(),
+            action: "create state root".to_string(),
+            path: state_root.to_path_buf(),
+            reason: e.to_string(),
         })?;
-        let cfg = Self { llm_provider: provider };
+        let cfg = Self {
+            llm_provider: provider,
+        };
         std::fs::write(&path, cfg.to_toml_string()).map_err(|e| {
             SimardError::PersistentStoreIo {
                 store: "runtime_config".to_string(),
@@ -181,11 +181,9 @@ fn read_env_provider() -> SimardResult<Option<LlmProvider>> {
         Ok(s) if s.is_empty() => Ok(None),
         Ok(s) => Ok(Some(parse_provider(ENV_LLM_PROVIDER, &s)?)),
         Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => {
-            Err(SimardError::NonUnicodeConfigValue {
-                key: ENV_LLM_PROVIDER.to_string(),
-            })
-        }
+        Err(std::env::VarError::NotUnicode(_)) => Err(SimardError::NonUnicodeConfigValue {
+            key: ENV_LLM_PROVIDER.to_string(),
+        }),
     }
 }
 
@@ -324,7 +322,9 @@ mod tests {
     #[test]
     fn toml_roundtrip_preserves_provider() {
         for provider in [LlmProvider::Copilot, LlmProvider::RustyClawd] {
-            let cfg = RuntimeConfig { llm_provider: provider };
+            let cfg = RuntimeConfig {
+                llm_provider: provider,
+            };
             let body = cfg.to_toml_string();
             let parsed = RuntimeConfig::from_toml_str(&body).unwrap();
             assert_eq!(parsed.llm_provider, provider);
