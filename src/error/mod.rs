@@ -228,6 +228,18 @@ pub enum SimardError {
     PromptNotFound {
         name: String,
     },
+    /// Stewardship: source-module → repo routing has no matching keyword. Fail-loud — no default repo.
+    StewardshipRoutingAmbiguous {
+        source: String,
+    },
+    /// Stewardship: a `gh` subprocess invocation failed (non-zero exit, missing binary, malformed JSON).
+    StewardshipGhCommandFailed {
+        reason: String,
+    },
+    /// Stewardship: an `OrchestratorRunSummary` had an empty required field.
+    StewardshipInvalidRunSummary {
+        field: &'static str,
+    },
 }
 
 pub type SimardResult<T> = Result<T, SimardError>;

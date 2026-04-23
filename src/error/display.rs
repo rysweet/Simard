@@ -271,6 +271,21 @@ impl Display for SimardError {
             Self::PromptNotFound { name } => {
                 write!(f, "required prompt asset not found: {name}")
             }
+            Self::StewardshipRoutingAmbiguous { source } => {
+                write!(
+                    f,
+                    "stewardship: cannot route source-module '{source}' to a target repo (no matching keyword)"
+                )
+            }
+            Self::StewardshipGhCommandFailed { reason } => {
+                write!(f, "stewardship: gh command failed: {reason}")
+            }
+            Self::StewardshipInvalidRunSummary { field } => {
+                write!(
+                    f,
+                    "stewardship: orchestrator run summary missing required field '{field}'"
+                )
+            }
         }
     }
 }
