@@ -23,7 +23,12 @@ fn cargo_install_from_repo_succeeds() {
     let status = Command::new(env!("CARGO"))
         .args(["install", "--path", ".", "--root"])
         .arg(&install_root)
-        .args(["--no-track", "--quiet"])
+        // `--debug` switches from the default release build (~40 min with
+        // cold cache because cargo install allocates an isolated target
+        // directory that bypasses the CI dep cache) to a dev-profile build.
+        // A smoke test only needs to prove the crate packages cleanly and
+        // `simard --help` loads — release-grade optimization is waste here.
+        .args(["--no-track", "--quiet", "--debug"])
         .status()
         .expect("failed to launch cargo install");
 
