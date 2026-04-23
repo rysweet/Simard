@@ -136,6 +136,36 @@ pub fn add_backlog_item(board: &mut GoalBoard, item: BacklogItem) -> SimardResul
     Ok(())
 }
 
+/// Default backlog score for stewardship-filed issues (issue #1167).
+pub const DEFAULT_STEWARD_SCORE: f64 = 0.6;
+
+/// Enqueue a stewardship-filed (or matched) GitHub issue onto the backlog
+/// (issue #1167).
+///
+/// Idempotent: if a backlog item with the same stewardship id already exists
+/// (same repo + issue number), this is a no-op and returns `Ok(())`.
+pub fn enqueue_stewardship_issue(
+    board: &mut GoalBoard,
+    repo: &str,
+    issue_number: u64,
+    url: &str,
+    signature: &str,
+) -> SimardResult<()> {
+    let id = format!("stewardship-{}-{}", repo.replace('/', "_"), issue_number);
+    if board.backlog.iter().any(|b| b.id == id) {
+        return Ok(());
+    }
+    let item = BacklogItem {
+        id,
+        description: format!(
+            "Investigate stewardship-filed failure (signature {signature}) — {url}"
+        ),
+        source: format!("stewardship:{repo}#{issue_number}"),
+        score: DEFAULT_STEWARD_SCORE,
+    };
+    add_backlog_item(board, item)
+}
+
 /// Promote a backlog item to an active goal. The item is removed from the
 /// backlog and inserted as a `NotStarted` active goal with the given priority.
 pub fn promote_to_active(
@@ -382,5 +412,69 @@ mod tests {
         let count = seed_default_board(&mut board);
         assert_eq!(count, 0);
         assert_eq!(board.active.len(), 1);
+    }
+
+    // ── enqueue_stewardship_issue (issue #1167) ─────────────────────────
+
+    #[test]
+    fn enqueue_stewardship_issue_adds_backlog_row() {
+        let mut board = GoalBoard::new();
+        super::enqueue_stewardship_issue(
+            &mut board,
+            "rysweet/Simard",
+            42,
+            "https://github.com/rysweet/Simard/issues/42",
+            "abcdef0123456789",
+        )
+        .unwrap();
+        assert_eq!(board.backlog.len(), 1);
+        let item = &board.backlog[0];
+        assert_eq!(item.id, "stewardship-rysweet_Simard-42");
+        assert_eq!(item.source, "stewardship:rysweet/Simard#42");
+        assert!(item.description.contains("abcdef0123456789"));
+        assert!(
+            item.description
+                .contains("https://github.com/rysweet/Simard/issues/42")
+        );
+        assert!(item.score > 0.0 && item.score <= 1.0);
+    }
+
+    #[test]
+    fn enqueue_stewardship_issue_is_idempotent_on_same_issue() {
+        let mut board = GoalBoard::new();
+        super::enqueue_stewardship_issue(
+            &mut board,
+            "rysweet/Simard",
+            42,
+            "https://github.com/rysweet/Simard/issues/42",
+            "sig",
+        )
+        .unwrap();
+        // Second call with same (repo, issue#) → no-op (returns Ok, backlog unchanged).
+        super::enqueue_stewardship_issue(
+            &mut board,
+            "rysweet/Simard",
+            42,
+            "https://github.com/rysweet/Simard/issues/42",
+            "sig",
+        )
+        .unwrap();
+        assert_eq!(board.backlog.len(), 1, "must not duplicate stewardship row");
+    }
+
+    #[test]
+    fn enqueue_stewardship_issue_amplihack_repo() {
+        let mut board = GoalBoard::new();
+        super::enqueue_stewardship_issue(
+            &mut board,
+            "rysweet/amplihack",
+            7,
+            "https://github.com/rysweet/amplihack/issues/7",
+            "deadbeef",
+        )
+        .unwrap();
+        let item = &board.backlog[0];
+        assert_eq!(item.id, "stewardship-rysweet_amplihack-7");
+        assert_eq!(item.source, "stewardship:rysweet/amplihack#7");
     }
 }
