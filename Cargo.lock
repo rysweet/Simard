@@ -3548,7 +3548,7 @@ dependencies = [
 
 [[package]]
 name = "simard"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "amplihack-memory",
  "assert_cmd",
