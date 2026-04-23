@@ -452,6 +452,22 @@ Internally, it may include:
 Human teams split work across specialists, leads, reviewers, and coordinators.
 Simard should borrow from that pattern instead of pretending one giant undifferentiated agent is the clean design.
 
+### 5a. Stewardship Mode
+
+Section 5 (line 435) calls Simard "a high-standard engineering steward over the amplihack ecosystem."
+Stewardship Mode is the mechanism that makes that role concrete: Simard converts her own orchestrator failures into tracked, deduplicated GitHub issues and feeds them back into her backlog so that no observed failure is lost.
+
+The loop runs on every orchestrator run that produces a failure summary:
+
+- **Trigger.** A Simard orchestrator run completes with a failure. The caller assembles an `OrchestratorRunSummary { run_id, recipe_name, failed_step, source_module, failure_kind, error_text }` and hands it to `stewardship::process_orchestrator_run`. Empty fields are rejected — there is no silent default.
+- **Routing.** The `source_module` string is matched against an explicit keyword matrix. Sources mentioning `amplihack`, `recipe-runner`, `orchestrator`, or `recipe::` route to `rysweet/amplihack`. Sources mentioning Simard subsystems (`engineer_loop`, `base_type`, `self_improve`, `goal_curation`, `agent_loop`, `session_builder`, `simard::`) route to `rysweet/Simard`. Anything unmatched fails loud — no default repo, no silent skip.
+- **Deduplication.** Every failure is reduced to a 16-hex-character signature: the first 8 bytes of `sha256(failure_kind || "\n" || normalized_error_text)`. Normalization strips ANSI escapes, collapses whitespace, and replaces volatile tokens (absolute paths, ISO-8601 timestamps, `run-…` IDs, hex blobs ≥ 7 chars) with stable placeholders. Stewardship searches `gh issue list -R <repo> --state open --search "stewardship-signature:<sig> in:body"`. A match short-circuits issue creation.
+- **Issue body contract.** New issues embed structured front-matter so future runs can match them: `filed-by: simard-stewardship`, `stewardship-signature: <hex>`, `originating-run`, `failed-step`, `source-module`, followed by the raw error.
+- **Backlog handoff.** Whether the cycle ended in `FiledNew` or `MatchedExisting`, Simard adds a backlog item via `goal_curation::enqueue_stewardship_issue` with id `stewardship-<owner>_<repo>-<num>` and source `stewardship:<owner>/<repo>#<num>`. Re-enqueueing the same issue is a no-op so repeated runs do not bloat the backlog.
+- **Failure handling.** Subprocess failures from `gh` propagate as `SimardError::StewardshipGhCommandFailed`. The loop never assumes "no matches" on a `gh` error and never files an issue while a search is degraded.
+
+Stewardship Mode owns no scheduling policy; it is invoked synchronously by orchestrator-side hooks. Scheduling a follow-up smart-orchestrator run against an upstream repo is intentionally deferred to a later iteration.
+
 ### 6. Agent Runtime
 
 The agent runtime is the system that takes an identity and makes it real.

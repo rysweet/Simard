@@ -379,3 +379,38 @@ fn display_not_a_repo() {
     assert!(msg.contains("/home/user/project"), "{msg}");
     assert!(msg.contains("no .git directory"), "{msg}");
 }
+
+// --- Display: StewardshipRoutingAmbiguous (issue #1167) ---
+
+#[test]
+fn display_stewardship_routing_ambiguous() {
+    let err = SimardError::StewardshipRoutingAmbiguous {
+        source: "totally_unknown_subsystem".to_string(),
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("stewardship"), "{msg}");
+    assert!(msg.contains("totally_unknown_subsystem"), "{msg}");
+}
+
+// --- Display: StewardshipGhCommandFailed ---
+
+#[test]
+fn display_stewardship_gh_command_failed() {
+    let err = SimardError::StewardshipGhCommandFailed {
+        reason: "rate limit exceeded".to_string(),
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("stewardship"), "{msg}");
+    assert!(msg.contains("gh"), "{msg}");
+    assert!(msg.contains("rate limit exceeded"), "{msg}");
+}
+
+// --- Display: StewardshipInvalidRunSummary ---
+
+#[test]
+fn display_stewardship_invalid_run_summary() {
+    let err = SimardError::StewardshipInvalidRunSummary { field: "run_id" };
+    let msg = err.to_string();
+    assert!(msg.contains("stewardship"), "{msg}");
+    assert!(msg.contains("run_id"), "{msg}");
+}
