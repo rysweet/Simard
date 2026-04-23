@@ -128,7 +128,7 @@ fn orient_produces_ranked_priorities() {
     let board = board_with_goals();
     let mut state = OodaState::new(board.clone());
     let obs = observe(&mut state, &bridges).unwrap();
-    let priorities = orient(&obs, &board).unwrap();
+    let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
     assert!(!priorities.is_empty());
     assert_eq!(priorities[0].goal_id, "g3"); // blocked = highest urgency
     assert!(priorities[0].urgency > priorities.last().unwrap().urgency);
@@ -140,7 +140,7 @@ fn decide_selects_actions_within_concurrent_limit() {
     let board = board_with_goals();
     let mut state = OodaState::new(board.clone());
     let obs = observe(&mut state, &bridges).unwrap();
-    let priorities = orient(&obs, &board).unwrap();
+    let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
     let config = OodaConfig {
         max_concurrent_actions: 2,
         ..Default::default()
@@ -156,7 +156,7 @@ fn act_dispatches_and_returns_outcomes() {
     let board = board_with_goals();
     let mut state = OodaState::new(board.clone());
     let obs = observe(&mut state, &bridges).unwrap();
-    let priorities = orient(&obs, &board).unwrap();
+    let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
     let actions = decide(&priorities, &OodaConfig::default()).unwrap();
     let outcomes = act(&actions, &mut bridges, &mut state).unwrap();
     assert_eq!(outcomes.len(), actions.len());
@@ -217,7 +217,7 @@ fn feral_all_goals_blocked() {
     .unwrap();
     let mut state = OodaState::new(board.clone());
     let obs = observe(&mut state, &bridges).unwrap();
-    let priorities = orient(&obs, &board).unwrap();
+    let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
     for p in priorities.iter().filter(|p| !p.goal_id.starts_with("__")) {
         assert!((p.urgency - 1.0).abs() < f64::EPSILON);
     }

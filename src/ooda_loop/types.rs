@@ -1,5 +1,6 @@
 //! Shared types for the OODA loop.
 
+use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
 
 use crate::cognitive_memory::CognitiveMemoryOps;
@@ -51,6 +52,11 @@ pub struct OodaState {
     pub last_cycle_summary: Option<String>,
     /// Duration in seconds of the last completed cycle.
     pub last_cycle_duration_secs: Option<u64>,
+    /// Per-goal consecutive-failure count. Incremented after each Act phase
+    /// when an outcome with `goal_id == Some(g)` has `success == false`,
+    /// reset to 0 on success. Used by Orient to demote chronically failing
+    /// goals so the daemon stops burning budget on the same broken target.
+    pub goal_failure_counts: HashMap<String, u32>,
 }
 
 impl OodaState {
@@ -65,6 +71,7 @@ impl OodaState {
             cycle_start_epoch: 0,
             last_cycle_summary: None,
             last_cycle_duration_secs: None,
+            goal_failure_counts: HashMap::new(),
         }
     }
 }
