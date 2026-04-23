@@ -173,9 +173,7 @@ fn action_is_valid(action: &GoalAction) -> bool {
         GoalAction::GhIssueCreate { title, body, .. } => {
             !title.trim().is_empty() && !title.contains('\n') && !body.trim().is_empty()
         }
-        GoalAction::GhIssueComment { issue, body, .. } => {
-            *issue > 0 && !body.trim().is_empty()
-        }
+        GoalAction::GhIssueComment { issue, body, .. } => *issue > 0 && !body.trim().is_empty(),
         GoalAction::GhIssueClose { issue, .. } => *issue > 0,
         GoalAction::GhPrComment { pr, body, .. } => *pr > 0 && !body.trim().is_empty(),
     }
@@ -482,9 +480,7 @@ pub(super) fn advance_goal_with_session(
                     ref repo,
                     ref labels,
                 }) => {
-                    let repo_arg = repo
-                        .as_deref()
-                        .unwrap_or("rysweet/Simard");
+                    let repo_arg = repo.as_deref().unwrap_or("rysweet/Simard");
                     let result = dispatch_gh_issue_create(repo_arg, title, body, labels);
                     let detail = match result {
                         Ok(ref url) => format!(
@@ -564,10 +560,9 @@ pub(super) fn advance_goal_with_session(
                             "gh_pr_comment succeeded for goal '{}': pr #{pr} {url}",
                             goal.id,
                         ),
-                        Err(ref e) => format!(
-                            "gh_pr_comment FAILED for goal '{}': pr #{pr}: {e}",
-                            goal.id,
-                        ),
+                        Err(ref e) => {
+                            format!("gh_pr_comment FAILED for goal '{}': pr #{pr}: {e}", goal.id,)
+                        }
                     };
                     eprintln!("[simard] OODA goal-action {detail}");
                     GoalSessionResult {
@@ -588,8 +583,7 @@ pub(super) fn advance_goal_with_session(
                     );
                     let detail = format!(
                         "goal-action parse failed for goal '{}': LLM did not emit a recognised JSON action (one of spawn_engineer / noop / assess_only / gh_issue_create / gh_issue_comment / gh_issue_close / gh_pr_comment). Raw response head: {}",
-                        goal.id,
-                        raw,
+                        goal.id, raw,
                     );
                     GoalSessionResult {
                         outcome: make_outcome(action, false, detail),
@@ -651,7 +645,9 @@ fn dispatch_gh_issue_create(
     body: &str,
     labels: &[String],
 ) -> Result<String, String> {
-    let mut args: Vec<&str> = vec!["issue", "create", "--repo", repo, "--title", title, "--body", body];
+    let mut args: Vec<&str> = vec![
+        "issue", "create", "--repo", repo, "--title", title, "--body", body,
+    ];
     let label_csv;
     if !labels.is_empty() {
         label_csv = labels.join(",");
@@ -668,11 +664,7 @@ fn dispatch_gh_issue_comment(repo: &str, issue: u64, body: &str) -> Result<Strin
     ])
 }
 
-fn dispatch_gh_issue_close(
-    repo: &str,
-    issue: u64,
-    comment: Option<&str>,
-) -> Result<(), String> {
+fn dispatch_gh_issue_close(repo: &str, issue: u64, comment: Option<&str>) -> Result<(), String> {
     let issue_str = issue.to_string();
     if let Some(body) = comment
         && !body.trim().is_empty()
@@ -687,9 +679,7 @@ fn dispatch_gh_issue_close(
 
 fn dispatch_gh_pr_comment(repo: &str, pr: u64, body: &str) -> Result<String, String> {
     let pr_str = pr.to_string();
-    run_gh(&[
-        "pr", "comment", &pr_str, "--repo", repo, "--body", body,
-    ])
+    run_gh(&["pr", "comment", &pr_str, "--repo", repo, "--body", body])
 }
 
 #[cfg(test)]

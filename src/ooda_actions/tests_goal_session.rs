@@ -258,10 +258,8 @@ fn session_outcome_describes_action_taken() {
 
 #[test]
 fn objective_includes_concrete_commands() {
-    let (session, captured) = MockSession::new_ok(
-        r#"{"action":"noop","reason":"nothing to do"}"#,
-        vec![],
-    );
+    let (session, captured) =
+        MockSession::new_ok(r#"{"action":"noop","reason":"nothing to do"}"#, vec![]);
     let mut bridges = bridges_with_session(session);
     let board = board_with_goal("g1", GoalProgress::NotStarted, None);
     let mut state = OodaState::new(board);
@@ -387,10 +385,7 @@ fn dispatch_records_parse_failure_outcome_detail() {
     // LLM returns prose with no JSON — parser returns None and the
     // dispatcher MUST fail loudly (no silent fallback). The outcome detail
     // must explain the parse failure so operators can diagnose.
-    let (session, _) = MockSession::new_ok(
-        "I have no idea what to do. PROGRESS: 30",
-        vec![],
-    );
+    let (session, _) = MockSession::new_ok("I have no idea what to do. PROGRESS: 30", vec![]);
     let mut bridges = bridges_with_session(session);
     let board = board_with_goal("g1", GoalProgress::InProgress { percent: 25 }, None);
     let mut state = OodaState::new(board);
@@ -507,8 +502,7 @@ fn prompt_asset_instructs_json_output() {
 
 #[test]
 fn prompt_asset_documents_all_action_variants() {
-    const ASSET: &str =
-        include_str!("../../prompt_assets/simard/goal_session_objective.md");
+    const ASSET: &str = include_str!("../../prompt_assets/simard/goal_session_objective.md");
     for variant in [
         "spawn_engineer",
         "noop",
