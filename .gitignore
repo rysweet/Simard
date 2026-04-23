@@ -9,3 +9,4 @@ logs/
 worktrees/
 node_modules/
 test-results/
+gym-wave*-tmp/
