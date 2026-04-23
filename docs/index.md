@@ -8,7 +8,7 @@ owner: simard
 
 # Simard documentation
 
-Simard is a terminal-native engineering identity, written in Rust, that drives and curates agentic coding systems. She composes work over a pluggable set of agent base types — including `local-harness`, `terminal-shell`, `rusty-clawd`, and `copilot-sdk` in v1, with Microsoft Agent Framework, Claude Code SDK, and amplihack / amplihack-rs as candidate substrates — and exposes five operating modes (engineer, meeting, goal-curation, improvement-curation, gym). For the full design contract, see [Specs/ProductArchitecture.md](../Specs/ProductArchitecture.md).
+Simard is a terminal-native engineering identity, written in Rust, that drives and curates agentic coding systems. She composes work over a pluggable set of agent base types — including `local-harness`, `terminal-shell`, `rusty-clawd`, and `copilot-sdk` in v1, with Microsoft Agent Framework, Claude Code SDK, and amplihack / amplihack-rs as candidate substrates — and exposes five operating modes (engineer, meeting, goal-curation, improvement-curation, gym). For the full design contract, see [Specs/ProductArchitecture.md](https://github.com/rysweet/Simard/blob/main/Specs/ProductArchitecture.md).
 
 `simard` is the canonical operator-facing CLI.
 
