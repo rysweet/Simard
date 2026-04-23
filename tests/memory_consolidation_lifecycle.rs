@@ -177,6 +177,8 @@ fn ooda_cycle_runs_with_consolidation_wired_in() {
         priority: 1,
         status: GoalProgress::NotStarted,
         assigned_to: None,
+        current_activity: None,
+        wip_refs: Vec::new(),
     });
 
     let mut state = OodaState::new(board);
@@ -315,6 +317,8 @@ fn multiple_ooda_cycles_accumulate_consolidation() {
         priority: 1,
         status: GoalProgress::InProgress { percent: 50 },
         assigned_to: None,
+        current_activity: None,
+        wip_refs: Vec::new(),
     });
 
     let mut state = OodaState::new(board);

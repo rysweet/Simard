@@ -161,7 +161,10 @@ fn poll_and_gc_marks_dead_sessions_with_ended_at() {
             .iter()
             .find(|s| s.agent_id == "engineer-live")
             .expect("live session must remain");
-        assert!(live.ended_at.is_none(), "live session must NOT have ended_at");
+        assert!(
+            live.ended_at.is_none(),
+            "live session must NOT have ended_at"
+        );
 
         let dead = reg
             .sessions
@@ -230,7 +233,8 @@ fn sanitize_id_empty_input_becomes_engineer() {
 fn sanitize_id_output_matches_safe_charset() {
     let out = sanitize_id("weird!@#$%^&*()chars");
     assert!(
-        out.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+        out.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
         "sanitize_id output must only contain [A-Za-z0-9_-]: got {out:?}"
     );
     assert!(!out.is_empty());

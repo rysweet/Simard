@@ -114,6 +114,9 @@ fn progress(sub_id: &str, epoch: u64, outcome: Option<&str>) -> SubordinateProgr
         last_action: "working".to_string(),
         heartbeat_epoch: epoch,
         outcome: outcome.map(String::from),
+        commits_produced: 0,
+        prs_produced: 0,
+        exit_status: None,
     }
 }
 

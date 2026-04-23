@@ -390,8 +390,7 @@ pub(super) fn advance_goal_with_session(
                         goal.id,
                     );
 
-                    let new_progress =
-                        assess_progress_from_outcome(&outcome, &goal.status);
+                    let new_progress = assess_progress_from_outcome(&outcome, &goal.status);
                     let verification = verify_claimed_actions(&outcome.execution_summary);
                     let verified_count = verification.iter().filter(|v| v.verified).count();
                     let claimed_count = verification.len();
@@ -570,7 +569,10 @@ mod tests {
         match parsed {
             GoalAction::SpawnEngineer { task, files } => {
                 assert_eq!(task, "fix the auth bug");
-                assert_eq!(files, vec!["src/auth.rs".to_string(), "src/lib.rs".to_string()]);
+                assert_eq!(
+                    files,
+                    vec!["src/auth.rs".to_string(), "src/lib.rs".to_string()]
+                );
             }
             other => panic!("expected SpawnEngineer, got {other:?}"),
         }
@@ -606,7 +608,10 @@ mod tests {
         let response = r#"{"action": "assess_only", "assessment": "good progress, no spawn needed", "progress_pct": 65}"#;
         let parsed = parse_goal_action(response).expect("clean assess_only JSON must parse");
         match parsed {
-            GoalAction::AssessOnly { assessment, progress_pct } => {
+            GoalAction::AssessOnly {
+                assessment,
+                progress_pct,
+            } => {
                 assert_eq!(assessment, "good progress, no spawn needed");
                 assert_eq!(progress_pct, 65);
             }
@@ -616,16 +621,29 @@ mod tests {
 
     #[test]
     fn parse_assess_only_at_zero_percent() {
-        let response = r#"{"action": "assess_only", "assessment": "not started", "progress_pct": 0}"#;
+        let response =
+            r#"{"action": "assess_only", "assessment": "not started", "progress_pct": 0}"#;
         let parsed = parse_goal_action(response).expect("0% should be valid");
-        assert!(matches!(parsed, GoalAction::AssessOnly { progress_pct: 0, .. }));
+        assert!(matches!(
+            parsed,
+            GoalAction::AssessOnly {
+                progress_pct: 0,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn parse_assess_only_at_100_percent() {
         let response = r#"{"action": "assess_only", "assessment": "done", "progress_pct": 100}"#;
         let parsed = parse_goal_action(response).expect("100% should be valid");
-        assert!(matches!(parsed, GoalAction::AssessOnly { progress_pct: 100, .. }));
+        assert!(matches!(
+            parsed,
+            GoalAction::AssessOnly {
+                progress_pct: 100,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -654,7 +672,8 @@ Hope that helps!"#;
         // The brace-balanced extractor must respect string boundaries and
         // not be confused by literal { or } inside JSON string values.
         let response = r#"prefix {"action": "spawn_engineer", "task": "implement fn foo() { return {}; }"} suffix"#;
-        let parsed = parse_goal_action(response).expect("nested braces inside strings must not break extraction");
+        let parsed = parse_goal_action(response)
+            .expect("nested braces inside strings must not break extraction");
         match parsed {
             GoalAction::SpawnEngineer { task, .. } => {
                 assert_eq!(task, "implement fn foo() { return {}; }");
@@ -806,8 +825,14 @@ Hope that helps!"#;
     fn goal_action_variants_are_distinct() {
         // Sanity: the three variants compare unequal.
         let a = GoalAction::Noop { reason: "x".into() };
-        let b = GoalAction::AssessOnly { assessment: "x".into(), progress_pct: 0 };
-        let c = GoalAction::SpawnEngineer { task: "x".into(), files: vec![] };
+        let b = GoalAction::AssessOnly {
+            assessment: "x".into(),
+            progress_pct: 0,
+        };
+        let c = GoalAction::SpawnEngineer {
+            task: "x".into(),
+            files: vec![],
+        };
         assert_ne!(a, b);
         assert_ne!(b, c);
         assert_ne!(a, c);

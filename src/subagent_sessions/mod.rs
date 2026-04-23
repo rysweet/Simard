@@ -120,10 +120,7 @@ pub fn save_atomic(reg: &Registry) -> io::Result<()> {
     })?;
     fs::create_dir_all(parent)?;
 
-    let tmp = parent.join(format!(
-        "subagent_sessions.json.tmp.{}",
-        std::process::id()
-    ));
+    let tmp = parent.join(format!("subagent_sessions.json.tmp.{}", std::process::id()));
 
     let serialized = serde_json::to_vec_pretty(reg).map_err(io::Error::other)?;
 

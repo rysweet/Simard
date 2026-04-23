@@ -176,10 +176,37 @@ pub fn analyze_objective(objective: &str) -> AnalyzedAction {
 /// Words that indicate the extracted text is natural-language prose rather
 /// than a real shell command.  Checked as whole whitespace-delimited tokens.
 const PROSE_SIGNAL_WORDS: &[&str] = &[
-    "and", "or", "but", "then", "also", "should", "would", "could", "please",
-    "the", "this", "that", "with", "from", "into", "about", "against", "after",
-    "before", "because", "since", "while", "although", "however", "therefore",
-    "furthermore", "additionally", "shall", "will", "might", "must",
+    "and",
+    "or",
+    "but",
+    "then",
+    "also",
+    "should",
+    "would",
+    "could",
+    "please",
+    "the",
+    "this",
+    "that",
+    "with",
+    "from",
+    "into",
+    "about",
+    "against",
+    "after",
+    "before",
+    "because",
+    "since",
+    "while",
+    "although",
+    "however",
+    "therefore",
+    "furthermore",
+    "additionally",
+    "shall",
+    "will",
+    "might",
+    "must",
 ];
 
 /// Returns `true` when `text` looks like a natural-language prose fragment
@@ -191,7 +218,10 @@ pub(crate) fn is_prose_fragment(text: &str) -> bool {
     }
 
     // Sentence-ending punctuation anywhere in the tokens is a strong signal.
-    if tokens.iter().any(|t| t.ends_with('.') || t.ends_with('?') || t.ends_with('!')) {
+    if tokens
+        .iter()
+        .any(|t| t.ends_with('.') || t.ends_with('?') || t.ends_with('!'))
+    {
         return true;
     }
 
@@ -205,7 +235,11 @@ pub(crate) fn is_prose_fragment(text: &str) -> bool {
     }
 
     // Issue/PR references like "#890" in the middle of a "command" are prose.
-    if tokens.iter().skip(1).any(|t| t.starts_with('#') && t.len() > 1) {
+    if tokens
+        .iter()
+        .skip(1)
+        .any(|t| t.starts_with('#') && t.len() > 1)
+    {
         return true;
     }
 
@@ -453,23 +487,21 @@ mod tests {
     fn extract_command_rejects_prose_with_period() {
         // Issue #912: prose fragments like "git commit -m and open PR against #890."
         // should not be treated as shell commands.
-        assert!(extract_command_from_objective(
-            "run git commit -m and open PR against #890."
-        ).is_none());
+        assert!(
+            extract_command_from_objective("run git commit -m and open PR against #890.").is_none()
+        );
     }
 
     #[test]
     fn extract_command_rejects_prose_with_conjunctions() {
-        assert!(extract_command_from_objective(
-            "run the migration and then deploy"
-        ).is_none());
+        assert!(extract_command_from_objective("run the migration and then deploy").is_none());
     }
 
     #[test]
     fn extract_command_rejects_prose_with_issue_ref() {
-        assert!(extract_command_from_objective(
-            "execute the fix for #123 in the planner"
-        ).is_none());
+        assert!(
+            extract_command_from_objective("execute the fix for #123 in the planner").is_none()
+        );
     }
 
     #[test]

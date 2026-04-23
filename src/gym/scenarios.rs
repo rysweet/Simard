@@ -2793,7 +2793,11 @@ pub(super) fn class_specific_checks(
                     passed: cache_pattern_named,
                     detail: format!(
                         "execution output {} a named caching pattern",
-                        if cache_pattern_named { "includes" } else { "lacks" }
+                        if cache_pattern_named {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
                     ),
                 },
                 BenchmarkCheckResult {
@@ -2976,7 +2980,11 @@ pub(super) fn class_specific_checks(
                     passed: event_store_described,
                     detail: format!(
                         "execution output {} event store/log description",
-                        if event_store_described { "includes" } else { "lacks" }
+                        if event_store_described {
+                            "includes"
+                        } else {
+                            "lacks"
+                        }
                     ),
                 },
                 BenchmarkCheckResult {

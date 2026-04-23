@@ -87,6 +87,8 @@ fn sample_goal(id: &str, priority: u32, progress: GoalProgress) -> ActiveGoal {
         priority,
         status: progress,
         assigned_to: None,
+        current_activity: None,
+        wip_refs: Vec::new(),
     }
 }
 

@@ -185,7 +185,10 @@ fn kill_orphaned_cargo_processes(report: &mut CleanupReport) {
         // for hours).
         let exe_basename = parts[2].rsplit('/').next().unwrap_or("");
         let is_cargo_invocation = exe_basename == "cargo"
-            && parts.get(3).map(|s| *s == "test" || *s == "build").unwrap_or(false);
+            && parts
+                .get(3)
+                .map(|s| *s == "test" || *s == "build")
+                .unwrap_or(false);
 
         if elapsed > threshold_seconds && is_cargo_invocation {
             eprintln!("  Killing orphaned cargo process pid={pid} (running {elapsed}s): {cmd}");
