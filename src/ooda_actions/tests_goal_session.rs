@@ -38,7 +38,10 @@ fn session_identity_describes_pm_architect_not_coder() {
 
 #[test]
 fn session_objective_includes_assessment_steps() {
-    let (session, captured) = MockSession::new_ok("PROGRESS: 30", vec![]);
+    let (session, captured) = MockSession::new_ok(
+        r#"{"action":"assess_only","assessment":"checked","progress_pct":30}"#,
+        vec![],
+    );
     let mut bridges = bridges_with_session(session);
     let board = board_with_goal("g1", GoalProgress::InProgress { percent: 10 }, None);
     let mut state = OodaState::new(board);
@@ -53,41 +56,33 @@ fn session_objective_includes_assessment_steps() {
     let input = input.as_ref().expect("session should have received input");
     let obj = &input.objective;
 
-    // Objective must include the goal ID and description.
+    // Objective must include the goal ID.
     assert!(obj.contains("g1"), "objective should contain goal ID");
 
-    // Must instruct assessment of goal status.
+    // Must teach the structured-action contract.
     assert!(
-        obj.to_lowercase().contains("assess") || obj.to_lowercase().contains("check"),
-        "objective should instruct assessment, got: {obj}"
+        obj.contains("spawn_engineer") && obj.contains("gh_issue_create"),
+        "objective should teach the JSON action schemas, got: {obj}"
     );
 
-    // Must mention creating GitHub issues for work.
+    // Must mention issue-first orchestration.
     assert!(
-        obj.to_lowercase().contains("github issue") || obj.to_lowercase().contains("issue"),
-        "objective should mention creating issues, got: {obj}"
+        obj.to_lowercase().contains("issue"),
+        "objective should mention GitHub issues, got: {obj}"
     );
 
-    // Must mention launching amplihack sessions.
+    // Must reject the legacy PROGRESS-line scraping contract.
     assert!(
-        obj.contains("simard engineer")
-            || obj.contains("simard spawn engineer")
-            || obj.contains("amplihack copilot"),
-        "objective should mention delegation commands, got: {obj}"
-    );
-
-    // Must request a PROGRESS line in the response.
-    assert!(
-        obj.contains("PROGRESS"),
-        "objective should request PROGRESS assessment, got: {obj}"
+        !obj.contains("PROGRESS:"),
+        "objective MUST NOT request a PROGRESS line (the legacy fallback was removed), got: {obj}"
     );
 }
 
 #[test]
 fn session_progress_comes_from_agent_response_not_auto_bump() {
-    // Agent reports PROGRESS: 55 — goal should become 55%, not current+10.
+    // Agent returns the new structured action with progress=55 — goal becomes 55%.
     let (session, _captured) = MockSession::new_ok(
-        "Assessed the goal. Created issue #42.\nPROGRESS: 55",
+        r#"{"action":"assess_only","assessment":"made progress","progress_pct":55}"#,
         vec![],
     );
     let mut bridges = bridges_with_session(session);
@@ -101,17 +96,17 @@ fn session_progress_comes_from_agent_response_not_auto_bump() {
     let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
 
     assert!(outcomes[0].success);
-    // Progress must be 55 (from agent response), NOT 30 (20+10 auto-bump).
     assert_eq!(
         state.active_goals.active[0].status,
         GoalProgress::InProgress { percent: 55 },
-        "progress should come from agent's PROGRESS line, not auto-bump"
+        "progress should come from assess_only.progress_pct, not auto-bump"
     );
 }
 
 #[test]
 fn session_no_progress_marker_preserves_current() {
-    // Agent does NOT include a PROGRESS line — current progress must be preserved.
+    // Agent returns prose instead of valid JSON — action MUST fail loudly,
+    // progress MUST be preserved, no silent fallback.
     let (session, _captured) = MockSession::new_ok(
         "Checked the repo. Everything looks fine.",
         vec!["no markers here".to_string()],
@@ -126,18 +121,30 @@ fn session_no_progress_marker_preserves_current() {
     };
     let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
 
-    assert!(outcomes[0].success);
-    // Must stay at 40%, NOT bumped to 50%.
+    // Non-JSON response = parse failure = failed outcome.
+    assert!(
+        !outcomes[0].success,
+        "non-JSON LLM response must produce a failed outcome (no silent fallback)"
+    );
+    assert!(
+        outcomes[0].detail.contains("parse failed"),
+        "outcome detail should explain the parse failure, got: {}",
+        outcomes[0].detail,
+    );
+    // Progress MUST stay at 40% (no silent mutation).
     assert_eq!(
         state.active_goals.active[0].status,
         GoalProgress::InProgress { percent: 40 },
-        "without PROGRESS marker, progress must be preserved (not auto-bumped)"
+        "progress must be preserved when LLM emits invalid action"
     );
 }
 
 #[test]
 fn session_progress_100_completes_goal() {
-    let (session, _captured) = MockSession::new_ok("PROGRESS: 100", vec![]);
+    let (session, _captured) = MockSession::new_ok(
+        r#"{"action":"assess_only","assessment":"done","progress_pct":100}"#,
+        vec![],
+    );
     let mut bridges = bridges_with_session(session);
     let board = board_with_goal("g1", GoalProgress::InProgress { percent: 80 }, None);
     let mut state = OodaState::new(board);
@@ -149,7 +156,7 @@ fn session_progress_100_completes_goal() {
     let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
 
     assert!(outcomes[0].success);
-    assert_eq!(state.active_goals.active[0].status, GoalProgress::Completed,);
+    assert_eq!(state.active_goals.active[0].status, GoalProgress::Completed);
 }
 
 #[test]
@@ -221,8 +228,13 @@ fn session_not_started_goal_reports_0_percent_in_objective() {
 }
 
 #[test]
-fn session_outcome_includes_verification_counts() {
-    let (session, _) = MockSession::new_ok("Created an issue. PROGRESS: 20", vec![]);
+fn session_outcome_describes_action_taken() {
+    // Replaces the old `verified=` assertion: outcome detail must describe
+    // which structured action was executed, not legacy verification counts.
+    let (session, _) = MockSession::new_ok(
+        r#"{"action":"assess_only","assessment":"made some progress","progress_pct":20}"#,
+        vec![],
+    );
     let mut bridges = bridges_with_session(session);
     let board = board_with_goal("g1", GoalProgress::NotStarted, None);
     let mut state = OodaState::new(board);
@@ -232,17 +244,22 @@ fn session_outcome_includes_verification_counts() {
         description: "advance".into(),
     };
     let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
-    // The outcome detail should include verification counts.
     assert!(
-        outcomes[0].detail.contains("verified="),
-        "outcome should include verification counts, got: {}",
+        outcomes[0].detail.contains("assess_only"),
+        "outcome should name the action taken, got: {}",
+        outcomes[0].detail,
+    );
+    assert!(
+        outcomes[0].detail.contains("progress=20%"),
+        "outcome should include the new progress, got: {}",
         outcomes[0].detail,
     );
 }
 
 #[test]
 fn objective_includes_concrete_commands() {
-    let (session, captured) = MockSession::new_ok("PROGRESS: 10", vec![]);
+    let (session, captured) =
+        MockSession::new_ok(r#"{"action":"noop","reason":"nothing to do"}"#, vec![]);
     let mut bridges = bridges_with_session(session);
     let board = board_with_goal("g1", GoalProgress::NotStarted, None);
     let mut state = OodaState::new(board);
@@ -255,18 +272,18 @@ fn objective_includes_concrete_commands() {
 
     let input = captured.borrow();
     let input = input.as_ref().unwrap();
+    // New prompt teaches the JSON action surface, not raw shell commands.
     assert!(
-        input.objective.contains("gh issue create"),
-        "objective should include concrete gh issue create command"
+        input.objective.contains("gh_issue_create"),
+        "objective should teach the gh_issue_create action"
     );
     assert!(
-        input.objective.contains("amplihack copilot")
-            || input.objective.contains("simard spawn engineer"),
-        "objective should include delegation command"
+        input.objective.contains("spawn_engineer"),
+        "objective should teach the spawn_engineer action"
     );
     assert!(
-        input.objective.contains("cargo test"),
-        "objective should include cargo test command"
+        input.objective.contains("gh_issue_close"),
+        "objective should teach the gh_issue_close action"
     );
 }
 
@@ -364,10 +381,10 @@ fn dispatch_assess_only_updates_progress_from_json() {
 }
 
 #[test]
-fn dispatch_records_parse_failure_fallback_outcome_detail() {
+fn dispatch_records_parse_failure_outcome_detail() {
     // LLM returns prose with no JSON — parser returns None and the
-    // dispatcher should fall back to legacy assessment, but the outcome
-    // detail must indicate the fallback path was taken.
+    // dispatcher MUST fail loudly (no silent fallback). The outcome detail
+    // must explain the parse failure so operators can diagnose.
     let (session, _) = MockSession::new_ok("I have no idea what to do. PROGRESS: 30", vec![]);
     let mut bridges = bridges_with_session(session);
     let board = board_with_goal("g1", GoalProgress::InProgress { percent: 25 }, None);
@@ -379,14 +396,21 @@ fn dispatch_records_parse_failure_fallback_outcome_detail() {
     };
     let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
 
+    assert!(
+        !outcomes[0].success,
+        "non-JSON LLM response must produce a failed outcome, got success"
+    );
     let detail = outcomes[0].detail.to_lowercase();
     assert!(
-        detail.contains("parse fail")
-            || detail.contains("fell back")
-            || detail.contains("fallback")
-            || detail.contains("legacy"),
-        "outcome detail must indicate parse fallback was used, got: {}",
+        detail.contains("parse failed"),
+        "outcome detail must explain the parse failure, got: {}",
         outcomes[0].detail
+    );
+    // Progress MUST stay at 25% (no silent mutation).
+    assert_eq!(
+        state.active_goals.active[0].status,
+        GoalProgress::InProgress { percent: 25 },
+        "progress must be preserved when LLM emits invalid action"
     );
 }
 
@@ -477,18 +501,20 @@ fn prompt_asset_instructs_json_output() {
 }
 
 #[test]
-fn prompt_asset_documents_three_action_variants() {
+fn prompt_asset_documents_all_action_variants() {
     const ASSET: &str = include_str!("../../prompt_assets/simard/goal_session_objective.md");
-    assert!(
-        ASSET.contains("spawn_engineer"),
-        "prompt asset must document spawn_engineer action"
-    );
-    assert!(
-        ASSET.contains("noop"),
-        "prompt asset must document noop action"
-    );
-    assert!(
-        ASSET.contains("assess_only"),
-        "prompt asset must document assess_only action"
-    );
+    for variant in [
+        "spawn_engineer",
+        "noop",
+        "assess_only",
+        "gh_issue_create",
+        "gh_issue_comment",
+        "gh_issue_close",
+        "gh_pr_comment",
+    ] {
+        assert!(
+            ASSET.contains(variant),
+            "prompt asset must document {variant} action"
+        );
+    }
 }

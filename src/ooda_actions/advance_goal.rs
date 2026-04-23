@@ -75,7 +75,12 @@ pub(super) fn dispatch_advance_goal(
 
         // For spawn_engineer the dispatcher must perform the actual fork
         // (it owns the state mutation needed to set goal.assigned_to).
-        if let Some(GoalAction::SpawnEngineer { task, files: _ }) = result.action {
+        if let Some(GoalAction::SpawnEngineer {
+            task,
+            files: _,
+            issue: _,
+        }) = result.action
+        {
             return dispatch_spawn_engineer(action, state, &goal_id, &task);
         }
 

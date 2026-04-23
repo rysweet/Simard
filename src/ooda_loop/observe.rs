@@ -33,9 +33,9 @@ pub fn gather_environment() -> EnvironmentSnapshot {
             "--limit",
             "20",
             "--json",
-            "title",
+            "number,title",
             "--jq",
-            ".[].title",
+            r##".[] | "#\(.number): \(.title)""##,
         ])
         .output()
         .ok()
