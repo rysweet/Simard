@@ -181,7 +181,11 @@ pub fn run_ooda_cycle(
     // --- Orient ---
     state.current_phase = OodaPhase::Orient;
     eprintln!("[simard] OODA cycle: entering Orient phase");
-    let priorities = orient(&observation, &state.active_goals, &state.goal_failure_counts)?;
+    let priorities = orient(
+        &observation,
+        &state.active_goals,
+        &state.goal_failure_counts,
+    )?;
     eprintln!(
         "[simard] OODA cycle: Orient complete ({} priorities)",
         priorities.len()

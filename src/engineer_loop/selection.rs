@@ -674,11 +674,13 @@ pub(crate) fn select_engineer_action(
     // failure here propagates as PlanningUnavailable so the cycle reports a
     // real failure instead of fabricating progress.
     let plan = crate::engineer_plan::plan_objective(objective, inspection)?;
-    let first_step = plan.steps().first().cloned().ok_or_else(|| {
-        SimardError::PlanningUnavailable {
-            reason: format!("LLM plan returned zero steps for objective: {objective}"),
-        }
-    })?;
+    let first_step =
+        plan.steps()
+            .first()
+            .cloned()
+            .ok_or_else(|| SimardError::PlanningUnavailable {
+                reason: format!("LLM plan returned zero steps for objective: {objective}"),
+            })?;
     let analyzed = first_step.action.clone();
     if !is_action_achievable(&analyzed, objective, Some(&first_step.target)) {
         return Err(SimardError::PlanningUnavailable {
@@ -1265,9 +1267,12 @@ mod tests {
 
     #[test]
     fn select_shell_command_from_argv_accepts_gh() {
-        let action =
-            select_shell_command_from_argv(vec!["gh".into(), "issue".into(), "view".into(), "915".into()], "note", "test")
-                .expect("gh is allowlisted");
+        let action = select_shell_command_from_argv(
+            vec!["gh".into(), "issue".into(), "view".into(), "915".into()],
+            "note",
+            "test",
+        )
+        .expect("gh is allowlisted");
         assert_eq!(action.argv[0], "gh");
         assert_eq!(action.argv.len(), 4);
     }
@@ -1317,7 +1322,8 @@ mod tests {
             "run cargo check",
             Some(""),
         );
-        let legacy = is_keyword_action_achievable(&AnalyzedAction::RunShellCommand, "run cargo check");
+        let legacy =
+            is_keyword_action_achievable(&AnalyzedAction::RunShellCommand, "run cargo check");
         assert_eq!(achievable_via_objective, legacy);
     }
 

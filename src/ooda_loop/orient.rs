@@ -278,8 +278,18 @@ mod tests {
         };
         let env_without = EnvironmentSnapshot::default();
 
-        let prio_with = orient(&make_observation(env_with_issue), &board, &std::collections::HashMap::new()).unwrap();
-        let prio_without = orient(&make_observation(env_without), &board, &std::collections::HashMap::new()).unwrap();
+        let prio_with = orient(
+            &make_observation(env_with_issue),
+            &board,
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
+        let prio_without = orient(
+            &make_observation(env_without),
+            &board,
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
         assert!(prio_with[0].urgency > prio_without[0].urgency);
         assert!(prio_with[0].reason.contains("open issue"));
     }
@@ -302,8 +312,18 @@ mod tests {
             recent_commits: Vec::new(),
         };
         let env_clean = EnvironmentSnapshot::default();
-        let prio_dirty = orient(&make_observation(env_dirty), &board, &std::collections::HashMap::new()).unwrap();
-        let prio_clean = orient(&make_observation(env_clean), &board, &std::collections::HashMap::new()).unwrap();
+        let prio_dirty = orient(
+            &make_observation(env_dirty),
+            &board,
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
+        let prio_clean = orient(
+            &make_observation(env_clean),
+            &board,
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
         assert!(prio_dirty[0].urgency > prio_clean[0].urgency);
         assert!(prio_dirty[0].reason.contains("dirty"));
     }
