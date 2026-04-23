@@ -75,7 +75,9 @@ pub struct ReviewSession {
 impl ReviewSession {
     /// Open a review LLM session. Returns an error if the adapter is unavailable.
     pub fn open() -> SimardResult<Self> {
-        let provider = LlmProvider::resolve()?;
+        let provider = LlmProvider::resolve().map_err(|e| SimardError::ReviewUnavailable {
+            reason: format!("LLM provider unavailable for review pipeline: {e}"),
+        })?;
         let session = SessionBuilder::new(OperatingMode::Engineer, provider)
             .node_id("review-pipeline")
             .address("review-pipeline://local")

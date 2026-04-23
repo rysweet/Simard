@@ -68,11 +68,51 @@ fn skip_if_no_llm_provider(rendered: &str) -> bool {
         || rendered.contains("LLM-based review is unavailable")
         || rendered.contains("LLM session but open() failed")
         || rendered.contains("base type 'review-pipeline-rustyclawd' failed")
+        || rendered.contains("missing required configuration 'SIMARD_LLM_PROVIDER'")
     {
         eprintln!("SKIP: no LLM provider available (CI environment)");
         return true;
     }
     false
+}
+
+#[cfg(test)]
+mod skip_helper_tests {
+    use super::skip_if_no_llm_provider;
+
+    #[test]
+    fn recognizes_missing_simard_llm_provider_config() {
+        // After kill-tier1-fallbacks (src/error/display.rs:9), RuntimeConfig::load()
+        // surfaces this exact error when SIMARD_LLM_PROVIDER is unset and no config
+        // file exists. Tests that drive the engineer loop must skip in that case.
+        let rendered = "thread 'main' panicked: missing required configuration 'SIMARD_LLM_PROVIDER': \
+             set the SIMARD_LLM_PROVIDER env var or add it to ~/.simard/config.toml";
+        assert!(
+            skip_if_no_llm_provider(rendered),
+            "skip_if_no_llm_provider must recognize the new SIMARD_LLM_PROVIDER missing-config error"
+        );
+    }
+
+    #[test]
+    fn recognizes_legacy_no_api_key() {
+        let rendered = "Error: No API key found in environment";
+        assert!(skip_if_no_llm_provider(rendered));
+    }
+
+    #[test]
+    fn recognizes_legacy_llm_session_open_failed() {
+        let rendered = "attempted to open LLM session but open() failed: connection refused";
+        assert!(skip_if_no_llm_provider(rendered));
+    }
+
+    #[test]
+    fn does_not_skip_on_unrelated_output() {
+        let rendered = "engineer loop completed: 1 cycle, 0 errors";
+        assert!(
+            !skip_if_no_llm_provider(rendered),
+            "skip helper must not false-positive on benign output"
+        );
+    }
 }
 
 fn run_command(cwd: &Path, argv: &[&str]) -> Output {
@@ -185,6 +225,9 @@ fn engineer_loop_probe_reports_repo_state_runs_verified_action_and_persists_trut
     );
     let rendered = rendered_output(&output);
 
+    if skip_if_no_llm_provider(&rendered) {
+        return;
+    }
     assert!(
         output.status.success(),
         "repo-grounded engineer loop should succeed once implemented:\n{rendered}"
@@ -502,6 +545,9 @@ fn engineer_loop_run_includes_non_zero_elapsed_duration() {
     );
     let rendered = rendered_output(&output);
 
+    if skip_if_no_llm_provider(&rendered) {
+        return;
+    }
     assert!(
         output.status.success(),
         "engineer loop should succeed:\n{rendered}"
