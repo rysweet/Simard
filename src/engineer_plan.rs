@@ -107,7 +107,8 @@ fn build_planning_prompt(objective: &str, inspection: &RepoInspection) -> String
 /// produce a valid `Vec<PlanStep>`.
 fn parse_plan_response(text: &str) -> SimardResult<Plan> {
     let trimmed = text.trim();
-    let skipped = skip_preamble(trimmed);
+    let denoised = strip_log_noise_lines(trimmed);
+    let skipped = skip_preamble(denoised);
 
     // Strategy 1: direct parse (after skipping any non-JSON preamble such as
     // the Copilot SDK adapter dispatch metadata line — see issue #944).
@@ -146,6 +147,39 @@ fn parse_plan_response(text: &str) -> SimardResult<Plan> {
             &trimmed[..trimmed.len().min(120)]
         ),
     })
+}
+
+/// Strip leading lines that are clearly diagnostic log output emitted by the
+/// wrapped LLM process (e.g. the amplihack launcher's
+/// "Warning: Could not prepare Copilot environment: [Errno 2] ...") before
+/// the actual JSON plan response begins. This complements `skip_preamble`
+/// which only advances to the first `[`/`{` byte and can misanchor on
+/// square brackets inside error messages like `[Errno 2]`. See issue #1175.
+///
+/// A line is considered noise when it starts (case-insensitively) with any
+/// of the well-known log level prefixes. Stops at the first line that does
+/// NOT match a noise prefix.
+fn strip_log_noise_lines(s: &str) -> &str {
+    const NOISE_PREFIXES: &[&str] = &[
+        "warning:", "error:", "info:", "debug:", "notice:", "trace:", "warn ", "error ", "info ",
+        "debug ",
+    ];
+    let mut cursor = 0usize;
+    for line in s.split_inclusive('\n') {
+        let trimmed_line = line.trim_start();
+        if trimmed_line.is_empty() {
+            cursor += line.len();
+            continue;
+        }
+        let lower = trimmed_line.to_ascii_lowercase();
+        let is_noise = NOISE_PREFIXES.iter().any(|p| lower.starts_with(p));
+        if is_noise {
+            cursor += line.len();
+        } else {
+            break;
+        }
+    }
+    &s[cursor..]
 }
 
 /// Skip any non-JSON preamble at the start of `s` by advancing to the
@@ -521,6 +555,40 @@ This plan inspects the repository without making changes."#;
     // Issue #944: LLM plan parser must skip preamble (e.g. Copilot SDK
     // adapter dispatch metadata) before each parsing strategy.
     // ---------------------------------------------------------------------
+
+    #[test]
+    fn parse_plan_response_skips_amplihack_launcher_warning_lines() {
+        let raw = "Warning: Could not prepare Copilot environment: [Errno 2] \
+                   No such file or directory: '/home/azureuser/.copilot/agents/amplihack'\n\
+                   Warning: Could not validate/repair config.json — nested agents may fail\n\
+                   [{\"action\":\"read_only_scan\",\"target\":\"src\",\
+                   \"expected_outcome\":\"scanned\",\
+                   \"verification_command\":\"ls src\"}]";
+        let plan = parse_plan_response(raw)
+            .expect("amplihack launcher Warning preamble must not break plan parsing (#1175)");
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan.steps()[0].action, AnalyzedAction::ReadOnlyScan);
+        assert_eq!(plan.steps()[0].target, "src");
+    }
+
+    #[test]
+    fn strip_log_noise_lines_strips_leading_warning_with_bracketed_errno() {
+        let raw = "Warning: Could not prepare Copilot environment: [Errno 2] foo\n[]";
+        assert_eq!(strip_log_noise_lines(raw), "[]");
+    }
+
+    #[test]
+    fn strip_log_noise_lines_is_noop_when_first_line_is_json() {
+        let raw = "[{\"a\":1}]";
+        assert_eq!(strip_log_noise_lines(raw), raw);
+    }
+
+    #[test]
+    fn strip_log_noise_lines_stops_at_first_non_noise_line() {
+        let raw = "Warning: foo\nHere is the plan:\n[]";
+        // "Here is the plan:" is not a log prefix, so stripping stops there.
+        assert_eq!(strip_log_noise_lines(raw), "Here is the plan:\n[]");
+    }
 
     #[test]
     fn parse_plan_response_skips_copilot_sdk_preamble() {
