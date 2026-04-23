@@ -213,8 +213,8 @@ mod tests {
             priority: 3,
             status: GoalProgress::NotStarted,
             assigned_to: None,
-        current_activity: None,
-        wip_refs: vec![],
+            current_activity: None,
+            wip_refs: vec![],
         };
         let json = serde_json::to_string(&g).unwrap();
         let g2: ActiveGoal = serde_json::from_str(&json).unwrap();
@@ -285,8 +285,8 @@ mod tests {
                 priority: 1,
                 status: GoalProgress::NotStarted,
                 assigned_to: None,
-            current_activity: None,
-            wip_refs: vec![],
+                current_activity: None,
+                wip_refs: vec![],
             })
             .collect();
         let board = GoalBoard {
@@ -305,8 +305,8 @@ mod tests {
                 priority: 1,
                 status: GoalProgress::NotStarted,
                 assigned_to: None,
-            current_activity: None,
-            wip_refs: vec![],
+                current_activity: None,
+                wip_refs: vec![],
             })
             .collect();
         let board = GoalBoard {

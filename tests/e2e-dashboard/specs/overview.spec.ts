@@ -79,7 +79,12 @@ test.describe('Dashboard Overview @structural', () => {
 
   test('all 10 tabs are present', async () => {
     const names = await overview.getTabNames();
-    expect(names).toEqual([
+    // The dashboard is a living surface — new tabs (e.g., Stewardship, Terminal,
+    // Workboard) are added as Simard grows capability. This test guards the
+    // *original* 10 tabs remain present; it does not demand they be the only
+    // tabs. See PR #1169 ambiguity resolution.
+    expect(names.length).toBeGreaterThanOrEqual(10);
+    for (const required of [
       'Overview',
       'Goals',
       'Traces',
@@ -90,7 +95,9 @@ test.describe('Dashboard Overview @structural', () => {
       'Chat',
       'Whiteboard',
       '🧠 Thinking',
-    ]);
+    ]) {
+      expect(names).toContain(required);
+    }
   });
 });
 
@@ -113,7 +120,6 @@ const MOCK_ACTIVITY = {
             success: true,
             action_kind: 'edit',
             action_description: 'Fixed bug in parser',
-            detail: 'detail-text',
           },
         ],
         priorities: [

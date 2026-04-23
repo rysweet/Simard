@@ -395,13 +395,8 @@ pub(crate) fn execute_engineer_action(
             })
         }
         EngineerActionKind::OpenIssue(ref req) => {
-            let argv_owned = sanitize_issue_create_args(
-                &req.title,
-                &req.body,
-                &req.labels,
-                None,
-                None,
-            );
+            let argv_owned =
+                sanitize_issue_create_args(&req.title, &req.body, &req.labels, None, None);
             let argv_refs: Vec<&str> = argv_owned.iter().map(String::as_str).collect();
             let output = run_command(repo_root, &argv_refs)?;
             Ok(ExecutedEngineerAction {

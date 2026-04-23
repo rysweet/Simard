@@ -12,7 +12,11 @@ use super::tmux::build_tmux_wrapped_command;
 fn produces_expected_argv_prefix() {
     let argv = build_tmux_wrapped_command(
         "simard-engineer-engineer-abc",
-        &["/usr/bin/simard".to_string(), "engineer".to_string(), "run".to_string()],
+        &[
+            "/usr/bin/simard".to_string(),
+            "engineer".to_string(),
+            "run".to_string(),
+        ],
         &PathBuf::from("/tmp/agent_logs/engineer-abc.log"),
     );
     assert_eq!(argv[0], "tmux", "argv[0] must be tmux");
@@ -57,8 +61,14 @@ fn shell_command_includes_inner_argv() {
     );
     let shell = &argv[7];
     assert!(shell.contains("simard"), "must contain inner exe: {shell}");
-    assert!(shell.contains("engineer"), "must contain 'engineer' arg: {shell}");
-    assert!(shell.contains("single-process"), "must contain subcommand: {shell}");
+    assert!(
+        shell.contains("engineer"),
+        "must contain 'engineer' arg: {shell}"
+    );
+    assert!(
+        shell.contains("single-process"),
+        "must contain subcommand: {shell}"
+    );
 }
 
 #[test]

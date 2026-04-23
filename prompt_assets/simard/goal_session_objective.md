@@ -2,6 +2,12 @@ Assess this goal and decide how to advance it. You MUST respond with a
 single JSON object and nothing else (no prose, no code fences, no
 markdown). The object must match exactly one of the three schemas below.
 
+IMPORTANT: The `<angle-bracketed>` tokens in the schemas below are
+placeholders you MUST replace with real content. Do NOT copy them
+literally into your response. A response whose `task`, `reason`, or
+`assessment` field equals `<one-paragraph concrete task>` (or any
+similar `<placeholder>`) is a bug and will be rejected.
+
 1. Spawn a subordinate engineer to do concrete coding work. Internally the
    supervisor invokes `simard spawn engineer` (or the equivalent
    `amplihack copilot` agent) with the task you provide:

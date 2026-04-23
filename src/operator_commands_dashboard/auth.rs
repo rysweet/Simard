@@ -135,13 +135,13 @@ pub async fn require_auth(request: Request, next: Next) -> Result<Response, Stat
 
     // Not authenticated — JSON error for API, redirect for pages
     if path.starts_with("/api/") || path.starts_with("/ws/") {
-        return Ok(Response::builder()
+        Ok(Response::builder()
             .status(401)
             .header("content-type", "application/json")
             .body(axum::body::Body::from(
                 r#"{"error":"not authenticated","login_url":"/login"}"#,
             ))
-            .unwrap());
+            .unwrap())
     } else {
         Ok(Response::builder()
             .status(303)

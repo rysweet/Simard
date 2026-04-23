@@ -368,10 +368,7 @@ fn dispatch_records_parse_failure_fallback_outcome_detail() {
     // LLM returns prose with no JSON — parser returns None and the
     // dispatcher should fall back to legacy assessment, but the outcome
     // detail must indicate the fallback path was taken.
-    let (session, _) = MockSession::new_ok(
-        "I have no idea what to do. PROGRESS: 30",
-        vec![],
-    );
+    let (session, _) = MockSession::new_ok("I have no idea what to do. PROGRESS: 30", vec![]);
     let mut bridges = bridges_with_session(session);
     let board = board_with_goal("g1", GoalProgress::InProgress { percent: 25 }, None);
     let mut state = OodaState::new(board);
@@ -453,7 +450,9 @@ fn dispatch_spawn_engineer_outcome_mentions_branch() {
 
     let detail = outcomes[0].detail.to_lowercase();
     assert!(
-        detail.contains("spawn_engineer") || detail.contains("spawn engineer") || detail.contains("subordinate"),
+        detail.contains("spawn_engineer")
+            || detail.contains("spawn engineer")
+            || detail.contains("subordinate"),
         "spawn_engineer outcome detail must mention the branch, got: {}",
         outcomes[0].detail
     );
@@ -469,8 +468,7 @@ fn dispatch_spawn_engineer_outcome_mentions_branch() {
 
 #[test]
 fn prompt_asset_instructs_json_output() {
-    const ASSET: &str =
-        include_str!("../../prompt_assets/simard/goal_session_objective.md");
+    const ASSET: &str = include_str!("../../prompt_assets/simard/goal_session_objective.md");
     let lower = ASSET.to_lowercase();
     assert!(
         lower.contains("json"),
@@ -480,8 +478,7 @@ fn prompt_asset_instructs_json_output() {
 
 #[test]
 fn prompt_asset_documents_three_action_variants() {
-    const ASSET: &str =
-        include_str!("../../prompt_assets/simard/goal_session_objective.md");
+    const ASSET: &str = include_str!("../../prompt_assets/simard/goal_session_objective.md");
     assert!(
         ASSET.contains("spawn_engineer"),
         "prompt asset must document spawn_engineer action"

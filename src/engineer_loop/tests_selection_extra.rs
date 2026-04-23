@@ -3,9 +3,9 @@
 
 use std::path::PathBuf;
 
-use super::selection::*;
 #[allow(unused_imports)]
 use super::selection::is_keyword_action_achievable;
+use super::selection::*;
 use super::types::*;
 
 fn make_clean_inspection() -> RepoInspection {

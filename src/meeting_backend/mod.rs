@@ -635,12 +635,12 @@ fn strip_ansi_escapes(s: &str) -> String {
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
         if c == '\x1b' {
-            if let Some(next) = chars.next() {
-                if next == '[' {
-                    for ch in chars.by_ref() {
-                        if ch.is_ascii_alphabetic() {
-                            break;
-                        }
+            if let Some(next) = chars.next()
+                && next == '['
+            {
+                for ch in chars.by_ref() {
+                    if ch.is_ascii_alphabetic() {
+                        break;
                     }
                 }
             }
@@ -653,10 +653,11 @@ fn strip_ansi_escapes(s: &str) -> String {
 
 /// Detect lines that are agent infrastructure noise, not conversational content.
 fn is_agent_noise_line(trimmed: &str) -> bool {
-    if trimmed.len() > 20 && trimmed.starts_with("202") {
-        if let Some('-') = trimmed.chars().nth(4) {
-            return true;
-        }
+    if trimmed.len() > 20
+        && trimmed.starts_with("202")
+        && let Some('-') = trimmed.chars().nth(4)
+    {
+        return true;
     }
     if trimmed.contains("newer version of amplihack") || trimmed.contains("amplihack update") {
         return true;
@@ -673,7 +674,8 @@ fn is_agent_noise_line(trimmed: &str) -> bool {
     if trimmed.starts_with("Changes ") && trimmed.contains("Requests") {
         return true;
     }
-    if trimmed.starts_with("Tokens ") && (trimmed.contains('\u{2191}') || trimmed.contains('\u{2193}'))
+    if trimmed.starts_with("Tokens ")
+        && (trimmed.contains('\u{2191}') || trimmed.contains('\u{2193}'))
     {
         return true;
     }
@@ -683,8 +685,7 @@ fn is_agent_noise_line(trimmed: &str) -> bool {
     if trimmed.starts_with("\u{2139} ") || trimmed.starts_with("\u{2713} ") {
         return true;
     }
-    if trimmed.contains(" INFO ")
-        && (trimmed.contains("simard") || trimmed.contains("rustyclawd"))
+    if trimmed.contains(" INFO ") && (trimmed.contains("simard") || trimmed.contains("rustyclawd"))
     {
         return true;
     }
@@ -863,8 +864,7 @@ mod tests {
         // Whitespace-only LLM output sanitises to empty; backend must
         // surface the explicit sentinel rather than an empty bubble.
         let agent = MockAgent::new("   \n\n   ");
-        let mut backend =
-            MeetingBackend::new_session("Test", Box::new(agent), None, String::new());
+        let mut backend = MeetingBackend::new_session("Test", Box::new(agent), None, String::new());
         let resp = backend.send_message("ping").unwrap();
         assert_eq!(resp.content, EMPTY_RESPONSE_SENTINEL);
         assert_eq!(resp.message_count, 2);

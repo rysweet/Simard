@@ -68,16 +68,18 @@ pub(super) fn persist_cycle_report(
                 "success": o.success,
                 "detail": o.detail,
             });
-            if let Some(spawn) = extract_spawn_engineer_outcome(&o.detail, o.success) {
-                if let Some(map) = entry.as_object_mut() {
+            if let Some(spawn) = extract_spawn_engineer_outcome(&o.detail, o.success)
+                && let Some(map) = entry.as_object_mut() {
                     map.insert("spawn_engineer".to_string(), spawn);
                 }
-            }
             entry
         }).collect::<Vec<_>>(),
     });
 
-    let _ = std::fs::write(&path, serde_json::to_string_pretty(&structured).unwrap_or_default());
+    let _ = std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&structured).unwrap_or_default(),
+    );
 }
 
 /// Extract structured spawn_engineer outcome fields from an action's free-form
@@ -96,7 +98,10 @@ pub(super) fn persist_cycle_report(
 ///
 /// Returns `None` when the detail does not reference `spawn_engineer`, so
 /// callers can attach the structured block only when meaningful.
-pub(crate) fn extract_spawn_engineer_outcome(detail: &str, success: bool) -> Option<serde_json::Value> {
+pub(crate) fn extract_spawn_engineer_outcome(
+    detail: &str,
+    success: bool,
+) -> Option<serde_json::Value> {
     if !detail.contains("spawn_engineer") {
         return None;
     }
@@ -305,8 +310,7 @@ mod tests {
 
     #[test]
     fn extract_spawn_engineer_dispatched_detail() {
-        let detail =
-            "spawn_engineer dispatched: agent='engineer-g1-1700', task='fix the auth bug' (goal 'g1', pid=1234)";
+        let detail = "spawn_engineer dispatched: agent='engineer-g1-1700', task='fix the auth bug' (goal 'g1', pid=1234)";
         let v = extract_spawn_engineer_outcome(detail, true).expect("should detect");
         assert_eq!(v["last_action"], "dispatched");
         assert_eq!(v["status"], "live");
@@ -317,7 +321,8 @@ mod tests {
 
     #[test]
     fn extract_spawn_engineer_skipped_detail() {
-        let detail = "spawn_engineer skipped: goal 'g1' already assigned to subordinate 'engineer-g1-old'";
+        let detail =
+            "spawn_engineer skipped: goal 'g1' already assigned to subordinate 'engineer-g1-old'";
         let v = extract_spawn_engineer_outcome(detail, true).expect("should detect");
         assert_eq!(v["last_action"], "skipped");
         assert_eq!(v["status"], "skipped");

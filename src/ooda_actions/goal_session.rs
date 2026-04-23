@@ -129,10 +129,63 @@ fn try_parse_action(s: &str) -> Option<GoalAction> {
 /// Per-variant invariants beyond what serde enforces.
 fn action_is_valid(action: &GoalAction) -> bool {
     match action {
-        GoalAction::SpawnEngineer { task, .. } => !task.trim().is_empty(),
+        GoalAction::SpawnEngineer { task, .. } => {
+            let trimmed = task.trim();
+            !trimmed.is_empty() && !is_placeholder_echo(trimmed)
+        }
         GoalAction::Noop { .. } => true,
         GoalAction::AssessOnly { progress_pct, .. } => *progress_pct <= 100,
     }
+}
+
+/// Detect when the LLM echoed the schema-example placeholder verbatim
+/// instead of filling it in with a real task description.
+///
+/// Observed failure mode (2026-04-23, daemon 555909/556323 at ~0.5% goal
+/// throughput): the model returned
+/// `{"task": "<one-paragraph concrete task>", ...}` literally, which then
+/// propagated into `engineer_plan::plan_objective` as the objective and
+/// caused "LLM plan returned zero steps" every cycle.
+///
+/// Heuristic: any task that is entirely a `<...>` angle-bracketed token,
+/// or begins/ends with one of the known schema placeholders. Kept narrow
+/// on purpose — legitimate tasks may legitimately include angle brackets
+/// when citing HTML/generics, so we only reject whole-string templates.
+fn is_placeholder_echo(task: &str) -> bool {
+    // Strip surrounding quotes/backticks the LLM sometimes adds around
+    // the value even though the JSON string already terminates them.
+    let stripped = task
+        .trim()
+        .trim_matches(|c: char| c == '"' || c == '`' || c == '\'');
+
+    // Exact-match the schema placeholders we ship in prompt_assets.
+    const KNOWN_PLACEHOLDERS: &[&str] = &[
+        "<one-paragraph concrete task>",
+        "<short explanation of why no action is needed>",
+        "<short status>",
+        "<title>",
+        "<body>",
+        "<description>",
+    ];
+    if KNOWN_PLACEHOLDERS.contains(&stripped) {
+        return true;
+    }
+
+    // Whole-string angle-bracket token with generic meta words (e.g.
+    // `<your task here>`, `<TODO>`). Requires: starts with '<', ends
+    // with '>', contains only template-ish characters, and is short.
+    if stripped.starts_with('<')
+        && stripped.ends_with('>')
+        && stripped.len() < 120
+        && !stripped.contains("```")
+        && stripped[1..stripped.len().saturating_sub(1)]
+            .chars()
+            .all(|c| c.is_alphanumeric() || c.is_whitespace() || "-_/:.,".contains(c))
+    {
+        return true;
+    }
+
+    false
 }
 
 /// Scan a string starting at an opening `{` and return the byte offset
@@ -390,8 +443,7 @@ pub(super) fn advance_goal_with_session(
                         goal.id,
                     );
 
-                    let new_progress =
-                        assess_progress_from_outcome(&outcome, &goal.status);
+                    let new_progress = assess_progress_from_outcome(&outcome, &goal.status);
                     let verification = verify_claimed_actions(&outcome.execution_summary);
                     let verified_count = verification.iter().filter(|v| v.verified).count();
                     let claimed_count = verification.len();
@@ -570,7 +622,10 @@ mod tests {
         match parsed {
             GoalAction::SpawnEngineer { task, files } => {
                 assert_eq!(task, "fix the auth bug");
-                assert_eq!(files, vec!["src/auth.rs".to_string(), "src/lib.rs".to_string()]);
+                assert_eq!(
+                    files,
+                    vec!["src/auth.rs".to_string(), "src/lib.rs".to_string()]
+                );
             }
             other => panic!("expected SpawnEngineer, got {other:?}"),
         }
@@ -606,7 +661,10 @@ mod tests {
         let response = r#"{"action": "assess_only", "assessment": "good progress, no spawn needed", "progress_pct": 65}"#;
         let parsed = parse_goal_action(response).expect("clean assess_only JSON must parse");
         match parsed {
-            GoalAction::AssessOnly { assessment, progress_pct } => {
+            GoalAction::AssessOnly {
+                assessment,
+                progress_pct,
+            } => {
                 assert_eq!(assessment, "good progress, no spawn needed");
                 assert_eq!(progress_pct, 65);
             }
@@ -616,16 +674,29 @@ mod tests {
 
     #[test]
     fn parse_assess_only_at_zero_percent() {
-        let response = r#"{"action": "assess_only", "assessment": "not started", "progress_pct": 0}"#;
+        let response =
+            r#"{"action": "assess_only", "assessment": "not started", "progress_pct": 0}"#;
         let parsed = parse_goal_action(response).expect("0% should be valid");
-        assert!(matches!(parsed, GoalAction::AssessOnly { progress_pct: 0, .. }));
+        assert!(matches!(
+            parsed,
+            GoalAction::AssessOnly {
+                progress_pct: 0,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn parse_assess_only_at_100_percent() {
         let response = r#"{"action": "assess_only", "assessment": "done", "progress_pct": 100}"#;
         let parsed = parse_goal_action(response).expect("100% should be valid");
-        assert!(matches!(parsed, GoalAction::AssessOnly { progress_pct: 100, .. }));
+        assert!(matches!(
+            parsed,
+            GoalAction::AssessOnly {
+                progress_pct: 100,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -654,7 +725,8 @@ Hope that helps!"#;
         // The brace-balanced extractor must respect string boundaries and
         // not be confused by literal { or } inside JSON string values.
         let response = r#"prefix {"action": "spawn_engineer", "task": "implement fn foo() { return {}; }"} suffix"#;
-        let parsed = parse_goal_action(response).expect("nested braces inside strings must not break extraction");
+        let parsed = parse_goal_action(response)
+            .expect("nested braces inside strings must not break extraction");
         match parsed {
             GoalAction::SpawnEngineer { task, .. } => {
                 assert_eq!(task, "implement fn foo() { return {}; }");
@@ -770,6 +842,42 @@ Hope that helps!"#;
         );
     }
 
+    // -- placeholder-echo rejection (regression for daemon bug observed
+    //    2026-04-23: LLM returned the schema example verbatim and
+    //    poisoned the engineer loop with `<one-paragraph concrete task>`
+    //    as the objective for every cycle) ---------------------------
+
+    #[test]
+    fn parse_rejects_verbatim_schema_placeholder_task() {
+        let response = r#"{"action": "spawn_engineer", "task": "<one-paragraph concrete task>"}"#;
+        assert!(
+            parse_goal_action(response).is_none(),
+            "task that echoes the prompt's <one-paragraph concrete task> placeholder must be rejected"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_generic_angle_bracket_placeholder() {
+        let response = r#"{"action": "spawn_engineer", "task": "<your task here>"}"#;
+        assert!(
+            parse_goal_action(response).is_none(),
+            "generic angle-bracket placeholders like <your task here> must be rejected"
+        );
+    }
+
+    #[test]
+    fn parse_accepts_task_mentioning_angle_brackets_in_real_content() {
+        // Legitimate task that happens to include angle brackets (e.g. a
+        // generic type, HTML tag, or comparison operator). Must NOT be
+        // rejected — the placeholder filter is whole-string exact, not
+        // substring.
+        let response = r#"{"action": "spawn_engineer", "task": "Fix generic parser to handle Vec<String> type annotations in src/parser.rs around line 142"}"#;
+        assert!(
+            parse_goal_action(response).is_some(),
+            "real tasks that contain <...> substrings must still be accepted"
+        );
+    }
+
     #[test]
     fn parse_rejects_oversized_input() {
         // Per design: 64 KiB cap on input.
@@ -806,8 +914,14 @@ Hope that helps!"#;
     fn goal_action_variants_are_distinct() {
         // Sanity: the three variants compare unequal.
         let a = GoalAction::Noop { reason: "x".into() };
-        let b = GoalAction::AssessOnly { assessment: "x".into(), progress_pct: 0 };
-        let c = GoalAction::SpawnEngineer { task: "x".into(), files: vec![] };
+        let b = GoalAction::AssessOnly {
+            assessment: "x".into(),
+            progress_pct: 0,
+        };
+        let c = GoalAction::SpawnEngineer {
+            task: "x".into(),
+            files: vec![],
+        };
         assert_ne!(a, b);
         assert_ne!(b, c);
         assert_ne!(a, c);
