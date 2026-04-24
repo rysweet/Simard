@@ -264,12 +264,29 @@ simard bootstrap run <identity> <base-type> <topology> <objective>
 
 | Environment Variable | Purpose |
 |---------------------|---------|
-| `ANTHROPIC_API_KEY` | API key for the `rusty-clawd` base type |
+| `ANTHROPIC_API_KEY` | API key for the `rusty-clawd` base type when configured for the Anthropic provider |
 | `SIMARD_LLM_PROVIDER` | Override the LLM provider selected from `~/.simard/config.toml` |
 | `SIMARD_COPILOT_GH_ACCOUNT` | GitHub account for Copilot auth (e.g., `rysweet_microsoft`) |
 | `SIMARD_COMMIT_GH_ACCOUNT` | GitHub account for git commits (e.g., `rysweet`) |
 
 Runtime configuration lives at `~/.simard/config.toml`. The runtime fails loudly when required configuration is missing — there are no silent defaults.
+
+### Provider Selection
+
+RustyClawd is multi-provider. Pick a provider by either:
+
+- Setting the env var `SIMARD_LLM_PROVIDER=copilot` (or `rustyclawd`), **or**
+- Adding `llm_provider = "copilot"` (or `"rustyclawd"`) to `~/.simard/config.toml`.
+
+When `copilot` is selected, the only credential step is `gh auth login`. RustyClawd resolves the token via `gh auth token` automatically — no API-key env var is needed. If the GitHub token lacks the Copilot scope, run:
+
+```bash
+gh auth refresh --hostname github.com --scopes copilot
+```
+
+When `rustyclawd` is selected, set `ANTHROPIC_API_KEY` (or place the key in `~/.rustyclawd/config`).
+
+There is no silent default — leaving both the env var and the config-file key unset is an error and will be reported as such.
 
 ## Repository Layout
 
