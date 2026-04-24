@@ -29,6 +29,13 @@ pub(crate) fn verify_grounding_stable(
     }
     checks.push(format!("repo-root={}", post.repo_root.display()));
 
+    // On an isolated engineer worktree (per #1197), the engineer is sandboxed
+    // on a per-goal `engineer/*` branch. HEAD movement on that branch is the
+    // engineer doing legitimate work (committing, applying patches), not a
+    // worktree contamination. Only enforce the strict no-HEAD-change rule
+    // when the engineer is somehow running on a shared / non-engineer branch.
+    let on_engineer_branch =
+        inspection.branch.starts_with("engineer/") && post.branch == inspection.branch;
     match &action.selected.kind {
         EngineerActionKind::GitCommit(_) => {
             if post.head == inspection.head {
@@ -37,6 +44,17 @@ pub(crate) fn verify_grounding_stable(
                 });
             }
             checks.push(format!("repo-head-changed={}", post.head));
+        }
+        _ if on_engineer_branch => {
+            // Engineer branch: allow HEAD movement (commits within the sandbox).
+            if post.head == inspection.head {
+                checks.push(format!("repo-head={}", post.head));
+            } else {
+                checks.push(format!(
+                    "repo-head-advanced-on-engineer-branch={}",
+                    post.head
+                ));
+            }
         }
         _ => {
             if post.head != inspection.head {
@@ -66,14 +84,22 @@ pub(crate) fn verify_worktree_state(
     post: &RepoInspection,
     checks: &mut Vec<String>,
 ) -> SimardResult<()> {
+    // Engineer worktrees (per #1197): the engineer is sandboxed on her own
+    // branch in her own worktree, so file mutations from RunShellCommand
+    // (e.g. git apply, sed -i) are legitimate. Only apply the strict
+    // "non-mutating actions must not dirty the worktree" rule when running
+    // on a shared / non-engineer branch.
+    let on_engineer_branch =
+        inspection.branch.starts_with("engineer/") && post.branch == inspection.branch;
     match &action.selected.kind {
         EngineerActionKind::ReadOnlyScan
         | EngineerActionKind::CargoTest
         | EngineerActionKind::CargoCheck
         | EngineerActionKind::RunShellCommand(_)
         | EngineerActionKind::OpenIssue(_) => {
-            if post.worktree_dirty != inspection.worktree_dirty
-                || post.changed_files != inspection.changed_files
+            if !on_engineer_branch
+                && (post.worktree_dirty != inspection.worktree_dirty
+                    || post.changed_files != inspection.changed_files)
             {
                 return Err(SimardError::VerificationFailed {
                     reason: "worktree state changed during a non-mutating local engineer action"
@@ -81,7 +107,14 @@ pub(crate) fn verify_worktree_state(
                 });
             }
             checks.push(format!("worktree-dirty={}", post.worktree_dirty));
-            checks.push("changed-files-after-action=<none>".to_string());
+            checks.push(if post.changed_files.is_empty() {
+                "changed-files-after-action=<none>".to_string()
+            } else {
+                format!(
+                    "changed-files-after-action={}",
+                    post.changed_files.join(", ")
+                )
+            });
         }
         EngineerActionKind::StructuredTextReplace(_)
         | EngineerActionKind::CreateFile(_)
