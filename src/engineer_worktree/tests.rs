@@ -45,9 +45,7 @@ fn init_parent_repo_no_main(dir: &Path) -> PathBuf {
 }
 
 fn run_git(repo: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(repo)
+    let out = git_cmd(repo, args)
         .output()
         .expect("spawn git");
     assert!(
@@ -60,9 +58,7 @@ fn run_git(repo: &Path, args: &[&str]) {
 }
 
 fn git_output(repo: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(repo)
+    let out = git_cmd(repo, args)
         .output()
         .expect("spawn git");
     assert!(
@@ -81,12 +77,25 @@ fn worktree_registered(parent_repo: &Path, path: &Path) -> bool {
 }
 
 fn branch_exists(parent_repo: &Path, branch: &str) -> bool {
-    Command::new("git")
-        .args(["rev-parse", "--verify", "--quiet", branch])
-        .current_dir(parent_repo)
+    git_cmd(parent_repo, &["rev-parse", "--verify", "--quiet", branch])
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Build a `git` command that mirrors production isolation: clear env, then
+/// re-inject only PATH and HOME. Required so other tests cannot poison
+/// these fixtures via process-global GIT_DIR / GIT_WORK_TREE.
+fn git_cmd(repo: &Path, args: &[&str]) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.args(args).current_dir(repo).env_clear();
+    if let Ok(p) = std::env::var("PATH") {
+        cmd.env("PATH", p);
+    }
+    if let Ok(h) = std::env::var("HOME") {
+        cmd.env("HOME", h);
+    }
+    cmd
 }
 
 // ---------------------------------------------------------------------------
@@ -341,4 +350,163 @@ fn verification_scope_isolates_worktree_from_parent_repo_mutations() {
     );
 
     wt.cleanup().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Test 8 — goal_id validation (F1): rejects path traversal, ref injection,
+// hidden-file leading-dot, and oversized inputs at the boundary.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rejects_invalid_goal_id() {
+    let parent_dir = tempdir().unwrap();
+    let state_dir = tempdir().unwrap();
+    let parent_repo = init_parent_repo(parent_dir.path());
+
+    let cases: &[&str] = &[
+        "",            // empty
+        "../../etc",   // path traversal
+        "..",          // parent dir
+        ".hidden",     // leading dot
+        "-rf",         // leading dash (argv injection)
+        "has space",   // disallowed byte
+        "has/slash",   // disallowed byte
+        "has\nnewl",   // control char
+    ];
+    for bad in cases {
+        let err = EngineerWorktree::allocate(&parent_repo, state_dir.path(), bad)
+            .expect_err(&format!("goal_id {bad:?} must be rejected"));
+        assert!(
+            matches!(err, SimardError::ActionExecutionFailed { .. }),
+            "expected ActionExecutionFailed for {bad:?}, got {err:?}"
+        );
+    }
+
+    // 65-byte input must fail; 64-byte must succeed.
+    let too_long = "a".repeat(65);
+    let err = EngineerWorktree::allocate(&parent_repo, state_dir.path(), &too_long)
+        .expect_err("65-byte goal_id must be rejected");
+    assert!(matches!(err, SimardError::ActionExecutionFailed { .. }), "got {err:?}");
+
+    let max_ok = "a".repeat(64);
+    let wt = EngineerWorktree::allocate(&parent_repo, state_dir.path(), &max_ok)
+        .expect("64-byte goal_id must be accepted");
+    wt.cleanup().expect("cleanup max-len worktree");
+
+    // Confirm the worktrees root was NOT polluted by any of the rejected ids.
+    let worktrees_root = state_dir.path().join("engineer-worktrees");
+    if worktrees_root.exists() {
+        for entry in fs::read_dir(&worktrees_root).unwrap().flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            assert!(
+                name.starts_with(&max_ok),
+                "rejected goal_id leaked to disk as {name:?}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 9 — sweep skips symlinks (F2/F3).
+// A symlink planted under engineer-worktrees/ pointing at an unrelated dir
+// must NOT be classified as an orphan and must NOT have its target deleted.
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn sweep_skips_symlinks_and_preserves_targets() {
+    use std::os::unix::fs::symlink;
+
+    let parent_dir = tempdir().unwrap();
+    let state_dir = tempdir().unwrap();
+    let target_dir = tempdir().unwrap();
+    let parent_repo = init_parent_repo(parent_dir.path());
+
+    // Create the worktrees root and plant a symlink inside it pointing at
+    // a directory whose contents must survive the sweep.
+    let worktrees_root = state_dir.path().join("engineer-worktrees");
+    fs::create_dir_all(&worktrees_root).unwrap();
+    let canary = target_dir.path().join("canary");
+    fs::write(&canary, b"do-not-delete").unwrap();
+
+    let link = worktrees_root.join("evil-symlink");
+    symlink(target_dir.path(), &link).expect("plant symlink");
+
+    let report = sweep_orphaned_worktrees(&parent_repo, state_dir.path())
+        .expect("sweep must succeed even with symlink present");
+
+    assert!(
+        report.removed_orphan_dirs.is_empty(),
+        "symlink must not be reported as removed orphan; got {:?}",
+        report.removed_orphan_dirs
+    );
+    assert!(canary.exists(), "symlink target contents must survive sweep");
+    // Symlink itself should still be there (skipped, not deleted).
+    assert!(
+        fs::symlink_metadata(&link).is_ok(),
+        "symlink should be left in place for an operator to investigate"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 10 — main_sha must be 40-hex (F7).
+// Already covered by the no-main test; add an explicit shape check via the
+// happy path: branch must point at the resolved 40-hex sha.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn allocate_records_full_40hex_main_sha_on_branch() {
+    let parent_dir = tempdir().unwrap();
+    let state_dir = tempdir().unwrap();
+    let parent_repo = init_parent_repo(parent_dir.path());
+
+    let main_sha = git_output(&parent_repo, &["rev-parse", "main"]);
+    let main_sha = main_sha.trim();
+    assert_eq!(main_sha.len(), 40, "fixture invariant: main is 40-hex");
+
+    let wt = EngineerWorktree::allocate(&parent_repo, state_dir.path(), "goal-sha")
+        .expect("allocate");
+    let branch_sha = git_output(&parent_repo, &["rev-parse", wt.branch()]);
+    assert_eq!(branch_sha.trim(), main_sha, "branch must point at main sha");
+    wt.cleanup().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Test 11 — git_capture ignores inherited GIT_DIR (F5).
+// Set a poisoned GIT_DIR in the test process env; allocate must still
+// succeed against the explicitly-passed parent_repo, because the child git
+// invocations env_clear before running.
+//
+// NOTE: env::set_var is process-global; this test must be in its own
+// process or run serially. cargo test default runs tests in parallel, so
+// we restrict the poisoned var to the duration of the call and accept the
+// (small) risk that another concurrent test reads GIT_DIR. Mitigated by
+// putting GIT_DIR at a non-existent path that git would error on.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn git_capture_clears_inherited_git_env() {
+    use std::sync::Mutex;
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let parent_dir = tempdir().unwrap();
+    let state_dir = tempdir().unwrap();
+    let parent_repo = init_parent_repo(parent_dir.path());
+
+    // SAFETY: env mutation under the local mutex.
+    let prior = std::env::var_os("GIT_DIR");
+    unsafe {
+        std::env::set_var("GIT_DIR", "/nonexistent/poisoned-git-dir");
+    }
+    let result = EngineerWorktree::allocate(&parent_repo, state_dir.path(), "goal-env");
+    unsafe {
+        match prior {
+            Some(v) => std::env::set_var("GIT_DIR", v),
+            None => std::env::remove_var("GIT_DIR"),
+        }
+    }
+    let wt = result.expect("allocate must ignore inherited GIT_DIR");
+    wt.cleanup().expect("cleanup");
 }
