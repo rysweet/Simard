@@ -94,6 +94,13 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
         // Limit concurrent cargo parallelism per agent to prevent OOM (issue #373).
         .env("CARGO_BUILD_JOBS", "4")
         .current_dir(&config.worktree_path);
+    // Issue #1197: per-engineer git worktrees would otherwise force a
+    // cold cargo rebuild (incl. lbug, ~40min) every spawn. Share one
+    // target dir across all engineer worktrees, but respect any operator
+    // override already in the environment.
+    if std::env::var_os("CARGO_TARGET_DIR").is_none() {
+        cmd.env("CARGO_TARGET_DIR", "/tmp/simard-engineer-target");
+    }
 
     if let Some((out, err)) = open_agent_log(&config.agent_name) {
         cmd.stdout(out).stderr(err);
@@ -130,7 +137,8 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
 
         // Run the tmux command. `tmux new-session -d` returns immediately
         // after the session is created; the inner shell runs detached inside.
-        let status = Command::new(&argv[0])
+        let mut tmux_cmd = Command::new(&argv[0]);
+        tmux_cmd
             .args(&argv[1..])
             .env("SIMARD_AGENT_NAME", &config.agent_name)
             .env(
@@ -140,7 +148,11 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
             .env("CARGO_BUILD_JOBS", "4")
             .current_dir(&config.worktree_path)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::null());
+        if std::env::var_os("CARGO_TARGET_DIR").is_none() {
+            tmux_cmd.env("CARGO_TARGET_DIR", "/tmp/simard-engineer-target");
+        }
+        let status = tmux_cmd
             .status()
             .map_err(|e| SimardError::BridgeSpawnFailed {
                 bridge: "subordinate".to_string(),

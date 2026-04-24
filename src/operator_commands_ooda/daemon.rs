@@ -232,6 +232,28 @@ pub fn run_ooda_daemon(
     let mut state = OodaState::new(board);
     let config = OodaConfig::default();
 
+    // Issue #1197: sweep orphaned engineer worktrees from prior crashed
+    // daemons before starting the loop, so disk pressure doesn't accumulate.
+    if let Ok(parent_repo) = std::env::current_dir() {
+        match crate::engineer_worktree::sweep_orphaned_worktrees(&parent_repo, &state_root) {
+            Ok(report) => {
+                if !report.removed_orphan_dirs.is_empty() {
+                    daemon_log(
+                        &state_root,
+                        &format!(
+                            "[simard] OODA daemon: swept {} orphan engineer worktree(s)",
+                            report.removed_orphan_dirs.len()
+                        ),
+                    );
+                }
+            }
+            Err(e) => daemon_log(
+                &state_root,
+                &format!("[simard] OODA daemon: engineer worktree sweep failed: {e}"),
+            ),
+        }
+    }
+
     let interval_secs: u64 = std::env::var("SIMARD_OODA_INTERVAL_SECS")
         .ok()
         .and_then(|v| v.parse().ok())

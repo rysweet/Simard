@@ -144,7 +144,7 @@ fn dispatch_spawn_engineer(
     }
 
     let agent_name = build_engineer_name(goal_id);
-    let worktree_path = match std::env::current_dir() {
+    let parent_repo = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => {
             return make_outcome(
@@ -156,6 +156,30 @@ fn dispatch_spawn_engineer(
             );
         }
     };
+
+    // Allocate a per-engineer git worktree (issue #1197) so concurrent
+    // engineers never share the same checkout. The worktree lives under
+    // `<state_root>/engineer-worktrees/` and is cleaned up when the
+    // subordinate is reaped (or via Drop as a safety net).
+    let state_root = engineer_worktree_state_root();
+    let worktree = match crate::engineer_worktree::EngineerWorktree::allocate(
+        &parent_repo,
+        &state_root,
+        goal_id,
+    ) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!(
+                "[simard] spawn_engineer FAILED for goal '{goal_id}': worktree allocation: {e}"
+            );
+            return make_outcome(
+                action,
+                false,
+                format!("spawn_engineer failed for goal '{goal_id}': worktree allocation: {e}"),
+            );
+        }
+    };
+    let worktree_path = worktree.path().to_path_buf();
 
     let config = SubordinateConfig {
         agent_name: agent_name.clone(),
@@ -177,6 +201,12 @@ fn dispatch_spawn_engineer(
             {
                 g.assigned_to = Some(agent_name.clone());
             }
+            // Take ownership of the worktree on the OODA state so the reaper
+            // path can clean it up after the subordinate exits. Drop is the
+            // safety net if the entry leaves the map without explicit cleanup.
+            state
+                .engineer_worktrees
+                .insert(goal_id.to_string(), worktree);
 
             // WS-2: persist the tmux session into the dashboard registry so
             // the Recent Actions feed can render Attach deep-links. Failures
@@ -221,6 +251,16 @@ fn dispatch_spawn_engineer(
             )
         }
         Err(e) => {
+            // Explicitly cleanup the worktree we just allocated; Drop is the
+            // safety net but explicit cleanup gives observable failure logs.
+            if let Err(ce) = worktree.cleanup() {
+                tracing::warn!(
+                    target: "simard::engineer_worktree",
+                    goal = %goal_id,
+                    error = %ce,
+                    "explicit worktree cleanup after spawn failure failed",
+                );
+            }
             eprintln!("[simard] spawn_engineer FAILED for goal '{goal_id}': {e}");
             make_outcome(
                 action,
@@ -229,6 +269,20 @@ fn dispatch_spawn_engineer(
             )
         }
     }
+}
+
+/// Resolve the supervisor state root for engineer worktrees.
+///
+/// Honors `SIMARD_STATE_ROOT` then falls back to `$HOME/.simard`, matching
+/// the supervisor's own resolution to keep all per-engineer state in a
+/// single discoverable tree.
+fn engineer_worktree_state_root() -> std::path::PathBuf {
+    std::env::var("SIMARD_STATE_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
+            std::path::PathBuf::from(home).join(".simard")
+        })
 }
 
 /// Build a unique subordinate agent name for a goal.
@@ -266,12 +320,21 @@ fn advance_goal_with_subordinate(
     goal_id: &str,
     sub_name: &str,
 ) -> ActionOutcome {
-    // Build a minimal handle for heartbeat checking.
+    // Build a minimal handle for heartbeat checking. The worktree path is
+    // taken from the OODA-owned EngineerWorktree (issue #1197) when
+    // available so artifact validation looks at the engineer's own scope,
+    // not the parent checkout. Falls back to "." for legacy/manual paths
+    // that pre-date worktree isolation.
+    let worktree_path = state
+        .engineer_worktrees
+        .get(goal_id)
+        .map(|w| w.path().to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
     let handle = crate::agent_supervisor::SubordinateHandle {
         pid: 0,
         agent_name: sub_name.to_string(),
         goal: goal_id.to_string(),
-        worktree_path: std::path::PathBuf::from("."),
+        worktree_path,
         spawn_time: 0,
         retry_count: 0,
         killed: false,
@@ -362,6 +425,8 @@ fn advance_goal_with_subordinate(
                     "subordinate '{sub_name}' exited without producing commits or PRs"
                 )),
             );
+            // Reap the per-engineer worktree (issue #1197).
+            cleanup_engineer_worktree_for_goal(state, goal_id);
             make_outcome(
                 action,
                 false,
@@ -376,6 +441,26 @@ fn advance_goal_with_subordinate(
             false,
             format!("heartbeat check failed for subordinate '{sub_name}': {e}"),
         ),
+    }
+}
+
+/// Cleanup the per-goal engineer worktree owned by the OODA state.
+///
+/// Called from terminal paths (subordinate completed, dead, or stale-failed)
+/// so the worktree dir + branch are reaped within one OODA cycle of the
+/// engineer's exit. Idempotent — missing entries are silently a no-op.
+fn cleanup_engineer_worktree_for_goal(state: &mut OodaState, goal_id: &str) {
+    if let Some(worktree) = state.engineer_worktrees.remove(goal_id)
+        && let Err(e) = worktree.cleanup()
+    {
+        tracing::warn!(
+            target: "simard::engineer_worktree",
+            goal = %goal_id,
+            error = %e,
+            "engineer worktree cleanup failed; Drop will run as a safety net",
+        );
+        // worktree drops here; if cleanup() already ran the swap guard
+        // ensures Drop is a no-op.
     }
 }
 
@@ -402,6 +487,8 @@ fn validate_subordinate_completion(
              {} commit(s), {} PR(s), outcome='{outcome_text}'",
             progress.commits_produced, progress.prs_produced,
         );
+        // Reap the per-engineer worktree (issue #1197).
+        cleanup_engineer_worktree_for_goal(state, goal_id);
         make_outcome(
             action,
             true,
@@ -427,6 +514,8 @@ fn validate_subordinate_completion(
                  but produced no commits or PRs"
             )),
         );
+        // Reap the per-engineer worktree (issue #1197).
+        cleanup_engineer_worktree_for_goal(state, goal_id);
         make_outcome(
             action,
             false,
