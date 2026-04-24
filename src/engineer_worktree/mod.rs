@@ -12,8 +12,8 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use std::sync::OnceLock;
@@ -94,7 +94,10 @@ impl EngineerWorktree {
         let main_sha = git_capture(parent_repo, &["rev-parse", "main"]).map_err(|reason| {
             SimardError::ActionExecutionFailed {
                 action: format!("engineer_worktree::allocate(goal={goal_id})"),
-                reason: format!("cannot resolve `main` in {}: {reason}", parent_repo.display()),
+                reason: format!(
+                    "cannot resolve `main` in {}: {reason}",
+                    parent_repo.display()
+                ),
             }
         })?;
         let main_sha = main_sha.trim();
@@ -118,34 +121,35 @@ impl EngineerWorktree {
         // 3. Ensure the worktrees root exists with mode 0700 on Unix.
         //    Worktrees may transiently hold credentials or .env files;
         //    do not expose them to other local users.
-        create_worktrees_root(&worktrees_root).map_err(|e| {
-            SimardError::ActionExecutionFailed {
-                action: format!("engineer_worktree::allocate(goal={goal_id})"),
-                reason: format!(
-                    "cannot create worktrees root {}: {e}",
-                    worktrees_root.display()
-                ),
-            }
+        create_worktrees_root(&worktrees_root).map_err(|e| SimardError::ActionExecutionFailed {
+            action: format!("engineer_worktree::allocate(goal={goal_id})"),
+            reason: format!(
+                "cannot create worktrees root {}: {e}",
+                worktrees_root.display()
+            ),
         })?;
 
         // Canonicalize the worktrees root once now that it exists. Used by
         // cleanup_inner / the failure-recovery path below to refuse any
         // `remove_dir_all` whose canonical path is not contained here.
-        let worktrees_root_canonical = worktrees_root.canonicalize().map_err(|e| {
-            SimardError::ActionExecutionFailed {
-                action: format!("engineer_worktree::allocate(goal={goal_id})"),
-                reason: format!(
-                    "cannot canonicalize worktrees root {}: {e}",
-                    worktrees_root.display()
-                ),
-            }
-        })?;
+        let worktrees_root_canonical =
+            worktrees_root
+                .canonicalize()
+                .map_err(|e| SimardError::ActionExecutionFailed {
+                    action: format!("engineer_worktree::allocate(goal={goal_id})"),
+                    reason: format!(
+                        "cannot canonicalize worktrees root {}: {e}",
+                        worktrees_root.display()
+                    ),
+                })?;
 
         // 4. `git worktree add -b <branch> <dir> <main_sha>` — serialized
         //    against the parent repo because git's worktree registry races.
         let dir_str = dir.to_string_lossy();
         let result = {
-            let _guard = worktree_mutation_lock().lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = worktree_mutation_lock()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             git_capture(
                 parent_repo,
                 &["worktree", "add", "-b", &branch, &dir_str, main_sha],
@@ -275,7 +279,9 @@ fn cleanup_inner(
     const ACTION: &str = "engineer_worktree::cleanup";
     let dir_str = dir.to_string_lossy();
     // Serialize all mutations to the parent's `.git/worktrees/` registry.
-    let _guard = worktree_mutation_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = worktree_mutation_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if let Err(e) = git_capture(parent_repo, &["worktree", "remove", "--force", &dir_str]) {
         tracing::debug!(
             target: "simard::engineer_worktree",
@@ -294,19 +300,15 @@ fn cleanup_inner(
     if dir.exists() {
         // Refuse to delete anything whose canonical path is not contained
         // inside the canonical worktrees root we recorded at allocate-time.
-        let safe_dir =
-            assert_under_root(dir, worktrees_root_canonical).map_err(|reason| {
-                SimardError::ActionExecutionFailed {
-                    action: ACTION.to_string(),
-                    reason,
-                }
-            })?;
+        let safe_dir = assert_under_root(dir, worktrees_root_canonical).map_err(|reason| {
+            SimardError::ActionExecutionFailed {
+                action: ACTION.to_string(),
+                reason,
+            }
+        })?;
         fs::remove_dir_all(&safe_dir).map_err(|e| SimardError::ActionExecutionFailed {
             action: ACTION.to_string(),
-            reason: format!(
-                "failed to remove worktree dir {}: {e}",
-                safe_dir.display()
-            ),
+            reason: format!("failed to remove worktree dir {}: {e}", safe_dir.display()),
         })?;
     }
     if let Err(e) = git_capture(parent_repo, &["branch", "-D", branch]) {
@@ -499,10 +501,7 @@ fn validate_goal_id(goal_id: &str) -> Result<(), String> {
     }
     let first = goal_id.as_bytes()[0];
     if first == b'-' || first == b'.' {
-        return Err(format!(
-            "goal_id must not start with {:?}",
-            first as char
-        ));
+        return Err(format!("goal_id must not start with {:?}", first as char));
     }
     for (i, b) in goal_id.bytes().enumerate() {
         let ok = b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-';

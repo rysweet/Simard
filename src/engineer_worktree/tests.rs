@@ -13,7 +13,7 @@ use std::thread;
 
 use tempfile::tempdir;
 
-use super::{sweep_orphaned_worktrees, EngineerWorktree};
+use super::{EngineerWorktree, sweep_orphaned_worktrees};
 use crate::error::SimardError;
 
 // ---------------------------------------------------------------------------
@@ -45,9 +45,7 @@ fn init_parent_repo_no_main(dir: &Path) -> PathBuf {
 }
 
 fn run_git(repo: &Path, args: &[&str]) {
-    let out = git_cmd(repo, args)
-        .output()
-        .expect("spawn git");
+    let out = git_cmd(repo, args).output().expect("spawn git");
     assert!(
         out.status.success(),
         "git {:?} failed in {}: {}",
@@ -58,9 +56,7 @@ fn run_git(repo: &Path, args: &[&str]) {
 }
 
 fn git_output(repo: &Path, args: &[&str]) -> String {
-    let out = git_cmd(repo, args)
-        .output()
-        .expect("spawn git");
+    let out = git_cmd(repo, args).output().expect("spawn git");
     assert!(
         out.status.success(),
         "git {:?} failed: {}",
@@ -163,7 +159,8 @@ fn cleanup_removes_dir_branch_and_registration_idempotently() {
         "branch {branch} must be deleted by cleanup"
     );
 
-    wt.cleanup().expect("second cleanup must be Ok (idempotent)");
+    wt.cleanup()
+        .expect("second cleanup must be Ok (idempotent)");
 }
 
 // ---------------------------------------------------------------------------
@@ -223,8 +220,7 @@ fn parallel_allocations_produce_distinct_paths_and_branches() {
         })
         .collect();
 
-    let worktrees: Vec<EngineerWorktree> =
-        handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let worktrees: Vec<EngineerWorktree> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
     let mut paths: Vec<_> = worktrees.iter().map(|w| w.path().to_path_buf()).collect();
     paths.sort();
@@ -293,8 +289,8 @@ fn sweep_removes_orphan_dirs_and_preserves_live_worktrees() {
     fs::create_dir_all(&orphan).expect("create orphan dir");
     fs::write(orphan.join("stale"), b"x").unwrap();
 
-    let report = sweep_orphaned_worktrees(&parent_repo, state_dir.path())
-        .expect("sweep must succeed");
+    let report =
+        sweep_orphaned_worktrees(&parent_repo, state_dir.path()).expect("sweep must succeed");
 
     assert!(
         report.removed_orphan_dirs.iter().any(|p| p == &orphan),
@@ -326,8 +322,8 @@ fn verification_scope_isolates_worktree_from_parent_repo_mutations() {
     let state_dir = tempdir().unwrap();
     let parent_repo = init_parent_repo(parent_dir.path());
 
-    let wt = EngineerWorktree::allocate(&parent_repo, state_dir.path(), "goal-iso")
-        .expect("allocate");
+    let wt =
+        EngineerWorktree::allocate(&parent_repo, state_dir.path(), "goal-iso").expect("allocate");
 
     let before: Vec<_> = fs::read_dir(wt.path())
         .unwrap()
@@ -364,14 +360,14 @@ fn rejects_invalid_goal_id() {
     let parent_repo = init_parent_repo(parent_dir.path());
 
     let cases: &[&str] = &[
-        "",            // empty
-        "../../etc",   // path traversal
-        "..",          // parent dir
-        ".hidden",     // leading dot
-        "-rf",         // leading dash (argv injection)
-        "has space",   // disallowed byte
-        "has/slash",   // disallowed byte
-        "has\nnewl",   // control char
+        "",          // empty
+        "../../etc", // path traversal
+        "..",        // parent dir
+        ".hidden",   // leading dot
+        "-rf",       // leading dash (argv injection)
+        "has space", // disallowed byte
+        "has/slash", // disallowed byte
+        "has\nnewl", // control char
     ];
     for bad in cases {
         let err = EngineerWorktree::allocate(&parent_repo, state_dir.path(), bad)
@@ -386,7 +382,10 @@ fn rejects_invalid_goal_id() {
     let too_long = "a".repeat(65);
     let err = EngineerWorktree::allocate(&parent_repo, state_dir.path(), &too_long)
         .expect_err("65-byte goal_id must be rejected");
-    assert!(matches!(err, SimardError::ActionExecutionFailed { .. }), "got {err:?}");
+    assert!(
+        matches!(err, SimardError::ActionExecutionFailed { .. }),
+        "got {err:?}"
+    );
 
     let max_ok = "a".repeat(64);
     let wt = EngineerWorktree::allocate(&parent_repo, state_dir.path(), &max_ok)
@@ -441,7 +440,10 @@ fn sweep_skips_symlinks_and_preserves_targets() {
         "symlink must not be reported as removed orphan; got {:?}",
         report.removed_orphan_dirs
     );
-    assert!(canary.exists(), "symlink target contents must survive sweep");
+    assert!(
+        canary.exists(),
+        "symlink target contents must survive sweep"
+    );
     // Symlink itself should still be there (skipped, not deleted).
     assert!(
         fs::symlink_metadata(&link).is_ok(),
@@ -465,8 +467,8 @@ fn allocate_records_full_40hex_main_sha_on_branch() {
     let main_sha = main_sha.trim();
     assert_eq!(main_sha.len(), 40, "fixture invariant: main is 40-hex");
 
-    let wt = EngineerWorktree::allocate(&parent_repo, state_dir.path(), "goal-sha")
-        .expect("allocate");
+    let wt =
+        EngineerWorktree::allocate(&parent_repo, state_dir.path(), "goal-sha").expect("allocate");
     let branch_sha = git_output(&parent_repo, &["rev-parse", wt.branch()]);
     assert_eq!(branch_sha.trim(), main_sha, "branch must point at main sha");
     wt.cleanup().unwrap();

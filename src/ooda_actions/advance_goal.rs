@@ -162,22 +162,23 @@ fn dispatch_spawn_engineer(
     // `<state_root>/engineer-worktrees/` and is cleaned up when the
     // subordinate is reaped (or via Drop as a safety net).
     let state_root = engineer_worktree_state_root();
-    let worktree =
-        match crate::engineer_worktree::EngineerWorktree::allocate(&parent_repo, &state_root, goal_id) {
-            Ok(w) => w,
-            Err(e) => {
-                eprintln!(
-                    "[simard] spawn_engineer FAILED for goal '{goal_id}': worktree allocation: {e}"
-                );
-                return make_outcome(
-                    action,
-                    false,
-                    format!(
-                        "spawn_engineer failed for goal '{goal_id}': worktree allocation: {e}"
-                    ),
-                );
-            }
-        };
+    let worktree = match crate::engineer_worktree::EngineerWorktree::allocate(
+        &parent_repo,
+        &state_root,
+        goal_id,
+    ) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!(
+                "[simard] spawn_engineer FAILED for goal '{goal_id}': worktree allocation: {e}"
+            );
+            return make_outcome(
+                action,
+                false,
+                format!("spawn_engineer failed for goal '{goal_id}': worktree allocation: {e}"),
+            );
+        }
+    };
     let worktree_path = worktree.path().to_path_buf();
 
     let config = SubordinateConfig {
