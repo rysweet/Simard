@@ -38,6 +38,46 @@ mod tests;
 /// Subdirectory under the supervisor state root that holds all engineer worktrees.
 pub const WORKTREES_SUBDIR: &str = "engineer-worktrees";
 
+/// Filename of the per-worktree liveness sentinel (issue #1213). Contains the
+/// PID of the process that allocated the worktree. Used by
+/// [`sweep_orphaned_worktrees`] to skip live worktrees whose git registration
+/// transiently disappeared (e.g. after a `git worktree prune` race).
+pub const ENGINEER_CLAIM_FILE: &str = ".simard-engineer-claim";
+
+/// Probe whether `pid` refers to a running process via `kill(pid, 0)`. Returns
+/// `true` if the process exists (regardless of permission to signal it).
+/// Returns `false` if the process is dead (ESRCH) or `pid` is non-positive.
+#[cfg(unix)]
+fn is_pid_alive(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: kill(pid, 0) performs no signal delivery. It is the standard
+    // POSIX liveness probe and has no side effects on the target process.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if rc == 0 {
+        return true;
+    }
+    // EPERM means the process exists but we can't signal it — still alive.
+    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    errno == libc::EPERM
+}
+
+#[cfg(not(unix))]
+fn is_pid_alive(_pid: i32) -> bool {
+    // Non-Unix platforms don't run the daemon; conservative default.
+    true
+}
+
+/// Read the engineer-claim PID out of `worktree_dir/.simard-engineer-claim`.
+/// Returns `None` if the file is missing, empty, malformed, or unreadable.
+/// Tolerant of all I/O errors — the caller treats `None` as "no claim".
+fn read_engineer_claim(worktree_dir: &Path) -> Option<i32> {
+    let path = worktree_dir.join(ENGINEER_CLAIM_FILE);
+    let raw = fs::read_to_string(&path).ok()?;
+    raw.trim().parse::<i32>().ok()
+}
+
 /// Maximum length of a `goal_id` accepted by [`EngineerWorktree::allocate`].
 const MAX_GOAL_ID_LEN: usize = 64;
 
@@ -68,6 +108,10 @@ pub struct SweepReport {
     /// Directories that were physically removed because they were not
     /// registered with the parent repository.
     pub removed_orphan_dirs: Vec<PathBuf>,
+    /// Directories that were unregistered with the parent repo but skipped
+    /// because their `.simard-engineer-claim` sentinel named a live PID
+    /// (issue #1213). Useful for diagnostics and tests.
+    pub skipped_live_dirs: Vec<PathBuf>,
 }
 
 impl EngineerWorktree {
@@ -202,6 +246,24 @@ impl EngineerWorktree {
                 action: format!("engineer_worktree::allocate(goal={goal_id})"),
                 reason: format!("`git worktree add` failed: {reason}"),
             });
+        }
+
+        // 5. Write the per-worktree liveness sentinel (issue #1213). If the
+        //    sweep ever runs against this worktree while git's registration
+        //    is transiently missing, the live PID guard prevents the
+        //    cwd-deletion-under-the-engineer's-feet bug.
+        let claim_path = dir.join(ENGINEER_CLAIM_FILE);
+        let claim_pid = std::process::id();
+        if let Err(e) = fs::write(&claim_path, format!("{claim_pid}\n")) {
+            // Sentinel write failure is non-fatal: the AtomicBool guard plus
+            // the existing canonical-prefix safety still protect us. Log loud
+            // so the regression is visible.
+            tracing::warn!(
+                target: "simard::engineer_worktree",
+                error = %e,
+                claim = %claim_path.display(),
+                "failed to write engineer-claim sentinel; sweep falls back to git-registration check only",
+            );
         }
 
         Ok(Self {
@@ -436,6 +498,22 @@ pub fn sweep_orphaned_worktrees(
             continue;
         }
         if registered.contains(&canonical) {
+            continue;
+        }
+        // Issue #1213: skip dirs whose engineer-claim sentinel names a live
+        // PID. Git's `worktree prune` can transiently drop a registration
+        // (observed during concurrent worktree mutations) and we must not
+        // delete a worktree out from under a running engineer subprocess.
+        if let Some(pid) = read_engineer_claim(&canonical)
+            && is_pid_alive(pid)
+        {
+            tracing::debug!(
+                target: "simard::engineer_worktree",
+                worktree = %canonical.display(),
+                pid,
+                "skipping unregistered worktree with live engineer-claim PID",
+            );
+            report.skipped_live_dirs.push(canonical);
             continue;
         }
         if let Err(e) = fs::remove_dir_all(&path) {

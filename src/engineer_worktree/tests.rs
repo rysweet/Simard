@@ -512,3 +512,98 @@ fn git_capture_clears_inherited_git_env() {
     let wt = result.expect("allocate must ignore inherited GIT_DIR");
     wt.cleanup().expect("cleanup");
 }
+
+// ---------------------------------------------------------------------------
+// Issue #1213 — engineer-claim sentinel + sweep liveness check
+// ---------------------------------------------------------------------------
+
+#[test]
+fn allocate_writes_engineer_claim_sentinel_with_current_pid() {
+    let parent_dir = tempdir().unwrap();
+    let state_dir = tempdir().unwrap();
+    let parent_repo = init_parent_repo(parent_dir.path());
+
+    let wt = EngineerWorktree::allocate(&parent_repo, state_dir.path(), "claim-write")
+        .expect("allocate");
+
+    let claim = wt.path().join(super::ENGINEER_CLAIM_FILE);
+    let raw = fs::read_to_string(&claim).expect("claim file present");
+    let pid: i32 = raw.trim().parse().expect("claim file contains an i32 pid");
+    assert_eq!(
+        pid,
+        std::process::id() as i32,
+        "claim file must record the allocating process PID"
+    );
+
+    wt.cleanup().expect("cleanup");
+}
+
+#[test]
+fn sweep_skips_unregistered_dir_with_live_engineer_claim() {
+    let parent_dir = tempdir().unwrap();
+    let state_dir = tempdir().unwrap();
+    let parent_repo = init_parent_repo(parent_dir.path());
+
+    // Create an unregistered worktree-shaped dir with a live (current) PID
+    // claim. Sweep MUST NOT delete it: this simulates the race where git's
+    // registration transiently disappeared but the engineer subprocess is
+    // still actively running in the cwd.
+    let worktrees_root = state_dir.path().join(super::WORKTREES_SUBDIR);
+    fs::create_dir_all(&worktrees_root).unwrap();
+    let live = worktrees_root.join("live-claimed-1");
+    fs::create_dir_all(&live).unwrap();
+    fs::write(
+        live.join(super::ENGINEER_CLAIM_FILE),
+        format!("{}\n", std::process::id()),
+    )
+    .unwrap();
+
+    let report = sweep_orphaned_worktrees(&parent_repo, state_dir.path()).expect("sweep");
+
+    assert!(
+        live.exists(),
+        "sweep must not delete dir with live PID claim"
+    );
+    assert!(
+        report
+            .skipped_live_dirs
+            .iter()
+            .any(|p| p.canonicalize().ok() == live.canonicalize().ok()),
+        "sweep report must record the skipped-live dir; got {:?}",
+        report.skipped_live_dirs
+    );
+    assert!(
+        report.removed_orphan_dirs.is_empty(),
+        "sweep must not record any removals; got {:?}",
+        report.removed_orphan_dirs
+    );
+}
+
+#[test]
+fn sweep_removes_unregistered_dir_with_dead_engineer_claim() {
+    let parent_dir = tempdir().unwrap();
+    let state_dir = tempdir().unwrap();
+    let parent_repo = init_parent_repo(parent_dir.path());
+
+    // Create an unregistered dir with a dead-PID claim (PID 1 belongs to
+    // init/systemd which we cannot signal — kill(1, 0) returns EPERM and
+    // therefore reads as alive — so use PID 2_147_483_646 which is virtually
+    // guaranteed not to exist and not to wrap around to a live one).
+    let worktrees_root = state_dir.path().join(super::WORKTREES_SUBDIR);
+    fs::create_dir_all(&worktrees_root).unwrap();
+    let dead = worktrees_root.join("dead-claimed-1");
+    fs::create_dir_all(&dead).unwrap();
+    fs::write(dead.join(super::ENGINEER_CLAIM_FILE), "2147483646\n").unwrap();
+
+    let report = sweep_orphaned_worktrees(&parent_repo, state_dir.path()).expect("sweep");
+
+    assert!(
+        !dead.exists(),
+        "sweep must remove unregistered dir whose claim PID is dead"
+    );
+    assert!(
+        report.removed_orphan_dirs.iter().any(|p| p == &dead),
+        "sweep report must record the removal; got {:?}",
+        report.removed_orphan_dirs
+    );
+}
