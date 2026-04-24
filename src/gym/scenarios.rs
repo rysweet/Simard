@@ -4,7 +4,7 @@ use crate::runtime::RuntimeTopology;
 
 use super::types::{BenchmarkCheckResult, BenchmarkClass, BenchmarkScenario};
 
-const BENCHMARK_SCENARIOS: [BenchmarkScenario; 118] = [
+const BENCHMARK_SCENARIOS: [BenchmarkScenario; 122] = [
     BenchmarkScenario {
         id: "repo-exploration-local",
         title: "Repo exploration on local harness",
@@ -1325,6 +1325,50 @@ const BENCHMARK_SCENARIOS: [BenchmarkScenario; 118] = [
         base_type: "terminal-shell",
         topology: RuntimeTopology::Distributed,
         objective: "Plan a game day exercise that simulates a regional failure. Cover: (1) the scenario script (which region is taken offline, how, and for how long), (2) participant roles (incident commander, scribe, operators per service) and the communication channel, (3) success criteria tied to recovery objectives (RPO/RTO) and a measurable abort signal, (4) the post-exercise debrief format that produces concrete action items and a blameless write-up. Confirm the distributed topology backend appears in runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "debugging-bug-localization-from-test-output-local",
+        title: "Debugging: localize bug from cargo test output on local harness",
+        description: "Given a representative `cargo test` failure trace, identify the offending file and function and explain the likely cause through the single-process local harness.",
+        class: BenchmarkClass::Debugging,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Given a `cargo test` failure trace from the simard crate, perform bug localization. Cover: (1) the exact file path and function name implicated by the failing assertion or panic, (2) the line range likely responsible based on the assertion message and stack frames, (3) at least two plausible root-cause hypotheses ranked by likelihood with the evidence supporting each, (4) the next single shell command (cargo test, grep, or git blame) that would discriminate between the hypotheses. Do not modify any code in this step.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "refactoring-rename-public-api-multifile-rusty-clawd",
+        title: "Refactoring: rename public API across multiple files on rusty-clawd",
+        description: "Plan a multi-file rename of a public function or type across at least three files without breaking downstream callers, exercised through the multi-process topology with the rusty-clawd base type.",
+        class: BenchmarkClass::Refactoring,
+        identity: "simard-gym",
+        base_type: "rusty-clawd",
+        topology: RuntimeTopology::MultiProcess,
+        objective: "Plan a multi-file rename of a public API symbol (function, struct, or enum) in the simard crate. Cover: (1) the chosen symbol, the proposed new name, and the rationale, (2) the complete inventory of files and call sites that must be updated (at least three files, identified via `rg` or equivalent), (3) the ordering of edits that keeps the crate compiling at each intermediate step (e.g., introduce alias, migrate callers, remove alias), (4) the verification commands (cargo check, cargo test) that confirm no caller is broken. Confirm the multi-process transport appears in runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "documentation-call-graph-summary-copilot",
+        title: "Documentation: produce call-graph summary of an unfamiliar module on copilot-sdk",
+        description: "Read an unfamiliar simard module and produce a structured documentation summary covering its public surface, internal call graph, and error paths through the copilot-sdk base type.",
+        class: BenchmarkClass::Documentation,
+        identity: "simard-gym",
+        base_type: "copilot-sdk",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Read the module `src/gym/scenarios.rs` (or a comparably sized module if unavailable) and produce a documentation summary. Cover: (1) the public items exported by the module (functions, types, constants) with a one-line purpose for each, (2) the internal call graph showing which public function delegates to which private helper, (3) the error paths — every `Result`-returning function and the `SimardError` variants it can produce, (4) at least one concrete usage example invoking a public item with realistic arguments. Output must be valid Markdown.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "code-review-failure-recovery-dirty-worktree-distributed-terminal",
+        title: "Code review: recover from dirty worktree with merge conflict on distributed terminal-shell",
+        description: "Plan a recovery procedure from a deliberately broken intermediate git state (dirty worktree with conflicting changes) on the distributed topology with the terminal-shell base type.",
+        class: BenchmarkClass::CodeReview,
+        identity: "simard-gym",
+        base_type: "terminal-shell",
+        topology: RuntimeTopology::Distributed,
+        objective: "Plan a failure-recovery procedure for a dirty git worktree containing conflicting uncommitted changes that block a pending rebase. Cover: (1) the diagnostic commands run first (`git status`, `git diff`, `git log --oneline -n 5`) and the specific signals each produces, (2) the decision matrix for stash vs commit vs discard based on whether the local changes are intentional, (3) the exact ordered sequence of git commands that resolves the conflict and restores a clean worktree, with rollback instructions if any step fails, (4) the verification that confirms the original work is preserved (no lost commits, no lost uncommitted edits). Confirm the distributed topology backend appears in runtime evidence.",
         expected_min_runtime_evidence: 4,
     },
 ];
