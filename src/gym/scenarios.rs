@@ -5,7 +5,7 @@ use crate::runtime::RuntimeTopology;
 use super::types::{BenchmarkCheckResult, BenchmarkClass, BenchmarkScenario};
 
 // NEEDLE-XYZ-GYM-MARKER: long-context-needle-in-haystack benchmark searches for this exact comment.
-static BENCHMARK_SCENARIOS: [BenchmarkScenario; 149] = [
+static BENCHMARK_SCENARIOS: [BenchmarkScenario; 152] = [
     BenchmarkScenario {
         id: "repo-exploration-local",
         title: "Repo exploration on local harness",
@@ -1668,6 +1668,39 @@ static BENCHMARK_SCENARIOS: [BenchmarkScenario; 149] = [
         base_type: "local-harness",
         topology: RuntimeTopology::SingleProcess,
         objective: "Open the file `src/gym/scenarios.rs`. Locate the unique marker comment `// NEEDLE-XYZ-GYM-MARKER` in that file. Report exactly two lines: `line: <1-based line number>` and `enclosing_scenario_id: <id of the BenchmarkScenario that the marker is nearest to, or `none` if the marker sits outside any scenario literal>`.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "multi-file-rename-public-api",
+        title: "Multi-file refactor: rename a public API symbol across modules",
+        description: "Plan a coordinated rename of a public API symbol that is referenced by multiple modules and tests, so an operator can apply the change without breaking downstream call sites.",
+        class: BenchmarkClass::Refactoring,
+        identity: "simard-engineer",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Plan renaming the public function `benchmark_scenarios` (in `src/gym/scenarios.rs`) to `gym_benchmark_scenarios` across the entire crate. Cover: (1) the exhaustive list of files that must change (definition site plus every `use`/call site under `src/`), found via grep for the existing identifier, (2) the ordered edit sequence so the crate stays compilable between commits (definition + re-exports first, then call sites), (3) the verification command (`cargo check --lib`) that proves no stale references remain, (4) preservation of behavior — the function body, return type, and visibility must be unchanged. Show before/after for at least one call site.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "plan-decomposition-vague-goal",
+        title: "Plan decomposition: turn a vague operator goal into atomic steps",
+        description: "Exercise plan-decomposition quality by asking the agent to convert a deliberately vague operator request into an ordered list of concrete, atomic, individually-verifiable steps.",
+        class: BenchmarkClass::SessionQuality,
+        identity: "simard-engineer",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "An operator says: \"make the gym suite better\". Decompose that vague goal into an ordered list of 5-8 atomic steps that an engineer agent could execute one-at-a-time. Each step MUST: (1) name a single concrete action (e.g. `run_shell_command`, `structured_text_replace`, `cargo_test`), (2) name the exact target artefact (file path, command, or scenario id) the action operates on, (3) state a one-sentence expected outcome, (4) state a verification command whose exit-zero proves the step worked. Reject any step whose target would be prose or another multi-step plan. Produce the list as a numbered Markdown list.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "failure-recovery-dirty-worktree",
+        title: "Failure recovery: resume work after a dirty-worktree git failure",
+        description: "Exercise failure-recovery by giving the agent a verbatim git error from an attempted branch switch on a dirty worktree, and requiring an ordered recovery plan that preserves the operator's uncommitted changes.",
+        class: BenchmarkClass::Debugging,
+        identity: "simard-engineer",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Below is a verbatim git failure an operator hit while trying to switch branches mid-task. Produce an ordered recovery plan (3-5 steps) that (a) preserves the uncommitted edits, (b) lets the operator complete the branch switch, (c) restores the edits onto the new branch, and (d) leaves the worktree clean. For each step give the exact `git` command and a one-line rationale. Explicitly reject `git checkout -- .` or `git reset --hard` as recovery options because they discard work.\n\n---- begin git output ----\n$ git switch main\nerror: Your local changes to the following files would be overwritten by checkout:\n\tsrc/gym/scenarios.rs\n\tsrc/gym/tests_scenarios.rs\nPlease commit your changes or stash them before you switch branches.\nAborting\n----  end git output  ----",
         expected_min_runtime_evidence: 3,
     },
 ];
