@@ -246,3 +246,76 @@ fn execute_structured_edit_missing_file_fails() {
     let err = execute_engineer_action(dir.path(), selected).unwrap_err();
     assert!(err.to_string().contains("could not read"));
 }
+
+// --- sanitize_issue_create_args ---
+
+#[test]
+fn sanitize_issue_create_args_happy_path_with_labels() {
+    let argv = sanitize_issue_create_args(
+        "fix: bug in parser",
+        "Body content here.",
+        &["bug".to_string(), "p1".to_string()],
+        Some("goal-123"),
+        Some("engineer"),
+    );
+    assert_eq!(
+        argv,
+        vec![
+            "gh".to_string(),
+            "issue".to_string(),
+            "create".to_string(),
+            "--title".to_string(),
+            "fix: bug in parser".to_string(),
+            "--body".to_string(),
+            "Body content here.".to_string(),
+            "--label".to_string(),
+            "bug".to_string(),
+            "--label".to_string(),
+            "p1".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn sanitize_issue_create_args_empty_body_substitutes_placeholder() {
+    let argv = sanitize_issue_create_args(
+        "Some title",
+        "   \n  ",
+        &[],
+        Some("goal-42"),
+        Some("ooda-engineer"),
+    );
+    // --body must always be present (issue #1011).
+    let body_index = argv.iter().position(|s| s == "--body").expect("--body flag");
+    let body_value = &argv[body_index + 1];
+    assert!(body_value.contains("goal-42"), "body refs goal id: {body_value}");
+    assert!(
+        body_value.contains("ooda-engineer.log"),
+        "body refs agent log path: {body_value}"
+    );
+    assert!(!argv.iter().any(|s| s == "--label"));
+}
+
+#[test]
+fn sanitize_issue_create_args_collapses_newlines_and_defaults_title() {
+    let argv = sanitize_issue_create_args(
+        "  \n\r ",
+        "line1\nline2\rline3",
+        &["valid-label".to_string(), "  \n  ".to_string()],
+        None,
+        None,
+    );
+    let title_index = argv.iter().position(|s| s == "--title").expect("--title flag");
+    assert_eq!(
+        argv[title_index + 1],
+        "(untitled issue spawned by OODA daemon)"
+    );
+    let body_index = argv.iter().position(|s| s == "--body").expect("--body flag");
+    let body = &argv[body_index + 1];
+    assert!(!body.contains('\n') && !body.contains('\r'), "newlines collapsed: {body:?}");
+    assert!(body.contains("line1 line2 line3"), "body collapsed: {body}");
+    // Empty label was filtered; valid one kept.
+    let label_count = argv.iter().filter(|s| s.as_str() == "--label").count();
+    assert_eq!(label_count, 1);
+    assert!(argv.iter().any(|s| s == "valid-label"));
+}
