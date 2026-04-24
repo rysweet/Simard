@@ -4,7 +4,8 @@ use crate::runtime::RuntimeTopology;
 
 use super::types::{BenchmarkCheckResult, BenchmarkClass, BenchmarkScenario};
 
-static BENCHMARK_SCENARIOS: [BenchmarkScenario; 147] = [
+// NEEDLE-XYZ-GYM-MARKER: long-context-needle-in-haystack benchmark searches for this exact comment.
+static BENCHMARK_SCENARIOS: [BenchmarkScenario; 149] = [
     BenchmarkScenario {
         id: "repo-exploration-local",
         title: "Repo exploration on local harness",
@@ -1646,6 +1647,28 @@ static BENCHMARK_SCENARIOS: [BenchmarkScenario; 147] = [
         topology: RuntimeTopology::MultiProcess,
         objective: "Design deterministic session replay. Cover: (1) what is captured (inputs, RNG seeds, timestamps, externally-fetched data) versus what is recomputed, (2) the boundary between deterministic core and non-deterministic edges (clock, network) and how edges are stubbed on replay, (3) the storage format and size budget per session, (4) a verification harness that detects replay divergence at the first differing record. Confirm the multi-process transport appears in runtime evidence.",
         expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "bug-localize-from-cargo-test-output",
+        title: "Bug localization from cargo test failure output",
+        description: "Given a verbatim cargo test failure block, the agent must identify the source file and function that contains the offending code path so an operator can begin a targeted fix.",
+        class: BenchmarkClass::BugFix,
+        identity: "simard-engineer",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Below is a verbatim `cargo test` failure block. Read it carefully, then name (1) the source file path and (2) the function (or test) that contains the offending code path. Output exactly two lines: `file: <path>` and `function: <name>`.\n\n---- begin cargo test output ----\nrunning 1 test\ntest gym::tests_scenarios::benchmark_scenarios_returns_nine_scenarios ... FAILED\n\nfailures:\n\n---- gym::tests_scenarios::benchmark_scenarios_returns_nine_scenarios stdout ----\nthread 'gym::tests_scenarios::benchmark_scenarios_returns_nine_scenarios' panicked at src/gym/tests_scenarios.rs:18:5:\nassertion `left == right` failed\n  left: 149\n right: 147\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\nfailures:\n    gym::tests_scenarios::benchmark_scenarios_returns_nine_scenarios\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n\nerror: test failed, to find out more, run `cargo test --lib -- gym::tests_scenarios::benchmark_scenarios_returns_nine_scenarios`\n----  end cargo test output  ----",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "long-context-needle-in-haystack",
+        title: "Long-context needle search in scenarios source",
+        description: "Exercise long-context retrieval by asking the agent to scan src/gym/scenarios.rs for a specific marker comment and report its line number plus the enclosing scenario id.",
+        class: BenchmarkClass::RepoExploration,
+        identity: "simard-engineer",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Open the file `src/gym/scenarios.rs`. Locate the unique marker comment `// NEEDLE-XYZ-GYM-MARKER` in that file. Report exactly two lines: `line: <1-based line number>` and `enclosing_scenario_id: <id of the BenchmarkScenario that the marker is nearest to, or `none` if the marker sits outside any scenario literal>`.",
+        expected_min_runtime_evidence: 3,
     },
 ];
 
