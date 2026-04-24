@@ -27,6 +27,7 @@ mod copilot_task_submit;
 pub mod cost_tracking;
 pub mod engineer_loop;
 pub mod engineer_plan;
+pub mod engineer_worktree;
 pub mod error;
 pub mod evidence;
 pub mod git_guardrails;

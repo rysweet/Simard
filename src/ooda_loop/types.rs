@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
 
 use crate::cognitive_memory::CognitiveMemoryOps;
+use crate::engineer_worktree::EngineerWorktree;
 use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress};
 use crate::gym_bridge::GymBridge;
 use crate::gym_scoring::GymSuiteScore;
@@ -57,6 +58,11 @@ pub struct OodaState {
     /// reset to 0 on success. Used by Orient to demote chronically failing
     /// goals so the daemon stops burning budget on the same broken target.
     pub goal_failure_counts: HashMap<String, u32>,
+    /// Per-goal isolated git worktrees owned by spawned engineers (issue #1197).
+    /// Keyed by `goal_id`; cleaned up by the reaper path when the engineer's
+    /// outcome is validated, or via `EngineerWorktree::Drop` if the entry is
+    /// removed before explicit `cleanup()` runs.
+    pub engineer_worktrees: HashMap<String, EngineerWorktree>,
 }
 
 impl OodaState {
@@ -72,6 +78,7 @@ impl OodaState {
             last_cycle_summary: None,
             last_cycle_duration_secs: None,
             goal_failure_counts: HashMap::new(),
+            engineer_worktrees: HashMap::new(),
         }
     }
 }
