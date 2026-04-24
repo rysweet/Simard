@@ -670,7 +670,10 @@ fn is_plausible_label(label: &str) -> bool {
         return false;
     }
     // Reject pure-punctuation placeholders the LLM tends to emit (`...`, `.…`, `…`).
-    if label.chars().all(|c| matches!(c, '.' | '…' | '-' | '_' | ' ')) {
+    if label
+        .chars()
+        .all(|c| matches!(c, '.' | '…' | '-' | '_' | ' '))
+    {
         return false;
     }
     // Require at least one alphanumeric character.
