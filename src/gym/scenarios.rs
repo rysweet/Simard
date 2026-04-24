@@ -5,7 +5,7 @@ use crate::runtime::RuntimeTopology;
 use super::types::{BenchmarkCheckResult, BenchmarkClass, BenchmarkScenario};
 
 // NEEDLE-XYZ-GYM-MARKER: long-context-needle-in-haystack benchmark searches for this exact comment.
-static BENCHMARK_SCENARIOS: [BenchmarkScenario; 149] = [
+static BENCHMARK_SCENARIOS: [BenchmarkScenario; 151] = [
     BenchmarkScenario {
         id: "repo-exploration-local",
         title: "Repo exploration on local harness",
@@ -1668,6 +1668,28 @@ static BENCHMARK_SCENARIOS: [BenchmarkScenario; 149] = [
         base_type: "local-harness",
         topology: RuntimeTopology::SingleProcess,
         objective: "Open the file `src/gym/scenarios.rs`. Locate the unique marker comment `// NEEDLE-XYZ-GYM-MARKER` in that file. Report exactly two lines: `line: <1-based line number>` and `enclosing_scenario_id: <id of the BenchmarkScenario that the marker is nearest to, or `none` if the marker sits outside any scenario literal>`.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "multi-file-refactor-rename-symbol",
+        title: "Multi-file refactor: rename a public symbol across the crate",
+        description: "Plan a safe cross-file rename of a public Rust symbol (struct, function, or enum variant) used in multiple modules. The agent must enumerate every call site, propose an ordered edit sequence, and describe the verification gates that prove the rename is behaviour-preserving.",
+        class: BenchmarkClass::Refactoring,
+        identity: "simard-engineer",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Plan a behaviour-preserving rename of the public type `BenchmarkScenario` in `src/gym/types.rs` to `GymScenario`. Produce, in order: (1) the exhaustive list of source files that import or reference `BenchmarkScenario` (use `rg -l 'BenchmarkScenario' src/` as the source of truth), (2) a per-file edit summary noting which references are type names, doc comments, or string literals, (3) the precise ordered sequence of edits (definition first, then re-exports, then call sites, then tests), and (4) the verification gates: `cargo check`, `cargo test --lib -- gym`, and `cargo clippy --all-targets`. Do NOT actually perform the rename — only output the plan.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "flaky-test-triage-from-history",
+        title: "Flaky-test triage from intermittent CI history",
+        description: "Given a short history of CI runs for a single test that sometimes passes and sometimes fails with non-deterministic output, the agent must classify the most likely flake category and propose a stabilisation strategy.",
+        class: BenchmarkClass::Debugging,
+        identity: "simard-engineer",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Below is a 6-run CI history for one Rust integration test. Classify the most likely flake category and propose a fix. Output exactly four lines:\n`category: <one of: timing/race | ordering/iteration | external-dependency | resource-leak | rng-seed>`\n`root_cause_hypothesis: <one sentence>`\n`stabilisation: <one sentence describing the code or harness change>`\n`verification: <one sentence describing how to prove the flake is gone (e.g. loop count, deterministic seed)>`\n\n---- begin ci history ----\nrun 1 (commit a1b2c3d): PASS in 0.42s\nrun 2 (commit a1b2c3d, retry): FAIL — assertion `left == right` failed\n  left: [\"alpha\", \"beta\", \"gamma\"]\n  right: [\"beta\", \"alpha\", \"gamma\"]\nrun 3 (commit a1b2c3d, retry): PASS in 0.39s\nrun 4 (commit e4f5a6b): FAIL — assertion `left == right` failed\n  left: [\"gamma\", \"alpha\", \"beta\"]\n  right: [\"beta\", \"alpha\", \"gamma\"]\nrun 5 (commit e4f5a6b, retry): PASS in 0.41s\nrun 6 (commit e4f5a6b, retry): FAIL — assertion `left == right` failed\n  left: [\"alpha\", \"gamma\", \"beta\"]\n  right: [\"beta\", \"alpha\", \"gamma\"]\n----  end ci history  ----",
         expected_min_runtime_evidence: 3,
     },
 ];
