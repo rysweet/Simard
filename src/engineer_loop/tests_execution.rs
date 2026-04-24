@@ -286,9 +286,15 @@ fn sanitize_issue_create_args_empty_body_substitutes_placeholder() {
         Some("ooda-engineer"),
     );
     // --body must always be present (issue #1011).
-    let body_index = argv.iter().position(|s| s == "--body").expect("--body flag");
+    let body_index = argv
+        .iter()
+        .position(|s| s == "--body")
+        .expect("--body flag");
     let body_value = &argv[body_index + 1];
-    assert!(body_value.contains("goal-42"), "body refs goal id: {body_value}");
+    assert!(
+        body_value.contains("goal-42"),
+        "body refs goal id: {body_value}"
+    );
     assert!(
         body_value.contains("ooda-engineer.log"),
         "body refs agent log path: {body_value}"
@@ -305,14 +311,23 @@ fn sanitize_issue_create_args_collapses_newlines_and_defaults_title() {
         None,
         None,
     );
-    let title_index = argv.iter().position(|s| s == "--title").expect("--title flag");
+    let title_index = argv
+        .iter()
+        .position(|s| s == "--title")
+        .expect("--title flag");
     assert_eq!(
         argv[title_index + 1],
         "(untitled issue spawned by OODA daemon)"
     );
-    let body_index = argv.iter().position(|s| s == "--body").expect("--body flag");
+    let body_index = argv
+        .iter()
+        .position(|s| s == "--body")
+        .expect("--body flag");
     let body = &argv[body_index + 1];
-    assert!(!body.contains('\n') && !body.contains('\r'), "newlines collapsed: {body:?}");
+    assert!(
+        !body.contains('\n') && !body.contains('\r'),
+        "newlines collapsed: {body:?}"
+    );
     assert!(body.contains("line1 line2 line3"), "body collapsed: {body}");
     // Empty label was filtered; valid one kept.
     let label_count = argv.iter().filter(|s| s.as_str() == "--label").count();
