@@ -26,6 +26,96 @@ Simard exposes five user-visible operating modes, each with its own success crit
 
 These are different operating modes, not cosmetic personas. Each mode owns its own command tree under the `simard` binary.
 
+## Daemon mode (autonomous OODA loop)
+
+Beyond the operator-driven modes above, Simard runs as a long-lived **autonomous daemon** that observes signals, ranks priorities, and dispatches engineer subprocesses without any human in the loop.
+
+```bash
+simard ooda run                  # run indefinitely
+simard ooda run --cycles=5       # run a fixed number of cycles
+```
+
+Each cycle:
+
+1. **Observe** — pulls signals from the goal register, open issues, gym scores, meeting handoffs, and memory consolidation pressure.
+2. **Orient** — ranks priorities and accounts for in-flight work to avoid duplicate dispatch.
+3. **Decide** — selects one action: `advance-goal` (spawn an engineer subprocess), `run-improvement` (self-improvement cycle), `run-gym-eval`, `consolidate-memory`, `research`, or `assess-only`.
+4. **Act** — for `advance-goal`, allocates a per-engineer git worktree under `~/.simard/engineer-worktrees/<goal-id>-<epoch>-<6hex>/` and spawns an isolated engineer subprocess.
+5. **Review** — runs the verify gate (`src/engineer_loop/verification.rs`) before any branch push and records the outcome in episodic memory.
+
+Engineer subprocesses are first-class OS processes — independent LLM sessions with their own tool budget and worktree. The daemon does not block on them; it polls completion and applies the verifier on the next cycle.
+
+Inspect and control a running daemon through the [Dashboard](#dashboard) or with:
+
+```bash
+simard ooda status                   # last cycle summary
+simard goal-curation read            # active goals + backlog
+simard improvement-curation read     # pending improvements awaiting approval
+```
+
+Full reference: [docs/daemon-mode.md](docs/daemon-mode.md) · How-to: [docs/howto/run-ooda-daemon.md](docs/howto/run-ooda-daemon.md) · Spawn semantics: [docs/howto/spawn-engineers-from-ooda-daemon.md](docs/howto/spawn-engineers-from-ooda-daemon.md).
+
+## Memory architecture
+
+Simard's memory is not a flat key-value store. She uses **six distinct memory types** modeled after cognitive psychology, implemented natively in Rust via `NativeCognitiveMemory` backed by LadybugDB (the `lbug` crate). There is no Python bridge — memory operations are direct LadybugDB calls.
+
+| Type | Lifetime | What it holds |
+|------|----------|---------------|
+| **Sensory** | TTL ~300 s | Raw observations: PTY output, error messages, objective text. Auto-expires unless promoted. |
+| **Working** | Task-scoped | The 20-slot active task context: goal, constraints, plan steps, current execution state. |
+| **Episodic** | Persistent | "What happened this session" — every cycle, every action, every observation. |
+| **Semantic** | Persistent, deduplicated | Facts and concepts promoted from episodic memory. |
+| **Procedural** | Persistent, indexed by trigger | Action sequences that worked for a given situation. |
+| **Prospective** | Persistent, time/event-indexed | Future intentions ("when CI is green for #1209, post a follow-up"). |
+
+Consolidation is automatic: working → episodic at task end; episodic → semantic / procedural when the OODA daemon dispatches a `consolidate-memory` action. Cross-session recall is automatic — when the daemon spawns a new engineer for a goal it seeds the engineer's working memory with the most relevant prior episodes for that goal-id.
+
+On-disk layout: `~/.simard/memory/lbug/` (LadybugDB persistent store), `~/.simard/memory/working/`, `~/.simard/memory/sensory/`.
+
+Multi-agent knowledge sharing inside a single Simard process is handled by the **hive event bus** (`src/hive_event_bus.rs`) — a `tokio::sync::broadcast` channel that every subsystem (memory consolidation, meeting facilitator, gym runner, engineer dispatcher) can publish to and subscribe from.
+
+Operator-level summary: [docs/memory.md](docs/memory.md) · Canonical specification: [docs/architecture/cognitive-memory.md](docs/architecture/cognitive-memory.md).
+
+## Dashboard
+
+Simard ships a read-only web dashboard that surfaces what the autonomous OODA daemon is doing right now: the active goal register, recent cycle actions, open PRs and issues, the cognitive memory graph, live traces, costs, and per-process resource usage.
+
+```bash
+simard dashboard serve --port=8080
+```
+
+A login code is generated on first start and printed to stdout (also persisted to `~/.simard/.dashkey`). Subsequent visits to `http://localhost:8080/` redirect to a login page that accepts the code and sets a session cookie.
+
+Tabs: **Overview** (daemon status, recent actions, open PRs, open issues), **Goals** (active register + backlog with promote/dismiss), **Traces** (live engineer subprocess and OODA cycle traces via xterm.js), **Logs**, **Processes** (live process tree), **Memory** (per-type filters + full-text search), **Costs**, **Chat**, **Whiteboard**, **Thinking** (planner output before action dispatch), **Terminal**.
+
+### Overview
+
+What the daemon did this cycle, top priority, recent actions, open PRs, open issues, system status:
+
+![Dashboard overview](docs/assets/dashboard-overview.png)
+
+### Goals
+
+Active priorities and backlog with promote / dismiss controls:
+
+![Goals tab](docs/assets/dashboard-goals.png)
+
+### Memory
+
+Six cognitive memory types with per-type filters, graph view, and full-text search:
+
+![Memory tab](docs/assets/dashboard-memory.png)
+
+Full reference: [docs/dashboard.md](docs/dashboard.md).
+
+## Distributed operations
+
+Simard's autonomous mode is *concurrent*: a single OODA daemon dispatches many engineer subprocesses in parallel on a single host, each in its own git worktree and its own LLM session. Coordination is via shared on-disk state (`~/.simard/goals/`, `~/.simard/memory/lbug/`) and the in-process hive event bus.
+
+The hive event bus is **in-process only** — there is no built-in multi-host transport today. Operators who want to federate across hosts can stage `~/.simard/goals/` and `~/.simard/memory/` on shared storage and point each daemon's `--state-root` at the shared path; engineer worktrees stay host-local. A network transport for the hive bus is tracked in [#949](https://github.com/rysweet/Simard/issues/949).
+
+Full reference: [docs/distributed-operations.md](docs/distributed-operations.md).
+
 ## Agent Base Types
 
 An agent base type is the underlying execution substrate an identity can build on. It is **not** the identity itself. Simard composes work over a pluggable set of base types and refuses to instantiate identities on substrates that cannot satisfy required capabilities.
@@ -319,7 +409,12 @@ Pre-commit and pre-push hooks enforce `cargo fmt --all -- --check`, `cargo clipp
 
 - [Product architecture (PRD)](Specs/ProductArchitecture.md)
 - [Documentation index](docs/index.md)
+- [Daemon mode (autonomous OODA loop)](docs/daemon-mode.md)
+- [Memory architecture](docs/memory.md)
+- [Dashboard](docs/dashboard.md)
+- [Distributed operations](docs/distributed-operations.md)
 - [Architecture overview](docs/architecture/overview.md)
+- [Cognitive Memory (canonical)](docs/architecture/cognitive-memory.md)
 - [Simard CLI reference](docs/reference/simard-cli.md)
 - [Runtime contracts reference](docs/reference/runtime-contracts.md)
 - [Base type adapters reference](docs/reference/base-type-adapters.md)
