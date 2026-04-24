@@ -5,7 +5,7 @@ use crate::runtime::RuntimeTopology;
 use super::types::{BenchmarkCheckResult, BenchmarkClass, BenchmarkScenario};
 
 // NEEDLE-XYZ-GYM-MARKER: long-context-needle-in-haystack benchmark searches for this exact comment.
-static BENCHMARK_SCENARIOS: [BenchmarkScenario; 152] = [
+static BENCHMARK_SCENARIOS: [BenchmarkScenario; 153] = [
     BenchmarkScenario {
         id: "repo-exploration-local",
         title: "Repo exploration on local harness",
@@ -1668,6 +1668,17 @@ static BENCHMARK_SCENARIOS: [BenchmarkScenario; 152] = [
         base_type: "local-harness",
         topology: RuntimeTopology::SingleProcess,
         objective: "Open the file `src/gym/scenarios.rs`. Locate the unique marker comment `// NEEDLE-XYZ-GYM-MARKER` in that file. Report exactly two lines: `line: <1-based line number>` and `enclosing_scenario_id: <id of the BenchmarkScenario that the marker is nearest to, or `none` if the marker sits outside any scenario literal>`.",
+        expected_min_runtime_evidence: 3,
+    },
+    BenchmarkScenario {
+        id: "memory-recall-consolidated-episode",
+        title: "Memory recall: summarize most recent consolidated episode",
+        description: "Exercise the agent's ability to use prior episode and consolidated memory context. The agent must locate the most recent consolidated episode in its memory store and summarize its source_label and slot_type so an operator can confirm cross-turn recall is working.",
+        class: BenchmarkClass::SessionQuality,
+        identity: "simard-engineer",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Use prior episode and consolidated memory context to answer the following question: recall the most recent consolidated episode currently held in your cognitive memory store and summarize it. Output exactly three lines: `episode_id: <id>`, `source_label: <source_label of that episode>`, and `slot_type: <slot_type of that episode>`. If no consolidated episode is available, output `episode_id: none`, `source_label: none`, `slot_type: none` and explain in one additional line why memory recall returned no results.",
         expected_min_runtime_evidence: 3,
     },
     BenchmarkScenario {
