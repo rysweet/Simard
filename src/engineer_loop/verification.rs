@@ -7,6 +7,15 @@ use super::types::{
     EngineerActionKind, ExecutedEngineerAction, RepoInspection, VerificationReport,
 };
 
+/// Per #1209: an engineer worktree may legitimately rename its branch from
+/// `engineer/<initial>` to `engineer/<better-name>`. Returns true when the
+/// transition stays within (or starts inside) the `engineer/*` namespace.
+/// Used to relax both the HEAD-stability and branch-equality checks for the
+/// engineer sandbox case.
+pub(crate) fn rename_within_engineer_namespace(inspection_branch: &str, post_branch: &str) -> bool {
+    inspection_branch.starts_with("engineer/") && post_branch.starts_with("engineer/")
+}
+
 // Re-export per-action verifiers so `use super::verification::*` in tests still works.
 pub(crate) use super::verification_actions::*;
 
@@ -34,8 +43,13 @@ pub(crate) fn verify_grounding_stable(
     // engineer doing legitimate work (committing, applying patches), not a
     // worktree contamination. Only enforce the strict no-HEAD-change rule
     // when the engineer is somehow running on a shared / non-engineer branch.
-    let on_engineer_branch =
-        inspection.branch.starts_with("engineer/") && post.branch == inspection.branch;
+    //
+    // Per #1209: the engineer LLM occasionally renames its branch
+    // (`git checkout -b engineer/<better-name>`). Renames within the engineer/*
+    // namespace are legitimate; only require both inspection and post branches
+    // to be in `engineer/`. Jumping out of the engineer/ namespace is still
+    // a real failure handled by the strict branch-equality check below.
+    let on_engineer_branch = rename_within_engineer_namespace(&inspection.branch, &post.branch);
     match &action.selected.kind {
         EngineerActionKind::GitCommit(_) => {
             if post.head == inspection.head {
@@ -66,7 +80,12 @@ pub(crate) fn verify_grounding_stable(
         }
     }
 
-    if post.branch != inspection.branch {
+    // Per #1209: allow rename within the engineer/* namespace (engineer/foo
+    // -> engineer/bar is legitimate). Jumping out of engineer/* (e.g. to
+    // main) is still a real failure.
+    let branch_changed = post.branch != inspection.branch;
+    let rename_within_engineer = rename_within_engineer_namespace(&inspection.branch, &post.branch);
+    if branch_changed && !rename_within_engineer {
         return Err(SimardError::VerificationFailed {
             reason: format!(
                 "branch changed from '{}' to '{}'",
@@ -89,8 +108,8 @@ pub(crate) fn verify_worktree_state(
     // (e.g. git apply, sed -i) are legitimate. Only apply the strict
     // "non-mutating actions must not dirty the worktree" rule when running
     // on a shared / non-engineer branch.
-    let on_engineer_branch =
-        inspection.branch.starts_with("engineer/") && post.branch == inspection.branch;
+    // Per #1209: rename within engineer/* namespace is legitimate.
+    let on_engineer_branch = rename_within_engineer_namespace(&inspection.branch, &post.branch);
     match &action.selected.kind {
         EngineerActionKind::ReadOnlyScan
         | EngineerActionKind::CargoTest
@@ -456,5 +475,50 @@ mod tests {
                 .iter()
                 .any(|c| c.contains("tracked-files-present=true"))
         );
+    }
+
+    // === Issue #1209: branch-rename within engineer/* namespace ===
+
+    #[test]
+    fn rename_within_engineer_allows_engineer_to_engineer() {
+        // engineer/foo -> engineer/bar should be legitimate (the engineer LLM
+        // sometimes does `git checkout -b engineer/<better-name>` mid-cycle).
+        assert!(rename_within_engineer_namespace(
+            "engineer/foo-1234",
+            "engineer/expand-gym-scenarios-wave7"
+        ));
+    }
+
+    #[test]
+    fn rename_within_engineer_rejects_engineer_to_main() {
+        // engineer/foo -> main is a real failure (escaped the sandbox).
+        assert!(!rename_within_engineer_namespace(
+            "engineer/foo-1234",
+            "main"
+        ));
+    }
+
+    #[test]
+    fn rename_within_engineer_rejects_main_to_engineer() {
+        // main -> engineer/foo means we weren't on an engineer branch to begin
+        // with; the strict checks should still apply.
+        assert!(!rename_within_engineer_namespace(
+            "main",
+            "engineer/foo-1234"
+        ));
+    }
+
+    #[test]
+    fn rename_within_engineer_allows_same_branch() {
+        // engineer/foo -> engineer/foo (no rename) trivially passes.
+        assert!(rename_within_engineer_namespace(
+            "engineer/foo-1234",
+            "engineer/foo-1234"
+        ));
+    }
+
+    #[test]
+    fn rename_within_engineer_rejects_unrelated_branches() {
+        assert!(!rename_within_engineer_namespace("feature/x", "develop"));
     }
 }
