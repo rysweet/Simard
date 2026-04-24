@@ -1,5 +1,7 @@
 use super::cycle::*;
-use super::types::{ImprovementConfig, ImprovementCycle, ImprovementDecision, ImprovementPhase};
+use super::types::{
+    ImprovementConfig, ImprovementCycle, ImprovementDecision, ImprovementPhase, ProposedChange,
+};
 use crate::gym_bridge::ScoreDimensions;
 use crate::gym_scoring::{GymSuiteScore, Regression, RegressionSeverity};
 
@@ -583,4 +585,92 @@ fn summarize_cycle_multiple_weak_dimension_details() {
     let summary = summarize_cycle(&cycle);
     assert!(summary.contains("source_attribution (30.0% deficit)"));
     assert!(summary.contains("specificity (15.0% deficit)"));
+}
+
+#[test]
+fn summarize_cycle_lists_proposed_change_count() {
+    // Happy path: when proposed_changes is non-empty, summary includes a count line.
+    let cycle = ImprovementCycle {
+        baseline: make_score(0.70),
+        proposed_changes: vec![
+            ProposedChange {
+                file_path: "src/a.rs".into(),
+                description: "tighten error handling".into(),
+                expected_impact: "fewer regressions".into(),
+            },
+            ProposedChange {
+                file_path: "src/b.rs".into(),
+                description: "expand docs".into(),
+                expected_impact: "clearer behaviour".into(),
+            },
+            ProposedChange {
+                file_path: "src/c.rs".into(),
+                description: "split helper".into(),
+                expected_impact: "easier testing".into(),
+            },
+        ],
+        post_score: Some(make_score(0.75)),
+        regressions: vec![],
+        decision: Some(ImprovementDecision::Commit {
+            net_improvement: 0.05,
+        }),
+        final_phase: ImprovementPhase::Decide,
+        weak_dimensions: Vec::new(),
+        weak_dimension_details: Vec::new(),
+        target_dimension: None,
+    };
+    let summary = summarize_cycle(&cycle);
+    assert!(
+        summary.contains("Proposed changes: 3"),
+        "summary should include count of proposed changes, got: {summary}"
+    );
+}
+
+#[test]
+fn summarize_cycle_lists_weak_dimensions_without_details() {
+    // Edge case: when weak_dimension_details is empty but weak_dimensions is
+    // populated (e.g. legacy cycles deserialized from JSON predating the
+    // weak_dimension_details field), summary falls back to the names-only line.
+    let cycle = ImprovementCycle {
+        baseline: make_score(0.50),
+        proposed_changes: vec![],
+        post_score: None,
+        regressions: vec![],
+        decision: None,
+        final_phase: ImprovementPhase::Analyze,
+        weak_dimensions: vec!["specificity".into(), "source_attribution".into()],
+        weak_dimension_details: Vec::new(),
+        target_dimension: None,
+    };
+    let summary = summarize_cycle(&cycle);
+    assert!(
+        summary.contains("Weak dimensions: specificity, source_attribution"),
+        "summary should fall back to the names-only weak dimensions line, got: {summary}"
+    );
+    // Detail format must NOT appear because details are empty.
+    assert!(!summary.contains("% deficit"));
+}
+
+#[test]
+fn summarize_cycle_omits_weak_dimensions_when_both_lists_empty() {
+    // Edge case: when both weak_dimension_details AND weak_dimensions are empty,
+    // summary must not include any "Weak dimensions:" line at all.
+    let cycle = ImprovementCycle {
+        baseline: make_score(0.90),
+        proposed_changes: vec![],
+        post_score: Some(make_score(0.92)),
+        regressions: vec![],
+        decision: Some(ImprovementDecision::Commit {
+            net_improvement: 0.02,
+        }),
+        final_phase: ImprovementPhase::Decide,
+        weak_dimensions: Vec::new(),
+        weak_dimension_details: Vec::new(),
+        target_dimension: None,
+    };
+    let summary = summarize_cycle(&cycle);
+    assert!(
+        !summary.contains("Weak dimensions"),
+        "summary must not include weak dimensions line when none exist, got: {summary}"
+    );
 }
