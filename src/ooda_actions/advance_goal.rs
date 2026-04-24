@@ -450,15 +450,15 @@ fn advance_goal_with_subordinate(
 /// so the worktree dir + branch are reaped within one OODA cycle of the
 /// engineer's exit. Idempotent — missing entries are silently a no-op.
 fn cleanup_engineer_worktree_for_goal(state: &mut OodaState, goal_id: &str) {
-    if let Some(worktree) = state.engineer_worktrees.remove(goal_id) {
-        if let Err(e) = worktree.cleanup() {
-            tracing::warn!(
-                target: "simard::engineer_worktree",
-                goal = %goal_id,
-                error = %e,
-                "engineer worktree cleanup failed; Drop will run as a safety net",
-            );
-        }
+    if let Some(worktree) = state.engineer_worktrees.remove(goal_id)
+        && let Err(e) = worktree.cleanup()
+    {
+        tracing::warn!(
+            target: "simard::engineer_worktree",
+            goal = %goal_id,
+            error = %e,
+            "engineer worktree cleanup failed; Drop will run as a safety net",
+        );
         // worktree drops here; if cleanup() already ran the swap guard
         // ensures Drop is a no-op.
     }
