@@ -10,9 +10,30 @@ use crate::base_types::{
     ensure_session_open, joined_prompt_ids,
 };
 use crate::error::{SimardError, SimardResult};
+use crate::runtime_config::RuntimeConfig;
 use crate::sanitization::objective_metadata;
+use crate::session_builder::LlmProvider;
 
 use super::execution::execute_rustyclawd_client;
+
+/// Build the `rustyclawd_core` `Config` for the configured provider.
+///
+/// Splits the provider branch out so it is independently testable without
+/// going through the full session lifecycle.
+///
+/// * `Copilot` — uses `RcConfig::new_copilot()` (sync, infallible). Token
+///   is resolved at HTTP-call time via `gh auth token`.
+/// * `RustyClawd` — uses `RcConfig::from_default_location().await` which
+///   reads `ANTHROPIC_API_KEY` env / `.env` / legacy on-disk key file.
+pub(super) fn build_rc_config(
+    provider: LlmProvider,
+    rt: &tokio::runtime::Runtime,
+) -> std::result::Result<RcConfig, ClientError> {
+    match provider {
+        LlmProvider::Copilot => Ok(RcConfig::new_copilot()),
+        LlmProvider::RustyClawd => rt.block_on(RcConfig::from_default_location()),
+    }
+}
 
 pub(super) struct RustyClawdSession {
     pub(super) descriptor: BaseTypeDescriptor,
@@ -56,27 +77,66 @@ impl BaseTypeSession for RustyClawdSession {
                 reason: format!("failed to create tokio runtime: {e}"),
             })?;
 
-        tracing::info!("RustyClawd: attempting client initialization from default config…");
-        let client_result = rt.block_on(async {
-            let config = RcConfig::from_default_location().await?;
-            RcClient::new(config)
-        });
+        // Resolve the configured provider before opening — RustyClawd is
+        // multi-provider, and we honor the operator's `SIMARD_LLM_PROVIDER`
+        // env var / `~/.simard/config.toml` choice. There is no silent
+        // default: a missing config is surfaced verbatim so the operator
+        // sees what to fix.
+        let provider = RuntimeConfig::load()
+            .map(|cfg| cfg.llm_provider)
+            .map_err(|e| match e {
+            SimardError::MissingRequiredConfig { .. } => SimardError::AdapterInvocationFailed {
+                base_type: self.descriptor.id.to_string(),
+                reason:
+                    "Simard llm_provider not configured. Set SIMARD_LLM_PROVIDER=copilot|rustyclawd \
+                     or add `llm_provider = \"...\"` to ~/.simard/config.toml."
+                        .to_string(),
+            },
+            other => SimardError::AdapterInvocationFailed {
+                base_type: self.descriptor.id.to_string(),
+                reason: format!("failed to load runtime config: {other}"),
+            },
+        })?;
+
+        tracing::info!(
+            provider = ?provider,
+            "RustyClawd: attempting client initialization for resolved provider…"
+        );
+        let client_result = build_rc_config(provider, &rt).and_then(RcClient::new);
 
         match client_result {
             Ok(client) => {
-                tracing::info!("RustyClawd: API client initialized successfully");
+                tracing::info!(
+                    provider = ?provider,
+                    "RustyClawd: API client initialized successfully"
+                );
                 self.client = Some(client);
             }
             Err(ClientError::ApiKeyNotFound) => {
+                let reason = match provider {
+                    LlmProvider::Copilot => {
+                        "RustyClawd configured for Copilot provider but token resolution failed. \
+                         Run `gh auth login` (and `gh auth refresh --hostname github.com \
+                         --scopes copilot` if the Copilot scope is rejected)."
+                            .to_string()
+                    }
+                    LlmProvider::RustyClawd => {
+                        "RustyClawd configured for Anthropic provider but no API key found. \
+                         Set ANTHROPIC_API_KEY env var or place key in ~/.rustyclawd/config."
+                            .to_string()
+                    }
+                };
                 return Err(SimardError::AdapterInvocationFailed {
                     base_type: self.descriptor.id.to_string(),
-                    reason: "No API key found. Set ANTHROPIC_API_KEY or configure gh auth for Copilot SDK.".to_string(),
+                    reason,
                 });
             }
             Err(e) => {
                 return Err(SimardError::AdapterInvocationFailed {
                     base_type: self.descriptor.id.to_string(),
-                    reason: format!("failed to initialize RustyClawd client: {e}"),
+                    reason: format!(
+                        "failed to initialize RustyClawd client (provider={provider:?}): {e}"
+                    ),
                 });
             }
         }
@@ -232,5 +292,19 @@ mod tests {
     fn max_history_messages_is_at_least_10() {
         let m = MAX_HISTORY_MESSAGES;
         assert!(m >= 10, "too low: {m}");
+    }
+
+    // ── Provider-aware config selection (issue #1193) ──
+
+    #[test]
+    fn build_rc_config_returns_copilot_endpoint_for_copilot_provider() {
+        // RcConfig::new_copilot() is sync + infallible — no network needed.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let cfg =
+            build_rc_config(LlmProvider::Copilot, &rt).expect("Copilot path must be infallible");
+        assert_eq!(cfg.api_url, "https://api.githubcopilot.com");
     }
 }
