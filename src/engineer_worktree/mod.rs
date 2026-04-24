@@ -69,6 +69,14 @@ fn is_pid_alive(_pid: i32) -> bool {
     true
 }
 
+/// Public wrapper over the private liveness probe so other modules
+/// (e.g. `ooda_actions::advance_goal::find_live_engineer_for_goal`)
+/// can implement their own claim-based checks without duplicating the
+/// `kill(pid, 0)` logic.
+pub fn is_pid_alive_public(pid: i32) -> bool {
+    is_pid_alive(pid)
+}
+
 /// Read the engineer-claim PID out of `worktree_dir/.simard-engineer-claim`.
 /// Returns `None` if the file is missing, empty, malformed, or unreadable.
 /// Tolerant of all I/O errors — the caller treats `None` as "no claim".

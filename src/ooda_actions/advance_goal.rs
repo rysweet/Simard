@@ -124,6 +124,24 @@ fn dispatch_spawn_engineer(
         );
     }
 
+    // Defense-in-depth (issue #1227): check the on-disk engineer-worktrees
+    // directory for any live worktree already pursuing this goal. The
+    // `assigned_to` board check above can miss in-flight engineers if the
+    // daemon was restarted between spawn and goal-status writeback (the
+    // engineer subprocess survives systemd unit restart). Without this
+    // check, we burn a second LLM session on the same goal.
+    let state_root_inflight = engineer_worktree_state_root();
+    if let Some(live) = find_live_engineer_for_goal(&state_root_inflight, goal_id) {
+        return make_outcome(
+            action,
+            true,
+            format!(
+                "spawn_engineer skipped: goal '{goal_id}' already has a live engineer worktree at {} (claim PID alive)",
+                live.display(),
+            ),
+        );
+    }
+
     // Recursion guard. Default current depth = 0 (top-level supervisor).
     let current_depth: u32 = std::env::var("SIMARD_SUBORDINATE_DEPTH")
         .ok()
@@ -283,6 +301,48 @@ fn engineer_worktree_state_root() -> std::path::PathBuf {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
             std::path::PathBuf::from(home).join(".simard")
         })
+}
+
+/// Scan `<state_root>/engineer-worktrees/` for any directory whose name
+/// starts with `<goal_id>-` and whose `.simard-engineer-claim` sentinel
+/// names a live PID. Returns the first such path, or None if no live
+/// engineer is currently pursuing this goal.
+///
+/// This is a defense-in-depth check used by `dispatch_spawn_engineer`
+/// to prevent duplicate engineer subprocesses on the same goal across
+/// daemon restarts (see issue #1227). Stateless: relies only on the
+/// on-disk worktree dir and the per-worktree PID sentinel introduced
+/// by issue #1213.
+pub(crate) fn find_live_engineer_for_goal(
+    state_root: &std::path::Path,
+    goal_id: &str,
+) -> Option<std::path::PathBuf> {
+    let worktrees_root = state_root.join(crate::engineer_worktree::WORKTREES_SUBDIR);
+    let entries = std::fs::read_dir(&worktrees_root).ok()?;
+    let prefix = format!("{goal_id}-");
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        let claim_path = path.join(crate::engineer_worktree::ENGINEER_CLAIM_FILE);
+        let raw = match std::fs::read_to_string(&claim_path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let pid: i32 = match raw.trim().parse() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if crate::engineer_worktree::is_pid_alive_public(pid) {
+            return Some(path);
+        }
+    }
+    None
 }
 
 /// Build a unique subordinate agent name for a goal.
@@ -668,5 +728,104 @@ mod tests {
         );
         assert!(outcome.detail.contains("0 commits"));
         assert!(outcome.detail.contains("0 PRs"));
+    }
+}
+
+#[cfg(test)]
+mod inflight_tests {
+    use super::find_live_engineer_for_goal;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn find_live_engineer_returns_none_when_root_missing() {
+        let tmp = tempdir().unwrap();
+        // No engineer-worktrees subdir exists.
+        let result = find_live_engineer_for_goal(tmp.path(), "any-goal");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_live_engineer_returns_none_when_no_matching_dir() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join(crate::engineer_worktree::WORKTREES_SUBDIR);
+        fs::create_dir_all(&root).unwrap();
+        let other = root.join("different-goal-1234-abc");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(
+            other.join(crate::engineer_worktree::ENGINEER_CLAIM_FILE),
+            format!("{}\n", std::process::id()),
+        )
+        .unwrap();
+        let result = find_live_engineer_for_goal(tmp.path(), "wanted-goal");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_live_engineer_returns_path_when_claim_alive() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join(crate::engineer_worktree::WORKTREES_SUBDIR);
+        fs::create_dir_all(&root).unwrap();
+        let live = root.join("my-goal-1777000000-deadbe");
+        fs::create_dir_all(&live).unwrap();
+        fs::write(
+            live.join(crate::engineer_worktree::ENGINEER_CLAIM_FILE),
+            format!("{}\n", std::process::id()),
+        )
+        .unwrap();
+        let result = find_live_engineer_for_goal(tmp.path(), "my-goal");
+        assert_eq!(result, Some(live));
+    }
+
+    #[test]
+    fn find_live_engineer_returns_none_when_claim_dead() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join(crate::engineer_worktree::WORKTREES_SUBDIR);
+        fs::create_dir_all(&root).unwrap();
+        let dead = root.join("ghost-goal-0-cafe");
+        fs::create_dir_all(&dead).unwrap();
+        fs::write(
+            dead.join(crate::engineer_worktree::ENGINEER_CLAIM_FILE),
+            "2147483646\n",
+        )
+        .unwrap();
+        let result = find_live_engineer_for_goal(tmp.path(), "ghost-goal");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_live_engineer_returns_none_when_claim_file_missing() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join(crate::engineer_worktree::WORKTREES_SUBDIR);
+        fs::create_dir_all(&root).unwrap();
+        let no_claim = root.join("orphan-goal-1-aa");
+        fs::create_dir_all(&no_claim).unwrap();
+        // No sentinel file written — pre-#1213 worktrees, or partial allocate.
+        let result = find_live_engineer_for_goal(tmp.path(), "orphan-goal");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_live_engineer_only_matches_exact_goal_prefix() {
+        // Goals "foo" and "foo-extended" must not collide. The match
+        // prefix is `<goal_id>-`, so "foo-1234-abc" matches goal "foo"
+        // but NOT goal "foo-extended" (which would need "foo-extended-...").
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join(crate::engineer_worktree::WORKTREES_SUBDIR);
+        fs::create_dir_all(&root).unwrap();
+        let foo_wt = root.join("foo-1234-abc");
+        fs::create_dir_all(&foo_wt).unwrap();
+        fs::write(
+            foo_wt.join(crate::engineer_worktree::ENGINEER_CLAIM_FILE),
+            format!("{}\n", std::process::id()),
+        )
+        .unwrap();
+
+        // Goal "foo" matches.
+        assert_eq!(find_live_engineer_for_goal(tmp.path(), "foo"), Some(foo_wt));
+        // Goal "foo-extended" does NOT match.
+        assert!(find_live_engineer_for_goal(tmp.path(), "foo-extended").is_none());
+        // Goal "fo" does NOT match (prefix is "fo-" which doesn't match "foo-1234").
+        assert!(find_live_engineer_for_goal(tmp.path(), "fo").is_none());
     }
 }
