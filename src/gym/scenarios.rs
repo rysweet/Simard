@@ -4,7 +4,7 @@ use crate::runtime::RuntimeTopology;
 
 use super::types::{BenchmarkCheckResult, BenchmarkClass, BenchmarkScenario};
 
-const BENCHMARK_SCENARIOS: [BenchmarkScenario; 147] = [
+static BENCHMARK_SCENARIOS: [BenchmarkScenario; 147] = [
     BenchmarkScenario {
         id: "repo-exploration-local",
         title: "Repo exploration on local harness",
