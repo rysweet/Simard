@@ -64,32 +64,18 @@ impl RuntimeKernel {
 
         if let Some(bridge) = &self.cognitive_bridge {
             // Flush working memory to episodes before final persistence.
-            if let Err(e) =
-                crate::memory_consolidation::consolidation_persistence(&session.id, &**bridge)
-            {
-                eprintln!("[simard] session consolidation: flush failed: {e}");
-            }
-            if let Err(e) =
-                crate::memory_consolidation::persistence_memory_operations(&session.id, &**bridge)
-            {
-                eprintln!("[simard] session consolidation: persistence failed: {e}");
-            }
+            crate::memory_consolidation::consolidation_persistence(&session.id, &**bridge)?;
+            crate::memory_consolidation::persistence_memory_operations(&session.id, &**bridge)?;
 
             // Save a cognitive memory snapshot and prune to 10 most recent.
             if let Some(dir) = crate::memory_snapshot::snapshot_dir(None) {
-                match crate::memory_snapshot::save_session_snapshot(
+                let path = crate::memory_snapshot::save_session_snapshot(
                     &**bridge,
                     &self.request.manifest.name,
                     &dir,
-                ) {
-                    Ok(path) => {
-                        eprintln!("[simard] snapshot: saved {}", path.display());
-                        crate::memory_snapshot::prune_snapshots(&dir, 10);
-                    }
-                    Err(e) => {
-                        eprintln!("[simard] snapshot: save failed: {e}");
-                    }
-                }
+                )?;
+                eprintln!("[simard] snapshot: saved {}", path.display());
+                crate::memory_snapshot::prune_snapshots(&dir, 10);
             }
         }
 
