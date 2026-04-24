@@ -194,17 +194,16 @@ pub fn persistence_memory_operations(
     session_id: &SessionId,
     bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
+    // Consolidate episodes (batch of 10) BEFORE clearing working memory, so a
+    // consolidation failure aborts teardown rather than silently dropping the
+    // session's working-memory contents. Errors are propagated.
+    bridge.consolidate_episodes(10)?;
+
     // Clear working memory for this session.
     bridge.clear_working(session_id.as_str())?;
 
     // Prune expired sensory items.
     bridge.prune_expired_sensory()?;
-
-    // Attempt episode consolidation (batch of 10) — best-effort; don't abort
-    // session teardown if the consolidation flush fails.
-    if let Err(e) = bridge.consolidate_episodes(10) {
-        eprintln!("[memory] consolidate_episodes error in persistence_memory_operations: {e}");
-    }
 
     // Store a final episodic memory marking session end.
     bridge.store_episode(
@@ -311,11 +310,10 @@ pub fn consolidation_persistence(
         None,
     )?;
 
-    // Consolidate any remaining episodes into long-term storage — best-effort;
-    // a flush error should not abort the persistence phase.
-    if let Err(e) = bridge.consolidate_episodes(20) {
-        eprintln!("[memory] consolidate_episodes error in consolidation_persistence: {e}");
-    }
+    // Consolidate any remaining episodes into long-term storage. Errors are
+    // propagated so a failed consolidation aborts the persistence phase
+    // rather than silently dropping data.
+    bridge.consolidate_episodes(20)?;
 
     Ok(())
 }
