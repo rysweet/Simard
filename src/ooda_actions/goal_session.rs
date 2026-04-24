@@ -649,12 +649,32 @@ fn dispatch_gh_issue_create(
         "issue", "create", "--repo", repo, "--title", title, "--body", body,
     ];
     let label_csv;
-    if !labels.is_empty() {
-        label_csv = labels.join(",");
+    let sanitized_labels: Vec<String> = labels
+        .iter()
+        .map(|l| l.trim().to_string())
+        .filter(|l| is_plausible_label(l))
+        .collect();
+    if !sanitized_labels.is_empty() {
+        label_csv = sanitized_labels.join(",");
         args.push("--label");
         args.push(&label_csv);
     }
     run_gh(&args)
+}
+
+/// Filter labels that are obviously bogus (placeholders, ellipses, control chars, empty).
+/// Real labels here are short kebab-case-or-spaced strings; LLM occasionally emits
+/// `"..."` or `".…"` (literal ellipsis) from truncated examples in the prompt.
+fn is_plausible_label(label: &str) -> bool {
+    if label.is_empty() || label.len() > 50 {
+        return false;
+    }
+    // Reject pure-punctuation placeholders the LLM tends to emit (`...`, `.…`, `…`).
+    if label.chars().all(|c| matches!(c, '.' | '…' | '-' | '_' | ' ')) {
+        return false;
+    }
+    // Require at least one alphanumeric character.
+    label.chars().any(|c| c.is_alphanumeric())
 }
 
 fn dispatch_gh_issue_comment(repo: &str, issue: u64, body: &str) -> Result<String, String> {
@@ -1108,5 +1128,35 @@ Hope that helps!"#;
         assert_ne!(a, b);
         assert_ne!(b, c);
         assert_ne!(a, c);
+    }
+}
+
+#[cfg(test)]
+mod label_sanitizer_tests {
+    use super::is_plausible_label;
+
+    #[test]
+    fn rejects_ellipsis_placeholders() {
+        assert!(!is_plausible_label("..."));
+        assert!(!is_plausible_label(".…"));
+        assert!(!is_plausible_label("…"));
+        assert!(!is_plausible_label("---"));
+        assert!(!is_plausible_label(""));
+        assert!(!is_plausible_label("   "));
+    }
+
+    #[test]
+    fn accepts_real_labels() {
+        assert!(is_plausible_label("bug"));
+        assert!(is_plausible_label("enhancement"));
+        assert!(is_plausible_label("good first issue"));
+        assert!(is_plausible_label("workflow:default"));
+        assert!(is_plausible_label("parity"));
+    }
+
+    #[test]
+    fn rejects_too_long_labels() {
+        let long = "x".repeat(60);
+        assert!(!is_plausible_label(&long));
     }
 }
