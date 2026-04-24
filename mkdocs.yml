@@ -45,6 +45,10 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Roadmap: ROADMAP.md
+  - Daemon mode: daemon-mode.md
+  - Memory architecture: memory.md
+  - Dashboard: dashboard.md
+  - Distributed operations: distributed-operations.md
   - Architecture:
     - Overview: architecture/overview.md
     - Bridge Pattern: architecture/bridge-pattern.md
