@@ -4,7 +4,7 @@ use crate::runtime::RuntimeTopology;
 
 use super::types::{BenchmarkCheckResult, BenchmarkClass, BenchmarkScenario};
 
-const BENCHMARK_SCENARIOS: [BenchmarkScenario; 118] = [
+const BENCHMARK_SCENARIOS: [BenchmarkScenario; 121] = [
     BenchmarkScenario {
         id: "repo-exploration-local",
         title: "Repo exploration on local harness",
@@ -1325,6 +1325,40 @@ const BENCHMARK_SCENARIOS: [BenchmarkScenario; 118] = [
         base_type: "terminal-shell",
         topology: RuntimeTopology::Distributed,
         objective: "Plan a game day exercise that simulates a regional failure. Cover: (1) the scenario script (which region is taken offline, how, and for how long), (2) participant roles (incident commander, scribe, operators per service) and the communication channel, (3) success criteria tied to recovery objectives (RPO/RTO) and a measurable abort signal, (4) the post-exercise debrief format that produces concrete action items and a blameless write-up. Confirm the distributed topology backend appears in runtime evidence.",
+        expected_min_runtime_evidence: 4,
+    },
+    // --- Additional diverse scenarios: multi-file refactor, dependency upgrade, failing-test triage ---
+    BenchmarkScenario {
+        id: "refactoring-multi-file-extract-module",
+        title: "Multi-file refactor: extract shared helpers into a new module",
+        description: "Plan a multi-file refactor that lifts duplicated helper logic out of three call sites into a single new module without changing observable behavior. Scored on whether the plan identifies every call site, defines the new module boundary, and preserves the public API.",
+        class: BenchmarkClass::Refactoring,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Plan a behavior-preserving multi-file refactor for the Simard repository. Cover: (1) at least three concrete source files containing duplicated helper logic that should be consolidated, (2) the proposed new module path, public function signatures, and visibility (pub vs pub(crate)), (3) the exact edits required at each call site to delegate to the new module, including imports, (4) the verification strategy (cargo check, cargo test, and any clippy invariants) that proves no behavior changed. Produce the migration as an ordered checklist that another engineer could execute.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "dependency-upgrade-major-version-bump",
+        title: "Dependency upgrade: major-version bump migration plan",
+        description: "Produce a migration plan for a major-version bump of a Cargo dependency, covering breaking changes, code edits required, and rollback strategy. Scored on whether the plan enumerates breaking changes, identifies all impacted call sites, and specifies a rollback path.",
+        class: BenchmarkClass::DependencyUpgrade,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Plan a major-version upgrade for a single Cargo dependency in the Simard repository (pick one declared in Cargo.toml). Cover: (1) the current pinned version, the target version, and a summary of the upstream changelog's breaking changes between them, (2) every call site in src/ that touches the changed API surface and the specific edits required at each one, (3) the order of operations (lockfile bump, code edits, test updates) and which steps must be atomic in a single commit, (4) the rollback strategy if cargo test or downstream integration reveals regressions, including how Cargo.lock would be reverted. Confirm the plan compiles cleanly under cargo check before declaring done.",
+        expected_min_runtime_evidence: 4,
+    },
+    BenchmarkScenario {
+        id: "debugging-failing-test-triage",
+        title: "Failing-test triage: classify and prioritize a red test suite",
+        description: "Triage a set of failing tests from a recent CI run, classifying each by likely root cause (real regression, flake, environmental, fixture drift) and producing an ordered fix queue. Scored on whether each failure receives an evidence-backed classification and the fix order matches blast radius.",
+        class: BenchmarkClass::Debugging,
+        identity: "simard-gym",
+        base_type: "local-harness",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Triage a failing-test report from a recent CI run against the Simard repository. Cover: (1) for each failing test, the precise test path (module::test_name), the failure mode (assertion mismatch, panic, timeout), and the suspected root-cause category (real regression, flake, environmental, fixture drift), (2) the evidence used to classify each failure (stack trace fragment, recent commit touching the same module, repeated failure across runs), (3) an ordered fix queue prioritized by blast radius and confidence, with the cheapest verifiable fix first, (4) the verification step for each proposed fix, including the exact `cargo test` invocation and any required environment setup. Produce the triage as a structured report another engineer could action without rerunning the suite.",
         expected_min_runtime_evidence: 4,
     },
 ];
