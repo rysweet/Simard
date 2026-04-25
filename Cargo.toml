@@ -8,6 +8,10 @@ default-run = "simard"
 name = "simard-gym"
 path = "src/bin/simard_gym.rs"
 
+[[bin]]
+name = "simard-ooda-step"
+path = "src/bin/simard_ooda_step.rs"
+
 [dependencies]
 # TODO: enable `ladybug` feature once amplihack-memory-lib publishes ladybug-graph-rs to crates.io
 # amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", features = ["ladybug"] }

@@ -13,7 +13,7 @@ const SLOW_ACTION_THRESHOLD_SECS: u64 = 60;
 /// - **fix**: action failed with an error
 /// - **optimization**: total act phase took longer than the threshold
 /// - **quality**: action succeeded but the detail suggests issues
-pub(super) fn review_outcomes(
+pub fn review_outcomes(
     outcomes: &[ActionOutcome],
     act_elapsed: std::time::Duration,
 ) -> Vec<ImprovementDirective> {

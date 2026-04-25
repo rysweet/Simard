@@ -17,10 +17,11 @@ mod types;
 mod tests_observe;
 
 // Re-export all public items so `crate::ooda_loop::X` still works.
-pub use curate::check_meeting_handoffs;
+pub use curate::{check_meeting_handoffs, promote_from_backlog};
 pub use decide::decide;
 pub use observe::{gather_environment, observe};
 pub use orient::orient;
+pub use review::review_outcomes;
 pub use summary::summarize_cycle_report;
 pub use types::{
     ActionKind, ActionOutcome, CycleReport, EnvironmentSnapshot, GoalSnapshot, Observation,

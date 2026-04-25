@@ -1,7 +1,7 @@
 use crate::error::SimardResult;
 use crate::goals::GoalStatus;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ImprovementDirective {
     pub title: String,
     pub priority: u8,

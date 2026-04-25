@@ -7,7 +7,7 @@ use crate::goal_curation::{ActiveGoal, BacklogItem, GoalBoard, GoalProgress};
 ///
 /// Backlog items are sorted by score descending and promoted until the
 /// active board is at capacity or the backlog is empty.
-pub(super) fn promote_from_backlog(board: &mut GoalBoard) {
+pub fn promote_from_backlog(board: &mut GoalBoard) {
     // Sort backlog by score descending so we promote the best first.
     board.backlog.sort_by(|a, b| {
         b.score
