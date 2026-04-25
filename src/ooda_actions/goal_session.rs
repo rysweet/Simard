@@ -2,7 +2,7 @@
 
 use serde::Deserialize;
 
-use crate::goal_curation::{GoalProgress, update_goal_progress};
+use crate::goal_curation::{GoalBoard, GoalProgress, update_goal_progress};
 use crate::ooda_loop::{ActionOutcome, OodaState, PlannedAction};
 
 use super::make_outcome;
@@ -346,6 +346,74 @@ fn truncate_for_outcome(s: &str) -> String {
     }
 }
 
+/// Apply an `assess_only` LLM decision to the goal board, returning the
+/// resulting [`ActionOutcome`].
+///
+/// Computes a [`GoalProgress`] from `progress_pct`, calls
+/// [`update_goal_progress`], and explicitly handles both arms:
+///
+/// * `Ok(())` — emits a `[simard] OODA goal-action assess_only ...`
+///   success log and produces a successful outcome.
+/// * `Err(e)` — emits a `[simard] OODA goal-action assess_only FAILED ...`
+///   error log (no misleading success log) and produces a failed outcome
+///   whose `detail` carries the underlying [`SimardError`] so operators
+///   and the OODA journal can see the cause.
+///
+/// Fixes #1258: the previous `let _ = update_goal_progress(...)` swallowed
+/// the error and the next log line lied about success.
+fn assess_only_outcome(
+    action: &PlannedAction,
+    board: &mut GoalBoard,
+    goal_id: &str,
+    assessment: &str,
+    progress_pct: u8,
+) -> ActionOutcome {
+    let new_progress = if progress_pct >= 100 {
+        GoalProgress::Completed
+    } else if progress_pct == 0 {
+        GoalProgress::NotStarted
+    } else {
+        GoalProgress::InProgress {
+            percent: progress_pct as u32,
+        }
+    };
+
+    match update_goal_progress(board, goal_id, new_progress) {
+        Ok(()) => {
+            eprintln!(
+                "[simard] OODA goal-action assess_only for '{}': {} (progress={}%)",
+                goal_id,
+                truncate_for_outcome(assessment),
+                progress_pct,
+            );
+            let detail = format!(
+                "assess_only: {} (progress={}%, goal '{}')",
+                truncate_for_outcome(assessment),
+                progress_pct,
+                goal_id,
+            );
+            make_outcome(action, true, detail)
+        }
+        Err(e) => {
+            eprintln!(
+                "[simard] OODA goal-action assess_only FAILED to update progress for '{}': {} (assessment='{}', progress={}%)",
+                goal_id,
+                e,
+                truncate_for_outcome(assessment),
+                progress_pct,
+            );
+            let detail = format!(
+                "assess_only failed: update_goal_progress error for goal '{}': {} (assessment='{}', progress={}%)",
+                goal_id,
+                e,
+                truncate_for_outcome(assessment),
+                progress_pct,
+            );
+            make_outcome(action, false, detail)
+        }
+    }
+}
+
 /// Advance a goal using a base-type session's `run_turn`.
 ///
 /// Simard acts as a PM architect: she assesses the goal, decides whether to
@@ -473,34 +541,15 @@ pub(super) fn advance_goal_with_session(
                     ref assessment,
                     progress_pct,
                 }) => {
-                    let new_progress = if progress_pct >= 100 {
-                        GoalProgress::Completed
-                    } else if progress_pct == 0 {
-                        GoalProgress::NotStarted
-                    } else {
-                        GoalProgress::InProgress {
-                            percent: progress_pct as u32,
-                        }
-                    };
-                    let _ = update_goal_progress(
+                    let outcome = assess_only_outcome(
+                        action,
                         &mut state.active_goals,
                         &goal.id,
-                        new_progress.clone(),
-                    );
-                    eprintln!(
-                        "[simard] OODA goal-action assess_only for '{}': {} (progress={}%)",
-                        goal.id,
-                        truncate_for_outcome(assessment),
+                        assessment,
                         progress_pct,
-                    );
-                    let detail = format!(
-                        "assess_only: {} (progress={}%, goal '{}')",
-                        truncate_for_outcome(assessment),
-                        progress_pct,
-                        goal.id,
                     );
                     GoalSessionResult {
-                        outcome: make_outcome(action, true, detail),
+                        outcome,
                         action: parsed,
                     }
                 }
@@ -815,7 +864,90 @@ mod tests {
         assert!(!GOAL_SESSION_IDENTITY.trim().is_empty());
     }
 
-    // -- Objective string building logic --
+    // -- assess_only_outcome: error surfacing (issue #1258) --
+
+    #[test]
+    fn assess_only_outcome_surfaces_error_when_goal_id_not_found() {
+        use crate::goal_curation::GoalBoard;
+        use crate::ooda_loop::{ActionKind, PlannedAction};
+
+        // GoalBoard with no matching goal_id (entirely empty active list).
+        let mut board = GoalBoard::new();
+
+        let action = PlannedAction {
+            kind: ActionKind::AdvanceGoal,
+            goal_id: Some("missing-goal".to_string()),
+            description: "advance missing-goal".to_string(),
+        };
+
+        let outcome = assess_only_outcome(
+            &action,
+            &mut board,
+            "missing-goal",
+            "looks ~halfway done",
+            50,
+        );
+
+        // Failure must be surfaced — not silently swallowed as success.
+        assert!(
+            !outcome.success,
+            "expected failed outcome when update_goal_progress errors, got success",
+        );
+        // The outcome detail must carry the underlying error so the OODA
+        // journal records the cause (issue #1258).
+        assert!(
+            outcome.detail.contains("assess_only failed"),
+            "detail missing failure marker: {}",
+            outcome.detail,
+        );
+        assert!(
+            outcome.detail.contains("missing-goal"),
+            "detail missing goal id: {}",
+            outcome.detail,
+        );
+        assert!(
+            outcome.detail.contains("not found"),
+            "detail missing underlying SimardError reason: {}",
+            outcome.detail,
+        );
+    }
+
+    #[test]
+    fn assess_only_outcome_succeeds_when_goal_id_matches() {
+        use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress};
+        use crate::ooda_loop::{ActionKind, PlannedAction};
+
+        let mut board = GoalBoard::new();
+        board.active.push(ActiveGoal {
+            id: "goal-real".to_string(),
+            description: "do the thing".to_string(),
+            priority: 1,
+            status: GoalProgress::NotStarted,
+            assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
+        });
+
+        let action = PlannedAction {
+            kind: ActionKind::AdvanceGoal,
+            goal_id: Some("goal-real".to_string()),
+            description: "advance goal-real".to_string(),
+        };
+
+        let outcome = assess_only_outcome(&action, &mut board, "goal-real", "halfway", 50);
+
+        assert!(outcome.success, "expected success when goal exists");
+        assert!(
+            outcome.detail.starts_with("assess_only:"),
+            "expected success detail format, got: {}",
+            outcome.detail,
+        );
+        assert_eq!(
+            board.active[0].status,
+            GoalProgress::InProgress { percent: 50 },
+            "board progress should have been updated on Ok path",
+        );
+    }
 
     #[test]
     fn objective_buffer_contains_goal_info() {
