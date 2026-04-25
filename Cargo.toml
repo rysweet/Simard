@@ -9,8 +9,17 @@ name = "simard-gym"
 path = "src/bin/simard_gym.rs"
 
 [[bin]]
+[[bin]]
 name = "simard-ooda-step"
 path = "src/bin/simard_ooda_step.rs"
+
+[[bin]]
+name = "simard-improve-step"
+path = "src/bin/simard_improve_step.rs"
+
+[[bin]]
+name = "simard-self-improve-recipe"
+path = "src/bin/simard_self_improve_recipe.rs"
 
 [dependencies]
 # TODO: enable `ladybug` feature once amplihack-memory-lib publishes ladybug-graph-rs to crates.io
