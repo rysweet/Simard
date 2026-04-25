@@ -133,25 +133,40 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
             config.worktree_path.to_string_lossy().into_owned(),
             config.goal.clone(),
         ];
-        let argv = build_tmux_wrapped_command(&session_name, &inner_argv, &log_path);
+        // Env vars must be passed via `tmux new-session -e KEY=VAL`. Setting
+        // them on `tmux_cmd` only reaches the tmux client; the long-running
+        // tmux server forks new sessions from its own env. Without explicit
+        // `-e`, vars like CARGO_TARGET_DIR silently fail to propagate and
+        // each engineer worktree builds its own ~12 GB cargo target dir.
+        let mut tmux_env: Vec<(String, String)> = vec![
+            ("SIMARD_AGENT_NAME".to_string(), config.agent_name.clone()),
+            (
+                "SIMARD_SUBORDINATE_DEPTH".to_string(),
+                (config.current_depth + 1).to_string(),
+            ),
+            ("CARGO_BUILD_JOBS".to_string(), "4".to_string()),
+        ];
+        if let Some(existing) = std::env::var_os("CARGO_TARGET_DIR") {
+            tmux_env.push((
+                "CARGO_TARGET_DIR".to_string(),
+                existing.to_string_lossy().into_owned(),
+            ));
+        } else {
+            tmux_env.push((
+                "CARGO_TARGET_DIR".to_string(),
+                "/tmp/simard-engineer-target".to_string(),
+            ));
+        }
+        let argv = build_tmux_wrapped_command(&session_name, &inner_argv, &log_path, &tmux_env);
 
         // Run the tmux command. `tmux new-session -d` returns immediately
         // after the session is created; the inner shell runs detached inside.
         let mut tmux_cmd = Command::new(&argv[0]);
         tmux_cmd
             .args(&argv[1..])
-            .env("SIMARD_AGENT_NAME", &config.agent_name)
-            .env(
-                "SIMARD_SUBORDINATE_DEPTH",
-                (config.current_depth + 1).to_string(),
-            )
-            .env("CARGO_BUILD_JOBS", "4")
             .current_dir(&config.worktree_path)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        if std::env::var_os("CARGO_TARGET_DIR").is_none() {
-            tmux_cmd.env("CARGO_TARGET_DIR", "/tmp/simard-engineer-target");
-        }
         let status = tmux_cmd
             .status()
             .map_err(|e| SimardError::BridgeSpawnFailed {

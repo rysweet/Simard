@@ -18,6 +18,7 @@ fn produces_expected_argv_prefix() {
             "run".to_string(),
         ],
         &PathBuf::from("/tmp/agent_logs/engineer-abc.log"),
+        &[],
     );
     assert_eq!(argv[0], "tmux", "argv[0] must be tmux");
     assert_eq!(argv[1], "new-session");
@@ -35,6 +36,7 @@ fn shell_command_pipes_through_tee_to_log() {
         "simard-engineer-x",
         &["/bin/echo".to_string(), "hi".to_string()],
         &PathBuf::from("/tmp/agent_logs/x.log"),
+        &[],
     );
     let shell = &argv[7];
     assert!(
@@ -58,6 +60,7 @@ fn shell_command_includes_inner_argv() {
             "single-process".to_string(),
         ],
         &PathBuf::from("/tmp/y.log"),
+        &[],
     );
     let shell = &argv[7];
     assert!(shell.contains("simard"), "must contain inner exe: {shell}");
@@ -84,6 +87,7 @@ fn shell_command_quotes_arguments_safely() {
             "implement \"feature\"".to_string(),
         ],
         &PathBuf::from("/tmp/z.log"),
+        &[],
     );
     let shell = &argv[7];
     // The quoted form must NOT allow the spaces to split arguments. We
@@ -103,6 +107,57 @@ fn session_name_is_passed_verbatim_in_dash_s_slot() {
         "simard-engineer-custom-id",
         &["/bin/true".to_string()],
         &PathBuf::from("/tmp/t.log"),
+        &[],
     );
     assert_eq!(argv[4], "simard-engineer-custom-id");
+}
+
+#[test]
+fn extra_env_emits_dash_e_flags_before_dash_s() {
+    // Regression: env vars set on the spawning Command don't propagate to
+    // tmux sessions when a tmux server already exists. The fix is `-e KEY=VAL`
+    // arguments to `tmux new-session`. Builder must emit them BEFORE `-s`.
+    let argv = build_tmux_wrapped_command(
+        "simard-engineer-env",
+        &["/bin/true".to_string()],
+        &PathBuf::from("/tmp/env.log"),
+        &[
+            ("CARGO_TARGET_DIR".to_string(), "/tmp/shared".to_string()),
+            ("SIMARD_AGENT_NAME".to_string(), "eng-1".to_string()),
+        ],
+    );
+    let s_pos = argv.iter().position(|a| a == "-s").expect("must have -s");
+    let e_positions: Vec<_> = argv
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| *a == "-e")
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(e_positions.len(), 2, "must emit one -e per env var");
+    for &p in &e_positions {
+        assert!(p < s_pos, "-e at {p} must come before -s at {s_pos}");
+    }
+    let env_values: Vec<&String> = e_positions.iter().map(|&p| &argv[p + 1]).collect();
+    assert!(
+        env_values.contains(&&"CARGO_TARGET_DIR=/tmp/shared".to_string()),
+        "must include CARGO_TARGET_DIR=...: {env_values:?}"
+    );
+    assert!(
+        env_values.contains(&&"SIMARD_AGENT_NAME=eng-1".to_string()),
+        "must include SIMARD_AGENT_NAME=...: {env_values:?}"
+    );
+}
+
+#[test]
+fn empty_extra_env_emits_no_dash_e_flags() {
+    let argv = build_tmux_wrapped_command(
+        "s",
+        &["/bin/true".to_string()],
+        &PathBuf::from("/tmp/n.log"),
+        &[],
+    );
+    assert!(
+        !argv.iter().any(|a| a == "-e"),
+        "empty extra_env must not emit any -e flags: {argv:?}"
+    );
 }
