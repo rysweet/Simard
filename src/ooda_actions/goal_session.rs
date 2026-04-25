@@ -378,36 +378,28 @@ fn assess_only_outcome(
         }
     };
 
+    let assessment_short = truncate_for_outcome(assessment);
+
     match update_goal_progress(board, goal_id, new_progress) {
         Ok(()) => {
             eprintln!(
                 "[simard] OODA goal-action assess_only for '{}': {} (progress={}%)",
-                goal_id,
-                truncate_for_outcome(assessment),
-                progress_pct,
+                goal_id, assessment_short, progress_pct,
             );
             let detail = format!(
                 "assess_only: {} (progress={}%, goal '{}')",
-                truncate_for_outcome(assessment),
-                progress_pct,
-                goal_id,
+                assessment_short, progress_pct, goal_id,
             );
             make_outcome(action, true, detail)
         }
         Err(e) => {
             eprintln!(
                 "[simard] OODA goal-action assess_only FAILED to update progress for '{}': {} (assessment='{}', progress={}%)",
-                goal_id,
-                e,
-                truncate_for_outcome(assessment),
-                progress_pct,
+                goal_id, e, assessment_short, progress_pct,
             );
             let detail = format!(
                 "assess_only failed: update_goal_progress error for goal '{}': {} (assessment='{}', progress={}%)",
-                goal_id,
-                e,
-                truncate_for_outcome(assessment),
-                progress_pct,
+                goal_id, e, assessment_short, progress_pct,
             );
             make_outcome(action, false, detail)
         }
