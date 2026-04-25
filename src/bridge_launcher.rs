@@ -122,15 +122,31 @@ pub fn launch_all_bridges(
         }
     };
 
-    let knowledge = launch_knowledge_bridge(&python_dir).ok();
-    let gym = launch_gym_bridge(&python_dir).ok();
-
-    if knowledge.is_none() {
-        eprintln!("[simard] knowledge bridge unavailable — domain knowledge disabled");
-    }
-    if gym.is_none() {
-        eprintln!("[simard] gym bridge unavailable — benchmarks disabled");
-    }
+    // Capture launch errors so the operator log explains *why* a bridge
+    // is missing — previously the .ok() discarded the error and the
+    // user only saw "bridge unavailable" with no diagnostic. The 13-day
+    // blindness episode (PR #4477) was made harder to diagnose by
+    // exactly this pattern; a richer log here is cheap insurance.
+    let knowledge_result = launch_knowledge_bridge(&python_dir);
+    let knowledge = match knowledge_result {
+        Ok(b) => Some(b),
+        Err(e) => {
+            eprintln!(
+                "[simard] knowledge bridge launch FAILED — domain knowledge disabled: {e}"
+            );
+            None
+        }
+    };
+    let gym_result = launch_gym_bridge(&python_dir);
+    let gym = match gym_result {
+        Ok(b) => Some(b),
+        Err(e) => {
+            eprintln!(
+                "[simard] gym bridge launch FAILED — benchmarks disabled: {e}"
+            );
+            None
+        }
+    };
 
     (knowledge, gym)
 }
