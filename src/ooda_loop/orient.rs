@@ -99,6 +99,21 @@ pub fn orient(
         });
     }
 
+    // ── Eval watchdog override ──────────────────────────────────────
+    // If the watchdog tripped in observe(), nothing else matters this
+    // cycle. Push a synthetic priority with urgency 1.0 (above any
+    // real goal) so decide() routes to it. This is the loop's "stop
+    // and ring the alarm" path — kept alongside other priorities so
+    // the existing ranking/filing/dashboard infrastructure picks it up
+    // for free, but with enough urgency that it preempts ordinary work.
+    if let Some(ref reason) = observation.eval_watchdog {
+        priorities.push(Priority {
+            goal_id: "__eval_watchdog__".to_string(),
+            urgency: 1.0,
+            reason: format!("EVAL WATCHDOG: {reason}"),
+        });
+    }
+
     priorities.sort_by(|a, b| {
         b.urgency
             .partial_cmp(&a.urgency)
@@ -147,6 +162,7 @@ mod tests {
             memory_stats: CognitiveStatistics::default(),
             pending_improvements: Vec::new(),
             environment: env,
+        eval_watchdog: None,
         }
     }
 
@@ -349,6 +365,7 @@ mod tests {
             },
             pending_improvements: Vec::new(),
             environment: EnvironmentSnapshot::default(),
+        eval_watchdog: None,
         };
         let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
         assert!(
@@ -369,6 +386,7 @@ mod tests {
             },
             pending_improvements: Vec::new(),
             environment: EnvironmentSnapshot::default(),
+        eval_watchdog: None,
         };
         let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
         assert!(
@@ -386,6 +404,7 @@ mod tests {
             memory_stats: CognitiveStatistics::default(),
             pending_improvements: Vec::new(),
             environment: EnvironmentSnapshot::default(),
+        eval_watchdog: None,
         };
         let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
         assert!(
@@ -403,6 +422,7 @@ mod tests {
             memory_stats: CognitiveStatistics::default(),
             pending_improvements: Vec::new(),
             environment: EnvironmentSnapshot::default(),
+        eval_watchdog: None,
         };
         let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
         assert!(
