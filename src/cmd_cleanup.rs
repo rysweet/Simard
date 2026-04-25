@@ -452,18 +452,18 @@ mod tests {
     fn binary_backups_keep_at_least_one() {
         // At least one backup must always be retained — losing the rollback
         // option silently is worse than the disk savings.
-        assert!(BINARY_BACKUPS_KEEP >= 1);
+        const { assert!(BINARY_BACKUPS_KEEP >= 1) };
     }
 
     #[test]
     fn snapshot_retention_covers_at_least_an_hour() {
         // With the default 5-min OODA cycle, 12 snapshots = 1 hour.
-        assert!(SNAPSHOTS_KEEP >= 12);
+        const { assert!(SNAPSHOTS_KEEP >= 12) };
     }
 
     #[test]
     fn corrupt_db_retention_at_least_a_day() {
-        assert!(CORRUPT_DB_MAX_AGE_DAYS >= 1);
+        const { assert!(CORRUPT_DB_MAX_AGE_DAYS >= 1) };
     }
 
     // ── rotate_simard_binary_backups ──
