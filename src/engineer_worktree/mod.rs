@@ -150,9 +150,7 @@ fn read_engineer_claim_full(worktree_dir: &Path) -> Option<EngineerClaim> {
     let raw = fs::read_to_string(&path).ok()?;
     let mut lines = raw.lines();
     let pid: i32 = lines.next()?.trim().parse().ok()?;
-    let starttime = lines
-        .next()
-        .and_then(|s| s.trim().parse::<u64>().ok());
+    let starttime = lines.next().and_then(|s| s.trim().parse::<u64>().ok());
     Some(EngineerClaim { pid, starttime })
 }
 

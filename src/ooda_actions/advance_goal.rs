@@ -341,8 +341,7 @@ pub(crate) fn find_live_engineer_for_goal(
             Some(p) => p,
             None => continue,
         };
-        let recorded_starttime: Option<u64> =
-            lines.next().and_then(|s| s.trim().parse().ok());
+        let recorded_starttime: Option<u64> = lines.next().and_then(|s| s.trim().parse().ok());
         if !crate::engineer_worktree::is_pid_alive_public(pid) {
             continue;
         }

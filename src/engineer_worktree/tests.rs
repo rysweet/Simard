@@ -574,8 +574,8 @@ fn allocate_writes_starttime_alongside_pid_on_linux() {
         .trim()
         .parse()
         .expect("starttime parses as u64");
-    let live_starttime = super::read_pid_starttime_public(pid)
-        .expect("can read starttime for own pid");
+    let live_starttime =
+        super::read_pid_starttime_public(pid).expect("can read starttime for own pid");
     assert_eq!(
         recorded_starttime, live_starttime,
         "recorded starttime must match the live process's current starttime"
