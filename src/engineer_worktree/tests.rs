@@ -528,7 +528,16 @@ fn allocate_writes_engineer_claim_sentinel_with_current_pid() {
 
     let claim = wt.path().join(super::ENGINEER_CLAIM_FILE);
     let raw = fs::read_to_string(&claim).expect("claim file present");
-    let pid: i32 = raw.trim().parse().expect("claim file contains an i32 pid");
+    // First line is the PID; remaining lines (if any) carry starttime metadata
+    // added in #1238. Both the legacy single-line PID-only format and the
+    // new (PID, starttime) format are accepted by the readers.
+    let pid: i32 = raw
+        .lines()
+        .next()
+        .expect("claim file has at least one line")
+        .trim()
+        .parse()
+        .expect("first line is an i32 pid");
     assert_eq!(
         pid,
         std::process::id() as i32,
@@ -536,6 +545,120 @@ fn allocate_writes_engineer_claim_sentinel_with_current_pid() {
     );
 
     wt.cleanup().expect("cleanup");
+}
+
+#[test]
+fn allocate_writes_starttime_alongside_pid_on_linux() {
+    // On Linux (where /proc/<pid>/stat is available), the sentinel must
+    // include the allocating process's starttime as a second line so the
+    // sweep can defend against PID-recycling false positives after a
+    // daemon restart (issue #1238).
+    if !std::path::Path::new("/proc/self/stat").exists() {
+        // /proc unavailable — skip on non-Linux test runners.
+        return;
+    }
+    let parent_dir = tempdir().unwrap();
+    let state_dir = tempdir().unwrap();
+    let parent_repo = init_parent_repo(parent_dir.path());
+
+    let wt = EngineerWorktree::allocate(&parent_repo, state_dir.path(), "claim-starttime")
+        .expect("allocate");
+
+    let claim = wt.path().join(super::ENGINEER_CLAIM_FILE);
+    let raw = fs::read_to_string(&claim).expect("claim file present");
+    let mut lines = raw.lines();
+    let pid: i32 = lines.next().unwrap().trim().parse().unwrap();
+    let recorded_starttime: u64 = lines
+        .next()
+        .expect("starttime line must be present on Linux")
+        .trim()
+        .parse()
+        .expect("starttime parses as u64");
+    let live_starttime = super::read_pid_starttime_public(pid)
+        .expect("can read starttime for own pid");
+    assert_eq!(
+        recorded_starttime, live_starttime,
+        "recorded starttime must match the live process's current starttime"
+    );
+
+    wt.cleanup().expect("cleanup");
+}
+
+#[test]
+fn sweep_removes_dir_with_recycled_pid_claim() {
+    // Regression test for issue #1238: a sentinel that names a live PID
+    // whose starttime DOES NOT match the recorded one (i.e. the original
+    // process is gone and the PID has been reassigned) must NOT cause the
+    // sweep to skip the worktree. Otherwise the daemon-restart-with-recycled-
+    // PID race leaks orphan worktrees forever.
+    if !std::path::Path::new("/proc/self/stat").exists() {
+        return; // /proc not available
+    }
+    let parent_dir = tempdir().unwrap();
+    let state_dir = tempdir().unwrap();
+    let parent_repo = init_parent_repo(parent_dir.path());
+
+    let worktrees_root = state_dir.path().join(super::WORKTREES_SUBDIR);
+    fs::create_dir_all(&worktrees_root).unwrap();
+    let recycled = worktrees_root.join("recycled-claim");
+    fs::create_dir_all(&recycled).unwrap();
+    // Write a claim naming the test process's PID but with a starttime
+    // that cannot match the live process (use 0 — the test process started
+    // some non-zero number of jiffies after boot).
+    fs::write(
+        recycled.join(super::ENGINEER_CLAIM_FILE),
+        format!("{}\n0\n", std::process::id()),
+    )
+    .unwrap();
+
+    let report = sweep_orphaned_worktrees(&parent_repo, state_dir.path()).expect("sweep");
+
+    assert!(
+        !recycled.exists(),
+        "sweep must remove dir whose claim PID is alive but starttime doesn't match"
+    );
+    assert!(
+        report.removed_orphan_dirs.iter().any(|p| p == &recycled),
+        "sweep must record the recycled-PID removal; got {:?}",
+        report.removed_orphan_dirs
+    );
+}
+
+#[test]
+fn sweep_keeps_legacy_pid_only_claim_with_live_pid() {
+    // Pre-#1238 sentinels are PID-only (no starttime line). They must
+    // still be honored as live when the PID is alive — otherwise a daemon
+    // upgrade would nuke every existing engineer worktree on the first
+    // sweep after the upgrade.
+    let parent_dir = tempdir().unwrap();
+    let state_dir = tempdir().unwrap();
+    let parent_repo = init_parent_repo(parent_dir.path());
+
+    let worktrees_root = state_dir.path().join(super::WORKTREES_SUBDIR);
+    fs::create_dir_all(&worktrees_root).unwrap();
+    let legacy = worktrees_root.join("legacy-pid-only-claim");
+    fs::create_dir_all(&legacy).unwrap();
+    // Single-line PID-only sentinel naming this test process.
+    fs::write(
+        legacy.join(super::ENGINEER_CLAIM_FILE),
+        format!("{}\n", std::process::id()),
+    )
+    .unwrap();
+
+    let report = sweep_orphaned_worktrees(&parent_repo, state_dir.path()).expect("sweep");
+
+    assert!(
+        legacy.exists(),
+        "sweep must not delete legacy PID-only claim with live PID"
+    );
+    assert!(
+        report
+            .skipped_live_dirs
+            .iter()
+            .any(|p| p.canonicalize().ok() == legacy.canonicalize().ok()),
+        "sweep must record legacy PID-only claim as skipped-live; got {:?}",
+        report.skipped_live_dirs
+    );
 }
 
 #[test]
