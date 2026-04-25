@@ -38,10 +38,10 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use simard::gym_scoring::{GymSuiteScore, detect_regression};
+use simard::gym_scoring::{detect_regression, GymSuiteScore};
 use simard::self_improve::{
-    ImprovementConfig, ImprovementCycle, ImprovementDecision, ImprovementPhase, ProposedChange,
-    WeakDimension, decide, find_weak_dimensions,
+    decide, find_weak_dimensions, ImprovementConfig, ImprovementCycle, ImprovementDecision,
+    ImprovementPhase, ProposedChange, WeakDimension,
 };
 
 const DEFAULT_WEAK_THRESHOLD: f64 = 0.7;
@@ -115,10 +115,17 @@ fn cmd_eval(args: &[String]) {
 fn cmd_analyze(args: &[String]) {
     let baseline_str = require_arg(args, "--baseline-json");
     let weak_threshold: f64 = arg_value(args, "--weak-threshold")
-        .map(|s| s.parse().unwrap_or_else(|_| die("invalid --weak-threshold")))
+        .map(|s| {
+            s.parse()
+                .unwrap_or_else(|_| die("invalid --weak-threshold"))
+        })
         .unwrap_or(DEFAULT_WEAK_THRESHOLD);
     let target_raw = arg_value(args, "--target-dimension").unwrap_or("");
-    let target = if target_raw.is_empty() { None } else { Some(target_raw) };
+    let target = if target_raw.is_empty() {
+        None
+    } else {
+        Some(target_raw)
+    };
 
     let baseline: GymSuiteScore = parse_json(baseline_str, "baseline");
     let weak = find_weak_dimensions(&baseline, weak_threshold, target);
@@ -133,7 +140,11 @@ fn cmd_decide(args: &[String]) {
     let research_decision = require_arg(args, "--research-decision");
     let apply_result_str = require_arg(args, "--apply-result-json");
     let target_raw = arg_value(args, "--target-dimension").unwrap_or("");
-    let target = if target_raw.is_empty() { None } else { Some(target_raw.to_string()) };
+    let target = if target_raw.is_empty() {
+        None
+    } else {
+        Some(target_raw.to_string())
+    };
 
     let baseline: GymSuiteScore = parse_json(baseline_str, "baseline");
     let weak: Vec<WeakDimension> = parse_json(weak_str, "weak-dimensions");
@@ -235,14 +246,20 @@ fn cmd_apply_or_rollback(args: &[String]) {
     let review: ReviewOutput = parse_json(review_str, "review");
     let critical = review.findings.iter().any(|f| f.severity == "critical");
     let result = if critical || !review.should_commit {
-        ApplyResultJson::ReviewBlocked { findings: review.findings }
+        ApplyResultJson::ReviewBlocked {
+            findings: review.findings,
+        }
     } else if patch.trim().is_empty() {
-        ApplyResultJson::PatchFailed { reason: "empty patch".to_string() }
+        ApplyResultJson::PatchFailed {
+            reason: "empty patch".to_string(),
+        }
     } else {
         // Phase 1: just record applied — actual git apply + commit happens in
         // Phase 1.5 once the test harness is wired. The recipe's deterministic
         // contract holds: ReviewBlocked vs Applied is decided by review JSON.
-        ApplyResultJson::Applied { findings: review.findings }
+        ApplyResultJson::Applied {
+            findings: review.findings,
+        }
     };
     emit(&json!(result));
 }
