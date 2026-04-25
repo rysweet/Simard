@@ -47,3 +47,16 @@ serial_test = "3.4.0"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# Dev/test profiles: keep enough debuginfo for backtraces (line numbers,
+# function names) but drop full DWARF. Cuts target/ size from ~13GB to
+# ~4-5GB without meaningfully degrading debugging. Full debug can be
+# re-enabled per-build with `RUSTFLAGS='-C debuginfo=2'`.
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+incremental = true
+
+[profile.test]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
