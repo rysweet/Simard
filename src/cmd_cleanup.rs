@@ -56,6 +56,15 @@ pub fn handle_cleanup() -> Result<(), Box<dyn std::error::Error>> {
     // 4. Kill orphaned cargo processes (running > 30 min with no parent simard)
     kill_orphaned_cargo_processes(&mut report);
 
+    // 5. Rotate ~/.simard/bin/simard.bak-* keeping newest N
+    rotate_simard_binary_backups(&mut report);
+
+    // 6. Remove old corrupted memory DBs
+    remove_old_corrupt_dbs(&mut report);
+
+    // 7. Trim ~/.simard/snapshots/ keeping newest N
+    trim_simard_snapshots(&mut report);
+
     eprintln!("\n{report}");
 
     if !report.errors.is_empty() {
@@ -92,29 +101,61 @@ fn clean_simard_canaries(base: &Path, report: &mut CleanupReport) {
     let Ok(entries) = std::fs::read_dir(base) else {
         return;
     };
+    // Anything older than this is fair game. 1 day is conservative — a real
+    // build would never linger in /tmp that long.
+    let max_age = std::time::Duration::from_secs(24 * 3600);
+    let now = std::time::SystemTime::now();
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if name_str.starts_with("simard-canary") || name_str.starts_with("simard-e2e") {
-            let path = entry.path();
-            match dir_size(&path) {
-                Ok(size) if size > 0 => {
-                    eprintln!(
-                        "  Removing {} ({} MB)",
-                        path.display(),
-                        size / (1024 * 1024)
-                    );
-                    if let Err(e) = std::fs::remove_dir_all(&path) {
-                        report
-                            .errors
-                            .push(format!("failed to remove {}: {e}", path.display()));
-                    } else {
-                        report.bytes_freed += size;
-                        report.dirs_removed.push(path);
-                    }
+        // Original canary patterns plus the broader simard-/amplihack-/ia2-
+        // session artifacts that accumulate from interactive sessions and
+        // detached recipe runners.
+        let matches_pattern = name_str.starts_with("simard-canary")
+            || name_str.starts_with("simard-e2e")
+            || name_str.starts_with("simard-")
+            || name_str.starts_with("amplihack-")
+            || name_str.starts_with("amplihack_eval")
+            || name_str.starts_with("ia2-");
+        if !matches_pattern {
+            continue;
+        }
+        // Never touch the active build target directory.
+        let path = entry.path();
+        if let Ok(current) = std::env::var("CARGO_TARGET_DIR")
+            && path.as_os_str() == current.as_str()
+        {
+            continue;
+        }
+        // Age check — leave fresh artifacts alone.
+        if let Ok(meta) = entry.metadata()
+            && let Ok(modified) = meta.modified()
+            && now.duration_since(modified).unwrap_or_default() < max_age
+        {
+            continue;
+        }
+        match dir_size(&path) {
+            Ok(size) if size > 0 => {
+                eprintln!(
+                    "  Removing {} ({} MB)",
+                    path.display(),
+                    size / (1024 * 1024)
+                );
+                let removed = if path.is_dir() {
+                    std::fs::remove_dir_all(&path)
+                } else {
+                    std::fs::remove_file(&path)
+                };
+                if let Err(e) = removed {
+                    report
+                        .errors
+                        .push(format!("failed to remove {}: {e}", path.display()));
+                } else {
+                    report.bytes_freed += size;
+                    report.dirs_removed.push(path);
                 }
-                _ => {}
             }
+            _ => {}
         }
     }
 }
@@ -211,8 +252,146 @@ fn dir_size(path: &Path) -> std::io::Result<u64> {
                 total += metadata.len();
             }
         }
+    } else if path.is_file() {
+        total = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     }
     Ok(total)
+}
+
+/// Number of binary backups to keep in `~/.simard/bin/`.
+/// Each binary is ~34 MB; keeping 2 is enough to roll back one bad deploy.
+const BINARY_BACKUPS_KEEP: usize = 2;
+
+/// Rotate `~/.simard/bin/simard.bak-*`, keeping only the newest N.
+/// Each deploy creates a new backup and they accumulate without bound;
+/// in practice they reach 1+ GB if you also keep an old debug build around.
+fn rotate_simard_binary_backups(report: &mut CleanupReport) {
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let bin_dir = PathBuf::from(home).join(".simard").join("bin");
+    let Ok(entries) = std::fs::read_dir(&bin_dir) else {
+        return;
+    };
+    let mut backups: Vec<(PathBuf, std::time::SystemTime)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            if !name.starts_with("simard.bak-") {
+                return None;
+            }
+            let modified = e.metadata().ok()?.modified().ok()?;
+            Some((e.path(), modified))
+        })
+        .collect();
+    if backups.len() <= BINARY_BACKUPS_KEEP {
+        return;
+    }
+    // Newest first.
+    backups.sort_by_key(|b| std::cmp::Reverse(b.1));
+    for (path, _) in backups.into_iter().skip(BINARY_BACKUPS_KEEP) {
+        let size = dir_size(&path).unwrap_or(0);
+        eprintln!(
+            "  Rotating binary backup {} ({} MB)",
+            path.display(),
+            size / (1024 * 1024)
+        );
+        if let Err(e) = std::fs::remove_file(&path) {
+            report
+                .errors
+                .push(format!("failed to rotate {}: {e}", path.display()));
+        } else {
+            report.bytes_freed += size;
+            report.dirs_removed.push(path);
+        }
+    }
+}
+
+/// Maximum age (in days) of corrupted memory DB files before deletion.
+const CORRUPT_DB_MAX_AGE_DAYS: u64 = 7;
+
+/// Remove `~/.simard/cognitive_memory.corrupt-*` files older than the threshold.
+/// These are quarantined snapshots of corrupted DBs; useful briefly for forensics
+/// then pure dead weight.
+fn remove_old_corrupt_dbs(report: &mut CleanupReport) {
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let simard_dir = PathBuf::from(home).join(".simard");
+    let Ok(entries) = std::fs::read_dir(&simard_dir) else {
+        return;
+    };
+    let max_age = std::time::Duration::from_secs(CORRUPT_DB_MAX_AGE_DAYS * 24 * 3600);
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("cognitive_memory.corrupt-") {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else { continue };
+        let Ok(modified) = meta.modified() else { continue };
+        if now.duration_since(modified).unwrap_or_default() < max_age {
+            continue;
+        }
+        let size = meta.len();
+        eprintln!(
+            "  Removing old corrupt DB {} ({} MB)",
+            path.display(),
+            size / (1024 * 1024)
+        );
+        if let Err(e) = std::fs::remove_file(&path) {
+            report
+                .errors
+                .push(format!("failed to remove {}: {e}", path.display()));
+        } else {
+            report.bytes_freed += size;
+            report.dirs_removed.push(path);
+        }
+    }
+}
+
+/// Maximum number of memory snapshot files to retain.
+/// One snapshot is written per OODA cycle; with a 5-minute interval, 100 files
+/// is roughly 8 hours of recent state — plenty for incident review.
+const SNAPSHOTS_KEEP: usize = 100;
+
+/// Trim `~/.simard/snapshots/session-*.json`, keeping only the newest N.
+/// These accumulate at one per cycle indefinitely.
+fn trim_simard_snapshots(report: &mut CleanupReport) {
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let snap_dir = PathBuf::from(home).join(".simard").join("snapshots");
+    let Ok(entries) = std::fs::read_dir(&snap_dir) else {
+        return;
+    };
+    let mut snaps: Vec<(PathBuf, std::time::SystemTime, u64)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            if !name.starts_with("session-") || !name.ends_with(".json") {
+                return None;
+            }
+            let meta = e.metadata().ok()?;
+            let modified = meta.modified().ok()?;
+            Some((e.path(), modified, meta.len()))
+        })
+        .collect();
+    if snaps.len() <= SNAPSHOTS_KEEP {
+        return;
+    }
+    snaps.sort_by_key(|b| std::cmp::Reverse(b.1));
+    for (path, _, size) in snaps.into_iter().skip(SNAPSHOTS_KEEP) {
+        if let Err(e) = std::fs::remove_file(&path) {
+            report
+                .errors
+                .push(format!("failed to trim {}: {e}", path.display()));
+        } else {
+            report.bytes_freed += size;
+            report.dirs_removed.push(path);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -263,5 +442,158 @@ mod tests {
     fn disk_usage_does_not_panic() {
         // Just verifying it doesn't crash
         print_disk_usage();
+    }
+
+    // ── Constant sanity ──
+
+    #[test]
+    fn binary_backups_keep_at_least_one() {
+        // At least one backup must always be retained — losing the rollback
+        // option silently is worse than the disk savings.
+        assert!(BINARY_BACKUPS_KEEP >= 1);
+    }
+
+    #[test]
+    fn snapshot_retention_covers_at_least_an_hour() {
+        // With the default 5-min OODA cycle, 12 snapshots = 1 hour.
+        assert!(SNAPSHOTS_KEEP >= 12);
+    }
+
+    #[test]
+    fn corrupt_db_retention_at_least_a_day() {
+        assert!(CORRUPT_DB_MAX_AGE_DAYS >= 1);
+    }
+
+    // ── rotate_simard_binary_backups ──
+
+    #[test]
+    fn rotate_keeps_newest_n_backups() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join(".simard").join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        // Create 5 fake backup files with progressively newer mtimes.
+        for i in 0..5 {
+            let p = bin_dir.join(format!("simard.bak-{i}"));
+            std::fs::write(&p, vec![0u8; 1024]).unwrap();
+            // Set mtime via filetime so they sort deterministically.
+            let mtime = std::time::UNIX_EPOCH
+                + std::time::Duration::from_secs(1_000_000_000 + (i as u64) * 1000);
+            let times = std::fs::FileTimes::new().set_modified(mtime);
+            std::fs::File::options().write(true).open(&p).unwrap().set_times(times).unwrap();
+        }
+        // Override HOME so the function targets our tempdir.
+        let old_home = std::env::var_os("HOME");
+        // SAFETY: test is single-threaded for env access; restored below.
+        unsafe {
+            std::env::set_var("HOME", tmp.path());
+        }
+        let mut report = CleanupReport::default();
+        rotate_simard_binary_backups(&mut report);
+        if let Some(h) = old_home {
+            unsafe {
+                std::env::set_var("HOME", h);
+            }
+        }
+        let remaining: Vec<_> = std::fs::read_dir(&bin_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            remaining.len(),
+            BINARY_BACKUPS_KEEP,
+            "should keep exactly {BINARY_BACKUPS_KEEP}: {remaining:?}"
+        );
+        // The two newest (4 and 3) should survive.
+        assert!(remaining.iter().any(|n| n.ends_with("-4")));
+        assert!(remaining.iter().any(|n| n.ends_with("-3")));
+        assert_eq!(report.dirs_removed.len(), 3);
+    }
+
+    #[test]
+    fn rotate_noop_when_under_threshold() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join(".simard").join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(bin_dir.join("simard.bak-only"), b"x").unwrap();
+        let old_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", tmp.path());
+        }
+        let mut report = CleanupReport::default();
+        rotate_simard_binary_backups(&mut report);
+        if let Some(h) = old_home {
+            unsafe {
+                std::env::set_var("HOME", h);
+            }
+        }
+        assert!(bin_dir.join("simard.bak-only").exists());
+        assert_eq!(report.dirs_removed.len(), 0);
+    }
+
+    // ── trim_simard_snapshots ──
+
+    #[test]
+    fn trim_snapshots_keeps_newest_n() {
+        let tmp = tempfile::tempdir().unwrap();
+        let snap_dir = tmp.path().join(".simard").join("snapshots");
+        std::fs::create_dir_all(&snap_dir).unwrap();
+        // Write SNAPSHOTS_KEEP + 5 files
+        let n = SNAPSHOTS_KEEP + 5;
+        for i in 0..n {
+            let p = snap_dir.join(format!("session-{i:04}.json"));
+            std::fs::write(&p, b"{}").unwrap();
+            let mtime = std::time::UNIX_EPOCH
+                + std::time::Duration::from_secs(1_000_000_000 + i as u64);
+            let times = std::fs::FileTimes::new().set_modified(mtime);
+            std::fs::File::options().write(true).open(&p).unwrap().set_times(times).unwrap();
+        }
+        let old_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", tmp.path());
+        }
+        let mut report = CleanupReport::default();
+        trim_simard_snapshots(&mut report);
+        if let Some(h) = old_home {
+            unsafe {
+                std::env::set_var("HOME", h);
+            }
+        }
+        let remaining = std::fs::read_dir(&snap_dir).unwrap().count();
+        assert_eq!(remaining, SNAPSHOTS_KEEP);
+        assert_eq!(report.dirs_removed.len(), 5);
+    }
+
+    // ── remove_old_corrupt_dbs ──
+
+    #[test]
+    fn corrupt_db_removed_when_older_than_threshold() {
+        let tmp = tempfile::tempdir().unwrap();
+        let simard = tmp.path().join(".simard");
+        std::fs::create_dir_all(&simard).unwrap();
+        let old = simard.join("cognitive_memory.corrupt-old");
+        let young = simard.join("cognitive_memory.corrupt-young");
+        let unrelated = simard.join("cognitive_memory.ladybug");
+        std::fs::write(&old, b"old").unwrap();
+        std::fs::write(&young, b"young").unwrap();
+        std::fs::write(&unrelated, b"keep").unwrap();
+        let old_mtime = std::time::SystemTime::now()
+            - std::time::Duration::from_secs((CORRUPT_DB_MAX_AGE_DAYS + 1) * 24 * 3600);
+        let times = std::fs::FileTimes::new().set_modified(old_mtime);
+        std::fs::File::options().write(true).open(&old).unwrap().set_times(times).unwrap();
+        let old_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", tmp.path());
+        }
+        let mut report = CleanupReport::default();
+        remove_old_corrupt_dbs(&mut report);
+        if let Some(h) = old_home {
+            unsafe {
+                std::env::set_var("HOME", h);
+            }
+        }
+        assert!(!old.exists(), "old corrupt DB should be removed");
+        assert!(young.exists(), "young corrupt DB should survive");
+        assert!(unrelated.exists(), "non-corrupt DB must never be touched");
     }
 }
