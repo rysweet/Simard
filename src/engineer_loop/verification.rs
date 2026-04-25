@@ -416,11 +416,9 @@ mod tests {
 
         let result = verify_kind_specific(&inspection, &action, &mut checks);
         assert!(result.is_ok());
-        assert!(
-            checks
-                .iter()
-                .any(|c| c.starts_with("shell-command-exit-code="))
-        );
+        assert!(checks
+            .iter()
+            .any(|c| c.starts_with("shell-command-exit-code=")));
     }
 
     #[test]
@@ -470,11 +468,9 @@ mod tests {
 
         let result = verify_kind_specific(&inspection, &action, &mut checks);
         assert!(result.is_ok());
-        assert!(
-            checks
-                .iter()
-                .any(|c| c.contains("tracked-files-present=true"))
-        );
+        assert!(checks
+            .iter()
+            .any(|c| c.contains("tracked-files-present=true")));
     }
 
     // === Issue #1209: branch-rename within engineer/* namespace ===

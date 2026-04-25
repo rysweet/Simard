@@ -8,16 +8,16 @@
 //! (generate-patch, review) are exercised separately by an end-to-end smoke
 //! test that uses the recipe runner's --dry-run mode.
 
-use std::process::{Command, Stdio};
 use std::io::Write;
+use std::process::{Command, Stdio};
 
 use serde_json::json;
 
 use simard::gym_bridge::ScoreDimensions;
-use simard::gym_scoring::{GymSuiteScore, detect_regression};
+use simard::gym_scoring::{detect_regression, GymSuiteScore};
 use simard::self_improve::{
-    ImprovementConfig, ImprovementCycle, ImprovementDecision, ImprovementPhase, ProposedChange,
-    decide, find_weak_dimensions,
+    decide, find_weak_dimensions, ImprovementConfig, ImprovementCycle, ImprovementDecision,
+    ImprovementPhase, ProposedChange,
 };
 
 fn ss(suite: &str, overall: f64, dims: ScoreDimensions) -> GymSuiteScore {
@@ -38,7 +38,7 @@ fn baseline_fixture() -> GymSuiteScore {
         0.65,
         ScoreDimensions {
             factual_accuracy: 0.80,
-            specificity: 0.55, // weak
+            specificity: 0.55,        // weak
             temporal_awareness: 0.60, // weak
             source_attribution: 0.85,
             confidence_calibration: 0.45, // weak
@@ -77,7 +77,11 @@ fn rust_path_cycle(proposal: &str, target_dim: Option<&str>) -> ImprovementCycle
             decision: Some(ImprovementDecision::Revert {
                 reason: format!(
                     "no changes proposed; weak dimensions: {}",
-                    if weak_names.is_empty() { "none".to_string() } else { weak_names.join(", ") }
+                    if weak_names.is_empty() {
+                        "none".to_string()
+                    } else {
+                        weak_names.join(", ")
+                    }
                 ),
             }),
             final_phase: ImprovementPhase::Analyze,
@@ -126,10 +130,18 @@ fn helper_bin() -> String {
 
 fn run_helper(args: &[&str], stdin_data: Option<&str>) -> String {
     let mut cmd = Command::new(helper_bin());
-    cmd.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = cmd.spawn().expect("spawn helper");
     if let Some(data) = stdin_data {
-        child.stdin.as_mut().unwrap().write_all(data.as_bytes()).unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(data.as_bytes())
+            .unwrap();
     }
     drop(child.stdin.take());
     let out = child.wait_with_output().expect("wait helper");
@@ -155,22 +167,43 @@ fn recipe_path_cycle(proposal: &str, target_dim: Option<&str>) -> ImprovementCyc
 
     // Phase 1: eval (fixture mode)
     let baseline_out = run_helper(
-        &["eval", "--workspace", ".", "--suite-id", "parity-suite",
-          "--baseline-fixture-json", &baseline_json],
+        &[
+            "eval",
+            "--workspace",
+            ".",
+            "--suite-id",
+            "parity-suite",
+            "--baseline-fixture-json",
+            &baseline_json,
+        ],
         None,
     );
-    assert_eq!(serde_json::from_str::<GymSuiteScore>(&baseline_out).unwrap(), baseline);
+    assert_eq!(
+        serde_json::from_str::<GymSuiteScore>(&baseline_out).unwrap(),
+        baseline
+    );
 
     // Phase 2: analyze
     let target = target_dim.unwrap_or("");
     let weak_out = run_helper(
-        &["analyze", "--baseline-json", &baseline_json,
-          "--weak-threshold", "0.7", "--target-dimension", target],
+        &[
+            "analyze",
+            "--baseline-json",
+            &baseline_json,
+            "--weak-threshold",
+            "0.7",
+            "--target-dimension",
+            target,
+        ],
         None,
     );
 
     // Phase 3 + 6: research-decision + decide
-    let research_decision = if proposal.is_empty() { "REVERT_NO_PROPOSAL" } else { "CONTINUE" };
+    let research_decision = if proposal.is_empty() {
+        "REVERT_NO_PROPOSAL"
+    } else {
+        "CONTINUE"
+    };
     let apply_result_json = if proposal.is_empty() {
         "null".to_string()
     } else {
@@ -182,13 +215,24 @@ fn recipe_path_cycle(proposal: &str, target_dim: Option<&str>) -> ImprovementCyc
     let cycle_out = run_helper(
         &[
             "decide",
-            "--baseline-json", &baseline_json,
-            "--post-json", if proposal.is_empty() { "null" } else { &post_json },
-            "--weak-dimensions-json", &weak_out,
-            "--proposal", proposal,
-            "--research-decision", research_decision,
-            "--apply-result-json", &apply_result_json,
-            "--target-dimension", target,
+            "--baseline-json",
+            &baseline_json,
+            "--post-json",
+            if proposal.is_empty() {
+                "null"
+            } else {
+                &post_json
+            },
+            "--weak-dimensions-json",
+            &weak_out,
+            "--proposal",
+            proposal,
+            "--research-decision",
+            research_decision,
+            "--apply-result-json",
+            &apply_result_json,
+            "--target-dimension",
+            target,
         ],
         None,
     );
@@ -202,17 +246,32 @@ fn assert_cycles_equivalent(rust: &ImprovementCycle, recipe: &ImprovementCycle) 
     assert_eq!(rust.baseline, recipe.baseline, "baseline mismatch");
     assert_eq!(rust.post_score, recipe.post_score, "post_score mismatch");
     assert_eq!(rust.regressions, recipe.regressions, "regressions mismatch");
-    assert_eq!(rust.weak_dimensions, recipe.weak_dimensions, "weak_dimensions list mismatch");
+    assert_eq!(
+        rust.weak_dimensions, recipe.weak_dimensions,
+        "weak_dimensions list mismatch"
+    );
     assert_eq!(
         rust.weak_dimension_details.len(),
         recipe.weak_dimension_details.len(),
         "weak detail count mismatch"
     );
-    for (a, b) in rust.weak_dimension_details.iter().zip(&recipe.weak_dimension_details) {
+    for (a, b) in rust
+        .weak_dimension_details
+        .iter()
+        .zip(&recipe.weak_dimension_details)
+    {
         assert_eq!(a.name, b.name, "weak dim name");
-        assert!((a.deficit - b.deficit).abs() < 1e-9, "deficit drift: {} vs {}", a.deficit, b.deficit);
+        assert!(
+            (a.deficit - b.deficit).abs() < 1e-9,
+            "deficit drift: {} vs {}",
+            a.deficit,
+            b.deficit
+        );
     }
-    assert_eq!(rust.target_dimension, recipe.target_dimension, "target dim mismatch");
+    assert_eq!(
+        rust.target_dimension, recipe.target_dimension,
+        "target dim mismatch"
+    );
     assert_eq!(rust.final_phase, recipe.final_phase, "final phase mismatch");
     assert_eq!(rust.decision, recipe.decision, "decision mismatch");
     assert_eq!(
@@ -240,7 +299,10 @@ fn parity_with_proposal_commits_when_net_positive() {
     let rust = rust_path_cycle("Strengthen specificity prompts", None);
     let recipe = recipe_path_cycle("Strengthen specificity prompts", None);
     assert_cycles_equivalent(&rust, &recipe);
-    assert!(matches!(recipe.decision, Some(ImprovementDecision::Commit { .. })));
+    assert!(matches!(
+        recipe.decision,
+        Some(ImprovementDecision::Commit { .. })
+    ));
 }
 
 #[test]

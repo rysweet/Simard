@@ -36,10 +36,10 @@ fn main() {
     let proposal = arg(&args, "--proposal").unwrap_or("");
     let weak_threshold = arg(&args, "--weak-threshold").unwrap_or("0.7");
     let target_dim = arg(&args, "--target-dimension").unwrap_or("");
-    let recipe = arg(&args, "--recipe").unwrap_or(
-        "amplifier-bundle/recipes/simard-self-improve-cycle.yaml",
-    );
-    let amplihack_home = arg(&args, "--amplihack-home").unwrap_or("/home/azureuser/src/amplihack-rs");
+    let recipe =
+        arg(&args, "--recipe").unwrap_or("amplifier-bundle/recipes/simard-self-improve-cycle.yaml");
+    let amplihack_home =
+        arg(&args, "--amplihack-home").unwrap_or("/home/azureuser/src/amplihack-rs");
 
     let recipe_path = if recipe.starts_with('/') {
         recipe.to_string()
@@ -57,7 +57,9 @@ fn main() {
         .args(["-c", &format!("target_dimension={target_dim}")])
         .args(["-f", "json"]);
 
-    let output = cmd.output().unwrap_or_else(|e| die(&format!("spawn amplihack: {e}")));
+    let output = cmd
+        .output()
+        .unwrap_or_else(|e| die(&format!("spawn amplihack: {e}")));
     if !output.status.success() {
         let _ = std::io::Write::write_all(&mut std::io::stderr(), &output.stderr);
         die(&format!("recipe failed with status {}", output.status));

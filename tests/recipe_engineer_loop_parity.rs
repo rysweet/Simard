@@ -15,8 +15,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use simard::engineer_loop::{
-    EngineerActionKind, ExecutedEngineerAction, RepoInspection, SelectedEngineerAction,
-    VerificationReport, select_engineer_action, verify_engineer_action,
+    select_engineer_action, verify_engineer_action, EngineerActionKind, ExecutedEngineerAction,
+    RepoInspection, SelectedEngineerAction, VerificationReport,
 };
 
 fn helper_bin() -> String {
@@ -67,8 +67,10 @@ fn parity_select_create_file_objective() {
     let rust = select_engineer_action(&inspection, objective).expect("rust select ok");
     let recipe_stdout = run_helper(&[
         "select",
-        "--inspection-json", &inspection_json,
-        "--objective", objective,
+        "--inspection-json",
+        &inspection_json,
+        "--objective",
+        objective,
     ]);
     let recipe: SelectedEngineerAction =
         serde_json::from_str(&recipe_stdout).expect("parse selected");
@@ -96,8 +98,10 @@ fn parity_select_cargo_test_objective_both_paths_error() {
     let out = std::process::Command::new(helper_bin())
         .args([
             "select",
-            "--inspection-json", &inspection_json,
-            "--objective", objective,
+            "--inspection-json",
+            &inspection_json,
+            "--objective",
+            objective,
         ])
         .output()
         .expect("spawn helper");
@@ -113,8 +117,10 @@ fn parity_select_read_only_scan_default() {
     let rust = select_engineer_action(&inspection, objective).expect("rust select ok");
     let recipe_stdout = run_helper(&[
         "select",
-        "--inspection-json", &inspection_json,
-        "--objective", objective,
+        "--inspection-json",
+        &inspection_json,
+        "--objective",
+        objective,
     ]);
     let recipe: SelectedEngineerAction =
         serde_json::from_str(&recipe_stdout).expect("parse selected");
@@ -158,13 +164,19 @@ fn parity_verify_failed_action_returns_error() {
     let out = std::process::Command::new(helper_bin())
         .args([
             "verify",
-            "--inspection-json", &inspection_json,
-            "--action-json", &action_json,
-            "--state-root", tmp.path().to_str().unwrap(),
+            "--inspection-json",
+            &inspection_json,
+            "--action-json",
+            &action_json,
+            "--state-root",
+            tmp.path().to_str().unwrap(),
         ])
         .output()
         .expect("spawn helper");
-    assert!(!out.status.success(), "recipe verify should fail on non-zero exit");
+    assert!(
+        !out.status.success(),
+        "recipe verify should fail on non-zero exit"
+    );
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("verify_engineer_action failed"),
         "stderr should mention verify failure: {}",
@@ -183,25 +195,60 @@ fn parity_verify_clean_read_only_scan_succeeds() {
     assert!(init.success(), "git init failed");
     // Need an initial commit for HEAD to resolve
     for cmd in [
-        vec!["-C", tmp.path().to_str().unwrap(), "config", "user.email", "test@test"],
-        vec!["-C", tmp.path().to_str().unwrap(), "config", "user.name", "test"],
-        vec!["-C", tmp.path().to_str().unwrap(), "commit", "--allow-empty", "-m", "init", "--quiet"],
+        vec![
+            "-C",
+            tmp.path().to_str().unwrap(),
+            "config",
+            "user.email",
+            "test@test",
+        ],
+        vec![
+            "-C",
+            tmp.path().to_str().unwrap(),
+            "config",
+            "user.name",
+            "test",
+        ],
+        vec![
+            "-C",
+            tmp.path().to_str().unwrap(),
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+            "--quiet",
+        ],
     ] {
-        let s = std::process::Command::new("git").args(&cmd).status().expect("git");
+        let s = std::process::Command::new("git")
+            .args(&cmd)
+            .status()
+            .expect("git");
         assert!(s.success(), "git {cmd:?} failed");
     }
 
     // Determine the actual branch + HEAD so inspection matches
     let branch_out = std::process::Command::new("git")
-        .args(["-C", tmp.path().to_str().unwrap(), "rev-parse", "--abbrev-ref", "HEAD"])
+        .args([
+            "-C",
+            tmp.path().to_str().unwrap(),
+            "rev-parse",
+            "--abbrev-ref",
+            "HEAD",
+        ])
         .output()
         .expect("git branch");
-    let branch = String::from_utf8(branch_out.stdout).unwrap().trim().to_string();
+    let branch = String::from_utf8(branch_out.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
     let head_out = std::process::Command::new("git")
         .args(["-C", tmp.path().to_str().unwrap(), "rev-parse", "HEAD"])
         .output()
         .expect("git rev-parse");
-    let head = String::from_utf8(head_out.stdout).unwrap().trim().to_string();
+    let head = String::from_utf8(head_out.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
 
     let inspection = RepoInspection {
         workspace_root: tmp.path().to_path_buf(),
@@ -230,14 +277,16 @@ fn parity_verify_clean_read_only_scan_succeeds() {
     };
     let action_json = serde_json::to_string(&action).unwrap();
 
-    let rust =
-        verify_engineer_action(&inspection, &action, tmp.path()).expect("rust verify ok");
+    let rust = verify_engineer_action(&inspection, &action, tmp.path()).expect("rust verify ok");
 
     let recipe_stdout = run_helper(&[
         "verify",
-        "--inspection-json", &inspection_json,
-        "--action-json", &action_json,
-        "--state-root", tmp.path().to_str().unwrap(),
+        "--inspection-json",
+        &inspection_json,
+        "--action-json",
+        &action_json,
+        "--state-root",
+        tmp.path().to_str().unwrap(),
     ]);
     let recipe: VerificationReport =
         serde_json::from_str(&recipe_stdout).expect("parse verification");

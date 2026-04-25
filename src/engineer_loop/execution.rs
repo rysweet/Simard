@@ -8,7 +8,7 @@ use crate::error::{SimardError, SimardResult};
 use crate::sanitization::sanitize_terminal_text;
 
 use super::types::{
-    EngineerActionKind, ExecutedEngineerAction, SelectedEngineerAction, validate_repo_relative_path,
+    validate_repo_relative_path, EngineerActionKind, ExecutedEngineerAction, SelectedEngineerAction,
 };
 use super::{
     CARGO_COMMAND_TIMEOUT_SECS, CLEARED_GIT_ENV_VARS, GIT_COMMAND_TIMEOUT_SECS,

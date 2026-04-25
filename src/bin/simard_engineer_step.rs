@@ -24,9 +24,9 @@ use std::process::ExitCode;
 use serde::Serialize;
 
 use simard::engineer_loop::{
-    ExecutedEngineerAction, RepoInspection, SelectedEngineerAction, VerificationReport,
     execute_engineer_action, inspect_workspace, persist_engineer_loop_artifacts,
-    run_optional_review, select_engineer_action, verify_engineer_action,
+    run_optional_review, select_engineer_action, verify_engineer_action, ExecutedEngineerAction,
+    RepoInspection, SelectedEngineerAction, VerificationReport,
 };
 use simard::runtime::RuntimeTopology;
 use simard::terminal_engineer_bridge::TerminalBridgeContext;
@@ -37,7 +37,9 @@ fn die(msg: impl AsRef<str>) -> ExitCode {
 }
 
 fn arg(args: &[String], flag: &str) -> Option<String> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1).cloned())
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1).cloned())
 }
 
 fn require(args: &[String], flag: &str) -> Result<String, String> {
@@ -54,7 +56,9 @@ fn main() -> ExitCode {
     let argv: Vec<String> = env::args().collect();
     let subcommand = match argv.get(1) {
         Some(s) => s.clone(),
-        None => return die("usage: simard-engineer-step <inspect|select|execute|verify|review|persist> [flags...]"),
+        None => return die(
+            "usage: simard-engineer-step <inspect|select|execute|verify|review|persist> [flags...]",
+        ),
     };
     let args = &argv[2..].to_vec();
 
@@ -94,8 +98,8 @@ fn cmd_select(args: &[String]) -> Result<(), String> {
 fn cmd_execute(args: &[String]) -> Result<(), String> {
     let repo_root = PathBuf::from(require(args, "--repo-root")?);
     let selected_json = require(args, "--selected-json")?;
-    let selected: SelectedEngineerAction = serde_json::from_str(&selected_json)
-        .map_err(|e| format!("parse selected-json: {e}"))?;
+    let selected: SelectedEngineerAction =
+        serde_json::from_str(&selected_json).map_err(|e| format!("parse selected-json: {e}"))?;
     let executed = execute_engineer_action(&repo_root, selected)
         .map_err(|e| format!("execute_engineer_action failed: {e}"))?;
     print_json(&executed)
@@ -107,8 +111,8 @@ fn cmd_verify(args: &[String]) -> Result<(), String> {
     let state_root = PathBuf::from(require(args, "--state-root")?);
     let inspection: RepoInspection = serde_json::from_str(&inspection_json)
         .map_err(|e| format!("parse inspection-json: {e}"))?;
-    let action: ExecutedEngineerAction = serde_json::from_str(&action_json)
-        .map_err(|e| format!("parse action-json: {e}"))?;
+    let action: ExecutedEngineerAction =
+        serde_json::from_str(&action_json).map_err(|e| format!("parse action-json: {e}"))?;
     let report = verify_engineer_action(&inspection, &action, &state_root)
         .map_err(|e| format!("verify_engineer_action failed: {e}"))?;
     print_json(&report)
@@ -119,8 +123,8 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
     let action_json = require(args, "--action-json")?;
     let inspection: RepoInspection = serde_json::from_str(&inspection_json)
         .map_err(|e| format!("parse inspection-json: {e}"))?;
-    let action: ExecutedEngineerAction = serde_json::from_str(&action_json)
-        .map_err(|e| format!("parse action-json: {e}"))?;
+    let action: ExecutedEngineerAction =
+        serde_json::from_str(&action_json).map_err(|e| format!("parse action-json: {e}"))?;
     run_optional_review(&inspection, &action)
         .map_err(|e| format!("run_optional_review failed: {e}"))?;
     println!("{{\"status\":\"ok\"}}");
@@ -139,15 +143,14 @@ fn cmd_persist(args: &[String]) -> Result<(), String> {
         .map_err(|e| format!("parse topology '{topology_str}': {e}"))?;
     let inspection: RepoInspection = serde_json::from_str(&inspection_json)
         .map_err(|e| format!("parse inspection-json: {e}"))?;
-    let action: ExecutedEngineerAction = serde_json::from_str(&action_json)
-        .map_err(|e| format!("parse action-json: {e}"))?;
+    let action: ExecutedEngineerAction =
+        serde_json::from_str(&action_json).map_err(|e| format!("parse action-json: {e}"))?;
     let verification: VerificationReport = serde_json::from_str(&verification_json)
         .map_err(|e| format!("parse verification-json: {e}"))?;
     let bridge_context: Option<TerminalBridgeContext> = match arg(args, "--terminal-bridge-json") {
-        Some(s) if !s.is_empty() && s != "null" => Some(
-            serde_json::from_str(&s)
-                .map_err(|e| format!("parse terminal-bridge-json: {e}"))?,
-        ),
+        Some(s) if !s.is_empty() && s != "null" => {
+            Some(serde_json::from_str(&s).map_err(|e| format!("parse terminal-bridge-json: {e}"))?)
+        }
         _ => None,
     };
 

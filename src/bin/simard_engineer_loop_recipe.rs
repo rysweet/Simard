@@ -11,7 +11,9 @@ use std::env;
 use std::process::{Command, ExitCode};
 
 fn arg(args: &[String], flag: &str) -> Option<String> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1).cloned())
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1).cloned())
 }
 
 fn main() -> ExitCode {
@@ -41,17 +43,22 @@ fn main() -> ExitCode {
         }
     };
 
-    let recipe_path = env::var("SIMARD_ENGINEER_RECIPE_PATH").unwrap_or_else(|_| {
-        "amplifier-bundle/recipes/simard-engineer-loop.yaml".to_string()
-    });
+    let recipe_path = env::var("SIMARD_ENGINEER_RECIPE_PATH")
+        .unwrap_or_else(|_| "amplifier-bundle/recipes/simard-engineer-loop.yaml".to_string());
 
     let status = Command::new("amplihack")
         .args([
-            "recipe", "run", &recipe_path,
-            "-c", &format!("workspace_root={workspace}"),
-            "-c", &format!("objective={objective}"),
-            "-c", &format!("topology={topology}"),
-            "-c", &format!("state_root={state_root}"),
+            "recipe",
+            "run",
+            &recipe_path,
+            "-c",
+            &format!("workspace_root={workspace}"),
+            "-c",
+            &format!("objective={objective}"),
+            "-c",
+            &format!("topology={topology}"),
+            "-c",
+            &format!("state_root={state_root}"),
             "--verbose",
         ])
         .status();
