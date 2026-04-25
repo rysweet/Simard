@@ -137,17 +137,14 @@ pub fn observe(state: &mut OodaState, bridges: &OodaBridges) -> SimardResult<Obs
 /// return None (no watchdog signal — but observe()'s usual logging
 /// will surface the underlying failure).
 fn run_eval_watchdog() -> Option<String> {
-    use crate::eval_watchdog::{
-        WatchdogConfig, collect_recent_records, detect_dead_signal,
-    };
+    use crate::eval_watchdog::{WatchdogConfig, collect_recent_records, detect_dead_signal};
     let history_path = std::path::Path::new("gym_history.db");
     if !history_path.exists() {
         return None;
     }
     let history = ScoreHistory::open(history_path).ok()?;
     let cfg = WatchdogConfig::default();
-    let recs = collect_recent_records(&history, "progressive", cfg.window_per_scenario)
-        .ok()?;
+    let recs = collect_recent_records(&history, "progressive", cfg.window_per_scenario).ok()?;
     detect_dead_signal(&recs, &cfg).map(|r| r.to_string())
 }
 

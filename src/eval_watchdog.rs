@@ -156,9 +156,10 @@ pub fn detect_dead_signal(
     // non-zero value. (Multiple distinct scenarios producing the exact
     // same score across multiple runs is statistically improbable.)
     let first_score = tails[0][0].score;
-    let all_same = tails
-        .iter()
-        .all(|v| v.iter().all(|r| (r.score - first_score).abs() < f64::EPSILON));
+    let all_same = tails.iter().all(|v| {
+        v.iter()
+            .all(|r| (r.score - first_score).abs() < f64::EPSILON)
+    });
     if all_same && first_score != 0.0 {
         return Some(DeadSignalReason::SuspiciouslyIdentical {
             score: first_score,

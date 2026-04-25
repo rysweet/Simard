@@ -17,7 +17,7 @@ pub(crate) fn make_minimal_observation() -> Observation {
         memory_stats: CognitiveStatistics::default(),
         pending_improvements: vec![],
         environment: EnvironmentSnapshot::default(),
-    eval_watchdog: None,
+        eval_watchdog: None,
     }
 }
 

@@ -738,15 +738,31 @@ fn run_gh(args: &[&str]) -> Result<String, String> {
 fn find_duplicate_open_issue(repo: &str, title: &str) -> Result<Option<u64>, String> {
     let search = format!("\"{}\" in:title", title.replace('"', "\\\""));
     let json = run_gh(&[
-        "issue", "list", "--repo", repo, "--state", "open",
-        "--search", &search, "--json", "number,title", "--limit", "10",
+        "issue",
+        "list",
+        "--repo",
+        repo,
+        "--state",
+        "open",
+        "--search",
+        &search,
+        "--json",
+        "number,title",
+        "--limit",
+        "10",
     ])?;
     #[derive(serde::Deserialize)]
-    struct Hit { number: u64, title: String }
-    let hits: Vec<Hit> = serde_json::from_str(&json)
-        .map_err(|e| format!("dedup parse failed: {e}"))?;
+    struct Hit {
+        number: u64,
+        title: String,
+    }
+    let hits: Vec<Hit> =
+        serde_json::from_str(&json).map_err(|e| format!("dedup parse failed: {e}"))?;
     let target = title.trim();
-    Ok(hits.into_iter().find(|h| h.title.trim() == target).map(|h| h.number))
+    Ok(hits
+        .into_iter()
+        .find(|h| h.title.trim() == target)
+        .map(|h| h.number))
 }
 
 fn dispatch_gh_issue_create(
@@ -1518,7 +1534,9 @@ mod makework_title_tests {
         assert!(!is_makework_title(
             "P4: cap /tmp/simard-engineer-target at 10 GB"
         ));
-        assert!(!is_makework_title("refactor scheduler to use bounded queue"));
+        assert!(!is_makework_title(
+            "refactor scheduler to use bounded queue"
+        ));
         // Title that *contains* the word "verify" but isn't a make-work
         // pattern must still pass.
         assert!(!is_makework_title("Add tests to verify rate limiter"));

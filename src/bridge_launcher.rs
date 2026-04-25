@@ -131,9 +131,7 @@ pub fn launch_all_bridges(
     let knowledge = match knowledge_result {
         Ok(b) => Some(b),
         Err(e) => {
-            eprintln!(
-                "[simard] knowledge bridge launch FAILED — domain knowledge disabled: {e}"
-            );
+            eprintln!("[simard] knowledge bridge launch FAILED — domain knowledge disabled: {e}");
             None
         }
     };
@@ -141,9 +139,7 @@ pub fn launch_all_bridges(
     let gym = match gym_result {
         Ok(b) => Some(b),
         Err(e) => {
-            eprintln!(
-                "[simard] gym bridge launch FAILED — benchmarks disabled: {e}"
-            );
+            eprintln!("[simard] gym bridge launch FAILED — benchmarks disabled: {e}");
             None
         }
     };
