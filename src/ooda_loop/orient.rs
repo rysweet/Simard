@@ -162,7 +162,7 @@ mod tests {
             memory_stats: CognitiveStatistics::default(),
             pending_improvements: Vec::new(),
             environment: env,
-        eval_watchdog: None,
+            eval_watchdog: None,
         }
     }
 
@@ -365,7 +365,7 @@ mod tests {
             },
             pending_improvements: Vec::new(),
             environment: EnvironmentSnapshot::default(),
-        eval_watchdog: None,
+            eval_watchdog: None,
         };
         let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
         assert!(
@@ -386,7 +386,7 @@ mod tests {
             },
             pending_improvements: Vec::new(),
             environment: EnvironmentSnapshot::default(),
-        eval_watchdog: None,
+            eval_watchdog: None,
         };
         let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
         assert!(
@@ -404,7 +404,7 @@ mod tests {
             memory_stats: CognitiveStatistics::default(),
             pending_improvements: Vec::new(),
             environment: EnvironmentSnapshot::default(),
-        eval_watchdog: None,
+            eval_watchdog: None,
         };
         let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
         assert!(
@@ -422,7 +422,7 @@ mod tests {
             memory_stats: CognitiveStatistics::default(),
             pending_improvements: Vec::new(),
             environment: EnvironmentSnapshot::default(),
-        eval_watchdog: None,
+            eval_watchdog: None,
         };
         let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
         assert!(

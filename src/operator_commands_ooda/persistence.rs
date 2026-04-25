@@ -207,7 +207,7 @@ mod tests {
                 },
                 pending_improvements: vec![],
                 environment: EnvironmentSnapshot::default(),
-            eval_watchdog: None,
+                eval_watchdog: None,
             },
             priorities: vec![Priority {
                 goal_id: "g1".to_string(),
