@@ -10,6 +10,7 @@
 //! ## Usage
 //!
 //! ```text
+//! simard-ooda-step observe   --state-json <P> --state-root <DIR>
 //! simard-ooda-step orient    --state-json <P> --observation-json <P>
 //! simard-ooda-step decide    --priorities-json <P> [--config-json <P>]
 //! simard-ooda-step review    --outcomes-json <P> [--act-elapsed-millis <N>]
@@ -21,25 +22,27 @@
 //! that take a path expect a path to a file containing JSON.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
 use simard::ooda_loop::{
-    decide, orient, promote_from_backlog, review_outcomes, ActionOutcome, Observation, OodaConfig,
-    OodaStateSnapshot, PlannedAction, Priority,
+    bridges_from_state_root, decide, observe, orient, promote_from_backlog, review_outcomes,
+    ActionOutcome, Observation, OodaConfig, OodaStateSnapshot, PlannedAction, Priority,
 };
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let result = match args.get(1).map(String::as_str) {
+        Some("observe") => parse_flags(&args[2..]).and_then(cmd_observe),
         Some("orient") => parse_flags(&args[2..]).and_then(cmd_orient),
         Some("decide") => parse_flags(&args[2..]).and_then(cmd_decide),
         Some("review") => parse_flags(&args[2..]).and_then(cmd_review),
         Some("curate") => parse_flags(&args[2..]).and_then(cmd_curate),
         Some(other) => Err(format!("unknown subcommand: {other}")),
         None => Err(
-            "missing subcommand: expected one of orient | decide | review | curate".to_string(),
+            "missing subcommand: expected one of observe | orient | decide | review | curate"
+                .to_string(),
         ),
     };
     match result {
@@ -137,4 +140,24 @@ fn cmd_curate(flags: HashMap<String, String>) -> Result<String, String> {
         "snapshot": OodaStateSnapshot::from(&state),
     });
     serde_json::to_string(&result).map_err(|e| format!("serialize curate result: {e}"))
+}
+
+/// Observe phase: bridge-dependent. Loads or builds an `OodaState` snapshot,
+/// connects bridges from `--state-root`, runs `observe`, and returns the
+/// `Observation` plus the updated snapshot (since `observe` mutates state —
+/// it consumes pending review_improvements into the observation).
+fn cmd_observe(flags: HashMap<String, String>) -> Result<String, String> {
+    let state_path = Path::new(require(&flags, "state-json")?);
+    let state_root = PathBuf::from(require(&flags, "state-root")?);
+    let snapshot: OodaStateSnapshot = read_json(state_path)?;
+    let mut state = snapshot.into_state();
+    let bridges = bridges_from_state_root(&state_root)
+        .map_err(|e| format!("bridge_factory failed: {e}"))?;
+    let observation = observe(&mut state, &bridges)
+        .map_err(|e| format!("observe phase failed: {e}"))?;
+    let result = serde_json::json!({
+        "observation": observation,
+        "snapshot": OodaStateSnapshot::from(&state),
+    });
+    serde_json::to_string(&result).map_err(|e| format!("serialize observe result: {e}"))
 }

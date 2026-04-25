@@ -300,6 +300,50 @@ fn parity_curate_archives_completed_goals() {
     assert_eq!(snap_back.active_goals.active[0].id, "g-active");
 }
 
+// --- observe subcommand surface (live execution requires bridges and is
+//      exercised by the daemon path; here we only verify the helper bin
+//      surface accepts the right flags and rejects malformed invocations) -
+
+#[test]
+fn observe_rejects_missing_state_json() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (code, _stdout, stderr) = run_bin(&[
+        "observe",
+        "--state-root",
+        tmp.path().to_str().unwrap(),
+    ]);
+    assert_eq!(code, 2);
+    let parsed: serde_json::Value = serde_json::from_str(stderr.trim()).expect("json envelope");
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("state-json"),
+        "expected --state-json error: {parsed}"
+    );
+}
+
+#[test]
+fn observe_rejects_missing_state_root() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let snap = snapshot_with_goals(vec![]);
+    let snap_path = write_json(tmp.path(), "snap.json", &snap);
+    let (code, _stdout, stderr) = run_bin(&[
+        "observe",
+        "--state-json",
+        snap_path.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 2);
+    let parsed: serde_json::Value = serde_json::from_str(stderr.trim()).expect("json envelope");
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("state-root"),
+        "expected --state-root error: {parsed}"
+    );
+}
+
 // --- error envelope -------------------------------------------------------
 
 #[test]
