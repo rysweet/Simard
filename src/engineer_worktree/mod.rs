@@ -39,10 +39,68 @@ mod tests;
 pub const WORKTREES_SUBDIR: &str = "engineer-worktrees";
 
 /// Filename of the per-worktree liveness sentinel (issue #1213). Contains the
-/// PID of the process that allocated the worktree. Used by
-/// [`sweep_orphaned_worktrees`] to skip live worktrees whose git registration
-/// transiently disappeared (e.g. after a `git worktree prune` race).
+/// PID of the process that allocated the worktree, plus its starttime read
+/// from `/proc/<pid>/stat` field 22 (issue #1238). The starttime guards
+/// against the daemon-restart-with-recycled-PID race: after a daemon restart,
+/// the new daemon's PID is unrelated to the old one, but Linux can recycle
+/// PIDs over time. Recording (PID, starttime) lets us distinguish "the
+/// original claimant is still running" from "a different process happens
+/// to occupy that PID slot now."
+///
+/// File format (line-separated, trailing newline tolerated):
+///   line 1: `<pid>` (decimal i32, required)
+///   line 2: `<starttime>` (u64 jiffies from /proc/<pid>/stat field 22,
+///           optional — absent in pre-#1238 sentinels)
 pub const ENGINEER_CLAIM_FILE: &str = ".simard-engineer-claim";
+
+/// Read field 22 (starttime in jiffies since boot) from `/proc/<pid>/stat`.
+/// Returns `None` if the file can't be read or is malformed.
+///
+/// `/proc/<pid>/stat` format: `pid (comm) state ppid ...` where `comm` may
+/// itself contain spaces and parentheses. We must therefore find the LAST
+/// `)` and split the remainder by whitespace; field 22 (starttime) is the
+/// 20th token AFTER `comm` (state=1, ppid=2, ..., starttime=20).
+#[cfg(unix)]
+fn read_pid_starttime(pid: i32) -> Option<u64> {
+    if pid <= 0 {
+        return None;
+    }
+    let raw = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let close_paren = raw.rfind(')')?;
+    let after = raw.get(close_paren + 1..)?.trim_start();
+    // After `comm`: state(1) ppid(2) pgrp(3) session(4) tty_nr(5) tpgid(6)
+    // flags(7) minflt(8) cminflt(9) majflt(10) cmajflt(11) utime(12) stime(13)
+    // cutime(14) cstime(15) priority(16) nice(17) num_threads(18)
+    // itrealvalue(19) starttime(20)
+    let mut tokens = after.split_ascii_whitespace();
+    let starttime = tokens.nth(19)?;
+    starttime.parse().ok()
+}
+
+#[cfg(not(unix))]
+fn read_pid_starttime(_pid: i32) -> Option<u64> {
+    None
+}
+
+/// Format the contents written into the engineer-claim sentinel file.
+fn format_engineer_claim(pid: u32) -> String {
+    match read_pid_starttime(pid as i32) {
+        Some(st) => format!("{pid}\n{st}\n"),
+        // /proc unavailable (test sandboxes, non-Linux): fall back to PID-only.
+        // Read path treats absent starttime as "unverifiable", but kill(pid,0)
+        // alone is still better than no claim.
+        None => format!("{pid}\n"),
+    }
+}
+
+/// Parsed engineer-claim sentinel contents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EngineerClaim {
+    pid: i32,
+    /// Starttime in /proc jiffies, if recorded (None for pre-#1238 sentinels
+    /// or platforms without /proc).
+    starttime: Option<u64>,
+}
 
 /// Probe whether `pid` refers to a running process via `kill(pid, 0)`. Returns
 /// `true` if the process exists (regardless of permission to signal it).
@@ -77,13 +135,56 @@ pub fn is_pid_alive_public(pid: i32) -> bool {
     is_pid_alive(pid)
 }
 
-/// Read the engineer-claim PID out of `worktree_dir/.simard-engineer-claim`.
+/// Public wrapper over `/proc/<pid>/stat` starttime lookup. Used by
+/// `ooda_actions::advance_goal` so it can do the same starttime-validated
+/// claim check as the sweep path.
+pub fn read_pid_starttime_public(pid: i32) -> Option<u64> {
+    read_pid_starttime(pid)
+}
+
+/// Read the engineer-claim sentinel out of `worktree_dir/.simard-engineer-claim`.
 /// Returns `None` if the file is missing, empty, malformed, or unreadable.
 /// Tolerant of all I/O errors — the caller treats `None` as "no claim".
-fn read_engineer_claim(worktree_dir: &Path) -> Option<i32> {
+fn read_engineer_claim_full(worktree_dir: &Path) -> Option<EngineerClaim> {
     let path = worktree_dir.join(ENGINEER_CLAIM_FILE);
     let raw = fs::read_to_string(&path).ok()?;
-    raw.trim().parse::<i32>().ok()
+    let mut lines = raw.lines();
+    let pid: i32 = lines.next()?.trim().parse().ok()?;
+    let starttime = lines.next().and_then(|s| s.trim().parse::<u64>().ok());
+    Some(EngineerClaim { pid, starttime })
+}
+
+/// Back-compat thin wrapper for callers that only care about the PID.
+#[allow(dead_code)]
+fn read_engineer_claim(worktree_dir: &Path) -> Option<i32> {
+    read_engineer_claim_full(worktree_dir).map(|c| c.pid)
+}
+
+/// Decide whether a parsed claim still names the original allocating process.
+///
+/// Returns `true` only if BOTH:
+///   1. `kill(pid, 0)` reports the PID is alive
+///   2. The recorded starttime matches the live process's current starttime
+///      (or the claim has no starttime, in which case we fall back to PID-only)
+///
+/// The starttime check defends against the daemon-restart-with-recycled-PID
+/// false positive: after a daemon restart the old PID may eventually be
+/// reused by an unrelated process, but its starttime will differ.
+fn claim_is_live(claim: &EngineerClaim) -> bool {
+    if !is_pid_alive(claim.pid) {
+        return false;
+    }
+    match claim.starttime {
+        Some(recorded) => match read_pid_starttime(claim.pid) {
+            Some(current) => current == recorded,
+            // Process exists but we can't read its stat — be conservative
+            // and treat as NOT live (better to occasionally re-allocate a
+            // worktree than to nuke a live engineer's cwd).
+            None => false,
+        },
+        // Pre-#1238 sentinel: no starttime recorded. Fall back to PID-only.
+        None => true,
+    }
 }
 
 /// Maximum length of a `goal_id` accepted by [`EngineerWorktree::allocate`].
@@ -256,13 +357,15 @@ impl EngineerWorktree {
             });
         }
 
-        // 5. Write the per-worktree liveness sentinel (issue #1213). If the
-        //    sweep ever runs against this worktree while git's registration
-        //    is transiently missing, the live PID guard prevents the
-        //    cwd-deletion-under-the-engineer's-feet bug.
+        // 5. Write the per-worktree liveness sentinel (issue #1213, refined
+        //    in #1238). If the sweep ever runs against this worktree while
+        //    git's registration is transiently missing, the live PID +
+        //    starttime guard prevents the cwd-deletion-under-the-engineer's-
+        //    feet bug. Recording starttime alongside the PID closes the
+        //    daemon-restart-with-recycled-PID race.
         let claim_path = dir.join(ENGINEER_CLAIM_FILE);
         let claim_pid = std::process::id();
-        if let Err(e) = fs::write(&claim_path, format!("{claim_pid}\n")) {
+        if let Err(e) = fs::write(&claim_path, format_engineer_claim(claim_pid)) {
             // Sentinel write failure is non-fatal: the AtomicBool guard plus
             // the existing canonical-prefix safety still protect us. Log loud
             // so the regression is visible.
@@ -508,18 +611,22 @@ pub fn sweep_orphaned_worktrees(
         if registered.contains(&canonical) {
             continue;
         }
-        // Issue #1213: skip dirs whose engineer-claim sentinel names a live
-        // PID. Git's `worktree prune` can transiently drop a registration
-        // (observed during concurrent worktree mutations) and we must not
-        // delete a worktree out from under a running engineer subprocess.
-        if let Some(pid) = read_engineer_claim(&canonical)
-            && is_pid_alive(pid)
+        // Issue #1213 / #1238: skip dirs whose engineer-claim sentinel
+        // names a live PID whose starttime still matches. Git's
+        // `worktree prune` can transiently drop a registration (observed
+        // during concurrent worktree mutations) and we must not delete
+        // a worktree out from under a running engineer subprocess.
+        // Starttime validation prevents the recycled-PID false positive
+        // after a daemon restart.
+        if let Some(claim) = read_engineer_claim_full(&canonical)
+            && claim_is_live(&claim)
         {
             tracing::debug!(
                 target: "simard::engineer_worktree",
                 worktree = %canonical.display(),
-                pid,
-                "skipping unregistered worktree with live engineer-claim PID",
+                pid = claim.pid,
+                starttime = ?claim.starttime,
+                "skipping unregistered worktree with live engineer-claim",
             );
             report.skipped_live_dirs.push(canonical);
             continue;

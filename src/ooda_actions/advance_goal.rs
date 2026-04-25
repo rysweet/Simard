@@ -334,13 +334,27 @@ pub(crate) fn find_live_engineer_for_goal(
             Ok(s) => s,
             Err(_) => continue,
         };
-        let pid: i32 = match raw.trim().parse() {
-            Ok(p) => p,
-            Err(_) => continue,
+        // Sentinel format (issue #1238): `<pid>\n<starttime>\n` (starttime
+        // optional for backwards compat with pre-#1238 sentinels).
+        let mut lines = raw.lines();
+        let pid: i32 = match lines.next().and_then(|s| s.trim().parse().ok()) {
+            Some(p) => p,
+            None => continue,
         };
-        if crate::engineer_worktree::is_pid_alive_public(pid) {
-            return Some(path);
+        let recorded_starttime: Option<u64> = lines.next().and_then(|s| s.trim().parse().ok());
+        if !crate::engineer_worktree::is_pid_alive_public(pid) {
+            continue;
         }
+        // Starttime guard: if the sentinel records a starttime, it must
+        // still match the live process. Mismatch → recycled PID, treat as
+        // dead. Pre-#1238 sentinels have no starttime → fall back to PID-only.
+        if let Some(recorded) = recorded_starttime {
+            match crate::engineer_worktree::read_pid_starttime_public(pid) {
+                Some(current) if current == recorded => {}
+                _ => continue,
+            }
+        }
+        return Some(path);
     }
     None
 }
