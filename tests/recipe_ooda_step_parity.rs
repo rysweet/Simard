@@ -14,12 +14,12 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use simard::memory_cognitive::CognitiveStatistics;
 use simard::goal_curation::{ActiveGoal, GoalBoard, GoalProgress};
 use simard::improvements::ImprovementDirective;
+use simard::memory_cognitive::CognitiveStatistics;
 use simard::ooda_loop::{
-    decide, orient, review_outcomes, ActionKind, ActionOutcome, EnvironmentSnapshot, Observation,
-    OodaConfig, OodaStateSnapshot, PlannedAction, Priority,
+    ActionKind, ActionOutcome, EnvironmentSnapshot, Observation, OodaConfig, OodaStateSnapshot,
+    PlannedAction, Priority, decide, orient, review_outcomes,
 };
 use simard::ooda_loop::{OodaPhase, OodaState};
 
@@ -36,7 +36,10 @@ fn write_json<T: serde::Serialize>(dir: &Path, name: &str, value: &T) -> std::pa
 }
 
 fn run_bin(args: &[&str]) -> (i32, String, String) {
-    let out = Command::new(helper_bin()).args(args).output().expect("spawn");
+    let out = Command::new(helper_bin())
+        .args(args)
+        .output()
+        .expect("spawn");
     (
         out.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&out.stdout).to_string(),
@@ -78,8 +81,10 @@ fn make_goal(id: &str, status: GoalProgress) -> ActiveGoal {
 
 #[test]
 fn parity_orient_with_blocked_goal() {
-    let snapshot =
-        snapshot_with_goals(vec![make_goal("g1", GoalProgress::Blocked("waiting".into()))]);
+    let snapshot = snapshot_with_goals(vec![make_goal(
+        "g1",
+        GoalProgress::Blocked("waiting".into()),
+    )]);
     let observation = empty_observation();
 
     let direct = orient(
@@ -200,11 +205,7 @@ fn parity_decide_skips_zero_urgency() {
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let pri_path = write_json(tmp.path(), "pri.json", &priorities);
-    let (code, stdout, _) = run_bin(&[
-        "decide",
-        "--priorities-json",
-        pri_path.to_str().unwrap(),
-    ]);
+    let (code, stdout, _) = run_bin(&["decide", "--priorities-json", pri_path.to_str().unwrap()]);
     assert_eq!(code, 0);
     let recipe: Vec<PlannedAction> = serde_json::from_str(stdout.trim()).expect("parse");
     assert_eq!(recipe.len(), 1);
@@ -252,11 +253,7 @@ fn parity_review_no_outcomes_yields_no_directives() {
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let out_path = write_json(tmp.path(), "out.json", &outcomes);
-    let (code, stdout, _) = run_bin(&[
-        "review",
-        "--outcomes-json",
-        out_path.to_str().unwrap(),
-    ]);
+    let (code, stdout, _) = run_bin(&["review", "--outcomes-json", out_path.to_str().unwrap()]);
     assert_eq!(code, 0);
     let recipe: Vec<ImprovementDirective> = serde_json::from_str(stdout.trim()).expect("parse");
     assert!(recipe.is_empty());
@@ -273,20 +270,14 @@ fn parity_curate_archives_completed_goals() {
 
     // Direct: import the goal_curation function ourselves
     let mut state_direct = snapshot.clone().into_state();
-    let archived_direct =
-        simard::goal_curation::archive_completed(&mut state_direct.active_goals);
-    let archived_direct_ids: Vec<String> =
-        archived_direct.iter().map(|g| g.id.clone()).collect();
+    let archived_direct = simard::goal_curation::archive_completed(&mut state_direct.active_goals);
+    let archived_direct_ids: Vec<String> = archived_direct.iter().map(|g| g.id.clone()).collect();
     assert_eq!(archived_direct_ids, vec!["g-done"]);
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let snap_path = write_json(tmp.path(), "snap.json", &snapshot);
 
-    let (code, stdout, stderr) = run_bin(&[
-        "curate",
-        "--state-json",
-        snap_path.to_str().unwrap(),
-    ]);
+    let (code, stdout, stderr) = run_bin(&["curate", "--state-json", snap_path.to_str().unwrap()]);
     assert_eq!(code, 0, "curate failed: {stderr}");
     let result: serde_json::Value = serde_json::from_str(stdout.trim()).expect("parse");
     let archived_recipe: Vec<String> =
@@ -354,11 +345,8 @@ fn act_rejects_missing_actions_json() {
 #[test]
 fn observe_rejects_missing_state_json() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let (code, _stdout, stderr) = run_bin(&[
-        "observe",
-        "--state-root",
-        tmp.path().to_str().unwrap(),
-    ]);
+    let (code, _stdout, stderr) =
+        run_bin(&["observe", "--state-root", tmp.path().to_str().unwrap()]);
     assert_eq!(code, 2);
     let parsed: serde_json::Value = serde_json::from_str(stderr.trim()).expect("json envelope");
     assert!(
@@ -375,11 +363,8 @@ fn observe_rejects_missing_state_root() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let snap = snapshot_with_goals(vec![]);
     let snap_path = write_json(tmp.path(), "snap.json", &snap);
-    let (code, _stdout, stderr) = run_bin(&[
-        "observe",
-        "--state-json",
-        snap_path.to_str().unwrap(),
-    ]);
+    let (code, _stdout, stderr) =
+        run_bin(&["observe", "--state-json", snap_path.to_str().unwrap()]);
     assert_eq!(code, 2);
     let parsed: serde_json::Value = serde_json::from_str(stderr.trim()).expect("json envelope");
     assert!(

@@ -385,9 +385,7 @@ mod tests {
         state.cycle_start_epoch = 1_700_000_000;
         state.last_cycle_summary = Some("prior summary".to_string());
         state.last_cycle_duration_secs = Some(42);
-        state
-            .goal_failure_counts
-            .insert("goal-snap".to_string(), 2);
+        state.goal_failure_counts.insert("goal-snap".to_string(), 2);
         state
     }
 
@@ -410,8 +408,7 @@ mod tests {
         let state = populated_state();
         let snap = OodaStateSnapshot::from(&state);
         let json = serde_json::to_string(&snap).expect("serialize snapshot");
-        let parsed: OodaStateSnapshot =
-            serde_json::from_str(&json).expect("deserialize snapshot");
+        let parsed: OodaStateSnapshot = serde_json::from_str(&json).expect("deserialize snapshot");
 
         let mut restored = OodaState::new(GoalBoard::new());
         parsed.apply_to(&mut restored);
