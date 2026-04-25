@@ -29,6 +29,7 @@ pub mod engineer_loop;
 pub mod engineer_plan;
 pub mod engineer_worktree;
 pub mod error;
+pub mod eval_watchdog;
 pub mod evidence;
 pub mod git_guardrails;
 pub mod goal_curation;

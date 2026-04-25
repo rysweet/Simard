@@ -90,6 +90,7 @@ fn persist_cycle_to_memory_with_open_issues() {
             open_issues: vec!["issue-1".to_string(), "issue-2".to_string()],
             recent_commits: vec!["abc123".to_string()],
         },
+        eval_watchdog: None,
     };
     super::super::persistence::persist_cycle_to_memory(&bridges, &report);
 }

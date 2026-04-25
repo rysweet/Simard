@@ -17,6 +17,7 @@ pub(crate) fn make_minimal_observation() -> Observation {
         memory_stats: CognitiveStatistics::default(),
         pending_improvements: vec![],
         environment: EnvironmentSnapshot::default(),
+    eval_watchdog: None,
     }
 }
 
@@ -54,6 +55,7 @@ pub(crate) fn make_report_with_goals_and_outcomes() -> CycleReport {
                 open_issues: vec!["issue-1".to_string()],
                 recent_commits: vec![],
             },
+            eval_watchdog: None,
         },
         priorities: vec![Priority {
             goal_id: "goal-1".to_string(),

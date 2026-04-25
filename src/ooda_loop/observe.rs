@@ -103,13 +103,52 @@ pub fn observe(state: &mut OodaState, bridges: &OodaBridges) -> SimardResult<Obs
 
     let pending_improvements = collect_pending_improvements(state, &gym_health);
 
+    // ── Eval watchdog ────────────────────────────────────────────────
+    // Detect dead signal in the gym progressive suite. This MUST run
+    // every cycle — the whole point is to fire when the loop is
+    // otherwise reporting "✓ completed" while every L-test scores 0.
+    let eval_watchdog = run_eval_watchdog();
+    if let Some(ref reason) = eval_watchdog {
+        // ERROR level. Use stderr (journal records all stderr at the
+        // service's default level; operators grepping for "EVAL
+        // WATCHDOG" must be able to find this).
+        eprintln!(
+            "[simard] ERROR EVAL WATCHDOG TRIPPED — {reason} \
+             — refusing to trust eval-derived priorities this cycle. \
+             Investigate amplihack LLM router, gym bridge, and Copilot \
+             auth state. Cycle will skip eval-driven actions."
+        );
+    }
+
     Ok(Observation {
         goal_statuses,
         gym_health,
         memory_stats,
         pending_improvements,
         environment,
+        eval_watchdog,
     })
+}
+
+/// Run the eval watchdog against the on-disk gym score history.
+///
+/// Returns Some(reason_text) when a dead signal is detected. Degrades
+/// honestly: if the history db doesn't exist or can't be opened we
+/// return None (no watchdog signal — but observe()'s usual logging
+/// will surface the underlying failure).
+fn run_eval_watchdog() -> Option<String> {
+    use crate::eval_watchdog::{
+        WatchdogConfig, collect_recent_records, detect_dead_signal,
+    };
+    let history_path = std::path::Path::new("gym_history.db");
+    if !history_path.exists() {
+        return None;
+    }
+    let history = ScoreHistory::open(history_path).ok()?;
+    let cfg = WatchdogConfig::default();
+    let recs = collect_recent_records(&history, "progressive", cfg.window_per_scenario)
+        .ok()?;
+    detect_dead_signal(&recs, &cfg).map(|r| r.to_string())
 }
 
 /// Collect pending improvement signals from gym regressions, unprocessed

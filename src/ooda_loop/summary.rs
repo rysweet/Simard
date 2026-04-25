@@ -49,6 +49,7 @@ mod tests {
                 memory_stats: CognitiveStatistics::default(),
                 pending_improvements: Vec::new(),
                 environment: EnvironmentSnapshot::default(),
+            eval_watchdog: None,
             },
             priorities: vec![Priority {
                 goal_id: "g1".to_string(),
@@ -92,6 +93,7 @@ mod tests {
                     open_issues: vec!["issue 1".to_string()],
                     recent_commits: Vec::new(),
                 },
+                eval_watchdog: None,
             },
             priorities: Vec::new(),
             planned_actions: Vec::new(),
@@ -112,6 +114,7 @@ mod tests {
                 memory_stats: CognitiveStatistics::default(),
                 pending_improvements: Vec::new(),
                 environment: EnvironmentSnapshot::default(),
+            eval_watchdog: None,
             },
             priorities: Vec::new(),
             planned_actions: Vec::new(),

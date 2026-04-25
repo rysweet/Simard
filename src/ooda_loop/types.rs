@@ -121,6 +121,16 @@ pub struct Observation {
     pub pending_improvements: Vec<ImprovementCycle>,
     /// Local environment state for goal assessment.
     pub environment: EnvironmentSnapshot,
+    /// Set when the eval watchdog has detected a dead signal — i.e. the
+    /// gym progressive suite has been silently producing zeros (or
+    /// pixel-identical scores) across multiple distinct scenarios for
+    /// long enough that the OODA loop must NOT trust further eval-derived
+    /// decisions until an operator investigates.
+    ///
+    /// Reason text is logged at ERROR level by observe(); orient pushes
+    /// a `__eval_watchdog__` priority with maximum urgency so the loop
+    /// surfaces the failure instead of marching past it.
+    pub eval_watchdog: Option<String>,
 }
 
 /// A ranked priority produced during the Orient phase.

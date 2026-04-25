@@ -61,6 +61,7 @@ fn collect_pending_improvements_detects_gym_regression() {
         memory_stats: CognitiveStatistics::default(),
         pending_improvements: Vec::new(),
         environment: EnvironmentSnapshot::default(),
+    eval_watchdog: None,
     });
 
     let result = collect_pending_improvements(&mut state, &Some(current_score.clone()));
@@ -96,6 +97,7 @@ fn collect_pending_improvements_no_regression_when_scores_stable() {
         memory_stats: CognitiveStatistics::default(),
         pending_improvements: Vec::new(),
         environment: EnvironmentSnapshot::default(),
+    eval_watchdog: None,
     });
 
     let result = collect_pending_improvements(&mut state, &Some(current_score));
