@@ -1123,7 +1123,24 @@ async fn workboard() -> Json<Value> {
     // --- 2. Goals with enriched status ---
     let goal_path = state_root.join("goal_records.json");
     let goal_content = std::fs::read_to_string(&goal_path).unwrap_or_default();
-    let goal_board = serde_json::from_str::<GoalBoard>(&goal_content).ok();
+    let goal_board = if goal_content.trim().is_empty() {
+        None
+    } else {
+        match serde_json::from_str::<GoalBoard>(&goal_content) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                // Surface parse failures so the dashboard doesn't silently
+                // render "no goals" when the file is malformed. Fail-open
+                // returns None (same as before) but logs why.
+                tracing::warn!(
+                    path = %goal_path.display(),
+                    error = %e,
+                    "goal_records.json failed to parse; dashboard rendering 0 goals"
+                );
+                None
+            }
+        }
+    };
 
     let goals_json: Vec<Value> = goal_board
         .as_ref()
