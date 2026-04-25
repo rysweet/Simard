@@ -14,7 +14,7 @@ use crate::memory_consolidation::PreparedContext;
 use crate::self_improve::ImprovementCycle;
 
 /// The four phases of a single OODA cycle, plus Sleep between cycles.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum OodaPhase {
     Observe,
     Orient,
@@ -84,7 +84,7 @@ impl OodaState {
 }
 
 /// A single goal's status snapshot for observation.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GoalSnapshot {
     pub id: String,
     pub description: String,
@@ -102,7 +102,7 @@ impl From<&ActiveGoal> for GoalSnapshot {
 }
 
 /// Snapshot of the local environment: git state, issues, recent commits.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct EnvironmentSnapshot {
     /// Output of `git status --porcelain` (empty string if unavailable).
     pub git_status: String,
@@ -113,7 +113,7 @@ pub struct EnvironmentSnapshot {
 }
 
 /// Everything gathered during the Observe phase.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Observation {
     pub goal_statuses: Vec<GoalSnapshot>,
     pub gym_health: Option<GymSuiteScore>,
@@ -134,7 +134,7 @@ pub struct Observation {
 }
 
 /// A ranked priority produced during the Orient phase.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Priority {
     pub goal_id: String,
     pub urgency: f64,
@@ -142,7 +142,7 @@ pub struct Priority {
 }
 
 /// The kind of action the OODA loop can dispatch.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ActionKind {
     AdvanceGoal,
     RunImprovement,
@@ -172,7 +172,7 @@ impl Display for ActionKind {
 }
 
 /// A planned action selected during the Decide phase.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PlannedAction {
     pub kind: ActionKind,
     pub goal_id: Option<String>,
@@ -180,7 +180,7 @@ pub struct PlannedAction {
 }
 
 /// Outcome of dispatching a single action.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ActionOutcome {
     pub action: PlannedAction,
     pub success: bool,
@@ -188,7 +188,7 @@ pub struct ActionOutcome {
 }
 
 /// Report for one complete OODA cycle.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CycleReport {
     pub cycle_number: u32,
     pub observation: Observation,
@@ -198,7 +198,7 @@ pub struct CycleReport {
 }
 
 /// Configuration for the OODA loop.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct OodaConfig {
     pub max_concurrent_actions: u32,
     pub improvement_threshold: f64,
