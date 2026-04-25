@@ -13,6 +13,7 @@
 //! simard-ooda-step observe   --state-json <P> --state-root <DIR>
 //! simard-ooda-step orient    --state-json <P> --observation-json <P>
 //! simard-ooda-step decide    --priorities-json <P> [--config-json <P>]
+//! simard-ooda-step act       --state-json <P> --actions-json <P> --state-root <DIR>
 //! simard-ooda-step review    --outcomes-json <P> [--act-elapsed-millis <N>]
 //! simard-ooda-step curate    --state-json <P>
 //! ```
@@ -26,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
+use simard::ooda_actions;
 use simard::ooda_loop::{
     bridges_from_state_root, decide, observe, orient, promote_from_backlog, review_outcomes,
     ActionOutcome, Observation, OodaConfig, OodaStateSnapshot, PlannedAction, Priority,
@@ -37,11 +39,12 @@ fn main() -> ExitCode {
         Some("observe") => parse_flags(&args[2..]).and_then(cmd_observe),
         Some("orient") => parse_flags(&args[2..]).and_then(cmd_orient),
         Some("decide") => parse_flags(&args[2..]).and_then(cmd_decide),
+        Some("act") => parse_flags(&args[2..]).and_then(cmd_act),
         Some("review") => parse_flags(&args[2..]).and_then(cmd_review),
         Some("curate") => parse_flags(&args[2..]).and_then(cmd_curate),
         Some(other) => Err(format!("unknown subcommand: {other}")),
         None => Err(
-            "missing subcommand: expected one of observe | orient | decide | review | curate"
+            "missing subcommand: expected one of observe | orient | decide | act | review | curate"
                 .to_string(),
         ),
     };
@@ -160,4 +163,26 @@ fn cmd_observe(flags: HashMap<String, String>) -> Result<String, String> {
         "snapshot": OodaStateSnapshot::from(&state),
     });
     serde_json::to_string(&result).map_err(|e| format!("serialize observe result: {e}"))
+}
+
+/// Act phase: bridge-dependent. Dispatches the supplied planned actions
+/// against live bridges and returns one [`ActionOutcome`] per input action.
+/// Also returns the post-act snapshot, since dispatch_actions mutates state
+/// (e.g. records engineer worktree handles, updates goal progress).
+fn cmd_act(flags: HashMap<String, String>) -> Result<String, String> {
+    let state_path = Path::new(require(&flags, "state-json")?);
+    let actions_path = Path::new(require(&flags, "actions-json")?);
+    let state_root = PathBuf::from(require(&flags, "state-root")?);
+    let snapshot: OodaStateSnapshot = read_json(state_path)?;
+    let actions: Vec<PlannedAction> = read_json(actions_path)?;
+    let mut state = snapshot.into_state();
+    let mut bridges = bridges_from_state_root(&state_root)
+        .map_err(|e| format!("bridge_factory failed: {e}"))?;
+    let outcomes = ooda_actions::dispatch_actions(&actions, &mut bridges, &mut state)
+        .map_err(|e| format!("act phase failed: {e}"))?;
+    let result = serde_json::json!({
+        "outcomes": outcomes,
+        "snapshot": OodaStateSnapshot::from(&state),
+    });
+    serde_json::to_string(&result).map_err(|e| format!("serialize act result: {e}"))
 }
