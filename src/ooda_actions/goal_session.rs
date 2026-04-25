@@ -171,11 +171,13 @@ fn action_is_valid(action: &GoalAction) -> bool {
         GoalAction::Noop { .. } => true,
         GoalAction::AssessOnly { progress_pct, .. } => *progress_pct <= 100,
         GoalAction::GhIssueCreate { title, body, .. } => {
-            !title.trim().is_empty()
-                && !title.contains('\n')
+            let t = title.trim();
+            !t.is_empty()
+                && !t.contains('\n')
                 && !body.trim().is_empty()
-                && !is_placeholder_echo(title.trim())
+                && !is_placeholder_echo(t)
                 && !is_placeholder_echo(body.trim())
+                && !is_makework_title(t)
         }
         GoalAction::GhIssueComment { issue, body, .. } => {
             *issue > 0 && !body.trim().is_empty() && !is_placeholder_echo(body.trim())
@@ -241,7 +243,43 @@ fn is_placeholder_echo(task: &str) -> bool {
     false
 }
 
-/// Scan a string starting at an opening `{` and return the byte offset
+/// Reject titles that match well-known make-work patterns (#1243 / P3).
+///
+/// Observed 2026-04-25: 5 issues filed as `verify existing issue #1177`
+/// (now closed as duplicates). Other recurring patterns: `test-only`,
+/// `monitor-pr-NNNN`, `rebase-and-merge-pr-NNNN`, single-verb titles
+/// like `observe` / `check` with no noun. These are dashboard theater;
+/// they create no engineering value and consume operator review time.
+///
+/// Conservative — case-insensitive prefix match on a short curated list.
+fn is_makework_title(title: &str) -> bool {
+    let lc = title.trim().to_lowercase();
+    const REJECT_PREFIXES: &[&str] = &[
+        "test-only ",
+        "test-only:",
+        "verify existing ",
+        "verify existing:",
+        "monitor-pr-",
+        "monitor pr ",
+        "rebase-and-merge-pr-",
+        "rebase and merge pr ",
+        "observe ",
+        "observe:",
+        "check ",
+        "check:",
+    ];
+    for p in REJECT_PREFIXES {
+        if lc.starts_with(p) {
+            return true;
+        }
+    }
+    // Single-verb titles with no noun ("observe", "check") even without
+    // trailing space are make-work too.
+    if matches!(lc.as_str(), "observe" | "check" | "monitor" | "verify") {
+        return true;
+    }
+    false
+}
 /// (exclusive) of the matching closing `}`, respecting JSON string
 /// literals and escape sequences.
 ///
@@ -1266,5 +1304,87 @@ mod placeholder_echo_tests {
             repo: None,
         };
         assert!(!action_is_valid(&action));
+    }
+}
+
+#[cfg(test)]
+mod makework_title_tests {
+    use super::{GoalAction, action_is_valid, is_makework_title};
+
+    #[test]
+    fn rejects_verify_existing_issue() {
+        // Exact pattern observed: "verify existing issue #1177" — 5 dupes
+        // closed manually 2026-04-25 as part of P3 cleanup.
+        assert!(is_makework_title("verify existing issue #1177"));
+        assert!(is_makework_title("Verify existing issue #1177"));
+        assert!(is_makework_title("verify existing: foo bar"));
+    }
+
+    #[test]
+    fn rejects_test_only_titles() {
+        assert!(is_makework_title("test-only sanity check"));
+        assert!(is_makework_title("test-only: validate cleanup"));
+    }
+
+    #[test]
+    fn rejects_monitor_pr_titles() {
+        assert!(is_makework_title("monitor-pr-1234"));
+        assert!(is_makework_title("monitor pr 1234"));
+    }
+
+    #[test]
+    fn rejects_rebase_and_merge_pr_titles() {
+        assert!(is_makework_title("rebase-and-merge-pr-9999"));
+        assert!(is_makework_title("Rebase and merge PR 1240"));
+    }
+
+    #[test]
+    fn rejects_bare_verb_titles() {
+        assert!(is_makework_title("observe"));
+        assert!(is_makework_title("check"));
+        assert!(is_makework_title("monitor"));
+        assert!(is_makework_title("verify"));
+        assert!(is_makework_title("Observe "));
+        assert!(is_makework_title("observe "));
+        assert!(is_makework_title("check: gym health"));
+    }
+
+    #[test]
+    fn accepts_real_engineering_titles() {
+        // These have legitimate verbs but are real work, not theater.
+        assert!(!is_makework_title("Fix race in cleanup hook"));
+        assert!(!is_makework_title("Add eval watchdog for dead-signal"));
+        assert!(!is_makework_title(
+            "P4: cap /tmp/simard-engineer-target at 10 GB"
+        ));
+        assert!(!is_makework_title("refactor scheduler to use bounded queue"));
+        // Title that *contains* the word "verify" but isn't a make-work
+        // pattern must still pass.
+        assert!(!is_makework_title("Add tests to verify rate limiter"));
+    }
+
+    #[test]
+    fn gh_issue_create_with_makework_title_is_invalid() {
+        let action = GoalAction::GhIssueCreate {
+            title: "verify existing issue #1177".into(),
+            body: "Reviewing...".into(),
+            repo: None,
+            labels: vec![],
+        };
+        assert!(
+            !action_is_valid(&action),
+            "make-work title must be rejected"
+        );
+    }
+
+    #[test]
+    fn gh_issue_create_with_real_title_is_valid() {
+        let action = GoalAction::GhIssueCreate {
+            title: "P5: audit fail-open paths in src/".into(),
+            body: "97 .ok() discards need classification.".into(),
+            repo: None,
+            labels: vec!["enhancement".into()],
+        };
+        assert!(action_is_valid(&action));
     }
 }
