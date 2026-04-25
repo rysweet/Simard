@@ -24,7 +24,7 @@ pub use orient::orient;
 pub use summary::summarize_cycle_report;
 pub use types::{
     ActionKind, ActionOutcome, CycleReport, EnvironmentSnapshot, GoalSnapshot, Observation,
-    OodaBridges, OodaConfig, OodaPhase, OodaState, PlannedAction, Priority,
+    OodaBridges, OodaConfig, OodaPhase, OodaState, OodaStateSnapshot, PlannedAction, Priority,
 };
 
 use std::time::Instant;

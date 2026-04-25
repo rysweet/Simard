@@ -228,6 +228,72 @@ fn env_f64(key: &str, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
+/// Serializable view of [`OodaState`] suitable for round-tripping through
+/// recipe steps via JSON. Excludes:
+/// - `engineer_worktrees` — OS handles owning git worktrees; recipe steps
+///   re-key these by `goal_id` from the parent process state.
+/// - The `OodaBridges` (memory store, gym, knowledge) — instantiated per
+///   helper-bin invocation from the configured `state_root`.
+///
+/// Use `OodaStateSnapshot::from(&state)` to capture, and
+/// `snapshot.apply_to(&mut state)` to restore the round-tripped fields.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct OodaStateSnapshot {
+    pub current_phase: OodaPhase,
+    pub active_goals: GoalBoard,
+    pub cycle_count: u32,
+    pub last_observation: Option<Observation>,
+    pub review_improvements: Vec<ImprovementCycle>,
+    pub prepared_context: Option<PreparedContext>,
+    pub cycle_start_epoch: u64,
+    pub last_cycle_summary: Option<String>,
+    pub last_cycle_duration_secs: Option<u64>,
+    pub goal_failure_counts: HashMap<String, u32>,
+}
+
+impl From<&OodaState> for OodaStateSnapshot {
+    fn from(state: &OodaState) -> Self {
+        Self {
+            current_phase: state.current_phase,
+            active_goals: state.active_goals.clone(),
+            cycle_count: state.cycle_count,
+            last_observation: state.last_observation.clone(),
+            review_improvements: state.review_improvements.clone(),
+            prepared_context: state.prepared_context.clone(),
+            cycle_start_epoch: state.cycle_start_epoch,
+            last_cycle_summary: state.last_cycle_summary.clone(),
+            last_cycle_duration_secs: state.last_cycle_duration_secs,
+            goal_failure_counts: state.goal_failure_counts.clone(),
+        }
+    }
+}
+
+impl OodaStateSnapshot {
+    /// Restore the round-tripped fields onto an existing [`OodaState`],
+    /// preserving the in-process `engineer_worktrees`.
+    pub fn apply_to(self, state: &mut OodaState) {
+        state.current_phase = self.current_phase;
+        state.active_goals = self.active_goals;
+        state.cycle_count = self.cycle_count;
+        state.last_observation = self.last_observation;
+        state.review_improvements = self.review_improvements;
+        state.prepared_context = self.prepared_context;
+        state.cycle_start_epoch = self.cycle_start_epoch;
+        state.last_cycle_summary = self.last_cycle_summary;
+        state.last_cycle_duration_secs = self.last_cycle_duration_secs;
+        state.goal_failure_counts = self.goal_failure_counts;
+    }
+
+    /// Construct a fresh [`OodaState`] from this snapshot. Worktrees start
+    /// empty — recipe steps that need them load from the per-goal worktree
+    /// directory under `state_root` instead of in-process handles.
+    pub fn into_state(self) -> OodaState {
+        let mut state = OodaState::new(self.active_goals.clone());
+        self.apply_to(&mut state);
+        state
+    }
+}
+
 /// All bridges needed by the OODA loop.
 pub struct OodaBridges {
     pub memory: Box<dyn CognitiveMemoryOps>,
@@ -298,6 +364,105 @@ mod tests {
         });
         let state = OodaState::new(board);
         assert_eq!(state.active_goals.active.len(), 1);
+    }
+
+    // --- OodaStateSnapshot round-trip ---
+
+    fn populated_state() -> OodaState {
+        let mut board = GoalBoard::new();
+        board.active.push(ActiveGoal {
+            id: "goal-snap".to_string(),
+            description: "Snapshot test".to_string(),
+            priority: 3,
+            status: GoalProgress::InProgress { percent: 25 },
+            assigned_to: Some("engineer-7".to_string()),
+            current_activity: Some("doing things".to_string()),
+            wip_refs: vec![],
+        });
+        let mut state = OodaState::new(board);
+        state.current_phase = OodaPhase::Decide;
+        state.cycle_count = 7;
+        state.cycle_start_epoch = 1_700_000_000;
+        state.last_cycle_summary = Some("prior summary".to_string());
+        state.last_cycle_duration_secs = Some(42);
+        state
+            .goal_failure_counts
+            .insert("goal-snap".to_string(), 2);
+        state
+    }
+
+    #[test]
+    fn snapshot_captures_serializable_fields() {
+        let state = populated_state();
+        let snap = OodaStateSnapshot::from(&state);
+        assert_eq!(snap.current_phase, OodaPhase::Decide);
+        assert_eq!(snap.cycle_count, 7);
+        assert_eq!(snap.cycle_start_epoch, 1_700_000_000);
+        assert_eq!(snap.last_cycle_summary.as_deref(), Some("prior summary"));
+        assert_eq!(snap.last_cycle_duration_secs, Some(42));
+        assert_eq!(snap.goal_failure_counts.get("goal-snap"), Some(&2));
+        assert_eq!(snap.active_goals.active.len(), 1);
+        assert_eq!(snap.active_goals.active[0].id, "goal-snap");
+    }
+
+    #[test]
+    fn snapshot_json_roundtrip_preserves_state() {
+        let state = populated_state();
+        let snap = OodaStateSnapshot::from(&state);
+        let json = serde_json::to_string(&snap).expect("serialize snapshot");
+        let parsed: OodaStateSnapshot =
+            serde_json::from_str(&json).expect("deserialize snapshot");
+
+        let mut restored = OodaState::new(GoalBoard::new());
+        parsed.apply_to(&mut restored);
+
+        assert_eq!(restored.current_phase, state.current_phase);
+        assert_eq!(restored.cycle_count, state.cycle_count);
+        assert_eq!(restored.cycle_start_epoch, state.cycle_start_epoch);
+        assert_eq!(restored.last_cycle_summary, state.last_cycle_summary);
+        assert_eq!(
+            restored.last_cycle_duration_secs,
+            state.last_cycle_duration_secs
+        );
+        assert_eq!(
+            restored.goal_failure_counts.get("goal-snap"),
+            state.goal_failure_counts.get("goal-snap")
+        );
+        assert_eq!(
+            restored.active_goals.active.len(),
+            state.active_goals.active.len()
+        );
+        assert_eq!(
+            restored.active_goals.active[0].id,
+            state.active_goals.active[0].id
+        );
+    }
+
+    #[test]
+    fn snapshot_apply_preserves_in_process_worktrees() {
+        // worktrees are NOT round-tripped — applying a snapshot must not
+        // touch them. Verify by leaving HashMap untouched after apply.
+        let mut state = OodaState::new(GoalBoard::new());
+        // We can't easily construct EngineerWorktree in tests (it owns a
+        // real git path), so just assert the field stays an empty map
+        // after a no-op snapshot apply.
+        assert!(state.engineer_worktrees.is_empty());
+        let snap = OodaStateSnapshot::from(&state);
+        snap.apply_to(&mut state);
+        assert!(
+            state.engineer_worktrees.is_empty(),
+            "apply_to must not clobber engineer_worktrees"
+        );
+    }
+
+    #[test]
+    fn snapshot_into_state_constructs_fresh_state() {
+        let original = populated_state();
+        let snap = OodaStateSnapshot::from(&original);
+        let restored = snap.into_state();
+        assert_eq!(restored.cycle_count, original.cycle_count);
+        assert_eq!(restored.current_phase, original.current_phase);
+        assert!(restored.engineer_worktrees.is_empty());
     }
 
     // --- GoalSnapshot ---
