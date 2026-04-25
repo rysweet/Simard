@@ -330,7 +330,9 @@ fn remove_old_corrupt_dbs(report: &mut CleanupReport) {
         }
         let path = entry.path();
         let Ok(meta) = entry.metadata() else { continue };
-        let Ok(modified) = meta.modified() else { continue };
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
         if now.duration_since(modified).unwrap_or_default() < max_age {
             continue;
         }
@@ -479,7 +481,12 @@ mod tests {
             let mtime = std::time::UNIX_EPOCH
                 + std::time::Duration::from_secs(1_000_000_000 + (i as u64) * 1000);
             let times = std::fs::FileTimes::new().set_modified(mtime);
-            std::fs::File::options().write(true).open(&p).unwrap().set_times(times).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_times(times)
+                .unwrap();
         }
         // Override HOME so the function targets our tempdir.
         let old_home = std::env::var_os("HOME");
@@ -543,10 +550,15 @@ mod tests {
         for i in 0..n {
             let p = snap_dir.join(format!("session-{i:04}.json"));
             std::fs::write(&p, b"{}").unwrap();
-            let mtime = std::time::UNIX_EPOCH
-                + std::time::Duration::from_secs(1_000_000_000 + i as u64);
+            let mtime =
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000 + i as u64);
             let times = std::fs::FileTimes::new().set_modified(mtime);
-            std::fs::File::options().write(true).open(&p).unwrap().set_times(times).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_times(times)
+                .unwrap();
         }
         let old_home = std::env::var_os("HOME");
         unsafe {
@@ -580,7 +592,12 @@ mod tests {
         let old_mtime = std::time::SystemTime::now()
             - std::time::Duration::from_secs((CORRUPT_DB_MAX_AGE_DAYS + 1) * 24 * 3600);
         let times = std::fs::FileTimes::new().set_modified(old_mtime);
-        std::fs::File::options().write(true).open(&old).unwrap().set_times(times).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
         let old_home = std::env::var_os("HOME");
         unsafe {
             std::env::set_var("HOME", tmp.path());
