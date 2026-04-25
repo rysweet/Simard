@@ -34,6 +34,13 @@ import sys
 import traceback
 from typing import Any, Callable
 
+# Capture the real stdout at import time so handlers can't accidentally
+# clobber the JSON-RPC channel with print() banners. After run() starts,
+# sys.stdout is rebound to sys.stderr; only _write_response writes to the
+# real stdout. This protects every BridgeServer subclass from any
+# downstream library that prints to stdout.
+_REAL_STDOUT = sys.stdout
+
 ERROR_METHOD_NOT_FOUND = -32601
 ERROR_INTERNAL = -32603
 ERROR_TIMEOUT = -32000
@@ -66,6 +73,10 @@ class BridgeServer:
 
     def run(self) -> None:
         """Read requests from stdin, dispatch, write responses to stdout."""
+        # Reroute any stray print() from handlers (or libraries they call)
+        # to stderr. The JSON-RPC channel must remain pristine; otherwise
+        # the Rust transport reports "malformed response line".
+        sys.stdout = sys.stderr
         for line in sys.stdin:
             line = line.strip()
             if not line:
@@ -119,8 +130,8 @@ def _error(code: int, message: str) -> dict[str, Any]:
 
 def _write_response(response: dict[str, Any]) -> None:
     line = json.dumps(response, separators=(",", ":"))
-    sys.stdout.write(line + "\n")
-    sys.stdout.flush()
+    _REAL_STDOUT.write(line + "\n")
+    _REAL_STDOUT.flush()
 
 
 # --- Standalone echo server for integration testing ---
