@@ -27,7 +27,7 @@ mod tests_prioritization;
 mod tests_trend;
 
 // Re-export all public items so `crate::self_improve::X` still works.
-pub use cycle::{apply_improvements, run_improvement_cycle, summarize_cycle};
+pub use cycle::{apply_improvements, decide, find_weak_dimensions, run_improvement_cycle, summarize_cycle};
 pub use history::ImprovementHistory;
 pub use prioritization::{
     PrioritizedDimension, PriorityWeights, find_weak_dimensions_detailed, prioritize_dimensions,

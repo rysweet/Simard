@@ -87,7 +87,7 @@ pub fn run_improvement_cycle(
 
 /// Apply the decision rule: commit if net improvement >= threshold
 /// and no single dimension regresses beyond the allowed maximum.
-pub(super) fn decide(
+pub fn decide(
     config: &ImprovementConfig,
     baseline: &GymSuiteScore,
     post: &GymSuiteScore,
@@ -141,7 +141,7 @@ pub(super) fn decide(
 ///
 /// Results are sorted by deficit (largest first) so callers can prioritize
 /// the weakest dimension for improvement.
-pub(super) fn find_weak_dimensions(
+pub fn find_weak_dimensions(
     score: &GymSuiteScore,
     weak_threshold: f64,
     target: Option<&str>,
