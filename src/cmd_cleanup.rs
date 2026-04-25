@@ -53,6 +53,9 @@ pub fn handle_cleanup() -> Result<(), Box<dyn std::error::Error>> {
     // 3. Clean old cargo target dirs (not the current one)
     clean_stale_cargo_targets(&mut report);
 
+    // 3b. LRU-rotate /tmp/simard-*-target dirs over the cap (P4 / #1244).
+    cap_simard_target_dirs(&mut report, 10 * 1024 * 1024 * 1024);
+
     // 4. Kill orphaned cargo processes (running > 30 min with no parent simard)
     kill_orphaned_cargo_processes(&mut report);
 
@@ -189,6 +192,81 @@ fn clean_stale_cargo_targets(report: &mut CleanupReport) {
                 }
                 _ => {}
             }
+        }
+    }
+}
+
+/// LRU-rotate `/tmp/simard-*-target` directories when total size exceeds
+/// `cap_bytes`. Keeps the currently-configured `CARGO_TARGET_DIR` and the
+/// freshest dirs by mtime; removes the oldest until total is under
+/// `cap_bytes * 8/10` (so we don't rotate again on the very next call).
+///
+/// Why: `/tmp/simard-engineer-target` and `/tmp/simard-pr*-target` were
+/// observed at 14-15 GB each on 2026-04-25, uncapped. Disk pressure
+/// caused multiple OOM linker failures and forced `--no-verify` pushes.
+/// (Issue #1244.)
+fn cap_simard_target_dirs(report: &mut CleanupReport, cap_bytes: u64) {
+    let current_target = std::env::var("CARGO_TARGET_DIR").ok();
+    let tmp = Path::new("/tmp");
+    let Ok(entries) = std::fs::read_dir(tmp) else {
+        return;
+    };
+    // Collect candidates: /tmp/simard-*-target dirs with their size+mtime.
+    let mut candidates: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !(name.starts_with("simard-") && name.ends_with("-target")) {
+            continue;
+        }
+        // Never delete the active CARGO_TARGET_DIR.
+        if let Some(ref current) = current_target
+            && Path::new(current) == path
+        {
+            continue;
+        }
+        let size = dir_size(&path).unwrap_or(0);
+        let mtime = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        candidates.push((path, size, mtime));
+    }
+    let total: u64 = candidates.iter().map(|(_, s, _)| s).sum();
+    if total <= cap_bytes {
+        return;
+    }
+    eprintln!(
+        "  /tmp/simard-*-target total {} MB exceeds cap {} MB — rotating LRU",
+        total / (1024 * 1024),
+        cap_bytes / (1024 * 1024)
+    );
+    // Sort oldest-first; remove until under 80% of cap.
+    candidates.sort_by_key(|(_, _, mtime)| *mtime);
+    let target_after = cap_bytes * 8 / 10;
+    let mut current_total = total;
+    for (path, size, _mtime) in candidates {
+        if current_total <= target_after {
+            break;
+        }
+        eprintln!(
+            "  Rotating LRU target {} ({} MB)",
+            path.display(),
+            size / (1024 * 1024)
+        );
+        if let Err(e) = std::fs::remove_dir_all(&path) {
+            report
+                .errors
+                .push(format!("failed to rotate {}: {e}", path.display()));
+        } else {
+            report.bytes_freed += size;
+            current_total = current_total.saturating_sub(size);
+            report.dirs_removed.push(path);
         }
     }
 }
@@ -444,6 +522,88 @@ mod tests {
     fn disk_usage_does_not_panic() {
         // Just verifying it doesn't crash
         print_disk_usage();
+    }
+
+    // ── cap_simard_target_dirs (P4 / #1244) ──
+
+    #[test]
+    fn cap_simard_target_dirs_under_cap_is_noop() {
+        // We can't easily redirect the function's hardcoded /tmp scan in a
+        // unit test, so we run with a cap so high it's guaranteed under it
+        // on a normal test host and assert nothing was rotated.
+        let mut report = CleanupReport::default();
+        cap_simard_target_dirs(&mut report, u64::MAX);
+        assert_eq!(report.bytes_freed, 0);
+        assert!(report.dirs_removed.is_empty());
+        assert!(report.errors.is_empty());
+    }
+
+    #[test]
+    fn cap_simard_target_dirs_lru_rotation_logic() {
+        // Direct-test the size accounting and ordering invariant via the
+        // helper structures. We synthesise a fake /tmp.
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+
+        // Three fake target dirs of different sizes and ages. Sleep
+        // between creates so mtimes are distinct (we can't use filetime
+        // without adding a new dep, and `std::fs::set_modified` requires
+        // touching the file — easier to just sleep).
+        let make = |name: &str, bytes: usize| {
+            let p = base.join(name);
+            std::fs::create_dir_all(&p).unwrap();
+            std::fs::write(p.join("payload"), vec![0u8; bytes]).unwrap();
+            p
+        };
+        let d_old = make("simard-old-target", 6 * 1024 * 1024);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let d_mid = make("simard-mid-target", 6 * 1024 * 1024);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let d_new = make("simard-new-target", 6 * 1024 * 1024);
+
+        // Manually replicate the candidate-collect+sort+rotate loop to
+        // verify the algorithm: cap is 10 MB, total is 18 MB, so we should
+        // rotate the oldest (6 MB) leaving 12 MB > 8 MB target. Then rotate
+        // the next oldest (mid, 6 MB) leaving 6 MB ≤ 8 MB target. Stop.
+        let cap_bytes: u64 = 10 * 1024 * 1024;
+        let mut candidates: Vec<(PathBuf, u64, std::time::SystemTime)> = vec![
+            (
+                d_old.clone(),
+                dir_size(&d_old).unwrap(),
+                std::fs::metadata(&d_old).unwrap().modified().unwrap(),
+            ),
+            (
+                d_mid.clone(),
+                dir_size(&d_mid).unwrap(),
+                std::fs::metadata(&d_mid).unwrap().modified().unwrap(),
+            ),
+            (
+                d_new.clone(),
+                dir_size(&d_new).unwrap(),
+                std::fs::metadata(&d_new).unwrap().modified().unwrap(),
+            ),
+        ];
+        candidates.sort_by_key(|(_, _, mtime)| *mtime);
+        // Oldest first.
+        assert_eq!(candidates[0].0, d_old);
+        assert_eq!(candidates[2].0, d_new);
+
+        let total: u64 = candidates.iter().map(|(_, s, _)| s).sum();
+        let target_after = cap_bytes * 8 / 10;
+        let mut current_total = total;
+        let mut rotated = Vec::new();
+        for (path, size, _) in candidates {
+            if current_total <= target_after {
+                break;
+            }
+            current_total = current_total.saturating_sub(size);
+            rotated.push(path);
+        }
+        // Expected: rotate the two oldest (d_old and d_mid), keep d_new.
+        assert_eq!(rotated.len(), 2);
+        assert!(rotated.contains(&d_old));
+        assert!(rotated.contains(&d_mid));
+        assert!(!rotated.contains(&d_new));
     }
 
     // ── Constant sanity ──
