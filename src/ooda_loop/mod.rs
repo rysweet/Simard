@@ -5,6 +5,7 @@
 //! dispatches them. If any bridge is unavailable, the cycle degrades honestly
 //! (Pillar 11): the observation records `None` for that subsystem.
 
+mod bridge_factory;
 mod curate;
 mod decide;
 mod observe;
@@ -17,6 +18,7 @@ mod types;
 mod tests_observe;
 
 // Re-export all public items so `crate::ooda_loop::X` still works.
+pub use bridge_factory::{bridges_from_state_root, connect_memory};
 pub use curate::{check_meeting_handoffs, promote_from_backlog};
 pub use decide::decide;
 pub use observe::{gather_environment, observe};
