@@ -1,8 +1,8 @@
-mod execution;
-mod review_persist;
-mod selection;
+pub(crate) mod execution;
+pub(crate) mod review_persist;
+pub(crate) mod selection;
 mod types;
-mod verification;
+pub(crate) mod verification;
 mod verification_actions;
 
 #[cfg(test)]
@@ -33,18 +33,21 @@ use crate::runtime::RuntimeTopology;
 use crate::terminal_engineer_bridge::{SHARED_EXPLICIT_STATE_ROOT_SOURCE, TerminalBridgeContext};
 
 use execution::{
-    execute_engineer_action, parse_status_paths, run_command, trimmed_stdout,
-    trimmed_stdout_allow_empty,
+    parse_status_paths, run_command, trimmed_stdout, trimmed_stdout_allow_empty,
 };
-use review_persist::{persist_engineer_loop_artifacts, run_optional_review};
-use selection::select_engineer_action;
-use verification::verify_engineer_action;
 
 // Re-export all public items so `crate::engineer_loop::X` still works.
 pub use types::{
-    AnalyzedAction, EngineerLoopRun, ExecutedEngineerAction, PhaseOutcome, PhaseTrace,
-    RepoInspection, SelectedEngineerAction, VerificationReport, analyze_objective,
+    AnalyzedAction, EngineerActionKind, EngineerLoopRun, ExecutedEngineerAction, PhaseOutcome,
+    PhaseTrace, RepoInspection, SelectedEngineerAction, VerificationReport, analyze_objective,
 };
+
+// Phase-entry-point re-exports for the recipe-driven engineer loop (Phase 2 rebuild).
+// These let `simard-engineer-step` (in src/bin/) drive each phase via JSON IPC.
+pub use execution::execute_engineer_action;
+pub use review_persist::{persist_engineer_loop_artifacts, run_optional_review};
+pub use selection::select_engineer_action;
+pub use verification::verify_engineer_action;
 
 pub(crate) const ENGINEER_IDENTITY: &str = "simard-engineer";
 pub(crate) const ENGINEER_BASE_TYPE: &str = "terminal-shell";
@@ -243,7 +246,7 @@ pub fn run_local_engineer_loop(
     })
 }
 
-pub(crate) fn inspect_workspace(
+pub fn inspect_workspace(
     workspace_root: &Path,
     state_root: &Path,
 ) -> SimardResult<RepoInspection> {

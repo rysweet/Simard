@@ -24,7 +24,7 @@ use super::{ENGINEER_BASE_TYPE, ENGINEER_IDENTITY, EXECUTION_SCOPE};
 /// Skips (returns `Ok`) for read-only actions, test/check actions, and when
 /// no LLM session is available. Blocks with [`SimardError::ReviewBlocked`]
 /// if the review finds high-severity bugs or security issues.
-pub(crate) fn run_optional_review(
+pub fn run_optional_review(
     inspection: &RepoInspection,
     action: &ExecutedEngineerAction,
 ) -> SimardResult<()> {
@@ -90,7 +90,7 @@ pub(crate) fn compute_diff_for_review(repo_root: &Path, kind: &EngineerActionKin
     }
 }
 
-pub(crate) fn persist_engineer_loop_artifacts(
+pub fn persist_engineer_loop_artifacts(
     state_root: &Path,
     topology: RuntimeTopology,
     objective: &str,

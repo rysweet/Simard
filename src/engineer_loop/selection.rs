@@ -657,7 +657,7 @@ pub(crate) fn is_action_achievable(
     }
 }
 
-pub(crate) fn select_engineer_action(
+pub fn select_engineer_action(
     inspection: &RepoInspection,
     objective: &str,
 ) -> SimardResult<SelectedEngineerAction> {
