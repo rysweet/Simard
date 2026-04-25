@@ -18,6 +18,10 @@ use crate::gym_bridge::GymBridge;
 use crate::knowledge_bridge::KnowledgeBridge;
 
 const DEFAULT_BRIDGE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Gym bridge runs full progressive benchmark suites which call out to LLMs;
+/// each suite typically takes several minutes. The 30s default would always
+/// trip and silently disable benchmark feedback.
+const GYM_BRIDGE_TIMEOUT: Duration = Duration::from_secs(900);
 
 fn default_circuit_breaker() -> CircuitBreakerConfig {
     CircuitBreakerConfig {
@@ -72,8 +76,16 @@ fn set_python_path() {
 }
 
 fn make_transport(name: &str, script: &Path, extra_args: Vec<String>) -> Box<dyn BridgeTransport> {
-    let transport =
-        SubprocessBridgeTransport::new(name, script, extra_args, DEFAULT_BRIDGE_TIMEOUT);
+    make_transport_with_timeout(name, script, extra_args, DEFAULT_BRIDGE_TIMEOUT)
+}
+
+fn make_transport_with_timeout(
+    name: &str,
+    script: &Path,
+    extra_args: Vec<String>,
+    timeout: Duration,
+) -> Box<dyn BridgeTransport> {
+    let transport = SubprocessBridgeTransport::new(name, script, extra_args, timeout);
     Box::new(CircuitBreakerTransport::new(
         transport,
         default_circuit_breaker(),
@@ -141,7 +153,7 @@ pub fn launch_knowledge_bridge(python_dir: &Path) -> SimardResult<KnowledgeBridg
 pub fn launch_gym_bridge(python_dir: &Path) -> SimardResult<GymBridge> {
     set_python_path();
     let script = python_dir.join("simard_gym_bridge.py");
-    let transport = make_transport("gym-eval", &script, vec![]);
+    let transport = make_transport_with_timeout("gym-eval", &script, vec![], GYM_BRIDGE_TIMEOUT);
     if !check_health("gym", transport.as_ref()) {
         return Err(crate::error::SimardError::BridgeSpawnFailed {
             bridge: "gym-eval".to_string(),
@@ -176,6 +188,13 @@ mod tests {
     #[test]
     fn default_bridge_timeout_is_30_seconds() {
         assert_eq!(DEFAULT_BRIDGE_TIMEOUT, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn gym_bridge_timeout_allows_full_suite() {
+        // Progressive suites call out to LLMs and routinely take minutes;
+        // anything under a few minutes silently disables benchmark feedback.
+        assert!(GYM_BRIDGE_TIMEOUT >= Duration::from_secs(300));
     }
 
     // ── default_circuit_breaker ──
