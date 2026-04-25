@@ -171,11 +171,19 @@ fn action_is_valid(action: &GoalAction) -> bool {
         GoalAction::Noop { .. } => true,
         GoalAction::AssessOnly { progress_pct, .. } => *progress_pct <= 100,
         GoalAction::GhIssueCreate { title, body, .. } => {
-            !title.trim().is_empty() && !title.contains('\n') && !body.trim().is_empty()
+            !title.trim().is_empty()
+                && !title.contains('\n')
+                && !body.trim().is_empty()
+                && !is_placeholder_echo(title.trim())
+                && !is_placeholder_echo(body.trim())
         }
-        GoalAction::GhIssueComment { issue, body, .. } => *issue > 0 && !body.trim().is_empty(),
+        GoalAction::GhIssueComment { issue, body, .. } => {
+            *issue > 0 && !body.trim().is_empty() && !is_placeholder_echo(body.trim())
+        }
         GoalAction::GhIssueClose { issue, .. } => *issue > 0,
-        GoalAction::GhPrComment { pr, body, .. } => *pr > 0 && !body.trim().is_empty(),
+        GoalAction::GhPrComment { pr, body, .. } => {
+            *pr > 0 && !body.trim().is_empty() && !is_placeholder_echo(body.trim())
+        }
     }
 }
 
@@ -207,6 +215,10 @@ fn is_placeholder_echo(task: &str) -> bool {
         "<title>",
         "<body>",
         "<description>",
+        "<short title, single line>",
+        "<markdown body, can be multi-line>",
+        "<comment body, can be multi-line>",
+        "<reason for closing>",
     ];
     if KNOWN_PLACEHOLDERS.contains(&stripped) {
         return true;
@@ -1161,5 +1173,98 @@ mod label_sanitizer_tests {
     fn rejects_too_long_labels() {
         let long = "x".repeat(60);
         assert!(!is_plausible_label(&long));
+    }
+}
+
+#[cfg(test)]
+mod placeholder_echo_tests {
+    use super::{GoalAction, action_is_valid, is_placeholder_echo};
+
+    #[test]
+    fn rejects_short_title_single_line_placeholder() {
+        // Exact bug observed 2026-04-25 — daemon filed issues #1247-1249 with
+        // these literal template tokens as the title and body.
+        assert!(is_placeholder_echo("<short title, single line>"));
+        assert!(is_placeholder_echo("<markdown body, can be multi-line>"));
+        assert!(is_placeholder_echo("<comment body, can be multi-line>"));
+        assert!(is_placeholder_echo("<reason for closing>"));
+    }
+
+    #[test]
+    fn rejects_existing_placeholders_still() {
+        assert!(is_placeholder_echo("<one-paragraph concrete task>"));
+        assert!(is_placeholder_echo("<title>"));
+        assert!(is_placeholder_echo("<body>"));
+    }
+
+    #[test]
+    fn accepts_real_titles_and_bodies() {
+        assert!(!is_placeholder_echo(
+            "P3: issue creator dedup by title-hash"
+        ));
+        assert!(!is_placeholder_echo("Fix race in cleanup hook"));
+        // Bodies that legitimately use angle-bracketed jargon must pass.
+        assert!(!is_placeholder_echo(
+            "The handler returns `Result<T, E>` instead of panicking."
+        ));
+    }
+
+    #[test]
+    fn gh_issue_create_with_placeholder_title_is_invalid() {
+        let action = GoalAction::GhIssueCreate {
+            title: "<short title, single line>".into(),
+            body: "real body content".into(),
+            repo: None,
+            labels: vec![],
+        };
+        assert!(
+            !action_is_valid(&action),
+            "placeholder title must be rejected"
+        );
+    }
+
+    #[test]
+    fn gh_issue_create_with_placeholder_body_is_invalid() {
+        let action = GoalAction::GhIssueCreate {
+            title: "real title".into(),
+            body: "<markdown body, can be multi-line>".into(),
+            repo: None,
+            labels: vec![],
+        };
+        assert!(
+            !action_is_valid(&action),
+            "placeholder body must be rejected"
+        );
+    }
+
+    #[test]
+    fn gh_issue_create_with_real_content_is_valid() {
+        let action = GoalAction::GhIssueCreate {
+            title: "Fix the issue creator template echo bug".into(),
+            body: "When the LLM returns the schema scaffold verbatim, we file garbage.".into(),
+            repo: None,
+            labels: vec!["bug".into()],
+        };
+        assert!(action_is_valid(&action));
+    }
+
+    #[test]
+    fn gh_issue_comment_rejects_placeholder_body() {
+        let action = GoalAction::GhIssueComment {
+            issue: 1247,
+            body: "<comment body, can be multi-line>".into(),
+            repo: None,
+        };
+        assert!(!action_is_valid(&action));
+    }
+
+    #[test]
+    fn gh_pr_comment_rejects_placeholder_body() {
+        let action = GoalAction::GhPrComment {
+            pr: 1240,
+            body: "<comment body, can be multi-line>".into(),
+            repo: None,
+        };
+        assert!(!action_is_valid(&action));
     }
 }
