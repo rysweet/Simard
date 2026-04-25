@@ -689,12 +689,49 @@ fn run_gh(args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// Look up an open issue in `repo` whose title exactly matches `title`.
+/// Returns `Ok(Some(number))` if a duplicate exists, `Ok(None)` otherwise.
+/// Errors are non-fatal — we treat lookup failure as "no duplicate found"
+/// and let the caller proceed (failing closed on dedup would block all
+/// issue creation if the gh search API hiccups).
+fn find_duplicate_open_issue(repo: &str, title: &str) -> Result<Option<u64>, String> {
+    let search = format!("\"{}\" in:title", title.replace('"', "\\\""));
+    let json = run_gh(&[
+        "issue", "list", "--repo", repo, "--state", "open",
+        "--search", &search, "--json", "number,title", "--limit", "10",
+    ])?;
+    #[derive(serde::Deserialize)]
+    struct Hit { number: u64, title: String }
+    let hits: Vec<Hit> = serde_json::from_str(&json)
+        .map_err(|e| format!("dedup parse failed: {e}"))?;
+    let target = title.trim();
+    Ok(hits.into_iter().find(|h| h.title.trim() == target).map(|h| h.number))
+}
+
 fn dispatch_gh_issue_create(
     repo: &str,
     title: &str,
     body: &str,
     labels: &[String],
 ) -> Result<String, String> {
+    // Pre-flight dedup: refuse to file a second open issue with the same
+    // title. The OODA daemon repeatedly proposed identical titles
+    // (#1178-1183 were six dupes of #1177; #1247-1250 were four dupes of
+    // each other). Title-hash check is cheap and stops the worst case.
+    match find_duplicate_open_issue(repo, title) {
+        Ok(Some(existing)) => {
+            return Err(format!(
+                "duplicate of open issue #{existing}: title \"{title}\" already exists"
+            ));
+        }
+        Ok(None) => {}
+        Err(e) => {
+            // Non-fatal: log and proceed. We'd rather risk an occasional
+            // dupe than block all issue creation on a search-API blip.
+            eprintln!("[simard] dedup lookup failed (proceeding): {e}");
+        }
+    }
+
     let mut args: Vec<&str> = vec![
         "issue", "create", "--repo", repo, "--title", title, "--body", body,
     ];
