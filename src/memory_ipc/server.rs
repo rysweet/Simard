@@ -1,6 +1,5 @@
 //! Server: spawn_server + ServerHandle + serve_connection + dispatch.
 
-use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::Arc;

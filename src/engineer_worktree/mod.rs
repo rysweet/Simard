@@ -8,18 +8,12 @@
 //!
 //! See `docs/reference/engineer-worktree-isolation.md` for the full contract.
 
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use std::sync::OnceLock;
-
-#[cfg(unix)]
-use std::os::unix::fs::DirBuilderExt;
 
 /// Process-wide lock serializing mutating `git worktree` commands against
 /// the parent repository. Git's `.git/worktrees/` registry is not safe to
@@ -58,10 +52,7 @@ pub const WORKTREES_SUBDIR: &str = "engineer-worktrees";
 pub const ENGINEER_CLAIM_FILE: &str = ".simard-engineer-claim";
 
 mod claim;
-use claim::{
-    EngineerClaim, claim_is_live, format_engineer_claim, is_pid_alive, read_engineer_claim,
-    read_engineer_claim_full, read_pid_starttime,
-};
+use claim::{EngineerClaim, claim_is_live, format_engineer_claim, read_engineer_claim_full};
 pub use claim::{is_pid_alive_public, read_pid_starttime_public};
 
 /// Maximum length of a `goal_id` accepted by [`EngineerWorktree::allocate`].

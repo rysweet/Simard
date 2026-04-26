@@ -4,11 +4,9 @@ use std::path::PathBuf;
 
 use tracing::{debug, info, warn};
 
-use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 use crate::meeting_facilitator::{
-    ActionItem, MeetingDecision, MeetingHandoff, OpenQuestion, default_handoff_dir,
-    write_meeting_handoff,
+    ActionItem, MeetingDecision, MeetingHandoff, default_handoff_dir, write_meeting_handoff,
 };
 
 use super::types::{ConversationMessage, HandoffActionItem, MeetingTranscript};
