@@ -19,6 +19,8 @@ mod tests_observe;
 #[cfg(test)]
 mod tests_orient;
 #[cfg(test)]
+mod tests_orient_extra;
+#[cfg(test)]
 mod tests_types;
 
 // Re-export all public items so `crate::ooda_loop::X` still works.
