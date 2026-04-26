@@ -34,8 +34,10 @@ use crate::error::SimardError;
 
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
 mod tests_extra;
+#[cfg(test)]
+#[cfg(test)]
+mod tests_more;
 
 /// Subdirectory under the supervisor state root that holds all engineer worktrees.
 pub const WORKTREES_SUBDIR: &str = "engineer-worktrees";
