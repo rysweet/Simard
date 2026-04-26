@@ -4976,7 +4976,12 @@ pub(crate) const INDEX_HTML: &str = r#"<!DOCTYPE html>
     function mgApplyFilters(){
       const checks={};
       document.querySelectorAll('.mem-filter').forEach(cb=>{checks[cb.dataset.type]=cb.checked;});
-      mgFiltered=mgNodes.filter(n=>checks[n.type]!==false);
+      mgFiltered=mgNodes.filter(n=>{
+        if(checks[n.type]===false)return false;
+        const lbl=(n.label||'').toLowerCase();
+        if(lbl.indexOf('goal-board:snapshot')>=0)return false;
+        return true;
+      });
       const ids=new Set(mgFiltered.map(n=>n.id));
       mgFilteredEdges=mgEdges.filter(e=>ids.has(e.source)&&ids.has(e.target));
       mgRender();
@@ -5065,14 +5070,17 @@ pub(crate) const INDEX_HTML: &str = r#"<!DOCTYPE html>
       });
       const r=8;
       mgFiltered.forEach(n=>{
-        ctx.beginPath();ctx.arc(n.x,n.y,n===mgPinned?r+3:r,0,Math.PI*2);
-        ctx.fillStyle=mgColors[n.type]||'#8b949e';
+        const lblLow=(n.label||'').toLowerCase();
+        const isGoal=lblLow.indexOf('goal')>=0;
+        const nr=isGoal?12:r;
+        ctx.beginPath();ctx.arc(n.x,n.y,n===mgPinned?nr+3:nr,0,Math.PI*2);
+        ctx.fillStyle=isGoal?'#FFD700':(mgColors[n.type]||'#8b949e');
         if(n===mgPinned){ctx.lineWidth=2;ctx.strokeStyle='#fff';ctx.stroke();}
         ctx.fill();
         const lbl=n.label||'';
         if(lbl.length>0&&mgScale>0.5){
           ctx.fillStyle='#c9d1d9';ctx.font='10px sans-serif';ctx.textAlign='center';
-          ctx.fillText(lbl.substring(0,30),n.x,n.y-r-4);
+          ctx.fillText(lbl.substring(0,30),n.x,n.y-nr-4);
         }
       });
       ctx.restore();
@@ -5403,9 +5411,15 @@ pub(crate) const INDEX_HTML: &str = r#"<!DOCTYPE html>
                       ${se.task_summary?`<div>task: ${esc(se.task_summary)}</div>`:''}
                     </div>`;
                   }
+                  const det=o.detail||'';
+                  const detLow=det.toLowerCase();
+                  const hasArtifact=detLow.indexOf('pr #')>=0||detLow.indexOf('commit')>=0;
+                  const isAssessmentOnly=detLow.indexOf('assessed')>=0&&detLow.indexOf('verified=0')>=0;
+                  const linkIcon=hasArtifact?'<span style="color:#2ea043;margin-right:4px" title="produced artifact">🔗</span>':'';
+                  const assessBadge=(!hasArtifact&&isAssessmentOnly)?' <span class="badge-assessment" style="background:#fb8500;color:#fff;padding:1px 6px;border-radius:3px;font-size:11px;margin-left:6px">assessment only</span>':'';
                   return `<div class="outcome ${o.success?'success':'failure'}">
-                    ${o.success?'✅':'❌'} <code>${esc(o.action_kind)}</code> — ${esc(o.action_description)}
-                    <div class="outcome-detail">${esc((o.detail||'').substring(0,300))}${(o.detail||'').length>300?'…':''}</div>
+                    ${o.success?'✅':'❌'} <code>${esc(o.action_kind)}</code> — ${esc(o.action_description)}${assessBadge}
+                    <div class="outcome-detail">${linkIcon}${esc(det.substring(0,300))}${det.length>300?'…':''}</div>
                     ${seBlock}
                   </div>`;
                 }).join('')}
