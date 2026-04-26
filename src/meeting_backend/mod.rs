@@ -7,6 +7,10 @@
 pub mod command;
 pub mod lightweight;
 pub mod persist;
+#[cfg(test)]
+mod tests_persist;
+#[cfg(test)]
+mod tests_persist_extra;
 pub mod types;
 
 use std::fmt::Write as _;
