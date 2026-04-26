@@ -7,6 +7,10 @@
 mod handoff;
 mod session;
 #[cfg(test)]
+mod tests_handoff;
+#[cfg(test)]
+mod tests_handoff_extra;
+#[cfg(test)]
 mod tests_session;
 mod types;
 
