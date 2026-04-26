@@ -4,6 +4,7 @@ mod goals;
 mod memory;
 mod activity;
 mod workboard;
+mod current_work;
 pub(crate) mod routes;
 
 #[cfg(test)]
