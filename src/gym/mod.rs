@@ -15,6 +15,8 @@ mod tests_mod;
 #[cfg(test)]
 mod tests_reporting;
 #[cfg(test)]
+mod tests_reporting_extra;
+#[cfg(test)]
 mod tests_scenarios;
 #[cfg(test)]
 mod tests_types;
