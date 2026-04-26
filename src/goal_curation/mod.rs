@@ -16,3 +16,5 @@ pub use types::{ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOA
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_operations;
