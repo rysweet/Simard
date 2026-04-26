@@ -12,6 +12,10 @@ mod tests_execution_extra;
 #[cfg(test)]
 mod tests_mod;
 #[cfg(test)]
+mod tests_mod_more;
+#[cfg(test)]
+mod tests_mod_most;
+#[cfg(test)]
 mod tests_review_persist;
 #[cfg(test)]
 mod tests_review_persist_extra;
