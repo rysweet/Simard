@@ -57,6 +57,7 @@ fn sample(agent_id: &str, ended_at: Option<i64>) -> SubagentSession {
 }
 
 #[test]
+#[serial_test::serial]
 fn registry_path_honors_state_root_env() {
     with_state_root("path-env", |root| {
         let p = registry_path();
@@ -72,6 +73,7 @@ fn registry_path_honors_state_root_env() {
 }
 
 #[test]
+#[serial_test::serial]
 fn load_returns_empty_when_missing() {
     with_state_root("empty", |_root| {
         let reg = load();
@@ -80,6 +82,7 @@ fn load_returns_empty_when_missing() {
 }
 
 #[test]
+#[serial_test::serial]
 fn save_atomic_round_trips_and_creates_parent_dir() {
     with_state_root("rt", |_root| {
         let reg = Registry {
@@ -95,6 +98,7 @@ fn save_atomic_round_trips_and_creates_parent_dir() {
 }
 
 #[test]
+#[serial_test::serial]
 fn save_atomic_leaves_no_tmp_siblings() {
     with_state_root("atomic", |_root| {
         let reg = Registry {
@@ -118,6 +122,7 @@ fn save_atomic_leaves_no_tmp_siblings() {
 }
 
 #[test]
+#[serial_test::serial]
 fn record_spawn_appends_to_registry() {
     with_state_root("rec", |_root| {
         record_spawn(sample("engineer-1", None)).unwrap();
@@ -142,6 +147,7 @@ impl SessionProbe for StubProbe {
 }
 
 #[test]
+#[serial_test::serial]
 fn poll_and_gc_marks_dead_sessions_with_ended_at() {
     with_state_root("poll", |_root| {
         record_spawn(sample("engineer-live", None)).unwrap();
@@ -179,6 +185,7 @@ fn poll_and_gc_marks_dead_sessions_with_ended_at() {
 }
 
 #[test]
+#[serial_test::serial]
 fn poll_and_gc_drops_entries_ended_more_than_24h_ago() {
     with_state_root("gc", |_root| {
         let now = std::time::SystemTime::now()
@@ -218,6 +225,7 @@ fn poll_and_gc_drops_entries_ended_more_than_24h_ago() {
 }
 
 #[test]
+#[serial_test::serial]
 fn sanitize_id_replaces_unsafe_chars_with_dash() {
     assert_eq!(sanitize_id("engineer-abc_123"), "engineer-abc_123");
     assert_eq!(sanitize_id("engineer/with spaces"), "engineer-with-spaces");
@@ -225,11 +233,13 @@ fn sanitize_id_replaces_unsafe_chars_with_dash() {
 }
 
 #[test]
+#[serial_test::serial]
 fn sanitize_id_empty_input_becomes_engineer() {
     assert_eq!(sanitize_id(""), "engineer");
 }
 
 #[test]
+#[serial_test::serial]
 fn sanitize_id_output_matches_safe_charset() {
     let out = sanitize_id("weird!@#$%^&*()chars");
     assert!(
