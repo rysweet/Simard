@@ -82,6 +82,25 @@ These are correct as-is and documented inline where useful:
 - 2 follow-ups identified (cost_tracking, dashboard goal_board)
 - 0 PROPAGATE bugs found that warrant immediate emergency fix
 
+## Round 6 outcome (post-cycle re-audit)
+
+Both Round-5 follow-ups verified:
+
+- **`src/cost_tracking.rs:280`** — Re-checked: the `.ok()` is inside a
+  `#[cfg(test)]` cleanup block (`fs::remove_dir_all(&dir).ok();`), not
+  a production path. No action needed; it's correct test hygiene.
+- **`src/operator_commands_dashboard/routes.rs:1126`** — Already migrated
+  to `match` + `tracing::warn!` with the path and error reason. The
+  dashboard now logs "goal_records.json failed to parse; dashboard
+  rendering 0 goals" on malformed input. Done.
+
+**Re-count baseline (2026-04-26):** 65 `.ok();` discards remain (down
+from 97 originally), 0 `_ => ()` bare catch-alls (down from 16). The
+remaining `.ok();` sites are dominated by the meeting_repl writeln
+cohort (REPL-output to potentially-closed pipe — DOCUMENT-FAIL-OPEN
+by design) and by env-var lookups. No further PROPAGATE/LOG-AND-CONTINUE
+candidates identified in the production crate graph.
+
 This audit closes the "is the codebase riddled with silent error swallows?" question with **no** for production-critical paths. The remaining cleanup is incremental.
 
 ## References
@@ -89,4 +108,6 @@ This audit closes the "is the codebase riddled with silent error swallows?" ques
 - [Google SRE Book — Monitoring Distributed Systems](https://sre.google/sre-book/monitoring-distributed-systems/)
 - PR #4477 (amplihack) — the 13-day silent failure that motivated this audit
 - PR #1240 (Simard) — eval-watchdog, the structural fix for the *symptom*
-- This PR (Simard) — the structural fix for one *cause*
+- PR #1259 (Simard) — bridge_launcher fail-open conversion (Round 5)
+- PR #1274 (Simard) — advance_goal.rs error propagation (4 sites, #1264)
+- PR #1275 (Simard) — vacate handler error propagation (#1263)
