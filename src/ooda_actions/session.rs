@@ -1,16 +1,55 @@
-//! LaunchSession — bounded terminal session for amplihack copilot tasks.
+//! LaunchSession — bounded terminal session that dispatches through the
+//! configured base type ([`LlmProvider`]).
+//!
+//! Per #1162: the launcher must consult [`LlmProvider::resolve`] (which
+//! reads `SIMARD_LLM_PROVIDER` then `~/.simard/config.toml`, with no
+//! silent default) and fail loud if the configured provider is one
+//! the launcher cannot drive yet. Today only `Copilot` is wired —
+//! `RustyClawd` returns an explicit "not implemented" error rather
+//! than silently degrading to amplihack.
 
 use crate::ooda_loop::{ActionOutcome, PlannedAction};
+use crate::session_builder::LlmProvider;
 
 use super::make_outcome;
 
 /// Launch a bounded terminal session to work on a specific task.
 ///
-/// Uses `PtyTerminalSession` to start `amplihack copilot -p <prompt>`,
-/// wait for natural process exit, and capture the transcript.
-/// This mirrors the copilot adapter pattern from `base_type_copilot.rs`:
-/// write the prompt to a temp file, invoke copilot with `-p`, chain `; exit`.
+/// Routes through the configured base type:
+/// - `LlmProvider::Copilot` → `amplihack copilot -p` via PTY (current behaviour)
+/// - `LlmProvider::RustyClawd` → explicit unsupported error (fail loud, no fallback)
+///
+/// If `LlmProvider::resolve()` itself fails (env var unset *and* config
+/// missing), the outcome surfaces that error verbatim so the operator
+/// fixes their config rather than getting silent default behaviour.
 pub(super) fn dispatch_launch_session(action: &PlannedAction) -> ActionOutcome {
+    let provider = match LlmProvider::resolve() {
+        Ok(p) => p,
+        Err(e) => {
+            return make_outcome(
+                action,
+                false,
+                format!("launch-session aborted: LlmProvider::resolve failed: {e}"),
+            );
+        }
+    };
+
+    match provider {
+        LlmProvider::Copilot => dispatch_launch_session_copilot(action),
+        LlmProvider::RustyClawd => make_outcome(
+            action,
+            false,
+            "launch-session not yet wired for rustyclawd base type — \
+             file an issue or set SIMARD_LLM_PROVIDER=copilot \
+             (no silent fallback by design, #1162)"
+                .to_string(),
+        ),
+    }
+}
+
+/// Copilot base-type implementation: shell out to `amplihack copilot -p`
+/// via a PTY-wrapped bash session and capture the transcript.
+fn dispatch_launch_session_copilot(action: &PlannedAction) -> ActionOutcome {
     use crate::terminal_session::PtyTerminalSession;
 
     let task = &action.description;
@@ -133,5 +172,46 @@ mod tests {
         };
         let outcome = super::dispatch_launch_session(&action);
         assert!(!outcome.detail.is_empty());
+    }
+
+    /// Regression #1162: rustyclawd is not yet wired through the launcher,
+    /// so it must fail loud rather than silently dispatching to amplihack.
+    /// Forcing the provider via env var keeps the test deterministic
+    /// regardless of the host's `~/.simard/config.toml` contents.
+    #[test]
+    fn dispatch_launch_session_fails_loud_on_unsupported_rustyclawd_1162() {
+        // SAFETY: tests are single-threaded by default in cargo (--test-threads=1
+        // unless the suite opts out), and this env mutation is local and
+        // restored before the test exits.
+        let prev = std::env::var("SIMARD_LLM_PROVIDER").ok();
+        // Safety: setting an env var is safe in single-threaded test context.
+        unsafe {
+            std::env::set_var("SIMARD_LLM_PROVIDER", "rustyclawd");
+        }
+
+        let action = PlannedAction {
+            kind: ActionKind::LaunchSession,
+            goal_id: None,
+            description: "noop".into(),
+        };
+        let outcome = super::dispatch_launch_session(&action);
+
+        // Restore the prior env state before any assertion can panic.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("SIMARD_LLM_PROVIDER", v),
+                None => std::env::remove_var("SIMARD_LLM_PROVIDER"),
+            }
+        }
+
+        assert!(
+            !outcome.success,
+            "rustyclawd is not yet wired for launch-session and must fail loud"
+        );
+        assert!(
+            outcome.detail.contains("rustyclawd") && outcome.detail.contains("not yet wired"),
+            "fail-loud message must name the provider and explain why; got: {}",
+            outcome.detail
+        );
     }
 }
