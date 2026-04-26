@@ -74,10 +74,10 @@ fn main() {
     // round-trip it to confirm shape. Non-fatal — recipe runner output format
     // may evolve.
     for line in stdout.lines() {
-        if line.starts_with('{') {
-            if let Ok(_cycle) = serde_json::from_str::<ImprovementCycle>(line) {
-                return;
-            }
+        if line.starts_with('{')
+            && let Ok(_cycle) = serde_json::from_str::<ImprovementCycle>(line)
+        {
+            return;
         }
     }
 }
