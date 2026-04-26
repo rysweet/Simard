@@ -18,6 +18,8 @@ mod types;
 mod tests_observe;
 #[cfg(test)]
 mod tests_orient;
+#[cfg(test)]
+mod tests_types;
 
 // Re-export all public items so `crate::ooda_loop::X` still works.
 pub use bridge_factory::{bridges_from_state_root, connect_memory};
