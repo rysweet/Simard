@@ -3,6 +3,7 @@ mod tests {
     use crate::operator_commands_dashboard::routes::*;
     use crate::operator_commands_dashboard::tmux::TmuxSession;
     use crate::operator_commands_dashboard::distributed::remote_vms_from_hosts;
+    use crate::operator_commands_dashboard::hosts::{host_entry_name, is_local_host, load_hosts, tag_local_membership};
     use crate::operator_commands_dashboard::current_work::{format_recent_actions_for_cycle, read_recent_cycle_reports};
     use serde_json::json;
 
