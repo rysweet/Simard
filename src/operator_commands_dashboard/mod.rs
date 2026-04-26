@@ -8,6 +8,7 @@ mod current_work;
 mod distributed;
 mod tmux;
 mod hosts;
+mod chat;
 pub(crate) mod routes;
 
 #[cfg(test)]
