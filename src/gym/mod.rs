@@ -18,6 +18,8 @@ mod tests_reporting;
 mod tests_scenarios;
 #[cfg(test)]
 mod tests_types;
+#[cfg(test)]
+mod tests_types_extra;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
