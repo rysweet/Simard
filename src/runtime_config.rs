@@ -216,11 +216,24 @@ mod tests {
     use tempfile::TempDir;
 
     fn with_clean_env<F: FnOnce()>(f: F) {
-        // SAFETY: tests are serialized via cargo's default single-threaded
-        // env access — no other thread reads/writes SIMARD_LLM_PROVIDER
-        // during the test body.
+        // The tests in this module all read/write `SIMARD_LLM_PROVIDER`.
+        // cargo runs tests multi-threaded by default, so they MUST be
+        // serialized to avoid env-var races where one test's `set_var`
+        // is observed by another test's `read_env_provider()`.
+        //
+        // CI flake observed at runtime_config.rs:286 in run 24947780630:
+        // `bootstrap_from_env_writes_when_missing` saw `wrote == false`
+        // because a concurrent test had cleared the env var between
+        // set_var and bootstrap_from_env.
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: lock above guarantees no other test in this module
+        // reads/writes SIMARD_LLM_PROVIDER while the closure runs.
         unsafe { std::env::remove_var(ENV_LLM_PROVIDER) };
         f();
+        // Always clear on exit so the next test starts clean even if the
+        // closure panicked before its own remove_var ran.
+        unsafe { std::env::remove_var(ENV_LLM_PROVIDER) };
     }
 
     #[test]
