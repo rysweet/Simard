@@ -29,7 +29,7 @@ pub struct SelectedHandoffArtifact {
     pub file_name: &'static str,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TerminalBridgeContext {
     pub continuity_source: String,
     pub handoff_file_name: String,

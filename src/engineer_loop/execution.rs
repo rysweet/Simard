@@ -220,7 +220,7 @@ pub(crate) fn parse_status_paths(stdout: &str) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn execute_engineer_action(
+pub fn execute_engineer_action(
     repo_root: &Path,
     selected: SelectedEngineerAction,
 ) -> SimardResult<ExecutedEngineerAction> {

@@ -239,7 +239,7 @@ pub(crate) fn verify_kind_specific(
     Ok(())
 }
 
-pub(crate) fn verify_engineer_action(
+pub fn verify_engineer_action(
     inspection: &RepoInspection,
     action: &ExecutedEngineerAction,
     state_root: &Path,
