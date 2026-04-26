@@ -13,6 +13,7 @@ mod logs;
 mod registry;
 mod metrics;
 mod agent_log;
+mod subagent;
 pub(crate) mod routes;
 
 #[cfg(test)]

@@ -2,7 +2,8 @@ use axum::Json;
 use serde_json::{Value, json};
 
 use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory, as_f64, as_i64, as_str};
-use super::routes::{count_json_records, file_metrics, resolve_state_root};
+use super::routes::resolve_state_root;
+use super::subagent::{count_json_records, file_metrics};
 
 // ---------------------------------------------------------------------------
 // Memory metrics panel
