@@ -12,6 +12,8 @@ mod simple_actions;
 #[cfg(test)]
 pub(crate) mod test_helpers;
 #[cfg(test)]
+mod tests_advance_goal;
+#[cfg(test)]
 mod tests_dispatch;
 #[cfg(test)]
 mod tests_goal_session;
