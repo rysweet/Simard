@@ -4,7 +4,6 @@ use super::git_ops::rollback;
 use super::*;
 use crate::engineer_loop::AnalyzedAction;
 use crate::engineer_plan::{Plan, PlanStep};
-use crate::error::SimardError;
 use crate::review_pipeline::{FindingCategory, Severity};
 
 fn make_patch(steps: Vec<PlanStep>) -> ImprovementPatch {

@@ -13,7 +13,6 @@
 //! - Input validation: empty required fields → InvalidRunSummary
 //! - No-fallback: ambiguous routing never calls gh
 
-use std::cell::RefCell;
 use std::sync::Mutex;
 
 use crate::error::SimardError;

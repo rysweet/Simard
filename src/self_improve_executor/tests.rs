@@ -1,6 +1,5 @@
 use std::path::Path;
 
-use super::git_ops::rollback;
 use super::*;
 use crate::engineer_loop::AnalyzedAction;
 use crate::engineer_plan::{Plan, PlanStep};

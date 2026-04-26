@@ -1,9 +1,7 @@
 use super::cycle::*;
-use super::types::{
-    ImprovementConfig, ImprovementCycle, ImprovementDecision, ImprovementPhase, ProposedChange,
-};
+use super::types::{ImprovementCycle, ImprovementDecision, ImprovementPhase, ProposedChange};
 use crate::gym_bridge::ScoreDimensions;
-use crate::gym_scoring::{GymSuiteScore, Regression, RegressionSeverity};
+use crate::gym_scoring::GymSuiteScore;
 
 fn make_score(v: f64) -> GymSuiteScore {
     GymSuiteScore {

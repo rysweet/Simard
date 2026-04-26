@@ -146,8 +146,6 @@ mod registry_inline {
     use super::*;
     use std::path::{Path, PathBuf};
 
-    use super::*;
-
     fn temp_registry_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "simard-registry-test-{}-{}",

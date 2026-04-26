@@ -5,7 +5,6 @@ use super::types::{
     SelectedEngineerAction, ShellCommandRequest, analyze_objective, parse_structured_edit_request,
     validate_repo_relative_path,
 };
-use crate::PhaseOutcome;
 
 #[test]
 fn git_status_paths_strip_status_prefixes() {

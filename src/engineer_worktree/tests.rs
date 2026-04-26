@@ -13,7 +13,7 @@ use std::thread;
 
 use tempfile::tempdir;
 
-use super::{EngineerWorktree, sweep_orphaned_worktrees};
+use super::EngineerWorktree;
 use crate::error::SimardError;
 
 // ---------------------------------------------------------------------------

@@ -4,9 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use semaphore::{epoch_now, extract_u64, is_pid_alive};
-
-use handoff::wait_for_ready;
+use semaphore::{epoch_now, is_pid_alive};
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 

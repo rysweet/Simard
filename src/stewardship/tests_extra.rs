@@ -18,11 +18,9 @@ use std::sync::Mutex;
 
 use crate::error::SimardError;
 use crate::goal_curation::GoalBoard;
-use crate::stewardship::dedup::{failure_signature, find_existing, normalize};
-use crate::stewardship::routing::route_failure;
+use crate::stewardship::dedup::failure_signature;
 use crate::stewardship::{
-    GhClient, GhIssue, OrchestratorRunSummary, StewardshipOutcome, TargetRepo,
-    process_orchestrator_run,
+    GhClient, GhIssue, OrchestratorRunSummary, StewardshipOutcome, process_orchestrator_run,
 };
 
 // ─────────────────────────── FakeGhClient ───────────────────────────

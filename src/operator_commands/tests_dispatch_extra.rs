@@ -1,7 +1,5 @@
 use super::dispatch::*;
 
-use std::path::PathBuf;
-
 fn s(value: &str) -> String {
     value.to_string()
 }

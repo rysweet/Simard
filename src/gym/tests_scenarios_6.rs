@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::gym::scenarios::*;
-    use crate::gym::types::{BenchmarkClass, BenchmarkScenario};
+    use crate::gym::types::BenchmarkClass;
 
     #[test]
     fn benchmark_scenarios_not_empty() {

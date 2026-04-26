@@ -12,7 +12,6 @@ use std::process::Command;
 use tempfile::tempdir;
 
 use super::{EngineerWorktree, sweep_orphaned_worktrees};
-use crate::error::SimardError;
 
 // ---------------------------------------------------------------------------
 // Fixtures
