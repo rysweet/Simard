@@ -1,5 +1,4 @@
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -7,13 +6,7 @@ use std::time::{Duration, Instant};
 use crate::error::{SimardError, SimardResult};
 use crate::sanitization::sanitize_terminal_text;
 
-use super::types::{
-    EngineerActionKind, ExecutedEngineerAction, SelectedEngineerAction, validate_repo_relative_path,
-};
-use super::{
-    CARGO_COMMAND_TIMEOUT_SECS, CLEARED_GIT_ENV_VARS, GIT_COMMAND_TIMEOUT_SECS,
-    SHELL_COMMAND_ALLOWLIST,
-};
+use super::{CARGO_COMMAND_TIMEOUT_SECS, CLEARED_GIT_ENV_VARS, GIT_COMMAND_TIMEOUT_SECS};
 
 pub(crate) struct CommandOutput {
     pub(crate) status: std::process::ExitStatus,
