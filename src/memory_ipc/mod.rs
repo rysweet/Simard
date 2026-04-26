@@ -168,11 +168,10 @@ pub(crate) fn read_frame<R: Read>(r: &mut R) -> SimardResult<Vec<u8>> {
     Ok(buf)
 }
 
-mod server;
 mod client;
+mod server;
 pub use client::RemoteCognitiveMemory;
 pub use server::{ServerHandle, spawn_server};
-
 
 // ============================================================================
 // Shared-memory adapter: Arc → Box<dyn CognitiveMemoryOps>

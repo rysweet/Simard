@@ -68,7 +68,6 @@ pub(super) fn checks_for_database_schema_change(combined: &str) -> Vec<Benchmark
     ]
 }
 
-
 pub(super) fn checks_for_rate_limiting(combined: &str) -> Vec<BenchmarkCheckResult> {
     let algorithm_named = combined.contains("token bucket")
         || combined.contains("token-bucket")
@@ -131,7 +130,6 @@ pub(super) fn checks_for_rate_limiting(combined: &str) -> Vec<BenchmarkCheckResu
     ]
 }
 
-
 pub(super) fn checks_for_api_design(combined: &str) -> Vec<BenchmarkCheckResult> {
     let api_surface_analyzed = combined.contains("pub fn")
         || combined.contains("pub struct")
@@ -188,7 +186,6 @@ pub(super) fn checks_for_api_design(combined: &str) -> Vec<BenchmarkCheckResult>
     ]
 }
 
-
 pub(super) fn checks_for_refactoring(combined: &str) -> Vec<BenchmarkCheckResult> {
     let change_identified = combined.contains("extract")
         || combined.contains("simplif")
@@ -240,7 +237,6 @@ pub(super) fn checks_for_refactoring(combined: &str) -> Vec<BenchmarkCheckResult
         },
     ]
 }
-
 
 pub(super) fn checks_for_error_handling(combined: &str) -> Vec<BenchmarkCheckResult> {
     let error_analysis = combined.contains("unwrap")

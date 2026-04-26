@@ -1,8 +1,8 @@
 use axum::Json;
 use serde_json::{Value, json};
 
-use super::routes::run_gh_json;
 use super::hosts::{host_entry_name, load_hosts, save_hosts};
+use super::routes::run_gh_json;
 
 /// Map the configured hosts list (the canonical source used by the Cluster
 /// Topology panel via `load_hosts()`) into the entries rendered by the

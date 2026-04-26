@@ -1,17 +1,16 @@
 //! Cleanup primitive + path helpers used by allocate/drop.
 
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::SimardError;
 
-use super::{ENGINEER_CLAIM_FILE, worktree_mutation_lock};
 use super::sweep::git_capture;
-
+use super::{ENGINEER_CLAIM_FILE, worktree_mutation_lock};
 
 /// Cleanup primitive shared by `cleanup()` and `Drop`.
 ///
@@ -70,7 +69,6 @@ pub fn cleanup_inner(
     }
     Ok(())
 }
-
 
 /// Canonicalize `dir` and verify it lives under `root_canonical`.
 /// Returns the canonicalized path so the caller can `fs::remove_dir_all`

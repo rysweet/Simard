@@ -5,7 +5,6 @@ use crate::meeting_facilitator::{ActionItem, MeetingDecision, MeetingHandoff, Op
 
 use crate::meeting_backend::types::{ConversationMessage, HandoffActionItem};
 
-
 const ACTION_SIGNALS: &[&str] = &[
     "action item:",
     "todo:",
@@ -46,9 +45,6 @@ const DEADLINE_SIGNALS: &[&str] = &[
     "today",
     "tonight",
 ];
-
-
-
 
 /// Extract structured action items from a conversation transcript.
 ///

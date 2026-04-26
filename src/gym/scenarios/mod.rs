@@ -44,7 +44,6 @@ pub(super) fn resolve_benchmark_scenario(scenario_id: &str) -> SimardResult<Benc
         })
 }
 
-
 mod checks;
 mod checks_1;
 mod checks_2;

@@ -1,21 +1,21 @@
-mod auth;
-mod monitoring;
-mod goals;
-mod memory;
 mod activity;
-mod workboard;
+mod agent_log;
+mod auth;
+mod chat;
 mod current_work;
 mod distributed;
-mod tmux;
+mod goals;
 mod hosts;
-mod chat;
-mod logs;
-mod registry;
-mod metrics;
-mod agent_log;
-mod subagent;
 mod index_html;
+mod logs;
+mod memory;
+mod metrics;
+mod monitoring;
+mod registry;
 pub(crate) mod routes;
+mod subagent;
+mod tmux;
+mod workboard;
 
 #[cfg(test)]
 mod tests_attach;

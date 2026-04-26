@@ -6,9 +6,9 @@ use tracing::{debug, info, warn};
 use crate::base_types::{BaseTypeOutcome, BaseTypeTurnInput};
 use crate::error::{SimardError, SimardResult};
 
-use super::{EMPTY_RESPONSE_SENTINEL, MAX_HISTORY, MeetingBackend};
-use super::types::{MeetingResponse, Role};
 use super::sanitize::extract_response;
+use super::types::{MeetingResponse, Role};
+use super::{EMPTY_RESPONSE_SENTINEL, MAX_HISTORY, MeetingBackend};
 
 impl MeetingBackend {
     /// Send a user message and get Simard's response.

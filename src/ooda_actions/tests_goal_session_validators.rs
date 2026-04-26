@@ -28,7 +28,6 @@ mod label_sanitizer_tests {
     }
 }
 
-
 mod placeholder_echo_tests {
     use crate::ooda_actions::goal_session::{GoalAction, action_is_valid, is_placeholder_echo};
 
@@ -120,7 +119,6 @@ mod placeholder_echo_tests {
         assert!(!action_is_valid(&action));
     }
 }
-
 
 mod makework_title_tests {
     use crate::ooda_actions::goal_session::{GoalAction, action_is_valid, is_makework_title};

@@ -7,23 +7,31 @@ use axum::{
 };
 use serde_json::{Value, json};
 
-use super::auth::{login, login_page, require_auth};
-use super::monitoring::{costs, get_budget, metrics, set_budget};
 use super::activity::{activity, traces};
-use super::workboard::workboard;
+use super::agent_log::{WS_AGENT_LOG_ROUTE, ws_agent_log_handler};
+use super::auth::{login, login_page, require_auth};
+use super::chat::ws_chat_handler;
 use super::current_work::current_work;
 use super::distributed::{distributed, strip_ansi_codes, vacate_vm};
-use super::tmux::{azlin_tmux_sessions, ws_tmux_attach_handler};
-use super::chat::ws_chat_handler;
+use super::goals::{
+    add_goal, demote_goal, goals, promote_backlog_item, remove_goal, seed_goals, update_goal_status,
+};
+use super::hosts::{
+    add_host, get_hosts, host_entry_name, is_local_host, load_hosts, remove_host, save_hosts,
+    tag_local_membership,
+};
 use super::logs::read_tail;
-use super::subagent::{disk_usage_pct, file_metrics, count_json_records, subagent_sessions};
-use super::agent_log::{WS_AGENT_LOG_ROUTE, ws_agent_log_handler};
-use super::metrics::{memory_metrics, ooda_thinking};
-use super::registry::{agent_graph, build_lock_force_release, build_lock_status, registry_deregister, registry_list, registry_register, registry_reap};
 use super::logs::{logs, processes, read_journal_logs};
-use super::hosts::{add_host, get_hosts, host_entry_name, is_local_host, load_hosts, remove_host, save_hosts, tag_local_membership};
 use super::memory::{build_agent_graph, classify_agent_layer, memory_graph, memory_search};
-use super::goals::{add_goal, demote_goal, goals, promote_backlog_item, remove_goal, seed_goals, update_goal_status};
+use super::metrics::{memory_metrics, ooda_thinking};
+use super::monitoring::{costs, get_budget, metrics, set_budget};
+use super::registry::{
+    agent_graph, build_lock_force_release, build_lock_status, registry_deregister, registry_list,
+    registry_reap, registry_register,
+};
+use super::subagent::{count_json_records, disk_usage_pct, file_metrics, subagent_sessions};
+use super::tmux::{azlin_tmux_sessions, ws_tmux_attach_handler};
+use super::workboard::workboard;
 use crate::agent_registry::{AgentRegistry, FileBackedAgentRegistry};
 use crate::build_lock::BuildLock;
 use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory, as_f64, as_i64, as_str};
@@ -83,7 +91,6 @@ pub fn build_router() -> Router {
         .route("/", get(index))
         .layer(middleware::from_fn(require_auth))
 }
-
 
 async fn status() -> Json<Value> {
     let version = format!(
@@ -176,13 +183,6 @@ async fn issues() -> Json<Value> {
     }
 }
 
-
-
-
-
-
-
-
 pub(crate) fn is_pid_alive(pid: u32) -> bool {
     std::path::Path::new(&format!("/proc/{pid}")).exists()
 }
@@ -211,10 +211,6 @@ pub(crate) fn truncate_with_ellipsis(s: &str, max: usize) -> String {
     }
 }
 
-
-
-
-
 /// Vacate a remote VM: stop Simard processes and export memory snapshot.
 ///
 /// Steps:
@@ -226,14 +222,9 @@ pub(crate) fn truncate_with_ellipsis(s: &str, max: usize) -> String {
 /// Strip ANSI escape sequences (CSI, OSC, and single-char escapes) so that
 /// output from azlin/SSH can be reliably parsed for KEY=value markers.
 
-
 async fn index() -> axum::response::Html<String> {
     axum::response::Html(super::index_html::index_html_string())
 }
-
-
-
-
 
 pub(crate) fn resolve_state_root() -> std::path::PathBuf {
     std::env::var("SIMARD_STATE_ROOT")
@@ -243,4 +234,3 @@ pub(crate) fn resolve_state_root() -> std::path::PathBuf {
             std::path::PathBuf::from(home).join(".simard")
         })
 }
-

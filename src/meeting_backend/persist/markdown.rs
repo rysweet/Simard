@@ -9,12 +9,12 @@ use tracing::{info, warn};
 use crate::error::{SimardError, SimardResult};
 use crate::meeting_facilitator::{ActionItem, MeetingDecision, MeetingHandoff, OpenQuestion};
 
-use crate::meeting_backend::types::{ConversationMessage, HandoffActionItem, MeetingTranscript};
 use super::extract::{
     extract_action_items, extract_decision_participants_pub, extract_decision_rationale_pub,
     extract_decisions, extract_open_questions, extract_themes,
 };
 use super::{meetings_dir, sanitize_filename};
+use crate::meeting_backend::types::{ConversationMessage, HandoffActionItem, MeetingTranscript};
 
 pub fn write_markdown_export(
     topic: &str,
@@ -252,4 +252,3 @@ pub fn write_handoff_markdown_report(
     info!(path = %path.display(), "Meeting handoff report written");
     Ok(path)
 }
-

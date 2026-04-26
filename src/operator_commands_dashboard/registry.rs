@@ -1,10 +1,10 @@
 use axum::Json;
 use serde_json::{Value, json};
 
-use crate::agent_registry::{AgentRegistry, FileBackedAgentRegistry};
-use crate::build_lock::BuildLock;
 use super::memory::build_agent_graph;
 use super::routes::resolve_state_root;
+use crate::agent_registry::{AgentRegistry, FileBackedAgentRegistry};
+use crate::build_lock::BuildLock;
 
 // ---------------------------------------------------------------------------
 // Agent Registry API (#296)
@@ -69,8 +69,6 @@ pub(crate) async fn registry_reap() -> Json<Value> {
 // Pure builder is unit-tested; HTTP handler sources live data from the
 // existing FileBackedAgentRegistry.
 // ---------------------------------------------------------------------------
-
-
 
 pub(crate) async fn agent_graph() -> Json<Value> {
     let reg = FileBackedAgentRegistry::new(&resolve_state_root());

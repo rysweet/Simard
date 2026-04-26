@@ -9,7 +9,9 @@ use super::gh::{
     dispatch_gh_issue_close, dispatch_gh_issue_comment, dispatch_gh_issue_create,
     dispatch_gh_pr_comment, find_duplicate_open_issue,
 };
-use super::{GoalAction, GoalSessionResult, OUTCOME_TEXT_MAX, parse_goal_action, truncate_for_outcome};
+use super::{
+    GoalAction, GoalSessionResult, OUTCOME_TEXT_MAX, parse_goal_action, truncate_for_outcome,
+};
 
 pub(crate) fn assess_only_outcome(
     action: &PlannedAction,

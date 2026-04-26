@@ -66,7 +66,6 @@ pub(super) fn checks_for_feature_flagging(combined: &str) -> Vec<BenchmarkCheckR
     ]
 }
 
-
 pub(super) fn checks_for_event_sourcing(combined: &str) -> Vec<BenchmarkCheckResult> {
     let event_store_described = combined.contains("event store")
         || combined.contains("event-store")
@@ -131,7 +130,6 @@ pub(super) fn checks_for_event_sourcing(combined: &str) -> Vec<BenchmarkCheckRes
     ]
 }
 
-
 pub(super) fn checks_for_debugging(combined: &str) -> Vec<BenchmarkCheckResult> {
     let root_cause_traced = combined.contains("trace")
         || combined.contains("origin")
@@ -188,7 +186,6 @@ pub(super) fn checks_for_debugging(combined: &str) -> Vec<BenchmarkCheckResult> 
     ]
 }
 
-
 pub(super) fn checks_for_config_management(combined: &str) -> Vec<BenchmarkCheckResult> {
     let config_inventoried = combined.contains("config")
         || combined.contains("feature")
@@ -240,7 +237,6 @@ pub(super) fn checks_for_config_management(combined: &str) -> Vec<BenchmarkCheck
         },
     ]
 }
-
 
 pub(super) fn checks_for_test_writing(combined: &str) -> Vec<BenchmarkCheckResult> {
     let has_test_annotation = combined.contains("#[test]")

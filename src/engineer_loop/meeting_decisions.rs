@@ -10,7 +10,6 @@ use crate::memory::{FileBackedMemoryStore, MemoryScope, MemoryStore};
 
 use super::MAX_CARRIED_MEETING_DECISIONS;
 
-
 pub(crate) fn load_carried_meeting_decisions(state_root: &Path) -> SimardResult<Vec<String>> {
     let memory_store = FileBackedMemoryStore::try_new(state_root.join("memory_records.json"))?;
     let mut carried = memory_store

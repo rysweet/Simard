@@ -70,7 +70,6 @@ pub(super) fn checks_for_accessibility_review(combined: &str) -> Vec<BenchmarkCh
     ]
 }
 
-
 pub(super) fn checks_for_cicd_pipeline(combined: &str) -> Vec<BenchmarkCheckResult> {
     let workflow_structure_described = combined.contains("workflow")
         || combined.contains("github actions")
@@ -132,7 +131,6 @@ pub(super) fn checks_for_cicd_pipeline(combined: &str) -> Vec<BenchmarkCheckResu
     ]
 }
 
-
 pub(super) fn checks_for_concurrency_analysis(combined: &str) -> Vec<BenchmarkCheckResult> {
     let race_condition_analyzed = combined.contains("race")
         || combined.contains("concurrent")
@@ -189,7 +187,6 @@ pub(super) fn checks_for_concurrency_analysis(combined: &str) -> Vec<BenchmarkCh
     ]
 }
 
-
 pub(super) fn checks_for_migration_planning(combined: &str) -> Vec<BenchmarkCheckResult> {
     let migration_scope_defined = combined.contains("migrat")
         || combined.contains("schema")
@@ -241,7 +238,6 @@ pub(super) fn checks_for_migration_planning(combined: &str) -> Vec<BenchmarkChec
         },
     ]
 }
-
 
 pub(super) fn checks_for_code_review(combined: &str) -> Vec<BenchmarkCheckResult> {
     let review_findings = combined.contains("finding")

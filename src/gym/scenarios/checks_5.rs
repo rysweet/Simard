@@ -67,7 +67,6 @@ pub(super) fn checks_for_caching_strategy(combined: &str) -> Vec<BenchmarkCheckR
     ]
 }
 
-
 pub(super) fn checks_for_chaos_engineering(combined: &str) -> Vec<BenchmarkCheckResult> {
     let experiment_or_fault_described = combined.contains("chaos")
         || combined.contains("fault injection")
@@ -132,8 +131,9 @@ pub(super) fn checks_for_chaos_engineering(combined: &str) -> Vec<BenchmarkCheck
     ]
 }
 
-
-pub(super) fn checks_for_observability_instrumentation(combined: &str) -> Vec<BenchmarkCheckResult> {
+pub(super) fn checks_for_observability_instrumentation(
+    combined: &str,
+) -> Vec<BenchmarkCheckResult> {
     let instrumentation_analyzed = combined.contains("log")
         || combined.contains("trac")
         || combined.contains("metric")
@@ -189,7 +189,6 @@ pub(super) fn checks_for_observability_instrumentation(combined: &str) -> Vec<Be
     ]
 }
 
-
 pub(super) fn checks_for_data_modeling(combined: &str) -> Vec<BenchmarkCheckResult> {
     let model_analyzed = combined.contains("type")
         || combined.contains("struct")
@@ -242,7 +241,6 @@ pub(super) fn checks_for_data_modeling(combined: &str) -> Vec<BenchmarkCheckResu
     ]
 }
 
-
 pub(super) fn checks_for_repo_exploration(combined: &str) -> Vec<BenchmarkCheckResult> {
     let structure_mentioned = combined.contains("src/")
         || combined.contains("directory")
@@ -286,7 +284,6 @@ pub(super) fn checks_for_repo_exploration(combined: &str) -> Vec<BenchmarkCheckR
         },
     ]
 }
-
 
 pub(super) fn checks_for_session_quality(
     combined: &str,

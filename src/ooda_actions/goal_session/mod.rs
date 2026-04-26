@@ -372,7 +372,6 @@ pub(super) fn truncate_for_outcome(s: &str) -> String {
 ///
 /// Fixes #1258: the previous `let _ = update_goal_progress(...)` swallowed
 /// the error and the next log line lied about success.
-
 mod advance;
 mod gh;
 

@@ -71,7 +71,6 @@ pub(super) fn checks_for_internationalization_review(combined: &str) -> Vec<Benc
     ]
 }
 
-
 pub(super) fn checks_for_dependency_upgrade(combined: &str) -> Vec<BenchmarkCheckResult> {
     let upgrade_target_named = combined.contains("cargo.toml")
         || combined.contains("dependenc")
@@ -131,7 +130,6 @@ pub(super) fn checks_for_dependency_upgrade(combined: &str) -> Vec<BenchmarkChec
     ]
 }
 
-
 pub(super) fn checks_for_data_migration(combined: &str) -> Vec<BenchmarkCheckResult> {
     let schema_delta_described = combined.contains("schema")
         || combined.contains("field")
@@ -190,7 +188,6 @@ pub(super) fn checks_for_data_migration(combined: &str) -> Vec<BenchmarkCheckRes
     ]
 }
 
-
 pub(super) fn checks_for_dependency_analysis(combined: &str) -> Vec<BenchmarkCheckResult> {
     let deps_analyzed = combined.contains("cargo.toml")
         || combined.contains("dependenc")
@@ -240,7 +237,6 @@ pub(super) fn checks_for_dependency_analysis(combined: &str) -> Vec<BenchmarkChe
         },
     ]
 }
-
 
 pub(super) fn checks_for_bug_fix(combined: &str) -> Vec<BenchmarkCheckResult> {
     let defect_identified = combined.contains("bug")

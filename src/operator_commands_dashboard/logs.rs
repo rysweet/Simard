@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use axum::Json;
 use serde_json::{Value, json};
 
-use crate::error::SimardResult;
 use super::routes::resolve_state_root;
+use crate::error::SimardResult;
 
 // ---------------------------------------------------------------------------
 // Logs endpoint — returns tail of daemon log + OODA transcripts

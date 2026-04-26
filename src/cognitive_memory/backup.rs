@@ -1,16 +1,15 @@
 //! NativeCognitiveMemory backup, restore, and DB-recovery helpers.
 
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::os::unix::io::AsRawFd;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::{Path, PathBuf};
 
 use crate::error::{SimardError, SimardResult};
 
 use super::NativeCognitiveMemory;
 
 impl NativeCognitiveMemory {
-
     /// Return the WAL file paths that LadybugDB may use for a given DB path.
     fn wal_paths(db_path: &Path) -> [PathBuf; 2] {
         let wal1 = db_path.with_extension("ladybug.wal");
@@ -341,7 +340,10 @@ impl NativeCognitiveMemory {
     }
 
     #[cfg(unix)]
-    pub(super) fn with_open_lock<T>(db_path: &Path, f: impl FnOnce() -> SimardResult<T>) -> SimardResult<T> {
+    pub(super) fn with_open_lock<T>(
+        db_path: &Path,
+        f: impl FnOnce() -> SimardResult<T>,
+    ) -> SimardResult<T> {
         let lock_path = db_path.with_extension("open.lock");
         if let Some(parent) = lock_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| SimardError::PersistentStoreIo {
