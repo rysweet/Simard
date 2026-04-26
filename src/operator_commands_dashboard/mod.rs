@@ -1,4 +1,5 @@
 mod auth;
+mod monitoring;
 pub(crate) mod routes;
 
 #[cfg(test)]
