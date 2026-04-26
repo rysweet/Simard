@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 
 use super::routes::resolve_state_root;
 use super::subagent::{count_json_records, file_metrics};
-use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory, as_f64, as_i64, as_str};
+use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 
 // ---------------------------------------------------------------------------
 // Memory metrics panel

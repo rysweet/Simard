@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 
 use super::current_work::format_recent_actions_for_cycle;
 use super::current_work::read_recent_cycle_reports;
-use super::routes::{is_pid_alive, resolve_state_root};
+use super::routes::{resolve_state_root};
 use crate::agent_registry::{AgentRegistry, FileBackedAgentRegistry};
 use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::goal_curation::GoalBoard;

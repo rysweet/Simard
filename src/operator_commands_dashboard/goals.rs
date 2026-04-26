@@ -3,7 +3,7 @@ use axum::extract::Path;
 use serde_json::{Value, json};
 
 use super::routes::resolve_state_root;
-use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory, as_f64, as_i64, as_str};
+use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::goal_curation::{ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS};
 use crate::goals::{GoalRecord, goal_slug};
 

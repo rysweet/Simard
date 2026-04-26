@@ -7,9 +7,7 @@ mod tests_b {
     use crate::operator_commands_dashboard::index_html::INDEX_HTML;
     use crate::operator_commands_dashboard::memory::{build_agent_graph, classify_agent_layer};
     use crate::operator_commands_dashboard::routes::*;
-    use crate::operator_commands_dashboard::tmux::TmuxSession;
     use crate::operator_commands_dashboard::tmux::parse_tmux_sessions;
-    use serde_json::json;
     #[test]
     fn sanitize_agent_name_rejects_invalid_names() {
         assert_eq!(sanitize_agent_name(""), None);
