@@ -8,6 +8,8 @@ mod tests_orchestration;
 mod tests_orchestration_inline;
 #[cfg(test)]
 mod tests_transcript;
+#[cfg(test)]
+mod tests_types;
 
 use std::path::Path;
 
