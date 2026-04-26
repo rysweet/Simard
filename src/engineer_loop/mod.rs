@@ -35,6 +35,8 @@ mod tests_verification;
 mod tests_verification_actions;
 #[cfg(test)]
 mod tests_verification_extra;
+#[cfg(test)]
+mod tests_verification_more;
 
 use std::fs;
 use std::path::{Path, PathBuf};
