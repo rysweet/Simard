@@ -4,7 +4,6 @@ use serde_json::{Value, json};
 use super::routes::{is_pid_alive, resolve_state_root, truncate_with_ellipsis};
 use crate::agent_registry::{AgentRegistry, FileBackedAgentRegistry};
 use crate::goal_curation::GoalBoard;
-use crate::goals::GoalRecord;
 
 /// Real-time snapshot of what Simard is doing right now.
 ///
