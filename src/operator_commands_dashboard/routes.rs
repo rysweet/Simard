@@ -228,7 +228,7 @@ pub(crate) fn truncate_with_ellipsis(s: &str, max: usize) -> String {
 
 
 async fn index() -> axum::response::Html<String> {
-    axum::response::Html(super::index_html::INDEX_HTML.to_string())
+    axum::response::Html(super::index_html::index_html_string())
 }
 
 
