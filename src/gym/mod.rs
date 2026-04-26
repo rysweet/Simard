@@ -7,6 +7,8 @@ mod types;
 #[cfg(test)]
 mod tests_executor;
 #[cfg(test)]
+mod tests_executor_extra;
+#[cfg(test)]
 mod tests_executor_metrics;
 #[cfg(test)]
 mod tests_gym_extra;
