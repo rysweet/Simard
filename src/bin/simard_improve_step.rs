@@ -38,10 +38,10 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use simard::gym_scoring::{detect_regression, GymSuiteScore};
+use simard::gym_scoring::{GymSuiteScore, detect_regression};
 use simard::self_improve::{
-    decide, find_weak_dimensions, ImprovementConfig, ImprovementCycle, ImprovementDecision,
-    ImprovementPhase, ProposedChange, WeakDimension,
+    ImprovementConfig, ImprovementCycle, ImprovementDecision, ImprovementPhase, ProposedChange,
+    WeakDimension, decide, find_weak_dimensions,
 };
 
 const DEFAULT_WEAK_THRESHOLD: f64 = 0.7;
@@ -109,7 +109,9 @@ fn cmd_eval(args: &[String]) {
 
     // Production path: would build a SubprocessBridgeTransport and call
     // gym.run_suite. Phase 1.5 follow-up — see plan.md.
-    die("live gym evaluation not yet wired in helper bin (Phase 1.5); pass --baseline-fixture-json for now");
+    die(
+        "live gym evaluation not yet wired in helper bin (Phase 1.5); pass --baseline-fixture-json for now",
+    );
 }
 
 fn cmd_analyze(args: &[String]) {
