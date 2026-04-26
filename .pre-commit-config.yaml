@@ -11,7 +11,10 @@ repos:
         entry: cargo fmt --all -- --check
         language: system
         pass_filenames: false
-        files: ^(src/|tests/|Cargo\.toml|Cargo\.lock|prompt_assets/)
+        # always_run so rebase/merge drift in unstaged files still fails the
+        # commit. Filtering by changed files lets formatting drift land via
+        # commits that don't touch src/, then CI fails. fmt --check is ~1s.
+        always_run: true
         stages:
           - pre-commit
           - manual
