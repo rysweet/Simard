@@ -189,9 +189,9 @@ mod tests {
 
     #[test]
     fn login_html_contains_form() {
-        assert!(LOGIN_HTML.contains("<form"));
-        assert!(LOGIN_HTML.contains("login-form"));
-        assert!(LOGIN_HTML.contains("/api/login"));
+        assert!(crate::operator_commands_dashboard::auth::LOGIN_HTML.contains("<form"));
+        assert!(crate::operator_commands_dashboard::auth::LOGIN_HTML.contains("login-form"));
+        assert!(crate::operator_commands_dashboard::auth::LOGIN_HTML.contains("/api/login"));
     }
 
     #[test]
@@ -208,8 +208,8 @@ mod tests {
 
     #[test]
     fn login_html_has_code_input() {
-        assert!(LOGIN_HTML.contains(r#"type="text""#));
-        assert!(LOGIN_HTML.contains("maxlength"));
+        assert!(crate::operator_commands_dashboard::auth::LOGIN_HTML.contains(r#"type="text""#));
+        assert!(crate::operator_commands_dashboard::auth::LOGIN_HTML.contains("maxlength"));
     }
 
     #[test]
