@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::operator_commands_dashboard::routes::*;
+    use crate::operator_commands_dashboard::agent_log::{sanitize_agent_name, agent_log_path, WS_AGENT_LOG_ROUTE};
     use crate::operator_commands_dashboard::tmux::TmuxSession;
     use crate::operator_commands_dashboard::distributed::remote_vms_from_hosts;
     use crate::operator_commands_dashboard::hosts::{host_entry_name, is_local_host, load_hosts, tag_local_membership};
