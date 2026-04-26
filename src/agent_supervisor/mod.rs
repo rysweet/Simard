@@ -15,6 +15,8 @@ mod types;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_lifecycle;
+#[cfg(test)]
 mod tests_tmux;
 
 /// Maximum retries per goal before the supervisor gives up.
