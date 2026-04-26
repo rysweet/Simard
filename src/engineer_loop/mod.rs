@@ -18,6 +18,10 @@ mod tests_selection;
 #[cfg(test)]
 mod tests_selection_extra;
 #[cfg(test)]
+mod tests_selection_inline_a;
+#[cfg(test)]
+mod tests_selection_inline_b;
+#[cfg(test)]
 mod tests_types;
 #[cfg(test)]
 mod tests_types_extra;
