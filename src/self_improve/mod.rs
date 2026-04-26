@@ -16,6 +16,10 @@ mod types;
 
 #[cfg(test)]
 mod tests_cycle;
+#[cfg(test)]
+mod tests_cycle_more;
+#[cfg(test)]
+mod tests_cycle_most;
 
 #[cfg(test)]
 mod tests_history;
