@@ -2,6 +2,8 @@ mod auth;
 mod monitoring;
 mod goals;
 mod memory;
+mod activity;
+mod workboard;
 pub(crate) mod routes;
 
 #[cfg(test)]
