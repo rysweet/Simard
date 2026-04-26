@@ -1,8 +1,4 @@
 use super::*;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::Barrier;
-use tokio::time::timeout;
 
 fn sample_kind() -> HiveEventKind {
     HiveEventKind::FactPromoted {

@@ -84,13 +84,7 @@ fn renders_review_context_directives_for_operator_curator_sessions() {
 mod promotion_inline {
     use super::super::promotion::*;
     use super::super::types::ImprovementPromotionPlan;
-    use crate::error::SimardError;
-    use crate::goals::GoalStatus;
-    use crate::review::{
-        ImprovementProposal, ReviewArtifact, ReviewEvidenceSummary, ReviewTargetKind,
-    };
-
-    use super::*;
+    use crate::review::ReviewArtifact;
 
     fn valid_plan_text() -> String {
         [
