@@ -9,6 +9,7 @@ mod distributed;
 mod tmux;
 mod hosts;
 mod chat;
+mod logs;
 pub(crate) mod routes;
 
 #[cfg(test)]
