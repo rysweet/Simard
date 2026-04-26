@@ -102,6 +102,8 @@ pub mod terminal_engineer_bridge;
 mod terminal_session;
 #[doc(hidden)]
 pub mod test_support;
+#[cfg(test)]
+mod tests_base_type_copilot;
 pub mod trace_collector;
 
 pub use agent_goal_assignment::{
