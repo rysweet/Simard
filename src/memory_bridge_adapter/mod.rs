@@ -17,6 +17,8 @@ mod bridge_tests;
 mod test_helpers;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_store;
 
 const STORE_NAME: &str = "cognitive-bridge-memory";
 
