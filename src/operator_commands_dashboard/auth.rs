@@ -255,3 +255,85 @@ mod tests {
         drop(guard);
     }
 }
+
+
+// === Login HTTP handlers ===
+
+use axum::{Json, response};
+use serde_json::{Value, json};
+
+pub(crate) async fn login(Json(body): Json<Value>) -> response::Response {
+    let code = body.get("code").and_then(|v| v.as_str()).unwrap_or("");
+    match try_login(code) {
+        Some(session_token) => response::Response::builder()
+            .status(200)
+            .header(
+                "set-cookie",
+                format!(
+                    "simard_session={session_token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400"
+                ),
+            )
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                json!({"ok": true}).to_string(),
+            ))
+            .unwrap(),
+        None => response::Response::builder()
+            .status(401)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                json!({"ok": false, "error": "invalid code"}).to_string(),
+            ))
+            .unwrap(),
+    }
+}
+
+pub(crate) async fn login_page() -> response::Html<String> {
+    response::Html(LOGIN_HTML.to_string())
+}
+
+pub(crate) const LOGIN_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Simard — Login</title>
+  <style>
+    :root { --bg: #0d1117; --fg: #c9d1d9; --accent: #58a6ff; --card: #161b22; --border: #30363d; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--fg); display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+    .login-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 2rem; width: 340px; text-align: center; }
+    h1 { color: var(--accent); font-size: 1.3rem; margin-bottom: 0.5rem; }
+    p { color: #8b949e; font-size: 0.85rem; margin-bottom: 1.5rem; }
+    input { width: 100%; padding: 0.6rem; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); font-size: 1.1rem; text-align: center; letter-spacing: 0.15em; }
+    input:focus { outline: none; border-color: var(--accent); }
+    button { width: 100%; margin-top: 1rem; padding: 0.6rem; border: none; border-radius: 6px; background: var(--accent); color: #0d1117; font-weight: 600; font-size: 0.95rem; cursor: pointer; }
+    button:hover { opacity: 0.9; }
+    .error { color: #f85149; margin-top: 0.75rem; font-size: 0.85rem; display: none; }
+  </style>
+</head>
+<body>
+  <div class="login-card">
+    <h1>🌲 Simard</h1>
+    <p>Enter the login code from the server terminal</p>
+    <form id="login-form">
+      <input id="code" type="text" placeholder="code" autocomplete="off" autofocus maxlength="8">
+      <button type="submit">Log in</button>
+    </form>
+    <div class="error" id="error">Invalid code. Check terminal output.</div>
+  </div>
+
+
+
+  <script>
+    document.getElementById('login-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const code = document.getElementById('code').value;
+      const r = await fetch('/api/login', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({code}) });
+      if (r.ok) { window.location.href = '/'; }
+      else { document.getElementById('error').style.display = 'block'; }
+    });
+  </script>
+</body>
+</html>
+"#;
