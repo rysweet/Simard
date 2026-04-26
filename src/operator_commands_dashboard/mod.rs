@@ -5,6 +5,7 @@ mod memory;
 mod activity;
 mod workboard;
 mod current_work;
+mod distributed;
 pub(crate) mod routes;
 
 #[cfg(test)]
