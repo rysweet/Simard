@@ -3,6 +3,10 @@ pub(crate) mod routes;
 
 #[cfg(test)]
 mod tests_attach;
+#[cfg(test)]
+mod tests_routes_a;
+#[cfg(test)]
+mod tests_routes_b;
 
 use std::net::SocketAddr;
 
