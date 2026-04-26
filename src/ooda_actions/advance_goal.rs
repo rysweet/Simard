@@ -430,9 +430,7 @@ fn advance_goal_with_subordinate(
 
             // Subordinate is alive and still working.
             let new_progress = GoalProgress::InProgress { percent: 50 };
-            if let Err(e) =
-                update_goal_progress(&mut state.active_goals, goal_id, new_progress)
-            {
+            if let Err(e) = update_goal_progress(&mut state.active_goals, goal_id, new_progress) {
                 eprintln!(
                     "[simard] OODA advance_goal FAILED to persist InProgress for \
                      goal '{goal_id}': {e}"
