@@ -5,6 +5,8 @@ mod types;
 #[cfg(test)]
 mod tests_orchestration;
 #[cfg(test)]
+mod tests_orchestration_inline;
+#[cfg(test)]
 mod tests_transcript;
 
 use std::path::Path;
