@@ -32,9 +32,7 @@ use crate::memory::{FileBackedMemoryStore, MemoryScope, MemoryStore};
 use crate::runtime::RuntimeTopology;
 use crate::terminal_engineer_bridge::{SHARED_EXPLICIT_STATE_ROOT_SOURCE, TerminalBridgeContext};
 
-use execution::{
-    parse_status_paths, run_command, trimmed_stdout, trimmed_stdout_allow_empty,
-};
+use execution::{parse_status_paths, run_command, trimmed_stdout, trimmed_stdout_allow_empty};
 
 // Re-export all public items so `crate::engineer_loop::X` still works.
 pub use types::{
@@ -246,10 +244,7 @@ pub fn run_local_engineer_loop(
     })
 }
 
-pub fn inspect_workspace(
-    workspace_root: &Path,
-    state_root: &Path,
-) -> SimardResult<RepoInspection> {
+pub fn inspect_workspace(workspace_root: &Path, state_root: &Path) -> SimardResult<RepoInspection> {
     let workspace_root =
         fs::canonicalize(workspace_root).map_err(|error| SimardError::NotARepo {
             path: workspace_root.to_path_buf(),

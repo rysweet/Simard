@@ -14,10 +14,10 @@ use std::process::{Command, Stdio};
 use serde_json::json;
 
 use simard::gym_bridge::ScoreDimensions;
-use simard::gym_scoring::{detect_regression, GymSuiteScore};
+use simard::gym_scoring::{GymSuiteScore, detect_regression};
 use simard::self_improve::{
-    decide, find_weak_dimensions, ImprovementConfig, ImprovementCycle, ImprovementDecision,
-    ImprovementPhase, ProposedChange,
+    ImprovementConfig, ImprovementCycle, ImprovementDecision, ImprovementPhase, ProposedChange,
+    decide, find_weak_dimensions,
 };
 
 fn ss(suite: &str, overall: f64, dims: ScoreDimensions) -> GymSuiteScore {

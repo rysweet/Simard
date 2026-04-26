@@ -23,7 +23,9 @@ fn main() -> ExitCode {
     let workspace = match arg(args, "--workspace") {
         Some(s) => s,
         None => {
-            eprintln!("usage: simard-engineer-loop-recipe --workspace <path> --objective <text> --topology <kebab> --state-root <path>");
+            eprintln!(
+                "usage: simard-engineer-loop-recipe --workspace <path> --objective <text> --topology <kebab> --state-root <path>"
+            );
             return ExitCode::from(2);
         }
     };

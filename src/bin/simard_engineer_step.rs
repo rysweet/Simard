@@ -24,9 +24,9 @@ use std::process::ExitCode;
 use serde::Serialize;
 
 use simard::engineer_loop::{
+    ExecutedEngineerAction, RepoInspection, SelectedEngineerAction, VerificationReport,
     execute_engineer_action, inspect_workspace, persist_engineer_loop_artifacts,
-    run_optional_review, select_engineer_action, verify_engineer_action, ExecutedEngineerAction,
-    RepoInspection, SelectedEngineerAction, VerificationReport,
+    run_optional_review, select_engineer_action, verify_engineer_action,
 };
 use simard::runtime::RuntimeTopology;
 use simard::terminal_engineer_bridge::TerminalBridgeContext;
@@ -56,9 +56,11 @@ fn main() -> ExitCode {
     let argv: Vec<String> = env::args().collect();
     let subcommand = match argv.get(1) {
         Some(s) => s.clone(),
-        None => return die(
-            "usage: simard-engineer-step <inspect|select|execute|verify|review|persist> [flags...]",
-        ),
+        None => {
+            return die(
+                "usage: simard-engineer-step <inspect|select|execute|verify|review|persist> [flags...]",
+            );
+        }
     };
     let args = &argv[2..].to_vec();
 

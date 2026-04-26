@@ -11,7 +11,7 @@ use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeState, RuntimeTopolog
 use crate::sanitization::objective_metadata;
 use crate::session::{SessionPhase, SessionRecord, UuidSessionIdGenerator};
 use crate::terminal_engineer_bridge::{
-    persist_handoff_artifacts, ScopedHandoffMode, TerminalBridgeContext,
+    ScopedHandoffMode, TerminalBridgeContext, persist_handoff_artifacts,
 };
 
 use super::types::{

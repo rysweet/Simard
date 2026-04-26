@@ -15,8 +15,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use simard::engineer_loop::{
-    select_engineer_action, verify_engineer_action, EngineerActionKind, ExecutedEngineerAction,
-    RepoInspection, SelectedEngineerAction, VerificationReport,
+    EngineerActionKind, ExecutedEngineerAction, RepoInspection, SelectedEngineerAction,
+    VerificationReport, select_engineer_action, verify_engineer_action,
 };
 
 fn helper_bin() -> String {
