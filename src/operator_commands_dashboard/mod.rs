@@ -14,6 +14,7 @@ mod registry;
 mod metrics;
 mod agent_log;
 mod subagent;
+mod index_html;
 pub(crate) mod routes;
 
 #[cfg(test)]

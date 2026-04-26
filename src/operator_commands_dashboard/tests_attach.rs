@@ -5,7 +5,7 @@
 //! helper, the registry session-name prefix, and the agent_id-extracting
 //! regex source. They will fail until Step 8 wires the UI in.
 
-use super::routes::INDEX_HTML;
+use super::index_html::INDEX_HTML;
 
 #[test]
 fn index_html_defines_render_action_detail_helper() {
