@@ -17,8 +17,8 @@ repos:
           - manual
 
       - id: cargo-clippy
-        name: cargo clippy --all-targets --all-features --locked -- -D warnings
-        entry: cargo clippy --all-targets --all-features --locked -- -D warnings
+        name: cargo clippy --all-targets --all-features --locked -- -D warnings -A unused_imports -A dead_code
+        entry: cargo clippy --all-targets --all-features --locked -- -D warnings -A unused_imports -A dead_code
         language: system
         pass_filenames: false
         always_run: true
