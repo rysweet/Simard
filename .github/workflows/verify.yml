@@ -11,14 +11,14 @@ env:
   # ~3.2GB even with all 4 cores active; well under the runner limit.
   CARGO_BUILD_JOBS: 4
   # Reduce DWARF size to keep peak linker memory under runner limits.
-  # Full debug info pushes rust-lld over the runner's RSS limit and the
+  # Full debug info pushes the linker over the runner's RSS limit and the
   # kernel kills it with SIGBUS (signal 7) during the link step.
   CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
   CARGO_PROFILE_DEV_INCREMENTAL: "false"
   CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
   CARGO_PROFILE_TEST_INCREMENTAL: "false"
-  # Speed up dependency compilation: pin a single rust-lld and disable
-  # debug info on dependencies (we only need it for our own code).
+  # Speed up dependency compilation: disable debug info on dependencies (we
+  # only need it for our own code).
   CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "false"
   CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "false"
 
@@ -31,48 +31,15 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Free disk space
-        run: |
-          # GitHub runners ship with ~14GB free; lbug + amplihack-memory + simard
-          # exhaust this. Remove preinstalled toolchains we don't use to free
-          # ~30GB. Failures are non-fatal (some paths may be missing).
-          sudo rm -rf /usr/share/dotnet || true
-          sudo rm -rf /usr/local/lib/android || true
-          sudo rm -rf /opt/ghc || true
-          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
-          sudo rm -rf /usr/local/share/boost || true
-          sudo rm -rf /usr/local/share/chromium || true
-          sudo rm -rf /usr/local/.ghcup || true
-          sudo apt-get clean || true
-          df -h /
-
-      - name: Add swap space (4 GB)
-        run: |
-          # GitHub runners ship with /swapfile pre-mounted; resizing with fallocate
-          # fails ("Text file busy"). Disable + remove first, then recreate.
-          if sudo swapon --show | awk 'NR>1 {print $1}' | grep -qx /swapfile; then
-            sudo swapoff /swapfile || true
-          fi
-          sudo rm -f /swapfile
-          sudo fallocate -l 4G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          echo "Swap enabled: $(swapon --show)"
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Prepare Rust runner (free disk, swap, mold, rust + cache)
+        uses: ./.github/actions/rust-runner-prep
         with:
-          components: rustfmt, clippy
-
-      - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: simard-ci
-          # Only the main branch writes the shared cache. PR runs read it but
-          # don't overwrite, eliminating cache thrashing across concurrent PRs.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
+          rust-components: rustfmt,clippy
+          swatinem-shared-key: simard-ci
+          # Single writer: only the main branch refreshes the shared cache.
+          # PR runs read it but never overwrite, eliminating cache thrashing
+          # across concurrent PRs.
+          swatinem-save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -129,51 +96,21 @@ jobs:
   install-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    # Wait for pre-commit so the Swatinem cache is warm (single-writer model)
+    # and the cargo registry / git deps don't have to be re-fetched. The
+    # actual `cargo install --path .` still runs in its own isolated target
+    # dir, but the dep download cost drops from minutes to seconds.
+    needs: pre-commit
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Free disk space
-        run: |
-          # GitHub runners ship with ~14GB free; lbug + amplihack-memory + simard
-          # exhaust this. Remove preinstalled toolchains we don't use to free
-          # ~30GB. Failures are non-fatal (some paths may be missing).
-          sudo rm -rf /usr/share/dotnet || true
-          sudo rm -rf /usr/local/lib/android || true
-          sudo rm -rf /opt/ghc || true
-          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
-          sudo rm -rf /usr/local/share/boost || true
-          sudo rm -rf /usr/local/share/chromium || true
-          sudo rm -rf /usr/local/.ghcup || true
-          sudo apt-get clean || true
-          df -h /
-
-      - name: Add swap space (4 GB)
-        run: |
-          # GitHub runners ship with /swapfile pre-mounted; resizing with fallocate
-          # fails ("Text file busy"). Disable + remove first, then recreate.
-          if sudo swapon --show | awk 'NR>1 {print $1}' | grep -qx /swapfile; then
-            sudo swapoff /swapfile || true
-          fi
-          sudo rm -f /swapfile
-          sudo fallocate -l 4G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          echo "Swap enabled: $(swapon --show)"
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@v2
+      - name: Prepare Rust runner (free disk, swap, mold, rust + cache)
+        uses: ./.github/actions/rust-runner-prep
         with:
-          shared-key: simard-ci
-          # Read-only on PRs and non-pre-commit jobs; pre-commit on main is
-          # the single writer to avoid cache contention.
-          save-if: false
-          cache-on-failure: true
+          swatinem-shared-key: simard-ci
+          swatinem-save-if: "false"
 
       - name: Run install smoke test
         env:
@@ -244,4 +181,3 @@ jobs:
             test-results/
           if-no-files-found: ignore
           retention-days: 7
-

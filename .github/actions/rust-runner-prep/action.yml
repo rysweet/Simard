@@ -1,0 +1,88 @@
+name: Rust runner prep
+description: |
+  Free disk space, add 4GB swap, install Rust + the mold linker, and wire up
+  the Swatinem cargo cache. Used by every Rust job in `verify.yml` so that the
+  ~90s preamble lives in exactly one place.
+
+  Set `swatinem-save-if` to `${{ github.ref == 'refs/heads/main' }}` for the
+  single writer (pre-commit on main) and `false` for every reader.
+
+inputs:
+  rust-components:
+    description: "Comma-separated rustup components to install (e.g. rustfmt,clippy)."
+    required: false
+    default: ""
+  swatinem-shared-key:
+    description: "Swatinem cargo cache shared-key (must match across jobs that share a cache)."
+    required: false
+    default: "simard-ci"
+  swatinem-save-if:
+    description: "Whether this job should write back to the shared cache. Use the main-branch guard for the single writer and 'false' everywhere else."
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Free disk space
+      shell: bash
+      run: |
+        # GitHub runners ship with ~14GB free; lbug + amplihack-memory + simard
+        # exhaust this. Remove preinstalled toolchains we don't use to free
+        # ~30GB. Failures are non-fatal (some paths may be missing).
+        sudo rm -rf /usr/share/dotnet || true
+        sudo rm -rf /usr/local/lib/android || true
+        sudo rm -rf /opt/ghc || true
+        sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+        sudo rm -rf /usr/local/share/boost || true
+        sudo rm -rf /usr/local/share/chromium || true
+        sudo rm -rf /usr/local/.ghcup || true
+        sudo apt-get clean || true
+        df -h /
+
+    - name: Add swap space (4 GB)
+      shell: bash
+      run: |
+        # GitHub runners ship with /swapfile pre-mounted; resizing with fallocate
+        # fails ("Text file busy"). Disable + remove first, then recreate.
+        if sudo swapon --show | awk 'NR>1 {print $1}' | grep -qx /swapfile; then
+          sudo swapoff /swapfile || true
+        fi
+        sudo rm -f /swapfile
+        sudo fallocate -l 4G /swapfile
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
+        echo "Swap enabled: $(swapon --show)"
+
+    - name: Install mold linker
+      shell: bash
+      # mold is a drop-in replacement for ld/lld with 3-5x faster cold-link of
+      # the simard binary (~30s -> ~7s) and bigger speedups on incremental
+      # link. Compatible with the line-tables-only debuginfo we already use;
+      # no behavioural risk vs rust-lld for non-LTO debug builds. Issue #1262.
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends mold
+        mold --version
+
+    - name: Configure mold as the default linker
+      shell: bash
+      # Persist a single RUSTFLAGS for every cargo invocation in this job. We
+      # use `-C link-arg=-fuse-ld=mold` rather than `-C linker=mold` so the
+      # rustc-driven linker invocation still goes through the cc wrapper that
+      # passes the right sysroot/lib paths.
+      run: |
+        echo 'RUSTFLAGS=-C link-arg=-fuse-ld=mold' >> "$GITHUB_ENV"
+
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: ${{ inputs.rust-components }}
+
+    - name: Cache cargo registry and build artifacts
+      uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: ${{ inputs.swatinem-shared-key }}
+        save-if: ${{ inputs.swatinem-save-if }}
+        cache-on-failure: true
