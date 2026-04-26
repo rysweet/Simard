@@ -10,6 +10,8 @@ mod validation;
 
 #[cfg(test)]
 mod tests_dispatch;
+#[cfg(test)]
+mod tests_dispatch_extra;
 
 // Re-export all public functions from sibling operator_commands_* modules.
 pub use crate::operator_commands_engineer::{run_engineer_loop_probe, run_engineer_read_probe};
