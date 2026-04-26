@@ -1,8 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
-
 use super::{MEETING_HANDOFF_FILENAME, MEETING_SESSION_WIP_FILENAME, MeetingHandoff};
 use crate::error::{SimardError, SimardResult};
 use crate::meeting_facilitator::types::MeetingSession;
