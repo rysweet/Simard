@@ -17,6 +17,8 @@ mod tests_advance_goal;
 mod tests_dispatch;
 #[cfg(test)]
 mod tests_goal_session;
+#[cfg(test)]
+mod tests_goal_session_extra;
 
 use crate::error::SimardResult;
 use crate::ooda_loop::{ActionKind, ActionOutcome, OodaBridges, OodaState, PlannedAction};
