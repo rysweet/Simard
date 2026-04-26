@@ -104,6 +104,8 @@ mod terminal_session;
 pub mod test_support;
 #[cfg(test)]
 mod tests_base_type_copilot;
+#[cfg(test)]
+mod tests_memory_ipc;
 pub mod trace_collector;
 
 pub use agent_goal_assignment::{
