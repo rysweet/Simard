@@ -151,6 +151,7 @@ fn corrupt_db_retention_at_least_a_day() {
 // ── rotate_simard_binary_backups ──
 
 #[test]
+#[serial_test::serial]
 fn rotate_keeps_newest_n_backups() {
     let tmp = tempfile::tempdir().unwrap();
     let bin_dir = tmp.path().join(".simard").join("bin");
@@ -200,6 +201,7 @@ fn rotate_keeps_newest_n_backups() {
 }
 
 #[test]
+#[serial_test::serial]
 fn rotate_noop_when_under_threshold() {
     let tmp = tempfile::tempdir().unwrap();
     let bin_dir = tmp.path().join(".simard").join("bin");
@@ -223,6 +225,7 @@ fn rotate_noop_when_under_threshold() {
 // ── trim_simard_snapshots ──
 
 #[test]
+#[serial_test::serial]
 fn trim_snapshots_keeps_newest_n() {
     let tmp = tempfile::tempdir().unwrap();
     let snap_dir = tmp.path().join(".simard").join("snapshots");
@@ -261,6 +264,7 @@ fn trim_snapshots_keeps_newest_n() {
 // ── remove_old_corrupt_dbs ──
 
 #[test]
+#[serial_test::serial]
 fn corrupt_db_removed_when_older_than_threshold() {
     let tmp = tempfile::tempdir().unwrap();
     let simard = tmp.path().join(".simard");

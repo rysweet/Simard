@@ -44,6 +44,7 @@ fn finding(category: FindingCategory, severity: Severity) -> crate::review_pipel
 }
 
 #[test]
+#[serial_test::serial]
 fn rollback_cleans_untracked_files() {
     let tmp = tempfile::tempdir().expect("create tempdir");
     let ws = tmp.path();
@@ -130,6 +131,7 @@ fn apply_result_display_commit_failed() {
 }
 
 #[test]
+#[serial_test::serial]
 fn apply_and_review_git_diff_failure_includes_rollback_error() {
     // If git diff fails and rollback also fails, both errors must surface.
     // We simulate this by running against a path that is NOT a git repo, so
@@ -184,6 +186,7 @@ fn apply_and_review_plan_failed_rollback_also_failed() {
 }
 
 #[test]
+#[serial_test::serial]
 fn apply_and_review_noop_plan_in_real_repo_succeeds() {
     // A plan with a no-op step in a real git repo should produce Applied
     // with no findings (empty diff → auto-pass).

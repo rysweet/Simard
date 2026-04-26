@@ -133,44 +133,51 @@ pub(crate) fn rollback(workspace: &Path) -> SimardResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use tempfile::tempdir;
+
+    /// Run a `git` subcommand with isolated config (immune to other tests
+    /// mutating HOME/XDG_CONFIG_HOME via env::set_var). Required because
+    /// some tests in this binary (e.g. cmd_cleanup) reassign HOME globally,
+    /// which would otherwise cause our `git` invocations to fail when
+    /// scheduled concurrently. Tests are also marked `#[serial_test::serial]` to prevent
+    /// concurrent HOME-mutating tests from breaking the production
+    /// `git_diff`/`git_commit`/`rollback` calls (which can't take env
+    /// overrides without changing the API).
+    fn isolated_git(workspace: &Path, args: &[&str]) -> std::process::Output {
+        Command::new("git")
+            .args(args)
+            .current_dir(workspace)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("HOME", workspace)
+            .env("XDG_CONFIG_HOME", workspace)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@test.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@test.com")
+            .output()
+            .unwrap()
+    }
 
     /// Set up a temporary git repository with an initial commit.
     fn init_temp_repo() -> tempfile::TempDir {
         let tmp = tempdir().unwrap();
         let ws = tmp.path();
-        Command::new("git")
-            .args(["init"])
-            .current_dir(ws)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(ws)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(ws)
-            .output()
-            .unwrap();
+        isolated_git(ws, &["init", "-b", "main"]);
+        isolated_git(ws, &["config", "user.email", "test@test.com"]);
+        isolated_git(ws, &["config", "user.name", "Test"]);
+        isolated_git(ws, &["config", "commit.gpgsign", "false"]);
         std::fs::write(ws.join("init.txt"), "hello").unwrap();
-        Command::new("git")
-            .args(["add", "-A"])
-            .current_dir(ws)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "initial"])
-            .current_dir(ws)
-            .output()
-            .unwrap();
+        isolated_git(ws, &["add", "-A"]);
+        isolated_git(ws, &["commit", "-m", "initial"]);
         tmp
     }
 
     // ── git_diff ────────────────────────────────────────────────────
 
     #[test]
+    #[serial_test::serial]
     fn git_diff_clean_repo_empty_diff() {
         let tmp = init_temp_repo();
         let diff = git_diff(tmp.path()).unwrap();
@@ -178,6 +185,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn git_diff_with_changes() {
         let tmp = init_temp_repo();
         std::fs::write(tmp.path().join("init.txt"), "changed").unwrap();
@@ -186,6 +194,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn git_diff_nonexistent_dir() {
         let result = git_diff(Path::new("/nonexistent/repo"));
         assert!(result.is_err());
@@ -194,22 +203,20 @@ mod tests {
     // ── git_commit ──────────────────────────────────────────────────
 
     #[test]
+    #[serial_test::serial]
     fn git_commit_with_staged_changes() {
         let tmp = init_temp_repo();
         std::fs::write(tmp.path().join("new.txt"), "content").unwrap();
         let result = git_commit(tmp.path(), "add new file");
         assert!(result.is_ok());
         // Verify commit was made
-        let log = Command::new("git")
-            .args(["log", "--oneline", "-1"])
-            .current_dir(tmp.path())
-            .output()
-            .unwrap();
+        let log = isolated_git(tmp.path(), &["log", "--oneline", "-1"]);
         let log_text = String::from_utf8_lossy(&log.stdout);
         assert!(log_text.contains("add new file"));
     }
 
     #[test]
+    #[serial_test::serial]
     fn git_commit_nothing_to_commit_fails() {
         let tmp = init_temp_repo();
         // Nothing changed, so git commit should fail
@@ -218,6 +225,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn git_commit_nonexistent_dir() {
         let result = git_commit(Path::new("/nonexistent/repo"), "msg");
         assert!(result.is_err());
@@ -226,6 +234,7 @@ mod tests {
     // ── rollback ────────────────────────────────────────────────────
 
     #[test]
+    #[serial_test::serial]
     fn rollback_restores_modified_files() {
         let tmp = init_temp_repo();
         let file = tmp.path().join("init.txt");
@@ -237,6 +246,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn rollback_removes_untracked_files() {
         let tmp = init_temp_repo();
         let untracked = tmp.path().join("untracked.txt");
@@ -248,6 +258,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn rollback_clean_repo_is_noop() {
         let tmp = init_temp_repo();
         let result = rollback(tmp.path());
@@ -255,6 +266,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn rollback_nonexistent_dir() {
         let result = rollback(Path::new("/nonexistent/repo"));
         assert!(result.is_err());
