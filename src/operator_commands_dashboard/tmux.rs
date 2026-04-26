@@ -9,15 +9,7 @@ use super::hosts::{host_entry_name, load_hosts};
 use super::distributed::strip_ansi_codes;
 use axum::extract::Path;
 
-// =====================================================================
-// WS-1 AZLIN-TMUX-SESSIONS-LIST
-//
-// Provides a per-host tmux-session listing companion panel for the
-// existing Terminal tab. Reuses:
-//   * `load_hosts()` — canonical `~/.simard/hosts.json` source
-//   * `azlin connect <host> --no-tmux -- <cmd>` — same exec channel as
-//     `distributed()` host-status code (no new SSH transport)
-// =====================================================================
+// WS-1 AZLIN-TMUX-SESSIONS-LIST: per-host tmux session listing via azlin connect.
 
 /// One tmux session as parsed from
 /// `tmux list-sessions -F '#S\t#{session_created}\t#{session_attached}\t#{session_windows}'`.
