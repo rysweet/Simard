@@ -5,10 +5,10 @@ use std::path::Path;
 use crate::error::{SimardError, SimardResult};
 use crate::sanitization::sanitize_terminal_text;
 
+use crate::engineer_loop::SHELL_COMMAND_ALLOWLIST;
 use crate::engineer_loop::types::{
     EngineerActionKind, ExecutedEngineerAction, SelectedEngineerAction, validate_repo_relative_path,
 };
-use crate::engineer_loop::SHELL_COMMAND_ALLOWLIST;
 
 use super::{
     run_command, sanitize_issue_create_args, timeout_for_command, trimmed_stdout,

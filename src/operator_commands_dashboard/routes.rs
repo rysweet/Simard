@@ -1,6 +1,5 @@
 use axum::{
-    Json, Router,
-    middleware,
+    Json, Router, middleware,
     routing::{delete, get, post, put},
 };
 use serde_json::{Value, json};
@@ -199,16 +198,16 @@ pub(crate) fn truncate_with_ellipsis(s: &str, max: usize) -> String {
     }
 }
 
-/// Vacate a remote VM: stop Simard processes and export memory snapshot.
-///
-/// Steps:
-/// 1. Connect via azlin and stop simard-ooda service
-/// 2. Kill any remaining simard/cargo processes
-/// 3. Export cognitive memory snapshot (if available)
-/// 4. Remove from configured hosts
+// Vacate a remote VM: stop Simard processes and export memory snapshot.
+//
+// Steps:
+// 1. Connect via azlin and stop simard-ooda service
+// 2. Kill any remaining simard/cargo processes
+// 3. Export cognitive memory snapshot (if available)
+// 4. Remove from configured hosts
 
-/// Strip ANSI escape sequences (CSI, OSC, and single-char escapes) so that
-/// output from azlin/SSH can be reliably parsed for KEY=value markers.
+// Strip ANSI escape sequences (CSI, OSC, and single-char escapes) so that
+// output from azlin/SSH can be reliably parsed for KEY=value markers.
 
 async fn index() -> axum::response::Html<String> {
     axum::response::Html(super::index_html::index_html_string())
