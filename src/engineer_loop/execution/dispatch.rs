@@ -1,8 +1,6 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
-use std::process::Command;
-use std::time::{Duration, Instant};
 
 use crate::error::{SimardError, SimardResult};
 use crate::sanitization::sanitize_terminal_text;
@@ -10,14 +8,11 @@ use crate::sanitization::sanitize_terminal_text;
 use crate::engineer_loop::types::{
     EngineerActionKind, ExecutedEngineerAction, SelectedEngineerAction, validate_repo_relative_path,
 };
-use crate::engineer_loop::{
-    CARGO_COMMAND_TIMEOUT_SECS, CLEARED_GIT_ENV_VARS, GIT_COMMAND_TIMEOUT_SECS,
-    SHELL_COMMAND_ALLOWLIST,
-};
+use crate::engineer_loop::SHELL_COMMAND_ALLOWLIST;
 
 use super::{
-    CommandOutput, parse_status_paths, run_command, sanitize_issue_create_args,
-    timeout_for_command, trimmed_stdout, trimmed_stdout_allow_empty,
+    run_command, sanitize_issue_create_args, timeout_for_command, trimmed_stdout,
+    trimmed_stdout_allow_empty,
 };
 
 pub fn execute_engineer_action(

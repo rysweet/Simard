@@ -8,9 +8,7 @@ use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 
 use super::STALE_THRESHOLD_SECONDS;
-use super::tmux::build_tmux_wrapped_command;
-use super::types::{HeartbeatStatus, SubordinateConfig, SubordinateHandle};
-use crate::subagent_sessions::session_name_for;
+use super::types::{HeartbeatStatus, SubordinateHandle};
 
 /// Resolve the Simard state root the same way the dashboard does.
 ///
