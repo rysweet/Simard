@@ -2,6 +2,7 @@
 mod tests_b {
     use crate::operator_commands_dashboard::routes::*;
     use crate::operator_commands_dashboard::tmux::parse_tmux_sessions;
+    use crate::operator_commands_dashboard::hosts::{host_entry_name, load_hosts};
     use crate::operator_commands_dashboard::memory::{build_agent_graph, classify_agent_layer};
     use crate::operator_commands_dashboard::tmux::TmuxSession;
     use serde_json::json;

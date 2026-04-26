@@ -5,7 +5,7 @@ use axum::{
 };
 use serde_json::{Value, json};
 
-use super::routes::{host_entry_name, load_hosts};
+use super::hosts::{host_entry_name, load_hosts};
 use super::distributed::strip_ansi_codes;
 use axum::extract::Path;
 
