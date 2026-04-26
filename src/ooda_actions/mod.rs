@@ -22,6 +22,8 @@ mod tests_goal_session_extra;
 #[cfg(test)]
 mod tests_goal_session_inline;
 #[cfg(test)]
+mod tests_goal_session_inline_b;
+#[cfg(test)]
 mod tests_goal_session_validators;
 
 use crate::error::SimardResult;
