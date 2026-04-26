@@ -40,3 +40,6 @@ pub use types::{
     ImprovementConfig, ImprovementCycle, ImprovementDecision, ImprovementPhase, ProposedChange,
     WeakDimension,
 };
+
+#[cfg(test)]
+mod tests_types;
