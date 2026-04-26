@@ -6,6 +6,7 @@ mod activity;
 mod workboard;
 mod current_work;
 mod distributed;
+mod tmux;
 pub(crate) mod routes;
 
 #[cfg(test)]
