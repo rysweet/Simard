@@ -42,13 +42,13 @@ use super::OodaBridges;
 /// which path was taken.
 pub fn connect_memory(state_root: &Path) -> SimardResult<Box<dyn CognitiveMemoryOps>> {
     let socket_path = memory_ipc::default_socket_path();
-    if socket_path.exists() {
-        if let Ok(remote) = RemoteCognitiveMemory::connect(&socket_path) {
-            // Wrap in SharedMemory so the trait-object type matches the
-            // `Box<dyn CognitiveMemoryOps>` shape expected by OodaBridges.
-            let arc: Arc<dyn CognitiveMemoryOps> = Arc::new(remote);
-            return Ok(Box::new(SharedMemory(arc)));
-        }
+    if socket_path.exists()
+        && let Ok(remote) = RemoteCognitiveMemory::connect(&socket_path)
+    {
+        // Wrap in SharedMemory so the trait-object type matches the
+        // `Box<dyn CognitiveMemoryOps>` shape expected by OodaBridges.
+        let arc: Arc<dyn CognitiveMemoryOps> = Arc::new(remote);
+        return Ok(Box::new(SharedMemory(arc)));
     }
     let native = NativeCognitiveMemory::open(state_root)?;
     Ok(Box::new(native))
