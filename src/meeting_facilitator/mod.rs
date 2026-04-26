@@ -6,6 +6,8 @@
 
 mod handoff;
 mod session;
+#[cfg(test)]
+mod tests_session;
 mod types;
 
 // Re-export all public items so `crate::meeting_facilitator::X` still works.
