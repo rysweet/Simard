@@ -171,6 +171,44 @@ fn extract_response_trims_whitespace() {
 }
 
 #[test]
+fn extract_response_unwraps_action_envelope_em_dash() {
+    // Regression: dashboard chat T2+ replies arrived as ACTION/EXPLANATION/CONFIDENCE
+    // protocol envelopes; the sanitizer stripped every line and returned empty.
+    let outcome = BaseTypeOutcome {
+        plan: String::new(),
+        execution_summary:
+            "ACTION: respond — 6.\nEXPLANATION: Direct arithmetic answer.\nCONFIDENCE: 1.0"
+                .to_string(),
+        evidence: Vec::new(),
+    };
+    assert_eq!(extract_response(&outcome), "6.");
+}
+
+#[test]
+fn extract_response_unwraps_action_envelope_alt_verb() {
+    let outcome = BaseTypeOutcome {
+        plan: String::new(),
+        execution_summary: "ACTION: reply — 100.\nEXPLANATION: Multiplication.\nCONFIDENCE: 0.99"
+            .to_string(),
+        evidence: Vec::new(),
+    };
+    assert_eq!(extract_response(&outcome), "100.");
+}
+
+#[test]
+fn extract_response_unwraps_action_envelope_multiline_body() {
+    let outcome = BaseTypeOutcome {
+        plan: String::new(),
+        execution_summary: "ACTION: respond — Line one of the reply.\nLine two of the reply.\nEXPLANATION: detail\nCONFIDENCE: 0.9".to_string(),
+        evidence: Vec::new(),
+    };
+    assert_eq!(
+        extract_response(&outcome),
+        "Line one of the reply.\nLine two of the reply."
+    );
+}
+
+#[test]
 fn sanitize_strips_tool_call_lines() {
     let input = "Here is the answer.\n[tool_call: search_files]\n[tool_result: found 3 files]\nThe files are ready.";
     let result = sanitize_agent_output(input);
