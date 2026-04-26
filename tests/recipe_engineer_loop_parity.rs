@@ -59,6 +59,7 @@ fn fixture_inspection() -> RepoInspection {
 }
 
 #[test]
+#[ignore = "requires live LLM provider (SIMARD_LLM_PROVIDER); planner has no fallback"]
 fn parity_select_create_file_objective() {
     let inspection = fixture_inspection();
     let inspection_json = serde_json::to_string(&inspection).unwrap();
@@ -79,6 +80,7 @@ fn parity_select_create_file_objective() {
 }
 
 #[test]
+#[ignore = "requires live LLM provider (SIMARD_LLM_PROVIDER); planner has no fallback"]
 fn parity_select_cargo_test_objective_both_paths_error() {
     // Without a Cargo.toml in the workspace, both paths should reject this
     // objective with the same UnsupportedEngineerAction error. The recipe
@@ -109,6 +111,7 @@ fn parity_select_cargo_test_objective_both_paths_error() {
 }
 
 #[test]
+#[ignore = "requires live LLM provider (SIMARD_LLM_PROVIDER); planner has no fallback"]
 fn parity_select_read_only_scan_default() {
     let inspection = fixture_inspection();
     let inspection_json = serde_json::to_string(&inspection).unwrap();
