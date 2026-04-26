@@ -1893,7 +1893,17 @@ async fn vacate_vm(Json(body): Json<Value>) -> Json<Value> {
             // Remove from configured hosts
             let mut hosts = load_hosts();
             hosts.retain(|h| h.get("name").and_then(|v| v.as_str()) != Some(vm_name));
-            let _ = save_hosts(&hosts);
+            if let Err(e) = save_hosts(&hosts) {
+                return Json(json!({
+                    "status": "partial",
+                    "message": format!(
+                        "Vacate succeeded on {vm_name} ({remaining} process(es) remaining) \
+                         but failed to update hosts file: {e}. Manual cleanup of \
+                         ~/.simard/hosts.json may be needed."
+                    ),
+                    "remaining_processes": remaining,
+                }));
+            }
 
             let msg = if remaining == 0 {
                 format!("All processes stopped on {vm_name}.")
