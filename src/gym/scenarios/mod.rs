@@ -46,4 +46,10 @@ pub(super) fn resolve_benchmark_scenario(scenario_id: &str) -> SimardResult<Benc
 
 
 mod checks;
+mod checks_1;
+mod checks_2;
+mod checks_3;
+mod checks_4;
+mod checks_5;
+mod checks_6;
 pub(crate) use checks::class_specific_checks;
