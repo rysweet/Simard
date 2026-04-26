@@ -5,6 +5,8 @@ mod types;
 
 #[cfg(test)]
 mod tests_mod;
+#[cfg(test)]
+mod tests_session;
 
 pub use ports::*;
 pub use traits::*;
