@@ -318,3 +318,5 @@ impl Default for HiveEventBus {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_extra;
