@@ -104,6 +104,7 @@ fn run_shell_command_cargo_fmt_succeeds() {
 }
 
 #[test]
+#[serial_test::serial]
 fn run_shell_command_git_status_succeeds() {
     let dir = tempfile::tempdir().unwrap();
     let _ = std::process::Command::new("git")

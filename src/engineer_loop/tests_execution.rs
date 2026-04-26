@@ -167,8 +167,11 @@ fn run_command_failing_command_returns_error() {
 }
 
 #[test]
+#[serial_test::serial]
 fn run_command_git_rev_parse_non_repo_gives_not_a_repo() {
     let dir = tempfile::tempdir().unwrap();
+    // Defensive isolation: prevent a polluted HOME from making git treat
+    // the tempdir as part of an outer worktree.
     let result = run_command(dir.path(), &["git", "rev-parse", "--show-toplevel"]);
     assert!(result.is_err());
     match result.err().unwrap() {
