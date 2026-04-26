@@ -14,100 +14,13 @@ use crate::ooda_loop::{
 use crate::runtime_config::RuntimeConfig;
 use crate::session_builder::{LlmProvider, SessionBuilder};
 
-use super::persistence::{persist_cycle_report, persist_cycle_to_memory};
+use crate::operator_commands_ooda::persistence::{persist_cycle_report, persist_cycle_to_memory};
 
-/// Append a timestamped log line to `{state_root}/ooda.log` **and** stderr.
-///
-/// The dashboard `/api/logs` endpoint already looks for `ooda.log` inside the
-/// state root, so writing here makes daemon output visible in the Logs tab
-/// without requiring systemd or manual redirection.  Failures to write are
-/// silently ignored — stderr is the primary output channel.
-pub(super) fn daemon_log(state_root: &std::path::Path, msg: &str) {
-    let line = format!("{} {msg}", chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),);
-    eprintln!("{msg}");
-    use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(state_root.join("ooda.log"))
-    {
-        let _ = writeln!(f, "{line}");
-    }
-}
+mod helpers;
+pub use helpers::*;
 
-/// Return the mtime of the currently-running executable, or `None` if it
-/// cannot be determined (e.g. the binary was deleted after launch).
-pub(super) fn exe_mtime() -> Option<SystemTime> {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| std::fs::metadata(p).ok())
-        .and_then(|m| m.modified().ok())
-}
-
-/// Check whether the on-disk binary is newer than `start_time`.
-pub(crate) fn binary_changed(start_time: SystemTime) -> bool {
-    exe_mtime().is_some_and(|mtime| mtime > start_time)
-}
-
-/// Replace the current process with a fresh copy of itself.
-///
-/// On success this function never returns — the process image is replaced
-/// via `exec()`.  On failure the error is returned so the caller can
-/// degrade gracefully and continue running.
-#[cfg(unix)]
-fn exec_self_reload() -> Result<(), Box<dyn std::error::Error>> {
-    use std::os::unix::process::CommandExt;
-
-    let exe = std::env::current_exe()?;
-    let args: Vec<String> = std::env::args().skip(1).collect();
-
-    eprintln!("[simard] New binary detected, restarting...");
-
-    // Flush stderr/stdout so the log line above is not lost.
-    use std::io::Write;
-    let _ = std::io::stdout().flush();
-    let _ = std::io::stderr().flush();
-
-    let err = std::process::Command::new(&exe).args(&args).exec();
-    // exec() only returns on failure
-    Err(format!("exec failed: {err}").into())
-}
-
-/// Sleep that wakes early when the shutdown flag is set.
-pub(super) fn interruptible_sleep(total: Duration, shutdown: &AtomicBool) {
-    let tick = Duration::from_millis(250);
-    let mut remaining = total;
-    while remaining > Duration::ZERO {
-        if shutdown.load(Ordering::Relaxed) {
-            return;
-        }
-        let chunk = remaining.min(tick);
-        std::thread::sleep(chunk);
-        remaining = remaining.saturating_sub(chunk);
-    }
-}
-
-/// Configuration for the embedded dashboard that runs inside the OODA daemon.
-pub struct DaemonDashboardConfig {
-    /// Whether to spawn the dashboard as a background task.
-    pub enabled: bool,
-    /// TCP port for the dashboard (default: 8080, overridable via
-    /// `SIMARD_DASHBOARD_PORT` env var or `--dashboard-port=` CLI flag).
-    pub port: u16,
-}
-
-impl Default for DaemonDashboardConfig {
-    fn default() -> Self {
-        let port = std::env::var("SIMARD_DASHBOARD_PORT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(8080);
-        Self {
-            enabled: true,
-            port,
-        }
-    }
-}
+mod config;
+pub use config::DaemonDashboardConfig;
 
 /// Run one or more OODA cycles as a daemon-style loop.
 ///
