@@ -10,6 +10,7 @@ mod tmux;
 mod hosts;
 mod chat;
 mod logs;
+mod registry;
 pub(crate) mod routes;
 
 #[cfg(test)]
