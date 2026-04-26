@@ -10,6 +10,8 @@ mod types;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_extra;
 
 // Re-export all public items so `crate::self_improve_executor::X` still works.
 pub use executor::{apply_and_review, generate_patch, run_autonomous_improvement};
