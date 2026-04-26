@@ -156,8 +156,10 @@ fn parity_decide_caps_at_max_concurrent_actions() {
             reason: "test".into(),
         })
         .collect();
-    let mut config = OodaConfig::default();
-    config.max_concurrent_actions = 2;
+    let config = OodaConfig {
+        max_concurrent_actions: 2,
+        ..Default::default()
+    };
 
     let direct = decide(&priorities, &config).expect("decide direct");
     assert_eq!(direct.len(), 2);
