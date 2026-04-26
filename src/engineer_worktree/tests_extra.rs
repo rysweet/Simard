@@ -97,6 +97,7 @@ fn git_cmd(repo: &Path, args: &[&str]) -> Command {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial_test::serial]
 fn allocate_records_full_40hex_main_sha_on_branch() {
     let parent_dir = tempdir().unwrap();
     let state_dir = tempdir().unwrap();
@@ -127,6 +128,7 @@ fn allocate_records_full_40hex_main_sha_on_branch() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial_test::serial]
 fn git_capture_clears_inherited_git_env() {
     use std::sync::Mutex;
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -157,6 +159,7 @@ fn git_capture_clears_inherited_git_env() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial_test::serial]
 fn allocate_writes_engineer_claim_sentinel_with_current_pid() {
     let parent_dir = tempdir().unwrap();
     let state_dir = tempdir().unwrap();
@@ -187,6 +190,7 @@ fn allocate_writes_engineer_claim_sentinel_with_current_pid() {
 }
 
 #[test]
+#[serial_test::serial]
 fn allocate_writes_starttime_alongside_pid_on_linux() {
     // On Linux (where /proc/<pid>/stat is available), the sentinel must
     // include the allocating process's starttime as a second line so the
@@ -224,6 +228,7 @@ fn allocate_writes_starttime_alongside_pid_on_linux() {
 }
 
 #[test]
+#[serial_test::serial]
 fn sweep_removes_dir_with_recycled_pid_claim() {
     // Regression test for issue #1238: a sentinel that names a live PID
     // whose starttime DOES NOT match the recorded one (i.e. the original
@@ -264,6 +269,7 @@ fn sweep_removes_dir_with_recycled_pid_claim() {
 }
 
 #[test]
+#[serial_test::serial]
 fn sweep_keeps_legacy_pid_only_claim_with_live_pid() {
     // Pre-#1238 sentinels are PID-only (no starttime line). They must
     // still be honored as live when the PID is alive — otherwise a daemon
@@ -301,6 +307,7 @@ fn sweep_keeps_legacy_pid_only_claim_with_live_pid() {
 }
 
 #[test]
+#[serial_test::serial]
 fn sweep_skips_unregistered_dir_with_live_engineer_claim() {
     let parent_dir = tempdir().unwrap();
     let state_dir = tempdir().unwrap();
@@ -342,6 +349,7 @@ fn sweep_skips_unregistered_dir_with_live_engineer_claim() {
 }
 
 #[test]
+#[serial_test::serial]
 fn sweep_removes_unregistered_dir_with_dead_engineer_claim() {
     let parent_dir = tempdir().unwrap();
     let state_dir = tempdir().unwrap();

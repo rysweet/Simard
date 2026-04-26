@@ -99,6 +99,7 @@ fn git_cmd(repo: &Path, args: &[&str]) -> Command {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial_test::serial]
 fn allocate_creates_unique_worktree_under_state_root() {
     let parent_dir = tempdir().expect("tempdir");
     let state_dir = tempdir().expect("tempdir");
@@ -137,6 +138,7 @@ fn allocate_creates_unique_worktree_under_state_root() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial_test::serial]
 fn cleanup_removes_dir_branch_and_registration_idempotently() {
     let parent_dir = tempdir().unwrap();
     let state_dir = tempdir().unwrap();
@@ -168,6 +170,7 @@ fn cleanup_removes_dir_branch_and_registration_idempotently() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial_test::serial]
 fn drop_runs_cleanup_when_explicit_cleanup_skipped() {
     let parent_dir = tempdir().unwrap();
     let state_dir = tempdir().unwrap();
@@ -198,6 +201,7 @@ fn drop_runs_cleanup_when_explicit_cleanup_skipped() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial_test::serial]
 fn parallel_allocations_produce_distinct_paths_and_branches() {
     let parent_dir = tempdir().unwrap();
     let state_dir = tempdir().unwrap();
@@ -242,6 +246,7 @@ fn parallel_allocations_produce_distinct_paths_and_branches() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial_test::serial]
 fn allocate_without_main_branch_returns_hard_error_and_leaves_no_dir() {
     let parent_dir = tempdir().unwrap();
     let state_dir = tempdir().unwrap();

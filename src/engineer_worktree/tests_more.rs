@@ -97,6 +97,7 @@ fn git_cmd(repo: &Path, args: &[&str]) -> Command {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial_test::serial]
 fn sweep_removes_orphan_dirs_and_preserves_live_worktrees() {
     let parent_dir = tempdir().unwrap();
     let state_dir = tempdir().unwrap();
@@ -140,6 +141,7 @@ fn sweep_removes_orphan_dirs_and_preserves_live_worktrees() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial_test::serial]
 fn verification_scope_isolates_worktree_from_parent_repo_mutations() {
     let parent_dir = tempdir().unwrap();
     let state_dir = tempdir().unwrap();
@@ -177,6 +179,7 @@ fn verification_scope_isolates_worktree_from_parent_repo_mutations() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial_test::serial]
 fn rejects_invalid_goal_id() {
     let parent_dir = tempdir().unwrap();
     let state_dir = tempdir().unwrap();
@@ -237,6 +240,7 @@ fn rejects_invalid_goal_id() {
 
 #[cfg(unix)]
 #[test]
+#[serial_test::serial]
 fn sweep_skips_symlinks_and_preserves_targets() {
     use std::os::unix::fs::symlink;
 

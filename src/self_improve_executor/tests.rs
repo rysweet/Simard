@@ -165,6 +165,7 @@ fn apply_and_review_plan_failed_on_bad_step() {
 }
 
 #[test]
+#[serial_test::serial]
 fn apply_and_review_empty_diff_is_applied() {
     // A plan with only no-op steps produces no diff.
     // Use a real temp git repo so `git diff HEAD` works.
