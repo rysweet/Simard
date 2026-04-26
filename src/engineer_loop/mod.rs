@@ -8,6 +8,8 @@ mod verification_actions;
 #[cfg(test)]
 mod tests_execution;
 #[cfg(test)]
+mod tests_execution_extra;
+#[cfg(test)]
 mod tests_mod;
 #[cfg(test)]
 mod tests_review_persist;
