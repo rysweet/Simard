@@ -1,0 +1,49 @@
+use crate::error::{SimardError, SimardResult};
+use crate::handoff::RuntimeHandoffSnapshot;
+use crate::runtime::RuntimeTopology;
+
+use super::types::{BenchmarkCheckResult, BenchmarkClass, BenchmarkScenario};
+
+// NEEDLE-XYZ-GYM-MARKER: long-context-needle-in-haystack benchmark searches for this exact comment.
+
+mod data_1;
+mod data_2;
+mod data_3;
+mod data_4;
+mod data_5;
+
+use std::sync::OnceLock;
+
+static ALL_BENCHMARK_SCENARIOS: OnceLock<Vec<BenchmarkScenario>> = OnceLock::new();
+
+fn all_benchmark_scenarios() -> &'static [BenchmarkScenario] {
+    ALL_BENCHMARK_SCENARIOS
+        .get_or_init(|| {
+            let mut v = Vec::with_capacity(153);
+            v.extend_from_slice(&data_1::SCENARIOS);
+            v.extend_from_slice(&data_2::SCENARIOS);
+            v.extend_from_slice(&data_3::SCENARIOS);
+            v.extend_from_slice(&data_4::SCENARIOS);
+            v.extend_from_slice(&data_5::SCENARIOS);
+            v
+        })
+        .as_slice()
+}
+
+pub fn benchmark_scenarios() -> &'static [BenchmarkScenario] {
+    all_benchmark_scenarios()
+}
+
+pub(super) fn resolve_benchmark_scenario(scenario_id: &str) -> SimardResult<BenchmarkScenario> {
+    benchmark_scenarios()
+        .iter()
+        .copied()
+        .find(|candidate| candidate.id == scenario_id)
+        .ok_or_else(|| SimardError::BenchmarkScenarioNotFound {
+            scenario_id: scenario_id.to_string(),
+        })
+}
+
+
+mod checks;
+pub(crate) use checks::class_specific_checks;
