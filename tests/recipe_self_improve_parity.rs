@@ -101,7 +101,7 @@ fn rust_path_cycle(proposal: &str, target_dim: Option<&str>) -> ImprovementCycle
         proposed_changes: vec![ProposedChange {
             file_path: ".".to_string(),
             description: proposal.to_string(),
-            expected_impact: format!("recipe-driven; research_decision=CONTINUE"),
+            expected_impact: "recipe-driven; research_decision=CONTINUE".to_string(),
         }],
     };
     let regressions = detect_regression(&post, &baseline);
