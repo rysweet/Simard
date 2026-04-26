@@ -1,6 +1,5 @@
 //! Built-in meeting templates and lookup.
 
-
 /// Meeting template content (agenda and prompts) for common meeting types.
 pub struct MeetingTemplate {
     pub name: &'static str,

@@ -11,7 +11,6 @@ use crate::error::{SimardError, SimardResult};
 
 use super::{MemoryRequest, MemoryResponse, ipc_err, read_frame, write_frame};
 
-
 // ============================================================================
 // Server
 // ============================================================================

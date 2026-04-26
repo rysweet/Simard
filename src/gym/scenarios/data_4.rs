@@ -1,7 +1,7 @@
 //! Auto-split BENCHMARK_SCENARIOS data — chunk 4 of 5.
 
-use crate::runtime::RuntimeTopology;
 use super::super::types::{BenchmarkClass, BenchmarkScenario};
+use crate::runtime::RuntimeTopology;
 
 pub(super) static SCENARIOS: [BenchmarkScenario; 31] = [
     BenchmarkScenario {

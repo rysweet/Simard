@@ -58,8 +58,11 @@ pub const WORKTREES_SUBDIR: &str = "engineer-worktrees";
 pub const ENGINEER_CLAIM_FILE: &str = ".simard-engineer-claim";
 
 mod claim;
+use claim::{
+    EngineerClaim, claim_is_live, format_engineer_claim, is_pid_alive, read_engineer_claim,
+    read_engineer_claim_full, read_pid_starttime,
+};
 pub use claim::{is_pid_alive_public, read_pid_starttime_public};
-use claim::{EngineerClaim, claim_is_live, format_engineer_claim, is_pid_alive, read_engineer_claim, read_engineer_claim_full, read_pid_starttime};
 
 /// Maximum length of a `goal_id` accepted by [`EngineerWorktree::allocate`].
 pub const MAX_GOAL_ID_LEN: usize = 64;
@@ -73,7 +76,6 @@ pub const MAX_GOAL_ID_LEN: usize = 64;
 /// Cleanup is idempotent and runs either via [`EngineerWorktree::cleanup`]
 /// (the explicit, observable path) or via [`Drop`] (the safety-net path).
 #[derive(Debug)]
-
 
 pub struct EngineerWorktree {
     path: PathBuf,

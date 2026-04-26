@@ -8,7 +8,6 @@ use crate::meeting_facilitator::{ActionItem, MeetingDecision, MeetingHandoff, Op
 
 use super::super::types::{ConversationMessage, HandoffActionItem, MeetingTranscript};
 
-
 /// Store the meeting as an episodic memory via the cognitive bridge.
 pub fn store_cognitive_memory(
     bridge: &dyn CognitiveMemoryOps,
@@ -74,7 +73,6 @@ pub fn store_cognitive_memory(
 ///
 /// The file includes YAML frontmatter (topic, date, participants) and the
 /// conversation transcript formatted as markdown.
-
 
 /// Store enriched meeting data (with action items) into episodic memory.
 pub fn store_enriched_cognitive_memory(

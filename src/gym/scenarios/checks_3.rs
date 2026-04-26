@@ -70,7 +70,6 @@ pub(super) fn checks_for_incident_response(combined: &str) -> Vec<BenchmarkCheck
     ]
 }
 
-
 pub(super) fn checks_for_release_management(combined: &str) -> Vec<BenchmarkCheckResult> {
     let version_bump_planned = combined.contains("version")
         || combined.contains("semver")
@@ -131,7 +130,6 @@ pub(super) fn checks_for_release_management(combined: &str) -> Vec<BenchmarkChec
     ]
 }
 
-
 pub(super) fn checks_for_performance_analysis(combined: &str) -> Vec<BenchmarkCheckResult> {
     let complexity_mentioned = combined.contains("o(n")
         || combined.contains("complexity")
@@ -188,7 +186,6 @@ pub(super) fn checks_for_performance_analysis(combined: &str) -> Vec<BenchmarkCh
     ]
 }
 
-
 pub(super) fn checks_for_security_audit(combined: &str) -> Vec<BenchmarkCheckResult> {
     let vulnerability_found = combined.contains("unsafe")
         || combined.contains("vulnerab")
@@ -243,7 +240,6 @@ pub(super) fn checks_for_security_audit(combined: &str) -> Vec<BenchmarkCheckRes
     ]
 }
 
-
 pub(super) fn checks_for_safe_code_change(combined: &str) -> Vec<BenchmarkCheckResult> {
     let compilation_evidence = combined.contains("compil")
         || combined.contains("cargo build")
@@ -281,7 +277,6 @@ pub(super) fn checks_for_safe_code_change(combined: &str) -> Vec<BenchmarkCheckR
         },
     ]
 }
-
 
 pub(super) fn checks_for_documentation(combined: &str) -> Vec<BenchmarkCheckResult> {
     let has_doc_syntax = combined.contains("///")

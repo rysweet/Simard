@@ -26,7 +26,6 @@ pub(crate) fn save_hosts(hosts: &[Value]) -> std::io::Result<()> {
     )
 }
 
-
 /// Compare two hostnames as short, case-insensitive names.
 ///
 /// Strips the first dot onward (FQDN suffix) on both sides and lowercases
@@ -67,7 +66,11 @@ pub(crate) fn host_entry_name(entry: &Value) -> &str {
 ///
 /// **Security: This is a UI hint only — MUST NOT be used for authorization
 /// decisions.** Hostnames are user-controlled and easily spoofed.
-pub(crate) fn tag_local_membership(hosts: &mut [Value], cluster_members: &[String], local_hostname: &str) {
+pub(crate) fn tag_local_membership(
+    hosts: &mut [Value],
+    cluster_members: &[String],
+    local_hostname: &str,
+) {
     let in_cluster =
         |name: &str| -> bool { cluster_members.iter().any(|m| is_local_host(m, name)) };
     for entry in hosts.iter_mut() {

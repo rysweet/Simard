@@ -256,7 +256,6 @@ mod tests {
     }
 }
 
-
 // === Login HTTP handlers ===
 
 use axum::{Json, response};

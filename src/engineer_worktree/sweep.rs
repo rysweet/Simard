@@ -1,19 +1,18 @@
 //! Sweeping orphaned engineer worktrees + helpers used by allocate.
 
-use std::path::Path;
-use std::process::Command;
 use std::collections::HashSet;
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command;
 
-use crate::error::SimardError;
 use super::{MAX_GOAL_ID_LEN, WORKTREES_SUBDIR};
+use crate::error::SimardError;
 
 use super::{
-    EngineerClaim, ENGINEER_CLAIM_FILE, SweepReport, claim_is_live, is_pid_alive_public,
+    ENGINEER_CLAIM_FILE, EngineerClaim, SweepReport, claim_is_live, is_pid_alive_public,
     read_engineer_claim_full, read_pid_starttime_public, worktree_mutation_lock,
 };
-
 
 /// Sweep `<state_root>/engineer-worktrees/` for orphans on daemon boot.
 ///

@@ -1,8 +1,8 @@
 //! Per-engineer worktree claim helpers — PID + starttime sentinel.
 
+use super::ENGINEER_CLAIM_FILE;
 use std::fs;
 use std::path::Path;
-use super::ENGINEER_CLAIM_FILE;
 
 /// Read field 22 (starttime in jiffies since boot) from `/proc/<pid>/stat`.
 /// Returns `None` if the file can't be read or is malformed.

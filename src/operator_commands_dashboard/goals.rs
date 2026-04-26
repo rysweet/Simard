@@ -259,7 +259,10 @@ pub(crate) async fn remove_goal(Path(id): Path<String>) -> Json<Value> {
     }
 }
 
-pub(crate) async fn update_goal_status(Path(id): Path<String>, Json(body): Json<Value>) -> Json<Value> {
+pub(crate) async fn update_goal_status(
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Json<Value> {
     let state_root = resolve_state_root();
     let goal_path = state_root.join("goal_records.json");
     let content = std::fs::read_to_string(&goal_path).unwrap_or_default();
@@ -372,4 +375,3 @@ pub(crate) async fn demote_goal(Path(id): Path<String>) -> Json<Value> {
         Err(e) => Json(json!({"error": format!("{e}")})),
     }
 }
-

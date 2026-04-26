@@ -234,7 +234,6 @@ mod backup;
 mod ops;
 
 impl NativeCognitiveMemory {
-
     fn conn(&self) -> SimardResult<lbug::Connection<'_>> {
         lbug::Connection::new(&self.db).map_err(|e| SimardError::RuntimeInitFailed {
             component: "cognitive-memory".into(),

@@ -1,8 +1,6 @@
 use axum::Json;
 use serde_json::{Value, json};
 
-
-
 pub(crate) fn file_metrics(path: &std::path::Path) -> (u64, Option<String>) {
     match std::fs::metadata(path) {
         Ok(m) => {
@@ -38,7 +36,6 @@ pub(crate) async fn disk_usage_pct() -> Option<u8> {
     let line = text.lines().nth(1)?;
     line.trim().trim_end_matches('%').parse().ok()
 }
-
 
 /// WS-2: list live and recently-ended subagent tmux sessions.
 ///

@@ -122,14 +122,22 @@ pub(crate) fn is_plausible_label(label: &str) -> bool {
     label.chars().any(|c| c.is_alphanumeric())
 }
 
-pub(super) fn dispatch_gh_issue_comment(repo: &str, issue: u64, body: &str) -> Result<String, String> {
+pub(super) fn dispatch_gh_issue_comment(
+    repo: &str,
+    issue: u64,
+    body: &str,
+) -> Result<String, String> {
     let issue_str = issue.to_string();
     run_gh(&[
         "issue", "comment", &issue_str, "--repo", repo, "--body", body,
     ])
 }
 
-pub(super) fn dispatch_gh_issue_close(repo: &str, issue: u64, comment: Option<&str>) -> Result<(), String> {
+pub(super) fn dispatch_gh_issue_close(
+    repo: &str,
+    issue: u64,
+    comment: Option<&str>,
+) -> Result<(), String> {
     let issue_str = issue.to_string();
     if let Some(body) = comment
         && !body.trim().is_empty()
@@ -146,4 +154,3 @@ pub(super) fn dispatch_gh_pr_comment(repo: &str, pr: u64, body: &str) -> Result<
     let pr_str = pr.to_string();
     run_gh(&["pr", "comment", &pr_str, "--repo", repo, "--body", body])
 }
-
