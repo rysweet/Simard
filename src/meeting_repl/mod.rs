@@ -8,6 +8,8 @@ mod repl;
 mod spinner;
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+mod tests_repl;
 
 pub use color::{cyan, green, yellow};
 pub use repl::run_meeting_repl;
