@@ -6,6 +6,8 @@ mod test_support;
 #[cfg(test)]
 mod tests_construction;
 #[cfg(test)]
+mod tests_read_view;
+#[cfg(test)]
 mod tests_validation;
 
 // Re-export all public items so `crate::operator_commands_terminal::X` still works.
