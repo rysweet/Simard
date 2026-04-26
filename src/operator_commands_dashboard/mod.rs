@@ -11,6 +11,7 @@ mod hosts;
 mod chat;
 mod logs;
 mod registry;
+mod metrics;
 pub(crate) mod routes;
 
 #[cfg(test)]
