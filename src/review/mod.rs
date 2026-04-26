@@ -4,6 +4,8 @@ mod types;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_build;
 
 // Re-export all public items so `crate::review::X` still works.
 pub use build::build_review_artifact;
