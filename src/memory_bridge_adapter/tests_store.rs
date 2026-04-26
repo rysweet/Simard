@@ -1,4 +1,3 @@
-use super::store::*;
 use super::test_helpers::{make_record, test_store};
 use crate::memory::{MemoryScope, MemoryStore};
 

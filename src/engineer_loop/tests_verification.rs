@@ -1,5 +1,5 @@
 use super::verification::*;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use super::types::{
     AppendToFileRequest, CreateFileRequest, EngineerActionKind, ExecutedEngineerAction,

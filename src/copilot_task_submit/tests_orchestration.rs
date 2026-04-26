@@ -5,7 +5,6 @@ use super::types::{
 };
 
 use crate::base_types::BaseTypeId;
-use crate::evidence::EvidenceSource;
 use crate::handoff::CopilotSubmitAudit;
 use crate::identity::OperatingMode;
 use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeTopology};

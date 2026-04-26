@@ -1,5 +1,4 @@
 use super::*;
-use super::*;
 
 fn test_mem() -> NativeCognitiveMemory {
     NativeCognitiveMemory::in_memory().expect("in-memory DB should create")

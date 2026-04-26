@@ -2,9 +2,8 @@ use super::verification::*;
 use std::path::{Path, PathBuf};
 
 use super::types::{
-    AppendToFileRequest, CreateFileRequest, EngineerActionKind, ExecutedEngineerAction,
-    GitCommitRequest, OpenIssueRequest, RepoInspection, SelectedEngineerAction,
-    ShellCommandRequest, StructuredEditRequest,
+    CreateFileRequest, EngineerActionKind, ExecutedEngineerAction, GitCommitRequest,
+    RepoInspection, SelectedEngineerAction, ShellCommandRequest,
 };
 
 fn make_inspection() -> RepoInspection {

@@ -1,7 +1,6 @@
 use super::types::{
     AppendToFileRequest, CreateFileRequest, EngineerActionKind, ExecutedEngineerAction,
-    GitCommitRequest, OpenIssueRequest, RepoInspection, SelectedEngineerAction,
-    ShellCommandRequest, StructuredEditRequest,
+    GitCommitRequest, RepoInspection, SelectedEngineerAction, ShellCommandRequest,
 };
 use super::verification::*;
 use std::path::{Path, PathBuf};

@@ -1,7 +1,5 @@
 use super::cycle::*;
-use super::types::{
-    ImprovementConfig, ImprovementCycle, ImprovementDecision, ImprovementPhase, ProposedChange,
-};
+use super::types::{ImprovementConfig, ImprovementCycle, ImprovementDecision, ImprovementPhase};
 use crate::gym_bridge::ScoreDimensions;
 use crate::gym_scoring::{GymSuiteScore, Regression, RegressionSeverity};
 

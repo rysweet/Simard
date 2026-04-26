@@ -1,7 +1,6 @@
 use super::build::*;
 use super::types::*;
 use crate::handoff::RuntimeHandoffSnapshot;
-use crate::memory::MemoryScope;
 
 // ---- failed_signal ----
 

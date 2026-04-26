@@ -1,7 +1,7 @@
 use super::orchestration::*;
 use super::types::{
     COPILOT_SUBMIT_BASE_TYPE, COPILOT_SUBMIT_FLOW_ASSET_PATH, COPILOT_SUBMIT_RUNTIME_NODE,
-    CopilotSubmitFlowAsset, CopilotSubmitOutcome, StartupStatus, SubmitStatus,
+    CopilotSubmitFlowAsset, CopilotSubmitOutcome,
 };
 
 use crate::base_types::BaseTypeId;
@@ -9,7 +9,7 @@ use crate::evidence::EvidenceSource;
 use crate::handoff::CopilotSubmitAudit;
 use crate::identity::OperatingMode;
 use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeTopology};
-use crate::session::{SessionPhase, SessionRecord, UuidSessionIdGenerator};
+use crate::session::{SessionRecord, UuidSessionIdGenerator};
 
 use std::path::PathBuf;
 

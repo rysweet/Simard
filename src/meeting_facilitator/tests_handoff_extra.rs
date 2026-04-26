@@ -2,7 +2,7 @@ use super::handoff::*;
 use super::*;
 use crate::meeting_facilitator::types::{ActionItem, MeetingDecision, MeetingSessionStatus};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Build a minimal session for testing.
 fn make_session(

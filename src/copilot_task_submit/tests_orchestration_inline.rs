@@ -1,7 +1,7 @@
 use super::orchestration::*;
 use super::types::{
     COPILOT_SUBMIT_BASE_TYPE, COPILOT_SUBMIT_FLOW_ASSET_PATH, COPILOT_SUBMIT_RUNTIME_NODE,
-    CopilotSubmitFlowAsset, CopilotSubmitOutcome, StartupStatus, SubmitStatus,
+    CopilotSubmitFlowAsset, StartupStatus, SubmitStatus,
 };
 
 use crate::base_types::BaseTypeId;
