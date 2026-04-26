@@ -1,7 +1,8 @@
 use axum::Json;
 use serde_json::{Value, json};
 
-use super::routes::{read_tail, resolve_state_root, run_gh_json};
+use super::logs::read_tail;
+use super::routes::{resolve_state_root, run_gh_json};
 use super::current_work::read_recent_cycle_reports;
 
 pub(crate) async fn traces() -> Json<Value> {
