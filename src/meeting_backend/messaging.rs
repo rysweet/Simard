@@ -1,6 +1,5 @@
 //! Send-message turn handling: prompt construction + LLM dispatch.
 
-use chrono::Utc;
 use tracing::{debug, info, warn};
 
 use crate::base_types::{BaseTypeOutcome, BaseTypeTurnInput};

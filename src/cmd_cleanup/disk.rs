@@ -1,7 +1,6 @@
 //! Disk-cleanup helpers extracted from mod.rs (#1266).
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use super::CleanupReport;
 

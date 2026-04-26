@@ -1,6 +1,5 @@
 //! NativeCognitiveMemory backup, restore, and DB-recovery helpers.
 
-use std::fs;
 use std::os::unix::io::AsRawFd;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};

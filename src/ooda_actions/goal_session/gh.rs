@@ -1,7 +1,5 @@
 //! GitHub CLI dispatch helpers used by goal-session actions.
 
-use std::process::Command;
-
 const GH_ARG_MAX_BYTES: usize = 32 * 1024;
 
 fn run_gh(args: &[&str]) -> Result<String, String> {
