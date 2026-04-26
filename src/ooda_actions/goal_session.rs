@@ -274,8 +274,19 @@ fn is_makework_title(title: &str) -> bool {
         }
     }
     // Single-verb titles with no noun ("observe", "check") even without
-    // trailing space are make-work too.
-    if matches!(lc.as_str(), "observe" | "check" | "monitor" | "verify") {
+    // trailing space are make-work too. Also include bare slug titles
+    // observed in #1260/#1261 (e.g. exact title `test-only`, `monitor-pr`).
+    if matches!(
+        lc.as_str(),
+        "observe"
+            | "check"
+            | "monitor"
+            | "verify"
+            | "test-only"
+            | "verify-existing"
+            | "monitor-pr"
+            | "rebase-and-merge-pr"
+    ) {
         return true;
     }
     false
@@ -1524,6 +1535,20 @@ mod makework_title_tests {
         assert!(is_makework_title("Observe "));
         assert!(is_makework_title("observe "));
         assert!(is_makework_title("check: gym health"));
+    }
+
+    /// Regression #1261: bare slug titles like `test-only` (issue #1260)
+    /// previously slipped through because the prefix matcher required a
+    /// trailing space/colon and the bare-token allowlist only covered the
+    /// single-verb forms.
+    #[test]
+    fn rejects_bare_slug_titles_1261() {
+        assert!(is_makework_title("test-only"));
+        assert!(is_makework_title("Test-Only"));
+        assert!(is_makework_title(" test-only "));
+        assert!(is_makework_title("verify-existing"));
+        assert!(is_makework_title("monitor-pr"));
+        assert!(is_makework_title("rebase-and-merge-pr"));
     }
 
     #[test]
