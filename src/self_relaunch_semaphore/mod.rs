@@ -10,6 +10,8 @@ pub(crate) mod semaphore;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_extra;
 
 // Re-export all public items so `crate::self_relaunch_semaphore::X` still works.
 pub use handoff::{HandoffConfig, HandoffResult, coordinated_handoff, signal_ready};
