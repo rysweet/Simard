@@ -69,6 +69,10 @@ impl MeetingBackend {
         let response_text = {
             let extracted = extract_response(&outcome);
             if extracted.trim().is_empty() {
+                tracing::warn!(
+                    raw_len = outcome.execution_summary.len(),
+                    "MeetingBackend: extract_response produced empty result"
+                );
                 EMPTY_RESPONSE_SENTINEL.to_string()
             } else {
                 extracted
