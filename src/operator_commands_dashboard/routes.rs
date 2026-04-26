@@ -4456,40 +4456,51 @@ pub(crate) const INDEX_HTML: &str = r#"<!DOCTYPE html>
         const d=await apiFetch('/api/logs');
         allLogLines=d.daemon_log_lines||[];
         applyLogFilter();
+        // Issue #928: guard each element access so a missing target on the
+        // current tab does not abort the whole fetchLogs and leave every
+        // panel stuck on "Loading…".
         const tEl=document.getElementById('ooda-transcripts');
-        if(d.ooda_transcripts?.length){
-          tEl.innerHTML=d.ooda_transcripts.map(t=>`
-            <div class="transcript-item">
-              <h3>${esc(t.name)} <span class="badge">${fmtB(t.size_bytes)}</span></h3>
-              <div class="log-box" style="max-height:200px">${esc((t.preview_lines||[]).join('\n'))||'(empty)'}</div>
-            </div>`).join('');
-        }else{tEl.innerHTML='<span style="color:#8b949e">No OODA transcripts found in state root.</span>';}
+        if(tEl){
+          if(d.ooda_transcripts?.length){
+            tEl.innerHTML=d.ooda_transcripts.map(t=>`
+              <div class="transcript-item">
+                <h3>${esc(t.name)} <span class="badge">${fmtB(t.size_bytes)}</span></h3>
+                <div class="log-box" style="max-height:200px">${esc((t.preview_lines||[]).join('\n'))||'(empty)'}</div>
+              </div>`).join('');
+          }else{tEl.innerHTML='<span style="color:#8b949e">No OODA transcripts found in state root.</span>';}
+        }
         // Render cycle reports
         const crEl=document.getElementById('cycle-reports');
-        if(d.cycle_reports?.length){
-          crEl.innerHTML=d.cycle_reports.map(c=>{
-            const num=c.cycle_number;
-            const text=c.summary||JSON.stringify(c.report||{});
-            return`<div class="transcript-item">
-              <h3>Cycle #${num}</h3>
-              <div class="log-box" style="max-height:100px">${esc(text)}</div>
-            </div>`;
-          }).join('');
-        }else{crEl.innerHTML='<span style="color:#8b949e">No cycle reports found. Run the OODA daemon to generate cycle data.</span>';}
+        if(crEl){
+          if(d.cycle_reports?.length){
+            crEl.innerHTML=d.cycle_reports.map(c=>{
+              const num=c.cycle_number;
+              const text=c.summary||JSON.stringify(c.report||{});
+              return`<div class="transcript-item">
+                <h3>Cycle #${num}</h3>
+                <div class="log-box" style="max-height:100px">${esc(text)}</div>
+              </div>`;
+            }).join('');
+          }else{crEl.innerHTML='<span style="color:#8b949e">No cycle reports found. Run the OODA daemon to generate cycle data.</span>';}
+        }
         const ttEl=document.getElementById('terminal-transcripts');
-        if(d.terminal_transcripts?.length){
-          ttEl.innerHTML=d.terminal_transcripts.map(t=>`
-            <div class="transcript-item">
-              <h3>${esc(t.name)} <span class="badge">${fmtB(t.size_bytes)}</span></h3>
-              <div class="log-box" style="max-height:200px">${esc((t.preview_lines||[]).join('\n'))||'(empty)'}</div>
-            </div>`).join('');
-        }else{ttEl.innerHTML='<span style="color:#8b949e">No terminal session transcripts found.</span>';}
+        if(ttEl){
+          if(d.terminal_transcripts?.length){
+            ttEl.innerHTML=d.terminal_transcripts.map(t=>`
+              <div class="transcript-item">
+                <h3>${esc(t.name)} <span class="badge">${fmtB(t.size_bytes)}</span></h3>
+                <div class="log-box" style="max-height:200px">${esc((t.preview_lines||[]).join('\n'))||'(empty)'}</div>
+              </div>`).join('');
+          }else{ttEl.innerHTML='<span style="color:#8b949e">No terminal session transcripts found.</span>';}
+        }
         const costEl=document.getElementById('cost-log-box');
-        if(d.cost_log_lines?.length){
-          costEl.textContent=d.cost_log_lines.join('\n');
-          costEl.scrollTop=costEl.scrollHeight;
-        }else{costEl.innerHTML='<span style="color:#8b949e">No cost ledger entries</span>';}
-      }catch(e){document.getElementById('daemon-log').textContent='Failed to load logs — check /api/logs endpoint';}
+        if(costEl){
+          if(d.cost_log_lines?.length){
+            costEl.textContent=d.cost_log_lines.join('\n');
+            costEl.scrollTop=costEl.scrollHeight;
+          }else{costEl.innerHTML='<span style="color:#8b949e">No cost ledger entries</span>';}
+        }
+      }catch(e){const dl=document.getElementById('daemon-log'); if(dl){dl.textContent='Failed to load logs — check /api/logs endpoint';}}
     }
     function applyLogFilter(){
       const filter=(document.getElementById('log-filter')?.value||'').toLowerCase();
