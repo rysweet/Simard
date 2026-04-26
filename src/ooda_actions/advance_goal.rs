@@ -430,7 +430,22 @@ fn advance_goal_with_subordinate(
 
             // Subordinate is alive and still working.
             let new_progress = GoalProgress::InProgress { percent: 50 };
-            let _ = update_goal_progress(&mut state.active_goals, goal_id, new_progress);
+            if let Err(e) =
+                update_goal_progress(&mut state.active_goals, goal_id, new_progress)
+            {
+                eprintln!(
+                    "[simard] OODA advance_goal FAILED to persist InProgress for \
+                     goal '{goal_id}': {e}"
+                );
+                return make_outcome(
+                    action,
+                    false,
+                    format!(
+                        "subordinate '{sub_name}' alive (phase={phase}) but \
+                         persisting InProgress for goal '{goal_id}' failed: {e}"
+                    ),
+                );
+            }
             make_outcome(
                 action,
                 true,
@@ -492,13 +507,27 @@ fn advance_goal_with_subordinate(
                 );
             }
 
-            let _ = update_goal_progress(
+            if let Err(e) = update_goal_progress(
                 &mut state.active_goals,
                 goal_id,
                 GoalProgress::Blocked(format!(
                     "subordinate '{sub_name}' exited without producing commits or PRs"
                 )),
-            );
+            ) {
+                eprintln!(
+                    "[simard] OODA advance_goal FAILED to persist Blocked for \
+                     goal '{goal_id}': {e}"
+                );
+                cleanup_engineer_worktree_for_goal(state, goal_id);
+                return make_outcome(
+                    action,
+                    false,
+                    format!(
+                        "subordinate '{sub_name}' exited with no artifacts and \
+                         persisting Blocked for goal '{goal_id}' failed: {e}"
+                    ),
+                );
+            }
             // Reap the per-engineer worktree (issue #1197).
             cleanup_engineer_worktree_for_goal(state, goal_id);
             make_outcome(
@@ -555,7 +584,21 @@ fn validate_subordinate_completion(
 
     if has_artifacts {
         let new_progress = GoalProgress::Completed;
-        let _ = update_goal_progress(&mut state.active_goals, goal_id, new_progress);
+        if let Err(e) = update_goal_progress(&mut state.active_goals, goal_id, new_progress) {
+            eprintln!(
+                "[simard] OODA advance_goal FAILED to persist Completed for \
+                 goal '{goal_id}': {e}"
+            );
+            return make_outcome(
+                action,
+                false,
+                format!(
+                    "subordinate '{sub_name}' produced {} commit(s) and {} PR(s) for \
+                     goal '{goal_id}' but persisting Completed failed: {e}",
+                    progress.commits_produced, progress.prs_produced,
+                ),
+            );
+        }
         eprintln!(
             "[simard] subordinate '{sub_name}' completed goal '{goal_id}' — \
              {} commit(s), {} PR(s), outcome='{outcome_text}'",
@@ -580,14 +623,28 @@ fn validate_subordinate_completion(
              '{outcome_text}' for goal '{goal_id}' but produced 0 commits \
              and 0 PRs — marking as failed for OODA retry"
         );
-        let _ = update_goal_progress(
+        if let Err(e) = update_goal_progress(
             &mut state.active_goals,
             goal_id,
             GoalProgress::Blocked(format!(
                 "subordinate '{sub_name}' exited with outcome '{outcome_text}' \
                  but produced no commits or PRs"
             )),
-        );
+        ) {
+            eprintln!(
+                "[simard] OODA advance_goal FAILED to persist Blocked for \
+                 goal '{goal_id}': {e}"
+            );
+            cleanup_engineer_worktree_for_goal(state, goal_id);
+            return make_outcome(
+                action,
+                false,
+                format!(
+                    "subordinate '{sub_name}' claimed '{outcome_text}' for goal '{goal_id}' \
+                     but produced no artifacts and persisting Blocked failed: {e}"
+                ),
+            );
+        }
         // Reap the per-engineer worktree (issue #1197).
         cleanup_engineer_worktree_for_goal(state, goal_id);
         make_outcome(
