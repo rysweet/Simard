@@ -31,15 +31,20 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Prepare Rust runner (free disk, swap, mold, rust + cache)
+      - name: Prepare Rust runner (free disk, swap, mold, rust)
         uses: ./.github/actions/rust-runner-prep
         with:
           rust-components: rustfmt,clippy
-          swatinem-shared-key: simard-ci
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: simard-ci
           # Single writer: only the main branch refreshes the shared cache.
           # PR runs read it but never overwrite, eliminating cache thrashing
           # across concurrent PRs.
-          swatinem-save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -106,11 +111,17 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Prepare Rust runner (free disk, swap, mold, rust + cache)
+      - name: Prepare Rust runner (free disk, swap, mold, rust)
         uses: ./.github/actions/rust-runner-prep
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
         with:
-          swatinem-shared-key: simard-ci
-          swatinem-save-if: "false"
+          shared-key: simard-ci
+          # Read-only on PRs and non-pre-commit jobs; pre-commit on main is
+          # the single writer to avoid cache contention.
+          save-if: false
+          cache-on-failure: true
 
       - name: Run install smoke test
         env:
