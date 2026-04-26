@@ -23,6 +23,8 @@ mod tests_types_inline;
 mod tests_verification;
 #[cfg(test)]
 mod tests_verification_actions;
+#[cfg(test)]
+mod tests_verification_extra;
 
 use std::fs;
 use std::path::{Path, PathBuf};
