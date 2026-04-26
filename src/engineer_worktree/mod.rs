@@ -34,8 +34,8 @@ use crate::error::SimardError;
 
 #[cfg(test)]
 mod tests;
-mod tests_extra;
 #[cfg(test)]
+mod tests_extra;
 #[cfg(test)]
 mod tests_more;
 
