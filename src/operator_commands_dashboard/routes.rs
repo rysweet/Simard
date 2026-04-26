@@ -1464,7 +1464,7 @@ fn is_pid_alive(pid: u32) -> bool {
 }
 
 /// Run a `gh` CLI command and parse JSON output, returning a `Value`.
-async fn run_gh_json(args: &[&str]) -> Value {
+pub(crate) async fn run_gh_json(args: &[&str]) -> Value {
     match tokio::process::Command::new("gh").args(args).output().await {
         Ok(o) if o.status.success() => {
             let raw = String::from_utf8_lossy(&o.stdout);
@@ -1477,7 +1477,7 @@ async fn run_gh_json(args: &[&str]) -> Value {
 /// Read the most recent N cycle report files from disk.
 /// Truncates `s` to at most `max` Unicode characters, appending `…` if the
 /// string was shortened. Pure helper; no allocation when no truncation needed.
-fn truncate_with_ellipsis(s: &str, max: usize) -> String {
+pub(crate) fn truncate_with_ellipsis(s: &str, max: usize) -> String {
     let mut chars = s.chars();
     let head: String = chars.by_ref().take(max).collect();
     if chars.next().is_some() {
@@ -1494,7 +1494,7 @@ fn truncate_with_ellipsis(s: &str, max: usize) -> String {
 /// `outcomes[].action_description`, then to `planned_actions[].description`
 /// for older cycles that have no outcomes recorded, then to the cycle
 /// summary as a last resort.
-fn format_recent_actions_for_cycle(cycle_num: u64, report: &Value) -> Vec<Value> {
+pub(crate) fn format_recent_actions_for_cycle(cycle_num: u64, report: &Value) -> Vec<Value> {
     const MAX_LEN: usize = 200;
 
     // The wrapper from `read_recent_cycle_reports` may put the parsed cycle
@@ -1574,7 +1574,7 @@ fn format_recent_actions_for_cycle(cycle_num: u64, report: &Value) -> Vec<Value>
     out
 }
 
-fn read_recent_cycle_reports(state_root: &std::path::Path, n: usize) -> Vec<Value> {
+pub(crate) fn read_recent_cycle_reports(state_root: &std::path::Path, n: usize) -> Vec<Value> {
     // The daemon writes to `state_root/state/cycle_reports/` while
     // resolve_state_root() may return the parent. Check both locations.
     let candidates = [
@@ -1630,7 +1630,7 @@ fn read_recent_cycle_reports(state_root: &std::path::Path, n: usize) -> Vec<Valu
 ///
 /// Empty input yields empty output; the frontend renders this as
 /// "No remote VMs configured".
-fn remote_vms_from_hosts(hosts: &[Value]) -> Vec<Value> {
+pub(crate) fn remote_vms_from_hosts(hosts: &[Value]) -> Vec<Value> {
     hosts
         .iter()
         .filter_map(|h| {
@@ -1977,7 +1977,7 @@ fn hosts_config_path() -> std::path::PathBuf {
         .join("hosts.json")
 }
 
-fn load_hosts() -> Vec<Value> {
+pub(crate) fn load_hosts() -> Vec<Value> {
     let path = hosts_config_path();
     let content = std::fs::read_to_string(&path).unwrap_or_else(|_| "[]".to_string());
     serde_json::from_str(&content).unwrap_or_default()
@@ -2394,7 +2394,7 @@ async fn handle_tmux_attach_ws(mut socket: WebSocket, host: String, session: Str
 ///
 /// **Security: This is a UI hint only — MUST NOT be used for authorization
 /// decisions.** Hostnames are user-controlled and easily spoofed.
-fn is_local_host(a: &str, b: &str) -> bool {
+pub(crate) fn is_local_host(a: &str, b: &str) -> bool {
     if a.is_empty() || b.is_empty() {
         return false;
     }
@@ -2406,7 +2406,7 @@ fn is_local_host(a: &str, b: &str) -> bool {
 
 /// Extract the host "name" field from a host entry, accepting either lowercase
 /// `name` (from `hosts.json`) or capitalized `Name` (from some `azlin list` outputs).
-fn host_entry_name(entry: &Value) -> &str {
+pub(crate) fn host_entry_name(entry: &Value) -> &str {
     entry
         .get("name")
         .and_then(|v| v.as_str())
@@ -2426,7 +2426,7 @@ fn host_entry_name(entry: &Value) -> &str {
 ///
 /// **Security: This is a UI hint only — MUST NOT be used for authorization
 /// decisions.** Hostnames are user-controlled and easily spoofed.
-fn tag_local_membership(hosts: &mut [Value], cluster_members: &[String], local_hostname: &str) {
+pub(crate) fn tag_local_membership(hosts: &mut [Value], cluster_members: &[String], local_hostname: &str) {
     let in_cluster =
         |name: &str| -> bool { cluster_members.iter().any(|m| is_local_host(m, name)) };
     for entry in hosts.iter_mut() {
@@ -3206,7 +3206,7 @@ async fn registry_reap() -> Json<Value> {
 
 /// Classify an agent role into one of three layers used by the dashboard
 /// graph visualization. Returns ("ooda" | "engineer" | "session").
-fn classify_agent_layer(role: &str) -> &'static str {
+pub(crate) fn classify_agent_layer(role: &str) -> &'static str {
     let r = role.to_ascii_lowercase();
     if r.contains("ooda") || r.contains("operator") || r.contains("supervisor") {
         "ooda"
@@ -3220,7 +3220,7 @@ fn classify_agent_layer(role: &str) -> &'static str {
 /// Build a {nodes, edges} graph value from registry entries. Edges connect
 /// every OODA node to every engineer, and every engineer to every session,
 /// matching the OODA -> engineers -> sessions topology requested in #951.
-fn build_agent_graph(entries: &[crate::agent_registry::AgentEntry]) -> Value {
+pub(crate) fn build_agent_graph(entries: &[crate::agent_registry::AgentEntry]) -> Value {
     let mut nodes = Vec::with_capacity(entries.len());
     let mut ooda_ids: Vec<&str> = Vec::new();
     let mut engineer_ids: Vec<&str> = Vec::new();
@@ -3690,7 +3690,7 @@ async fn disk_usage_pct() -> Option<u8> {
     line.trim().trim_end_matches('%').parse().ok()
 }
 
-const LOGIN_HTML: &str = r#"<!DOCTYPE html>
+pub(crate) const LOGIN_HTML: &str = r#"<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -5630,766 +5630,3 @@ pub(crate) const INDEX_HTML: &str = r#"<!DOCTYPE html>
 </body>
 </html>
 "#;
-
-/// Truncate an outcome detail string to at most `max` Unicode scalar values,
-/// appending an ellipsis (`…`) when truncation occurs. Char-aware (UTF-8 safe).
-#[cfg(test)]
-fn truncate_outcome_detail(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let mut out: String = s.chars().take(max).collect();
-        out.push('…');
-        out
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn remote_vms_panel_matches_configured_hosts() {
-        use std::collections::BTreeSet;
-
-        let hosts = vec![
-            serde_json::json!({"name": "vm-alpha", "resource_group": "rg1"}),
-            serde_json::json!({"name": "vm-beta",  "resource_group": "rg2"}),
-        ];
-
-        let remote_vms = remote_vms_from_hosts(&hosts);
-
-        let host_names: BTreeSet<String> = hosts
-            .iter()
-            .filter_map(|h| h.get("name").and_then(|v| v.as_str()).map(String::from))
-            .collect();
-        let vm_names: BTreeSet<String> = remote_vms
-            .iter()
-            .filter_map(|v| v.get("vm_name").and_then(|x| x.as_str()).map(String::from))
-            .collect();
-
-        assert_eq!(
-            host_names, vm_names,
-            "Remote VMs panel must agree with configured hosts (Cluster Topology source)"
-        );
-        assert!(
-            !vm_names.contains("Simard"),
-            "Hardcoded 'Simard' default must not appear unless explicitly configured"
-        );
-
-        // Empty hosts -> empty remote_vms (frontend renders 'No remote VMs configured').
-        let empty: Vec<serde_json::Value> = Vec::new();
-        assert!(remote_vms_from_hosts(&empty).is_empty());
-
-        // Each entry has expected fields with safe defaults.
-        for vm in &remote_vms {
-            assert!(vm.get("vm_name").and_then(|v| v.as_str()).is_some());
-            assert!(vm.get("resource_group").is_some());
-            assert!(vm.get("status").is_some());
-        }
-    }
-
-    /// Config-validation: the Remote VMs panel and the Cluster Topology panel
-    /// MUST derive their VM identifier set from the same canonical source
-    /// (`load_hosts()` → ~/.simard/hosts.json). Regression guard for the bug
-    /// where Remote VMs displayed a stale hard-coded list while Topology read
-    /// the live config. Mirrors how `distributed()` (Remote VMs) and
-    /// `get_hosts()` (Topology) extract names from the same hosts vector.
-    #[test]
-    fn remote_vms_and_topology_agree_on_vm_set() {
-        use std::collections::BTreeSet;
-
-        // Includes the "Name" alias variant accepted by host_entry_name to
-        // ensure both extractors handle every shape load_hosts() may yield.
-        let hosts = vec![
-            serde_json::json!({"name": "vm-alpha", "resource_group": "rg1"}),
-            serde_json::json!({"name": "vm-beta",  "resource_group": "rg2"}),
-            serde_json::json!({"Name": "vm-gamma", "resource_group": "rg3"}),
-        ];
-
-        // Topology side: get_hosts() builds cluster_members via host_entry_name.
-        let topology_set: BTreeSet<String> = hosts
-            .iter()
-            .map(|e| host_entry_name(e).to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        // Remote VMs side: distributed() builds entries via remote_vms_from_hosts.
-        let remote_vms_set: BTreeSet<String> = remote_vms_from_hosts(&hosts)
-            .iter()
-            .filter_map(|v| v.get("vm_name").and_then(|x| x.as_str()).map(String::from))
-            .collect();
-
-        assert_eq!(
-            topology_set, remote_vms_set,
-            "Remote VMs panel and Cluster Topology panel must report the same VM set \
-             when fed the same load_hosts() output"
-        );
-    }
-
-    #[test]
-    fn is_local_host_exact_match() {
-        assert!(is_local_host("myhost", "myhost"));
-    }
-
-    #[test]
-    fn is_local_host_case_insensitive() {
-        assert!(is_local_host("MyHost", "myhost"));
-        assert!(is_local_host("myhost", "MYHOST"));
-        assert!(is_local_host("MyHost.Example.COM", "myhost"));
-    }
-
-    #[test]
-    fn is_local_host_fqdn_vs_short() {
-        // FQDN on either side reduces to short name
-        assert!(is_local_host("myhost", "myhost.example.com"));
-        assert!(is_local_host("myhost.example.com", "myhost"));
-        assert!(is_local_host("myhost.a.b", "myhost.c.d"));
-    }
-
-    #[test]
-    fn is_local_host_non_match() {
-        assert!(!is_local_host("myhost", "otherhost"));
-        assert!(!is_local_host(
-            "myhost.example.com",
-            "otherhost.example.com"
-        ));
-        assert!(!is_local_host("host1", "host2"));
-    }
-
-    #[test]
-    fn is_local_host_empty_inputs() {
-        assert!(!is_local_host("", "myhost"));
-        assert!(!is_local_host("myhost", ""));
-        assert!(!is_local_host("", ""));
-    }
-
-    #[test]
-    fn tag_local_membership_marks_only_local_when_in_cluster() {
-        // Three Azlin hosts; cluster membership lists vm-a and vm-b.
-        // Local hostname is vm-a (with FQDN suffix to exercise short-name match).
-        let mut hosts = vec![
-            serde_json::json!({"name": "vm-a", "resource_group": "rg1"}),
-            serde_json::json!({"name": "vm-b", "resource_group": "rg1"}),
-            serde_json::json!({"name": "vm-c", "resource_group": "rg2"}),
-        ];
-        let cluster_members: Vec<String> = vec!["vm-a".into(), "vm-b".into()];
-        let local_hostname = "VM-A.internal.example.com";
-
-        tag_local_membership(&mut hosts, &cluster_members, local_hostname);
-
-        assert_eq!(
-            hosts[0]["is_local"],
-            serde_json::Value::Bool(true),
-            "vm-a matches local hostname AND is in cluster -> joined"
-        );
-        assert_eq!(
-            hosts[1]["is_local"],
-            serde_json::Value::Bool(false),
-            "vm-b is in cluster but is not local -> not joined"
-        );
-        assert_eq!(
-            hosts[2]["is_local"],
-            serde_json::Value::Bool(false),
-            "vm-c is neither local nor in cluster"
-        );
-
-        // Local hostname matches an entry, but that entry is NOT in cluster_members.
-        let mut hosts2 = vec![serde_json::json!({"name": "vm-x"})];
-        tag_local_membership(&mut hosts2, &cluster_members, "vm-x");
-        assert_eq!(
-            hosts2[0]["is_local"],
-            serde_json::Value::Bool(false),
-            "vm-x matches local but is not a cluster member -> not joined"
-        );
-
-        // Capitalized "Name" key (azlin discovered VMs) is also recognized.
-        let mut discovered = vec![serde_json::json!({"Name": "VM-A"})];
-        tag_local_membership(&mut discovered, &cluster_members, "vm-a");
-        assert_eq!(
-            discovered[0]["is_local"],
-            serde_json::Value::Bool(true),
-            "Capitalized Name field should also be matched"
-        );
-
-        // Empty local hostname must never produce a match (guards bad /etc/hostname reads).
-        let mut hosts3 = vec![serde_json::json!({"name": "vm-a"})];
-        tag_local_membership(&mut hosts3, &cluster_members, "");
-        assert_eq!(
-            hosts3[0]["is_local"],
-            serde_json::Value::Bool(false),
-            "Empty local hostname must not produce a match"
-        );
-    }
-
-    #[test]
-    fn build_router_creates_valid_router() {
-        let router = build_router();
-        // Verify the router can be constructed without panicking.
-        // Axum routers are opaque, but construction succeeding validates
-        // that all route paths, handlers, and middleware are well-formed.
-        let _ = router;
-    }
-
-    #[test]
-    fn login_html_contains_form() {
-        assert!(LOGIN_HTML.contains("<form"));
-        assert!(LOGIN_HTML.contains("login-form"));
-        assert!(LOGIN_HTML.contains("/api/login"));
-    }
-
-    #[test]
-    fn index_html_contains_dashboard_structure() {
-        assert!(INDEX_HTML.contains("Simard Dashboard"));
-        assert!(INDEX_HTML.contains("/api/status"));
-        assert!(INDEX_HTML.contains("/api/workboard"));
-        assert!(INDEX_HTML.contains("Whiteboard"));
-        assert!(INDEX_HTML.contains("/api/issues"));
-        assert!(INDEX_HTML.contains("fetchStatus"));
-        assert!(INDEX_HTML.contains("mem-graph-canvas"));
-        assert!(INDEX_HTML.contains("fetchMemoryGraph"));
-    }
-
-    #[test]
-    fn login_html_has_code_input() {
-        assert!(LOGIN_HTML.contains(r#"type="text""#));
-        assert!(LOGIN_HTML.contains("maxlength"));
-    }
-
-    #[test]
-    fn read_recent_cycle_reports_empty_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let reports = read_recent_cycle_reports(dir.path(), 5);
-        assert!(reports.is_empty());
-    }
-
-    #[test]
-    fn read_recent_cycle_reports_returns_sorted_and_truncated() {
-        let dir = tempfile::tempdir().unwrap();
-        let cycle_dir = dir.path().join("cycle_reports");
-        std::fs::create_dir_all(&cycle_dir).unwrap();
-
-        for i in 1..=15 {
-            std::fs::write(
-                cycle_dir.join(format!("cycle_{i}.json")),
-                format!("Cycle {i}: 1 action, 1 succeeded"),
-            )
-            .unwrap();
-        }
-
-        let reports = read_recent_cycle_reports(dir.path(), 5);
-        assert_eq!(reports.len(), 5);
-        // Should be sorted descending by cycle number
-        assert_eq!(reports[0]["cycle_number"], 15);
-        assert_eq!(reports[4]["cycle_number"], 11);
-    }
-
-    #[test]
-    fn read_recent_cycle_reports_parses_json_content() {
-        let dir = tempfile::tempdir().unwrap();
-        let cycle_dir = dir.path().join("cycle_reports");
-        std::fs::create_dir_all(&cycle_dir).unwrap();
-
-        std::fs::write(
-            cycle_dir.join("cycle_1.json"),
-            r#"{"actions": 3, "succeeded": 2}"#,
-        )
-        .unwrap();
-
-        let reports = read_recent_cycle_reports(dir.path(), 5);
-        assert_eq!(reports.len(), 1);
-        assert_eq!(reports[0]["cycle_number"], 1);
-        // JSON content should be nested under "report"
-        assert!(reports[0].get("report").is_some());
-        assert_eq!(reports[0]["report"]["actions"], 3);
-    }
-
-    #[test]
-    fn read_recent_cycle_reports_deduplicates_across_dirs() {
-        let dir = tempfile::tempdir().unwrap();
-        // Create both candidate directories with overlapping cycle numbers
-        let dir_a = dir.path().join("cycle_reports");
-        let dir_b = dir.path().join("state").join("cycle_reports");
-        std::fs::create_dir_all(&dir_a).unwrap();
-        std::fs::create_dir_all(&dir_b).unwrap();
-
-        std::fs::write(dir_a.join("cycle_5.json"), "from dir_a").unwrap();
-        std::fs::write(dir_b.join("cycle_5.json"), "from dir_b").unwrap();
-        std::fs::write(dir_b.join("cycle_6.json"), "unique to dir_b").unwrap();
-
-        let reports = read_recent_cycle_reports(dir.path(), 10);
-        // Should have 2 unique cycle numbers (5 and 6), not 3
-        assert_eq!(reports.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn run_gh_json_returns_empty_array_on_failure() {
-        // gh is unlikely to succeed without auth in test; verify graceful handling
-        let result = run_gh_json(&["pr", "list", "--json", "number"]).await;
-        assert!(result.is_array());
-    }
-
-    #[test]
-    fn format_recent_actions_prefers_outcome_detail_truncated() {
-        let long: String = "x".repeat(250);
-        let report = json!({
-            "cycle_number": 103,
-            "report": {
-                "outcomes": [
-                    {"action_kind": "advance-goal", "action_description": "not yet started", "detail": long},
-                    {"action_kind": "advance-goal", "action_description": "not yet started", "detail": "short detail"}
-                ],
-                "planned_actions": [
-                    {"kind": "advance-goal", "description": "not yet started"}
-                ],
-                "summary": "should-not-show"
-            }
-        });
-        let entries = format_recent_actions_for_cycle(103, &report);
-        assert_eq!(entries.len(), 2);
-        let first = entries[0]["result"].as_str().unwrap();
-        // 200 chars + the trailing ellipsis
-        assert_eq!(first.chars().count(), 201);
-        assert!(first.ends_with('…'));
-        assert!(first.starts_with("xxxx"));
-        assert_eq!(entries[0]["action"], "advance-goal");
-        assert_eq!(entries[0]["cycle"], 103);
-        assert_eq!(entries[1]["result"], "short detail");
-    }
-
-    #[test]
-    fn format_recent_actions_outcome_short_detail_passthrough() {
-        let report = json!({
-            "report": {
-                "outcomes": [
-                    {"action_kind": "run-improvement", "detail": "improvement cycle ok"}
-                ]
-            }
-        });
-        let entries = format_recent_actions_for_cycle(7, &report);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0]["result"], "improvement cycle ok");
-        assert!(!entries[0]["result"].as_str().unwrap().ends_with('…'));
-    }
-
-    #[test]
-    fn format_recent_actions_falls_back_to_planned_actions_when_outcomes_empty() {
-        let report = json!({
-            "report": {
-                "outcomes": [],
-                "planned_actions": [
-                    {"kind": "advance-goal", "description": "kick off the work"}
-                ]
-            }
-        });
-        let entries = format_recent_actions_for_cycle(42, &report);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0]["action"], "advance-goal");
-        assert_eq!(entries[0]["result"], "kick off the work");
-    }
-
-    #[test]
-    fn format_recent_actions_sensible_default_when_both_missing() {
-        // Neither outcomes nor planned_actions present, but a summary exists.
-        let report = json!({
-            "report": {"summary": "OODA cycle #5: 0 actions"}
-        });
-        let entries = format_recent_actions_for_cycle(5, &report);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0]["action"], "cycle-summary");
-        assert_eq!(entries[0]["result"], "OODA cycle #5: 0 actions");
-
-        // Completely empty report yields no entries (no panic).
-        let empty = json!({"report": {}});
-        assert!(format_recent_actions_for_cycle(0, &empty).is_empty());
-
-        // Outcome with neither detail nor action_description still produces
-        // a sensible placeholder rather than dropping the row.
-        let bare = json!({"report": {"outcomes": [{"action_kind": "noop"}]}});
-        let entries = format_recent_actions_for_cycle(1, &bare);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0]["result"], "(no detail)");
-    }
-
-    // ---------------------------------------------------------------------
-    // Issue #947 — Agent terminal widget tests (TDD: written before impl).
-    // These tests define the contract for `sanitize_agent_name`,
-    // `agent_log_path`, the WS route registration, and the inline HTML
-    // additions for the Terminal tab.
-    // ---------------------------------------------------------------------
-
-    #[test]
-    fn sanitize_agent_name_accepts_valid_names() {
-        // Allow-list: ^[A-Za-z0-9_-]{1,64}$
-        assert_eq!(sanitize_agent_name("planner"), Some("planner".to_string()));
-        assert_eq!(sanitize_agent_name("agent_1"), Some("agent_1".to_string()));
-        assert_eq!(
-            sanitize_agent_name("Agent-42"),
-            Some("Agent-42".to_string())
-        );
-        assert_eq!(sanitize_agent_name("a"), Some("a".to_string()));
-        // Exactly 64 chars (boundary).
-        let max_len: String = std::iter::repeat_n('x', 64).collect();
-        assert_eq!(sanitize_agent_name(&max_len), Some(max_len.clone()));
-    }
-
-    #[test]
-    fn sanitize_agent_name_rejects_invalid_names() {
-        assert_eq!(sanitize_agent_name(""), None);
-        // 65 chars (boundary).
-        let too_long: String = std::iter::repeat_n('x', 65).collect();
-        assert_eq!(sanitize_agent_name(&too_long), None);
-        // Path traversal attempts (INV-7): every disallowed byte must reject.
-        assert_eq!(sanitize_agent_name(".."), None);
-        assert_eq!(sanitize_agent_name("../etc/passwd"), None);
-        assert_eq!(sanitize_agent_name("a/b"), None);
-        assert_eq!(sanitize_agent_name("a\\b"), None);
-        assert_eq!(sanitize_agent_name("a.b"), None);
-        assert_eq!(sanitize_agent_name("a b"), None);
-        assert_eq!(sanitize_agent_name("a\0b"), None);
-        assert_eq!(sanitize_agent_name("a\nb"), None);
-        assert_eq!(sanitize_agent_name("café"), None);
-        assert_eq!(sanitize_agent_name("a:b"), None);
-        assert_eq!(sanitize_agent_name("a;b"), None);
-        assert_eq!(sanitize_agent_name("a*b"), None);
-    }
-
-    #[test]
-    fn agent_log_path_layout_under_state_root() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let p = agent_log_path(root, "planner");
-        assert_eq!(p, root.join("agent_logs").join("planner.log"));
-    }
-
-    #[test]
-    fn agent_log_path_does_not_escape_state_root_for_valid_names() {
-        // INV-7: any name that passed the sanitizer must produce a path
-        // strictly inside <state_root>/agent_logs/.
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let log_dir = root.join("agent_logs");
-        for name in ["planner", "agent_1", "Agent-42", "a", "abc-_123"] {
-            let p = agent_log_path(root, name);
-            assert!(
-                p.starts_with(&log_dir),
-                "agent_log_path({name:?}) = {p:?} escaped {log_dir:?}"
-            );
-            let expected = format!("{name}.log");
-            assert_eq!(
-                p.file_name().and_then(|n| n.to_str()),
-                Some(expected.as_str())
-            );
-        }
-    }
-
-    #[test]
-    fn index_html_contains_terminal_tab_and_xterm() {
-        // Tab button + pane.
-        assert!(
-            INDEX_HTML.contains("Terminal"),
-            "Index HTML should include a Terminal tab label"
-        );
-        assert!(
-            INDEX_HTML.contains("tab-terminal"),
-            "Index HTML should include a tab-terminal pane id"
-        );
-        assert!(
-            INDEX_HTML.contains("xterm-host"),
-            "Index HTML should include the xterm-host container"
-        );
-        // xterm.js pinned to 5.3.0 from jsdelivr CDN (per design).
-        assert!(
-            INDEX_HTML.contains("xterm@5.3.0"),
-            "Index HTML should pin xterm.js to version 5.3.0"
-        );
-        // WS endpoint path is referenced by the client JS.
-        assert!(
-            INDEX_HTML.contains("/ws/agent_log/"),
-            "Index HTML should reference the /ws/agent_log/ endpoint"
-        );
-    }
-
-    #[test]
-    fn build_router_registers_ws_agent_log_route() {
-        // Smoke-check: build_router constructs without panic and references
-        // the new route. Axum's Router does not expose its route table for
-        // direct inspection in stable, so we assert via build success and
-        // a marker constant exposed by the module.
-        let _router = build_router();
-        assert!(
-            WS_AGENT_LOG_ROUTE.starts_with("/ws/agent_log/"),
-            "WS_AGENT_LOG_ROUTE should be the agent log WS path; got {WS_AGENT_LOG_ROUTE:?}"
-        );
-    }
-
-    // ---------------------------------------------------------------------
-    // Issue #951 — Agent graph endpoint tests.
-    // ---------------------------------------------------------------------
-
-    fn make_entry(id: &str, role: &str) -> crate::agent_registry::AgentEntry {
-        crate::agent_registry::AgentEntry {
-            id: id.to_string(),
-            pid: 1,
-            host: "localhost".to_string(),
-            start_time: chrono::Utc::now(),
-            last_heartbeat: chrono::Utc::now(),
-            state: crate::agent_registry::AgentState::Running,
-            role: role.to_string(),
-            resources: crate::agent_registry::ResourceUsage {
-                rss_bytes: None,
-                cpu_percent: None,
-            },
-        }
-    }
-
-    #[test]
-    fn classify_agent_layer_buckets_roles() {
-        assert_eq!(classify_agent_layer("ooda-loop"), "ooda");
-        assert_eq!(classify_agent_layer("operator"), "ooda");
-        assert_eq!(classify_agent_layer("agent_supervisor"), "ooda");
-        assert_eq!(classify_agent_layer("engineer"), "engineer");
-        assert_eq!(classify_agent_layer("planner"), "engineer");
-        assert_eq!(classify_agent_layer("builder"), "engineer");
-        assert_eq!(classify_agent_layer("session-42"), "session");
-        assert_eq!(classify_agent_layer("anything-else"), "session");
-    }
-
-    #[test]
-    fn build_agent_graph_emits_layered_topology() {
-        let entries = vec![
-            make_entry("o1", "ooda"),
-            make_entry("e1", "engineer"),
-            make_entry("e2", "engineer"),
-            make_entry("s1", "session"),
-            make_entry("s2", "session"),
-        ];
-        let graph = build_agent_graph(&entries);
-
-        let nodes = graph["nodes"].as_array().expect("nodes array");
-        assert_eq!(nodes.len(), 5);
-        assert!(
-            nodes
-                .iter()
-                .all(|n| n.get("id").is_some() && n.get("type").is_some())
-        );
-
-        // OODA -> 2 engineers (2 edges) + each engineer -> 2 sessions (4 edges) = 6
-        let edges = graph["edges"].as_array().expect("edges array");
-        assert_eq!(edges.len(), 6);
-        assert!(
-            edges
-                .iter()
-                .all(|e| e.get("src").is_some() && e.get("dst").is_some())
-        );
-
-        assert_eq!(graph["layers"]["ooda"], 1);
-        assert_eq!(graph["layers"]["engineer"], 2);
-        assert_eq!(graph["layers"]["session"], 2);
-    }
-
-    #[test]
-    fn build_agent_graph_handles_empty_input() {
-        let graph = build_agent_graph(&[]);
-        assert_eq!(graph["nodes"].as_array().unwrap().len(), 0);
-        assert_eq!(graph["edges"].as_array().unwrap().len(), 0);
-    }
-
-    #[test]
-    fn truncate_short_unchanged() {
-        assert_eq!(truncate_outcome_detail("hello", 200), "hello");
-    }
-
-    #[test]
-    fn truncate_exactly_200_unchanged() {
-        let s = "x".repeat(200);
-        let out = truncate_outcome_detail(&s, 200);
-        assert_eq!(out, s);
-        assert_eq!(out.chars().count(), 200);
-    }
-
-    #[test]
-    fn truncate_201_truncated_with_ellipsis() {
-        let s = "x".repeat(201);
-        let out = truncate_outcome_detail(&s, 200);
-        assert_eq!(out.chars().count(), 201); // 200 + ellipsis
-        assert!(out.ends_with('…'));
-        assert_eq!(out.chars().filter(|&c| c == 'x').count(), 200);
-    }
-
-    #[test]
-    fn truncate_utf8_boundary_safe() {
-        // 250 emoji (4-byte UTF-8 each) — must not panic and must truncate by codepoint.
-        let s: String = "🎉".repeat(250);
-        let out = truncate_outcome_detail(&s, 200);
-        assert_eq!(out.chars().count(), 201);
-        assert!(out.ends_with('…'));
-        assert_eq!(out.chars().filter(|&c| c == '🎉').count(), 200);
-    }
-
-    #[test]
-    fn truncate_accented_chars() {
-        let s: String = "é".repeat(250);
-        let out = truncate_outcome_detail(&s, 200);
-        assert_eq!(out.chars().count(), 201);
-        assert!(out.ends_with('…'));
-    }
-
-    #[test]
-    fn truncate_combining_chars_no_panic() {
-        // base 'e' + combining acute U+0301 repeated; must not panic.
-        let unit = "e\u{0301}";
-        let s: String = unit.repeat(150); // 300 codepoints
-        let out = truncate_outcome_detail(&s, 200);
-        assert_eq!(out.chars().count(), 201);
-        assert!(out.ends_with('…'));
-    }
-
-    #[test]
-    fn truncate_empty_returns_empty() {
-        assert_eq!(truncate_outcome_detail("", 200), "");
-    }
-
-    #[test]
-    fn truncate_with_zero_max() {
-        // Defensive: zero-max on non-empty returns just the ellipsis;
-        // empty input returns empty.
-        assert_eq!(truncate_outcome_detail("hi", 0), "…");
-        assert_eq!(truncate_outcome_detail("", 0), "");
-    }
-
-    // ---------------------------------------------------------------------
-    // WS-1 AZLIN-TMUX-SESSIONS-LIST — TDD tests (Step 7).
-    //
-    // These tests specify the contract for `parse_tmux_sessions` (the pure
-    // parser used by `/api/azlin/tmux-sessions`) and for host enumeration
-    // (which MUST go through `load_hosts()` so the panel agrees with the
-    // Cluster Topology / Remote VMs source).
-    //
-    // They are expected to FAIL TO COMPILE until the implementation lands
-    // (Step 8): symbols `parse_tmux_sessions` and `TmuxSession` do not yet
-    // exist. That compile failure IS the failing test.
-    // ---------------------------------------------------------------------
-
-    /// Basic happy-path: 3 sessions, mixed `attached`. Verifies field types
-    /// and tab-separated parse of `#S\t#{session_created}\t#{session_attached}\t#{session_windows}`.
-    #[test]
-    fn parse_tmux_sessions_basic() {
-        let input = "main\t1700000000\t1\t3\nwork\t1700000500\t0\t1\nidle\t1700000999\t0\t2\n";
-        let out = parse_tmux_sessions(input);
-        assert_eq!(out.len(), 3, "should parse 3 well-formed rows");
-
-        assert_eq!(out[0].name, "main");
-        assert_eq!(out[0].created, 1_700_000_000_i64);
-        assert!(out[0].attached);
-        assert_eq!(out[0].windows, 3_u32);
-
-        assert_eq!(out[1].name, "work");
-        assert!(!out[1].attached);
-        assert_eq!(out[1].windows, 1);
-
-        assert_eq!(out[2].name, "idle");
-        assert!(!out[2].attached);
-        assert_eq!(out[2].windows, 2);
-    }
-
-    /// Empty input → empty vec (no panic, no synthetic row).
-    #[test]
-    fn parse_tmux_sessions_empty() {
-        assert!(parse_tmux_sessions("").is_empty());
-        assert!(parse_tmux_sessions("\n").is_empty());
-        assert!(parse_tmux_sessions("\n\n  \n").is_empty());
-    }
-
-    /// `tmux: no server running` exits 1 with empty stdout; the route maps
-    /// that to `reachable:true, sessions:[]`. The parser itself just needs
-    /// to handle the typical stderr-style content gracefully (no panic, no
-    /// rows). The route layer is responsible for the reachable flag.
-    #[test]
-    fn parse_tmux_sessions_no_server() {
-        // Real-world: tmux writes "no server running on /tmp/tmux-1000/default"
-        // to stderr and stdout is empty. But if a wrapper conflates streams,
-        // the parser must still return [] (no tabs ⇒ malformed ⇒ skipped).
-        assert!(parse_tmux_sessions("no server running on /tmp/tmux-1000/default\n").is_empty());
-        assert!(parse_tmux_sessions("").is_empty());
-    }
-
-    /// Malformed rows (wrong field count, non-numeric created/windows,
-    /// non-0/1 attached) are skipped; valid rows survive.
-    #[test]
-    fn parse_tmux_sessions_malformed() {
-        let input = concat!(
-            "good\t1700000000\t1\t2\n",
-            "too\tfew\tfields\n",                // 3 fields — skip
-            "bad-created\tNaN\t0\t1\n",          // created not int — skip
-            "bad-windows\t1700000000\t0\tabc\n", // windows not uint — skip
-            "another-good\t1700001000\t0\t5\n",
-            "trailing-tabs\t1700002000\t1\t1\t\t\n", // extra empties — also skip
-            "\n",                                    // blank
-        );
-        let out = parse_tmux_sessions(input);
-        assert_eq!(out.len(), 2, "only the two well-formed rows should survive");
-        assert_eq!(out[0].name, "good");
-        assert_eq!(out[1].name, "another-good");
-        assert_eq!(out[1].windows, 5);
-    }
-
-    /// Host enumeration MUST go through `load_hosts()` (the canonical
-    /// `~/.simard/hosts.json` reader). Setting `HOME` to a tempdir with a
-    /// synthetic `hosts.json` and calling `load_hosts()` must yield exactly
-    /// the synthetic entries — proving the tmux route would see the same
-    /// host set as the Topology / Remote-VMs panels.
-    #[test]
-    fn host_enumeration_reads_load_hosts() {
-        use std::io::Write;
-
-        // Use a unique tempdir to avoid races with other tests touching HOME.
-        let tmp = std::env::temp_dir().join(format!(
-            "simard-tmux-tdd-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(tmp.join(".simard")).expect("mkdir");
-        let mut f = std::fs::File::create(tmp.join(".simard").join("hosts.json"))
-            .expect("create hosts.json");
-        writeln!(
-            f,
-            r#"[{{"name":"vm-tmux-1","resource_group":"rg-x"}},{{"name":"vm-tmux-2","resource_group":"rg-y"}}]"#
-        )
-        .expect("write");
-
-        // SAFETY: tests in this module share a process; we save & restore HOME.
-        let prev_home = std::env::var("HOME").ok();
-        // Rust 2024: env mutation is unsafe.
-        // The compile-time gate makes the unsafe block harmless when not on edition 2024.
-        unsafe {
-            std::env::set_var("HOME", &tmp);
-        }
-
-        let hosts = load_hosts();
-
-        // Restore HOME before assertions so a panic doesn't leak state.
-        unsafe {
-            match prev_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
-
-        let names: Vec<String> = hosts
-            .iter()
-            .map(|h| host_entry_name(h).to_string())
-            .collect();
-        assert_eq!(
-            names,
-            vec!["vm-tmux-1".to_string(), "vm-tmux-2".to_string()],
-            "tmux-sessions route MUST enumerate via load_hosts() (canonical source)"
-        );
-
-        // Cleanup tempdir (best-effort).
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-}
