@@ -1,6 +1,8 @@
 mod file_backed;
 #[cfg(test)]
 mod hardening_tests;
+#[cfg(test)]
+mod hardening_tests_extra;
 mod in_memory;
 #[cfg(test)]
 mod proptest_tests;
