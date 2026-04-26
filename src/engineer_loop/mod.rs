@@ -21,6 +21,8 @@ mod tests_types;
 mod tests_types_inline;
 #[cfg(test)]
 mod tests_verification;
+#[cfg(test)]
+mod tests_verification_actions;
 
 use std::fs;
 use std::path::{Path, PathBuf};
