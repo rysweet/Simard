@@ -1,12 +1,10 @@
 //! Cognitive memory writers for meeting summaries and handoffs.
 
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::cognitive_memory::CognitiveMemoryOps;
-use crate::error::SimardResult;
-use crate::meeting_facilitator::{ActionItem, MeetingDecision, MeetingHandoff, OpenQuestion};
 
-use super::super::types::{ConversationMessage, HandoffActionItem, MeetingTranscript};
+use super::super::types::{ConversationMessage, HandoffActionItem};
 
 /// Store the meeting as an episodic memory via the cognitive bridge.
 pub fn store_cognitive_memory(

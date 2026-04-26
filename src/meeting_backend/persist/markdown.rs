@@ -1,20 +1,15 @@
 //! Markdown export writers for meeting transcripts and handoffs.
 
-use std::fs;
-use std::io::Write;
 use std::path::PathBuf;
 
 use tracing::{info, warn};
 
 use crate::error::{SimardError, SimardResult};
-use crate::meeting_facilitator::{ActionItem, MeetingDecision, MeetingHandoff, OpenQuestion};
+use crate::meeting_facilitator::MeetingDecision;
 
-use super::extract::{
-    extract_action_items, extract_decision_participants_pub, extract_decision_rationale_pub,
-    extract_decisions, extract_open_questions, extract_themes,
-};
+use super::extract::{extract_decisions, extract_open_questions, extract_themes};
 use super::{meetings_dir, sanitize_filename};
-use crate::meeting_backend::types::{ConversationMessage, HandoffActionItem, MeetingTranscript};
+use crate::meeting_backend::types::{ConversationMessage, HandoffActionItem};
 
 pub fn write_markdown_export(
     topic: &str,
