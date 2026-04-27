@@ -13,8 +13,7 @@ use crate::session::SessionId;
 
 use super::types::*;
 use super::{
-    act, check_meeting_handoffs, decide, gather_environment, observe, orient, promote_from_backlog,
-    review_outcomes,
+    act, check_meeting_handoffs, decide, observe, orient, promote_from_backlog, review_outcomes,
 };
 
 /// Run one complete OODA cycle: Observe -> Orient -> Decide -> Act -> Curate.
