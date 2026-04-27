@@ -25,7 +25,6 @@ use tracing::{debug, info, warn};
 
 use crate::base_types::{BaseTypeSession, BaseTypeTurnInput};
 use crate::cognitive_memory::CognitiveMemoryOps;
-use crate::error::SimardResult;
 
 pub use command::{MeetingCommand, parse_command};
 pub use types::{
