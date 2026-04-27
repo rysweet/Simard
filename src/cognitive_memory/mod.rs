@@ -311,4 +311,3 @@ pub(crate) fn as_f64(val: &lbug::Value) -> Option<f64> {
 
 #[cfg(test)]
 mod tests_mod;
-pub(crate) use ops::escape_cypher;

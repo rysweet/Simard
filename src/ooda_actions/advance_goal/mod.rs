@@ -1,11 +1,6 @@
 //! AdvanceGoal dispatch — routing, subordinate heartbeat, and session-based advancement.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use crate::agent_supervisor::{
-    HeartbeatStatus, SubordinateConfig, check_heartbeat, spawn_subordinate,
-};
-use crate::goal_curation::{GoalProgress, update_goal_progress};
+use crate::goal_curation::GoalProgress;
 use crate::ooda_loop::{ActionOutcome, OodaBridges, OodaState, PlannedAction};
 
 use super::goal_session::GoalAction;
@@ -16,7 +11,6 @@ mod subordinate;
 use spawn::dispatch_spawn_engineer;
 pub use spawn::find_live_engineer_for_goal;
 use subordinate::advance_goal_with_subordinate;
-pub use subordinate::validate_subordinate_completion;
 
 /// AdvanceGoal: progress the target goal on the board.
 ///

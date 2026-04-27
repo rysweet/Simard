@@ -146,9 +146,8 @@ fn kill_orphaned_cargo_processes(report: &mut CleanupReport) {
 /// Recursively compute directory size in bytes.
 mod disk;
 pub(crate) use disk::{
-    BINARY_BACKUPS_KEEP, CORRUPT_DB_MAX_AGE_DAYS, SNAPSHOTS_KEEP, cap_simard_target_dirs,
-    clean_simard_canaries, clean_stale_cargo_targets, dir_size, remove_old_corrupt_dbs,
-    rotate_simard_binary_backups, trim_simard_snapshots,
+    cap_simard_target_dirs, clean_simard_canaries, clean_stale_cargo_targets,
+    remove_old_corrupt_dbs, rotate_simard_binary_backups, trim_simard_snapshots,
 };
 
 #[cfg(test)]

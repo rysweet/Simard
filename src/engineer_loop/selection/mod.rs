@@ -4,7 +4,7 @@ use super::types::{
     AnalyzedAction, AppendToFileRequest, CreateFileRequest, EngineerActionKind, GitCommitRequest,
     OpenIssueRequest, RepoInspection, SelectedEngineerAction, ShellCommandRequest,
     StructuredEditRequest, extract_command_from_objective, extract_file_path_from_objective,
-    is_prose_fragment, parse_structured_edit_request, validate_repo_relative_path,
+    parse_structured_edit_request, validate_repo_relative_path,
 };
 
 use super::SHELL_COMMAND_ALLOWLIST;
