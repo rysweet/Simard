@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::error::SimardError;
 
 use super::sweep::git_capture;
-use super::{ENGINEER_CLAIM_FILE, worktree_mutation_lock};
+use super::worktree_mutation_lock;
 
 /// Cleanup primitive shared by `cleanup()` and `Drop`.
 ///
