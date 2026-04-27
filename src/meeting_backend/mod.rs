@@ -23,9 +23,9 @@ use std::time::Duration;
 use chrono::Utc;
 use tracing::{debug, info, warn};
 
-use crate::base_types::{BaseTypeOutcome, BaseTypeSession, BaseTypeTurnInput};
+use crate::base_types::{BaseTypeSession, BaseTypeTurnInput};
 use crate::cognitive_memory::CognitiveMemoryOps;
-use crate::error::{SimardError, SimardResult};
+use crate::error::SimardResult;
 
 pub use command::{MeetingCommand, parse_command};
 pub use types::{

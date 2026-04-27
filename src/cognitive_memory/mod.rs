@@ -10,9 +10,6 @@
 
 pub(crate) mod schema;
 
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 

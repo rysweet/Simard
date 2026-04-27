@@ -1,7 +1,6 @@
 //! Action-item / decision / theme extraction from meeting messages.
 
-use crate::error::SimardResult;
-use crate::meeting_facilitator::{ActionItem, MeetingDecision, MeetingHandoff, OpenQuestion};
+use crate::meeting_facilitator::OpenQuestion;
 
 use crate::meeting_backend::types::{ConversationMessage, HandoffActionItem};
 

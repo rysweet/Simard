@@ -16,11 +16,8 @@
 //! caller should open the DB directly.
 
 use std::io::{Read, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::Duration;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 

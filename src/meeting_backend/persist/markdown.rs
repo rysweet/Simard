@@ -7,7 +7,7 @@ use tracing::{info, warn};
 use crate::error::{SimardError, SimardResult};
 use crate::meeting_facilitator::MeetingDecision;
 
-use super::extract::{extract_decisions, extract_open_questions, extract_themes};
+use super::extract::{extract_open_questions, extract_themes};
 use super::{meetings_dir, sanitize_filename};
 use crate::meeting_backend::types::{ConversationMessage, HandoffActionItem};
 

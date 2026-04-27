@@ -1,8 +1,6 @@
 use crate::error::{SimardError, SimardResult};
-use crate::handoff::RuntimeHandoffSnapshot;
-use crate::runtime::RuntimeTopology;
 
-use super::types::{BenchmarkCheckResult, BenchmarkClass, BenchmarkScenario};
+use super::types::BenchmarkScenario;
 
 // NEEDLE-XYZ-GYM-MARKER: long-context-needle-in-haystack benchmark searches for this exact comment.
 

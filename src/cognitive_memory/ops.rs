@@ -1,6 +1,6 @@
 //! CognitiveMemoryOps trait impl for NativeCognitiveMemory + Cypher escaping.
 
-use crate::error::{SimardError, SimardResult};
+use crate::error::SimardResult;
 use crate::memory_cognitive::{
     CognitiveFact, CognitiveProcedure, CognitiveProspective, CognitiveStatistics,
     CognitiveWorkingSlot,

@@ -10,10 +10,7 @@ use crate::engineer_loop::types::{
     EngineerActionKind, ExecutedEngineerAction, SelectedEngineerAction, validate_repo_relative_path,
 };
 
-use super::{
-    run_command, sanitize_issue_create_args, timeout_for_command, trimmed_stdout,
-    trimmed_stdout_allow_empty,
-};
+use super::{run_command, sanitize_issue_create_args};
 
 pub fn execute_engineer_action(
     repo_root: &Path,

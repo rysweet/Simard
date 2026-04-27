@@ -1,13 +1,10 @@
 //! Meeting handoff artifacts — written when a meeting closes, consumed by
 //! the engineer loop and the `act-on-decisions` CLI subcommand.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-
-use crate::error::{SimardError, SimardResult};
 
 use super::types::{ActionItem, MeetingDecision, MeetingSession, OpenQuestion};
 
