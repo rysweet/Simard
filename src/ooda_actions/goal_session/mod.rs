@@ -2,10 +2,7 @@
 
 use serde::Deserialize;
 
-use crate::goal_curation::{GoalBoard, GoalProgress, update_goal_progress};
-use crate::ooda_loop::{ActionOutcome, OodaState, PlannedAction};
-
-use super::make_outcome;
+use crate::ooda_loop::ActionOutcome;
 
 /// Maximum LLM response size accepted by [`parse_goal_action`] (64 KiB).
 ///

@@ -9,10 +9,7 @@ use std::process::Command;
 use super::{MAX_GOAL_ID_LEN, WORKTREES_SUBDIR};
 use crate::error::SimardError;
 
-use super::{
-    ENGINEER_CLAIM_FILE, EngineerClaim, SweepReport, claim_is_live, is_pid_alive_public,
-    read_engineer_claim_full, read_pid_starttime_public, worktree_mutation_lock,
-};
+use super::{SweepReport, claim_is_live, read_engineer_claim_full};
 
 /// Sweep `<state_root>/engineer-worktrees/` for orphans on daemon boot.
 ///
