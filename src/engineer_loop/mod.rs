@@ -307,6 +307,4 @@ pub fn inspect_workspace(workspace_root: &Path, state_root: &Path) -> SimardResu
 }
 
 mod meeting_decisions;
-pub(crate) use meeting_decisions::{
-    architecture_gap_summary, is_meeting_decision_record, load_carried_meeting_decisions,
-};
+pub(crate) use meeting_decisions::{architecture_gap_summary, load_carried_meeting_decisions};
