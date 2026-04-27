@@ -48,7 +48,6 @@ use std::time::Instant;
 
 use crate::error::{SimardError, SimardResult};
 use crate::goals::{FileBackedGoalStore, GoalStore};
-use crate::memory::{FileBackedMemoryStore, MemoryScope, MemoryStore};
 use crate::runtime::RuntimeTopology;
 use crate::terminal_engineer_bridge::{SHARED_EXPLICIT_STATE_ROOT_SOURCE, TerminalBridgeContext};
 
