@@ -3,14 +3,10 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::agent_roles::AgentRole;
-use crate::agent_supervisor::{
-    HeartbeatStatus, SubordinateConfig, check_heartbeat, spawn_subordinate,
-};
-use crate::goal_curation::{GoalProgress, update_goal_progress};
+use crate::agent_supervisor::{SubordinateConfig, spawn_subordinate};
 use crate::identity_composition::max_subordinate_depth;
-use crate::ooda_loop::{ActionOutcome, OodaBridges, OodaState, PlannedAction};
+use crate::ooda_loop::{ActionOutcome, OodaState, PlannedAction};
 
-use crate::ooda_actions::goal_session::GoalAction;
 use crate::ooda_actions::make_outcome;
 
 /// Spawn a subordinate engineer for a goal that the LLM picked

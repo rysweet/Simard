@@ -1,16 +1,5 @@
 //! GitHub issue number extraction helpers.
 
-use crate::error::{SimardError, SimardResult};
-
-use crate::engineer_loop::types::{
-    AnalyzedAction, AppendToFileRequest, CreateFileRequest, EngineerActionKind, GitCommitRequest,
-    OpenIssueRequest, RepoInspection, SelectedEngineerAction, ShellCommandRequest,
-    StructuredEditRequest, extract_command_from_objective, extract_file_path_from_objective,
-    is_prose_fragment, parse_structured_edit_request, validate_repo_relative_path,
-};
-
-use crate::engineer_loop::SHELL_COMMAND_ALLOWLIST;
-
 const MAX_ISSUE_DIGITS: usize = 20;
 
 /// Scan an objective string for a reference to an existing GitHub issue
