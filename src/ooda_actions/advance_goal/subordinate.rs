@@ -1,16 +1,9 @@
 //! AdvanceGoal dispatch — routing, subordinate heartbeat, and session-based advancement.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use crate::agent_roles::AgentRole;
-use crate::agent_supervisor::{
-    HeartbeatStatus, SubordinateConfig, check_heartbeat, spawn_subordinate,
-};
+use crate::agent_supervisor::{HeartbeatStatus, check_heartbeat};
 use crate::goal_curation::{GoalProgress, update_goal_progress};
-use crate::identity_composition::max_subordinate_depth;
 use crate::ooda_loop::{ActionOutcome, OodaBridges, OodaState, PlannedAction};
 
-use crate::ooda_actions::goal_session::GoalAction;
 use crate::ooda_actions::make_outcome;
 
 /// Advance a goal that has a subordinate assigned by checking heartbeat
