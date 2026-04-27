@@ -36,16 +36,10 @@ pub use types::{
     OodaBridges, OodaConfig, OodaPhase, OodaState, OodaStateSnapshot, PlannedAction, Priority,
 };
 
-use std::time::Instant;
-
 use crate::error::{SimardError, SimardResult};
-use crate::goal_curation::load_goal_board;
-use crate::gym_bridge::ScoreDimensions;
-use crate::gym_scoring::GymSuiteScore;
 use crate::memory_consolidation;
 use crate::memory_consolidation::preparation_memory_operations;
 use crate::self_improve::{ImprovementCycle, ImprovementPhase};
-use crate::session::SessionId;
 
 /// Act: dispatch actions. Failures are per-action, not cycle-wide (Pillar 11).
 ///

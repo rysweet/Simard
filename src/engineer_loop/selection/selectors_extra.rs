@@ -1,7 +1,5 @@
 //! Cargo-action selector + action-achievability checks.
 
-use crate::error::{SimardError, SimardResult};
-
 use super::{extract_existing_issue_number, tokenise_target_argv};
 
 use crate::engineer_loop::types::{

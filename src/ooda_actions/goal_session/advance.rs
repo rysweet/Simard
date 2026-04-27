@@ -1,6 +1,5 @@
 //! Goal-session "advance" + "assess-only" outcome computation.
 
-use crate::error::SimardResult;
 use crate::goal_curation::{GoalBoard, GoalProgress, update_goal_progress};
 use crate::ooda_loop::{ActionOutcome, OodaState, PlannedAction};
 

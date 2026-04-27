@@ -2,12 +2,10 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::agent_roles::AgentRole;
 use crate::agent_supervisor::{
     HeartbeatStatus, SubordinateConfig, check_heartbeat, spawn_subordinate,
 };
 use crate::goal_curation::{GoalProgress, update_goal_progress};
-use crate::identity_composition::max_subordinate_depth;
 use crate::ooda_loop::{ActionOutcome, OodaBridges, OodaState, PlannedAction};
 
 use super::goal_session::GoalAction;
