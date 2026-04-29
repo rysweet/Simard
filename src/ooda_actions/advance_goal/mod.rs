@@ -9,6 +9,10 @@ use super::make_outcome;
 mod spawn;
 mod subordinate;
 use spawn::dispatch_spawn_engineer;
+// Dispatch-dedup helper introduced by PR #1228; intentionally re-exported so
+// the daemon can scan engineer-worktrees for live sentinels before spawning.
+// Clippy flags it as unused at the lib level — suppress to preserve the API.
+#[allow(unused_imports)]
 pub use spawn::find_live_engineer_for_goal;
 use subordinate::advance_goal_with_subordinate;
 // re-exported for cfg(test) consumers in ooda_actions/tests_advance_goal.rs (false-positive of clippy unused_imports on lib pass — see #1405)

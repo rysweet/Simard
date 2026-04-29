@@ -372,5 +372,10 @@ pub(super) fn truncate_for_outcome(s: &str) -> String {
 mod advance;
 mod gh;
 
+// `assess_only_outcome` is consumed by cfg(test) module `tests_goal_session_inline`;
+// `is_plausible_label` is consumed by cfg(test) module `tests_goal_session_validators`.
+// Clippy flags both as unused in non-test compilation; suppress to keep the test API stable.
+#[allow(unused_imports)]
 pub(crate) use advance::{advance_goal_with_session, assess_only_outcome};
+#[allow(unused_imports)]
 pub(crate) use gh::is_plausible_label;
