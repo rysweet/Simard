@@ -36,10 +36,7 @@ pub use types::{
     OodaBridges, OodaConfig, OodaPhase, OodaState, OodaStateSnapshot, PlannedAction, Priority,
 };
 
-use crate::error::{SimardError, SimardResult};
-use crate::memory_consolidation;
-use crate::memory_consolidation::preparation_memory_operations;
-use crate::self_improve::{ImprovementCycle, ImprovementPhase};
+use crate::error::SimardResult;
 
 /// Act: dispatch actions. Failures are per-action, not cycle-wide (Pillar 11).
 ///
