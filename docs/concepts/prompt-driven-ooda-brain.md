@@ -4,7 +4,7 @@ Simard's OODA daemon delegates the **engineer-lifecycle decision** — what to d
 when `spawn_engineer` finds an existing live worktree for a goal — to a
 prompt-driven "brain" instead of a hard-coded skip. The decision is reasoned
 about by an LLM that reads a markdown prompt; iterating on behavior is a matter
-of editing [`prompt_assets/simard/ooda_brain.md`](../../prompt_assets/simard/ooda_brain.md),
+of editing `prompt_assets/simard/ooda_brain.md`,
 not writing Rust.
 
 ## Why

@@ -1,7 +1,7 @@
 # How-To: Edit the OODA Brain Prompt
 
 The OODA daemon's engineer-lifecycle behavior is reasoned about by an LLM
-reading [`prompt_assets/simard/ooda_brain.md`](../../prompt_assets/simard/ooda_brain.md).
+reading `prompt_assets/simard/ooda_brain.md`.
 This guide shows how to iterate on that behavior **without touching Rust**.
 
 ## TL;DR
@@ -10,7 +10,7 @@ This guide shows how to iterate on that behavior **without touching Rust**.
 2. Rebuild: `cargo build --release -p simard`.
    (The prompt is compiled in via `include_str!`; a rebuild is required.)
 3. Restart the daemon (see
-   [run-ooda-daemon](run-ooda-daemon.md#restarting-the-daemon)).
+   [run-ooda-daemon](run-ooda-daemon.md)).
 4. Tail `~/.simard/ooda.log` and the latest
    `~/.simard/cycle_reports/cycle_*.json` to confirm the new behavior.
 
