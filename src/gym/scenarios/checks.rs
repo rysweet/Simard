@@ -28,7 +28,15 @@ pub(crate) fn class_specific_checks(
         BenchmarkClass::DependencyAnalysis => {
             super::checks_1::checks_for_dependency_analysis(&combined)
         }
-        BenchmarkClass::ErrorHandling => super::checks_4::checks_for_error_handling(&combined),
+        BenchmarkClass::ErrorHandling => match scenario.id {
+            "error-handling-debug-stale-engineer-worktree"
+            | "error-handling-debug-pre-push-clippy-failure"
+            | "error-handling-debug-mkdocs-strict-broken-link"
+            | "error-handling-debug-recipe-runner-hollow-success" => {
+                super::checks_9::checks_for_error_handling_debug(scenario, &combined, exported)
+            }
+            _ => super::checks_4::checks_for_error_handling(&combined),
+        },
         BenchmarkClass::PerformanceAnalysis => {
             super::checks_3::checks_for_performance_analysis(&combined)
         }
