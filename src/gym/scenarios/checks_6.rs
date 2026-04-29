@@ -318,6 +318,27 @@ pub(super) fn checks_for_knowledge_recall(
                     || combined.contains("skip cargo-test")
                     || combined.contains("cargo-test"))
         }
+        "knowledge-recall-tool-amplihack-recipe" => {
+            combined.contains("amplihack")
+                && (combined.contains("recipe run") || combined.contains("smart-orchestrator"))
+                && (combined.contains("amplihack_home")
+                    || combined.contains("amplihack_agent_binary"))
+        }
+        "knowledge-recall-tool-pre-push-skip" => {
+            (combined.contains("skip=cargo-test") || combined.contains("skip cargo-test"))
+                && combined.contains("--no-verify")
+                && (combined.contains("forbid")
+                    || combined.contains("prohibit")
+                    || combined.contains("never")
+                    || combined.contains("not allowed")
+                    || combined.contains("disallow"))
+        }
+        "knowledge-recall-tool-redeploy-script" => {
+            combined.contains("redeploy-local.sh")
+                && (combined.contains("simard_shared_target")
+                    || combined.contains("~/.simard/bin/simard")
+                    || combined.contains(".simard/bin/simard"))
+        }
         _ => false,
     };
 
