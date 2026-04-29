@@ -9,7 +9,7 @@
 use super::super::types::{BenchmarkClass, BenchmarkScenario};
 use crate::runtime::RuntimeTopology;
 
-pub(super) static SCENARIOS: [BenchmarkScenario; 2] = [
+pub(super) static SCENARIOS: [BenchmarkScenario; 5] = [
     BenchmarkScenario {
         id: "knowledge-recall-self-code",
         title: "Knowledge recall: locate the OodaBrain trait and its wire-in site",
@@ -30,6 +30,39 @@ pub(super) static SCENARIOS: [BenchmarkScenario; 2] = [
         base_type: "rusty-clawd",
         topology: RuntimeTopology::SingleProcess,
         objective: "Recall the user-mandated stance on bypassing pre-push verification (--no-verify) and explain the approved alternative for known-flaky local tests.",
+        expected_min_runtime_evidence: 2,
+    },
+    BenchmarkScenario {
+        id: "knowledge-recall-tool-amplihack-recipe",
+        title: "Knowledge recall: amplihack recipe runner invocation",
+        description: "Verify the agent can recall how the amplihack recipe runner is invoked for development and investigation work, including the sub-command, the recipe name, and at least one required environment variable.",
+        class: BenchmarkClass::KnowledgeRecall,
+        identity: "simard-gym",
+        base_type: "rusty-clawd",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Recall how the amplihack recipe runner is invoked for development and investigation work, including the sub-command, the recipe name, and at least one required environment variable.",
+        expected_min_runtime_evidence: 2,
+    },
+    BenchmarkScenario {
+        id: "knowledge-recall-tool-pre-push-skip",
+        title: "Knowledge recall: pre-push hook SKIP=cargo-test policy",
+        description: "Verify the agent can recall the approved environment variable used to skip the cargo-test stage of the local pre-push hook for known-flaky tests, and explain why --no-verify is forbidden.",
+        class: BenchmarkClass::KnowledgeRecall,
+        identity: "simard-gym",
+        base_type: "rusty-clawd",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Recall the approved environment variable used to skip the cargo-test stage of the local pre-push hook for known-flaky tests, and explain why --no-verify is forbidden.",
+        expected_min_runtime_evidence: 2,
+    },
+    BenchmarkScenario {
+        id: "knowledge-recall-tool-redeploy-script",
+        title: "Knowledge recall: redeploy-local.sh + CARGO_TARGET_DIR",
+        description: "Verify the agent can recall the script and target-directory environment variable used to rebuild and reinstall the running simard daemon binary after a main-branch merge.",
+        class: BenchmarkClass::KnowledgeRecall,
+        identity: "simard-gym",
+        base_type: "rusty-clawd",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Recall the script and target-directory environment variable used to rebuild and reinstall the running simard daemon binary after a main-branch merge.",
         expected_min_runtime_evidence: 2,
     },
 ];

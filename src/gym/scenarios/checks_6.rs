@@ -318,6 +318,17 @@ pub(super) fn checks_for_knowledge_recall(
                     || combined.contains("skip cargo-test")
                     || combined.contains("cargo-test"))
         }
+        "knowledge-recall-tool-amplihack-recipe" => {
+            combined.contains("amplihack")
+                && (combined.contains("recipe") || combined.contains("smart-orchestrator"))
+                && combined.contains("amplihack_home")
+        }
+        "knowledge-recall-tool-pre-push-skip" => {
+            combined.contains("skip=cargo-test") && combined.contains("--no-verify")
+        }
+        "knowledge-recall-tool-redeploy-script" => {
+            combined.contains("redeploy-local.sh") && combined.contains("cargo_target_dir")
+        }
         _ => false,
     };
 
