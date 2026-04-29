@@ -133,7 +133,6 @@ pub(crate) fn rollback(workspace: &Path) -> SimardResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
     use tempfile::tempdir;
 
     /// Run a `git` subcommand with isolated config (immune to other tests

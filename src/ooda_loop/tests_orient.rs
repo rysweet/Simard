@@ -1,27 +1,7 @@
 use super::orient::*;
 use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress};
-use crate::gym_bridge::ScoreDimensions;
-use crate::gym_scoring::GymSuiteScore;
 use crate::memory_cognitive::CognitiveStatistics;
 use crate::ooda_loop::{EnvironmentSnapshot, Observation};
-
-fn make_gym_score(overall: f64, factual_accuracy: f64) -> GymSuiteScore {
-    GymSuiteScore {
-        suite_id: "progressive".to_string(),
-        overall,
-        dimensions: ScoreDimensions {
-            factual_accuracy,
-            specificity: 0.8,
-            temporal_awareness: 0.7,
-            source_attribution: 0.6,
-            confidence_calibration: 0.5,
-        },
-        scenario_count: 5,
-        scenarios_passed: 4,
-        pass_rate: 0.8,
-        recorded_at_unix_ms: None,
-    }
-}
 
 fn make_board_with_goals(goals: Vec<ActiveGoal>) -> GoalBoard {
     let mut board = GoalBoard::new();

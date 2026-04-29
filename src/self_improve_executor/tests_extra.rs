@@ -15,10 +15,6 @@ fn make_patch(steps: Vec<PlanStep>) -> ImprovementPatch {
     }
 }
 
-fn passing_step() -> PlanStep {
-    step("src/lib.rs", "true")
-}
-
 fn failing_step() -> PlanStep {
     step("src/fail.rs", "false")
 }

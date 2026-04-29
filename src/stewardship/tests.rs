@@ -113,17 +113,6 @@ fn sample_run() -> OrchestratorRunSummary {
     }
 }
 
-fn amplihack_run() -> OrchestratorRunSummary {
-    OrchestratorRunSummary {
-        run_id: "run-xyz789".to_string(),
-        recipe_name: "smart-orchestrator".to_string(),
-        failed_step: "decompose".to_string(),
-        source_module: "amplihack::recipe-runner".to_string(),
-        failure_kind: "NonZeroExit".to_string(),
-        error_text: "exit 1: decomposition produced 0 workstreams".to_string(),
-    }
-}
-
 // ─────────────────────────── Routing tests ───────────────────────────
 
 #[test]
