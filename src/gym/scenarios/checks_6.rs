@@ -1,6 +1,7 @@
 //! class_specific_checks helpers — chunk 6 of 6.
 
-use super::super::types::BenchmarkCheckResult;
+use super::super::types::{BenchmarkCheckResult, BenchmarkScenario};
+use crate::handoff::RuntimeHandoffSnapshot;
 
 pub(super) fn checks_for_feature_flagging(combined: &str) -> Vec<BenchmarkCheckResult> {
     let flag_mechanism_described = combined.contains("feature flag")
@@ -281,6 +282,64 @@ pub(super) fn checks_for_test_writing(combined: &str) -> Vec<BenchmarkCheckResul
                 } else {
                     "lacks"
                 }
+            ),
+        },
+    ]
+}
+
+/// Checks for the `KnowledgeRecall` benchmark family (issue #1459).
+///
+/// Each scenario in this family asks the agent to recall something she should
+/// already know (her own code, her tools, the repos she maintains, or the
+/// user's stated preferences). The checks verify that runtime evidence is
+/// grounded — either by referencing at least one stored memory record or by
+/// citing a real repository file path — and that the response actually names
+/// the topic the objective asked about.
+pub(super) fn checks_for_knowledge_recall(
+    scenario: &BenchmarkScenario,
+    combined: &str,
+    exported: &RuntimeHandoffSnapshot,
+) -> Vec<BenchmarkCheckResult> {
+    let memory_grounded = !exported.memory_records.is_empty();
+    let path_cited =
+        combined.contains(".rs") || combined.contains("src/") || combined.contains("docs/");
+    let evidence_grounded = memory_grounded || path_cited;
+
+    let topic_match = match scenario.id {
+        "knowledge-recall-self-code" => {
+            (combined.contains("oodabrain")
+                || combined.contains("ooda_brain")
+                || combined.contains("ooda brain"))
+                && (combined.contains("trait") || combined.contains("wire"))
+        }
+        "knowledge-recall-user-preference" => {
+            combined.contains("--no-verify")
+                && (combined.contains("skip=cargo-test")
+                    || combined.contains("skip cargo-test")
+                    || combined.contains("cargo-test"))
+        }
+        _ => false,
+    };
+
+    vec![
+        BenchmarkCheckResult {
+            id: "knowledge-recall-evidence-grounded".to_string(),
+            passed: evidence_grounded,
+            detail: format!(
+                "runtime evidence {} a stored memory record or repo file path",
+                if evidence_grounded {
+                    "references"
+                } else {
+                    "lacks"
+                }
+            ),
+        },
+        BenchmarkCheckResult {
+            id: "knowledge-recall-topic-cited".to_string(),
+            passed: topic_match,
+            detail: format!(
+                "execution output {} the recall topic named by the objective",
+                if topic_match { "names" } else { "omits" }
             ),
         },
     ]

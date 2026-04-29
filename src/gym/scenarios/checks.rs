@@ -76,5 +76,8 @@ pub(crate) fn class_specific_checks(
         BenchmarkClass::ChaosEngineering => {
             super::checks_5::checks_for_chaos_engineering(&combined)
         }
+        BenchmarkClass::KnowledgeRecall => {
+            super::checks_6::checks_for_knowledge_recall(scenario, &combined, exported)
+        }
     }
 }
