@@ -55,4 +55,36 @@ Subsequent PRs add the repo-knowledge and tools-knowledge sub-families and
 extend the scoring to read directly from the ladybug-backed cognitive memory
 store under `~/.simard/cognitive_memory/`.
 
+## Tools sub-family (this PR)
+
+The second PR in the series adds the **tools-knowledge** sub-family (sub-family
+#4 in the enumeration above). It ships before the repo-knowledge sub-family
+(#3) because tool-recall scenarios require no repo-history fixtures and land
+as a pure data + checks change.
+
+Three new scenarios are registered, each grounded in canonical lowercase
+tokens that the topic-cited check searches for in the agent's combined plan,
+execution summary, and reflection summary text:
+
+- `knowledge-recall-tool-amplihack-recipe` — recall how the amplihack recipe
+  runner is invoked for development and investigation work, including the
+  sub-command, the recipe name, and at least one required environment
+  variable. Topic-cited verifies the response names `amplihack`, either
+  `recipe` or `smart-orchestrator`, and the `AMPLIHACK_HOME` env var.
+- `knowledge-recall-tool-pre-push-skip` — recall the approved environment
+  variable used to skip the cargo-test stage of the local pre-push hook for
+  known-flaky tests, and explain why `--no-verify` is forbidden. Topic-cited
+  verifies the response contains both the `SKIP=cargo-test` token and the
+  `--no-verify` token. The check verifies *presence* of these tokens only;
+  the framing — that `--no-verify` is prohibited and `SKIP=cargo-test` is the
+  approved alternative — is enforced by the scenario's objective prompt, not
+  by the check arm itself.
+- `knowledge-recall-tool-redeploy-script` — recall the script and target-
+  directory environment variable used to rebuild and reinstall the running
+  simard daemon binary after a main-branch merge. Topic-cited verifies the
+  response names `redeploy-local.sh` and `CARGO_TARGET_DIR`.
+
+Each scenario reuses the same two BenchmarkCheckResults established by the
+first PR (`knowledge-recall-evidence-grounded` + `knowledge-recall-topic-cited`).
+
 [issue]: https://github.com/rysweet/Simard/issues/1459
