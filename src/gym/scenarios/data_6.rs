@@ -9,7 +9,7 @@
 use super::super::types::{BenchmarkClass, BenchmarkScenario};
 use crate::runtime::RuntimeTopology;
 
-pub(super) static SCENARIOS: [BenchmarkScenario; 8] = [
+pub(super) static SCENARIOS: [BenchmarkScenario; 10] = [
     BenchmarkScenario {
         id: "knowledge-recall-self-code",
         title: "Knowledge recall: locate the OodaBrain trait and its wire-in site",
@@ -96,6 +96,28 @@ pub(super) static SCENARIOS: [BenchmarkScenario; 8] = [
         base_type: "rusty-clawd",
         topology: RuntimeTopology::SingleProcess,
         objective: "Recall how Simard's OODA daemon spawns engineer subagents into isolated worktrees: name the directory under ~/.simard/ where engineer worktrees live, and the goal-id-prefixed naming convention.",
+        expected_min_runtime_evidence: 2,
+    },
+    BenchmarkScenario {
+        id: "knowledge-recall-cross-session-fact",
+        title: "Knowledge recall: cross-session canary fact from prior gym run",
+        description: "Verify the agent can recall a fact stored during a prior gym session — a memory tagged 'gym-cross-session-canary' carrying a deterministic canary token — directly stress-testing that cognitive memory survives session boundaries.",
+        class: BenchmarkClass::KnowledgeRecall,
+        identity: "simard-gym",
+        base_type: "rusty-clawd",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Recall a fact stored in a prior gym session: in the previous run a memory was written tagged 'gym-cross-session-canary' with content describing a deterministic canary token. Cite the canary token and the tag from accumulated cognitive memory, demonstrating cross-session persistence.",
+        expected_min_runtime_evidence: 2,
+    },
+    BenchmarkScenario {
+        id: "knowledge-recall-cross-session-preference",
+        title: "Knowledge recall: cross-session user preference for prompt-driven brain",
+        description: "Verify the agent can recall a user-stated preference from a prior session — that Simard's brain be prompt-driven rather than code-driven — including the date the preference was stated and the architectural pattern it produced.",
+        class: BenchmarkClass::KnowledgeRecall,
+        identity: "simard-gym",
+        base_type: "rusty-clawd",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Recall a user-stated preference from a prior session: the user mandated that Simard's brain be prompt-driven rather than code-driven. Cite the date the preference was stated and the architectural pattern it produced (prompt_assets/simard/*.md plus include_str! plus an LLM trait).",
         expected_min_runtime_evidence: 2,
     },
 ];

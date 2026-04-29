@@ -82,6 +82,11 @@ pub(crate) fn class_specific_checks(
             | "knowledge-recall-repo-engineer-worktree-pattern" => {
                 super::checks_7::checks_for_knowledge_recall_repo(scenario, &combined, exported)
             }
+            "knowledge-recall-cross-session-fact" | "knowledge-recall-cross-session-preference" => {
+                super::checks_8::checks_for_knowledge_recall_cross_session(
+                    scenario, &combined, exported,
+                )
+            }
             _ => super::checks_6::checks_for_knowledge_recall(scenario, &combined, exported),
         },
     }

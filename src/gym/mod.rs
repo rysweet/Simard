@@ -35,6 +35,8 @@ mod tests_scenarios_6;
 #[cfg(test)]
 mod tests_scenarios_7;
 #[cfg(test)]
+mod tests_scenarios_8;
+#[cfg(test)]
 mod tests_types;
 #[cfg(test)]
 mod tests_types_extra;

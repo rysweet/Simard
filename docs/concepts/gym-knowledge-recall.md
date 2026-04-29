@@ -114,3 +114,47 @@ respect the 400-LOC per-module cap (#1266).
 
 This PR completes the four-sub-family scaffolding from [#1459][issue]:
 self-code, user-preference, tools-knowledge, and repo-knowledge.
+
+## Cross-session recall (this PR)
+
+The capstone PR for the four-sub-family roadmap from [#1459][issue]
+adds a fifth sub-family: **cross-session recall**. Where the previous
+sub-families verify that Simard remembers facts about her own code,
+her tools, the repos she maintains, and the operator's preferences,
+cross-session recall verifies the underlying capability that makes any
+of those memories useful in the long run — that they **survive session
+boundaries**.
+
+This is the hardest variant of the family because every other check in
+this file can be satisfied by the agent re-deriving the answer from the
+current session's prompt context. Cross-session checks deliberately
+cannot: each scenario's check looks for tokens that only make sense if
+the agent read accumulated cognitive memory from a *prior* gym run.
+That makes these scenarios a direct stress test of the cognitive memory
+persistence subsystem — and a complement to the still-wedged
+`improve-cognitive-memory-persistence` daemon goal, whose whole purpose
+is to make that subsystem reliable across restarts.
+
+The two new scenarios are:
+
+- `knowledge-recall-cross-session-fact` — recalls a fact stored in a
+  prior gym session as a memory tagged `gym-cross-session-canary` with
+  a deterministic canary token. The check requires the runtime evidence
+  to cite the canary token, the tag, and the prior-session origin from
+  accumulated cognitive memory.
+- `knowledge-recall-cross-session-preference` — recalls the
+  user-stated preference that Simard's brain be prompt-driven rather
+  than code-driven, including the date the preference was stated
+  (Apr 29) and the architectural pattern it produced
+  (`prompt_assets/simard/*.md` + `include_str!` + an LLM trait such as
+  `OodaBrain`).
+
+Both scenarios reuse the same two-check template seeded by the first
+PR (`knowledge-recall-evidence-grounded` and
+`knowledge-recall-topic-cited`), with topic matchers tuned for
+cross-session tokens in `src/gym/scenarios/checks_8.rs` (split out of
+`checks_7.rs` to respect the 400-LOC per-module cap from #1266).
+
+This PR closes out the four-sub-family roadmap from [#1459][issue]:
+self-code, user-preference, tools-knowledge, repo-knowledge, and now
+cross-session.
