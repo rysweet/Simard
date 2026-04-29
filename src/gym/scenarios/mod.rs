@@ -18,7 +18,7 @@ static ALL_BENCHMARK_SCENARIOS: OnceLock<Vec<BenchmarkScenario>> = OnceLock::new
 fn all_benchmark_scenarios() -> &'static [BenchmarkScenario] {
     ALL_BENCHMARK_SCENARIOS
         .get_or_init(|| {
-            let mut v = Vec::with_capacity(158);
+            let mut v = Vec::with_capacity(161);
             v.extend_from_slice(&data_1::SCENARIOS);
             v.extend_from_slice(&data_2::SCENARIOS);
             v.extend_from_slice(&data_3::SCENARIOS);
@@ -51,4 +51,5 @@ mod checks_3;
 mod checks_4;
 mod checks_5;
 mod checks_6;
+mod checks_7;
 pub(crate) use checks::class_specific_checks;

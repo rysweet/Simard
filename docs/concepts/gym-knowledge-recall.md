@@ -85,3 +85,32 @@ first PR (`knowledge-recall-evidence-grounded` and
 The next planned PR adds the `repo-knowledge` sub-family.
 
 [pr-1460]: https://github.com/rysweet/Simard/pull/1460
+
+## Repo-knowledge sub-family (this PR)
+
+The third (and final scaffolding) scenario-level PR for [#1459][issue]
+adds three `repo-knowledge` scenarios. Each one verifies that Simard
+recalls a structural fact about her own repository layout rather than
+re-deriving it from a fresh `grep`:
+
+- `knowledge-recall-repo-ooda-loop-layout` — recalls the layout of
+  Simard's OODA loop module: the four canonical phase modules under
+  `src/ooda_loop/` (`observe`, `orient`, `decide`, `act`) and the file
+  that holds the cycle entry point (`cycle.rs` / `mod.rs`).
+- `knowledge-recall-repo-cognitive-memory-store` — recalls the storage
+  backend used by the cognitive memory subsystem (`ladybug`) and the
+  on-disk filename of the primary persistent store under
+  `~/.simard/` (`cognitive_memory.ladybug`).
+- `knowledge-recall-repo-engineer-worktree-pattern` — recalls how the
+  OODA daemon spawns engineer subagents into isolated worktrees: the
+  `~/.simard/engineer-worktrees/` directory and the
+  `engineer-<goal-id>-<timestamp>` naming convention.
+
+All three scenarios reuse the same two-check template seeded by the
+first PR (`knowledge-recall-evidence-grounded` and
+`knowledge-recall-topic-cited`). Topic matchers for the new scenarios
+live in `src/gym/scenarios/checks_7.rs`, split out of `checks_6.rs` to
+respect the 400-LOC per-module cap (#1266).
+
+This PR completes the four-sub-family scaffolding from [#1459][issue]:
+self-code, user-preference, tools-knowledge, and repo-knowledge.

@@ -76,8 +76,13 @@ pub(crate) fn class_specific_checks(
         BenchmarkClass::ChaosEngineering => {
             super::checks_5::checks_for_chaos_engineering(&combined)
         }
-        BenchmarkClass::KnowledgeRecall => {
-            super::checks_6::checks_for_knowledge_recall(scenario, &combined, exported)
-        }
+        BenchmarkClass::KnowledgeRecall => match scenario.id {
+            "knowledge-recall-repo-ooda-loop-layout"
+            | "knowledge-recall-repo-cognitive-memory-store"
+            | "knowledge-recall-repo-engineer-worktree-pattern" => {
+                super::checks_7::checks_for_knowledge_recall_repo(scenario, &combined, exported)
+            }
+            _ => super::checks_6::checks_for_knowledge_recall(scenario, &combined, exported),
+        },
     }
 }

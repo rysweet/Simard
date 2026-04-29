@@ -215,3 +215,101 @@ fn class_checks_knowledge_recall_tools_fail_when_ungrounded() {
         }
     }
 }
+
+// ---- repo-knowledge sub-family (issue #1459) ----
+
+#[test]
+fn knowledge_recall_repo_ooda_loop_layout_scenario_resolves() {
+    let scenario = resolve_benchmark_scenario("knowledge-recall-repo-ooda-loop-layout")
+        .expect("knowledge-recall-repo-ooda-loop-layout scenario must be registered");
+    assert_tools_scenario_shape(&scenario);
+}
+
+#[test]
+fn knowledge_recall_repo_cognitive_memory_store_scenario_resolves() {
+    let scenario = resolve_benchmark_scenario("knowledge-recall-repo-cognitive-memory-store")
+        .expect("knowledge-recall-repo-cognitive-memory-store scenario must be registered");
+    assert_tools_scenario_shape(&scenario);
+}
+
+#[test]
+fn knowledge_recall_repo_engineer_worktree_pattern_scenario_resolves() {
+    let scenario = resolve_benchmark_scenario("knowledge-recall-repo-engineer-worktree-pattern")
+        .expect("knowledge-recall-repo-engineer-worktree-pattern scenario must be registered");
+    assert_tools_scenario_shape(&scenario);
+}
+
+#[test]
+fn class_checks_knowledge_recall_repo_ooda_loop_layout_passes_with_grounded_answer() {
+    let scenario = resolve_benchmark_scenario("knowledge-recall-repo-ooda-loop-layout").unwrap();
+    let outcome = dummy_outcome(
+        "consult stored memory on Simard's OODA loop module layout",
+        "the OODA loop lives under src/ooda_loop/ with phase modules observe, orient, decide, act and the cycle entry point in cycle.rs",
+        "documented module map confirmed via mod.rs",
+    );
+    let exported = dummy_handoff(1);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 2);
+    assert!(
+        checks.iter().all(|c| c.passed),
+        "all KnowledgeRecall checks should pass for a fully grounded ooda-loop-layout answer: {checks:?}"
+    );
+}
+
+#[test]
+fn class_checks_knowledge_recall_repo_cognitive_memory_store_passes_with_grounded_answer() {
+    let scenario =
+        resolve_benchmark_scenario("knowledge-recall-repo-cognitive-memory-store").unwrap();
+    let outcome = dummy_outcome(
+        "recall the cognitive memory storage backend",
+        "Simard's cognitive memory subsystem uses the ladybug embedded store and persists to ~/.simard/cognitive_memory.ladybug",
+        "verified via src/ inspection",
+    );
+    let exported = dummy_handoff(1);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 2);
+    assert!(
+        checks.iter().all(|c| c.passed),
+        "all KnowledgeRecall checks should pass for a fully grounded cognitive-memory-store answer: {checks:?}"
+    );
+}
+
+#[test]
+fn class_checks_knowledge_recall_repo_engineer_worktree_pattern_passes_with_grounded_answer() {
+    let scenario =
+        resolve_benchmark_scenario("knowledge-recall-repo-engineer-worktree-pattern").unwrap();
+    let outcome = dummy_outcome(
+        "recall how the OODA daemon spawns engineer subagents into worktrees",
+        "engineer worktrees live under ~/.simard/engineer-worktrees/ named engineer-<goal-id>-<timestamp>",
+        "documented in src/ daemon notes",
+    );
+    let exported = dummy_handoff(1);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 2);
+    assert!(
+        checks.iter().all(|c| c.passed),
+        "all KnowledgeRecall checks should pass for a fully grounded engineer-worktree-pattern answer: {checks:?}"
+    );
+}
+
+#[test]
+fn class_checks_knowledge_recall_repo_fail_when_ungrounded() {
+    for id in [
+        "knowledge-recall-repo-ooda-loop-layout",
+        "knowledge-recall-repo-cognitive-memory-store",
+        "knowledge-recall-repo-engineer-worktree-pattern",
+    ] {
+        let scenario = resolve_benchmark_scenario(id).unwrap();
+        let outcome = dummy_outcome("nothing", "bland text", "empty");
+        let exported = dummy_handoff(0);
+        let checks = class_specific_checks(&scenario, &outcome, &exported);
+        assert_eq!(checks.len(), 2);
+        for check in &checks {
+            assert!(
+                !check.passed,
+                "scenario {id}: check '{}' should have failed",
+                check.id
+            );
+        }
+    }
+}
