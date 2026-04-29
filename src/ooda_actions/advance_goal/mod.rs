@@ -74,6 +74,10 @@ pub(super) fn dispatch_advance_goal(
         _ => {}
     }
 
+    // Clone the brain Arc up-front so we don't fight the borrow checker
+    // when we mutably borrow `bridges.session` below (issue #1266).
+    let brain = std::sync::Arc::clone(&bridges.brain);
+
     // If a base-type session is available, use run_turn for real agent work.
     if let Some(ref mut session) = bridges.session {
         let result =
@@ -87,7 +91,7 @@ pub(super) fn dispatch_advance_goal(
             issue: _,
         }) = result.action
         {
-            return dispatch_spawn_engineer(action, state, &goal_id, &task);
+            return dispatch_spawn_engineer(action, state, &goal_id, &task, brain.as_ref());
         }
 
         return result.outcome;

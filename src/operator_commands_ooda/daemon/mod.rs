@@ -134,11 +134,32 @@ pub fn run_ooda_daemon(
         "[simard] OODA daemon: LLM session opened for autonomous work",
     );
 
+    let brain: std::sync::Arc<dyn crate::ooda_brain::OodaBrain> =
+        match crate::ooda_brain::build_rustyclawd_brain() {
+            Ok(b) => {
+                daemon_log(
+                    &state_root,
+                    "[simard] OODA daemon: brain = RustyClawdBrain (prompt-driven)",
+                );
+                b.into()
+            }
+            Err(e) => {
+                daemon_log(
+                    &state_root,
+                    &format!(
+                        "[simard] OODA daemon: brain = DeterministicFallbackBrain (rustyclawd unavailable: {e})"
+                    ),
+                );
+                std::sync::Arc::new(crate::ooda_brain::DeterministicFallbackBrain)
+            }
+        };
+
     let mut bridges = OodaBridges {
         memory,
         knowledge,
         gym,
         session: Some(session),
+        brain,
     };
 
     let board = load_goal_board(&*bridges.memory).unwrap_or_default();

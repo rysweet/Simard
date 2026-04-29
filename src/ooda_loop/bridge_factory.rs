@@ -69,6 +69,7 @@ pub fn bridges_from_state_root(state_root: &Path) -> SimardResult<OodaBridges> {
         knowledge,
         gym,
         session: None,
+        brain: std::sync::Arc::new(crate::ooda_brain::DeterministicFallbackBrain),
     })
 }
 
