@@ -271,3 +271,79 @@ fn class_checks_incident_response_fails_without_keywords() {
         assert!(!check.passed, "check '{}' should have failed", check.id);
     }
 }
+
+// -- Wave 9: KnowledgeRecall (issue #1459) --
+
+#[test]
+fn knowledge_recall_self_code_scenario_resolves() {
+    let scenario = resolve_benchmark_scenario("knowledge-recall-self-code")
+        .expect("knowledge-recall-self-code scenario must be registered");
+    assert_eq!(scenario.class, BenchmarkClass::KnowledgeRecall);
+    assert_eq!(scenario.identity, "simard-gym");
+    assert_eq!(scenario.base_type, "rusty-clawd");
+    assert_eq!(scenario.expected_min_runtime_evidence, 2);
+}
+
+#[test]
+fn knowledge_recall_user_preference_scenario_resolves() {
+    let scenario = resolve_benchmark_scenario("knowledge-recall-user-preference")
+        .expect("knowledge-recall-user-preference scenario must be registered");
+    assert_eq!(scenario.class, BenchmarkClass::KnowledgeRecall);
+    assert_eq!(scenario.identity, "simard-gym");
+    assert_eq!(scenario.base_type, "rusty-clawd");
+    assert_eq!(scenario.expected_min_runtime_evidence, 2);
+}
+
+#[test]
+fn class_checks_knowledge_recall_self_code_passes_with_grounded_answer() {
+    let scenario = resolve_benchmark_scenario("knowledge-recall-self-code").unwrap();
+    let outcome = dummy_outcome(
+        "review src/ooda_brain/mod.rs to locate the OodaBrain trait definition",
+        "OodaBrain trait lives in src/ooda_brain/mod.rs and is wired in by the OODA action layer",
+        "cited single wire-in site; trait is the brain entrypoint",
+    );
+    let exported = dummy_handoff(1);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 2);
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "knowledge-recall-evidence-grounded" && c.passed),
+        "evidence-grounded check should pass when memory records exist or a path is cited"
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "knowledge-recall-topic-cited" && c.passed),
+        "topic-cited check should pass when OodaBrain trait is named"
+    );
+}
+
+#[test]
+fn class_checks_knowledge_recall_user_preference_passes_with_grounded_answer() {
+    let scenario = resolve_benchmark_scenario("knowledge-recall-user-preference").unwrap();
+    let outcome = dummy_outcome(
+        "consult stored memory on user stance regarding --no-verify",
+        "user mandates never using --no-verify; SKIP=cargo-test is the approved alternative for known-flaky local tests",
+        "documented preference in cognitive memory",
+    );
+    let exported = dummy_handoff(1);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 2);
+    assert!(
+        checks.iter().all(|c| c.passed),
+        "all KnowledgeRecall checks should pass for a fully grounded answer"
+    );
+}
+
+#[test]
+fn class_checks_knowledge_recall_fails_when_ungrounded() {
+    let scenario = resolve_benchmark_scenario("knowledge-recall-self-code").unwrap();
+    let outcome = dummy_outcome("nothing", "bland text", "empty");
+    let exported = dummy_handoff(0);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 2);
+    for check in &checks {
+        assert!(!check.passed, "check '{}' should have failed", check.id);
+    }
+}

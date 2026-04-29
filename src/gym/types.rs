@@ -39,6 +39,7 @@ pub enum BenchmarkClass {
     RateLimiting,
     EventSourcing,
     ChaosEngineering,
+    KnowledgeRecall,
 }
 
 impl Display for BenchmarkClass {
@@ -76,6 +77,7 @@ impl Display for BenchmarkClass {
             Self::RateLimiting => "rate-limiting",
             Self::EventSourcing => "event-sourcing",
             Self::ChaosEngineering => "chaos-engineering",
+            Self::KnowledgeRecall => "knowledge-recall",
         };
         f.write_str(label)
     }
