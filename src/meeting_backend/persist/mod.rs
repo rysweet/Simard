@@ -242,6 +242,11 @@ mod extract;
 mod templates;
 
 pub use cognitive::{store_cognitive_memory, store_enriched_cognitive_memory};
+// re-exported for cfg(test) consumers in meeting_backend/tests_persist.rs (false-positive of clippy unused_imports on lib pass — see #1405)
+#[allow(unused_imports)]
+pub(crate) use extract::{
+    clean_action_description, extract_assignee, extract_deadline, split_sentences,
+};
 pub use extract::{
     extract_action_items, extract_decision_participants_pub, extract_decision_rationale_pub,
     extract_decisions, extract_open_questions, extract_themes, link_action_items_to_goals,

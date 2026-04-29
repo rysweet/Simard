@@ -309,5 +309,9 @@ pub(crate) fn as_f64(val: &lbug::Value) -> Option<f64> {
     }
 }
 
+// re-exported for cfg(test) consumers in cognitive_memory/tests_mod.rs (false-positive of clippy unused_imports on lib pass — see #1405)
+#[allow(unused_imports)]
+pub(crate) use ops::escape_cypher;
+
 #[cfg(test)]
 mod tests_mod;

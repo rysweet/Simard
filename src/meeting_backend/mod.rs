@@ -25,6 +25,9 @@ use tracing::{debug, info, warn};
 
 use crate::base_types::{BaseTypeSession, BaseTypeTurnInput};
 use crate::cognitive_memory::CognitiveMemoryOps;
+// imported for cfg(test) consumers in meeting_backend/tests_mod.rs (false-positive of clippy unused_imports on lib pass — see #1405)
+#[allow(unused_imports)]
+use crate::error::SimardResult;
 
 pub use command::{MeetingCommand, parse_command};
 pub use types::{

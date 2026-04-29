@@ -145,9 +145,12 @@ fn kill_orphaned_cargo_processes(report: &mut CleanupReport) {
 
 /// Recursively compute directory size in bytes.
 mod disk;
+// re-exported for cfg(test) consumers in cmd_cleanup/tests.rs (false-positive of clippy unused_imports on lib pass — see #1405)
+#[allow(unused_imports)]
 pub(crate) use disk::{
-    cap_simard_target_dirs, clean_simard_canaries, clean_stale_cargo_targets,
-    remove_old_corrupt_dbs, rotate_simard_binary_backups, trim_simard_snapshots,
+    BINARY_BACKUPS_KEEP, CORRUPT_DB_MAX_AGE_DAYS, SNAPSHOTS_KEEP, cap_simard_target_dirs,
+    clean_simard_canaries, clean_stale_cargo_targets, dir_size, remove_old_corrupt_dbs,
+    rotate_simard_binary_backups, trim_simard_snapshots,
 };
 
 #[cfg(test)]

@@ -11,6 +11,9 @@ mod subordinate;
 use spawn::dispatch_spawn_engineer;
 pub use spawn::find_live_engineer_for_goal;
 use subordinate::advance_goal_with_subordinate;
+// re-exported for cfg(test) consumers in ooda_actions/tests_advance_goal.rs (false-positive of clippy unused_imports on lib pass — see #1405)
+#[allow(unused_imports)]
+pub use subordinate::validate_subordinate_completion;
 
 /// AdvanceGoal: progress the target goal on the board.
 ///
