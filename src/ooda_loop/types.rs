@@ -303,4 +303,8 @@ pub struct OodaBridges {
     /// When present, `AdvanceGoal` actions use `run_turn` to delegate work
     /// to an LLM agent instead of just bumping a progress percentage.
     pub session: Option<Box<dyn crate::base_types::BaseTypeSession>>,
+    /// Prompt-driven decision brain (issue #1266). Today only the
+    /// engineer-lifecycle skip branch consults it; future PRs migrate
+    /// observe/orient/decide/curate/review.
+    pub brain: std::sync::Arc<dyn crate::ooda_brain::OodaBrain>,
 }

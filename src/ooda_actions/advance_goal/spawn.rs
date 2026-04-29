@@ -5,6 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::agent_roles::AgentRole;
 use crate::agent_supervisor::{SubordinateConfig, spawn_subordinate};
 use crate::identity_composition::max_subordinate_depth;
+use crate::ooda_brain::{
+    EngineerLifecycleDecision, OodaBrain, apply_decision_to_state, gather_engineer_lifecycle_ctx,
+};
 use crate::ooda_loop::{ActionOutcome, OodaState, PlannedAction};
 
 use crate::ooda_actions::make_outcome;
@@ -20,6 +23,7 @@ pub fn dispatch_spawn_engineer(
     state: &mut OodaState,
     goal_id: &str,
     task: &str,
+    brain: &dyn OodaBrain,
 ) -> ActionOutcome {
     // Re-check assignment under exclusive state borrow to prevent a
     // double-spawn race (two cycles parsing spawn_engineer back-to-back).
@@ -42,16 +46,29 @@ pub fn dispatch_spawn_engineer(
     // daemon was restarted between spawn and goal-status writeback (the
     // engineer subprocess survives systemd unit restart). Without this
     // check, we burn a second LLM session on the same goal.
+    //
+    // Issue #1266: instead of unconditionally returning success=true (which
+    // clears the failure counter and makes FAILURE_PENALTY useless), consult
+    // the prompt-driven brain. The brain reasons about whether to keep
+    // skipping, reclaim, deprioritize, file an issue, or block the goal.
     let state_root_inflight = engineer_worktree_state_root();
     if let Some(live) = find_live_engineer_for_goal(&state_root_inflight, goal_id) {
-        return make_outcome(
-            action,
-            true,
-            format!(
-                "spawn_engineer skipped: goal '{goal_id}' already has a live engineer worktree at {} (claim PID alive)",
-                live.display(),
-            ),
-        );
+        let ctx = gather_engineer_lifecycle_ctx(state, &state_root_inflight, goal_id, &live);
+        let decision = match brain.decide_engineer_lifecycle(&ctx) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(
+                    target: "simard::ooda_brain",
+                    goal = %goal_id,
+                    error = %e,
+                    "brain.decide_engineer_lifecycle failed; falling back to continue_skipping",
+                );
+                EngineerLifecycleDecision::ContinueSkipping {
+                    rationale: format!("brain-error fallback: {e}"),
+                }
+            }
+        };
+        return apply_lifecycle_decision(action, state, goal_id, &live, decision);
     }
 
     // Recursion guard. Default current depth = 0 (top-level supervisor).
@@ -294,5 +311,96 @@ fn truncate_for_log(s: &str) -> String {
             end -= 1;
         }
         format!("{}…", &s[..end])
+    }
+}
+
+/// Apply a brain decision at the engineer-lifecycle skip site (issue #1266).
+///
+/// Wraps the pure state mutation in `apply_decision_to_state` with the IO
+/// side effects each variant requires: numeric kill of the sentinel pid +
+/// `git worktree remove` for `ReclaimAndRedispatch`, `gh issue create` for
+/// `OpenTrackingIssue`. `success` is `true` only for `ContinueSkipping` so
+/// every other branch lets the existing FAILURE_PENALTY engage in the next
+/// orient phase (see `src/ooda_loop/orient.rs:12`).
+fn apply_lifecycle_decision(
+    action: &PlannedAction,
+    state: &mut OodaState,
+    goal_id: &str,
+    live_worktree: &std::path::Path,
+    decision: EngineerLifecycleDecision,
+) -> ActionOutcome {
+    let success = matches!(decision, EngineerLifecycleDecision::ContinueSkipping { .. });
+
+    if let EngineerLifecycleDecision::ReclaimAndRedispatch { .. } = &decision {
+        if let Some(pid) = read_sentinel_pid(live_worktree)
+            && let Err(e) = numeric_kill(pid)
+        {
+            tracing::warn!(
+                target: "simard::ooda_brain",
+                goal = %goal_id,
+                pid,
+                error = %e,
+                "reclaim_and_redispatch: failed to kill engineer pid",
+            );
+        }
+        if let Err(e) = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(live_worktree)
+            .status()
+        {
+            tracing::warn!(
+                target: "simard::ooda_brain",
+                goal = %goal_id,
+                worktree = %live_worktree.display(),
+                error = %e,
+                "reclaim_and_redispatch: git worktree remove failed",
+            );
+        }
+    }
+
+    if let EngineerLifecycleDecision::OpenTrackingIssue { title, body, .. } = &decision {
+        let result = std::process::Command::new("gh")
+            .args([
+                "issue",
+                "create",
+                "--title",
+                title,
+                "--body",
+                body,
+                "--label",
+                "ooda-stuck",
+            ])
+            .status();
+        if let Err(e) = result {
+            tracing::warn!(
+                target: "simard::ooda_brain",
+                goal = %goal_id,
+                error = %e,
+                "open_tracking_issue: gh issue create failed",
+            );
+        }
+    }
+
+    let detail = apply_decision_to_state(&decision, state, goal_id);
+    make_outcome(action, success, detail)
+}
+
+/// Read the sentinel pid file written by the engineer-worktree allocator.
+/// Returns `None` if the file is missing or unparseable.
+fn read_sentinel_pid(worktree: &std::path::Path) -> Option<i32> {
+    let claim = worktree.join(crate::engineer_worktree::ENGINEER_CLAIM_FILE);
+    let raw = std::fs::read_to_string(claim).ok()?;
+    raw.lines().next()?.trim().parse().ok()
+}
+
+/// Numeric SIGTERM via `libc::kill`. Per repo shell policy and the #1266
+/// spec we never shell out to name-based process terminators.
+fn numeric_kill(pid: i32) -> std::io::Result<()> {
+    // SAFETY: libc::kill is FFI but the call is well-defined for any i32.
+    let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
     }
 }
