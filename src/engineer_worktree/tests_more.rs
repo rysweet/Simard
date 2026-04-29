@@ -30,18 +30,6 @@ fn init_parent_repo(dir: &Path) -> PathBuf {
     dir.to_path_buf()
 }
 
-fn init_parent_repo_no_main(dir: &Path) -> PathBuf {
-    fs::create_dir_all(dir).expect("create dir");
-    run_git(dir, &["init", "--initial-branch=trunk", "--quiet"]);
-    run_git(dir, &["config", "user.email", "t@e.com"]);
-    run_git(dir, &["config", "user.name", "t"]);
-    run_git(dir, &["config", "commit.gpgsign", "false"]);
-    fs::write(dir.join("a"), "x").unwrap();
-    run_git(dir, &["add", "a"]);
-    run_git(dir, &["commit", "-m", "x", "--quiet"]);
-    dir.to_path_buf()
-}
-
 fn run_git(repo: &Path, args: &[&str]) {
     let out = git_cmd(repo, args).output().expect("spawn git");
     assert!(
@@ -68,13 +56,6 @@ fn worktree_registered(parent_repo: &Path, path: &Path) -> bool {
     let listing = git_output(parent_repo, &["worktree", "list", "--porcelain"]);
     let needle = format!("worktree {}", path.display());
     listing.lines().any(|l| l == needle)
-}
-
-fn branch_exists(parent_repo: &Path, branch: &str) -> bool {
-    git_cmd(parent_repo, &["rev-parse", "--verify", "--quiet", branch])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
 }
 
 /// Build a `git` command that mirrors production isolation: clear env, then
