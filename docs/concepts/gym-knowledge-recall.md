@@ -56,3 +56,32 @@ extend the scoring to read directly from the ladybug-backed cognitive memory
 store under `~/.simard/cognitive_memory/`.
 
 [issue]: https://github.com/rysweet/Simard/issues/1459
+
+## Tools sub-family (PR #1461)
+
+The second scenario-level PR after [#1460][pr-1460] adds three
+`tools-knowledge` scenarios. Each one verifies that Simard recalls a
+concrete operating-tool fact rather than confabulating an interface:
+
+- `knowledge-recall-tool-amplihack-recipe` — recalls how the amplihack
+  recipe runner is invoked for development and investigation work: the
+  `amplihack recipe run` sub-command, the `smart-orchestrator` recipe
+  name, and at least one required environment variable
+  (`AMPLIHACK_HOME` or `AMPLIHACK_AGENT_BINARY`).
+- `knowledge-recall-tool-pre-push-skip` — recalls that
+  `SKIP=cargo-test` is the approved override for the cargo-test stage
+  of the local pre-push hook on known-flaky tests, and explains why
+  `--no-verify` is forbidden as a bypass.
+- `knowledge-recall-tool-redeploy-script` — recalls that
+  `scripts/redeploy-local.sh` rebuilds the simard daemon using the
+  `SIMARD_SHARED_TARGET` target directory and reinstalls to
+  `~/.simard/bin/simard` after a main-branch merge.
+
+All three scenarios reuse the same two-check template seeded by the
+first PR (`knowledge-recall-evidence-grounded` and
+`knowledge-recall-topic-cited`), with topic matchers extended in
+`src/gym/scenarios/checks_6.rs` to look for the canonical tokens above.
+
+The next planned PR adds the `repo-knowledge` sub-family.
+
+[pr-1460]: https://github.com/rysweet/Simard/pull/1460
