@@ -9,7 +9,7 @@
 use super::super::types::{BenchmarkClass, BenchmarkScenario};
 use crate::runtime::RuntimeTopology;
 
-pub(super) static SCENARIOS: [BenchmarkScenario; 5] = [
+pub(super) static SCENARIOS: [BenchmarkScenario; 8] = [
     BenchmarkScenario {
         id: "knowledge-recall-self-code",
         title: "Knowledge recall: locate the OodaBrain trait and its wire-in site",
@@ -63,6 +63,39 @@ pub(super) static SCENARIOS: [BenchmarkScenario; 5] = [
         base_type: "rusty-clawd",
         topology: RuntimeTopology::SingleProcess,
         objective: "Recall the script and target-directory environment variable used to rebuild and reinstall the running simard daemon binary after a main-branch merge.",
+        expected_min_runtime_evidence: 2,
+    },
+    BenchmarkScenario {
+        id: "knowledge-recall-repo-ooda-loop-layout",
+        title: "Knowledge recall: Simard OODA loop module layout",
+        description: "Verify the agent can recall the on-disk layout of Simard's OODA loop module — the four canonical phase modules under src/ooda_loop/ and the file that holds the cycle entry point — rather than guessing at module names.",
+        class: BenchmarkClass::KnowledgeRecall,
+        identity: "simard-gym",
+        base_type: "rusty-clawd",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Recall the layout of Simard's OODA loop module: name the four canonical phase modules under src/ooda_loop/ and the file that holds the cycle entry point.",
+        expected_min_runtime_evidence: 2,
+    },
+    BenchmarkScenario {
+        id: "knowledge-recall-repo-cognitive-memory-store",
+        title: "Knowledge recall: cognitive memory storage backend",
+        description: "Verify the agent can recall the storage backend used by Simard's cognitive memory subsystem and the on-disk filename of the primary persistent store under ~/.simard/, rather than confabulating a path or backend name.",
+        class: BenchmarkClass::KnowledgeRecall,
+        identity: "simard-gym",
+        base_type: "rusty-clawd",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Recall the storage backend used by Simard's cognitive memory subsystem and the on-disk filename of the primary persistent store under ~/.simard/.",
+        expected_min_runtime_evidence: 2,
+    },
+    BenchmarkScenario {
+        id: "knowledge-recall-repo-engineer-worktree-pattern",
+        title: "Knowledge recall: engineer subagent worktree pattern",
+        description: "Verify the agent can recall how Simard's OODA daemon spawns engineer subagents into isolated worktrees: the directory under ~/.simard/ where engineer worktrees live and the goal-id-prefixed naming convention used for each worktree.",
+        class: BenchmarkClass::KnowledgeRecall,
+        identity: "simard-gym",
+        base_type: "rusty-clawd",
+        topology: RuntimeTopology::SingleProcess,
+        objective: "Recall how Simard's OODA daemon spawns engineer subagents into isolated worktrees: name the directory under ~/.simard/ where engineer worktrees live, and the goal-id-prefixed naming convention.",
         expected_min_runtime_evidence: 2,
     },
 ];
