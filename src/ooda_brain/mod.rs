@@ -16,13 +16,20 @@ use crate::ooda_loop::OodaState;
 use std::path::PathBuf;
 
 mod context;
+mod decide;
 mod fallback;
 mod rustyclawd;
 
 #[cfg(test)]
+mod decide_tests;
+#[cfg(test)]
 mod tests;
 
 pub use context::{gather_engineer_lifecycle_ctx, redact_secrets};
+pub use decide::{
+    DecideContext, DecideJudgment, DeterministicFallbackDecideBrain, OodaDecideBrain,
+    RustyClawdDecideBrain, build_rustyclawd_decide_brain,
+};
 pub use fallback::DeterministicFallbackBrain;
 pub use rustyclawd::{LlmSubmitter, RustyClawdBrain, SessionLlmSubmitter, build_rustyclawd_brain};
 
