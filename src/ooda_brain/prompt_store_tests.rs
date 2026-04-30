@@ -175,3 +175,39 @@ fn singleton_is_idempotent() {
     let b = global() as *const PromptStore;
     assert_eq!(a, b, "global() must return the same instance");
 }
+
+// --- prompt_version helper -------------------------------------------------
+
+#[test]
+fn prompt_version_is_12_lowercase_hex_chars() {
+    let v = prompt_version("anything");
+    assert_eq!(v.len(), 12);
+    assert!(
+        v.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+        "expected 12 lowercase hex chars, got {v:?}"
+    );
+}
+
+#[test]
+fn prompt_version_is_deterministic() {
+    let a = prompt_version("ooda system prompt");
+    let b = prompt_version("ooda system prompt");
+    assert_eq!(a, b);
+}
+
+#[test]
+fn prompt_version_changes_on_any_byte_change() {
+    let a = prompt_version("hello");
+    let b = prompt_version("hello\n");
+    let c = prompt_version("Hello");
+    assert_ne!(a, b);
+    assert_ne!(a, c);
+    assert_ne!(b, c);
+}
+
+#[test]
+fn prompt_version_matches_known_sha256_prefix() {
+    // sha256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+    assert_eq!(prompt_version(""), "e3b0c44298fc");
+}

@@ -76,6 +76,11 @@ pub fn dispatch_spawn_engineer(
             goal_id,
             &decision,
             fallback_used,
+            if fallback_used {
+                String::new()
+            } else {
+                crate::ooda_brain::prompt_store::current_version(crate::ooda_brain::ACT_PROMPT_NAME)
+            },
         ));
         return apply_lifecycle_decision(action, state, goal_id, &live, decision);
     }

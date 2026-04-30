@@ -392,6 +392,7 @@ mod tests {
             rationale: "high priority".to_string(),
             confidence: 1.0,
             fallback: false,
+            prompt_version: "abc123def456".to_string(),
         });
         report.brain_judgments.push(BrainJudgmentRecord {
             phase: BrainPhase::Orient,
@@ -400,6 +401,7 @@ mod tests {
             rationale: "two failures".to_string(),
             confidence: 0.8,
             fallback: true,
+            prompt_version: String::new(),
         });
         persist_cycle_report(dir.path(), &report);
         let content =

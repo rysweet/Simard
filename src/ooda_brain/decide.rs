@@ -23,7 +23,7 @@ const ADAPTER_TAG: &str = "ooda-decide-brain";
 /// [`prompt_store::global`]; the compile-time embedded baseline is
 /// preserved in [`prompt_store::embedded_fallback`] so the daemon never
 /// fails because a prompt file is missing.
-const PROMPT_NAME: &str = "ooda_decide.md";
+pub const PROMPT_NAME: &str = "ooda_decide.md";
 
 // ---------------------------------------------------------------------------
 // Context fed to the brain

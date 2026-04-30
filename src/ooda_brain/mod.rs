@@ -35,7 +35,7 @@ mod tests;
 pub use context::{gather_engineer_lifecycle_ctx, redact_secrets};
 pub use decide::{
     DecideContext, DecideJudgment, DeterministicFallbackDecideBrain, OodaDecideBrain,
-    RustyClawdDecideBrain, build_rustyclawd_decide_brain,
+    PROMPT_NAME as DECIDE_PROMPT_NAME, RustyClawdDecideBrain, build_rustyclawd_decide_brain,
 };
 pub use fallback::DeterministicFallbackBrain;
 pub use judgment_record::{
@@ -44,9 +44,13 @@ pub use judgment_record::{
 };
 pub use orient::{
     DeterministicFallbackOrientBrain, FAILURE_PENALTY_PER_CONSECUTIVE, OodaOrientBrain,
-    OrientContext, OrientJudgment, RustyClawdOrientBrain, build_rustyclawd_orient_brain,
+    OrientContext, OrientJudgment, PROMPT_NAME as ORIENT_PROMPT_NAME, RustyClawdOrientBrain,
+    build_rustyclawd_orient_brain,
 };
-pub use rustyclawd::{LlmSubmitter, RustyClawdBrain, SessionLlmSubmitter, build_rustyclawd_brain};
+pub use rustyclawd::{
+    LlmSubmitter, PROMPT_NAME as ACT_PROMPT_NAME, RustyClawdBrain, SessionLlmSubmitter,
+    build_rustyclawd_brain,
+};
 
 // ---------------------------------------------------------------------------
 // Context fed to the brain

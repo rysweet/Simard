@@ -14,7 +14,7 @@ use crate::session_builder::{LlmProvider, SessionBuilder};
 /// next OODA cycle without restarting the daemon (PR #1474 follow-up).
 /// This constant is retained as documentation of the embedded baseline; the
 /// authoritative copy lives in [`prompt_store::embedded_fallback`].
-const PROMPT_NAME: &str = "ooda_brain.md";
+pub const PROMPT_NAME: &str = "ooda_brain.md";
 
 const ADAPTER_TAG: &str = "ooda-brain";
 

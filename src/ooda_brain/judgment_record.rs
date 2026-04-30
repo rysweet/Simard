@@ -52,6 +52,13 @@ pub struct BrainJudgmentRecord {
     /// `true` when the deterministic fallback fired because the LLM brain
     /// errored or returned an invalid judgment.
     pub fallback: bool,
+    /// 12-char sha256 prefix of the prompt-asset content that produced this
+    /// judgment (see [`crate::ooda_brain::prompt_store::prompt_version`]).
+    /// Empty for fallback / deterministic phases that don't read a prompt
+    /// file — which observers can read as "no prompt was involved".
+    /// Default-skipped on serialise so older cycle reports stay readable.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prompt_version: String,
 }
 
 const CONTEXT_SUMMARY_MAX: usize = 200;
@@ -72,6 +79,7 @@ impl BrainJudgmentRecord {
         goal_id: &str,
         decision: &EngineerLifecycleDecision,
         fallback: bool,
+        prompt_version: impl Into<String>,
     ) -> Self {
         let (label, rationale) = match decision {
             EngineerLifecycleDecision::ContinueSkipping { rationale } => {
@@ -97,6 +105,7 @@ impl BrainJudgmentRecord {
             rationale: rationale.to_string(),
             confidence: if fallback { 0.5 } else { 1.0 },
             fallback,
+            prompt_version: prompt_version.into(),
         }
     }
 
@@ -107,6 +116,7 @@ impl BrainJudgmentRecord {
         urgency: f64,
         judgment: &DecideJudgment,
         fallback: bool,
+        prompt_version: impl Into<String>,
     ) -> Self {
         let label = match judgment {
             DecideJudgment::AdvanceGoal { .. } => "advance_goal",
@@ -126,6 +136,7 @@ impl BrainJudgmentRecord {
             rationale: judgment.rationale().to_string(),
             confidence: if fallback { 0.5 } else { 1.0 },
             fallback,
+            prompt_version: prompt_version.into(),
         }
     }
 
@@ -137,6 +148,7 @@ impl BrainJudgmentRecord {
         failure_count: u32,
         judgment: &OrientJudgment,
         fallback: bool,
+        prompt_version: impl Into<String>,
     ) -> Self {
         let label = if judgment.demotion_applied > 0.0 {
             "demote"
@@ -152,6 +164,7 @@ impl BrainJudgmentRecord {
             rationale: judgment.rationale.clone(),
             confidence: judgment.confidence as f32,
             fallback,
+            prompt_version: prompt_version.into(),
         }
     }
 }
@@ -217,11 +230,33 @@ mod tests {
             rationale: "because".to_string(),
             confidence: 0.75,
             fallback: false,
+            prompt_version: "deadbeef1234".to_string(),
         };
         let json = serde_json::to_string(&rec).unwrap();
         assert!(json.contains("\"phase\":\"decide\""));
+        assert!(json.contains("\"prompt_version\":\"deadbeef1234\""));
         let back: BrainJudgmentRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(rec, back);
+    }
+
+    #[test]
+    fn empty_prompt_version_is_omitted_from_json() {
+        // Older cycle reports / deterministic-only phases serialise without
+        // the field, so observers can read "no field" === "no prompt".
+        let rec = BrainJudgmentRecord {
+            phase: BrainPhase::Act,
+            context_summary: "ctx".to_string(),
+            decision: "continue_skipping".to_string(),
+            rationale: "r".to_string(),
+            confidence: 0.5,
+            fallback: true,
+            prompt_version: String::new(),
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        assert!(
+            !json.contains("prompt_version"),
+            "expected empty prompt_version to be skipped: {json}"
+        );
     }
 
     #[test]
@@ -230,11 +265,12 @@ mod tests {
             rationale: "stuck".to_string(),
             redispatch_context: "ctx".to_string(),
         };
-        let rec = BrainJudgmentRecord::from_engineer_lifecycle("g1", &dec, false);
+        let rec = BrainJudgmentRecord::from_engineer_lifecycle("g1", &dec, false, "abc123def456");
         assert_eq!(rec.phase, BrainPhase::Act);
         assert_eq!(rec.decision, "reclaim_and_redispatch");
         assert_eq!(rec.rationale, "stuck");
         assert!(!rec.fallback);
+        assert_eq!(rec.prompt_version, "abc123def456");
     }
 
     #[test]
@@ -242,18 +278,20 @@ mod tests {
         let j = DecideJudgment::RunGymEval {
             rationale: "gym slipped".to_string(),
         };
-        let rec = BrainJudgmentRecord::from_decide("__improvement__", 0.7, &j, true);
+        let rec = BrainJudgmentRecord::from_decide("__improvement__", 0.7, &j, true, "");
         assert_eq!(rec.phase, BrainPhase::Decide);
         assert_eq!(rec.decision, "run_gym_eval");
         assert!(rec.fallback);
         assert!((rec.confidence - 0.5).abs() < f32::EPSILON);
+        assert!(rec.prompt_version.is_empty());
     }
 
     #[test]
     fn from_orient_labels_demotion_vs_no_op() {
         let demoted = sample_orient_judgment();
-        let rec = BrainJudgmentRecord::from_orient("g1", 0.6, 1, &demoted, false);
+        let rec = BrainJudgmentRecord::from_orient("g1", 0.6, 1, &demoted, false, "v1");
         assert_eq!(rec.decision, "demote");
+        assert_eq!(rec.prompt_version, "v1");
 
         let untouched = OrientJudgment {
             adjusted_urgency: 0.6,
@@ -261,7 +299,7 @@ mod tests {
             confidence: 1.0,
             demotion_applied: 0.0,
         };
-        let rec = BrainJudgmentRecord::from_orient("g1", 0.6, 0, &untouched, false);
+        let rec = BrainJudgmentRecord::from_orient("g1", 0.6, 0, &untouched, false, "");
         assert_eq!(rec.decision, "no_demotion");
     }
 
@@ -271,7 +309,7 @@ mod tests {
         let dec = EngineerLifecycleDecision::ContinueSkipping {
             rationale: long.clone(),
         };
-        let rec = BrainJudgmentRecord::from_engineer_lifecycle(&long, &dec, false);
+        let rec = BrainJudgmentRecord::from_engineer_lifecycle(&long, &dec, false, "");
         assert!(rec.context_summary.len() <= CONTEXT_SUMMARY_MAX + 4);
     }
 
@@ -288,6 +326,7 @@ mod tests {
                     rationale: "r".to_string(),
                     confidence: 1.0,
                     fallback: false,
+                    prompt_version: String::new(),
                 });
                 push(BrainJudgmentRecord {
                     phase: BrainPhase::Decide,
@@ -296,6 +335,7 @@ mod tests {
                     rationale: "r".to_string(),
                     confidence: 1.0,
                     fallback: false,
+                    prompt_version: String::new(),
                 });
 
                 let drained = take_all();
@@ -311,6 +351,7 @@ mod tests {
                     rationale: "r".to_string(),
                     confidence: 1.0,
                     fallback: false,
+                    prompt_version: String::new(),
                 });
                 clear();
                 assert!(take_all().is_empty());
@@ -327,6 +368,7 @@ mod tests {
             rationale: "r".to_string(),
             confidence: 1.0,
             fallback: false,
+            prompt_version: String::new(),
         });
         assert!(take_all().is_empty());
     }
@@ -343,6 +385,7 @@ mod tests {
                 rationale: "r".to_string(),
                 confidence: 1.0,
                 fallback: false,
+                prompt_version: String::new(),
             });
             take_all()
         }));
@@ -372,6 +415,7 @@ mod tests {
                     rationale: "r".to_string(),
                     confidence: 1.0,
                     fallback: false,
+                    prompt_version: String::new(),
                 });
             }
             tokio::task::yield_now().await;
