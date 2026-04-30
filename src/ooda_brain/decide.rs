@@ -12,15 +12,18 @@
 //! availability for Decide: [`DeterministicFallbackDecideBrain`] preserves the
 //! pre-#1458 mapping bit-for-bit and is the floor when no LLM is configured.
 
+use super::prompt_store;
 use super::rustyclawd::LlmSubmitter;
 use crate::error::{SimardError, SimardResult};
 use crate::ooda_loop::ActionKind;
 
 const ADAPTER_TAG: &str = "ooda-decide-brain";
 
-/// Embedded prompt — single source of truth. Editing the markdown file
-/// changes brain behaviour without code changes.
-const DECIDE_PROMPT: &str = include_str!("../../prompt_assets/simard/ooda_decide.md");
+/// Prompt asset name. The on-disk file is read fresh per call via
+/// [`prompt_store::global`]; the compile-time embedded baseline is
+/// preserved in [`prompt_store::embedded_fallback`] so the daemon never
+/// fails because a prompt file is missing.
+const PROMPT_NAME: &str = "ooda_decide.md";
 
 // ---------------------------------------------------------------------------
 // Context fed to the brain
@@ -149,10 +152,11 @@ impl<S: LlmSubmitter> RustyClawdDecideBrain<S> {
         Self { submitter }
     }
 
-    /// Render the embedded prompt with the context. Exposed so tests can
-    /// snapshot the rendering separate from LLM submission.
+    /// Render the prompt with the context. Loaded fresh per call so prompt
+    /// edits take effect on the next OODA cycle (see [`prompt_store`]).
     pub fn render_prompt(&self, ctx: &DecideContext) -> String {
-        DECIDE_PROMPT
+        prompt_store::global()
+            .load(PROMPT_NAME)
             .replace("{goal_id}", &ctx.goal_id)
             .replace("{urgency}", &format!("{:.3}", ctx.urgency))
             .replace("{reason}", &ctx.reason)

@@ -18,6 +18,7 @@
 //! configured *or* when the LLM-backed brain returns an invalid judgment
 //! (e.g. attempts to escalate above `base_urgency`).
 
+use super::prompt_store;
 use super::rustyclawd::LlmSubmitter;
 use crate::error::{SimardError, SimardResult};
 
@@ -28,9 +29,9 @@ const ADAPTER_TAG: &str = "ooda-orient-brain";
 /// `src/ooda_loop/orient.rs`. Five failures drive any goal's urgency to 0.
 pub const FAILURE_PENALTY_PER_CONSECUTIVE: f64 = 0.2;
 
-/// Embedded prompt — single source of truth. Editing the markdown file
-/// changes brain behaviour without code changes.
-const ORIENT_PROMPT: &str = include_str!("../../prompt_assets/simard/ooda_orient.md");
+/// Prompt asset name. Loaded fresh per call from disk (with embedded
+/// fallback) so prompt edits take effect on the next OODA cycle.
+const PROMPT_NAME: &str = "ooda_orient.md";
 
 // ---------------------------------------------------------------------------
 // Context fed to the brain
@@ -177,10 +178,11 @@ impl<S: LlmSubmitter> RustyClawdOrientBrain<S> {
         Self { submitter }
     }
 
-    /// Render the embedded prompt with the context. Exposed so tests can
-    /// snapshot the rendering separate from LLM submission.
+    /// Render the prompt with the context. Loaded fresh per call so prompt
+    /// edits take effect on the next OODA cycle (see [`prompt_store`]).
     pub fn render_prompt(&self, ctx: &OrientContext) -> String {
-        ORIENT_PROMPT
+        prompt_store::global()
+            .load(PROMPT_NAME)
             .replace("{goal_id}", &ctx.goal_id)
             .replace("{base_urgency}", &format!("{:.3}", ctx.base_urgency))
             .replace("{base_reason}", &ctx.base_reason)
