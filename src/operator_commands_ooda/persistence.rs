@@ -75,14 +75,28 @@ pub(super) fn persist_cycle_report(
             entry
         }).collect::<Vec<_>>(),
         "brain_judgments": report.brain_judgments.iter().map(|j| {
-            json!({
+            let mut entry = json!({
                 "phase": j.phase,
                 "context_summary": j.context_summary,
                 "decision": j.decision,
                 "rationale": j.rationale,
                 "confidence": j.confidence,
                 "fallback": j.fallback,
-            })
+            });
+            // PR #1476 added `prompt_version` to BrainJudgmentRecord but the
+            // manual json! mapping here was missed, silently dropping the
+            // field on every persisted cycle report. Restore it (and skip
+            // when empty so deterministic-fallback judgments — and pre-#1476
+            // call sites — stay clean).
+            if !j.prompt_version.is_empty()
+                && let Some(map) = entry.as_object_mut()
+            {
+                map.insert(
+                    "prompt_version".to_string(),
+                    serde_json::Value::String(j.prompt_version.clone()),
+                );
+            }
+            entry
         }).collect::<Vec<_>>(),
     });
 
@@ -412,8 +426,22 @@ mod tests {
         assert_eq!(arr[0]["phase"], "decide");
         assert_eq!(arr[0]["decision"], "advance_goal");
         assert_eq!(arr[0]["fallback"], false);
+        // Regression: PR #1476 added `prompt_version` to BrainJudgmentRecord
+        // but the manual json! mapping in persist_cycle_report omitted it,
+        // silently dropping the field on every persisted cycle report.
+        assert_eq!(
+            arr[0]["prompt_version"], "abc123def456",
+            "prompt_version must round-trip through persist_cycle_report's manual json! mapping"
+        );
         assert_eq!(arr[1]["phase"], "orient");
         assert_eq!(arr[1]["fallback"], true);
+        // Empty prompt_version (deterministic-fallback judgments) stays
+        // omitted, matching the struct-level skip_serializing_if behaviour.
+        assert!(
+            arr[1].get("prompt_version").is_none(),
+            "empty prompt_version must be omitted (got {:?})",
+            arr[1].get("prompt_version")
+        );
     }
 
     #[test]
