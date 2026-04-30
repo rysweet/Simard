@@ -3,22 +3,20 @@
 //! Surfaces what each prompt-driven OODA phase decided for the user to
 //! inspect via `~/.simard/cycle_reports/cycle_*.json`. The Act, Decide and
 //! Orient phases each call `brain.judge_*()` (or fall back to the
-//! deterministic floor). After every such call site, the wire-in pushes a
-//! [`BrainJudgmentRecord`] onto the per-cycle accumulator. The cycle-report
-//! writer drains the accumulator and persists the records under the new
-//! `brain_judgments` field.
+//! deterministic floor); each call site pushes a [`BrainJudgmentRecord`]
+//! onto the per-cycle accumulator, which the cycle-report writer drains.
 //!
-//! Threading: the accumulator is a `thread_local!` `RefCell<Vec<...>>`. The
-//! OODA cycle runs single-threaded per daemon (`run_ooda_cycle`), so a
-//! thread-local is the least invasive plumbing — it avoids threading a
-//! per-cycle context through every brain call site (each lives at a
-//! different layer of the stack: `ooda_loop::orient`, `ooda_loop::decide`,
-//! `ooda_actions::advance_goal::spawn`).
+//! Threading: the accumulator is a [`tokio::task_local!`], installed by
+//! [`with_cycle_scope`] (a thin wrapper around `LocalKey::sync_scope`) at
+//! the top of `run_ooda_cycle`. A previous implementation used
+//! `thread_local!`, but brain LLM calls drive Tokio worker threads via the
+//! session adapter, so pushes could land on a different OS thread than the
+//! eventual `take_all()` — producing empty `brain_judgments` arrays in
+//! cycle reports (PR #1472, daemon `d69c411c52f1` cycle_2 had
+//! `planned_actions: 3` but `brain_judgments: []`).
 //!
-//! Lifecycle is deterministic:
-//! 1. `clear()` at the start of each `run_ooda_cycle`.
-//! 2. `push()` after each `brain.judge_*()` call (or fallback).
-//! 3. `take_all()` when assembling the final `CycleReport`.
+//! Outside any scope (e.g., unit tests that don't establish one), `push()`
+//! silently no-ops and `take_all()` returns an empty vec.
 
 use std::cell::RefCell;
 
@@ -159,29 +157,41 @@ impl BrainJudgmentRecord {
 }
 
 // ---------------------------------------------------------------------------
-// Per-cycle thread-local accumulator
+// Per-cycle task-local accumulator
 // ---------------------------------------------------------------------------
 
-thread_local! {
-    static BRAIN_JUDGMENTS: RefCell<Vec<BrainJudgmentRecord>> = const { RefCell::new(Vec::new()) };
+tokio::task_local! {
+    /// Per-cycle accumulator. Installed by [`with_cycle_scope`].
+    static BRAIN_JUDGMENTS: RefCell<Vec<BrainJudgmentRecord>>;
 }
 
-/// Append one judgment to the current cycle's accumulator.
+/// Run a closure (one OODA cycle's body) inside a fresh
+/// [`BRAIN_JUDGMENTS`] task-local scope. Every `push()` invoked
+/// transitively by `f` — including from Tokio worker threads driven by
+/// brain LLM calls — observes the same accumulator. Called exactly once
+/// per cycle from `ooda_loop::cycle::run_ooda_cycle`.
+pub fn with_cycle_scope<R>(f: impl FnOnce() -> R) -> R {
+    BRAIN_JUDGMENTS.sync_scope(RefCell::new(Vec::new()), f)
+}
+
+/// Append one judgment to the current cycle's accumulator. Silently no-ops
+/// outside a [`with_cycle_scope`] (e.g., in tests with no scope set up).
 pub fn push(record: BrainJudgmentRecord) {
-    BRAIN_JUDGMENTS.with(|cell| cell.borrow_mut().push(record));
+    let _ = BRAIN_JUDGMENTS.try_with(|cell| cell.borrow_mut().push(record));
 }
 
-/// Drain and return all records accumulated so far. Called at the end of
-/// `run_ooda_cycle` to attach the records to the [`CycleReport`].
+/// Drain and return all records accumulated so far. Returns `vec![]`
+/// outside a scope.
 pub fn take_all() -> Vec<BrainJudgmentRecord> {
-    BRAIN_JUDGMENTS.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
+    BRAIN_JUDGMENTS
+        .try_with(|cell| std::mem::take(&mut *cell.borrow_mut()))
+        .unwrap_or_default()
 }
 
-/// Reset the accumulator (drops any leftover records). Called at the start
-/// of `run_ooda_cycle` so a previous cycle (or test) cannot leak entries
-/// into the next one.
+/// Reset the accumulator (drops any leftover records). Retained for the
+/// `clear_brain_judgments()` re-export. No-ops outside a scope.
 pub fn clear() {
-    BRAIN_JUDGMENTS.with(|cell| cell.borrow_mut().clear());
+    let _ = BRAIN_JUDGMENTS.try_with(|cell| cell.borrow_mut().clear());
 }
 
 #[cfg(test)]
@@ -265,57 +275,67 @@ mod tests {
         assert!(rec.context_summary.len() <= CONTEXT_SUMMARY_MAX + 4);
     }
 
-    #[test]
-    fn accumulator_push_take_clear_isolation() {
-        // Use a fresh thread so the thread-local starts empty regardless of
-        // any leftovers from other tests in the same module.
-        let handle = std::thread::spawn(|| {
-            clear();
-            assert!(take_all().is_empty());
+    #[tokio::test]
+    async fn accumulator_push_take_clear_isolation() {
+        BRAIN_JUDGMENTS
+            .scope(RefCell::new(Vec::new()), async {
+                assert!(take_all().is_empty());
 
-            push(BrainJudgmentRecord {
-                phase: BrainPhase::Act,
-                context_summary: "a".to_string(),
-                decision: "x".to_string(),
-                rationale: "r".to_string(),
-                confidence: 1.0,
-                fallback: false,
-            });
-            push(BrainJudgmentRecord {
-                phase: BrainPhase::Decide,
-                context_summary: "b".to_string(),
-                decision: "y".to_string(),
-                rationale: "r".to_string(),
-                confidence: 1.0,
-                fallback: false,
-            });
+                push(BrainJudgmentRecord {
+                    phase: BrainPhase::Act,
+                    context_summary: "a".to_string(),
+                    decision: "x".to_string(),
+                    rationale: "r".to_string(),
+                    confidence: 1.0,
+                    fallback: false,
+                });
+                push(BrainJudgmentRecord {
+                    phase: BrainPhase::Decide,
+                    context_summary: "b".to_string(),
+                    decision: "y".to_string(),
+                    rationale: "r".to_string(),
+                    confidence: 1.0,
+                    fallback: false,
+                });
 
-            let drained = take_all();
-            assert_eq!(drained.len(), 2);
-            // Second drain is empty — take_all() consumes.
-            assert!(take_all().is_empty());
+                let drained = take_all();
+                assert_eq!(drained.len(), 2);
+                // Second drain is empty — take_all() consumes.
+                assert!(take_all().is_empty());
 
-            // clear() also wipes after pushes.
-            push(BrainJudgmentRecord {
-                phase: BrainPhase::Orient,
-                context_summary: "c".to_string(),
-                decision: "z".to_string(),
-                rationale: "r".to_string(),
-                confidence: 1.0,
-                fallback: false,
-            });
-            clear();
-            assert!(take_all().is_empty());
-        });
-        handle.join().unwrap();
+                // clear() also wipes after pushes.
+                push(BrainJudgmentRecord {
+                    phase: BrainPhase::Orient,
+                    context_summary: "c".to_string(),
+                    decision: "z".to_string(),
+                    rationale: "r".to_string(),
+                    confidence: 1.0,
+                    fallback: false,
+                });
+                clear();
+                assert!(take_all().is_empty());
+            })
+            .await;
     }
 
-    #[test]
-    fn accumulator_isolates_across_threads() {
-        // Each thread has its own thread-local — pushes in one thread must
-        // not appear in another.
-        let t1 = std::thread::spawn(|| {
-            clear();
+    #[tokio::test]
+    async fn push_outside_scope_is_silent_noop() {
+        push(BrainJudgmentRecord {
+            phase: BrainPhase::Act,
+            context_summary: "orphan".to_string(),
+            decision: "x".to_string(),
+            rationale: "r".to_string(),
+            confidence: 1.0,
+            fallback: false,
+        });
+        assert!(take_all().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn accumulator_isolates_across_concurrent_scopes() {
+        // Each spawned task installs its own scope. Pushes in one task must
+        // not appear in another, even when both run on the same worker pool.
+        let t1 = tokio::spawn(with_cycle_scope_async(async {
             push(BrainJudgmentRecord {
                 phase: BrainPhase::Act,
                 context_summary: "t1".to_string(),
@@ -325,14 +345,47 @@ mod tests {
                 fallback: false,
             });
             take_all()
-        });
-        let t2 = std::thread::spawn(|| {
-            clear();
+        }));
+        let t2 = tokio::spawn(with_cycle_scope_async(async { take_all() }));
+        assert_eq!(t1.await.unwrap().len(), 1);
+        assert!(t2.await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn survives_multi_thread_runtime_with_yields() {
+        // Regression for PR #1472: under a multi-thread runtime, pushes that
+        // happen after `.await` points (which may migrate the task to a
+        // different worker thread) must still be observed by `take_all`.
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let collected: Vec<BrainJudgmentRecord> = rt.block_on(with_cycle_scope_async(async {
+            for i in 0..3 {
+                tokio::task::yield_now().await;
+                push(BrainJudgmentRecord {
+                    phase: BrainPhase::Decide,
+                    context_summary: format!("ctx-{i}"),
+                    decision: "advance_goal".to_string(),
+                    rationale: "r".to_string(),
+                    confidence: 1.0,
+                    fallback: false,
+                });
+            }
+            tokio::task::yield_now().await;
             take_all()
-        });
-        let v1 = t1.join().unwrap();
-        let v2 = t2.join().unwrap();
-        assert_eq!(v1.len(), 1);
-        assert!(v2.is_empty());
+        }));
+
+        // All 3 pushes observed regardless of which worker executed each.
+        assert_eq!(collected.len(), 3);
+    }
+
+    /// Test helper: async equivalent of [`with_cycle_scope`].
+    fn with_cycle_scope_async<F: std::future::Future>(
+        fut: F,
+    ) -> impl std::future::Future<Output = F::Output> {
+        BRAIN_JUDGMENTS.scope(RefCell::new(Vec::new()), fut)
     }
 }

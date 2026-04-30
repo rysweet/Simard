@@ -37,7 +37,7 @@ pub use decide::{
 pub use fallback::DeterministicFallbackBrain;
 pub use judgment_record::{
     BrainJudgmentRecord, BrainPhase, clear as clear_brain_judgments, push as push_brain_judgment,
-    take_all as take_brain_judgments,
+    take_all as take_brain_judgments, with_cycle_scope as with_brain_judgment_scope,
 };
 pub use orient::{
     DeterministicFallbackOrientBrain, FAILURE_PENALTY_PER_CONSECUTIVE, OodaOrientBrain,

@@ -30,8 +30,19 @@ pub fn run_ooda_cycle(
     bridges: &mut OodaBridges,
     config: &OodaConfig,
 ) -> SimardResult<CycleReport> {
-    // Reset per-cycle brain-judgment accumulator so a previous cycle (or a
-    // panicking test) cannot leak entries into this one.
+    // Install per-cycle brain-judgment task-local. Was a `thread_local!`
+    // (PR #1472), but brain LLM calls drive Tokio worker threads via the
+    // session adapter, so pushes landed on different OS threads than the
+    // eventual `take_all()` — daemon `d69c411c52f1` cycle_2 showed
+    // `planned_actions: 3` but `brain_judgments: []`.
+    crate::ooda_brain::with_brain_judgment_scope(|| run_ooda_cycle_inner(state, bridges, config))
+}
+
+fn run_ooda_cycle_inner(
+    state: &mut OodaState,
+    bridges: &mut OodaBridges,
+    config: &OodaConfig,
+) -> SimardResult<CycleReport> {
     crate::ooda_brain::clear_brain_judgments();
 
     // Budget enforcement: refuse to run if daily or weekly spend is exceeded.
