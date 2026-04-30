@@ -20,12 +20,15 @@ mod decide;
 mod fallback;
 mod judgment_record;
 mod orient;
+pub mod prompt_store;
 mod rustyclawd;
 
 #[cfg(test)]
 mod decide_tests;
 #[cfg(test)]
 mod orient_tests;
+#[cfg(test)]
+mod prompt_store_tests;
 #[cfg(test)]
 mod tests;
 

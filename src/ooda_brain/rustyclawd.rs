@@ -2,15 +2,19 @@
 //! abstraction. Production wires the real RustyClawd session; tests wire a
 //! canned-response stub.
 
+use super::prompt_store;
 use super::{EngineerLifecycleCtx, EngineerLifecycleDecision, OodaBrain};
 use crate::base_types::BaseTypeTurnInput;
 use crate::error::{SimardError, SimardResult};
 use crate::identity::OperatingMode;
 use crate::session_builder::{LlmProvider, SessionBuilder};
 
-/// Embedded prompt — single source of truth. Editing this file changes the
-/// brain's behaviour without code changes (the central design claim of #1266).
-const BRAIN_PROMPT: &str = include_str!("../../prompt_assets/simard/ooda_brain.md");
+/// Embedded prompt — compile-time fallback. The runtime brain reads from
+/// disk via [`prompt_store::global`] so prompt edits take effect on the
+/// next OODA cycle without restarting the daemon (PR #1474 follow-up).
+/// This constant is retained as documentation of the embedded baseline; the
+/// authoritative copy lives in [`prompt_store::embedded_fallback`].
+const PROMPT_NAME: &str = "ooda_brain.md";
 
 const ADAPTER_TAG: &str = "ooda-brain";
 
@@ -33,14 +37,17 @@ impl<S: LlmSubmitter> RustyClawdBrain<S> {
         Self { submitter }
     }
 
-    /// Render the embedded prompt with the context. Exposed so tests can
-    /// snapshot the rendering separate from LLM submission.
+    /// Render the prompt with the context. Loads the prompt fresh per call
+    /// via [`prompt_store::global`] so on-disk edits take effect on the
+    /// next OODA cycle. Falls back to the embedded baseline when no file
+    /// exists at the resolved path.
     pub fn render_prompt(&self, ctx: &EngineerLifecycleCtx) -> String {
         let sentinel = ctx
             .sentinel_pid
             .map(|p| p.to_string())
             .unwrap_or_else(|| "<none>".to_string());
-        BRAIN_PROMPT
+        prompt_store::global()
+            .load(PROMPT_NAME)
             .replace("{goal_id}", &ctx.goal_id)
             .replace("{goal_description}", &ctx.goal_description)
             .replace("{cycle_number}", &ctx.cycle_number.to_string())

@@ -60,6 +60,29 @@ cp -f "$NEW_BIN" "${INSTALL_BIN}.new"
 mv -f "${INSTALL_BIN}.new" "$INSTALL_BIN"
 echo "[redeploy] installed → ${INSTALL_BIN}"
 
+# ---------------------------------------------------------------------------
+# Sync prompt assets so the running daemon can hot-reload prompt edits on the
+# next OODA cycle (see docs/concepts/prompt-driven-brain-iteration.md). The
+# daemon resolves prompts from $SIMARD_PROMPT_ASSETS_DIR (override) or, by
+# default, from $HOME/.simard/prompt_assets/simard/ — which is exactly where
+# we copy them here. The embedded compile-time fallback always remains as a
+# safety net.
+# ---------------------------------------------------------------------------
+PROMPT_SRC="${SIMARD_REPO}/prompt_assets"
+PROMPT_DST="${HOME}/.simard/prompt_assets"
+if [[ -d "$PROMPT_SRC" ]]; then
+  mkdir -p "$PROMPT_DST"
+  cp -rf "$PROMPT_SRC/." "$PROMPT_DST/"
+  echo "[redeploy] synced prompt assets → ${PROMPT_DST}"
+  if [[ -d "$PROMPT_DST/simard" ]]; then
+    while IFS= read -r f; do
+      echo "[redeploy]   prompt: $(basename "$f")"
+    done < <(find "$PROMPT_DST/simard" -maxdepth 1 -type f -name '*.md' | sort)
+  fi
+else
+  echo "[redeploy] WARN: ${PROMPT_SRC} missing; daemon will use embedded prompts only"
+fi
+
 if [[ "$RESTART" -eq 0 ]]; then
   echo "[redeploy] --no-restart given; daemon NOT restarted"
   exit 0

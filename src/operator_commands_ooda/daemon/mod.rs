@@ -140,6 +140,22 @@ pub fn run_ooda_daemon(
     let decide_brain = brains::build_decide_brain(&state_root);
     let orient_brain = brains::build_orient_brain(&state_root);
 
+    // Surface where the daemon will look for hot-reloadable prompt assets so
+    // operators know where to edit (see `docs/concepts/prompt-driven-brain-iteration.md`).
+    {
+        let store = crate::ooda_brain::prompt_store::global();
+        let dir_str = store
+            .resolved_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<embedded only>".to_string());
+        daemon_log(
+            &state_root,
+            &format!(
+                "[simard] OODA daemon: prompt_assets dir = {dir_str} (3 prompts hot-reloadable)"
+            ),
+        );
+    }
+
     let mut bridges = OodaBridges {
         memory,
         knowledge,
