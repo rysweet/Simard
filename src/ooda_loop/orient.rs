@@ -105,6 +105,13 @@ pub fn orient_with_brain(
                     count,
                     &judgment,
                     fallback_used,
+                    if fallback_used {
+                        String::new()
+                    } else {
+                        crate::ooda_brain::prompt_store::current_version(
+                            crate::ooda_brain::ORIENT_PROMPT_NAME,
+                        )
+                    },
                 ));
                 reason = format!("{reason}; {}", judgment.rationale);
                 urgency = judgment.adjusted_urgency;

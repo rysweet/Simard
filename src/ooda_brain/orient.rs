@@ -31,7 +31,7 @@ pub const FAILURE_PENALTY_PER_CONSECUTIVE: f64 = 0.2;
 
 /// Prompt asset name. Loaded fresh per call from disk (with embedded
 /// fallback) so prompt edits take effect on the next OODA cycle.
-const PROMPT_NAME: &str = "ooda_orient.md";
+pub const PROMPT_NAME: &str = "ooda_orient.md";
 
 // ---------------------------------------------------------------------------
 // Context fed to the brain

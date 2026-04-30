@@ -58,6 +58,9 @@ pub fn decide_with_brain(
                     priority.urgency,
                     &j,
                     false,
+                    crate::ooda_brain::prompt_store::current_version(
+                        crate::ooda_brain::DECIDE_PROMPT_NAME,
+                    ),
                 ));
                 j
             }
@@ -68,6 +71,7 @@ pub fn decide_with_brain(
                     priority.urgency,
                     &j,
                     true,
+                    String::new(),
                 ));
                 j
             }

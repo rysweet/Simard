@@ -38,9 +38,12 @@
 //! save) bumps mtime and invalidates the cache on the next call.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
+
+use sha2::{Digest, Sha256};
 
 /// Environment variable that overrides the prompt-asset directory.
 pub const ENV_VAR: &str = "SIMARD_PROMPT_ASSETS_DIR";
@@ -180,4 +183,32 @@ static GLOBAL: OnceLock<PromptStore> = OnceLock::new();
 /// Subsequent calls are guaranteed to return the same instance.
 pub fn global() -> &'static PromptStore {
     GLOBAL.get_or_init(PromptStore::from_env)
+}
+
+// --- Prompt versioning -----------------------------------------------------
+
+/// Number of leading sha256 hex chars used as the human-facing prompt version.
+/// 12 hex chars = 48 bits = ample to disambiguate prompt edits while staying
+/// short enough to scan in cycle reports.
+const PROMPT_VERSION_HEX_CHARS: usize = 12;
+
+/// Hash arbitrary prompt content into a short, stable version tag (the first
+/// 12 hex chars of its sha256). Identical content always yields the same
+/// version; any byte change yields a different version.
+pub fn prompt_version(content: &str) -> String {
+    let digest = Sha256::digest(content.as_bytes());
+    let mut out = String::with_capacity(PROMPT_VERSION_HEX_CHARS);
+    // 12 hex chars = 6 bytes. `write!` to a String is infallible.
+    for byte in &digest[..PROMPT_VERSION_HEX_CHARS / 2] {
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
+}
+
+/// Convenience: hash the prompt named `name` as currently resolved by the
+/// global store. Used by call sites that record a [`crate::ooda_brain::
+/// judgment_record::BrainJudgmentRecord`] right after invoking a prompt-driven
+/// brain — so cycle reports show which on-disk prompt produced each judgment.
+pub fn current_version(name: &str) -> String {
+    prompt_version(&global().load(name))
 }
