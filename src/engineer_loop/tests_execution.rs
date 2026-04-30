@@ -392,7 +392,6 @@ fn execute_read_only_scan_propagates_zero_exit() {
 fn run_command_allow_nonzero_returns_status_without_error() {
     let dir = tempfile::tempdir().unwrap();
     let output = run_command_allow_nonzero(dir.path(), &["false"])
-        .ok()
         .expect("non-zero exit must not be Err");
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
@@ -401,9 +400,10 @@ fn run_command_allow_nonzero_returns_status_without_error() {
 #[test]
 fn run_command_strict_still_errors_on_nonzero() {
     let dir = tempfile::tempdir().unwrap();
-    let err = run_command(dir.path(), &["false"])
-        .err()
-        .expect("strict variant must error");
+    let err = match run_command(dir.path(), &["false"]) {
+        Ok(_) => panic!("strict variant must error"),
+        Err(e) => e,
+    };
     let msg = err.to_string();
     assert!(
         msg.contains("exited with status"),
