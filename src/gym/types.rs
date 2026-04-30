@@ -40,6 +40,7 @@ pub enum BenchmarkClass {
     EventSourcing,
     ChaosEngineering,
     KnowledgeRecall,
+    SelfIntrospection,
 }
 
 impl Display for BenchmarkClass {
@@ -78,6 +79,7 @@ impl Display for BenchmarkClass {
             Self::EventSourcing => "event-sourcing",
             Self::ChaosEngineering => "chaos-engineering",
             Self::KnowledgeRecall => "knowledge-recall",
+            Self::SelfIntrospection => "self-introspection",
         };
         f.write_str(label)
     }

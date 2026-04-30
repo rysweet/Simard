@@ -15,7 +15,7 @@ use crate::session::{SessionId, SessionPhase, SessionRecord};
 
 #[test]
 fn benchmark_scenarios_returns_nine_scenarios() {
-    assert_eq!(benchmark_scenarios().len(), 167);
+    assert_eq!(benchmark_scenarios().len(), 172);
 }
 
 #[test]
@@ -96,6 +96,7 @@ fn benchmark_scenarios_covers_all_classes() {
     assert!(has_class(BenchmarkClass::AccessibilityReview));
     assert!(has_class(BenchmarkClass::InternationalizationReview));
     assert!(has_class(BenchmarkClass::IncidentResponse));
+    assert!(has_class(BenchmarkClass::SelfIntrospection));
 }
 
 // --- resolve_benchmark_scenario ---

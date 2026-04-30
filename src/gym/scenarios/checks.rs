@@ -97,5 +97,8 @@ pub(crate) fn class_specific_checks(
             }
             _ => super::checks_6::checks_for_knowledge_recall(scenario, &combined, exported),
         },
+        BenchmarkClass::SelfIntrospection => {
+            super::checks_10::checks_for_self_introspection(scenario, &combined, exported)
+        }
     }
 }
