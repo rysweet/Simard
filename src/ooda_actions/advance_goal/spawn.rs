@@ -6,7 +6,8 @@ use crate::agent_roles::AgentRole;
 use crate::agent_supervisor::{SubordinateConfig, spawn_subordinate};
 use crate::identity_composition::max_subordinate_depth;
 use crate::ooda_brain::{
-    EngineerLifecycleDecision, OodaBrain, apply_decision_to_state, gather_engineer_lifecycle_ctx,
+    BrainJudgmentRecord, EngineerLifecycleDecision, OodaBrain, apply_decision_to_state,
+    gather_engineer_lifecycle_ctx, push_brain_judgment,
 };
 use crate::ooda_loop::{ActionOutcome, OodaState, PlannedAction};
 
@@ -54,8 +55,8 @@ pub fn dispatch_spawn_engineer(
     let state_root_inflight = engineer_worktree_state_root();
     if let Some(live) = find_live_engineer_for_goal(&state_root_inflight, goal_id) {
         let ctx = gather_engineer_lifecycle_ctx(state, &state_root_inflight, goal_id, &live);
-        let decision = match brain.decide_engineer_lifecycle(&ctx) {
-            Ok(d) => d,
+        let (decision, fallback_used) = match brain.decide_engineer_lifecycle(&ctx) {
+            Ok(d) => (d, false),
             Err(e) => {
                 tracing::warn!(
                     target: "simard::ooda_brain",
@@ -63,11 +64,19 @@ pub fn dispatch_spawn_engineer(
                     error = %e,
                     "brain.decide_engineer_lifecycle failed; falling back to continue_skipping",
                 );
-                EngineerLifecycleDecision::ContinueSkipping {
-                    rationale: format!("brain-error fallback: {e}"),
-                }
+                (
+                    EngineerLifecycleDecision::ContinueSkipping {
+                        rationale: format!("brain-error fallback: {e}"),
+                    },
+                    true,
+                )
             }
         };
+        push_brain_judgment(BrainJudgmentRecord::from_engineer_lifecycle(
+            goal_id,
+            &decision,
+            fallback_used,
+        ));
         return apply_lifecycle_decision(action, state, goal_id, &live, decision);
     }
 
