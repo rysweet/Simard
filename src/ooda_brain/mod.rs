@@ -18,10 +18,13 @@ use std::path::PathBuf;
 mod context;
 mod decide;
 mod fallback;
+mod orient;
 mod rustyclawd;
 
 #[cfg(test)]
 mod decide_tests;
+#[cfg(test)]
+mod orient_tests;
 #[cfg(test)]
 mod tests;
 
@@ -31,6 +34,10 @@ pub use decide::{
     RustyClawdDecideBrain, build_rustyclawd_decide_brain,
 };
 pub use fallback::DeterministicFallbackBrain;
+pub use orient::{
+    DeterministicFallbackOrientBrain, FAILURE_PENALTY_PER_CONSECUTIVE, OodaOrientBrain,
+    OrientContext, OrientJudgment, RustyClawdOrientBrain, build_rustyclawd_orient_brain,
+};
 pub use rustyclawd::{LlmSubmitter, RustyClawdBrain, SessionLlmSubmitter, build_rustyclawd_brain};
 
 // ---------------------------------------------------------------------------
