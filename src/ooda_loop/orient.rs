@@ -4,7 +4,10 @@ use std::collections::HashMap;
 
 use crate::error::SimardResult;
 use crate::goal_curation::{GoalBoard, GoalProgress};
-use crate::ooda_brain::{DeterministicFallbackOrientBrain, OodaOrientBrain, OrientContext};
+use crate::ooda_brain::{
+    BrainJudgmentRecord, DeterministicFallbackOrientBrain, OodaOrientBrain, OrientContext,
+    push_brain_judgment,
+};
 
 use super::{Observation, Priority};
 
@@ -92,11 +95,17 @@ pub fn orient_with_brain(
                     base_reason: reason.clone(),
                     failure_count: count,
                 };
-                let judgment = brain
-                    .judge_orientation(&ctx)
-                    .ok()
-                    .filter(|j| j.validate(ctx.base_urgency).is_ok())
-                    .unwrap_or_else(|| DeterministicFallbackOrientBrain::compute(&ctx));
+                let (judgment, fallback_used) = match brain.judge_orientation(&ctx) {
+                    Ok(j) if j.validate(ctx.base_urgency).is_ok() => (j, false),
+                    _ => (DeterministicFallbackOrientBrain::compute(&ctx), true),
+                };
+                push_brain_judgment(BrainJudgmentRecord::from_orient(
+                    &g.id,
+                    ctx.base_urgency,
+                    count,
+                    &judgment,
+                    fallback_used,
+                ));
                 reason = format!("{reason}; {}", judgment.rationale);
                 urgency = judgment.adjusted_urgency;
             }

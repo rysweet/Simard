@@ -30,6 +30,10 @@ pub fn run_ooda_cycle(
     bridges: &mut OodaBridges,
     config: &OodaConfig,
 ) -> SimardResult<CycleReport> {
+    // Reset per-cycle brain-judgment accumulator so a previous cycle (or a
+    // panicking test) cannot leak entries into this one.
+    crate::ooda_brain::clear_brain_judgments();
+
     // Budget enforcement: refuse to run if daily or weekly spend is exceeded.
     if let Ok(daily) = crate::cost_tracking::daily_summary()
         && daily.total_cost_usd >= config.daily_budget_usd
@@ -377,12 +381,14 @@ pub fn run_ooda_cycle(
     }
 
     state.cycle_count += 1;
+    let brain_judgments = crate::ooda_brain::take_brain_judgments();
     Ok(CycleReport {
         cycle_number: state.cycle_count,
         observation,
         priorities,
         planned_actions,
         outcomes,
+        brain_judgments,
     })
 }
 

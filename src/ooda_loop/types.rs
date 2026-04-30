@@ -195,6 +195,11 @@ pub struct CycleReport {
     pub priorities: Vec<Priority>,
     pub planned_actions: Vec<PlannedAction>,
     pub outcomes: Vec<ActionOutcome>,
+    /// Per-cycle forensic trace of prompt-driven OODA brain judgments
+    /// (act / decide / orient). Empty when no brain calls fired this cycle
+    /// or when reading older reports written before this field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub brain_judgments: Vec<crate::ooda_brain::BrainJudgmentRecord>,
 }
 
 /// Configuration for the OODA loop.

@@ -18,6 +18,7 @@ use std::path::PathBuf;
 mod context;
 mod decide;
 mod fallback;
+mod judgment_record;
 mod orient;
 mod rustyclawd;
 
@@ -34,6 +35,10 @@ pub use decide::{
     RustyClawdDecideBrain, build_rustyclawd_decide_brain,
 };
 pub use fallback::DeterministicFallbackBrain;
+pub use judgment_record::{
+    BrainJudgmentRecord, BrainPhase, clear as clear_brain_judgments, push as push_brain_judgment,
+    take_all as take_brain_judgments,
+};
 pub use orient::{
     DeterministicFallbackOrientBrain, FAILURE_PENALTY_PER_CONSECUTIVE, OodaOrientBrain,
     OrientContext, OrientJudgment, RustyClawdOrientBrain, build_rustyclawd_orient_brain,

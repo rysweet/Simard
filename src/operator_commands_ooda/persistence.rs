@@ -74,6 +74,16 @@ pub(super) fn persist_cycle_report(
                 }
             entry
         }).collect::<Vec<_>>(),
+        "brain_judgments": report.brain_judgments.iter().map(|j| {
+            json!({
+                "phase": j.phase,
+                "context_summary": j.context_summary,
+                "decision": j.decision,
+                "rationale": j.rationale,
+                "confidence": j.confidence,
+                "fallback": j.fallback,
+            })
+        }).collect::<Vec<_>>(),
     });
 
     let _ = std::fs::write(
@@ -228,6 +238,7 @@ mod tests {
                 success: true,
                 detail: "done".to_string(),
             }],
+            brain_judgments: Vec::new(),
         }
     }
 
@@ -366,5 +377,55 @@ mod tests {
         assert!(content.contains("\"spawn_engineer\""));
         assert!(content.contains("engineer-g1-9"));
         assert!(content.contains("\"status\": \"live\""));
+    }
+
+    #[test]
+    fn persist_cycle_report_serialises_brain_judgments_when_present() {
+        use crate::ooda_brain::{BrainJudgmentRecord, BrainPhase};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut report = minimal_report(11);
+        report.brain_judgments.push(BrainJudgmentRecord {
+            phase: BrainPhase::Decide,
+            context_summary: "goal_id=ship-v1 urgency=0.900".to_string(),
+            decision: "advance_goal".to_string(),
+            rationale: "high priority".to_string(),
+            confidence: 1.0,
+            fallback: false,
+        });
+        report.brain_judgments.push(BrainJudgmentRecord {
+            phase: BrainPhase::Orient,
+            context_summary: "goal_id=g1 base_urgency=0.600 failures=2".to_string(),
+            decision: "demote".to_string(),
+            rationale: "two failures".to_string(),
+            confidence: 0.8,
+            fallback: true,
+        });
+        persist_cycle_report(dir.path(), &report);
+        let content =
+            std::fs::read_to_string(dir.path().join("cycle_reports/cycle_11.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let arr = parsed["brain_judgments"].as_array().expect("array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["phase"], "decide");
+        assert_eq!(arr[0]["decision"], "advance_goal");
+        assert_eq!(arr[0]["fallback"], false);
+        assert_eq!(arr[1]["phase"], "orient");
+        assert_eq!(arr[1]["fallback"], true);
+    }
+
+    #[test]
+    fn persist_cycle_report_emits_empty_brain_judgments_array_when_none() {
+        let dir = tempfile::tempdir().unwrap();
+        // minimal_report(...) has brain_judgments = vec![] by default.
+        let report = minimal_report(12);
+        persist_cycle_report(dir.path(), &report);
+        let content =
+            std::fs::read_to_string(dir.path().join("cycle_reports/cycle_12.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        // Persistence writer always emits the field as [] for forensic
+        // consistency on the dashboard side, even though the Rust struct's
+        // `Vec` skips serialisation when empty.
+        assert_eq!(parsed["brain_judgments"], serde_json::json!([]));
     }
 }

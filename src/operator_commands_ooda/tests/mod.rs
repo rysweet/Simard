@@ -29,6 +29,7 @@ pub(crate) fn make_test_report(cycle_number: u32) -> CycleReport {
         priorities: vec![],
         planned_actions: vec![],
         outcomes: vec![],
+        brain_judgments: vec![],
     }
 }
 
@@ -88,5 +89,6 @@ pub(crate) fn make_report_with_goals_and_outcomes() -> CycleReport {
                 detail: "Failed".to_string(),
             },
         ],
+        brain_judgments: vec![],
     }
 }

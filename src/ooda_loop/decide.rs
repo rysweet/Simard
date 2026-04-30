@@ -9,7 +9,10 @@
 //! invoke [`decide_with_brain`] directly.
 
 use crate::error::SimardResult;
-use crate::ooda_brain::{DecideContext, DeterministicFallbackDecideBrain, OodaDecideBrain};
+use crate::ooda_brain::{
+    BrainJudgmentRecord, DecideContext, DeterministicFallbackDecideBrain, OodaDecideBrain,
+    push_brain_judgment,
+};
 
 use super::{OodaConfig, PlannedAction, Priority};
 
@@ -48,9 +51,27 @@ pub fn decide_with_brain(
             urgency: priority.urgency,
             reason: priority.reason.clone(),
         };
-        let judgment = brain
-            .judge_decision(&ctx)
-            .or_else(|_| fallback.judge_decision(&ctx))?;
+        let judgment = match brain.judge_decision(&ctx) {
+            Ok(j) => {
+                push_brain_judgment(BrainJudgmentRecord::from_decide(
+                    &priority.goal_id,
+                    priority.urgency,
+                    &j,
+                    false,
+                ));
+                j
+            }
+            Err(_) => {
+                let j = fallback.judge_decision(&ctx)?;
+                push_brain_judgment(BrainJudgmentRecord::from_decide(
+                    &priority.goal_id,
+                    priority.urgency,
+                    &j,
+                    true,
+                ));
+                j
+            }
+        };
         actions.push(PlannedAction {
             kind: judgment.action_kind(),
             goal_id: if priority.goal_id.starts_with("__") {
