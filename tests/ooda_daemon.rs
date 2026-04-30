@@ -93,6 +93,8 @@ fn test_bridges() -> OodaBridges {
         gym: mock_gym(),
         session: None,
         brain: std::sync::Arc::new(simard::ooda_brain::DeterministicFallbackBrain),
+        decide_brain: None,
+        orient_brain: None,
     }
 }
 

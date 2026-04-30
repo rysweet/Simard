@@ -26,9 +26,9 @@ mod tests_types;
 // Re-export all public items so `crate::ooda_loop::X` still works.
 pub use bridge_factory::{bridges_from_state_root, connect_memory};
 pub use curate::{check_meeting_handoffs, promote_from_backlog};
-pub use decide::decide;
+pub use decide::{decide, decide_with_brain};
 pub use observe::{gather_environment, observe};
-pub use orient::orient;
+pub use orient::{orient, orient_with_brain};
 pub use review::review_outcomes;
 pub use summary::summarize_cycle_report;
 pub use types::{
