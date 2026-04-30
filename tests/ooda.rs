@@ -78,6 +78,8 @@ fn test_bridges() -> OodaBridges {
         gym: GymBridge::new(Box::new(mock_gym_transport())),
         session: None,
         brain: std::sync::Arc::new(simard::ooda_brain::DeterministicFallbackBrain),
+        decide_brain: None,
+        orient_brain: None,
     }
 }
 
@@ -240,6 +242,8 @@ fn feral_gym_bridge_down() {
         gym: GymBridge::new(Box::new(failing_gym)),
         session: None,
         brain: std::sync::Arc::new(simard::ooda_brain::DeterministicFallbackBrain),
+        decide_brain: None,
+        orient_brain: None,
     };
     let mut state = OodaState::new(board_with_goals());
     let report = run_ooda_cycle(&mut state, &mut bridges, &OodaConfig::default()).unwrap();

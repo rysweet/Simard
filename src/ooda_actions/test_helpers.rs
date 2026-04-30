@@ -140,6 +140,8 @@ pub(crate) fn test_bridges() -> OodaBridges {
         gym: mock_gym(),
         session: None,
         brain: std::sync::Arc::new(crate::ooda_brain::DeterministicFallbackBrain),
+        decide_brain: None,
+        orient_brain: None,
     }
 }
 
@@ -172,5 +174,7 @@ pub(crate) fn bridges_with_session(session: MockSession) -> OodaBridges {
         gym: mock_gym(),
         session: Some(Box::new(session)),
         brain: std::sync::Arc::new(crate::ooda_brain::DeterministicFallbackBrain),
+        decide_brain: None,
+        orient_brain: None,
     }
 }

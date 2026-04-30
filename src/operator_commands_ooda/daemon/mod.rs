@@ -19,6 +19,8 @@ use crate::operator_commands_ooda::persistence::{persist_cycle_report, persist_c
 mod helpers;
 pub use helpers::*;
 
+mod brains;
+
 mod config;
 pub use config::DaemonDashboardConfig;
 
@@ -134,25 +136,9 @@ pub fn run_ooda_daemon(
         "[simard] OODA daemon: LLM session opened for autonomous work",
     );
 
-    let brain: std::sync::Arc<dyn crate::ooda_brain::OodaBrain> =
-        match crate::ooda_brain::build_rustyclawd_brain() {
-            Ok(b) => {
-                daemon_log(
-                    &state_root,
-                    "[simard] OODA daemon: brain = RustyClawdBrain (prompt-driven)",
-                );
-                b.into()
-            }
-            Err(e) => {
-                daemon_log(
-                    &state_root,
-                    &format!(
-                        "[simard] OODA daemon: brain = DeterministicFallbackBrain (rustyclawd unavailable: {e})"
-                    ),
-                );
-                std::sync::Arc::new(crate::ooda_brain::DeterministicFallbackBrain)
-            }
-        };
+    let brain = brains::build_act_brain(&state_root);
+    let decide_brain = brains::build_decide_brain(&state_root);
+    let orient_brain = brains::build_orient_brain(&state_root);
 
     let mut bridges = OodaBridges {
         memory,
@@ -160,6 +146,8 @@ pub fn run_ooda_daemon(
         gym,
         session: Some(session),
         brain,
+        decide_brain,
+        orient_brain,
     };
 
     let board = load_goal_board(&*bridges.memory).unwrap_or_default();

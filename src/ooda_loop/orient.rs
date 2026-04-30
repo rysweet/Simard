@@ -161,3 +161,67 @@ pub fn orient_with_brain(
     });
     Ok(priorities)
 }
+
+#[cfg(test)]
+mod wire_in_tests {
+    use super::*;
+    use crate::goal_curation::{ActiveGoal, GoalProgress};
+    use crate::memory_cognitive::CognitiveStatistics;
+    use crate::ooda_brain::OrientJudgment;
+    use crate::ooda_loop::EnvironmentSnapshot;
+
+    /// Wiring test (companion to PR completing #1469 + #1471 wire-up):
+    /// when an LLM-backed orient brain is provided, the per-cycle
+    /// `BrainJudgmentRecord.rationale` for the orient phase must be the
+    /// brain's own rationale — NOT the deterministic fallback marker. This
+    /// mirrors the analogous test for decide-brain wiring.
+    #[test]
+    fn orient_with_brain_records_brain_rationale_not_fallback_marker() {
+        struct LlmStubOrientBrain;
+        impl OodaOrientBrain for LlmStubOrientBrain {
+            fn judge_orientation(&self, ctx: &OrientContext) -> SimardResult<OrientJudgment> {
+                Ok(OrientJudgment {
+                    adjusted_urgency: (ctx.base_urgency - 0.05).max(0.0),
+                    rationale: "llm-orient-brain: light demotion".to_string(),
+                    confidence: 0.9,
+                    demotion_applied: 0.05,
+                })
+            }
+        }
+
+        let mut board = GoalBoard::default();
+        board.active.push(ActiveGoal {
+            id: "ship-v1".to_string(),
+            description: "ship v1".to_string(),
+            priority: 1,
+            status: GoalProgress::NotStarted,
+            assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
+        });
+        let obs = Observation {
+            goal_statuses: Vec::new(),
+            gym_health: None,
+            memory_stats: CognitiveStatistics::default(),
+            pending_improvements: Vec::new(),
+            environment: EnvironmentSnapshot::default(),
+            eval_watchdog: None,
+        };
+        let mut failures = HashMap::new();
+        failures.insert("ship-v1".to_string(), 1);
+
+        let records = crate::ooda_brain::with_brain_judgment_scope(|| {
+            crate::ooda_brain::clear_brain_judgments();
+            orient_with_brain(&obs, &board, &failures, &LlmStubOrientBrain).unwrap();
+            crate::ooda_brain::take_brain_judgments()
+        });
+        assert_eq!(records.len(), 1);
+        assert!(
+            !records[0].rationale.contains("fallback-brain"),
+            "expected LLM-orient-brain rationale, got fallback marker: {}",
+            records[0].rationale,
+        );
+        assert_eq!(records[0].rationale, "llm-orient-brain: light demotion");
+        assert!(!records[0].fallback);
+    }
+}

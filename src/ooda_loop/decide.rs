@@ -246,27 +246,41 @@ mod tests {
     }
 
     #[test]
-    fn decide_with_brain_falls_back_on_brain_error() {
-        struct AlwaysErrBrain;
-        impl OodaDecideBrain for AlwaysErrBrain {
+    fn decide_with_brain_records_brain_rationale_not_fallback_marker() {
+        // Wiring test: when an LLM-backed brain is provided, the rationale
+        // recorded on the per-cycle BrainJudgmentRecord must be the brain's
+        // own rationale, NOT the deterministic-fallback's
+        // `"fallback-brain: prefix-routed"` marker. This proves the
+        // daemon's #1469 wire-up actually fires the LLM brain.
+        struct LlmStubBrain;
+        impl OodaDecideBrain for LlmStubBrain {
             fn judge_decision(
                 &self,
                 _ctx: &DecideContext,
             ) -> crate::error::SimardResult<DecideJudgment> {
-                Err(crate::error::SimardError::AdapterInvocationFailed {
-                    base_type: "test".to_string(),
-                    reason: "boom".to_string(),
+                Ok(DecideJudgment::AdvanceGoal {
+                    rationale: "llm-brain: high-leverage progress".to_string(),
                 })
             }
         }
         let priorities = vec![Priority {
-            goal_id: "__memory__".to_string(),
-            urgency: 0.5,
-            reason: "fallback expected".to_string(),
+            goal_id: "ship-v1".to_string(),
+            urgency: 0.9,
+            reason: "test".to_string(),
         }];
         let config = OodaConfig::default();
-        let actions = decide_with_brain(&priorities, &config, &AlwaysErrBrain).unwrap();
-        // Fallback maps __memory__ → ConsolidateMemory, preserving pre-#1458 behaviour.
-        assert_eq!(actions[0].kind, ActionKind::ConsolidateMemory);
+        let records = crate::ooda_brain::with_brain_judgment_scope(|| {
+            crate::ooda_brain::clear_brain_judgments();
+            decide_with_brain(&priorities, &config, &LlmStubBrain).unwrap();
+            crate::ooda_brain::take_brain_judgments()
+        });
+        assert_eq!(records.len(), 1);
+        assert!(
+            !records[0].rationale.contains("fallback-brain"),
+            "expected LLM-brain rationale, got fallback marker: {}",
+            records[0].rationale,
+        );
+        assert_eq!(records[0].rationale, "llm-brain: high-leverage progress");
+        assert!(!records[0].fallback);
     }
 }

@@ -169,6 +169,8 @@ fn ooda_cycle_runs_with_consolidation_wired_in() {
         ))),
         session: None,
         brain: std::sync::Arc::new(simard::ooda_brain::DeterministicFallbackBrain),
+        decide_brain: None,
+        orient_brain: None,
     };
 
     let mut board = GoalBoard::new();
@@ -310,6 +312,8 @@ fn multiple_ooda_cycles_accumulate_consolidation() {
         ))),
         session: None,
         brain: std::sync::Arc::new(simard::ooda_brain::DeterministicFallbackBrain),
+        decide_brain: None,
+        orient_brain: None,
     };
 
     let mut board = GoalBoard::new();

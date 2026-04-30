@@ -312,4 +312,12 @@ pub struct OodaBridges {
     /// engineer-lifecycle skip branch consults it; future PRs migrate
     /// observe/orient/decide/curate/review.
     pub brain: std::sync::Arc<dyn crate::ooda_brain::OodaBrain>,
+    /// Optional LLM-backed Decide brain (PR #1469). When `Some`, the
+    /// cycle's Decide phase routes through it; otherwise it uses the
+    /// `DeterministicFallbackDecideBrain` floor.
+    pub decide_brain: Option<std::sync::Arc<dyn crate::ooda_brain::OodaDecideBrain>>,
+    /// Optional LLM-backed Orient brain (PR #1471). When `Some`, the
+    /// cycle's Orient phase routes through it; otherwise it uses the
+    /// `DeterministicFallbackOrientBrain` floor.
+    pub orient_brain: Option<std::sync::Arc<dyn crate::ooda_brain::OodaOrientBrain>>,
 }

@@ -13,7 +13,8 @@ use crate::session::SessionId;
 
 use super::types::*;
 use super::{
-    act, check_meeting_handoffs, decide, observe, orient, promote_from_backlog, review_outcomes,
+    act, check_meeting_handoffs, decide, decide_with_brain, observe, orient, orient_with_brain,
+    promote_from_backlog, review_outcomes,
 };
 
 /// Run one complete OODA cycle: Observe -> Orient -> Decide -> Act -> Curate.
@@ -160,11 +161,19 @@ fn run_ooda_cycle_inner(
     // --- Orient ---
     state.current_phase = OodaPhase::Orient;
     eprintln!("[simard] OODA cycle: entering Orient phase");
-    let priorities = orient(
-        &observation,
-        &state.active_goals,
-        &state.goal_failure_counts,
-    )?;
+    let priorities = match bridges.orient_brain.as_ref() {
+        Some(brain) => orient_with_brain(
+            &observation,
+            &state.active_goals,
+            &state.goal_failure_counts,
+            brain.as_ref(),
+        )?,
+        None => orient(
+            &observation,
+            &state.active_goals,
+            &state.goal_failure_counts,
+        )?,
+    };
     eprintln!(
         "[simard] OODA cycle: Orient complete ({} priorities)",
         priorities.len()
@@ -182,7 +191,10 @@ fn run_ooda_cycle_inner(
     // --- Decide ---
     state.current_phase = OodaPhase::Decide;
     eprintln!("[simard] OODA cycle: entering Decide phase");
-    let planned_actions = decide(&priorities, config)?;
+    let planned_actions = match bridges.decide_brain.as_ref() {
+        Some(brain) => decide_with_brain(&priorities, config, brain.as_ref())?,
+        None => decide(&priorities, config)?,
+    };
     eprintln!(
         "[simard] OODA cycle: Decide complete ({} actions)",
         planned_actions.len()
