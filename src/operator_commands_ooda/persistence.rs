@@ -74,29 +74,25 @@ pub(super) fn persist_cycle_report(
                 }
             entry
         }).collect::<Vec<_>>(),
+        // BrainJudgmentRecord is a flat data carrier whose external JSON
+        // shape is governed entirely by its `Serialize` derive (including
+        // `#[serde(skip_serializing_if = "String::is_empty")]` on
+        // `prompt_version`). Defer to `serde_json::to_value` so the auto-
+        // derive is the single source of truth — adding a new field to
+        // the struct then forgetting to mirror it here is exactly the
+        // divergence-class bug PR #1480 had to repair.
+        //
+        // The other sub-structs (observation, outcomes, …) are NOT pure
+        // 1:1 mappings — they intentionally project / summarise (counts
+        // vs full lists, derived `summary`, `kind.to_string()`-style
+        // labels, the `spawn_engineer` enrichment block) and so stay
+        // hand-rolled by design.
+        //
+        // `BrainJudgmentRecord` only carries primitives + a small enum
+        // and so cannot fail to serialise; the `unwrap_or` keeps the
+        // best-effort write contract of this function.
         "brain_judgments": report.brain_judgments.iter().map(|j| {
-            let mut entry = json!({
-                "phase": j.phase,
-                "context_summary": j.context_summary,
-                "decision": j.decision,
-                "rationale": j.rationale,
-                "confidence": j.confidence,
-                "fallback": j.fallback,
-            });
-            // PR #1476 added `prompt_version` to BrainJudgmentRecord but the
-            // manual json! mapping here was missed, silently dropping the
-            // field on every persisted cycle report. Restore it (and skip
-            // when empty so deterministic-fallback judgments — and pre-#1476
-            // call sites — stay clean).
-            if !j.prompt_version.is_empty()
-                && let Some(map) = entry.as_object_mut()
-            {
-                map.insert(
-                    "prompt_version".to_string(),
-                    serde_json::Value::String(j.prompt_version.clone()),
-                );
-            }
-            entry
+            serde_json::to_value(j).unwrap_or(serde_json::Value::Null)
         }).collect::<Vec<_>>(),
     });
 

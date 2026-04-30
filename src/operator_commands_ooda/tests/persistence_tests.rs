@@ -131,3 +131,75 @@ fn persist_cycle_report_multiple_cycles_coexist() {
     }
     let _ = std::fs::remove_dir_all(&scratch);
 }
+
+#[test]
+fn persist_cycle_report_uses_serde_derive_for_all_fields() {
+    // Regression for the divergence-class bug fixed in PR #1480: the
+    // hand-rolled brain_judgments mapping in `persist_cycle_report`
+    // silently dropped any field added to `BrainJudgmentRecord` (e.g.
+    // PR #1476's `prompt_version`). Persisting via
+    // `serde_json::to_value(&record)` makes the struct's `Serialize`
+    // derive the single source of truth — assert that here so any future
+    // field addition is caught by `cargo test` instead of going missing
+    // from cycle reports for days.
+    use crate::ooda_brain::{BrainJudgmentRecord, BrainPhase};
+
+    let record = BrainJudgmentRecord {
+        phase: BrainPhase::Decide,
+        context_summary: "goal_id=ship-v1 urgency=0.900".to_string(),
+        decision: "advance_goal".to_string(),
+        rationale: "high priority".to_string(),
+        confidence: 0.95,
+        fallback: false,
+        prompt_version: "abc123def456".to_string(),
+    };
+
+    let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-scratch")
+        .join(format!("ooda-serde-derive-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+
+    let mut report = make_test_report(77);
+    report.brain_judgments.push(record.clone());
+    persist_cycle_report(&scratch, &report);
+
+    let content =
+        std::fs::read_to_string(scratch.join("cycle_reports").join("cycle_77.json")).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let persisted = parsed["brain_judgments"]
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_object())
+        .expect("brain_judgments[0] must be a JSON object");
+
+    // (a) Round-trip: every populated field of the input record appears in
+    //     the persisted JSON with its original value.
+    assert_eq!(persisted["phase"], "decide");
+    assert_eq!(persisted["context_summary"], record.context_summary);
+    assert_eq!(persisted["decision"], record.decision);
+    assert_eq!(persisted["rationale"], record.rationale);
+    assert_eq!(persisted["confidence"], record.confidence);
+    assert_eq!(persisted["fallback"], record.fallback);
+    assert_eq!(persisted["prompt_version"], record.prompt_version);
+
+    // (b) Key-set equality with the struct's own Serialize derive: if
+    //     anyone adds a new field to BrainJudgmentRecord, this assertion
+    //     fires immediately instead of letting the field be silently
+    //     dropped from cycle reports (cf. PR #1480).
+    let expected: std::collections::BTreeSet<String> = serde_json::to_value(&record)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    let actual: std::collections::BTreeSet<String> = persisted.keys().cloned().collect();
+    assert_eq!(
+        actual, expected,
+        "persisted brain_judgments[0] keys must match the struct's Serialize derive output \
+         (divergence-class bug fixed in PR #1480 — keep auto-derive as source of truth)"
+    );
+
+    let _ = std::fs::remove_dir_all(&scratch);
+}
