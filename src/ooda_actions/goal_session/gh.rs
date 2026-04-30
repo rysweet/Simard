@@ -67,6 +67,18 @@ pub(super) fn dispatch_gh_issue_create(
     body: &str,
     labels: &[String],
 ) -> Result<String, String> {
+    // Pre-flight makework guard: refuse to file issues whose titles match
+    // the bare-slug / placeholder patterns the LLM occasionally emits
+    // (e.g. literal `"test-only"` with body `"body"`). Without this gate,
+    // the dispatch path bypasses the upstream `action_is_valid` check and
+    // we accumulate junk issues — observed: 36 open `"test-only"` issues
+    // had to be cleaned up before this fix landed.
+    if super::is_makework_title(title) {
+        return Err(format!(
+            "refusing to file makework issue: title \"{title}\" matches placeholder/no-op pattern"
+        ));
+    }
+
     // Pre-flight dedup: refuse to file a second open issue with the same
     // title. The OODA daemon repeatedly proposed identical titles
     // (#1178-1183 were six dupes of #1177; #1247-1250 were four dupes of
@@ -151,4 +163,40 @@ pub(super) fn dispatch_gh_issue_close(
 pub(super) fn dispatch_gh_pr_comment(repo: &str, pr: u64, body: &str) -> Result<String, String> {
     let pr_str = pr.to_string();
     run_gh(&["pr", "comment", &pr_str, "--repo", repo, "--body", body])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dispatch_gh_issue_create_rejects_makework_title_before_spawn() {
+        // Regression: 36 open `"test-only"` issues with body `"body"` were
+        // filed before this guard existed. The guard short-circuits before
+        // any `gh` CLI invocation, so we can assert on the error message
+        // without networking or a `gh` binary on PATH.
+        let cases = ["test-only", "test-only ", "monitor-pr-1234", "verify"];
+        for title in cases {
+            let err = dispatch_gh_issue_create("rysweet/Simard", title, "body", &[])
+                .expect_err(&format!("expected makework rejection for {title:?}"));
+            assert!(
+                err.contains("makework"),
+                "title {title:?} should be rejected as makework, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_gh_issue_create_passes_real_titles_through_makework_guard() {
+        // Real titles should pass the makework gate (they may still fail
+        // later in dedup or `gh` invocation, but NOT with a "makework" error).
+        let title = "fix(ooda): persist_cycle_report dropped prompt_version";
+        let result = dispatch_gh_issue_create("rysweet/Simard", title, "body", &[]);
+        if let Err(e) = result {
+            assert!(
+                !e.contains("makework"),
+                "real title {title:?} should not be flagged as makework, got: {e}"
+            );
+        }
+    }
 }
