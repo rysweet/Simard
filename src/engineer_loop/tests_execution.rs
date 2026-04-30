@@ -391,8 +391,8 @@ fn execute_read_only_scan_propagates_zero_exit() {
 #[test]
 fn run_command_allow_nonzero_returns_status_without_error() {
     let dir = tempfile::tempdir().unwrap();
-    let output = run_command_allow_nonzero(dir.path(), &["false"])
-        .expect("non-zero exit must not be Err");
+    let output =
+        run_command_allow_nonzero(dir.path(), &["false"]).expect("non-zero exit must not be Err");
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
 }
