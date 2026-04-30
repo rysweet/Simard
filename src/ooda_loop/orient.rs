@@ -4,25 +4,45 @@ use std::collections::HashMap;
 
 use crate::error::SimardResult;
 use crate::goal_curation::{GoalBoard, GoalProgress};
+use crate::ooda_brain::{DeterministicFallbackOrientBrain, OodaOrientBrain, OrientContext};
 
 use super::{Observation, Priority};
 
-/// Urgency penalty per consecutive failure on a goal. Five failures in a
-/// row drives any goal's urgency to 0 (deprioritised below everything else).
-const FAILURE_PENALTY_PER_CONSECUTIVE: f64 = 0.2;
-
 /// Orient: rank goals by urgency, informed by environment context.
 ///
-/// Base urgency: Blocked > not-started > in-progress > completed.
-/// Environment signals (dirty working tree, open issues mentioning a goal)
-/// can boost a goal's urgency so the OODA loop prioritises actionable work.
-/// Goals with consecutive failures are demoted by
-/// `FAILURE_PENALTY_PER_CONSECUTIVE * count` (clamped to ≥0) so the daemon
-/// stops burning budget retrying the same broken target.
+/// The per-failure penalty constant lives on the deterministic-fallback
+/// brain ([`crate::ooda_brain::FAILURE_PENALTY_PER_CONSECUTIVE`]) so prompt
+/// + code stay in sync.
+///
+/// Default entrypoint: wires in [`DeterministicFallbackOrientBrain`] for
+/// the failure-penalty demotion judgment so the daemon never depends on
+/// LLM availability for Orient. Callers with an LLM-backed brain can use
+/// [`orient_with_brain`].
 pub fn orient(
     observation: &Observation,
     goals: &GoalBoard,
     failure_counts: &HashMap<String, u32>,
+) -> SimardResult<Vec<Priority>> {
+    let brain = DeterministicFallbackOrientBrain;
+    orient_with_brain(observation, goals, failure_counts, &brain)
+}
+
+/// Orient using a caller-supplied brain for the failure-penalty demotion
+/// judgment. On any brain error or invalid judgment for an individual goal,
+/// falls back to the deterministic floor for that goal so a transient
+/// adapter failure cannot stall the cycle or invert priorities.
+///
+/// Base urgency: Blocked > not-started > in-progress > completed.
+/// Environment signals (dirty working tree, open issues mentioning a goal)
+/// can boost a goal's urgency so the OODA loop prioritises actionable work.
+/// Goals with consecutive failures are demoted by the brain (or by the
+/// deterministic floor `FAILURE_PENALTY_PER_CONSECUTIVE * count`, clamped to
+/// ≥0) so the daemon stops burning budget retrying the same broken target.
+pub fn orient_with_brain(
+    observation: &Observation,
+    goals: &GoalBoard,
+    failure_counts: &HashMap<String, u32>,
+    brain: &dyn OodaOrientBrain,
 ) -> SimardResult<Vec<Priority>> {
     let env = &observation.environment;
     let has_dirty_tree = !env.git_status.is_empty();
@@ -58,16 +78,27 @@ pub fn orient(
                 reason = format!("{reason}; dirty working tree");
             }
 
-            // Demote chronically failing goals.
+            // Demote chronically failing goals — prompt-driven judgment via
+            // the OodaOrientBrain (PR #1469's third-of-three OODA brain).
+            // Per-call fallback to the deterministic floor on any brain
+            // error or invalid judgment so the cycle never stalls and the
+            // brain can never escalate a failing goal above its base.
             if let Some(&count) = failure_counts.get(&g.id)
                 && count > 0
             {
-                let penalty = FAILURE_PENALTY_PER_CONSECUTIVE * count as f64;
-                let demoted = (urgency - penalty).max(0.0);
-                reason = format!(
-                    "{reason}; {count} consecutive failure(s) → urgency {urgency:.2} − {penalty:.2}"
-                );
-                urgency = demoted;
+                let ctx = OrientContext {
+                    goal_id: g.id.clone(),
+                    base_urgency: urgency,
+                    base_reason: reason.clone(),
+                    failure_count: count,
+                };
+                let judgment = brain
+                    .judge_orientation(&ctx)
+                    .ok()
+                    .filter(|j| j.validate(ctx.base_urgency).is_ok())
+                    .unwrap_or_else(|| DeterministicFallbackOrientBrain::compute(&ctx));
+                reason = format!("{reason}; {}", judgment.rationale);
+                urgency = judgment.adjusted_urgency;
             }
 
             Priority {
