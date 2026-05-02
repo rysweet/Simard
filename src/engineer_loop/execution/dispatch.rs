@@ -10,7 +10,7 @@ use crate::engineer_loop::types::{
     EngineerActionKind, ExecutedEngineerAction, SelectedEngineerAction, validate_repo_relative_path,
 };
 
-use super::{run_command, sanitize_issue_create_args};
+use super::{run_command, run_command_allow_nonzero, sanitize_issue_create_args};
 
 pub fn execute_engineer_action(
     repo_root: &Path,
@@ -19,7 +19,17 @@ pub fn execute_engineer_action(
     match selected.kind.clone() {
         EngineerActionKind::ReadOnlyScan => {
             let argv = selected.argv.iter().map(String::as_str).collect::<Vec<_>>();
-            let output = run_command(repo_root, &argv)?;
+            // ReadOnlyScan tools (rg, grep, git ls-files, …) signal information
+            // through their exit code. ripgrep, in particular, exits 1 when
+            // there are no matches and 2 when no files were searched (e.g. a
+            // `--glob '!target'` filter excluded everything in the cwd). The
+            // brain wants to *see* those signals via stdout/stderr/exit_code
+            // and decide what to do next; aborting the entire engineer loop
+            // on a benign "no matches" was the failure mode that kept the
+            // `improve-cognitive-memory-persistence` worktrees stuck for
+            // dozens of cycles. So we capture the output verbatim and leave
+            // interpretation to the brain.
+            let output = run_command_allow_nonzero(repo_root, &argv)?;
             Ok(ExecutedEngineerAction {
                 selected,
                 exit_code: output.status.code().unwrap_or_default(),

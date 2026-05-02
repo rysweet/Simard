@@ -10,11 +10,11 @@ Replace the sections below with information about your project.
 
 ---
 
-## Project: issue-1015-ws-2-subagent-tmux-tracking-on-fresh-worktree-off
+## Project: Simard
 
 ## Overview
 
-An autonomous engineer who drives and curates agentic coding systems. Named after [Suzanne Simard](https://en.wikipedia.org/wiki/Suzanne_Simard), the scientist who discovered how trees communicate through underground fungal networks.
+A terminal-native engineering agent who drives and curates agentic coding systems. Named after [Suzanne Simard](https://en.wikipedia.org/wiki/Suzanne_Simard), the scientist who discovered how trees communicate through underground fungal networks.
 
 ## Architecture
 

@@ -81,7 +81,41 @@ pub(crate) fn timeout_for_command(argv: &[&str]) -> Duration {
     }
 }
 
+/// Run a command exactly like [`run_command`] but **do not** treat a non-zero
+/// exit status as a fatal `ActionExecutionFailed` error.
+///
+/// This is the right primitive for read-only scan tools (`rg`, `grep`, …)
+/// where the command's exit code is signal the brain needs to consume rather
+/// than a fatal failure. Concretely, ripgrep documents three exit codes:
+///
+/// - `0` — at least one match was found.
+/// - `1` — the search ran cleanly but found no matches.
+/// - `2` — the search produced a usage warning *or* zero files were searched
+///   (for example when a `--glob '!target'` filter excluded everything in the
+///   current cwd).
+///
+/// Aborting the engineer loop on exit `1` or `2` means every empty search
+/// kills the loop before the brain can see the (perfectly informative)
+/// stdout/stderr — see the recurring failures of the
+/// `improve-cognitive-memory-persistence` engineer worktrees in
+/// `~/.simard/agent_logs/`.
+///
+/// Setup-time failures (empty argv, invalid argv segments, spawn failure,
+/// timeout) are still surfaced as errors. Only the *exit status* is allowed
+/// to be non-zero here.
+pub(crate) fn run_command_allow_nonzero(cwd: &Path, argv: &[&str]) -> SimardResult<CommandOutput> {
+    run_command_inner(cwd, argv, /* allow_nonzero_exit = */ true)
+}
+
 pub(crate) fn run_command(cwd: &Path, argv: &[&str]) -> SimardResult<CommandOutput> {
+    run_command_inner(cwd, argv, /* allow_nonzero_exit = */ false)
+}
+
+fn run_command_inner(
+    cwd: &Path,
+    argv: &[&str],
+    allow_nonzero_exit: bool,
+) -> SimardResult<CommandOutput> {
     let (program, args) = argv
         .split_first()
         .ok_or_else(|| SimardError::ActionExecutionFailed {
@@ -145,7 +179,7 @@ pub(crate) fn run_command(cwd: &Path, argv: &[&str]) -> SimardResult<CommandOutp
             reason: format!("failed to collect child output: {error}"),
         })?;
 
-    if !output.status.success() {
+    if !output.status.success() && !allow_nonzero_exit {
         let stderr = sanitize_terminal_text(&String::from_utf8_lossy(&output.stderr));
         let stdout = sanitize_terminal_text(&String::from_utf8_lossy(&output.stdout));
         let reason = if stderr.trim().is_empty() {

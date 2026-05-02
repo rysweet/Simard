@@ -337,3 +337,76 @@ fn sanitize_issue_create_args_collapses_newlines_and_defaults_title() {
     assert_eq!(label_count, 1);
     assert!(argv.iter().any(|s| s == "valid-label"));
 }
+
+// --- execute_engineer_action: ReadOnlyScan tolerates non-zero exit codes ---
+
+/// Regression test for the failure mode that kept Simard's
+/// `improve-cognitive-memory-persistence` engineer worktrees stuck in a loop
+/// for dozens of cycles. The brain proposes an `rg` search action; when the
+/// search legitimately finds zero matches (rg exit 1) or filters out every
+/// candidate file (rg exit 2), the dispatch must still return an
+/// `ExecutedEngineerAction` carrying the exit code and stderr so the brain
+/// can pick a different next step. Aborting with `ActionExecutionFailed`
+/// kills the entire loop on a benign empty search and is wrong.
+#[test]
+fn execute_read_only_scan_tolerates_nonzero_exit() {
+    let dir = tempfile::tempdir().unwrap();
+    // `false` always exits with status 1 and produces no output. This stands
+    // in for ripgrep's exit-1-on-no-matches and exit-2-on-no-files-searched
+    // without depending on rg being installed in the test environment.
+    let selected = SelectedEngineerAction {
+        label: "rg-search".into(),
+        rationale: "test".into(),
+        argv: vec!["false".into()],
+        plan_summary: "test".into(),
+        verification_steps: Vec::new(),
+        expected_changed_files: Vec::new(),
+        kind: EngineerActionKind::ReadOnlyScan,
+    };
+    let result = execute_engineer_action(dir.path(), selected)
+        .expect("ReadOnlyScan must not abort on non-zero exit; that is the brain's signal");
+    assert_eq!(
+        result.exit_code, 1,
+        "exit code from the underlying tool must be surfaced verbatim"
+    );
+    assert!(result.changed_files.is_empty());
+}
+
+#[test]
+fn execute_read_only_scan_propagates_zero_exit() {
+    let dir = tempfile::tempdir().unwrap();
+    let selected = SelectedEngineerAction {
+        label: "true-noop".into(),
+        rationale: "test".into(),
+        argv: vec!["true".into()],
+        plan_summary: "test".into(),
+        verification_steps: Vec::new(),
+        expected_changed_files: Vec::new(),
+        kind: EngineerActionKind::ReadOnlyScan,
+    };
+    let result = execute_engineer_action(dir.path(), selected).unwrap();
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn run_command_allow_nonzero_returns_status_without_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let output =
+        run_command_allow_nonzero(dir.path(), &["false"]).expect("non-zero exit must not be Err");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn run_command_strict_still_errors_on_nonzero() {
+    let dir = tempfile::tempdir().unwrap();
+    let err = match run_command(dir.path(), &["false"]) {
+        Ok(_) => panic!("strict variant must error"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("exited with status"),
+        "error must include exit status; got: {msg}"
+    );
+}
