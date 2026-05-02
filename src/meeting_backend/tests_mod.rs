@@ -259,7 +259,7 @@ fn sanitize_strips_ansi_escape_codes() {
 
 #[test]
 fn sanitize_strips_agent_noise_lines() {
-    let input = "Hello user.\n2026-04-18T18:23:41.151133Z INFO launching copilot binary=copilot\nACTION: search\nEXPLANATION: looking\nCONFIDENCE: 0.95\nChanges +0 -0 Requests 7.5 Premium (16s)\nTokens \u{2191} 64.7k \u{2193} 12k\nA newer version of amplihack is available.\n\u{2139} Loading...\n\u{2713} Done\nNODE_OPTIONS=--max-old-space\nGoodbye user.";
+    let input = "Hello user.\n2026-04-18T18:23:41.151133Z INFO launching copilot binary=copilot\nACTION: search\nEXPLANATION: looking\nCONFIDENCE: 0.95\nChanges   +0 -0\nRequests  7.5 Premium (16s)\nTokens \u{2191} 64.7k \u{2193} 12k\nA newer version of amplihack is available.\nUpdate now? [y/N] (5s timeout):\n\u{2139} Loading...\n\u{2713} Done\nNODE_OPTIONS=--max-old-space\nGoodbye user.";
     let result = sanitize_agent_output(input);
     assert!(result.contains("Hello user."), "result: {result}");
     assert!(result.contains("Goodbye user."), "result: {result}");
@@ -267,9 +267,11 @@ fn sanitize_strips_agent_noise_lines() {
     assert!(!result.contains("ACTION:"), "result: {result}");
     assert!(!result.contains("EXPLANATION:"), "result: {result}");
     assert!(!result.contains("CONFIDENCE:"), "result: {result}");
-    assert!(!result.contains("Changes +0"), "result: {result}");
+    assert!(!result.contains("Changes"), "result: {result}");
+    assert!(!result.contains("Requests"), "result: {result}");
     assert!(!result.contains("Tokens"), "result: {result}");
     assert!(!result.contains("amplihack"), "result: {result}");
+    assert!(!result.contains("Update now"), "result: {result}");
     assert!(!result.contains("NODE_OPTIONS"), "result: {result}");
 }
 

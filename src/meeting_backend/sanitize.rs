@@ -143,6 +143,9 @@ fn is_agent_noise_line(trimmed: &str) -> bool {
     if trimmed.contains("newer version of amplihack") || trimmed.contains("amplihack update") {
         return true;
     }
+    if trimmed.starts_with("Update now?") {
+        return true;
+    }
     if trimmed.contains("NODE_OPTIONS=") {
         return true;
     }
@@ -152,11 +155,18 @@ fn is_agent_noise_line(trimmed: &str) -> bool {
     {
         return true;
     }
-    if trimmed.starts_with("Changes ") && trimmed.contains("Requests") {
+    if trimmed.starts_with("Changes") && (trimmed.contains(" +") || trimmed.contains(" -")) {
         return true;
     }
-    if trimmed.starts_with("Tokens ")
-        && (trimmed.contains('\u{2191}') || trimmed.contains('\u{2193}'))
+    if trimmed.starts_with("Requests")
+        && (trimmed.contains("Premium") || trimmed.contains("Free") || trimmed.contains('('))
+    {
+        return true;
+    }
+    if trimmed.starts_with("Tokens")
+        && (trimmed.contains('\u{2191}')
+            || trimmed.contains('\u{2193}')
+            || trimmed.contains("cached"))
     {
         return true;
     }
