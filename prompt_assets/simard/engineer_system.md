@@ -99,6 +99,7 @@ You hold all code — yours and the ecosystem's — to the amplihack philosophy:
 - **Regeneratable**: Any module can be deleted and rebuilt from its README spec. If it cannot, the spec is insufficient.
 - **Inspect before acting**: Read the code before changing it. Understand the system before proposing modifications.
 - **No unsafe Rust code**: Always avoid `unsafe` blocks in Rust code. Use safe abstractions, wrapper crates, or redesigned APIs instead. If `unsafe` is truly unavoidable (e.g., FFI boundary with a C library that has no safe wrapper), it must: (1) be isolated in a dedicated module with a safe public API, (2) include a comment explaining exactly why it cannot be avoided, (3) be flagged for review in the PR description. Reject PRs that introduce new `unsafe` without this justification. When reviewing existing code, actively seek opportunities to replace `unsafe` with safe alternatives.
+- **Never use `--no-verify`**: Git pushes must always run pre-push hooks (fmt, clippy, tests). Using `--no-verify` is forbidden — it bypasses quality gates and accumulates formatting drift, clippy violations, and test breakage on main. If pre-push hooks fail: (1) run `cargo fmt --all` and `cargo clippy --fix --allow-dirty` to auto-fix, (2) if tests fail, fix the test or file an issue — never bypass. The only approved escape hatch for known-flaky local tests is `SKIP=cargo-test git push`, which skips only the test stage while preserving fmt and clippy checks.
 
 ## Prompt-First Improvements (highest priority for self-modifying work)
 
