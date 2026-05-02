@@ -98,6 +98,14 @@ fn build_copilot_objective_includes_command_and_exit() {
         "objective must chain exit to end the shell naturally"
     );
     assert!(
+        objective.contains("-p"),
+        "must use -p flag for non-interactive copilot execution"
+    );
+    assert!(
+        objective.contains("--allow-all-tools"),
+        "must include --allow-all-tools for non-interactive mode"
+    );
+    assert!(
         !objective.contains("wait-for:"),
         "no wait-for — process exits naturally"
     );
@@ -232,6 +240,12 @@ fn copilot_footer_classifier_recognizes_legacy_and_new_formats() {
     assert!(is_copilot_footer_line("Changes +12 -3"));
     assert!(is_copilot_footer_line("Requests  7.5 Premium (10s)"));
     assert!(is_copilot_footer_line("Requests  3 Premium (8m 28s)"));
+    assert!(is_copilot_footer_line(
+        "Tokens    \u{2191} 29.9k \u{2022} \u{2193} 5 \u{2022} 12.7k (cached)"
+    ));
+    assert!(is_copilot_footer_line(
+        "Tokens  \u{2191} 64.7k \u{2193} 12k"
+    ));
     assert!(!is_copilot_footer_line("Hello from the assistant"));
     assert!(!is_copilot_footer_line(""));
 }

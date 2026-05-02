@@ -116,6 +116,14 @@ pub fn is_copilot_footer_line(trimmed: &str) -> bool {
     {
         return true;
     }
+    // Token usage summary: "Tokens    ↑ 29.9k • ↓ 5 • 12.7k (cached)"
+    if trimmed.starts_with("Tokens")
+        && (trimmed.contains('\u{2191}')
+            || trimmed.contains('\u{2193}')
+            || trimmed.contains("cached"))
+    {
+        return true;
+    }
     false
 }
 
@@ -181,6 +189,7 @@ fn is_transcript_noise_line(trimmed: &str) -> bool {
         .trim_start();
     if stripped_trim.contains("amplihack is available")
         || stripped_trim.starts_with("Run 'amplihack update'")
+        || stripped_trim.starts_with("Update now?")
         || without_info_glyph.starts_with("NODE_OPTIONS=")
         || without_info_glyph.starts_with("amplihack ")
         || stripped_trim.starts_with("amplihack: ")
