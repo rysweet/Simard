@@ -277,11 +277,11 @@ impl BaseTypeSession for CopilotSdkSession {
 /// Build a terminal-session-compatible objective string that launches the
 /// copilot command with the enriched prompt.
 ///
-/// Strategy: write the prompt to a temp file, run `<copilot-cmd> -p @file`,
-/// then `exit` the shell.  The terminal infrastructure calls `finish()` which
-/// waits for the process to exit naturally — no artificial timeouts.  The
-/// copilot runs to completion however long it takes, and we read the full
-/// transcript afterward.
+/// Strategy: write the prompt to a temp file, run `<copilot-cmd> -p "$(cat file)"`
+/// in non-interactive mode with `--allow-all-tools`, then `exit` the shell.
+/// The terminal infrastructure calls `finish()` which waits for the process
+/// to exit naturally.  The copilot runs to completion however long it takes,
+/// and we read the full transcript afterward.
 pub(super) fn build_copilot_terminal_objective(
     config: &CopilotAdapterConfig,
     formatted_prompt: &str,
@@ -292,9 +292,11 @@ pub(super) fn build_copilot_terminal_objective(
         objective.push_str(&format!("working-directory: {cwd}\n"));
     }
 
-    // Write the prompt to a temp file and pipe it via stdin to the copilot
-    // command. Using stdin avoids `-p` flag incompatibility between the Python
-    // and Rust versions of amplihack. The `--subprocess-safe` flag skips
+    // Write the prompt to a temp file and pass it to the copilot command via
+    // `-p "$(cat file)"` for non-interactive execution. The copilot CLI does
+    // NOT read prompts from piped stdin in interactive mode — it requires the
+    // `-p` flag for scripted/non-interactive usage. `--allow-all-tools` is
+    // required by copilot for non-interactive mode. `--subprocess-safe` skips
     // interactive staging/env updates. Chain with `exit` so the shell exits
     // after the copilot finishes.
     let escaped = formatted_prompt
@@ -303,7 +305,7 @@ pub(super) fn build_copilot_terminal_objective(
     objective.push_str(&format!(
         "command: SIMARD_PROMPT_FILE=$(mktemp /tmp/simard-copilot-prompt.XXXXXX) && \
          printf '%s' '{}' > \"$SIMARD_PROMPT_FILE\" && \
-         cat \"$SIMARD_PROMPT_FILE\" | {} --subprocess-safe ; \
+         {} --subprocess-safe -p \"$(cat \"$SIMARD_PROMPT_FILE\")\" --allow-all-tools ; \
          rm -f \"$SIMARD_PROMPT_FILE\" ; exit\n",
         escaped, config.command,
     ));

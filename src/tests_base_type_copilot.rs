@@ -98,6 +98,14 @@ fn build_copilot_objective_includes_command_and_exit() {
         "objective must chain exit to end the shell naturally"
     );
     assert!(
+        objective.contains("-p"),
+        "must use -p flag for non-interactive copilot execution"
+    );
+    assert!(
+        objective.contains("--allow-all-tools"),
+        "must include --allow-all-tools for non-interactive mode"
+    );
+    assert!(
         !objective.contains("wait-for:"),
         "no wait-for — process exits naturally"
     );
