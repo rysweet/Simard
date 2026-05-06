@@ -1,9 +1,5 @@
-use super::execution::execute_engineer_action;
 use super::execution::parse_status_paths;
-use super::types::{
-    AnalyzedAction, AppendToFileRequest, CreateFileRequest, EngineerActionKind,
-    SelectedEngineerAction, ShellCommandRequest, analyze_objective, validate_repo_relative_path,
-};
+use super::types::{AnalyzedAction, analyze_objective, validate_repo_relative_path};
 use crate::PhaseOutcome;
 
 #[test]
@@ -67,66 +63,6 @@ fn validate_repo_relative_path_double_dot_mid_path_rejected() {
 fn validate_repo_relative_path_with_dot_prefix() {
     let result = validate_repo_relative_path("./src/main.rs").unwrap();
     assert_eq!(result, "src/main.rs");
-}
-
-// ---- RunShellCommand allowlisted commands ----
-
-#[test]
-fn run_shell_command_cargo_fmt_succeeds() {
-    let dir = tempfile::tempdir().unwrap();
-    // Initialize a minimal git repo so git commands work
-    let _ = std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(dir.path())
-        .output();
-    let selected = SelectedEngineerAction {
-        label: "run-shell-command".to_string(),
-        rationale: "test".to_string(),
-        argv: vec!["cargo".to_string(), "version".to_string()],
-        plan_summary: "test".to_string(),
-        verification_steps: Vec::new(),
-        expected_changed_files: Vec::new(),
-        kind: EngineerActionKind::RunShellCommand(ShellCommandRequest {
-            argv: vec!["cargo".to_string(), "version".to_string()],
-        }),
-    };
-    // This may succeed or fail depending on whether cargo is available,
-    // but it should NOT be rejected by the allowlist.
-    let result = execute_engineer_action(dir.path(), selected);
-    // Either succeeds or fails for cargo-specific reason, NOT allowlist
-    if let Err(e) = &result {
-        assert!(
-            !e.to_string().contains("allowlist"),
-            "cargo should be allowlisted: {e}"
-        );
-    }
-}
-
-#[test]
-#[serial_test::serial]
-fn run_shell_command_git_status_succeeds() {
-    let dir = tempfile::tempdir().unwrap();
-    let _ = std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(dir.path())
-        .output();
-    let selected = SelectedEngineerAction {
-        label: "run-shell-command".to_string(),
-        rationale: "test".to_string(),
-        argv: vec!["git".to_string(), "status".to_string()],
-        plan_summary: "test".to_string(),
-        verification_steps: Vec::new(),
-        expected_changed_files: Vec::new(),
-        kind: EngineerActionKind::RunShellCommand(ShellCommandRequest {
-            argv: vec!["git".to_string(), "status".to_string()],
-        }),
-    };
-    let result = execute_engineer_action(dir.path(), selected);
-    assert!(
-        result.is_ok(),
-        "git should be allowlisted: {:?}",
-        result.err()
-    );
 }
 
 // ---- analyze_objective: additional keywords ----
@@ -232,54 +168,6 @@ fn phase_outcome_failed_debug() {
     let outcome = PhaseOutcome::Failed("test error".to_string());
     let debug = format!("{:?}", outcome);
     assert!(debug.contains("test error"));
-}
-
-// ---- CreateFile: nested directory creation ----
-
-#[test]
-fn create_file_creates_parent_directories() {
-    let dir = tempfile::tempdir().unwrap();
-    let selected = SelectedEngineerAction {
-        label: "create-file".to_string(),
-        rationale: "test".to_string(),
-        argv: vec!["simard-create-file".to_string()],
-        plan_summary: "test".to_string(),
-        verification_steps: Vec::new(),
-        expected_changed_files: vec!["deep/nested/dir/file.txt".to_string()],
-        kind: EngineerActionKind::CreateFile(CreateFileRequest {
-            relative_path: "deep/nested/dir/file.txt".to_string(),
-            content: "deep content".to_string(),
-        }),
-    };
-    let result = execute_engineer_action(dir.path(), selected).unwrap();
-    assert_eq!(result.exit_code, 0);
-    let written = std::fs::read_to_string(dir.path().join("deep/nested/dir/file.txt")).unwrap();
-    assert_eq!(written, "deep content");
-}
-
-// ---- AppendToFile: appends correctly ----
-
-#[test]
-fn append_to_file_preserves_existing_content() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("data.txt"), "original\n").unwrap();
-    let selected = SelectedEngineerAction {
-        label: "append-to-file".to_string(),
-        rationale: "test".to_string(),
-        argv: vec!["simard-append-file".to_string()],
-        plan_summary: "test".to_string(),
-        verification_steps: Vec::new(),
-        expected_changed_files: vec!["data.txt".to_string()],
-        kind: EngineerActionKind::AppendToFile(AppendToFileRequest {
-            relative_path: "data.txt".to_string(),
-            content: "appended\n".to_string(),
-        }),
-    };
-    let result = execute_engineer_action(dir.path(), selected).unwrap();
-    assert_eq!(result.exit_code, 0);
-    let content = std::fs::read_to_string(dir.path().join("data.txt")).unwrap();
-    assert!(content.starts_with("original\n"));
-    assert!(content.ends_with("appended\n"));
 }
 
 // ---- validate_repo_relative_path: more edge cases ----

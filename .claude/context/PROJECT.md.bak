@@ -10,7 +10,7 @@ Replace the sections below with information about your project.
 
 ---
 
-## Project: Simard
+## Project: issue-1536-refactor-simards-engineer-loop-to-remove-the-plan
 
 ## Overview
 

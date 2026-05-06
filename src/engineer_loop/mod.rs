@@ -1,14 +1,8 @@
+mod agent_spawn;
 pub(crate) mod execution;
 pub(crate) mod review_persist;
-pub(crate) mod selection;
 mod types;
-pub(crate) mod verification;
-mod verification_actions;
 
-#[cfg(test)]
-mod tests_execution;
-#[cfg(test)]
-mod tests_execution_extra;
 #[cfg(test)]
 mod tests_mod;
 #[cfg(test)]
@@ -20,27 +14,11 @@ mod tests_review_persist;
 #[cfg(test)]
 mod tests_review_persist_extra;
 #[cfg(test)]
-mod tests_selection;
-#[cfg(test)]
-mod tests_selection_extra;
-#[cfg(test)]
-mod tests_selection_inline_a;
-#[cfg(test)]
-mod tests_selection_inline_b;
-#[cfg(test)]
 mod tests_types;
 #[cfg(test)]
 mod tests_types_extra;
 #[cfg(test)]
 mod tests_types_inline;
-#[cfg(test)]
-mod tests_verification;
-#[cfg(test)]
-mod tests_verification_actions;
-#[cfg(test)]
-mod tests_verification_extra;
-#[cfg(test)]
-mod tests_verification_more;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -61,10 +39,8 @@ pub use types::{
 
 // Phase-entry-point re-exports for the recipe-driven engineer loop (Phase 2 rebuild).
 // These let `simard-engineer-step` (in src/bin/) drive each phase via JSON IPC.
-pub use execution::execute_engineer_action;
+pub use agent_spawn::spawn_agent_for_goal;
 pub use review_persist::{persist_engineer_loop_artifacts, run_optional_review};
-pub use selection::select_engineer_action;
-pub use verification::verify_engineer_action;
 
 pub(crate) const ENGINEER_IDENTITY: &str = "simard-engineer";
 pub(crate) const ENGINEER_BASE_TYPE: &str = "terminal-shell";
@@ -142,64 +118,48 @@ pub fn run_local_engineer_loop(
     let terminal_bridge_context = terminal_bridge_context?;
 
     let phase_start = Instant::now();
-    let selected_action = select_engineer_action(&inspection, objective);
-    match &selected_action {
-        Ok(_) => {
+    let outcome_summary =
+        agent_spawn::spawn_agent_for_goal(objective, &inspection, &inspection.repo_root);
+    let action = match outcome_summary {
+        Ok(summary) => {
             phase_traces.push(PhaseTrace {
-                name: "select".to_string(),
+                name: "agent-spawn".to_string(),
                 duration: phase_start.elapsed(),
                 outcome: PhaseOutcome::Success,
             });
+            ExecutedEngineerAction {
+                selected: SelectedEngineerAction {
+                    label: "agent-session".to_string(),
+                    rationale: format!("Spawned autonomous agent session for: {objective}"),
+                    argv: vec![],
+                    plan_summary: objective.to_string(),
+                    verification_steps: vec![],
+                    expected_changed_files: vec![],
+                    kind: EngineerActionKind::AgentSession {
+                        outcome_summary: summary.clone(),
+                    },
+                },
+                exit_code: 0,
+                stdout: summary,
+                stderr: String::new(),
+                changed_files: vec![],
+            }
         }
         Err(e) => {
             phase_traces.push(PhaseTrace {
-                name: "select".to_string(),
+                name: "agent-spawn".to_string(),
                 duration: phase_start.elapsed(),
                 outcome: PhaseOutcome::Failed(e.to_string()),
             });
+            return Err(e);
         }
-    }
-    let selected_action = selected_action?;
+    };
 
-    let phase_start = Instant::now();
-    let action = execute_engineer_action(&inspection.repo_root, selected_action);
-    match &action {
-        Ok(_) => {
-            phase_traces.push(PhaseTrace {
-                name: "execute".to_string(),
-                duration: phase_start.elapsed(),
-                outcome: PhaseOutcome::Success,
-            });
-        }
-        Err(e) => {
-            phase_traces.push(PhaseTrace {
-                name: "execute".to_string(),
-                duration: phase_start.elapsed(),
-                outcome: PhaseOutcome::Failed(e.to_string()),
-            });
-        }
-    }
-    let action = action?;
-
-    let phase_start = Instant::now();
-    let verification = verify_engineer_action(&inspection, &action, &state_root);
-    match &verification {
-        Ok(_) => {
-            phase_traces.push(PhaseTrace {
-                name: "verify".to_string(),
-                duration: phase_start.elapsed(),
-                outcome: PhaseOutcome::Success,
-            });
-        }
-        Err(e) => {
-            phase_traces.push(PhaseTrace {
-                name: "verify".to_string(),
-                duration: phase_start.elapsed(),
-                outcome: PhaseOutcome::Failed(e.to_string()),
-            });
-        }
-    }
-    let verification = verification?;
+    let verification = VerificationReport {
+        status: "agent-completed".to_string(),
+        summary: action.stdout.clone(),
+        checks: vec![],
+    };
 
     // Optional LLM-driven review gate: only runs for mutating actions
     // when an LLM session is available (requires ANTHROPIC_API_KEY).

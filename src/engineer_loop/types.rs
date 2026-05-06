@@ -83,6 +83,7 @@ pub enum EngineerActionKind {
     RunShellCommand(ShellCommandRequest),
     GitCommit(GitCommitRequest),
     OpenIssue(OpenIssueRequest),
+    AgentSession { outcome_summary: String },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]

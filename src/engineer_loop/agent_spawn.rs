@@ -18,8 +18,16 @@ pub(crate) fn build_agent_prompt(objective: &str, inspection: &RepoInspection) -
     } else {
         inspection.changed_files.join(", ")
     };
-    let dirty = if inspection.worktree_dirty { "dirty" } else { "clean" };
-    let goals: Vec<&str> = inspection.active_goals.iter().map(|g| g.title.as_str()).collect();
+    let dirty = if inspection.worktree_dirty {
+        "dirty"
+    } else {
+        "clean"
+    };
+    let goals: Vec<&str> = inspection
+        .active_goals
+        .iter()
+        .map(|g| g.title.as_str())
+        .collect();
     let goals_list = if goals.is_empty() {
         "none".to_string()
     } else {
@@ -142,10 +150,8 @@ mod tests {
                 status: GoalStatus::Active,
                 priority: 1,
                 owner_identity: "simard".to_string(),
-                source_session_id: SessionId::parse(
-                    "00000000-0000-0000-0000-000000000001",
-                )
-                .unwrap(),
+                source_session_id: SessionId::parse("00000000-0000-0000-0000-000000000001")
+                    .unwrap(),
                 updated_in: SessionPhase::Execution,
             }],
             carried_meeting_decisions: vec![],

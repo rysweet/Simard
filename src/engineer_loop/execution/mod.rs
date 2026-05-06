@@ -245,6 +245,3 @@ pub(crate) fn parse_status_paths(stdout: &str) -> Vec<String> {
         })
         .collect()
 }
-
-mod dispatch;
-pub use dispatch::execute_engineer_action;
