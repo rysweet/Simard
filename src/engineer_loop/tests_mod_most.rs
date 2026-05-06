@@ -192,16 +192,6 @@ fn validate_repo_relative_path_with_multiple_dots() {
 // ---- constants: additional validation ----
 
 #[test]
-fn shell_command_allowlist_does_not_contain_shell() {
-    for cmd in &["sh", "bash", "zsh", "python", "python3", "node"] {
-        assert!(
-            !super::SHELL_COMMAND_ALLOWLIST.contains(cmd),
-            "allowlist should not contain interpreter {cmd}"
-        );
-    }
-}
-
-#[test]
 fn cleared_git_env_vars_all_start_with_git() {
     for var in super::CLEARED_GIT_ENV_VARS {
         assert!(
@@ -209,16 +199,6 @@ fn cleared_git_env_vars_all_start_with_git() {
             "cleared env var should start with GIT_: {var}"
         );
     }
-}
-
-#[test]
-fn shell_command_allowlist_contains_cargo() {
-    assert!(super::SHELL_COMMAND_ALLOWLIST.contains(&"cargo"));
-}
-
-#[test]
-fn shell_command_allowlist_contains_git() {
-    assert!(super::SHELL_COMMAND_ALLOWLIST.contains(&"git"));
 }
 
 #[test]

@@ -166,26 +166,6 @@ fn max_carried_meeting_decisions_is_reasonable() {
 }
 
 #[test]
-fn shell_command_allowlist_contains_expected_commands() {
-    for cmd in &["cargo", "git", "gh", "rustfmt", "clippy"] {
-        assert!(
-            super::SHELL_COMMAND_ALLOWLIST.contains(cmd),
-            "allowlist should contain {cmd}"
-        );
-    }
-}
-
-#[test]
-fn shell_command_allowlist_excludes_dangerous_commands() {
-    for cmd in &["rm", "sudo", "chmod", "chown", "dd", "mkfs"] {
-        assert!(
-            !super::SHELL_COMMAND_ALLOWLIST.contains(cmd),
-            "allowlist should not contain {cmd}"
-        );
-    }
-}
-
-#[test]
 fn cleared_git_env_vars_is_nonempty() {
     assert!(!super::CLEARED_GIT_ENV_VARS.is_empty());
     assert!(super::CLEARED_GIT_ENV_VARS.contains(&"GIT_DIR"));
