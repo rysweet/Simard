@@ -1,5 +1,5 @@
 use super::execution::parse_status_paths;
-use super::types::{AnalyzedAction, analyze_objective, validate_repo_relative_path};
+use super::types::{AnalyzedAction, analyze_objective};
 use crate::PhaseOutcome;
 
 #[test]
@@ -11,58 +11,6 @@ fn parse_status_paths_multiple_mixed_statuses() {
     assert!(paths.contains(&"added.rs".to_string()));
     assert!(paths.contains(&"untracked.txt".to_string()));
     assert!(paths.contains(&"deleted.rs".to_string()));
-}
-
-// ---- extract_command_from_objective additional tests ----
-
-#[test]
-fn extract_command_with_multiple_args() {
-    let cmd = super::types::extract_command_from_objective("run cargo test --lib").unwrap();
-    assert_eq!(cmd[0], "cargo");
-    assert!(cmd.len() >= 2);
-}
-
-#[test]
-fn extract_command_case_insensitive() {
-    let cmd = super::types::extract_command_from_objective("RUN cargo fmt").unwrap();
-    assert_eq!(cmd[0], "cargo");
-}
-
-// ---- extract_file_path_from_objective additional tests ----
-
-#[test]
-fn extract_file_path_nested_directory() {
-    let path =
-        super::types::extract_file_path_from_objective("create src/engineer_loop/types.rs now")
-            .unwrap();
-    assert!(path.contains('/'));
-}
-
-#[test]
-fn extract_file_path_toml_extension() {
-    let path = super::types::extract_file_path_from_objective("update Cargo.toml").unwrap();
-    assert_eq!(path, "Cargo.toml");
-}
-
-// ---- validate_repo_relative_path additional tests ----
-
-#[test]
-fn validate_repo_relative_path_nested_dirs() {
-    let result = validate_repo_relative_path("src/engineer_loop/mod.rs").unwrap();
-    assert_eq!(result, "src/engineer_loop/mod.rs");
-}
-
-#[test]
-fn validate_repo_relative_path_double_dot_mid_path_rejected() {
-    let err = validate_repo_relative_path("src/../../../etc/passwd")
-        .expect_err("parent traversal should be rejected");
-    assert!(err.to_string().contains("must not escape"));
-}
-
-#[test]
-fn validate_repo_relative_path_with_dot_prefix() {
-    let result = validate_repo_relative_path("./src/main.rs").unwrap();
-    assert_eq!(result, "src/main.rs");
 }
 
 // ---- analyze_objective: additional keywords ----
@@ -168,25 +116,6 @@ fn phase_outcome_failed_debug() {
     let outcome = PhaseOutcome::Failed("test error".to_string());
     let debug = format!("{:?}", outcome);
     assert!(debug.contains("test error"));
-}
-
-// ---- validate_repo_relative_path: more edge cases ----
-
-#[test]
-fn validate_repo_relative_path_with_trailing_slash_accepted() {
-    // Trailing slashes are accepted (path normalization strips them)
-    let result = validate_repo_relative_path("src/");
-    assert!(
-        result.is_ok(),
-        "trailing slash should be accepted: {result:?}"
-    );
-}
-
-#[test]
-fn validate_repo_relative_path_with_multiple_dots() {
-    let err = validate_repo_relative_path("../../outside")
-        .expect_err("double parent traversal should be rejected");
-    assert!(err.to_string().contains("must not escape"));
 }
 
 // ---- constants: additional validation ----

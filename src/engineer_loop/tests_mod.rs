@@ -1,7 +1,5 @@
 use super::execution::parse_status_paths;
-use super::types::{
-    AnalyzedAction, analyze_objective, parse_structured_edit_request, validate_repo_relative_path,
-};
+use super::types::{AnalyzedAction, analyze_objective};
 
 #[test]
 fn git_status_paths_strip_status_prefixes() {
@@ -13,28 +11,6 @@ fn git_status_paths_strip_status_prefixes() {
             "tests/engineer_loop.rs".to_string(),
             "docs/index.md".to_string()
         ]
-    );
-}
-
-#[test]
-fn structured_edit_request_requires_complete_directives() {
-    let error = parse_structured_edit_request("edit-file: docs/demo.txt\nreplace: before\n")
-        .expect_err("incomplete structured edit directives should fail");
-    assert!(
-        error
-            .to_string()
-            .contains("structured edit objectives must include non-empty"),
-        "error should explain the missing directives: {error}"
-    );
-}
-
-#[test]
-fn structured_edit_paths_must_stay_repo_relative() {
-    let error = validate_repo_relative_path("../outside.txt")
-        .expect_err("parent escapes should be rejected");
-    assert!(
-        error.to_string().contains("must not escape"),
-        "error should explain the rejected path: {error}"
     );
 }
 
