@@ -113,13 +113,44 @@ pub fn run_local_engineer_loop(
     }
     let terminal_bridge_context = terminal_bridge_context?;
 
+    // Phase: agent-prompt-build
     let phase_start = Instant::now();
-    let outcome_summary =
-        agent_spawn::spawn_agent_for_goal(objective, &inspection, &inspection.repo_root);
+    let agent_prompt = agent_spawn::build_agent_prompt(objective, &inspection);
+    phase_traces.push(PhaseTrace {
+        name: "agent-prompt-build".to_string(),
+        duration: phase_start.elapsed(),
+        outcome: PhaseOutcome::Success,
+    });
+
+    // Phase: agent-spawn — open session and start background thread
+    let phase_start = Instant::now();
+    let rx = agent_spawn::start_agent_session(agent_prompt, &inspection.repo_root);
+    let rx = match rx {
+        Ok(rx) => {
+            phase_traces.push(PhaseTrace {
+                name: "agent-spawn".to_string(),
+                duration: phase_start.elapsed(),
+                outcome: PhaseOutcome::Success,
+            });
+            rx
+        }
+        Err(e) => {
+            phase_traces.push(PhaseTrace {
+                name: "agent-spawn".to_string(),
+                duration: phase_start.elapsed(),
+                outcome: PhaseOutcome::Failed(e.to_string()),
+            });
+            return Err(e);
+        }
+    };
+
+    // Phase: agent-wait — block until agent session completes
+    let phase_start = Instant::now();
+    let outcome_summary = agent_spawn::await_agent_session(rx);
     let action = match outcome_summary {
         Ok(summary) => {
             phase_traces.push(PhaseTrace {
-                name: "agent-spawn".to_string(),
+                name: "agent-wait".to_string(),
                 duration: phase_start.elapsed(),
                 outcome: PhaseOutcome::Success,
             });
@@ -143,7 +174,7 @@ pub fn run_local_engineer_loop(
         }
         Err(e) => {
             phase_traces.push(PhaseTrace {
-                name: "agent-spawn".to_string(),
+                name: "agent-wait".to_string(),
                 duration: phase_start.elapsed(),
                 outcome: PhaseOutcome::Failed(e.to_string()),
             });

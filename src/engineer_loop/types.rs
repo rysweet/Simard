@@ -71,6 +71,7 @@ pub struct OpenIssueRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EngineerActionKind {
     ReadOnlyScan,
     StructuredTextReplace(StructuredEditRequest),

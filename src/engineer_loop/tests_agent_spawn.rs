@@ -100,12 +100,18 @@ fn build_agent_prompt_lists_all_changed_files() {
         "Cargo.toml".to_string(),
     ];
     let prompt = build_agent_prompt("update dependencies", &inspection);
-    assert!(prompt.contains("src/lib.rs"), "missing src/lib.rs in:\n{prompt}");
+    assert!(
+        prompt.contains("src/lib.rs"),
+        "missing src/lib.rs in:\n{prompt}"
+    );
     assert!(
         prompt.contains("tests/integration.rs"),
         "missing tests/integration.rs in:\n{prompt}"
     );
-    assert!(prompt.contains("Cargo.toml"), "missing Cargo.toml in:\n{prompt}");
+    assert!(
+        prompt.contains("Cargo.toml"),
+        "missing Cargo.toml in:\n{prompt}"
+    );
 }
 
 /// When no files are changed, the prompt should say "none".

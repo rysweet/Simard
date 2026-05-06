@@ -40,23 +40,26 @@ pub(crate) fn build_agent_prompt(objective: &str, inspection: &RepoInspection) -
          When done, summarize what you changed.\n\n\
          Objective: {objective}\n\
          Branch: {branch}\n\
+         HEAD: {head}\n\
          Worktree: {dirty}\n\
          Changed files: {files}\n\
          Active goals: {goals_list}",
         objective = objective,
         branch = inspection.branch,
+        head = inspection.head,
     )
 }
 
-/// Spawn an autonomous agent session to accomplish `objective`.
+/// Start an agent session thread and return the channel receiver.
 ///
-/// Opens an LLM agent session, sends a natural-language prompt, and waits
-/// for the agent to complete, returning the execution summary.
-pub fn spawn_agent_for_goal(
-    objective: &str,
-    inspection: &RepoInspection,
+/// This is the "spawn" half of the two-part agent execution:
+/// 1. Opens an LLM session
+/// 2. Spawns a background thread that runs the session turn
+/// 3. Returns a Receiver that yields the execution summary
+pub(crate) fn start_agent_session(
+    prompt: String,
     _workspace_path: &Path,
-) -> SimardResult<String> {
+) -> SimardResult<mpsc::Receiver<SimardResult<String>>> {
     let provider = LlmProvider::resolve()?;
     let mut session = SessionBuilder::new(OperatingMode::Engineer, provider)
         .node_id("engineer-agent")
@@ -68,7 +71,6 @@ pub fn spawn_agent_for_goal(
             reason,
         })?;
 
-    let prompt = build_agent_prompt(objective, inspection);
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let result = session
@@ -76,8 +78,16 @@ pub fn spawn_agent_for_goal(
             .map(|o| o.execution_summary);
         let _ = tx.send(result);
     });
-    let outcome_summary = rx
-        .recv_timeout(Duration::from_secs(AGENT_SESSION_TIMEOUT_SECS))
+    Ok(rx)
+}
+
+/// Wait for a running agent session to complete and return the execution summary.
+///
+/// This is the "wait" half of the two-part agent execution.
+pub(crate) fn await_agent_session(
+    rx: mpsc::Receiver<SimardResult<String>>,
+) -> SimardResult<String> {
+    rx.recv_timeout(Duration::from_secs(AGENT_SESSION_TIMEOUT_SECS))
         .map_err(|_| SimardError::ActionExecutionFailed {
             action: "agent-spawn".to_string(),
             reason: format!("agent session timed out after {AGENT_SESSION_TIMEOUT_SECS}s"),
@@ -85,8 +95,21 @@ pub fn spawn_agent_for_goal(
         .map_err(|e| SimardError::ActionExecutionFailed {
             action: "agent-spawn".to_string(),
             reason: format!("agent session failed: {e}"),
-        })?;
-    Ok(outcome_summary)
+        })
+}
+
+/// Spawn an autonomous agent session to accomplish `objective`.
+///
+/// Opens an LLM agent session, sends a natural-language prompt, and waits
+/// for the agent to complete, returning the execution summary.
+pub fn spawn_agent_for_goal(
+    objective: &str,
+    inspection: &RepoInspection,
+    workspace_path: &Path,
+) -> SimardResult<String> {
+    let prompt = build_agent_prompt(objective, inspection);
+    let rx = start_agent_session(prompt, workspace_path)?;
+    await_agent_session(rx)
 }
 
 #[cfg(test)]
