@@ -16,7 +16,7 @@ engineering work to a subordinate Copilot agent session. It replaces the
 old `plan_objective` + `execute_plan` pair from the removed
 `src/engineer_plan` module.
 
-**Module**: `simard::engineer_plan` (re-exported as
+**Module**: `simard::engineer_agent` (re-exported as
 `simard::engineer_loop::spawn_agent_for_goal`)
 
 ---
@@ -163,6 +163,5 @@ not be used:
 
 | `SimardError` variant          | When raised                                          |
 |--------------------------------|------------------------------------------------------|
-| `ActionExecutionFailed`        | Agent returned non-zero exit, or timeout elapsed     |
+| `ActionExecutionFailed`        | Agent returned non-zero exit, timeout elapsed, or `workspace_path` does not exist / is not a git repo |
 | `PlanningUnavailable`          | Copilot SDK unavailable / session failed to start    |
-| `ActionExecutionFailed`        | `workspace_path` does not exist or is not a git repo |

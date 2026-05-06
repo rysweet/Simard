@@ -70,7 +70,9 @@ code `2` and prints a timeout message to stderr.
 | Code | Meaning                                        |
 |------|------------------------------------------------|
 | `0`  | Agent session completed successfully           |
-| `2`  | Flag parsing error, agent failure, or timeout  |
+| `1`  | Agent session returned non-zero exit           |
+| `2`  | Agent session timed out (wall time > 3600 s)   |
+| `3`  | Flag parsing error or invalid arguments        |
 
 ---
 

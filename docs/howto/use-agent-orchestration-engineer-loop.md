@@ -40,10 +40,13 @@ how to interpret cycle reports produced under the new architecture.
    objective requires. The engineer loop blocks until the session returns or
    the 3600-second timeout elapses.
 
-4. **Review** — `run_optional_review()` runs `git diff` to capture all
-   workspace mutations. Because the agent manages its own git operations the
-   diff may include multiple commits. The `EngineerActionKind::AgentSession`
-   variant is always treated as mutating, so the review always fires.
+4. **Review** — `run_optional_review()` runs `git diff <pre-agent-sha>..HEAD`
+   to capture all workspace mutations committed by the agent. The
+   `EngineerActionKind::AgentSession` variant requires a dedicated
+   `compute_diff_for_review` arm that diffs against `inspection.head_sha`
+   (the commit SHA recorded before the agent was spawned). Without this, an
+   agent that commits its work before returning produces an empty diff and
+   the review silently skips.
 
 5. **Persist** — `persist_engineer_loop_artifacts()` writes the
    `EngineerLoopRun` to the state directory as a cycle report. The

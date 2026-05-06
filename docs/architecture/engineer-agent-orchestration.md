@@ -94,11 +94,23 @@ pub enum EngineerActionKind {
 }
 ```
 
-`AgentSession` is treated as **mutating** by `run_optional_review`: because the
-agent may have written files, the review always runs a `git diff` to capture
-the full workspace diff. The `compute_diff_for_review` wildcard arm handles it
-(runs `git diff HEAD`) — appropriate since the agent manages its own git
-operations.
+`AgentSession` is treated as **mutating** by `run_optional_review`: the variant
+must be added to the `is_mutating` `matches!` arm in `review_persist.rs`.
+
+For `compute_diff_for_review`, `AgentSession` requires a dedicated match arm
+that diffs against the SHA captured **before** the agent was spawned (stored
+as `inspection.head_sha`). The wildcard arm runs `git diff` (uncommitted
+working-tree only) — insufficient when the agent commits before returning:
+
+```rust
+EngineerActionKind::AgentSession => {
+    &["git", "diff", inspection.head_sha.as_str(), "HEAD"]
+}
+```
+
+If `inspection.head_sha` is not yet tracked in `RepoInspection`, the field
+must be added as part of this refactor. Without it, the review will silently
+receive an empty diff for any agent run that commits its work.
 
 An `ExecutedEngineerAction` whose `selected.kind` is `AgentSession` has:
 
