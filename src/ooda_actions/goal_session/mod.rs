@@ -183,9 +183,7 @@ pub(super) fn action_is_valid(action: &GoalAction) -> bool {
                 && !body.trim().is_empty()
                 && !is_placeholder_echo(body.trim())
         }
-        GoalAction::GhIssueClose {
-            issue, comment, ..
-        } => {
+        GoalAction::GhIssueClose { issue, comment, .. } => {
             // Reject the example value from the prompt template (issue 1234,
             // comment "Fixed in PR #1199.") that can leak through when the
             // Copilot adapter terminal session times out and the transcript
@@ -202,10 +200,7 @@ pub(super) fn action_is_valid(action: &GoalAction) -> bool {
         }
         GoalAction::GhPrComment { pr, body, .. } => {
             // Reject prompt template example (pr 1199)
-            *pr > 0
-                && *pr != 1199
-                && !body.trim().is_empty()
-                && !is_placeholder_echo(body.trim())
+            *pr > 0 && *pr != 1199 && !body.trim().is_empty() && !is_placeholder_echo(body.trim())
         }
     }
 }

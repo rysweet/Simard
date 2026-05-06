@@ -1,7 +1,9 @@
 //! AdvanceGoal dispatch — routing, subordinate heartbeat, and session-based advancement.
 
 use crate::agent_supervisor::{HeartbeatStatus, check_heartbeat};
-use crate::goal_curation::{GoalProgress, clear_goal_assignment, save_goal_board, update_goal_progress};
+use crate::goal_curation::{
+    GoalProgress, clear_goal_assignment, save_goal_board, update_goal_progress,
+};
 use crate::ooda_loop::{ActionOutcome, OodaBridges, OodaState, PlannedAction};
 
 use crate::ooda_actions::make_outcome;

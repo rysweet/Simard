@@ -85,32 +85,33 @@ handled autonomously by the agent.
 
 ## EngineerActionKind::AgentSession
 
-The `EngineerActionKind` enum gains one new variant:
+The `EngineerActionKind` enum has one new variant:
 
 ```rust
 pub enum EngineerActionKind {
     // …existing variants…
-    AgentSession,   // subordinate Copilot agent managed the work
+    AgentSession { outcome_summary: String },   // subordinate Copilot agent managed the work
 }
 ```
 
-`AgentSession` is treated as **mutating** by `run_optional_review`: the variant
-must be added to the `is_mutating` `matches!` arm in `review_persist.rs`.
+`AgentSession` is treated as **mutating** by `run_optional_review` — it is
+included in the `is_mutating` `matches!` arm in `review_persist.rs`.
 
 For `compute_diff_for_review`, `AgentSession` requires a dedicated match arm
 that diffs against the SHA captured **before** the agent was spawned (stored
-as `inspection.head_sha`). The wildcard arm runs `git diff` (uncommitted
+as `inspection.head`). The wildcard arm runs `git diff` (uncommitted
 working-tree only) — insufficient when the agent commits before returning:
 
 ```rust
-EngineerActionKind::AgentSession => {
-    &["git", "diff", inspection.head_sha.as_str(), "HEAD"]
+EngineerActionKind::AgentSession { .. } => {
+    &["git", "diff", inspection.head.as_str(), "HEAD"]
 }
 ```
 
-If `inspection.head_sha` is not yet tracked in `RepoInspection`, the field
-must be added as part of this refactor. Without it, the review will silently
-receive an empty diff for any agent run that commits its work.
+`inspection.head` already exists in `RepoInspection` and holds the HEAD SHA
+captured at the time of workspace inspection — before the agent is spawned.
+Without this dedicated arm, an agent run that commits its work produces an
+empty diff and the review silently skips.
 
 An `ExecutedEngineerAction` whose `selected.kind` is `AgentSession` has:
 

@@ -1,34 +1,15 @@
 use std::path::Path;
 
 use super::*;
-use crate::engineer_loop::AnalyzedAction;
-use crate::engineer_plan::{Plan, PlanStep};
 use crate::error::SimardError;
 use crate::review_pipeline::{FindingCategory, Severity};
 
-fn make_patch(steps: Vec<PlanStep>) -> ImprovementPatch {
+fn make_patch(outcome_summary: &str) -> ImprovementPatch {
     ImprovementPatch {
         description: "test improvement".into(),
         target_files: vec!["src/lib.rs".into()],
-        plan: Plan::new(steps),
+        outcome_summary: outcome_summary.to_string(),
         review_findings: Vec::new(),
-    }
-}
-
-fn passing_step() -> PlanStep {
-    step("src/lib.rs", "true")
-}
-
-fn failing_step() -> PlanStep {
-    step("src/fail.rs", "false")
-}
-
-fn step(target: &str, cmd: &str) -> PlanStep {
-    PlanStep {
-        action: AnalyzedAction::RunShellCommand,
-        target: target.into(),
-        expected_outcome: "ok".into(),
-        verification_command: cmd.into(),
     }
 }
 
@@ -118,18 +99,11 @@ fn apply_result_commit_failed_without_critical() {
 
 #[test]
 fn improvement_patch_construction() {
-    let patch = make_patch(vec![passing_step()]);
+    let patch = make_patch("agent completed successfully");
     assert_eq!(patch.description, "test improvement");
     assert_eq!(patch.target_files, vec!["src/lib.rs"]);
-    assert_eq!(patch.plan.len(), 1);
+    assert_eq!(patch.outcome_summary, "agent completed successfully");
     assert!(patch.review_findings.is_empty());
-}
-
-#[test]
-fn improvement_patch_empty_plan() {
-    let patch = make_patch(Vec::new());
-    assert!(patch.plan.is_empty());
-    assert_eq!(patch.plan.len(), 0);
 }
 
 #[test]
@@ -144,30 +118,17 @@ fn generate_patch_without_api_key_returns_unavailable() {
     let result = generate_patch("improve error handling", &inspection);
     unsafe { std::env::remove_var("SIMARD_LLM_PROVIDER") };
     match result {
-        Err(SimardError::PlanningUnavailable { .. }) => {
-            // Any PlanningUnavailable is correct — whether from open() or run_turn().
+        Err(SimardError::ActionExecutionFailed { .. }) => {
+            // Any ActionExecutionFailed is correct — whether from open() or run_turn().
         }
-        other => panic!("expected PlanningUnavailable, got: {other:?}"),
-    }
-}
-
-#[test]
-fn apply_and_review_plan_failed_on_bad_step() {
-    let patch = make_patch(vec![failing_step()]);
-    let result = apply_and_review(&patch, Path::new("/tmp"));
-    match &result {
-        ApplyResult::PlanFailed { reason } => {
-            assert!(reason.contains("failed"));
-        }
-        other => panic!("expected PlanFailed, got: {other:?}"),
+        other => panic!("expected ActionExecutionFailed, got: {other:?}"),
     }
 }
 
 #[test]
 #[serial_test::serial]
 fn apply_and_review_empty_diff_is_applied() {
-    // A plan with only no-op steps produces no diff.
-    // Use a real temp git repo so `git diff HEAD` works.
+    // The agent ran but produced no diff → Applied with no findings.
     let dir = tempfile::TempDir::new().unwrap();
     std::process::Command::new("git")
         .args(["init"])
@@ -196,13 +157,7 @@ fn apply_and_review_empty_diff_is_applied() {
         String::from_utf8_lossy(&commit_out.stderr)
     );
 
-    let step = PlanStep {
-        action: AnalyzedAction::ReadOnlyScan,
-        target: ".".to_string(),
-        expected_outcome: "ok".to_string(),
-        verification_command: "true".to_string(),
-    };
-    let patch = make_patch(vec![step]);
+    let patch = make_patch("agent ran no-op");
     let result = apply_and_review(&patch, dir.path());
     assert!(result.is_applied());
 }

@@ -1,6 +1,5 @@
 //! Data types for self-improvement patches and results.
 
-use crate::engineer_plan::Plan;
 use crate::review_pipeline::{ReviewFinding, Severity};
 
 /// A planned improvement patch ready for execution and review.
@@ -10,8 +9,8 @@ pub struct ImprovementPatch {
     pub description: String,
     /// Files expected to be affected.
     pub target_files: Vec<String>,
-    /// The LLM-generated execution plan.
-    pub plan: Plan,
+    /// Summary of what the agent session accomplished.
+    pub outcome_summary: String,
     /// Review findings (populated after review).
     pub review_findings: Vec<ReviewFinding>,
 }

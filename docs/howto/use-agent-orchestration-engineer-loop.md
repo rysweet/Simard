@@ -43,7 +43,7 @@ how to interpret cycle reports produced under the new architecture.
 4. **Review** — `run_optional_review()` runs `git diff <pre-agent-sha>..HEAD`
    to capture all workspace mutations committed by the agent. The
    `EngineerActionKind::AgentSession` variant requires a dedicated
-   `compute_diff_for_review` arm that diffs against `inspection.head_sha`
+   `compute_diff_for_review` arm that diffs against `inspection.head`
    (the commit SHA recorded before the agent was spawned). Without this, an
    agent that commits its work before returning produces an empty diff and
    the review silently skips.

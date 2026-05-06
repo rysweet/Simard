@@ -1,7 +1,5 @@
-use std::path::{Component, Path};
 use std::time::Duration;
 
-use crate::error::{SimardError, SimardResult};
 use crate::goals::GoalRecord;
 use crate::terminal_engineer_bridge::TerminalBridgeContext;
 
@@ -73,6 +71,7 @@ pub struct OpenIssueRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EngineerActionKind {
     ReadOnlyScan,
     StructuredTextReplace(StructuredEditRequest),
@@ -83,6 +82,7 @@ pub enum EngineerActionKind {
     RunShellCommand(ShellCommandRequest),
     GitCommit(GitCommitRequest),
     OpenIssue(OpenIssueRequest),
+    AgentSession { outcome_summary: String },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -188,205 +188,4 @@ pub fn analyze_objective(objective: &str) -> AnalyzedAction {
     } else {
         AnalyzedAction::ReadOnlyScan
     }
-}
-
-/// Words that indicate the extracted text is natural-language prose rather
-/// than a real shell command.  Checked as whole whitespace-delimited tokens.
-const PROSE_SIGNAL_WORDS: &[&str] = &[
-    "and",
-    "or",
-    "but",
-    "then",
-    "also",
-    "should",
-    "would",
-    "could",
-    "please",
-    "the",
-    "this",
-    "that",
-    "with",
-    "from",
-    "into",
-    "about",
-    "against",
-    "after",
-    "before",
-    "because",
-    "since",
-    "while",
-    "although",
-    "however",
-    "therefore",
-    "furthermore",
-    "additionally",
-    "shall",
-    "will",
-    "might",
-    "must",
-];
-
-/// Returns `true` when `text` looks like a natural-language prose fragment
-/// rather than a structured shell command.
-pub(crate) fn is_prose_fragment(text: &str) -> bool {
-    let tokens: Vec<&str> = text.split_whitespace().collect();
-    if tokens.is_empty() {
-        return true;
-    }
-
-    // Sentence-ending punctuation anywhere in the tokens is a strong signal.
-    if tokens
-        .iter()
-        .any(|t| t.ends_with('.') || t.ends_with('?') || t.ends_with('!'))
-    {
-        return true;
-    }
-
-    // If more than a third of the tokens are prose signal words, it's prose.
-    let prose_count = tokens
-        .iter()
-        .filter(|t| PROSE_SIGNAL_WORDS.contains(&t.to_lowercase().as_str()))
-        .count();
-    if tokens.len() >= 3 && prose_count * 3 >= tokens.len() {
-        return true;
-    }
-
-    // Issue/PR references like "#890" in the middle of a "command" are prose.
-    if tokens
-        .iter()
-        .skip(1)
-        .any(|t| t.starts_with('#') && t.len() > 1)
-    {
-        return true;
-    }
-
-    false
-}
-
-pub(crate) fn extract_command_from_objective(objective: &str) -> Option<Vec<String>> {
-    let lower = objective.to_lowercase();
-    let rest = if let Some(idx) = lower.find("run ") {
-        &objective[idx + 4..]
-    } else if let Some(idx) = lower.find("execute ") {
-        &objective[idx + 8..]
-    } else {
-        return None;
-    };
-    let argv: Vec<String> = rest.split_whitespace().map(String::from).collect();
-    if argv.is_empty() {
-        return None;
-    }
-
-    // Reject if the extracted text looks like prose rather than a command.
-    if is_prose_fragment(rest) {
-        return None;
-    }
-
-    Some(argv)
-}
-
-pub(crate) fn extract_file_path_from_objective(objective: &str) -> Option<String> {
-    objective
-        .split_whitespace()
-        .find(|w| w.contains('/') || (w.contains('.') && w.len() > 2))
-        .map(|s| s.to_string())
-}
-
-pub(crate) fn parse_structured_edit_request(
-    objective: &str,
-) -> SimardResult<Option<StructuredEditRequest>> {
-    let mut relative_path = None;
-    let mut search = None;
-    let mut replacement = None;
-    let mut verify_contains = None;
-    let mut saw_edit_directive = false;
-
-    for line in objective.lines() {
-        let trimmed = line.trim();
-        if let Some(value) = trimmed.strip_prefix("edit-file:") {
-            saw_edit_directive = true;
-            relative_path = Some(non_empty_objective_value("edit-file", value)?);
-        } else if let Some(value) = trimmed.strip_prefix("replace:") {
-            saw_edit_directive = true;
-            search = Some(unescape_edit_value(&non_empty_objective_value(
-                "replace", value,
-            )?));
-        } else if let Some(value) = trimmed.strip_prefix("with:") {
-            saw_edit_directive = true;
-            replacement = Some(unescape_edit_value(&non_empty_objective_value(
-                "with", value,
-            )?));
-        } else if let Some(value) = trimmed.strip_prefix("verify-contains:") {
-            saw_edit_directive = true;
-            verify_contains = Some(unescape_edit_value(&non_empty_objective_value(
-                "verify-contains",
-                value,
-            )?));
-        }
-    }
-
-    if !saw_edit_directive {
-        return Ok(None);
-    }
-
-    match (relative_path, search, replacement, verify_contains) {
-        (Some(relative_path), Some(search), Some(replacement), Some(verify_contains)) => {
-            Ok(Some(StructuredEditRequest {
-                relative_path,
-                search,
-                replacement,
-                verify_contains,
-            }))
-        }
-        _ => Err(SimardError::UnsupportedEngineerAction {
-            reason: "structured edit objectives must include non-empty edit-file:, replace:, with:, and verify-contains: lines".to_string(),
-        }),
-    }
-}
-
-pub(crate) fn non_empty_objective_value(field: &str, value: &str) -> SimardResult<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err(SimardError::UnsupportedEngineerAction {
-            reason: format!("structured edit objective field '{field}' cannot be empty"),
-        });
-    }
-    Ok(trimmed.to_string())
-}
-
-pub(crate) fn unescape_edit_value(value: &str) -> String {
-    value.replace("\\n", "\n").replace("\\t", "\t")
-}
-
-pub(crate) fn validate_repo_relative_path(relative_path: &str) -> SimardResult<String> {
-    let path = Path::new(relative_path);
-    if path.is_absolute() {
-        return Err(SimardError::UnsupportedEngineerAction {
-            reason: "structured edit target paths must stay relative to the selected repo"
-                .to_string(),
-        });
-    }
-
-    let mut normalized = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(segment) => normalized.push(segment.to_string_lossy().into_owned()),
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(SimardError::UnsupportedEngineerAction {
-                    reason: "structured edit target paths must not escape the selected repo"
-                        .to_string(),
-                });
-            }
-        }
-    }
-
-    if normalized.is_empty() {
-        return Err(SimardError::UnsupportedEngineerAction {
-            reason: "structured edit target paths must identify a file under the selected repo"
-                .to_string(),
-        });
-    }
-
-    Ok(normalized.join("/"))
 }

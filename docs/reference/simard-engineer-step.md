@@ -146,6 +146,7 @@ The `inspect`, `review`, and `persist` subcommands are unchanged.
 ```json
 {
   "branch": "feat/my-feature",
+  "head": "abc123def456",
   "worktree_dirty": true,
   "changed_files": ["src/foo.rs", "src/bar.rs"],
   "active_goals": [
