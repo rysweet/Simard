@@ -233,6 +233,31 @@ mod tests {
     }
 
     #[test]
+    fn terminal_sanitization_redacts_keys_with_sensitive_suffixes() {
+        // Verifies that keys ending with recognized suffixes (_token, _secret, _password,
+        // _passwd, _api_key, _apikey, _authorization) are redacted by sanitize_terminal_text.
+        let cases = [
+            ("access_token=abc", "access_token=[REDACTED]"),
+            ("client_secret=xyz", "client_secret=[REDACTED]"),
+            ("db_password=hunter2", "db_password=[REDACTED]"),
+            ("db_passwd=hunter2", "db_passwd=[REDACTED]"),
+            ("stripe_api_key=sk_live", "stripe_api_key=[REDACTED]"),
+            ("stripe_apikey=sk_live", "stripe_apikey=[REDACTED]"),
+            (
+                "proxy_authorization=Basic abc",
+                "proxy_authorization=[REDACTED]",
+            ),
+        ];
+        for (input, expected) in &cases {
+            assert_eq!(
+                sanitize_terminal_text(input),
+                *expected,
+                "failed for input: {input}"
+            );
+        }
+    }
+
+    #[test]
     fn terminal_sanitization_keeps_normal_operator_text_with_security_words() {
         let raw = "\
 State root: /tmp/simard-secret-path.12345

@@ -1,7 +1,7 @@
 //! AdvanceGoal dispatch — routing, subordinate heartbeat, and session-based advancement.
 
 use crate::agent_supervisor::{HeartbeatStatus, check_heartbeat};
-use crate::goal_curation::{GoalProgress, update_goal_progress};
+use crate::goal_curation::{GoalProgress, clear_goal_assignment, update_goal_progress};
 use crate::ooda_loop::{ActionOutcome, OodaBridges, OodaState, PlannedAction};
 
 use crate::ooda_actions::make_outcome;
@@ -87,14 +87,24 @@ pub fn advance_goal_with_subordinate(
 
             eprintln!(
                 "[simard] WARNING: subordinate '{sub_name}' stale ({seconds_since}s) \
-                 with no completion outcome — goal '{goal_id}' needs reassignment"
+                 with no completion outcome — clearing assignment so goal '{goal_id}' \
+                 can be re-dispatched"
             );
+            // Clear the assignment so dispatch_advance_goal re-enters the session
+            // path and can spawn a fresh engineer on the next OODA cycle.
+            if let Err(e) = clear_goal_assignment(&mut state.active_goals, goal_id) {
+                eprintln!(
+                    "[simard] OODA advance_goal FAILED to clear assignment for \
+                     goal '{goal_id}': {e}"
+                );
+            }
+            cleanup_engineer_worktree_for_goal(state, goal_id);
             make_outcome(
                 action,
                 false,
                 format!(
                     "subordinate '{sub_name}' stale ({seconds_since}s) with no artifacts, \
-                     goal '{goal_id}' needs reassignment"
+                     goal '{goal_id}' assignment cleared for re-dispatch"
                 ),
             )
         }
@@ -126,15 +136,9 @@ pub fn advance_goal_with_subordinate(
                 );
             }
 
-            if let Err(e) = update_goal_progress(
-                &mut state.active_goals,
-                goal_id,
-                GoalProgress::Blocked(format!(
-                    "subordinate '{sub_name}' exited without producing commits or PRs"
-                )),
-            ) {
+            if let Err(e) = clear_goal_assignment(&mut state.active_goals, goal_id) {
                 eprintln!(
-                    "[simard] OODA advance_goal FAILED to persist Blocked for \
+                    "[simard] OODA advance_goal FAILED to clear assignment for \
                      goal '{goal_id}': {e}"
                 );
                 cleanup_engineer_worktree_for_goal(state, goal_id);
@@ -143,7 +147,7 @@ pub fn advance_goal_with_subordinate(
                     false,
                     format!(
                         "subordinate '{sub_name}' exited with no artifacts and \
-                         persisting Blocked for goal '{goal_id}' failed: {e}"
+                         clearing assignment for goal '{goal_id}' failed: {e}"
                     ),
                 );
             }
@@ -154,7 +158,7 @@ pub fn advance_goal_with_subordinate(
                 false,
                 format!(
                     "subordinate '{sub_name}' exited with no output artifacts, \
-                     goal '{goal_id}' marked failed for retry"
+                     goal '{goal_id}' assignment cleared for re-dispatch"
                 ),
             )
         }

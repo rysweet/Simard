@@ -228,6 +228,26 @@ pub fn update_goal_progress(
     Ok(())
 }
 
+/// Clear the assignment of an active goal, resetting it to `NotStarted` so
+/// it can be re-dispatched on the next OODA cycle.
+///
+/// Used when a subordinate is detected as dead or stale with no artifacts —
+/// clearing `assigned_to` allows `dispatch_advance_goal` to re-enter the
+/// session-based spawn path rather than the subordinate heartbeat path.
+pub fn clear_goal_assignment(board: &mut GoalBoard, goal_id: &str) -> SimardResult<()> {
+    let goal = board
+        .active
+        .iter_mut()
+        .find(|g| g.id == goal_id)
+        .ok_or_else(|| SimardError::InvalidGoalRecord {
+            field: "goal_id".to_string(),
+            reason: format!("active goal '{goal_id}' not found"),
+        })?;
+    goal.assigned_to = None;
+    goal.status = GoalProgress::NotStarted;
+    Ok(())
+}
+
 /// Remove completed goals from the active list. Returns the removed goals.
 pub fn archive_completed(board: &mut GoalBoard) -> Vec<ActiveGoal> {
     let mut archived = Vec::new();

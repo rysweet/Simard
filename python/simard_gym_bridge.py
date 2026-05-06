@@ -232,7 +232,7 @@ class GymBridgeServer(BridgeServer):
         agg = _zero_dims()
         if ok_scores:
             for d in ALL_DIMENSIONS:
-                vals = [s["dimensions"][d] for s in srs if s["success"]]
+                vals = [s["dimensions"][d] for s in srs if s["success"] and s["dimensions"].get(d) is not None]
                 agg[d] = sum(vals) / len(vals) if vals else 0.0
         return {
             "suite_id": suite_id, "success": result.success,
