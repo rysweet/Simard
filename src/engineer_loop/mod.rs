@@ -4,6 +4,8 @@ pub(crate) mod review_persist;
 mod types;
 
 #[cfg(test)]
+mod tests_agent_spawn;
+#[cfg(test)]
 mod tests_mod;
 #[cfg(test)]
 mod tests_mod_more;
