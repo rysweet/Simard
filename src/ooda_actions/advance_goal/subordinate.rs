@@ -1,7 +1,7 @@
 //! AdvanceGoal dispatch — routing, subordinate heartbeat, and session-based advancement.
 
 use crate::agent_supervisor::{HeartbeatStatus, check_heartbeat};
-use crate::goal_curation::{GoalProgress, clear_goal_assignment, update_goal_progress};
+use crate::goal_curation::{GoalProgress, clear_goal_assignment, save_goal_board, update_goal_progress};
 use crate::ooda_loop::{ActionOutcome, OodaBridges, OodaState, PlannedAction};
 
 use crate::ooda_actions::make_outcome;
@@ -97,6 +97,11 @@ pub fn advance_goal_with_subordinate(
                     "[simard] OODA advance_goal FAILED to clear assignment for \
                      goal '{goal_id}': {e}"
                 );
+            } else if let Err(e) = save_goal_board(&state.active_goals, &*bridges.memory) {
+                eprintln!(
+                    "[simard] OODA advance_goal FAILED to persist goal board after \
+                     clearing stale assignment for goal '{goal_id}': {e}"
+                );
             }
             cleanup_engineer_worktree_for_goal(state, goal_id);
             make_outcome(
@@ -149,6 +154,12 @@ pub fn advance_goal_with_subordinate(
                         "subordinate '{sub_name}' exited with no artifacts and \
                          clearing assignment for goal '{goal_id}' failed: {e}"
                     ),
+                );
+            }
+            if let Err(e) = save_goal_board(&state.active_goals, &*bridges.memory) {
+                eprintln!(
+                    "[simard] OODA advance_goal FAILED to persist goal board after \
+                     clearing dead assignment for goal '{goal_id}': {e}"
                 );
             }
             // Reap the per-engineer worktree (issue #1197).

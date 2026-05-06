@@ -73,7 +73,13 @@ pub fn load_goal_board(bridge: &dyn CognitiveMemoryOps) -> SimardResult<GoalBoar
     Ok(GoalBoard::new())
 }
 
-/// Save the current board state as a semantic fact in cognitive memory.
+/// Save the current board state as a semantic fact in cognitive memory
+/// **and** to `goal_records.json` on disk.
+///
+/// The on-disk write ensures that the next OODA cycle start (which loads
+/// from cognitive memory OR disk) always sees the latest board state,
+/// even when cognitive memory `search_facts` returns a stale snapshot
+/// due to unordered `LIMIT 1` retrieval across multiple fact nodes.
 pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> SimardResult<()> {
     let snapshot = serde_json::to_string(board).map_err(|e| SimardError::InvalidGoalRecord {
         field: "board".to_string(),
@@ -86,6 +92,22 @@ pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> Si
         &["goal-board".to_string()],
         "goal-curator",
     )?;
+
+    // Also write to disk so intermediate saves (e.g. stale subordinate
+    // clearing during Act phase) are durable across cycle boundaries.
+    let state_root = std::env::var("SIMARD_STATE_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".into());
+            std::path::PathBuf::from(home).join(".simard")
+        });
+    let goal_path = state_root.join("goal_records.json");
+    if let Ok(pretty) = serde_json::to_string_pretty(board) {
+        if let Err(e) = std::fs::write(&goal_path, pretty) {
+            eprintln!("[simard] save_goal_board: failed to write goal_records.json: {e}");
+        }
+    }
+
     Ok(())
 }
 

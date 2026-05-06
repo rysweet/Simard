@@ -173,7 +173,18 @@ fn strip_log_noise_lines(s: &str) -> &str {
         }
         let lower = trimmed_line.to_ascii_lowercase();
         let is_noise = NOISE_PREFIXES.iter().any(|p| lower.starts_with(p));
-        if is_noise {
+        // Also skip Copilot CLI tool-call formatting lines that may
+        // appear before the actual plan JSON (defense-in-depth for when
+        // the transcript parser doesn't fully strip them).
+        let is_copilot_ui = trimmed_line.starts_with('●')
+            || trimmed_line.starts_with("│")
+            || trimmed_line.starts_with("└")
+            || trimmed_line.starts_with("\u{2502}")
+            || trimmed_line.starts_with("\u{2514}")
+            || trimmed_line.starts_with("\u{25cf}")
+            || trimmed_line.ends_with("lines...")
+            || trimmed_line.ends_with("lines…");
+        if is_noise || is_copilot_ui {
             cursor += line.len();
         } else {
             break;

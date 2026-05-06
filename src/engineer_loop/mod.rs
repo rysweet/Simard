@@ -70,8 +70,8 @@ pub(crate) const ENGINEER_IDENTITY: &str = "simard-engineer";
 pub(crate) const ENGINEER_BASE_TYPE: &str = "terminal-shell";
 pub(crate) const EXECUTION_SCOPE: &str = "local-only";
 pub(crate) const MAX_CARRIED_MEETING_DECISIONS: usize = 3;
-pub(crate) const GIT_COMMAND_TIMEOUT_SECS: u64 = 60;
-pub(crate) const CARGO_COMMAND_TIMEOUT_SECS: u64 = 120;
+pub(crate) const GIT_COMMAND_TIMEOUT_SECS: u64 = 1800;
+pub(crate) const CARGO_COMMAND_TIMEOUT_SECS: u64 = 3600;
 pub(crate) const SHELL_COMMAND_ALLOWLIST: &[&str] = &[
     // Mutating / build / VCS — produce real work
     "cargo", "git", "gh", "rustfmt", "clippy",
