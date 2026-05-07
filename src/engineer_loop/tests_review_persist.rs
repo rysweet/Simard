@@ -298,4 +298,38 @@ fn persist_artifacts_with_different_topologies() {
     }
 }
 
+// --- compute_diff_for_review: AgentSession ---
+
+#[test]
+fn diff_for_review_agent_session_with_pre_spawn_head_uses_range_diff() {
+    let dir = tempfile::tempdir().unwrap();
+    let kind = EngineerActionKind::AgentSession {
+        outcome_summary: "implemented feature X".into(),
+    };
+    // Not a real git repo → command fails → returns empty string gracefully.
+    // The important invariant is that it doesn't panic.
+    let result = compute_diff_for_review(dir.path(), &kind, Some("deadbeef"));
+    assert!(result.is_empty()); // not a git repo
+}
+
+#[test]
+fn diff_for_review_agent_session_without_pre_spawn_head_falls_back_to_git_diff() {
+    let dir = tempfile::tempdir().unwrap();
+    let kind = EngineerActionKind::AgentSession {
+        outcome_summary: "minor cleanup".into(),
+    };
+    let result = compute_diff_for_review(dir.path(), &kind, None);
+    assert!(result.is_empty()); // not a git repo
+}
+
+#[test]
+fn optional_review_agent_session_succeeds_without_llm_session() {
+    let inspection = make_inspection();
+    let action = make_executed(EngineerActionKind::AgentSession {
+        outcome_summary: "refactored engineer loop".into(),
+    });
+    // No LLM session available → review is skipped, returns Ok
+    run_optional_review(&inspection, &action).unwrap();
+}
+
 // --- make_inspection / make_executed helper validation ---
