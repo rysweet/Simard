@@ -72,7 +72,13 @@ pub fn run_optional_review(
 
     let findings = match findings {
         Ok(f) => f,
-        Err(_) => return Ok(()),
+        // The session opened but the review RPC itself failed (network, quota,
+        // malformed response). Log it so operators can see the failure rather
+        // than silently pretending the review passed.
+        Err(ref e) => {
+            tracing::warn!(error = %e, "review_diff RPC failed; skipping review gate");
+            return Ok(());
+        }
     };
 
     if !crate::review_pipeline::should_commit(&findings) {
