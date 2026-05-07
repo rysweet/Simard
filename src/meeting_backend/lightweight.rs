@@ -280,8 +280,10 @@ pub(crate) fn strip_copilot_noise(raw: &str) -> String {
         if trimmed.starts_with("Warning:") {
             continue;
         }
-        // Skip single-character progress indicator lines (● C\n  o\n  n\n...)
-        if trimmed.len() <= 2 && !trimmed.is_empty() {
+        // Skip single-character progress indicator lines (● C\n  o\n  n\n...) but
+        // only while still in the leading-noise region.  Once real content has been
+        // emitted a short line like "OK" or "No" is valid response text.
+        if result.is_empty() && trimmed.len() <= 2 && !trimmed.is_empty() {
             continue;
         }
         if trimmed.starts_with('●') {
@@ -428,6 +430,19 @@ mod tests {
         );
         let result = strip_copilot_noise(input);
         assert_eq!(result, "Here is the actual answer.\nIt continues here.");
+    }
+
+    /// Short lines that appear MID-response (after real content) must NOT be
+    /// stripped — "OK", "No", "Go" are valid LLM responses.
+    #[test]
+    fn strip_copilot_noise_preserves_short_lines_after_content() {
+        let input = "Here is my answer.\nOK\nMore details follow.";
+        let result = strip_copilot_noise(input);
+        assert!(
+            result.contains("OK"),
+            "short line after real content must be preserved: got {result:?}"
+        );
+        assert_eq!(result, "Here is my answer.\nOK\nMore details follow.");
     }
 
     /// A three-character line must NOT be stripped (only <=2 are noise).
