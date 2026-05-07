@@ -27,7 +27,6 @@ fn make_executed(kind: EngineerActionKind) -> ExecutedEngineerAction {
             argv: vec!["test".into()],
             plan_summary: "test".into(),
             verification_steps: Vec::new(),
-            expected_changed_files: Vec::new(),
             kind,
         },
         exit_code: 0,

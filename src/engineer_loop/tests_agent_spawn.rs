@@ -41,7 +41,6 @@ fn make_agent_session_action(summary: &str) -> ExecutedEngineerAction {
             argv: vec![],
             plan_summary: "objective".into(),
             verification_steps: vec![],
-            expected_changed_files: vec![],
             kind: EngineerActionKind::AgentSession {
                 outcome_summary: summary.to_string(),
             },

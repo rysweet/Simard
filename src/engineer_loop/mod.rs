@@ -18,11 +18,7 @@ mod tests_review_persist;
 #[cfg(test)]
 mod tests_review_persist_extra;
 #[cfg(test)]
-mod tests_types;
-#[cfg(test)]
 mod tests_types_extra;
-#[cfg(test)]
-mod tests_types_inline;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -37,8 +33,8 @@ use execution::{parse_status_paths, run_command, trimmed_stdout, trimmed_stdout_
 
 // Re-export all public items so `crate::engineer_loop::X` still works.
 pub use types::{
-    AnalyzedAction, EngineerActionKind, EngineerLoopRun, ExecutedEngineerAction, PhaseOutcome,
-    PhaseTrace, RepoInspection, SelectedEngineerAction, VerificationReport, analyze_objective,
+    EngineerActionKind, EngineerLoopRun, ExecutedEngineerAction, PhaseOutcome, PhaseTrace,
+    RepoInspection, SelectedEngineerAction, VerificationReport,
 };
 
 // Phase-entry-point re-exports for the recipe-driven engineer loop (Phase 2 rebuild).
@@ -163,7 +159,6 @@ pub fn run_local_engineer_loop(
                     argv: vec![],
                     plan_summary: objective.to_string(),
                     verification_steps: vec![],
-                    expected_changed_files: vec![],
                     kind: EngineerActionKind::AgentSession {
                         outcome_summary: summary.clone(),
                     },

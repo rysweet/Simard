@@ -92,7 +92,6 @@ pub struct SelectedEngineerAction {
     pub argv: Vec<String>,
     pub plan_summary: String,
     pub verification_steps: Vec<String>,
-    pub expected_changed_files: Vec<String>,
     pub kind: EngineerActionKind,
 }
 
@@ -138,54 +137,4 @@ pub struct EngineerLoopRun {
     #[serde(with = "duration_millis")]
     pub elapsed_duration: Duration,
     pub phase_traces: Vec<PhaseTrace>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AnalyzedAction {
-    CreateFile,
-    AppendToFile,
-    RunShellCommand,
-    GitCommit,
-    OpenIssue,
-    StructuredTextReplace,
-    CargoTest,
-    ReadOnlyScan,
-}
-
-/// Classify an objective string into an action category using keyword matching.
-/// Case-insensitive. More specific compound patterns are checked before single
-/// keywords so that "run tests" maps to `CargoTest` rather than `RunShellCommand`.
-pub fn analyze_objective(objective: &str) -> AnalyzedAction {
-    let lower = objective.to_lowercase();
-
-    // Issue/bug patterns before "create" — "create a feature request" is an issue, not a file
-    if lower.contains("issue") || lower.contains("bug report") || lower.contains("feature request")
-    {
-        AnalyzedAction::OpenIssue
-    } else if lower.contains("new file") || lower.contains("create") || lower.contains("add file") {
-        AnalyzedAction::CreateFile
-    } else if lower.contains("append") || lower.contains("add to") {
-        AnalyzedAction::AppendToFile
-    } else if lower.contains("commit") || lower.contains("save changes") {
-        AnalyzedAction::GitCommit
-    } else if lower.contains("cargo test")
-        || lower.contains("run tests")
-        || lower.contains("test suite")
-        || lower.contains("run the tests")
-    {
-        AnalyzedAction::CargoTest
-    } else if lower.contains("run") || lower.contains("execute") || lower.contains("check") {
-        AnalyzedAction::RunShellCommand
-    } else if lower.contains("fix")
-        || lower.contains("change")
-        || lower.contains("update")
-        || lower.contains("replace")
-    {
-        AnalyzedAction::StructuredTextReplace
-    } else if lower.contains("test") {
-        AnalyzedAction::CargoTest
-    } else {
-        AnalyzedAction::ReadOnlyScan
-    }
 }

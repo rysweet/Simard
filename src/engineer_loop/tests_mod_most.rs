@@ -1,5 +1,4 @@
 use super::execution::parse_status_paths;
-use super::types::{AnalyzedAction, analyze_objective};
 use crate::PhaseOutcome;
 
 #[test]
@@ -11,50 +10,6 @@ fn parse_status_paths_multiple_mixed_statuses() {
     assert!(paths.contains(&"added.rs".to_string()));
     assert!(paths.contains(&"untracked.txt".to_string()));
     assert!(paths.contains(&"deleted.rs".to_string()));
-}
-
-// ---- analyze_objective: additional keywords ----
-
-#[test]
-fn analyze_objective_edit_falls_through_to_readonly_scan() {
-    // "edit" is not a recognized keyword — falls to default ReadOnlyScan
-    assert_eq!(
-        analyze_objective("edit the config file"),
-        AnalyzedAction::ReadOnlyScan
-    );
-}
-
-#[test]
-fn analyze_objective_replace_maps_to_structured_edit() {
-    assert_eq!(
-        analyze_objective("replace the old text"),
-        AnalyzedAction::StructuredTextReplace
-    );
-}
-
-#[test]
-fn analyze_objective_check_maps_to_run_shell_command() {
-    // "check" matches the run/execute/check branch → RunShellCommand
-    assert_eq!(
-        analyze_objective("check the build"),
-        AnalyzedAction::RunShellCommand
-    );
-}
-
-#[test]
-fn analyze_objective_mixed_case_create() {
-    assert_eq!(
-        analyze_objective("Create A NEW config.yaml"),
-        AnalyzedAction::CreateFile
-    );
-}
-
-#[test]
-fn analyze_objective_issue_maps_to_open_issue() {
-    assert_eq!(
-        analyze_objective("file an issue about the crash"),
-        AnalyzedAction::OpenIssue
-    );
 }
 
 // ---- parse_status_paths: renamed files ----

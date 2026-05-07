@@ -158,9 +158,8 @@ pub use cost_tracking::{
     CostEntry, CostSummary, daily_summary, estimate_tokens, record_cost, weekly_summary,
 };
 pub use engineer_loop::{
-    AnalyzedAction, EngineerLoopRun, ExecutedEngineerAction, PhaseOutcome, PhaseTrace,
-    RepoInspection, SelectedEngineerAction, VerificationReport, analyze_objective,
-    run_local_engineer_loop, spawn_agent_for_goal,
+    EngineerLoopRun, ExecutedEngineerAction, PhaseOutcome, PhaseTrace, RepoInspection,
+    SelectedEngineerAction, VerificationReport, run_local_engineer_loop, spawn_agent_for_goal,
 };
 pub use error::{SimardError, SimardResult};
 pub use evidence::{

@@ -338,7 +338,6 @@ mod tests {
                 argv: vec!["test".to_string()],
                 plan_summary: "plan".to_string(),
                 verification_steps: vec![],
-                expected_changed_files: vec![],
                 kind: EngineerActionKind::ReadOnlyScan,
             },
             exit_code: 0,
