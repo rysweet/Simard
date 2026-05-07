@@ -42,10 +42,17 @@ pub fn run_optional_review(
 
     let mut review_session = match crate::review_pipeline::ReviewSession::open() {
         Ok(s) => s,
-        // No session available (no API key, etc.) → review is honestly skipped
-        // per this function's contract. The action already happened; review is
-        // an optional safety net, not a hard gate.
-        Err(SimardError::ReviewUnavailable { .. }) => return Ok(()),
+        // No session available (no API key, quota exhausted, network failure).
+        // Emit a warning so operators can detect misconfigured deployments
+        // where the safety net is silently absent (SEC-2).
+        Err(SimardError::ReviewUnavailable { ref reason }) => {
+            tracing::warn!(
+                reason = %reason,
+                "review gate skipped: LLM review unavailable; \
+                 set REQUIRE_REVIEW=1 to make this a hard failure"
+            );
+            return Ok(());
+        }
         Err(e) => return Err(e),
     };
 
