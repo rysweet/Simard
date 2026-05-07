@@ -31,7 +31,7 @@ pub(crate) struct PtyTerminalSession {
     child: Child,
     stdin: Option<BufWriter<ChildStdin>>,
     transcript_path: PathBuf,
-    transcript_guard: TranscriptGuard,
+    _transcript_guard: TranscriptGuard,
     _workflow_restore_guards: Vec<WorkflowRestoreGuard>,
     final_status: Option<ExitStatus>,
 }
@@ -83,7 +83,7 @@ impl PtyTerminalSession {
             child,
             stdin: Some(BufWriter::new(stdin)),
             transcript_path,
-            transcript_guard,
+            _transcript_guard: transcript_guard,
             _workflow_restore_guards: workflow_restore_guards,
             final_status: None,
         })
@@ -361,10 +361,10 @@ fn has_active_work_processes(root_pid: u32) -> bool {
     }
     while let Some(pid) = queue.pop_front() {
         let comm_path = format!("/proc/{pid}/comm");
-        if let Ok(comm) = std::fs::read_to_string(&comm_path) {
-            if WORK_PROCESS_NAMES.contains(&comm.trim()) {
-                return true;
-            }
+        if let Ok(comm) = std::fs::read_to_string(&comm_path)
+            && WORK_PROCESS_NAMES.contains(&comm.trim())
+        {
+            return true;
         }
         if let Some(kids) = children.get(&pid) {
             for &kid in kids {

@@ -4,7 +4,7 @@
 //! (issue #1548). Adds 22 new scenarios across six classes:
 //!   - KnowledgeRecall    (+5) — tools, user prefs, cross-session depth
 //!   - SelfIntrospection  (+3) — L6–L8: goal-status recall, rationale
-//!                               comparison, observe-phase discrimination
+//!     comparison, observe-phase discrimination
 //!   - ChaosEngineering   (+3) — Simard-specific chaos patterns
 //!   - CicdPipeline       (+4) — Simard CI/CD and release patterns
 //!   - CachingStrategy    (+3) — Simard memory-cache and LRU patterns
