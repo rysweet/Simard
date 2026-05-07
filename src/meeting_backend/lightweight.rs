@@ -10,12 +10,6 @@
 
 use std::io::Write;
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
-use std::thread;
-use std::time::Duration;
-
-#[cfg(unix)]
-extern crate libc;
 
 use tracing::{debug, info, warn};
 
@@ -79,10 +73,7 @@ impl LightweightChatSession {
     /// Execute a chat turn by piping the prompt to the copilot subprocess.
     ///
     /// stderr is captured separately and logged (not mixed into the response).
-    /// Times out after 900 seconds to avoid hanging meeting sessions indefinitely.
     fn execute_piped_turn(&self, prompt: &str) -> SimardResult<String> {
-        const TURN_TIMEOUT_SECS: u64 = 900;
-
         let mut child = Command::new(DEFAULT_CHAT_COMMAND)
             .args(["copilot", "--subprocess-safe"])
             .env("AMPLIHACK_NONINTERACTIVE", "1")
@@ -96,45 +87,19 @@ impl LightweightChatSession {
                 reason: format!("failed to spawn copilot subprocess: {e}"),
             })?;
 
-        // Write prompt to stdin and close it.
+        // Write prompt to stdin and close it
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(prompt.as_bytes()).map_err(|e| {
-                SimardError::AdapterInvocationFailed {
-                    base_type: "lightweight-chat".to_string(),
-                    reason: format!("failed to write prompt to copilot subprocess: {e}"),
-                }
-            })?;
+            let _ = stdin.write_all(prompt.as_bytes());
             // stdin dropped here, closing the pipe
         }
 
-        // Wait with a timeout via a background thread + channel.
-        // Save the PID before moving `child` into the thread so we can kill
-        // it if the timeout fires.
-        let child_pid = child.id();
-        let (tx, rx) = mpsc::channel();
-        thread::spawn(move || {
-            let _ = tx.send(child.wait_with_output());
-        });
-
-        let output = match rx.recv_timeout(Duration::from_secs(TURN_TIMEOUT_SECS)) {
-            Ok(Ok(out)) => out,
-            Ok(Err(e)) => {
-                return Err(SimardError::AdapterInvocationFailed {
+        let output =
+            child
+                .wait_with_output()
+                .map_err(|e| SimardError::AdapterInvocationFailed {
                     base_type: "lightweight-chat".to_string(),
                     reason: format!("copilot subprocess failed: {e}"),
-                });
-            }
-            Err(_) => {
-                #[cfg(unix)]
-                unsafe {
-                    libc::kill(child_pid as i32, libc::SIGTERM);
-                }
-                return Err(SimardError::AdapterInvocationFailed {
-                    base_type: "lightweight-chat".to_string(),
-                    reason: format!("copilot subprocess timed out after {TURN_TIMEOUT_SECS}s"),
-                });
-            }
-        };
+                })?;
 
         // Log stderr separately — never include in response (#568)
         let stderr_text = String::from_utf8_lossy(&output.stderr);
@@ -199,10 +164,9 @@ impl BaseTypeSession for LightweightChatSession {
         let start = std::time::Instant::now();
 
         let response_text = self.execute_piped_turn(&prompt)?;
-        let elapsed_ms = start.elapsed().as_millis() as u64;
 
         info!(
-            elapsed_ms,
+            elapsed_ms = start.elapsed().as_millis() as u64,
             response_len = response_text.len(),
             turn = self.turn_count,
             "Lightweight chat: received response"
@@ -227,7 +191,7 @@ impl BaseTypeSession for LightweightChatSession {
             execution_summary: response_text,
             evidence: vec![
                 format!("lightweight-chat-turn={}", self.turn_count),
-                format!("elapsed-ms={elapsed_ms}"),
+                format!("elapsed-ms={}", start.elapsed().as_millis()),
             ],
         })
     }
@@ -280,10 +244,8 @@ pub(crate) fn strip_copilot_noise(raw: &str) -> String {
         if trimmed.starts_with("Warning:") {
             continue;
         }
-        // Skip single-character progress indicator lines (● C\n  o\n  n\n...) but
-        // only while still in the leading-noise region.  Once real content has been
-        // emitted a short line like "OK" or "No" is valid response text.
-        if result.is_empty() && trimmed.len() <= 2 && !trimmed.is_empty() {
+        // Skip single-character progress indicator lines (● C\n  o\n  n\n...)
+        if trimmed.len() <= 2 && !trimmed.is_empty() {
             continue;
         }
         if trimmed.starts_with('●') {
@@ -356,197 +318,5 @@ mod tests {
         let mut session = LightweightChatSession::new().unwrap();
         let input = BaseTypeTurnInput::objective_only("hello");
         assert!(session.run_turn(input).is_err());
-    }
-
-    // ── additional strip_copilot_noise contract tests ─────────────────────────
-
-    /// Warning: lines from Copilot config validation must be stripped.
-    #[test]
-    fn strip_copilot_noise_removes_warning_lines() {
-        let input = "Warning: Could not enable MCP server\nActual response.";
-        let result = strip_copilot_noise(input);
-        assert_eq!(
-            result, "Actual response.",
-            "Warning: prefix lines must be stripped"
-        );
-    }
-
-    /// Bullet (●) progress-indicator lines must be stripped.
-    #[test]
-    fn strip_copilot_noise_removes_bullet_progress_lines() {
-        let input = "● Connecting to agent\nActual response.";
-        let result = strip_copilot_noise(input);
-        assert_eq!(
-            result, "Actual response.",
-            "Lines starting with ● must be stripped"
-        );
-    }
-
-    /// Lines that are 1 or 2 characters (progress spinners) must be stripped.
-    #[test]
-    fn strip_copilot_noise_removes_one_and_two_char_lines() {
-        let input = "a\nbc\nActual response.";
-        let result = strip_copilot_noise(input);
-        assert_eq!(
-            result, "Actual response.",
-            "1-2 char lines must be treated as noise and stripped"
-        );
-    }
-
-    /// All recognised footer marker prefixes must trigger the stop-reading gate.
-    #[test]
-    fn strip_copilot_noise_removes_all_footer_marker_variants() {
-        let markers = [
-            "Total usage est: 1234 tokens",
-            "API time spent: 2.3s",
-            "Total session time: 10s",
-            "Changes 5",
-            "Requests 3",
-            "Tokens 100",
-        ];
-        for marker in &markers {
-            let input = format!("Response text.\n{marker}\nmore stuff");
-            let result = strip_copilot_noise(&input);
-            assert_eq!(
-                result, "Response text.",
-                "Footer marker '{marker}' should stop output"
-            );
-        }
-    }
-
-    /// Mixed noise + real content: all noise categories before and after
-    /// the real content must be stripped; footer must truncate.
-    #[test]
-    fn strip_copilot_noise_mixed_noise_and_content() {
-        let input = concat!(
-            "● Setting up\n",
-            "Warning: something minor\n",
-            "a\n",
-            "b\n",
-            "Here is the actual answer.\n",
-            "It continues here.\n",
-            "Total usage est: 500 tokens\n",
-            "API time spent: 1.2s\n"
-        );
-        let result = strip_copilot_noise(input);
-        assert_eq!(result, "Here is the actual answer.\nIt continues here.");
-    }
-
-    /// Short lines that appear MID-response (after real content) must NOT be
-    /// stripped — "OK", "No", "Go" are valid LLM responses.
-    #[test]
-    fn strip_copilot_noise_preserves_short_lines_after_content() {
-        let input = "Here is my answer.\nOK\nMore details follow.";
-        let result = strip_copilot_noise(input);
-        assert!(
-            result.contains("OK"),
-            "short line after real content must be preserved: got {result:?}"
-        );
-        assert_eq!(result, "Here is my answer.\nOK\nMore details follow.");
-    }
-
-    /// A three-character line must NOT be stripped (only <=2 are noise).
-    #[test]
-    fn strip_copilot_noise_preserves_three_char_lines() {
-        let input = "yes\nActual response.";
-        let result = strip_copilot_noise(input);
-        assert!(
-            result.contains("yes"),
-            "3-char lines must not be stripped: got {result:?}"
-        );
-    }
-
-    /// Meaningful multi-line responses must pass through unchanged.
-    #[test]
-    fn strip_copilot_noise_preserves_meaningful_multiline_response() {
-        let input = "Line one of the response.\nLine two of the response.\nLine three.";
-        let result = strip_copilot_noise(input);
-        assert_eq!(result, input.trim());
-    }
-
-    // ── session lifecycle contract tests ──────────────────────────────────────
-
-    /// run_turn after close must return an error — not panic.
-    #[test]
-    fn run_turn_after_close_returns_error() {
-        let mut session = LightweightChatSession::new().unwrap();
-        session.open().unwrap();
-        session.close().unwrap();
-        let input = BaseTypeTurnInput::objective_only("hello");
-        assert!(
-            session.run_turn(input).is_err(),
-            "run_turn on a closed session must return Err"
-        );
-    }
-
-    /// Closing a session that was never opened must return an error.
-    #[test]
-    fn close_before_open_returns_error() {
-        let mut session = LightweightChatSession::new().unwrap();
-        assert!(
-            session.close().is_err(),
-            "close() on a never-opened session must return Err"
-        );
-    }
-
-    /// Double-close must return an error.
-    #[test]
-    fn double_close_returns_error() {
-        let mut session = LightweightChatSession::new().unwrap();
-        session.open().unwrap();
-        session.close().unwrap();
-        assert!(session.close().is_err(), "second close() must return Err");
-    }
-
-    /// The session descriptor id must identify this as "lightweight-chat".
-    #[test]
-    fn session_descriptor_id_is_lightweight_chat() {
-        let session = LightweightChatSession::new().unwrap();
-        let id = session.descriptor().id.as_str();
-        assert_eq!(id, "lightweight-chat");
-    }
-
-    /// Prompt building: when only objective is present, the prompt equals
-    /// the objective string exactly.
-    #[test]
-    fn prompt_building_objective_only_equals_objective() {
-        // We verify the branching logic is correct by checking turn input
-        // construction — the `execute_piped_turn` path is tested via integration.
-        let input = BaseTypeTurnInput::objective_only("just the objective");
-        // identity_context and prompt_preamble must be empty
-        assert!(input.identity_context.is_empty());
-        assert!(input.prompt_preamble.is_empty());
-        assert_eq!(input.objective, "just the objective");
-    }
-
-    /// When preamble and identity context are provided, both must be joinable
-    /// with the objective into a combined prompt.
-    #[test]
-    fn prompt_building_with_preamble_and_identity() {
-        let input = BaseTypeTurnInput {
-            objective: "Do the task.".to_string(),
-            identity_context: "You are Simard.".to_string(),
-            prompt_preamble: "System preamble.".to_string(),
-        };
-        // Simulate the join logic from run_turn
-        let mut parts = Vec::new();
-        if !input.prompt_preamble.is_empty() {
-            parts.push(input.prompt_preamble.as_str());
-        }
-        if !input.identity_context.is_empty() {
-            parts.push(input.identity_context.as_str());
-        }
-        parts.push(&input.objective);
-        let prompt = parts.join("\n\n");
-
-        assert!(prompt.contains("System preamble."));
-        assert!(prompt.contains("You are Simard."));
-        assert!(prompt.contains("Do the task."));
-        // Order: preamble first, identity second, objective last
-        let preamble_pos = prompt.find("System preamble.").unwrap();
-        let identity_pos = prompt.find("You are Simard.").unwrap();
-        let objective_pos = prompt.find("Do the task.").unwrap();
-        assert!(preamble_pos < identity_pos);
-        assert!(identity_pos < objective_pos);
     }
 }

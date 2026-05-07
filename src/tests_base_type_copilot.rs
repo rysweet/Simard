@@ -134,6 +134,30 @@ fn build_copilot_objective_escapes_single_quotes() {
 }
 
 #[test]
+fn build_copilot_objective_does_not_double_backslashes() {
+    // Backslashes are literal inside POSIX single-quoted strings and must
+    // NOT be doubled. Doubling causes the receiver to see twice as many
+    // backslashes as the original prompt contained.
+    let config = CopilotAdapterConfig::default();
+    let prompt = r"path\to\file and \\double\\";
+    let objective = build_copilot_terminal_objective(&config, prompt);
+    // The raw backslash sequences must appear unchanged in the shell command.
+    assert!(
+        objective.contains(r"path\to\file"),
+        "single backslashes must not be doubled; got: {objective}"
+    );
+    assert!(
+        objective.contains(r"\\double\\"),
+        "double backslashes must not be quadrupled; got: {objective}"
+    );
+    // Sanity: no quadrupled backslashes introduced by incorrect doubling.
+    assert!(
+        !objective.contains(r"\\\\"),
+        "backslashes must not be quadrupled; got: {objective}"
+    );
+}
+
+#[test]
 fn extract_response_from_transcript_isolates_copilot_output() {
     // Full transcript format: newline-delimited lines from `script`
     let transcript = "\

@@ -1,10 +1,14 @@
-mod agent_spawn;
 pub(crate) mod execution;
 pub(crate) mod review_persist;
+pub(crate) mod selection;
 mod types;
+pub(crate) mod verification;
+mod verification_actions;
 
 #[cfg(test)]
-mod tests_agent_spawn;
+mod tests_execution;
+#[cfg(test)]
+mod tests_execution_extra;
 #[cfg(test)]
 mod tests_mod;
 #[cfg(test)]
@@ -16,11 +20,27 @@ mod tests_review_persist;
 #[cfg(test)]
 mod tests_review_persist_extra;
 #[cfg(test)]
+mod tests_selection;
+#[cfg(test)]
+mod tests_selection_extra;
+#[cfg(test)]
+mod tests_selection_inline_a;
+#[cfg(test)]
+mod tests_selection_inline_b;
+#[cfg(test)]
 mod tests_types;
 #[cfg(test)]
 mod tests_types_extra;
 #[cfg(test)]
 mod tests_types_inline;
+#[cfg(test)]
+mod tests_verification;
+#[cfg(test)]
+mod tests_verification_actions;
+#[cfg(test)]
+mod tests_verification_extra;
+#[cfg(test)]
+mod tests_verification_more;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -41,8 +61,10 @@ pub use types::{
 
 // Phase-entry-point re-exports for the recipe-driven engineer loop (Phase 2 rebuild).
 // These let `simard-engineer-step` (in src/bin/) drive each phase via JSON IPC.
-pub use agent_spawn::spawn_agent_for_goal;
+pub use execution::execute_engineer_action;
 pub use review_persist::{persist_engineer_loop_artifacts, run_optional_review};
+pub use selection::select_engineer_action;
+pub use verification::verify_engineer_action;
 
 pub(crate) const ENGINEER_IDENTITY: &str = "simard-engineer";
 pub(crate) const ENGINEER_BASE_TYPE: &str = "terminal-shell";
@@ -50,6 +72,12 @@ pub(crate) const EXECUTION_SCOPE: &str = "local-only";
 pub(crate) const MAX_CARRIED_MEETING_DECISIONS: usize = 3;
 pub(crate) const GIT_COMMAND_TIMEOUT_SECS: u64 = 60;
 pub(crate) const CARGO_COMMAND_TIMEOUT_SECS: u64 = 120;
+pub(crate) const SHELL_COMMAND_ALLOWLIST: &[&str] = &[
+    // Mutating / build / VCS — produce real work
+    "cargo", "git", "gh", "rustfmt", "clippy",
+    // Read-only inspection — safe for engineers to use during planning
+    "ls", "cat", "grep", "rg", "find", "wc", "head", "tail", "jq",
+];
 
 pub(crate) const CLEARED_GIT_ENV_VARS: &[&str] = &[
     "GIT_DIR",
@@ -113,80 +141,65 @@ pub fn run_local_engineer_loop(
     }
     let terminal_bridge_context = terminal_bridge_context?;
 
-    // Phase: agent-prompt-build
     let phase_start = Instant::now();
-    let agent_prompt = agent_spawn::build_agent_prompt(objective, &inspection);
-    phase_traces.push(PhaseTrace {
-        name: "agent-prompt-build".to_string(),
-        duration: phase_start.elapsed(),
-        outcome: PhaseOutcome::Success,
-    });
-
-    // Phase: agent-spawn — open session and start background thread
-    let phase_start = Instant::now();
-    let rx = agent_spawn::start_agent_session(agent_prompt, &inspection.repo_root);
-    let rx = match rx {
-        Ok(rx) => {
+    let selected_action = select_engineer_action(&inspection, objective);
+    match &selected_action {
+        Ok(_) => {
             phase_traces.push(PhaseTrace {
-                name: "agent-spawn".to_string(),
+                name: "select".to_string(),
                 duration: phase_start.elapsed(),
                 outcome: PhaseOutcome::Success,
             });
-            rx
         }
         Err(e) => {
             phase_traces.push(PhaseTrace {
-                name: "agent-spawn".to_string(),
+                name: "select".to_string(),
                 duration: phase_start.elapsed(),
                 outcome: PhaseOutcome::Failed(e.to_string()),
             });
-            return Err(e);
         }
-    };
+    }
+    let selected_action = selected_action?;
 
-    // Phase: agent-wait — block until agent session completes
     let phase_start = Instant::now();
-    let outcome_summary = agent_spawn::await_agent_session(rx);
-    let action = match outcome_summary {
-        Ok(summary) => {
+    let action = execute_engineer_action(&inspection.repo_root, selected_action);
+    match &action {
+        Ok(_) => {
             phase_traces.push(PhaseTrace {
-                name: "agent-wait".to_string(),
+                name: "execute".to_string(),
                 duration: phase_start.elapsed(),
                 outcome: PhaseOutcome::Success,
             });
-            ExecutedEngineerAction {
-                selected: SelectedEngineerAction {
-                    label: "agent-session".to_string(),
-                    rationale: format!("Spawned autonomous agent session for: {objective}"),
-                    argv: vec![],
-                    plan_summary: objective.to_string(),
-                    verification_steps: vec![],
-                    expected_changed_files: vec![],
-                    kind: EngineerActionKind::AgentSession {
-                        outcome_summary: summary.clone(),
-                    },
-                },
-                exit_code: 0,
-                stdout: summary,
-                stderr: String::new(),
-                changed_files: vec![],
-            }
         }
         Err(e) => {
             phase_traces.push(PhaseTrace {
-                name: "agent-wait".to_string(),
+                name: "execute".to_string(),
                 duration: phase_start.elapsed(),
                 outcome: PhaseOutcome::Failed(e.to_string()),
             });
-            return Err(e);
         }
-    };
+    }
+    let action = action?;
 
-    let verification = VerificationReport {
-        status: "agent-completed".to_string(),
-        summary: action.stdout.clone(),
-        checks: vec![],
-    };
+    let phase_start = Instant::now();
+    let verification = verify_engineer_action(&inspection, &action, &state_root);
+    match &verification {
+        Ok(_) => {
+            phase_traces.push(PhaseTrace {
+                name: "verify".to_string(),
+                duration: phase_start.elapsed(),
+                outcome: PhaseOutcome::Success,
+            });
+        }
+        Err(e) => {
+            phase_traces.push(PhaseTrace {
+                name: "verify".to_string(),
+                duration: phase_start.elapsed(),
+                outcome: PhaseOutcome::Failed(e.to_string()),
+            });
+        }
+    }
+    let verification = verification?;
 
     // Optional LLM-driven review gate: only runs for mutating actions
     // when an LLM session is available (requires ANTHROPIC_API_KEY).

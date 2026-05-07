@@ -73,13 +73,7 @@ pub fn load_goal_board(bridge: &dyn CognitiveMemoryOps) -> SimardResult<GoalBoar
     Ok(GoalBoard::new())
 }
 
-/// Save the current board state as a semantic fact in cognitive memory
-/// **and** to `goal_records.json` on disk.
-///
-/// The on-disk write ensures that the next OODA cycle start (which loads
-/// from cognitive memory OR disk) always sees the latest board state,
-/// even when cognitive memory `search_facts` returns a stale snapshot
-/// due to unordered `LIMIT 1` retrieval across multiple fact nodes.
+/// Save the current board state as a semantic fact in cognitive memory.
 pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> SimardResult<()> {
     let snapshot = serde_json::to_string(board).map_err(|e| SimardError::InvalidGoalRecord {
         field: "board".to_string(),
@@ -92,22 +86,6 @@ pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> Si
         &["goal-board".to_string()],
         "goal-curator",
     )?;
-
-    // Also write to disk so intermediate saves (e.g. stale subordinate
-    // clearing during Act phase) are durable across cycle boundaries.
-    let state_root = std::env::var("SIMARD_STATE_ROOT")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".into());
-            std::path::PathBuf::from(home).join(".simard")
-        });
-    let goal_path = state_root.join("goal_records.json");
-    if let Ok(pretty) = serde_json::to_string_pretty(board)
-        && let Err(e) = std::fs::write(&goal_path, pretty)
-    {
-        eprintln!("[simard] save_goal_board: failed to write goal_records.json: {e}");
-    }
-
     Ok(())
 }
 
@@ -250,26 +228,6 @@ pub fn update_goal_progress(
     Ok(())
 }
 
-/// Clear the assignment of an active goal, resetting it to `NotStarted` so
-/// it can be re-dispatched on the next OODA cycle.
-///
-/// Used when a subordinate is detected as dead or stale with no artifacts —
-/// clearing `assigned_to` allows `dispatch_advance_goal` to re-enter the
-/// session-based spawn path rather than the subordinate heartbeat path.
-pub fn clear_goal_assignment(board: &mut GoalBoard, goal_id: &str) -> SimardResult<()> {
-    let goal = board
-        .active
-        .iter_mut()
-        .find(|g| g.id == goal_id)
-        .ok_or_else(|| SimardError::InvalidGoalRecord {
-            field: "goal_id".to_string(),
-            reason: format!("active goal '{goal_id}' not found"),
-        })?;
-    goal.assigned_to = None;
-    goal.status = GoalProgress::NotStarted;
-    Ok(())
-}
-
 /// Remove completed goals from the active list. Returns the removed goals.
 pub fn archive_completed(board: &mut GoalBoard) -> Vec<ActiveGoal> {
     let mut archived = Vec::new();
@@ -310,13 +268,13 @@ pub const DEFAULT_SEED_GOALS: [(u32, &str, &str); 5] = [
     ),
     (
         4,
-        "Fix broken features",
-        "Analyze all Simard features against their specs and intended behavior. Identify features that are not working correctly (e.g., meeting REPL, any other broken functionality) and fix them. Prioritize by user impact. Start by auditing the Specs/ directory and comparing each spec against the actual implementation to find gaps and failures.",
+        "Add more gym benchmark scenarios",
+        "Expand the gym evaluation suite with diverse scenarios for broader coverage",
     ),
     (
         5,
-        "Self-serve dashboard improvement",
-        "Use your own dashboard (localhost:8080) with Playwright to understand your operations and memory. Continuously improve the dashboard until it is very useful for understanding your internal state. The dashboard must not use jargon and must remain useful to humans too. Login by reading the code from ~/.simard/.dashkey. Playwright is installed (playwright==1.59.0 with Chromium browser).",
+        "Explore developer ideas from tracked researchers",
+        "Monitor tracked researchers and incorporate promising ideas into the roadmap",
     ),
 ];
 

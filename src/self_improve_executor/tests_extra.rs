@@ -2,14 +2,29 @@ use std::path::Path;
 
 use super::git_ops::rollback;
 use super::*;
+use crate::engineer_loop::AnalyzedAction;
+use crate::engineer_plan::{Plan, PlanStep};
 use crate::review_pipeline::{FindingCategory, Severity};
 
-fn make_patch(outcome_summary: &str) -> ImprovementPatch {
+fn make_patch(steps: Vec<PlanStep>) -> ImprovementPatch {
     ImprovementPatch {
         description: "test improvement".into(),
         target_files: vec!["src/lib.rs".into()],
-        outcome_summary: outcome_summary.to_string(),
+        plan: Plan::new(steps),
         review_findings: Vec::new(),
+    }
+}
+
+fn failing_step() -> PlanStep {
+    step("src/fail.rs", "false")
+}
+
+fn step(target: &str, cmd: &str) -> PlanStep {
+    PlanStep {
+        action: AnalyzedAction::RunShellCommand,
+        target: target.into(),
+        expected_outcome: "ok".into(),
+        verification_command: cmd.into(),
     }
 }
 
@@ -114,10 +129,17 @@ fn apply_result_display_commit_failed() {
 #[serial_test::serial]
 fn apply_and_review_git_diff_failure_includes_rollback_error() {
     // If git diff fails and rollback also fails, both errors must surface.
-    // We simulate this by running against a path that is NOT a git repo.
+    // We simulate this by running against a path that is NOT a git repo, so
+    // `git diff HEAD` fails, and `git checkout -- .` (rollback) also fails.
     let dir = tempfile::TempDir::new().unwrap();
     // No `git init` — intentionally not a repo.
-    let patch = make_patch("summary");
+    let step = PlanStep {
+        action: AnalyzedAction::ReadOnlyScan,
+        target: ".".to_string(),
+        expected_outcome: "ok".to_string(),
+        verification_command: "true".to_string(),
+    };
+    let patch = make_patch(vec![step]);
     let result = apply_and_review(&patch, dir.path());
     match &result {
         ApplyResult::PlanFailed { reason } => {
@@ -142,17 +164,41 @@ fn apply_and_review_review_blocked_rollback_failure_surfaces_as_critical() {
 }
 
 #[test]
+fn apply_and_review_plan_failed_rollback_also_failed() {
+    // When plan stops early and rollback fails, both reasons are combined.
+    let patch = make_patch(vec![failing_step()]);
+    // /dev/null is not a git repo, so rollback will fail.
+    let result = apply_and_review(&patch, Path::new("/dev/null"));
+    match &result {
+        ApplyResult::PlanFailed { reason } => {
+            assert!(
+                reason.contains("failed"),
+                "reason should describe the failure, got: {reason}"
+            );
+        }
+        other => panic!("expected PlanFailed, got: {other:?}"),
+    }
+}
+
+#[test]
 #[serial_test::serial]
 fn apply_and_review_noop_plan_in_real_repo_succeeds() {
-    // An agent that produces no diff → Applied with no findings (empty diff → auto-pass).
+    // A plan with a no-op step in a real git repo should produce Applied
+    // with no findings (empty diff → auto-pass).
     let dir = tempfile::TempDir::new().unwrap();
     init_test_repo(dir.path());
 
-    let patch = make_patch("agent no-op");
+    let step = PlanStep {
+        action: AnalyzedAction::ReadOnlyScan,
+        target: ".".to_string(),
+        expected_outcome: "ok".to_string(),
+        verification_command: "true".to_string(),
+    };
+    let patch = make_patch(vec![step]);
     let result = apply_and_review(&patch, dir.path());
     assert!(
         result.is_applied(),
-        "expected Applied for no-op agent, got: {result:?}"
+        "expected Applied for no-op plan, got: {result:?}"
     );
 }
 
@@ -192,4 +238,46 @@ fn init_test_repo(ws: &Path) {
         .current_dir(ws)
         .output()
         .expect("git commit");
+}
+
+#[test]
+fn generate_patch_deduplicates_target_files() {
+    // Mirror generate_patch's target-file extraction with sort+dedup.
+    let steps = vec![
+        step("src/lib.rs", "true"),
+        step("src/lib.rs", "true"),
+        step("src/main.rs", "true"),
+        step(".", "true"),
+        step("", "true"),
+    ];
+    let plan = Plan::new(steps);
+    let mut files: Vec<String> = plan
+        .steps()
+        .iter()
+        .map(|s| s.target.clone())
+        .filter(|t| t != "." && !t.is_empty())
+        .collect();
+    files.sort();
+    files.dedup();
+    assert_eq!(files, vec!["src/lib.rs", "src/main.rs"]);
+}
+
+#[test]
+fn generate_patch_deduplicates_non_adjacent_duplicates() {
+    // Verify that sort+dedup catches non-adjacent duplicates (the bug fix).
+    let steps = vec![
+        step("src/a.rs", "true"),
+        step("src/b.rs", "true"),
+        step("src/a.rs", "true"),
+    ];
+    let plan = Plan::new(steps);
+    let mut files: Vec<String> = plan
+        .steps()
+        .iter()
+        .map(|s| s.target.clone())
+        .filter(|t| t != "." && !t.is_empty())
+        .collect();
+    files.sort();
+    files.dedup();
+    assert_eq!(files, vec!["src/a.rs", "src/b.rs"]);
 }

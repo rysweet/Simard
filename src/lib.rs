@@ -26,6 +26,7 @@ mod copilot_status_probe;
 mod copilot_task_submit;
 pub mod cost_tracking;
 pub mod engineer_loop;
+pub mod engineer_plan;
 pub mod engineer_worktree;
 pub mod error;
 pub mod eval_watchdog;
@@ -160,7 +161,10 @@ pub use cost_tracking::{
 pub use engineer_loop::{
     AnalyzedAction, EngineerLoopRun, ExecutedEngineerAction, PhaseOutcome, PhaseTrace,
     RepoInspection, SelectedEngineerAction, VerificationReport, analyze_objective,
-    run_local_engineer_loop, spawn_agent_for_goal,
+    run_local_engineer_loop,
+};
+pub use engineer_plan::{
+    Plan, PlanExecutionResult, PlanStep, PlanStepResult, execute_plan, plan_objective,
 };
 pub use error::{SimardError, SimardResult};
 pub use evidence::{

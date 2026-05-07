@@ -34,7 +34,6 @@ pub fn run_optional_review(
             | EngineerActionKind::CreateFile(_)
             | EngineerActionKind::AppendToFile(_)
             | EngineerActionKind::GitCommit(_)
-            | EngineerActionKind::AgentSession { .. }
     );
     if !is_mutating {
         return Ok(());

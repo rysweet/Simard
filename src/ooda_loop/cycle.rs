@@ -67,24 +67,7 @@ fn run_ooda_cycle_inner(
     }
 
     // Only replace board if loaded one is non-empty (cold memory = keep local).
-    // A `.reseed_goals` marker file forces re-seeding from DEFAULT_SEED_GOALS,
-    // ignoring the stale cognitive memory snapshot.
-    let state_root = std::env::var("SIMARD_STATE_ROOT")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".into());
-            std::path::PathBuf::from(home).join(".simard")
-        });
-    let reseed_marker = state_root.join(".reseed_goals");
-    if reseed_marker.exists() {
-        eprintln!(
-            "[simard] OODA start: .reseed_goals marker found — ignoring cognitive memory board"
-        );
-        if let Err(e) = std::fs::remove_file(&reseed_marker) {
-            eprintln!("[simard] OODA start: failed to remove .reseed_goals marker: {e}");
-        }
-        state.active_goals = crate::goal_curation::GoalBoard::new();
-    } else if let Ok(board) = load_goal_board(&*bridges.memory)
+    if let Ok(board) = load_goal_board(&*bridges.memory)
         && !board.active.is_empty()
     {
         state.active_goals = board;

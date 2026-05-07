@@ -2,7 +2,8 @@
 
 use std::path::Path;
 
-use crate::engineer_loop::{RepoInspection, spawn_agent_for_goal};
+use crate::engineer_loop::RepoInspection;
+use crate::engineer_plan::{PlanExecutionResult, execute_plan, plan_objective};
 use crate::error::SimardResult;
 use crate::review_pipeline::{ReviewFinding, ReviewSession, review_diff, should_commit};
 
@@ -16,28 +17,57 @@ const PHILOSOPHY_REVIEW: &str = "Ruthless simplicity. No unnecessary abstraction
 
 /// Generate an [`ImprovementPatch`] from a proposal description.
 ///
-/// Calls [`spawn_agent_for_goal`] to run an autonomous agent session.
-/// Returns `Err(ActionExecutionFailed)` if no LLM session can be opened.
+/// Calls [`plan_objective`] to create a multi-step plan for implementing the
+/// improvement. Returns `Err(PlanningUnavailable)` if no LLM session can be
+/// opened.
 pub fn generate_patch(
     proposal: &str,
     inspection: &RepoInspection,
 ) -> SimardResult<ImprovementPatch> {
-    let outcome_summary = spawn_agent_for_goal(proposal, inspection, &inspection.repo_root)?;
+    let plan = plan_objective(proposal, inspection)?;
+    let target_files: Vec<String> = {
+        let mut files: Vec<String> = plan
+            .steps()
+            .iter()
+            .map(|s| s.target.clone())
+            .filter(|t| t != "." && !t.is_empty())
+            .collect();
+        files.sort();
+        files.dedup();
+        files
+    };
+
     Ok(ImprovementPatch {
         description: proposal.to_string(),
-        target_files: vec![],
-        outcome_summary,
+        target_files,
+        plan,
         review_findings: Vec::new(),
     })
 }
 
-/// Execute a patch, review the resulting diff, and commit or roll back.
+/// Execute a patch plan, review the resulting diff, and commit or roll back.
 ///
 /// Returns [`ApplyResult::Applied`] if the review passes,
 /// [`ApplyResult::ReviewBlocked`] if the review gates the commit,
 /// [`ApplyResult::CommitFailed`] if the commit itself fails, or
-/// [`ApplyResult::PlanFailed`] if git operations fail.
+/// [`ApplyResult::PlanFailed`] if plan execution or git operations fail.
 pub fn apply_and_review(patch: &ImprovementPatch, workspace_path: &Path) -> ApplyResult {
+    let exec_result: PlanExecutionResult = execute_plan(&patch.plan, workspace_path);
+
+    if exec_result.stopped_early {
+        let reason = exec_result
+            .completed
+            .last()
+            .map(|r| format!("step '{}' failed: {}", r.step.target, r.stderr))
+            .unwrap_or_else(|| "plan execution stopped early".to_string());
+        if let Err(rb_err) = rollback(workspace_path) {
+            return ApplyResult::PlanFailed {
+                reason: format!("{reason}; rollback also failed: {rb_err}"),
+            };
+        }
+        return ApplyResult::PlanFailed { reason };
+    }
+
     let diff_text = match git_diff(workspace_path) {
         Ok(d) => d,
         Err(e) => {

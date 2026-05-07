@@ -299,9 +299,11 @@ pub(super) fn build_copilot_terminal_objective(
     // required by copilot for non-interactive mode. `--subprocess-safe` skips
     // interactive staging/env updates. Chain with `exit` so the shell exits
     // after the copilot finishes.
-    let escaped = formatted_prompt
-        .replace('\\', "\\\\")
-        .replace('\'', "'\\''");
+    //
+    // POSIX single-quoted strings treat all characters as literal — backslashes
+    // are NOT special inside single quotes and must NOT be doubled. Only `'`
+    // needs escaping via the `'\''` idiom (end-quote, escaped-quote, re-open).
+    let escaped = formatted_prompt.replace('\'', "'\\''");
     objective.push_str(&format!(
         "command: SIMARD_PROMPT_FILE=$(mktemp /tmp/simard-copilot-prompt.XXXXXX) && \
          printf '%s' '{}' > \"$SIMARD_PROMPT_FILE\" && \

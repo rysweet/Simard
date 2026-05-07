@@ -85,38 +85,6 @@ pub(super) fn checks_for_self_introspection(
                 || combined.contains("under 500");
             goal_named && coverage_named && longitudinal_named && bounded_named
         }
-        "self-introspection-l6-goal-status-recall" => {
-            let goal_named = combined.contains("self-serve-dashboard-improvement")
-                || combined.contains("dashboard");
-            let status_named = combined.contains("in-progress") || combined.contains("in progress");
-            let cycle_named = combined.contains("cycle 9") || combined.contains("cycle_9");
-            let deterministic_named =
-                combined.contains("deterministic") || combined.contains("fallback");
-            goal_named && status_named && cycle_named && deterministic_named
-        }
-        "self-introspection-l7-rationale-comparison" => {
-            let skip_named = combined.contains("skip");
-            let dispatch_named =
-                combined.contains("dispatch_engineer") || combined.contains("dispatch engineer");
-            let blocked_named = combined.contains("blocked")
-                || combined.contains("clippy")
-                || combined.contains("open worktree");
-            let dashboard_named = combined.contains("dashboard") || combined.contains("playwright");
-            skip_named && dispatch_named && blocked_named && dashboard_named
-        }
-        "self-introspection-l8-observe-phase-discrimination" => {
-            let observe_named = combined.contains("observe");
-            let deterministic_named =
-                combined.contains("deterministic") || combined.contains("design");
-            let pr_cited = combined.contains("#1458")
-                || combined.contains("#1469")
-                || combined.contains("#1471")
-                || combined.contains("prompt-driven");
-            let empty_version_named = combined.contains("empty")
-                || combined.contains("no llm")
-                || combined.contains("not llm");
-            observe_named && deterministic_named && pr_cited && empty_version_named
-        }
         _ => false,
     };
 

@@ -12,7 +12,6 @@ mod data_5;
 mod data_6;
 mod data_7;
 mod data_8;
-mod data_9;
 
 use std::sync::OnceLock;
 
@@ -21,7 +20,7 @@ static ALL_BENCHMARK_SCENARIOS: OnceLock<Vec<BenchmarkScenario>> = OnceLock::new
 fn all_benchmark_scenarios() -> &'static [BenchmarkScenario] {
     ALL_BENCHMARK_SCENARIOS
         .get_or_init(|| {
-            let mut v = Vec::with_capacity(194);
+            let mut v = Vec::with_capacity(172);
             v.extend_from_slice(&data_1::SCENARIOS);
             v.extend_from_slice(&data_2::SCENARIOS);
             v.extend_from_slice(&data_3::SCENARIOS);
@@ -30,7 +29,6 @@ fn all_benchmark_scenarios() -> &'static [BenchmarkScenario] {
             v.extend_from_slice(&data_6::SCENARIOS);
             v.extend_from_slice(&data_7::SCENARIOS);
             v.extend_from_slice(&data_8::SCENARIOS);
-            v.extend_from_slice(&data_9::SCENARIOS);
             v
         })
         .as_slice()

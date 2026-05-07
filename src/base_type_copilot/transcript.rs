@@ -116,14 +116,6 @@ pub fn is_copilot_footer_line(trimmed: &str) -> bool {
     {
         return true;
     }
-    // Token usage summary: "Tokens    ↑ 29.9k • ↓ 5 • 12.7k (cached)"
-    if trimmed.starts_with("Tokens")
-        && (trimmed.contains('\u{2191}')
-            || trimmed.contains('\u{2193}')
-            || trimmed.contains("cached"))
-    {
-        return true;
-    }
     false
 }
 
@@ -136,21 +128,6 @@ pub fn is_copilot_footer_line(trimmed: &str) -> bool {
 ///   * File-system artefacts emitted by tool plumbing: `Created file ...`,
 ///     `Modified file ...`, `Deleted file ...`, `Wrote file ...`
 fn is_transcript_noise_line(trimmed: &str) -> bool {
-    // Copilot CLI tool-call tree formatting (● action, │ output, └ summary)
-    // These appear when the Copilot CLI agent executes tool calls as part of
-    // its response. They are visual artifacts that should not be parsed as
-    // conversational content.
-    if trimmed.starts_with('●')
-        || trimmed.starts_with("│")
-        || trimmed.starts_with("└")
-        || trimmed.starts_with("\u{2502}")  // │ BOX DRAWINGS LIGHT VERTICAL
-        || trimmed.starts_with("\u{2514}")  // └ BOX DRAWINGS LIGHT UP AND RIGHT
-        || trimmed.starts_with("\u{25cf}")  // ● BLACK CIRCLE
-        || trimmed.ends_with("lines...")
-        || trimmed.ends_with("lines…")
-    {
-        return true;
-    }
     // Shell `time` builtin output (POSIX format: "real\t0m1.234s")
     for prefix in ["real\t", "real ", "user\t", "user ", "sys\t", "sys "] {
         if let Some(rest) = trimmed.strip_prefix(prefix) {
@@ -204,7 +181,6 @@ fn is_transcript_noise_line(trimmed: &str) -> bool {
         .trim_start();
     if stripped_trim.contains("amplihack is available")
         || stripped_trim.starts_with("Run 'amplihack update'")
-        || stripped_trim.starts_with("Update now?")
         || without_info_glyph.starts_with("NODE_OPTIONS=")
         || without_info_glyph.starts_with("amplihack ")
         || stripped_trim.starts_with("amplihack: ")

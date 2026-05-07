@@ -165,7 +165,7 @@ pub(super) fn action_is_valid(action: &GoalAction) -> bool {
             let trimmed = task.trim();
             !trimmed.is_empty() && !is_placeholder_echo(trimmed)
         }
-        GoalAction::Noop { reason } => !is_placeholder_echo(reason.trim()),
+        GoalAction::Noop { .. } => true,
         GoalAction::AssessOnly { progress_pct, .. } => *progress_pct <= 100,
         GoalAction::GhIssueCreate { title, body, .. } => {
             let t = title.trim();
@@ -177,30 +177,11 @@ pub(super) fn action_is_valid(action: &GoalAction) -> bool {
                 && !is_makework_title(t)
         }
         GoalAction::GhIssueComment { issue, body, .. } => {
-            // Reject prompt template example (issue 1234)
-            *issue > 0
-                && *issue != 1234
-                && !body.trim().is_empty()
-                && !is_placeholder_echo(body.trim())
+            *issue > 0 && !body.trim().is_empty() && !is_placeholder_echo(body.trim())
         }
-        GoalAction::GhIssueClose { issue, comment, .. } => {
-            // Reject the example value from the prompt template (issue 1234,
-            // comment "Fixed in PR #1199.") that can leak through when the
-            // Copilot adapter terminal session times out and the transcript
-            // (containing the echoed prompt) is parsed as the response.
-            if *issue == 1234 {
-                return false;
-            }
-            if let Some(c) = comment
-                && is_placeholder_echo(c.trim())
-            {
-                return false;
-            }
-            *issue > 0
-        }
+        GoalAction::GhIssueClose { issue, .. } => *issue > 0,
         GoalAction::GhPrComment { pr, body, .. } => {
-            // Reject prompt template example (pr 1199)
-            *pr > 0 && *pr != 1199 && !body.trim().is_empty() && !is_placeholder_echo(body.trim())
+            *pr > 0 && !body.trim().is_empty() && !is_placeholder_echo(body.trim())
         }
     }
 }
@@ -229,14 +210,12 @@ pub(super) fn is_placeholder_echo(task: &str) -> bool {
     const KNOWN_PLACEHOLDERS: &[&str] = &[
         "<one-paragraph concrete task>",
         "<short explanation of why no action is needed>",
-        "<short explanation>",
         "<short status>",
         "<title>",
         "<body>",
         "<description>",
         "<short title, single line>",
         "<markdown body, can be multi-line>",
-        "<markdown body>",
         "<comment body, can be multi-line>",
         "<reason for closing>",
     ];

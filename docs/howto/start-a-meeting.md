@@ -1,7 +1,7 @@
 ---
 title: How to start a meeting with Simard
 description: Start a conversational meeting with Simard from the CLI or dashboard. Simard maintains conversation context, remembers past meetings, and persists outcomes on close.
-last_updated: 2026-05-07
+last_updated: 2026-04-12
 review_schedule: as-needed
 owner: simard
 doc_type: howto
@@ -9,7 +9,6 @@ related:
   - ../index.md
   - ../reference/simard-cli.md
   - ../reference/meeting-backend-api.md
-  - ../reference/lightweight-chat-session.md
   - ../architecture/unified-meeting-backend.md
   - ./carry-meeting-decisions-into-engineer-sessions.md
   - ./use-meeting-templates.md
@@ -24,30 +23,24 @@ Meetings are natural conversations with Simard — no structured input format re
 
 - [ ] You are in the repository root
 - [ ] `cargo run --quiet -- ...` works locally (for CLI meetings)
-- [ ] `SIMARD_LLM_PROVIDER` is set (or auto-detected via the launcher) — see §8 below
 - [ ] Dashboard is running (for WebSocket meetings)
 
 ## 1. Start a meeting from the CLI
 
 ```bash
-simard meeting "discuss the next Simard milestone"
+cargo run --quiet -- meeting run local-harness single-process \
+  "discuss the next Simard milestone" \
+  "$STATE_ROOT"
 ```
 
-Or with a cargo build:
+`$STATE_ROOT` is the shared state directory (e.g., `target/state-root`). See the [local session tutorial](../tutorials/run-your-first-local-session.md) for setup.
 
-```bash
-cargo run --quiet -- meeting "discuss the next Simard milestone"
-```
-
-For the Copilot provider the session uses a lightweight direct-subprocess connection — no
-PTY overhead, no 50-second startup delay per turn. Simard greets you and the conversation
-begins:
+Simard greets you and the conversation begins:
 
 ```text
-  Memory: cognitive bridge active (LadybugDB backend)
-  Agent: ready
-
-Simard: Hello! Ready to discuss the next Simard milestone.
+Simard meeting session started
+Topic: discuss the next Simard milestone
+Type /help for commands, or just start talking.
 
 simard> Hey Simard, what's been on your mind since our last meeting?
 
@@ -175,83 +168,13 @@ The JSON transcript contains:
 }
 ```
 
-## 7. Updating goals via a meeting
-
-You can discuss and revise Simard's goal board directly in a meeting, without editing
-`~/.simard/goals.json` by hand or rebuilding the binary.
-
-Tell Simard what you want to change in natural language:
-
-```text
-simard> I want you to prioritise the memory consolidation work above everything else
-        this week. The gym SecAudit work can wait.
-
-Simard: Understood. I'll move the memory-consolidation goal to p1 and defer the
-        SecAudit improvement goal to the backlog. I'll note this as an action item
-        in the meeting summary so the OODA loop picks it up on the next cycle.
-```
-
-When you close the meeting (`/close`), Simard writes a `HandoffActionItem` into the
-meeting record. The OODA daemon reads this on its next iteration and updates the active
-goal list accordingly. You do **not** need to touch the reseed-goals marker file or
-rebuild the binary.
-
-### What gets persisted
-
-| Outcome | Persisted to |
-|---------|-------------|
-| Full transcript | `~/.simard/meetings/{timestamp}_{topic}.json` |
-| Action items (goal changes, next steps) | Meeting handoff (`target/meeting_handoffs/meeting_handoff.json`) |
-| Episodic memory of the meeting | Cognitive memory DB |
-| Semantic extractions (decisions, facts) | Cognitive memory DB |
-| Prospective memory (agreed next steps) | Cognitive memory DB |
-
-### Timing
-
-Goal changes discussed in a meeting take effect on the **next OODA cycle** after the
-meeting is closed. The OODA daemon polls for new meeting handoffs at the start of each
-orient phase. If the daemon is not running, the handoff file remains on disk until the
-next daemon start.
-
-## 8. LLM provider and session backend
-
-Simard resolves the LLM provider at startup via `SIMARD_LLM_PROVIDER` (or the
-`AMPLIHACK_LLM_PROVIDER` alias). When the provider is `copilot`, the meeting REPL uses
-`LightweightChatSession` — a direct piped subprocess that bypasses PTY infrastructure:
-
-- No ~50 s amplihack startup overhead per turn
-- No transcript-idle timeout (the process-tree idle guard in `PtyTerminalSession` does
-  not apply)
-- stderr captured and logged separately (never mixed into Simard's response)
-- 900 s per-turn timeout matches the gym bridge bound
-
-For other providers (RustyClawd, etc.) the standard `SessionBuilder` PTY path is used.
-
-See [LightweightChatSession API reference](../reference/lightweight-chat-session.md)
-for implementation details.
-
-## 9. Carry meeting outcomes into engineer sessions
+## 7. Carry meeting outcomes into engineer sessions
 
 Meeting handoffs still integrate with the OODA loop and engineer sessions. See [How to carry meeting decisions into engineer sessions](./carry-meeting-decisions-into-engineer-sessions.md) for the full flow.
 
 The key difference: decisions and action items are no longer extracted from structured `decision:` / `next-step:` prefixes. Instead, the `/close` summary captures them from the natural conversation and writes them into the handoff artifact.
 
 ## Troubleshooting
-
-### Simard doesn't respond — the REPL hangs after input
-
-If you see the prompt cursor blinking with no response after 2–3 minutes, check:
-
-1. **Provider configured?** Run `gh auth status` for Copilot or verify `ANTHROPIC_API_KEY`
-   for Claude. An unconfigured provider causes `open_meeting_agent_session()` to log
-   `[simard] meeting agent: LLM provider not configured` and exit before the REPL starts.
-2. **`amplihack` on PATH?** The lightweight session invokes `amplihack copilot
-   --subprocess-safe`. If the binary is not found, the turn returns an
-   `AdapterInvocationFailed` error immediately.
-3. **Long compute in progress?** LLM calls can take up to 15 minutes. The 900 s
-   timeout is intentionally generous. If Simard responds eventually, no action needed.
-   If the process exits with "timed out after 900s", the LLM invocation is hung — check
-   network connectivity and provider status.
 
 ### Simard doesn't remember what we discussed earlier in the meeting
 
@@ -272,7 +195,5 @@ It shouldn't. Both use the same `MeetingBackend`. If you notice differences, fil
 
 - [Unified meeting backend architecture](../architecture/unified-meeting-backend.md) — How the backend is structured.
 - [Meeting backend API reference](../reference/meeting-backend-api.md) — Rust API for `MeetingBackend`.
-- [LightweightChatSession API reference](../reference/lightweight-chat-session.md) — The direct-subprocess session used for Copilot provider meetings.
-- [Terminal session idle detection](../reference/terminal-session-idle-detection.md) — How the PTY session avoids premature SIGTERM during long LLM calls.
 - [Simard CLI reference](../reference/simard-cli.md) — Full command tree.
 - [OODA meeting handoff integration](../architecture/ooda-meeting-handoff-integration.md) — How meeting outcomes feed into the OODA loop.
