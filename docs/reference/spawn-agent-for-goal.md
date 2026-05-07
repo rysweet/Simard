@@ -16,8 +16,9 @@ engineering work to a subordinate Copilot agent session. It replaces the
 old `plan_objective` + `execute_plan` pair from the removed
 `src/engineer_plan` module.
 
-**Module**: `simard::engineer_agent` (re-exported as
-`simard::engineer_loop::spawn_agent_for_goal`)
+**Module**: `simard::engineer_loop` (defined in
+`src/engineer_loop/agent_spawn.rs`, re-exported at the crate root as
+`simard::spawn_agent_for_goal`)
 
 ---
 
@@ -60,19 +61,24 @@ Never panics. All errors are returned as `SimardResult`.
 
 ## Prompt construction
 
-`spawn_agent_for_goal` builds the agent prompt by combining:
+`spawn_agent_for_goal` builds the agent prompt via `build_agent_prompt` in
+`src/engineer_loop/agent_spawn.rs`. The prompt is a hardcoded format string
+that combines:
 
-1. **System context** — identity and constraints drawn from
-   `prompt_assets/simard/engineer_planning.md`
-2. **Workspace snapshot** — branch name, dirty/clean status, list of changed
-   files, and active goal titles from `inspection`
-3. **Objective** — the raw `objective` string, appended last
+1. **Fixed preamble** — "You are an autonomous software engineer…" instruction
+   directing the agent to implement the objective and summarise what it changed
+2. **Workspace snapshot** — branch name, HEAD SHA, dirty/clean status, list of
+   changed files, and active goal titles from `inspection`
+3. **Objective** — the raw `objective` string
 
 ```
-<system context from engineer_planning.md>
+You are an autonomous software engineer working on a git repository.
+Use your tools to implement the following objective completely and correctly.
+When done, summarize what you changed.
 
 Objective: <objective>
 Branch: <inspection.branch>
+HEAD: <inspection.head>
 Worktree: dirty | clean
 Changed files: <comma-separated list, or "none">
 Active goals: <semicolon-separated titles, or "none">
@@ -161,7 +167,7 @@ not be used:
 
 ## Error variants
 
-| `SimardError` variant          | When raised                                          |
-|--------------------------------|------------------------------------------------------|
-| `ActionExecutionFailed`        | Agent returned non-zero exit, timeout elapsed, or `workspace_path` does not exist / is not a git repo |
-| `PlanningUnavailable`          | Copilot SDK unavailable / session failed to start    |
+| `SimardError` variant          | When raised                                                                              |
+|--------------------------------|------------------------------------------------------------------------------------------|
+| `ActionExecutionFailed`        | Agent returned non-zero exit, timeout elapsed, or the Copilot SDK session failed to open |
+| `MissingRequiredConfig`        | `LlmProvider::resolve()` found no provider — neither `SIMARD_LLM_PROVIDER` env var nor `llm_provider` in `~/.simard/config.toml` |
