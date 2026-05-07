@@ -14,6 +14,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+#[cfg(unix)]
+extern crate libc;
+
 use tracing::{debug, info, warn};
 
 use crate::base_types::{
@@ -93,13 +96,21 @@ impl LightweightChatSession {
                 reason: format!("failed to spawn copilot subprocess: {e}"),
             })?;
 
-        // Write prompt to stdin and close it
+        // Write prompt to stdin and close it.
         if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(prompt.as_bytes());
+            stdin.write_all(prompt.as_bytes()).map_err(|e| {
+                SimardError::AdapterInvocationFailed {
+                    base_type: "lightweight-chat".to_string(),
+                    reason: format!("failed to write prompt to copilot subprocess: {e}"),
+                }
+            })?;
             // stdin dropped here, closing the pipe
         }
 
         // Wait with a timeout via a background thread + channel.
+        // Save the PID before moving `child` into the thread so we can kill
+        // it if the timeout fires.
+        let child_pid = child.id();
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
             let _ = tx.send(child.wait_with_output());
@@ -114,6 +125,10 @@ impl LightweightChatSession {
                 });
             }
             Err(_) => {
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(child_pid as i32, libc::SIGTERM);
+                }
                 return Err(SimardError::AdapterInvocationFailed {
                     base_type: "lightweight-chat".to_string(),
                     reason: format!("copilot subprocess timed out after {TURN_TIMEOUT_SECS}s"),

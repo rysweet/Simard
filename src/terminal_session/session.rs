@@ -265,7 +265,6 @@ impl PtyTerminalSession {
             }
         };
         let transcript = self.read_transcript()?;
-        let _ = &self.transcript_guard;
         Ok(TerminalSessionCapture {
             transcript,
             exit_status,
