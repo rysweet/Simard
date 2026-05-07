@@ -310,8 +310,8 @@ pub const DEFAULT_SEED_GOALS: [(u32, &str, &str); 5] = [
     ),
     (
         4,
-        "Add more gym benchmark scenarios",
-        "Expand the gym evaluation suite with diverse scenarios for broader coverage",
+        "Fix broken features",
+        "Analyze all Simard features against their specs and intended behavior. Identify features that are not working correctly (e.g., meeting REPL, any other broken functionality) and fix them. Prioritize by user impact. Start by auditing the Specs/ directory and comparing each spec against the actual implementation to find gaps and failures.",
     ),
     (
         5,

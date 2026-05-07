@@ -18,6 +18,7 @@ fn counting_bridge() -> (CognitiveMemoryBridge, Arc<AtomicU32>) {
             "memory.check_triggers" => Ok(json!({"prospectives": []})),
             "memory.recall_procedure" => Ok(json!({"procedures": []})),
             "memory.store_fact" => Ok(json!({"id": "sem_1"})),
+            "memory.get_working" => Ok(json!({"slots": []})),
             "memory.clear_working" => Ok(json!({"count": 2})),
             "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
             "memory.consolidate_episodes" => Ok(json!({"id": null})),
@@ -163,8 +164,8 @@ fn consolidation_intake_with_facts_pushes_to_working_memory() {
 fn consolidation_persistence_flushes_and_consolidates() {
     let (bridge, count) = counting_bridge();
     consolidation_persistence(&test_session_id(), &bridge).unwrap();
-    // store_episode + consolidate_episodes = 2
-    assert_eq!(count.load(Ordering::SeqCst), 2);
+    // get_working + store_episode + consolidate_episodes = 3
+    assert_eq!(count.load(Ordering::SeqCst), 3);
 }
 
 /// Round-trip verification: intake → execution → persistence → recall.

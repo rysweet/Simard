@@ -303,6 +303,14 @@ pub fn consolidation_persistence(
     session_id: &SessionId,
     bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
+    // Drain all working-memory slots into episodic store so they survive
+    // session teardown.  Each slot is written as an episode using its
+    // slot_type as the source label, preserving the memory category.
+    let slots = bridge.get_working(session_id.as_str())?;
+    for slot in &slots {
+        bridge.store_episode(&slot.content, &slot.slot_type, None)?;
+    }
+
     // Store an episodic record capturing the consolidation event.
     bridge.store_episode(
         &format!("Session {session_id} flushing working memory to episodes"),
