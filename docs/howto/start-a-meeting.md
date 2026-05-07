@@ -39,11 +39,9 @@ Or with a cargo build:
 cargo run --quiet -- meeting "discuss the next Simard milestone"
 ```
 
-Simard greets you and the conversation begins immediately. For the Copilot provider the
-session uses a lightweight direct-subprocess connection — no PTY overhead, no 50-second
-startup delay per turn.
-
-Simard greets you and the conversation begins:
+For the Copilot provider the session uses a lightweight direct-subprocess connection — no
+PTY overhead, no 50-second startup delay per turn. Simard greets you and the conversation
+begins:
 
 ```text
   Memory: cognitive bridge active (LadybugDB backend)

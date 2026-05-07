@@ -125,7 +125,7 @@ being returned. This removes:
 - Empty leading lines
 - Copilot startup noise (`Staged N hook files`, `XPIA`, `Script started on`, `Warning:`)
 - Single-character or bullet-prefix progress indicator lines (`●`)
-- Usage-stats footer lines (`Total usage est:`, `API time est:`, `Total session time:`,
+- Usage-stats footer lines (`Total usage est:`, `API time spent:`, `Total session time:`,
   `Changes`, `Requests`, `Tokens`)
 
 ## Capabilities
