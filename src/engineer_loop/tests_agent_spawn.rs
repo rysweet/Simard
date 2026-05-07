@@ -124,6 +124,30 @@ fn build_agent_prompt_says_none_when_no_changed_files() {
     );
 }
 
+/// The prompt must include the structured output instructions section so the
+/// OODA loop and meeting backend can parse the agent's response consistently.
+#[test]
+fn build_agent_prompt_includes_instructions_section() {
+    let inspection = make_inspection();
+    let prompt = build_agent_prompt("fix the bug", &inspection);
+    assert!(
+        prompt.contains("## Instructions"),
+        "prompt must include ## Instructions section; got:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("ACTION:"),
+        "prompt must mention ACTION: format; got:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("EXPLANATION:"),
+        "prompt must mention EXPLANATION: format; got:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("CONFIDENCE:"),
+        "prompt must mention CONFIDENCE: format; got:\n{prompt}"
+    );
+}
+
 // ─── 2. AgentSession serialisation (must be snake_case) ────────────────────
 
 /// `EngineerActionKind::AgentSession` must serialise to `"agent_session"` (not

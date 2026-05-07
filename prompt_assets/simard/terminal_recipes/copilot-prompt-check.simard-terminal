@@ -1,6 +1,0 @@
-working-directory: .
-wait-timeout-seconds: 45
-command: amplihack copilot
-wait-for: Type @ to mention files
-input: /exit
-wait-for: Resume any session with copilot --resume

@@ -74,8 +74,7 @@ pub(crate) fn build_agent_prompt(objective: &str, inspection: &RepoInspection) -
     let mut prompt = format!(
         "You are an autonomous software engineer working on a git repository.\n\
          Use your tools to implement the following objective completely and correctly.\n\
-         When done, summarize what you changed.\n\n\
-         Objective:\n\
+         When done, summarize what you changed.\n\
          ```\n\
          {objective}\n\
          ```\n\
@@ -91,6 +90,15 @@ pub(crate) fn build_agent_prompt(objective: &str, inspection: &RepoInspection) -
         let gap = sanitize_prompt_field(&inspection.architecture_gap_summary, 1000);
         prompt.push_str(&format!("\nArchitecture gaps:\n  {gap}"));
     }
+
+    // Append structured output instructions so the agent's response can be
+    // parsed consistently by the OODA loop and the meeting backend sanitizer.
+    prompt.push_str(
+        "\n## Instructions\n\
+         1. ACTIONS: one per line, formatted as `ACTION: <kind> — <description>`\n\
+         2. EXPLANATION: a brief rationale\n\
+         3. CONFIDENCE: a decimal between 0.0 and 1.0",
+    );
 
     prompt
 }

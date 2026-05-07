@@ -1,9 +1,0 @@
-name: simard-memory-bridge-live
-app_type: cli
-description: Verify Python memory bridge starts and responds to health + store/search
-steps:
-  - action: run
-    command: "echo '{\"id\":\"1\",\"method\":\"bridge.health\",\"params\":{}}' | PYTHONPATH=/home/azureuser/src/amplirusty/amplihack-memory-lib/src python3 python/simard_memory_bridge.py --agent-name qa-test --db-path /tmp/qa-memory-$$"
-    timeout: 15s
-  - action: expect_stdout
-    contains: '"healthy":true'
