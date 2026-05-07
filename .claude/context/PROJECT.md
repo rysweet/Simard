@@ -10,7 +10,7 @@ Replace the sections below with information about your project.
 
 ---
 
-## Project: main
+## Project: issue-1564-two-fixes-needed-in-simard-1-terminal-session-idle
 
 ## Overview
 
