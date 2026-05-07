@@ -23,15 +23,15 @@ pub(crate) fn build_agent_prompt(objective: &str, inspection: &RepoInspection) -
     } else {
         "clean"
     };
-    let goals: Vec<&str> = inspection
-        .active_goals
-        .iter()
-        .map(|g| g.title.as_str())
-        .collect();
-    let goals_list = if goals.is_empty() {
+    let goals_list = if inspection.active_goals.is_empty() {
         "none".to_string()
     } else {
-        goals.join("; ")
+        inspection
+            .active_goals
+            .iter()
+            .map(|g| g.title.as_str())
+            .collect::<Vec<_>>()
+            .join("; ")
     };
     let decisions = if inspection.carried_meeting_decisions.is_empty() {
         "none".to_string()

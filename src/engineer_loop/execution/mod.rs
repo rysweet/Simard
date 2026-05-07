@@ -60,7 +60,8 @@ fn run_command_inner(
             reason: error.to_string(),
         })?;
 
-    let deadline = Instant::now() + timeout_for_command(argv);
+    let timeout = timeout_for_command(argv);
+    let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(_status)) => break,
@@ -70,10 +71,10 @@ fn run_command_inner(
                     let _ = child.wait();
                     return Err(SimardError::CommandTimeout {
                         action: argv.join(" "),
-                        timeout_secs: timeout_for_command(argv).as_secs(),
+                        timeout_secs: timeout.as_secs(),
                     });
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(Duration::from_millis(10));
             }
             Err(error) => {
                 return Err(SimardError::ActionExecutionFailed {
