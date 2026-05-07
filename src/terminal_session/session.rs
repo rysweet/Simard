@@ -214,11 +214,15 @@ impl PtyTerminalSession {
                                 idle_start = Some(std::time::Instant::now());
                             }
 
-                            // If transcript has been idle for IDLE_TIMEOUT_SECS,
-                            // the copilot finished but the wrapper shell is hung.
+                            // If transcript has been idle for IDLE_TIMEOUT_SECS
+                            // AND no LLM work process is still running, the
+                            // copilot finished but the wrapper shell is hung.
+                            // We suppress SIGTERM while work processes are alive
+                            // so silent LLM computation is not interrupted.
                             if let Some(start) = idle_start
                                 && start.elapsed()
                                     >= std::time::Duration::from_secs(IDLE_TIMEOUT_SECS)
+                                && !has_active_work_processes(self.child.id())
                             {
                                 eprintln!(
                                     "[simard] terminal session pid={} idle for {}s after \
@@ -304,6 +308,75 @@ impl PtyTerminalSession {
         }
         Ok(None)
     }
+}
+
+/// Process names that indicate active LLM work is in progress.
+#[cfg(unix)]
+const WORK_PROCESS_NAMES: &[&str] = &["copilot", "node", "amplihack"];
+
+/// Return `true` if any descendant of `root_pid` (via `/proc`) is named one
+/// of the `WORK_PROCESS_NAMES`.  Used to suppress premature SIGTERM when
+/// transcript growth has stopped but the LLM is still computing silently.
+///
+/// On I/O error (process vanished mid-read) the entry is skipped — never
+/// panics.  Returns `false` on non-unix targets (preserving original
+/// behaviour).
+#[cfg(unix)]
+fn has_active_work_processes(root_pid: u32) -> bool {
+    use std::collections::HashSet;
+
+    // Collect all (pid, ppid) pairs from /proc.
+    let mut pairs: Vec<(u32, u32)> = Vec::new();
+    let Ok(proc_dir) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    for entry in proc_dir.flatten() {
+        let name = entry.file_name();
+        let s = name.to_string_lossy();
+        let Ok(pid) = s.parse::<u32>() else { continue };
+        let status_path = format!("/proc/{pid}/status");
+        let Ok(content) = std::fs::read_to_string(&status_path) else {
+            continue;
+        };
+        for line in content.lines() {
+            if let Some(rest) = line.strip_prefix("PPid:") {
+                if let Ok(ppid) = rest.trim().parse::<u32>() {
+                    pairs.push((pid, ppid));
+                }
+                break;
+            }
+        }
+    }
+
+    // BFS to find all descendants of root_pid.
+    let mut descendants: HashSet<u32> = HashSet::new();
+    let mut queue: Vec<u32> = vec![root_pid];
+    while let Some(parent) = queue.pop() {
+        for &(pid, ppid) in &pairs {
+            if ppid == parent && descendants.insert(pid) {
+                queue.push(pid);
+            }
+        }
+    }
+
+    // Check whether any descendant comm matches a work-process name.
+    for pid in descendants {
+        let comm_path = format!("/proc/{pid}/comm");
+        let Ok(comm) = std::fs::read_to_string(&comm_path) else {
+            continue;
+        };
+        let comm = comm.trim();
+        if WORK_PROCESS_NAMES.contains(&comm) {
+            return true;
+        }
+    }
+
+    false
+}
+
+#[cfg(not(unix))]
+fn has_active_work_processes(_root_pid: u32) -> bool {
+    false
 }
 
 fn unique_transcript_path(label: &str) -> PathBuf {

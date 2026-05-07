@@ -1,5 +1,6 @@
 use std::io::{self, BufReader};
 
+use crate::base_types::BaseTypeSession;
 use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::greeting_banner::print_greeting_banner;
 use crate::identity::OperatingMode;
@@ -83,16 +84,39 @@ fn open_meeting_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeSes
             return None;
         }
     };
-    match crate::session_builder::SessionBuilder::new(OperatingMode::Meeting, provider)
-        .node_id("meeting-repl")
-        .address("meeting-repl://local")
-        .adapter_tag("meeting")
-        .open()
-    {
-        Ok(s) => Some(s),
-        Err(e) => {
-            eprintln!("[simard] meeting agent session failed: {e}");
-            None
+    match provider {
+        crate::session_builder::LlmProvider::Copilot => {
+            // Use lightweight piped session — avoids PTY overhead and the
+            // transcript-idle SIGTERM that fires when Copilot is computing
+            // silently, breaking interactive meetings.
+            match crate::meeting_backend::lightweight::LightweightChatSession::new() {
+                Ok(mut session) => {
+                    if let Err(e) = session.open() {
+                        eprintln!("[simard] meeting agent session open failed: {e}");
+                        return None;
+                    }
+                    Some(Box::new(session))
+                }
+                Err(e) => {
+                    eprintln!("[simard] meeting agent session failed: {e}");
+                    None
+                }
+            }
+        }
+        _ => {
+            // Non-Copilot providers: use standard SessionBuilder path.
+            match crate::session_builder::SessionBuilder::new(OperatingMode::Meeting, provider)
+                .node_id("meeting-repl")
+                .address("meeting-repl://local")
+                .adapter_tag("meeting")
+                .open()
+            {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    eprintln!("[simard] meeting agent session failed: {e}");
+                    None
+                }
+            }
         }
     }
 }

@@ -10,6 +10,9 @@
 
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use tracing::{debug, info, warn};
 
@@ -73,7 +76,10 @@ impl LightweightChatSession {
     /// Execute a chat turn by piping the prompt to the copilot subprocess.
     ///
     /// stderr is captured separately and logged (not mixed into the response).
+    /// Times out after 900 seconds to avoid hanging meeting sessions indefinitely.
     fn execute_piped_turn(&self, prompt: &str) -> SimardResult<String> {
+        const TURN_TIMEOUT_SECS: u64 = 900;
+
         let mut child = Command::new(DEFAULT_CHAT_COMMAND)
             .args(["copilot", "--subprocess-safe"])
             .env("AMPLIHACK_NONINTERACTIVE", "1")
@@ -93,13 +99,27 @@ impl LightweightChatSession {
             // stdin dropped here, closing the pipe
         }
 
-        let output =
-            child
-                .wait_with_output()
-                .map_err(|e| SimardError::AdapterInvocationFailed {
+        // Wait with a timeout via a background thread + channel.
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(child.wait_with_output());
+        });
+
+        let output = match rx.recv_timeout(Duration::from_secs(TURN_TIMEOUT_SECS)) {
+            Ok(Ok(out)) => out,
+            Ok(Err(e)) => {
+                return Err(SimardError::AdapterInvocationFailed {
                     base_type: "lightweight-chat".to_string(),
                     reason: format!("copilot subprocess failed: {e}"),
-                })?;
+                });
+            }
+            Err(_) => {
+                return Err(SimardError::AdapterInvocationFailed {
+                    base_type: "lightweight-chat".to_string(),
+                    reason: format!("copilot subprocess timed out after {TURN_TIMEOUT_SECS}s"),
+                });
+            }
+        };
 
         // Log stderr separately — never include in response (#568)
         let stderr_text = String::from_utf8_lossy(&output.stderr);
