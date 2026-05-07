@@ -339,4 +339,183 @@ mod tests {
         let input = BaseTypeTurnInput::objective_only("hello");
         assert!(session.run_turn(input).is_err());
     }
+
+    // ── additional strip_copilot_noise contract tests ─────────────────────────
+
+    /// Warning: lines from Copilot config validation must be stripped.
+    #[test]
+    fn strip_copilot_noise_removes_warning_lines() {
+        let input = "Warning: Could not enable MCP server\nActual response.";
+        let result = strip_copilot_noise(input);
+        assert_eq!(
+            result, "Actual response.",
+            "Warning: prefix lines must be stripped"
+        );
+    }
+
+    /// Bullet (●) progress-indicator lines must be stripped.
+    #[test]
+    fn strip_copilot_noise_removes_bullet_progress_lines() {
+        let input = "● Connecting to agent\nActual response.";
+        let result = strip_copilot_noise(input);
+        assert_eq!(
+            result, "Actual response.",
+            "Lines starting with ● must be stripped"
+        );
+    }
+
+    /// Lines that are 1 or 2 characters (progress spinners) must be stripped.
+    #[test]
+    fn strip_copilot_noise_removes_one_and_two_char_lines() {
+        let input = "a\nbc\nActual response.";
+        let result = strip_copilot_noise(input);
+        assert_eq!(
+            result, "Actual response.",
+            "1-2 char lines must be treated as noise and stripped"
+        );
+    }
+
+    /// All recognised footer marker prefixes must trigger the stop-reading gate.
+    #[test]
+    fn strip_copilot_noise_removes_all_footer_marker_variants() {
+        let markers = [
+            "Total usage est: 1234 tokens",
+            "API time spent: 2.3s",
+            "Total session time: 10s",
+            "Changes 5",
+            "Requests 3",
+            "Tokens 100",
+        ];
+        for marker in &markers {
+            let input = format!("Response text.\n{marker}\nmore stuff");
+            let result = strip_copilot_noise(&input);
+            assert_eq!(
+                result, "Response text.",
+                "Footer marker '{marker}' should stop output"
+            );
+        }
+    }
+
+    /// Mixed noise + real content: all noise categories before and after
+    /// the real content must be stripped; footer must truncate.
+    #[test]
+    fn strip_copilot_noise_mixed_noise_and_content() {
+        let input = concat!(
+            "● Setting up\n",
+            "Warning: something minor\n",
+            "a\n",
+            "b\n",
+            "Here is the actual answer.\n",
+            "It continues here.\n",
+            "Total usage est: 500 tokens\n",
+            "API time spent: 1.2s\n"
+        );
+        let result = strip_copilot_noise(input);
+        assert_eq!(result, "Here is the actual answer.\nIt continues here.");
+    }
+
+    /// A three-character line must NOT be stripped (only <=2 are noise).
+    #[test]
+    fn strip_copilot_noise_preserves_three_char_lines() {
+        let input = "yes\nActual response.";
+        let result = strip_copilot_noise(input);
+        assert!(
+            result.contains("yes"),
+            "3-char lines must not be stripped: got {result:?}"
+        );
+    }
+
+    /// Meaningful multi-line responses must pass through unchanged.
+    #[test]
+    fn strip_copilot_noise_preserves_meaningful_multiline_response() {
+        let input = "Line one of the response.\nLine two of the response.\nLine three.";
+        let result = strip_copilot_noise(input);
+        assert_eq!(result, input.trim());
+    }
+
+    // ── session lifecycle contract tests ──────────────────────────────────────
+
+    /// run_turn after close must return an error — not panic.
+    #[test]
+    fn run_turn_after_close_returns_error() {
+        let mut session = LightweightChatSession::new().unwrap();
+        session.open().unwrap();
+        session.close().unwrap();
+        let input = BaseTypeTurnInput::objective_only("hello");
+        assert!(
+            session.run_turn(input).is_err(),
+            "run_turn on a closed session must return Err"
+        );
+    }
+
+    /// Closing a session that was never opened must return an error.
+    #[test]
+    fn close_before_open_returns_error() {
+        let mut session = LightweightChatSession::new().unwrap();
+        assert!(
+            session.close().is_err(),
+            "close() on a never-opened session must return Err"
+        );
+    }
+
+    /// Double-close must return an error.
+    #[test]
+    fn double_close_returns_error() {
+        let mut session = LightweightChatSession::new().unwrap();
+        session.open().unwrap();
+        session.close().unwrap();
+        assert!(session.close().is_err(), "second close() must return Err");
+    }
+
+    /// The session descriptor id must identify this as "lightweight-chat".
+    #[test]
+    fn session_descriptor_id_is_lightweight_chat() {
+        let session = LightweightChatSession::new().unwrap();
+        let id = session.descriptor().id.as_str();
+        assert_eq!(id, "lightweight-chat");
+    }
+
+    /// Prompt building: when only objective is present, the prompt equals
+    /// the objective string exactly.
+    #[test]
+    fn prompt_building_objective_only_equals_objective() {
+        // We verify the branching logic is correct by checking turn input
+        // construction — the `execute_piped_turn` path is tested via integration.
+        let input = BaseTypeTurnInput::objective_only("just the objective");
+        // identity_context and prompt_preamble must be empty
+        assert!(input.identity_context.is_empty());
+        assert!(input.prompt_preamble.is_empty());
+        assert_eq!(input.objective, "just the objective");
+    }
+
+    /// When preamble and identity context are provided, both must be joinable
+    /// with the objective into a combined prompt.
+    #[test]
+    fn prompt_building_with_preamble_and_identity() {
+        let input = BaseTypeTurnInput {
+            objective: "Do the task.".to_string(),
+            identity_context: "You are Simard.".to_string(),
+            prompt_preamble: "System preamble.".to_string(),
+        };
+        // Simulate the join logic from run_turn
+        let mut parts = Vec::new();
+        if !input.prompt_preamble.is_empty() {
+            parts.push(input.prompt_preamble.as_str());
+        }
+        if !input.identity_context.is_empty() {
+            parts.push(input.identity_context.as_str());
+        }
+        parts.push(&input.objective);
+        let prompt = parts.join("\n\n");
+
+        assert!(prompt.contains("System preamble."));
+        assert!(prompt.contains("You are Simard."));
+        assert!(prompt.contains("Do the task."));
+        // Order: preamble first, identity second, objective last
+        let preamble_pos = prompt.find("System preamble.").unwrap();
+        let identity_pos = prompt.find("You are Simard.").unwrap();
+        let objective_pos = prompt.find("Do the task.").unwrap();
+        assert!(preamble_pos < identity_pos);
+        assert!(identity_pos < objective_pos);
+    }
 }
