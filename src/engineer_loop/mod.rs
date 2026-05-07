@@ -6,6 +6,8 @@ mod types;
 #[cfg(test)]
 mod tests_agent_spawn;
 #[cfg(test)]
+mod tests_agent_spawn_contract;
+#[cfg(test)]
 mod tests_mod;
 #[cfg(test)]
 mod tests_mod_more;

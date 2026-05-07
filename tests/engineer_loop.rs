@@ -706,3 +706,65 @@ verify-contains: /// Greets a person by name.";
         "function signature should still be present:\n{lib_content}"
     );
 }
+
+// ─── simard-engineer-step binary subcommand contract tests ───────────────────
+
+/// The binary usage message must NOT reference the old removed subcommands
+/// (select, execute, verify). These were part of the plan-parse-execute
+/// architecture that was replaced by `agent-spawn` in issue #1536.
+///
+/// **Currently FAILS**: the binary still shows
+/// `<inspect|select|execute|verify|review|persist>` in its die() message.
+#[test]
+fn simard_engineer_step_usage_does_not_mention_removed_subcommands() {
+    let output = Command::new(env!("CARGO_BIN_EXE_simard-engineer-step"))
+        .output()
+        .expect("simard-engineer-step must be launchable");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // The old subcommands were removed in the #1536 refactor.
+    assert!(
+        !stderr.contains("select"),
+        "usage must not mention removed 'select' subcommand; stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("execute"),
+        "usage must not mention removed 'execute' subcommand; stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("verify"),
+        "usage must not mention removed 'verify' subcommand; stderr:\n{stderr}"
+    );
+
+    // The correct subcommands must be present.
+    assert!(
+        stderr.contains("agent-spawn"),
+        "usage must mention 'agent-spawn' subcommand; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("inspect"),
+        "usage must mention 'inspect' subcommand; stderr:\n{stderr}"
+    );
+}
+
+/// Passing an unknown subcommand to the binary must exit with code 2 and
+/// print an error mentioning the unknown name.
+#[test]
+fn simard_engineer_step_unknown_subcommand_exits_2() {
+    let output = Command::new(env!("CARGO_BIN_EXE_simard-engineer-step"))
+        .arg("select") // old removed subcommand
+        .output()
+        .expect("simard-engineer-step must be launchable");
+
+    let code = output.status.code().unwrap_or(0);
+    assert_eq!(
+        code, 2,
+        "unknown subcommand must exit with code 2; got {code}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("select") || stderr.contains("unknown"),
+        "error message must name the unknown subcommand; stderr:\n{stderr}"
+    );
+}
