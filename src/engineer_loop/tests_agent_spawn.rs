@@ -259,20 +259,26 @@ fn run_local_engineer_loop_emits_agent_prompt_build_phase() {
 
     let dir = tempfile::tempdir().unwrap();
     // Initialise a bare git repo so inspect_workspace succeeds.
-    std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(dir.path())
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
+    // Clear GIT_DIR and related vars so git init targets the tempdir, not any
+    // inherited worktree GIT_DIR from the outer cargo test environment.
+    let mut init_cmd = std::process::Command::new("git");
+    init_cmd.args(["init"]).current_dir(dir.path());
+    for key in crate::engineer_loop::CLEARED_GIT_ENV_VARS {
+        init_cmd.env_remove(key);
+    }
+    init_cmd.output().unwrap();
+    let mut commit_cmd = std::process::Command::new("git");
+    commit_cmd
         .args(["commit", "--allow-empty", "-m", "init"])
         .current_dir(dir.path())
         .env("GIT_AUTHOR_NAME", "test")
         .env("GIT_AUTHOR_EMAIL", "test@test.com")
         .env("GIT_COMMITTER_NAME", "test")
-        .env("GIT_COMMITTER_EMAIL", "test@test.com")
-        .output()
-        .unwrap();
+        .env("GIT_COMMITTER_EMAIL", "test@test.com");
+    for key in crate::engineer_loop::CLEARED_GIT_ENV_VARS {
+        commit_cmd.env_remove(key);
+    }
+    commit_cmd.output().unwrap();
 
     let state_root = dir.path().join("state");
     std::fs::create_dir_all(&state_root).unwrap();
