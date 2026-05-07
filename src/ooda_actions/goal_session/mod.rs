@@ -191,10 +191,10 @@ pub(super) fn action_is_valid(action: &GoalAction) -> bool {
             if *issue == 1234 {
                 return false;
             }
-            if let Some(c) = comment {
-                if is_placeholder_echo(c.trim()) {
-                    return false;
-                }
+            if let Some(c) = comment
+                && is_placeholder_echo(c.trim())
+            {
+                return false;
             }
             *issue > 0
         }

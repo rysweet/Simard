@@ -182,28 +182,73 @@ impl PtyTerminalSession {
         let exit_status = match self.final_status.take() {
             Some(status) => status,
             None => {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+                // Two-phase wait:
+                //  1. Wait indefinitely for the process to exit naturally.
+                //     Agentic sessions (engineers, Copilot adapter) may run
+                //     for hours — arbitrary timeouts cause premature termination.
+                //  2. If the transcript stops growing for 5 minutes after stdin
+                //     is closed, the copilot likely finished but the `script`
+                //     wrapper shell is hung at a prompt. Send SIGTERM.
+                let mut idle_start: Option<std::time::Instant> = None;
+                let mut last_transcript_size: u64 = std::fs::metadata(&self.transcript_path)
+                    .ok()
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                const IDLE_TIMEOUT_SECS: u64 = 300; // 5 min of no transcript growth
+
                 loop {
                     match self.child.try_wait() {
                         Ok(Some(status)) => break status,
-                        Ok(None) if std::time::Instant::now() >= deadline => {
-                            eprintln!(
-                                "[simard] terminal session pid={} did not exit after 10min, \
-                                 returning transcript so far",
-                                self.child.id()
-                            );
-                            #[cfg(unix)]
-                            {
-                                use std::os::unix::process::ExitStatusExt;
-                                break std::process::ExitStatus::from_raw(0);
-                            }
-                            #[cfg(not(unix))]
-                            {
-                                break self.child.wait().unwrap_or_default();
-                            }
-                        }
                         Ok(None) => {
-                            std::thread::sleep(std::time::Duration::from_millis(200));
+                            std::thread::sleep(std::time::Duration::from_secs(1));
+
+                            // Check if transcript is still growing.
+                            let current_size = std::fs::metadata(&self.transcript_path)
+                                .ok()
+                                .map(|m| m.len())
+                                .unwrap_or(0);
+                            if current_size > last_transcript_size {
+                                last_transcript_size = current_size;
+                                idle_start = None; // reset idle timer
+                            } else if idle_start.is_none() {
+                                idle_start = Some(std::time::Instant::now());
+                            }
+
+                            // If transcript has been idle for IDLE_TIMEOUT_SECS,
+                            // the copilot finished but the wrapper shell is hung.
+                            if let Some(start) = idle_start
+                                && start.elapsed()
+                                    >= std::time::Duration::from_secs(IDLE_TIMEOUT_SECS)
+                            {
+                                eprintln!(
+                                    "[simard] terminal session pid={} idle for {}s after \
+                                         copilot exit — sending SIGTERM",
+                                    self.child.id(),
+                                    IDLE_TIMEOUT_SECS,
+                                );
+                                #[cfg(unix)]
+                                {
+                                    unsafe {
+                                        libc::kill(self.child.id() as i32, libc::SIGTERM);
+                                    }
+                                }
+                                // Give it a moment to clean up.
+                                std::thread::sleep(std::time::Duration::from_secs(2));
+                                match self.child.try_wait() {
+                                    Ok(Some(status)) => break status,
+                                    _ => {
+                                        #[cfg(unix)]
+                                        {
+                                            use std::os::unix::process::ExitStatusExt;
+                                            break std::process::ExitStatus::from_raw(0);
+                                        }
+                                        #[cfg(not(unix))]
+                                        {
+                                            break self.child.wait().unwrap_or_default();
+                                        }
+                                    }
+                                }
+                            }
                         }
                         Err(e) => {
                             return Err(SimardError::AdapterInvocationFailed {

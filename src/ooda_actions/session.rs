@@ -87,7 +87,8 @@ fn dispatch_launch_session_copilot(action: &PlannedAction) -> ActionOutcome {
     }
 
     // Wait for natural process exit — copilot runs to completion, then
-    // bash exits via the chained `; exit`. finish() polls up to 600s.
+    // bash exits via the chained `; exit`. finish() waits indefinitely for
+    // transcript activity; if idle for 5 min, sends SIGTERM to hung wrapper.
     match session.finish() {
         Ok(capture) => {
             let preview = crate::terminal_session::transcript_preview(&capture.transcript);

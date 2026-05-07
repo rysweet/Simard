@@ -102,10 +102,10 @@ pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> Si
             std::path::PathBuf::from(home).join(".simard")
         });
     let goal_path = state_root.join("goal_records.json");
-    if let Ok(pretty) = serde_json::to_string_pretty(board) {
-        if let Err(e) = std::fs::write(&goal_path, pretty) {
-            eprintln!("[simard] save_goal_board: failed to write goal_records.json: {e}");
-        }
+    if let Ok(pretty) = serde_json::to_string_pretty(board)
+        && let Err(e) = std::fs::write(&goal_path, pretty)
+    {
+        eprintln!("[simard] save_goal_board: failed to write goal_records.json: {e}");
     }
 
     Ok(())
@@ -315,8 +315,8 @@ pub const DEFAULT_SEED_GOALS: [(u32, &str, &str); 5] = [
     ),
     (
         5,
-        "Explore developer ideas from tracked researchers",
-        "Monitor tracked researchers and incorporate promising ideas into the roadmap",
+        "Self-serve dashboard improvement",
+        "Use your own dashboard (localhost:8080) with Playwright to understand your operations and memory. Continuously improve the dashboard until it is very useful for understanding your internal state. The dashboard must not use jargon and must remain useful to humans too. Login by reading the code from ~/.simard/.dashkey. Playwright is installed (playwright==1.59.0 with Chromium browser).",
     ),
 ];
 

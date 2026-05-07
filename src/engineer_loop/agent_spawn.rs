@@ -34,7 +34,7 @@ pub(crate) fn build_agent_prompt(objective: &str, inspection: &RepoInspection) -
         goals.join("; ")
     };
 
-    format!(
+    let mut prompt = format!(
         "You are an autonomous software engineer working on a git repository.\n\
          Use your tools to implement the following objective completely and correctly.\n\
          When done, summarize what you changed.\n\n\
@@ -47,7 +47,14 @@ pub(crate) fn build_agent_prompt(objective: &str, inspection: &RepoInspection) -
         objective = objective,
         branch = inspection.branch,
         head = inspection.head,
-    )
+    );
+
+    if !inspection.architecture_gap_summary.is_empty() {
+        prompt.push_str("\n\nArchitecture notes: ");
+        prompt.push_str(&inspection.architecture_gap_summary);
+    }
+
+    prompt
 }
 
 /// Start an agent session thread and return the channel receiver.
@@ -182,5 +189,42 @@ mod tests {
         };
         let prompt = build_agent_prompt("improve quality", &inspection);
         assert!(prompt.contains("Self-improvement"));
+    }
+
+    #[test]
+    fn build_agent_prompt_includes_architecture_gap_summary_when_set() {
+        use crate::engineer_loop::types::RepoInspection;
+        let inspection = RepoInspection {
+            workspace_root: "/tmp".into(),
+            repo_root: "/tmp".into(),
+            branch: "main".into(),
+            head: "abc".into(),
+            worktree_dirty: false,
+            changed_files: vec![],
+            active_goals: vec![],
+            carried_meeting_decisions: vec![],
+            architecture_gap_summary: "session_builder.rs exceeds 400 lines".to_string(),
+        };
+        let prompt = build_agent_prompt("improve quality", &inspection);
+        assert!(prompt.contains("Architecture notes:"));
+        assert!(prompt.contains("session_builder.rs exceeds 400 lines"));
+    }
+
+    #[test]
+    fn build_agent_prompt_omits_architecture_notes_when_empty() {
+        use crate::engineer_loop::types::RepoInspection;
+        let inspection = RepoInspection {
+            workspace_root: "/tmp".into(),
+            repo_root: "/tmp".into(),
+            branch: "main".into(),
+            head: "abc".into(),
+            worktree_dirty: false,
+            changed_files: vec![],
+            active_goals: vec![],
+            carried_meeting_decisions: vec![],
+            architecture_gap_summary: String::new(),
+        };
+        let prompt = build_agent_prompt("improve quality", &inspection);
+        assert!(!prompt.contains("Architecture notes:"));
     }
 }
