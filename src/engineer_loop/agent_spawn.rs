@@ -33,8 +33,18 @@ pub(crate) fn build_agent_prompt(objective: &str, inspection: &RepoInspection) -
     } else {
         goals.join("; ")
     };
+    let decisions = if inspection.carried_meeting_decisions.is_empty() {
+        "none".to_string()
+    } else {
+        inspection
+            .carried_meeting_decisions
+            .iter()
+            .map(|d| format!("  - {d}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
 
-    format!(
+    let mut prompt = format!(
         "You are an autonomous software engineer working on a git repository.\n\
          Use your tools to implement the following objective completely and correctly.\n\
          When done, summarize what you changed.\n\n\
@@ -43,11 +53,21 @@ pub(crate) fn build_agent_prompt(objective: &str, inspection: &RepoInspection) -
          HEAD: {head}\n\
          Worktree: {dirty}\n\
          Changed files: {files}\n\
-         Active goals: {goals_list}",
+         Active goals: {goals_list}\n\
+         Meeting decisions: {decisions}",
         objective = objective,
         branch = inspection.branch,
         head = inspection.head,
-    )
+    );
+
+    if !inspection.architecture_gap_summary.is_empty() {
+        prompt.push_str(&format!(
+            "\nArchitecture gaps:\n  {}",
+            inspection.architecture_gap_summary
+        ));
+    }
+
+    prompt
 }
 
 /// Start an agent session thread and return the channel receiver.
