@@ -322,10 +322,11 @@ const WORK_PROCESS_NAMES: &[&str] = &["copilot", "node", "amplihack"];
 /// behaviour).
 #[cfg(unix)]
 fn has_active_work_processes(root_pid: u32) -> bool {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet, VecDeque};
 
-    // Collect all (pid, ppid) pairs from /proc.
-    let mut pairs: Vec<(u32, u32)> = Vec::new();
+    // Single /proc scan: build a parent→children map.  O(n) vs the previous
+    // O(n²) approach that re-scanned the flat pairs Vec on every BFS step.
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
     let Ok(proc_dir) = std::fs::read_dir("/proc") else {
         return false;
     };
@@ -340,36 +341,39 @@ fn has_active_work_processes(root_pid: u32) -> bool {
         for line in content.lines() {
             if let Some(rest) = line.strip_prefix("PPid:") {
                 if let Ok(ppid) = rest.trim().parse::<u32>() {
-                    pairs.push((pid, ppid));
+                    children.entry(ppid).or_default().push(pid);
                 }
                 break;
             }
         }
     }
 
-    // BFS to find all descendants of root_pid.
-    let mut descendants: HashSet<u32> = HashSet::new();
-    let mut queue: Vec<u32> = vec![root_pid];
-    while let Some(parent) = queue.pop() {
-        for &(pid, ppid) in &pairs {
-            if ppid == parent && descendants.insert(pid) {
-                queue.push(pid);
+    // BFS over descendants; check comm at each node and short-circuit on
+    // first match — no need to collect the full set before checking.
+    let mut visited: HashSet<u32> = HashSet::new();
+    let mut queue: VecDeque<u32> = VecDeque::new();
+    if let Some(kids) = children.get(&root_pid) {
+        for &kid in kids {
+            if visited.insert(kid) {
+                queue.push_back(kid);
             }
         }
     }
-
-    // Check whether any descendant comm matches a work-process name.
-    for pid in descendants {
+    while let Some(pid) = queue.pop_front() {
         let comm_path = format!("/proc/{pid}/comm");
-        let Ok(comm) = std::fs::read_to_string(&comm_path) else {
-            continue;
-        };
-        let comm = comm.trim();
-        if WORK_PROCESS_NAMES.contains(&comm) {
-            return true;
+        if let Ok(comm) = std::fs::read_to_string(&comm_path) {
+            if WORK_PROCESS_NAMES.contains(&comm.trim()) {
+                return true;
+            }
+        }
+        if let Some(kids) = children.get(&pid) {
+            for &kid in kids {
+                if visited.insert(kid) {
+                    queue.push_back(kid);
+                }
+            }
         }
     }
-
     false
 }
 

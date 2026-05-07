@@ -199,9 +199,10 @@ impl BaseTypeSession for LightweightChatSession {
         let start = std::time::Instant::now();
 
         let response_text = self.execute_piped_turn(&prompt)?;
+        let elapsed_ms = start.elapsed().as_millis() as u64;
 
         info!(
-            elapsed_ms = start.elapsed().as_millis() as u64,
+            elapsed_ms,
             response_len = response_text.len(),
             turn = self.turn_count,
             "Lightweight chat: received response"
@@ -226,7 +227,7 @@ impl BaseTypeSession for LightweightChatSession {
             execution_summary: response_text,
             evidence: vec![
                 format!("lightweight-chat-turn={}", self.turn_count),
-                format!("elapsed-ms={}", start.elapsed().as_millis()),
+                format!("elapsed-ms={elapsed_ms}"),
             ],
         })
     }
