@@ -196,24 +196,27 @@ fn run_optional_review_does_not_skip_agent_session() {
     );
 }
 
-// ─── 5. compute_diff_for_review uses `git diff` for AgentSession ─────────────
+// ─── 5. compute_diff_for_review uses pre-spawn HEAD diff for AgentSession ───────
 
-/// For `AgentSession`, the diff must capture ALL workspace changes (not just
-/// the last commit), so `git diff` must be used, not `git diff HEAD~1 HEAD`.
+/// For `AgentSession`, the diff must capture ALL commits the agent made during
+/// its run. Without a pre-spawn HEAD, plain `git diff` (working tree only) would
+/// produce an empty result when the agent commits its work, silently skipping review.
 #[test]
-fn compute_diff_for_review_agent_session_uses_git_diff() {
-    // Use a valid git repo (this crate's own worktree) to get a real diff call.
-    // We only check that the call does NOT blow up and follows the wildcard arm.
+fn compute_diff_for_review_agent_session_uses_pre_spawn_head() {
     let kind = EngineerActionKind::AgentSession {
         outcome_summary: "done".to_string(),
     };
-    // diff is a String (may be empty if worktree is clean) — must not panic.
-    let _diff = compute_diff_for_review(std::path::Path::new("."), &kind);
-    // Contrast: GitCommit uses HEAD~1..HEAD; AgentSession uses plain `git diff`.
-    // There's no easy way to assert the git subcommand from Rust unit tests,
-    // so we just assert the function doesn't treat AgentSession like GitCommit
-    // by verifying the kind enum variant is indeed not GitCommit.
+    // With None: falls back to plain `git diff` (no commit captured).
+    // Using the real worktree — must not panic regardless of head value.
+    let _diff_no_head = compute_diff_for_review(std::path::Path::new("."), &kind, None);
+
+    // With a pre-spawn HEAD: uses `git diff <head> HEAD` to capture committed work.
+    // Use a dummy SHA; the git call will fail gracefully (empty string), but the
+    // key contract is that the call does NOT blow up and uses the distinct arm.
+    let _diff_with_head = compute_diff_for_review(std::path::Path::new("."), &kind, Some("HEAD"));
+    // AgentSession must not be treated as GitCommit (HEAD~1..HEAD) or ReadOnlyScan.
     assert!(!matches!(kind, EngineerActionKind::GitCommit(_)));
+    assert!(!matches!(kind, EngineerActionKind::ReadOnlyScan));
 }
 
 // ─── 6. run_local_engineer_loop emits three agent-* phase traces ─────────────

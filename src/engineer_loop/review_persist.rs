@@ -49,7 +49,11 @@ pub fn run_optional_review(
         Err(e) => return Err(e),
     };
 
-    let diff_text = compute_diff_for_review(&inspection.repo_root, &action.selected.kind);
+    let diff_text = compute_diff_for_review(
+        &inspection.repo_root,
+        &action.selected.kind,
+        Some(&inspection.head),
+    );
     if diff_text.is_empty() {
         let _ = review_session.close();
         return Ok(());
@@ -76,12 +80,25 @@ pub(crate) const PHILOSOPHY_REVIEW: &str = "Ruthless simplicity. No unnecessary 
     Modules under 400 lines. Every public function tested. \
     Clippy clean. No panics in library code.";
 
-pub(crate) fn compute_diff_for_review(repo_root: &Path, kind: &EngineerActionKind) -> String {
-    let args: &[&str] = match kind {
-        EngineerActionKind::GitCommit(_) => &["git", "diff", "HEAD~1", "HEAD"],
-        _ => &["git", "diff"],
+pub(crate) fn compute_diff_for_review(
+    repo_root: &Path,
+    kind: &EngineerActionKind,
+    pre_spawn_head: Option<&str>,
+) -> String {
+    let args: Vec<String> = match kind {
+        EngineerActionKind::GitCommit(_) => {
+            vec!["git".into(), "diff".into(), "HEAD~1".into(), "HEAD".into()]
+        }
+        // For agent sessions, diff from the pre-spawn HEAD to include all commits
+        // the agent made during its run. Plain `git diff` only shows uncommitted
+        // changes and produces an empty result when the agent commits its work.
+        EngineerActionKind::AgentSession { .. } => match pre_spawn_head {
+            Some(head) => vec!["git".into(), "diff".into(), head.to_string(), "HEAD".into()],
+            None => vec!["git".into(), "diff".into()],
+        },
+        _ => vec!["git".into(), "diff".into()],
     };
-    match Command::new(args[0])
+    match Command::new(&args[0])
         .args(&args[1..])
         .current_dir(repo_root)
         .output()
@@ -282,6 +299,7 @@ mod tests {
         let diff = compute_diff_for_review(
             Path::new("/tmp/nonexistent-repo-test-xyz"),
             &EngineerActionKind::ReadOnlyScan,
+            None,
         );
         assert!(diff.is_empty());
     }
@@ -294,6 +312,7 @@ mod tests {
             &EngineerActionKind::GitCommit(super::super::types::GitCommitRequest {
                 message: "test commit".to_string(),
             }),
+            None,
         );
         // With a nonexistent dir, diff is empty — the key test is no panic
         assert!(diff.is_empty());

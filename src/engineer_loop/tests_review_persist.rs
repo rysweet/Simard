@@ -93,7 +93,7 @@ fn diff_for_review_git_commit_uses_head_diff() {
         message: "test".into(),
     });
     // Won't succeed (not a git repo), but should return empty string gracefully
-    let result = compute_diff_for_review(dir.path(), &kind);
+    let result = compute_diff_for_review(dir.path(), &kind, None);
     assert!(result.is_empty()); // no git repo → empty
 }
 
@@ -101,7 +101,7 @@ fn diff_for_review_git_commit_uses_head_diff() {
 fn diff_for_review_non_commit_uses_git_diff() {
     let dir = tempfile::tempdir().unwrap();
     let kind = EngineerActionKind::ReadOnlyScan;
-    let result = compute_diff_for_review(dir.path(), &kind);
+    let result = compute_diff_for_review(dir.path(), &kind, None);
     assert!(result.is_empty()); // no git repo → empty
 }
 
@@ -174,7 +174,7 @@ fn diff_for_review_create_file_uses_git_diff() {
         relative_path: "new.rs".into(),
         content: "content".into(),
     });
-    let result = compute_diff_for_review(dir.path(), &kind);
+    let result = compute_diff_for_review(dir.path(), &kind, None);
     assert!(result.is_empty()); // not a git repo
 }
 
@@ -185,7 +185,7 @@ fn diff_for_review_append_to_file_uses_git_diff() {
         relative_path: "log.txt".into(),
         content: "entry".into(),
     });
-    let result = compute_diff_for_review(dir.path(), &kind);
+    let result = compute_diff_for_review(dir.path(), &kind, None);
     assert!(result.is_empty());
 }
 
@@ -198,21 +198,21 @@ fn diff_for_review_structured_text_replace_uses_git_diff() {
         replacement: "new".into(),
         verify_contains: "new".into(),
     });
-    let result = compute_diff_for_review(dir.path(), &kind);
+    let result = compute_diff_for_review(dir.path(), &kind, None);
     assert!(result.is_empty());
 }
 
 #[test]
 fn diff_for_review_cargo_test_uses_git_diff() {
     let dir = tempfile::tempdir().unwrap();
-    let result = compute_diff_for_review(dir.path(), &EngineerActionKind::CargoTest);
+    let result = compute_diff_for_review(dir.path(), &EngineerActionKind::CargoTest, None);
     assert!(result.is_empty());
 }
 
 #[test]
 fn diff_for_review_cargo_check_uses_git_diff() {
     let dir = tempfile::tempdir().unwrap();
-    let result = compute_diff_for_review(dir.path(), &EngineerActionKind::CargoCheck);
+    let result = compute_diff_for_review(dir.path(), &EngineerActionKind::CargoCheck, None);
     assert!(result.is_empty());
 }
 

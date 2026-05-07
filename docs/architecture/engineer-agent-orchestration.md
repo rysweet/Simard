@@ -119,7 +119,7 @@ An `ExecutedEngineerAction` whose `selected.kind` is `AgentSession` has:
 |--------------------|------------------------------------------------------|
 | `label`            | `"agent-session"`                                    |
 | `rationale`        | The natural-language prompt sent to the agent        |
-| `argv`             | `["copilot", "agent", "--goal", "<objective>"]`      |
+| `argv`             | `[]` (agent sessions have no argv; the prompt is sent via session API) |
 | `plan_summary`     | The `execution_summary` returned by the agent        |
 | `exit_code`        | `0` on success, non-zero on agent failure or timeout |
 | `stdout`           | Agent's final output text                            |
@@ -131,7 +131,7 @@ An `ExecutedEngineerAction` whose `selected.kind` is `AgentSession` has:
 ## Timeout
 
 `spawn_agent_for_goal()` enforces a **3600-second** wall-clock timeout
-(matching `CARGO_COMMAND_TIMEOUT_SECS`). If the agent session does not return
+(`AGENT_SESSION_TIMEOUT_SECS` in `agent_spawn.rs`). If the agent session does not return
 within that window the call returns:
 
 ```

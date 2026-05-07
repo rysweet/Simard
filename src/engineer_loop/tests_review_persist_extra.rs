@@ -89,7 +89,7 @@ fn diff_for_review_run_shell_command_uses_git_diff() {
     let kind = EngineerActionKind::RunShellCommand(super::types::ShellCommandRequest {
         argv: vec!["echo".into(), "hello".into()],
     });
-    let result = compute_diff_for_review(dir.path(), &kind);
+    let result = compute_diff_for_review(dir.path(), &kind, None);
     assert!(result.is_empty());
 }
 
@@ -101,7 +101,7 @@ fn diff_for_review_open_issue_uses_git_diff() {
         body: "body".into(),
         labels: vec!["bug".into()],
     });
-    let result = compute_diff_for_review(dir.path(), &kind);
+    let result = compute_diff_for_review(dir.path(), &kind, None);
     assert!(result.is_empty());
 }
 
