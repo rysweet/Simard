@@ -45,8 +45,10 @@ pub fn spawn_agent_for_goal(
 Returns `Ok(execution_summary)` where `execution_summary` is the agent's
 final output text — typically a short paragraph describing what was done,
 what tests were run, and whether the work succeeded. This string is stored
-in `ExecutedEngineerAction.selected.plan_summary` and appears verbatim in
-the cycle report.
+in `ExecutedEngineerAction.stdout` (and mirrored in
+`ExecutedEngineerAction.selected.kind.agent_session.outcome_summary`).
+`ExecutedEngineerAction.selected.plan_summary` holds the original
+objective string, not the agent output.
 
 Returns `Err(SimardError::ActionExecutionFailed { reason })` on:
 - Agent session failure (non-zero exit from the Copilot SDK)
@@ -91,22 +93,26 @@ autonomously, calling whatever tools it needs to complete the work.
 
 ## Timeout behaviour
 
-The call blocks the calling thread for up to **3600 seconds**. Internally it
-uses `std::thread::spawn` + `std::sync::mpsc::channel::recv_timeout` so the
-calling thread is not permanently blocked if the agent hangs:
+The call blocks the calling thread for up to **3600 seconds**. Internally
+`spawn_agent_for_goal` delegates to two helpers:
+
+1. **`start_agent_session`** — opens the LLM session, spawns a background
+   thread that calls `session.run_turn(...)`, and returns an
+   `mpsc::Receiver<SimardResult<String>>`.
+2. **`await_agent_session`** — calls `recv_timeout` on that receiver with the
+   `AGENT_SESSION_TIMEOUT_SECS` deadline:
 
 ```rust
-let (tx, rx) = std::sync::mpsc::channel();
-std::thread::spawn(move || {
-    let result = session.run_turn(turn_input); // blocking Copilot SDK call
-    let _ = tx.send(result);
-});
-match rx.recv_timeout(Duration::from_secs(3600)) {
-    Ok(result) => result.map(|r| r.execution_summary),
-    Err(_) => Err(SimardError::ActionExecutionFailed {
-        reason: "agent session timed out after 3600s".to_string(),
-    }),
-}
+// await_agent_session (src/engineer_loop/agent_spawn.rs)
+rx.recv_timeout(Duration::from_secs(AGENT_SESSION_TIMEOUT_SECS))
+    .map_err(|_| SimardError::ActionExecutionFailed {
+        action: "agent-spawn".to_string(),
+        reason: format!("agent session timed out after {AGENT_SESSION_TIMEOUT_SECS}s"),
+    })?
+    .map_err(|e| SimardError::ActionExecutionFailed {
+        action: "agent-spawn".to_string(),
+        reason: format!("agent session failed: {e}"),
+    })
 ```
 
 The 3600-second limit is set by `AGENT_SESSION_TIMEOUT_SECS` defined in

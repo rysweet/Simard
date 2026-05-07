@@ -116,16 +116,20 @@ On success you'll see `ExecutedEngineerAction` JSON with `exit_code: 0`:
     "label": "agent-session",
     "rationale": "Spawned autonomous agent session for: Add a hello_world...",
     "argv": [],
-    "plan_summary": "Added hello_world() returning 'Hello, world!' and a \
-#[test] fn test_hello_world. cargo test passes.",
-    "kind": { "agent_session": { "outcome_summary": "Added hello_world()..." } }
+    "plan_summary": "Add a hello_world function to main.rs that returns the string 'Hello, world!' and write a test for it.",
+    "verification_steps": [],
+    "expected_changed_files": [],
+    "kind": { "agent_session": { "outcome_summary": "Added hello_world() returning 'Hello, world!' and a #[test] fn test_hello_world. cargo test passes." } }
   },
   "exit_code": 0,
-  "stdout": "Added hello_world() returning ...",
+  "stdout": "Added hello_world() returning 'Hello, world!' and a #[test] fn test_hello_world. cargo test passes.",
   "stderr": "",
   "changed_files": ["main.rs"]
 }
 ```
+
+> **Note:** `plan_summary` echoes the original objective. The agent's execution
+> summary is in `stdout` and `selected.kind.agent_session.outcome_summary`.
 
 ---
 
@@ -185,13 +189,17 @@ Expected output:
 { "name": "persist",            "outcome": { "Success": null } }
 ```
 
-The `agent-spawn` phase accounts for almost all the wall time. The `plan_summary`
-field shows what the agent reported back:
+The `agent-spawn` phase accounts for almost all the wall time. The agent's
+execution summary is in `action.stdout` (and mirrored in
+`action.selected.kind.agent_session.outcome_summary`):
 
 ```bash
-jq '.action.selected.plan_summary' \
+jq '.action.stdout' \
   /tmp/simard-tutorial/state/cycle-reports/*.json
 ```
+
+> **Note:** `action.selected.plan_summary` echoes the original objective string,
+> not the agent's output.
 
 ---
 
