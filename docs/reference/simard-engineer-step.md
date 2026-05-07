@@ -162,7 +162,7 @@ The `inspect`, `review`, and `persist` subcommands are unchanged.
   "selected": {
     "label": "agent-session",
     "rationale": "Implement the frobnicator as described in objective",
-    "argv": ["copilot", "agent", "--goal", "<objective>"],
+    "argv": [],
     "plan_summary": "Added frobnicator module, all tests pass.",
     "verification_steps": [],
     "expected_changed_files": [],

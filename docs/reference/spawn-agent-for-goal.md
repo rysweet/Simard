@@ -103,8 +103,8 @@ match rx.recv_timeout(Duration::from_secs(3600)) {
 }
 ```
 
-The 3600-second limit matches `CARGO_COMMAND_TIMEOUT_SECS` defined in
-`src/engineer_loop/mod.rs`.
+The 3600-second limit is set by `AGENT_SESSION_TIMEOUT_SECS` defined in
+`src/engineer_loop/agent_spawn.rs`.
 
 ---
 

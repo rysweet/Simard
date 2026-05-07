@@ -54,6 +54,7 @@ nav:
     - Bridge Pattern: architecture/bridge-pattern.md
     - Cognitive Memory: architecture/cognitive-memory.md
     - Agent Composition: architecture/agent-composition.md
+    - Engineer Agent Orchestration: architecture/engineer-agent-orchestration.md
     - Implementation Plan: architecture/implementation-plan.md
   - Concepts:
     - Truthful Runtime Metadata: concepts/truthful-runtime-metadata.md
@@ -61,10 +62,15 @@ nav:
   - Tutorials:
     - First Local Session: tutorials/run-your-first-local-session.md
     - First Benchmark Suite: tutorials/run-your-first-benchmark-gym.md
+    - First Agent Engineer Loop: tutorials/run-your-first-engineer-agent-loop.md
   - How-To Guides:
     - Terminal to Engineer: howto/move-from-terminal-recipes-into-engineer-runs.md
     - Bootstrap and Reflection: howto/configure-bootstrap-and-inspect-reflection.md
     - Carry Meeting Decisions: howto/carry-meeting-decisions-into-engineer-sessions.md
+    - Agent Orchestration Engineer Loop: howto/use-agent-orchestration-engineer-loop.md
+    - Spawn Engineers from OODA: howto/spawn-engineers-from-ooda-daemon.md
+    - Attach to Running Engineer: howto/attach-to-a-running-engineer.md
+    - Inspect Engineer Worktrees: howto/inspect-and-clean-engineer-worktrees.md
     - Inspect Meeting Records: howto/inspect-meeting-records.md
     - Inspect Improvements: howto/inspect-improvement-curation-state.md
     - Reclaim Disk Space: howto/reclaim-disk-space-and-run-low-space-rust-builds.md
@@ -72,6 +78,10 @@ nav:
     - Dashboard E2E Tests: howto/run-dashboard-e2e-tests.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
+    - simard-engineer-step: reference/simard-engineer-step.md
+    - spawn_agent_for_goal API: reference/spawn-agent-for-goal.md
+    - Engineer Loop Configuration: reference/engineer-loop-configuration.md
+    - Engineer Worktree Isolation: reference/engineer-worktree-isolation.md
     - Runtime Contracts: reference/runtime-contracts.md
     - Bridge Wire Protocol: reference/bridge-wire-protocol.md
     - Dashboard E2E Tests: reference/dashboard-e2e-tests.md
