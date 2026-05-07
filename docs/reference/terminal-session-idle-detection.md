@@ -54,7 +54,7 @@ of the session's root PID and checks whether any of them are active work process
 1. Read all numeric directories under `/proc/` and collect `(pid, ppid)` pairs by
    parsing the `PPid:` line in each `/proc/<N>/status` file. Entries that vanish
    mid-read are skipped gracefully.
-2. BFS from `root_pid` to build the full set of descendant PIDs.
+2. DFS from `root_pid` (via a `Vec` stack with `pop()`) to build the full set of descendant PIDs.
 3. For each descendant, read `/proc/<N>/comm`. If the trimmed comm matches any name in
    `WORK_PROCESS_NAMES`, return `true`.
 4. If no match is found, or if all `/proc` reads fail, return `false`.
