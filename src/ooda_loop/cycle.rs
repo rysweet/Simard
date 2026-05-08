@@ -69,13 +69,7 @@ fn run_ooda_cycle_inner(
     // Only replace board if loaded one is non-empty (cold memory = keep local).
     // A `.reseed_goals` marker file forces re-seeding from DEFAULT_SEED_GOALS,
     // ignoring the stale cognitive memory snapshot.
-    let state_root = std::env::var("SIMARD_STATE_ROOT")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".into());
-            std::path::PathBuf::from(home).join(".simard")
-        });
-    let reseed_marker = state_root.join(".reseed_goals");
+    let reseed_marker = crate::goal_curation::simard_state_root().join(".reseed_goals");
     if reseed_marker.exists() {
         eprintln!(
             "[simard] OODA start: .reseed_goals marker found — ignoring cognitive memory board"
@@ -385,31 +379,9 @@ fn run_ooda_cycle_inner(
     // Promote highest-scoring backlog items to fill freed slots.
     promote_from_backlog(&mut state.active_goals);
 
-    // Persist the updated board to cognitive memory (best-effort).
+    // Persist the updated board to cognitive memory and disk (best-effort).
     if let Err(e) = crate::goal_curation::persist_board(&state.active_goals, &*bridges.memory) {
         eprintln!("[simard] OODA curate: failed to persist goal board: {e}");
-    }
-
-    // Also write the board to disk so the dashboard can read it.
-    {
-        let state_root = std::env::var("SIMARD_STATE_ROOT")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".into());
-                std::path::PathBuf::from(home).join(".simard")
-            });
-        let goal_path = state_root.join("goal_records.json");
-        if let Err(e) = std::fs::create_dir_all(&state_root) {
-            eprintln!("[simard] OODA curate: failed to create state dir: {e}");
-        }
-        match serde_json::to_string_pretty(&state.active_goals) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(&goal_path, json) {
-                    eprintln!("[simard] OODA curate: failed to write goal_records.json: {e}");
-                }
-            }
-            Err(e) => eprintln!("[simard] OODA curate: failed to serialize goal board: {e}"),
-        }
     }
 
     // --- Memory consolidation: persistence at cycle end ---

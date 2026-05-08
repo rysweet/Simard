@@ -57,6 +57,17 @@ fn validate_backlog_item(item: &BacklogItem) -> SimardResult<()> {
 // Persistence
 // ---------------------------------------------------------------------------
 
+/// Resolve the Simard state root directory.
+///
+/// Priority: `$SIMARD_STATE_ROOT` env var → `$HOME/.simard` → `/home/azureuser/.simard`.
+pub fn simard_state_root() -> std::path::PathBuf {
+    if let Ok(v) = std::env::var("SIMARD_STATE_ROOT") {
+        return std::path::PathBuf::from(v);
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".into());
+    std::path::PathBuf::from(home).join(".simard")
+}
+
 /// Load a goal board using a three-tier fallback strategy:
 ///
 /// 1. `$SIMARD_STATE_ROOT/goal_records.json` (or `~/.simard/goal_records.json`) — primary
@@ -69,13 +80,7 @@ fn validate_backlog_item(item: &BacklogItem) -> SimardResult<()> {
 /// avoids the unordered `LIMIT 1` retrieval issue in cognitive memory (issue #1574).
 pub fn load_goal_board(bridge: &dyn CognitiveMemoryOps) -> SimardResult<GoalBoard> {
     // Tier 1: disk file — primary source of truth.
-    let state_root = std::env::var("SIMARD_STATE_ROOT")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".into());
-            std::path::PathBuf::from(home).join(".simard")
-        });
-    let goal_path = state_root.join("goal_records.json");
+    let goal_path = simard_state_root().join("goal_records.json");
     match std::fs::read_to_string(&goal_path) {
         Ok(content) => match serde_json::from_str::<GoalBoard>(&content) {
             Ok(board) => return Ok(board),
@@ -143,13 +148,11 @@ pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> Si
 
     // Also write to disk so intermediate saves (e.g. stale subordinate
     // clearing during Act phase) are durable across cycle boundaries.
-    let state_root = std::env::var("SIMARD_STATE_ROOT")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".into());
-            std::path::PathBuf::from(home).join(".simard")
-        });
+    let state_root = simard_state_root();
     let goal_path = state_root.join("goal_records.json");
+    if let Err(e) = std::fs::create_dir_all(&state_root) {
+        eprintln!("[simard] save_goal_board: failed to create state dir: {e}");
+    }
     if let Ok(pretty) = serde_json::to_string_pretty(board)
         && let Err(e) = std::fs::write(&goal_path, pretty)
     {
