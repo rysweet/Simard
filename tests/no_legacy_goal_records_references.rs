@@ -16,32 +16,54 @@
 //! is complete. They are intentionally `rg`-shaped so that operators running
 //! the same shell command get the same answer.
 
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 fn repo_src_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")
 }
 
-/// Run ripgrep with arbitrary args, return stdout lines (one per match).
-/// Treats exit code 1 (no matches) as success; panics on other failures.
-fn rg(args: &[&str]) -> Vec<String> {
-    let output = Command::new("rg")
-        .args(args)
-        .output()
-        .expect("ripgrep (rg) must be installed for migration acceptance tests");
-    if !output.status.success() && output.status.code() != Some(1) {
-        panic!(
-            "rg {:?} failed: stderr={}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
+/// Recursively walk `root` collecting all `.rs` files.
+fn collect_rs_files(root: &Path, out: &mut Vec<PathBuf>) {
+    let entries = match fs::read_dir(root) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rs_files(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            out.push(path);
+        }
     }
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    if stdout.trim().is_empty() {
-        return vec![];
+}
+
+/// Find all `<file>:<line>:<text>` lines containing `needle` under `root`,
+/// excluding any file whose basename appears in `exclude_basenames`.
+fn grep_recursive(root: &Path, needle: &str, exclude_basenames: &[&str]) -> Vec<String> {
+    let mut files = Vec::new();
+    collect_rs_files(root, &mut files);
+    let mut matches = Vec::new();
+    for file in files {
+        let basename = file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if exclude_basenames.contains(&basename) {
+            continue;
+        }
+        let contents = match fs::read_to_string(&file) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        for (idx, line) in contents.lines().enumerate() {
+            if line.contains(needle) {
+                matches.push(format!("{}:{}:{}", file.display(), idx + 1, line));
+            }
+        }
     }
-    stdout.lines().map(|l| l.to_string()).collect()
+    matches
 }
 
 #[test]
@@ -50,31 +72,23 @@ fn no_legacy_goal_records_json_references_outside_migration_files() {
     // Spec acceptance criterion #1: only `goal_curation/operations.rs` and
     // `bootstrap/config.rs` (incl. its tests) may mention `goal_records.json`.
     // Migration-test scaffolding (which has to mention the legacy file in
-    // `assert!(!exists())` style assertions) is excluded by glob — the
+    // `assert!(!exists())` style assertions) is excluded by basename — the
     // grep is meant to police production code, not the tests that prove the
     // migration is complete.
-    let matches = rg(&[
-        "-n",
-        "-F",
+    let matches = grep_recursive(
+        &src,
         "goal_records.json",
-        src.to_str().unwrap(),
-        "-g",
-        "!**/goal_curation/operations.rs",
-        "-g",
-        "!**/goal_curation/tests.rs",
-        "-g",
-        "!**/goal_curation/tests_operations.rs",
-        "-g",
-        "!**/goal_curation/tests_adapter.rs",
-        "-g",
-        "!**/memory_ipc/tests_launcher.rs",
-        "-g",
-        "!**/bootstrap/config.rs",
-        "-g",
-        "!**/bootstrap/tests_config.rs",
-        "-g",
-        "!**/tests_goal_records_migration.rs",
-    ]);
+        &[
+            "operations.rs",
+            "tests.rs",
+            "tests_operations.rs",
+            "tests_adapter.rs",
+            "tests_launcher.rs",
+            "config.rs",
+            "tests_config.rs",
+            "tests_goal_records_migration.rs",
+        ],
+    );
 
     assert!(
         matches.is_empty(),
@@ -100,14 +114,11 @@ fn no_file_backed_goal_store_references_in_meeting_or_engineer_paths() {
         if !scope.exists() {
             continue;
         }
-        all_matches.extend(rg(&[
-            "-n",
-            "-F",
+        all_matches.extend(grep_recursive(
+            &scope,
             "FileBackedGoalStore",
-            scope.to_str().unwrap(),
-            "-g",
-            "!**/tests_goal_records_migration.rs",
-        ]));
+            &["tests_goal_records_migration.rs"],
+        ));
     }
 
     assert!(
@@ -127,14 +138,11 @@ fn dashboard_handlers_do_not_reference_goal_records_json() {
     // code (test scaffolding excluded).
     let src = repo_src_dir();
     let dashboard = src.join("operator_commands_dashboard");
-    let matches = rg(&[
-        "-n",
-        "-F",
+    let matches = grep_recursive(
+        &dashboard,
         "goal_records.json",
-        dashboard.to_str().unwrap(),
-        "-g",
-        "!**/tests_goal_records_migration.rs",
-    ]);
+        &["tests_goal_records_migration.rs"],
+    );
 
     assert!(
         matches.is_empty(),
@@ -149,17 +157,13 @@ fn validation_module_does_not_reference_goal_records_json() {
     // "out of scope" hint in the task description): operator_commands/
     // validation.rs:45 currently refers to the legacy file too and must
     // be migrated. This guards against regression.
-    let _ = Path::new(""); // silence unused-import warnings when nothing else uses Path
     let src = repo_src_dir();
     let validation = src.join("operator_commands");
-    let matches = rg(&[
-        "-n",
-        "-F",
+    let matches = grep_recursive(
+        &validation,
         "goal_records.json",
-        validation.to_str().unwrap(),
-        "-g",
-        "!**/tests_goal_records_migration.rs",
-    ]);
+        &["tests_goal_records_migration.rs"],
+    );
 
     assert!(
         matches.is_empty(),
