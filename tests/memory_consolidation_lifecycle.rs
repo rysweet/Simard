@@ -27,6 +27,7 @@ fn counting_bridge() -> (CognitiveMemoryBridge, Arc<AtomicU32>) {
         match method {
             "memory.record_sensory" => Ok(json!({"id": "sen_1"})),
             "memory.push_working" => Ok(json!({"id": "wrk_1"})),
+            "memory.get_working" => Ok(json!({"slots": []})),
             "memory.store_episode" => Ok(json!({"id": "epi_1"})),
             "memory.search_facts" => Ok(json!({"facts": []})),
             "memory.check_triggers" => Ok(json!({"prospectives": []})),
@@ -128,6 +129,7 @@ fn full_mock_memory_transport() -> InMemoryBridgeTransport {
         })),
         "memory.record_sensory" => Ok(json!({"id": "sen_1"})),
         "memory.push_working" => Ok(json!({"id": "wrk_1"})),
+        "memory.get_working" => Ok(json!({"slots": []})),
         "memory.check_triggers" => Ok(json!({"prospectives": []})),
         "memory.clear_working" => Ok(json!({"count": 0})),
         "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
@@ -275,6 +277,7 @@ fn multiple_ooda_cycles_accumulate_consolidation() {
             "memory.recall_procedure" => Ok(json!({"procedures": []})),
             "memory.record_sensory" => Ok(json!({"id": "sen_1"})),
             "memory.push_working" => Ok(json!({"id": "wrk_1"})),
+            "memory.get_working" => Ok(json!({"slots": []})),
             "memory.check_triggers" => Ok(json!({"prospectives": []})),
             "memory.clear_working" => Ok(json!({"count": 0})),
             "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
