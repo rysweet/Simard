@@ -2,6 +2,9 @@ use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::time::Duration;
 
+#[cfg(target_os = "macos")]
+pub(crate) const DEFAULT_SHELL: &str = "/bin/bash";
+#[cfg(not(target_os = "macos"))]
 pub(crate) const DEFAULT_SHELL: &str = "/usr/bin/bash";
 pub(crate) const PTY_LAUNCHER: &str = "script";
 pub(crate) const WAIT_STEP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -39,6 +42,9 @@ mod tests {
 
     #[test]
     fn default_shell_constant() {
+        #[cfg(target_os = "macos")]
+        assert_eq!(DEFAULT_SHELL, "/bin/bash");
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(DEFAULT_SHELL, "/usr/bin/bash");
     }
 
