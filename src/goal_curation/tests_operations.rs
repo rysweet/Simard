@@ -228,6 +228,20 @@ fn mock_bridge_with_snapshot(board_json: &str) -> crate::memory_bridge::Cognitiv
     CognitiveMemoryBridge::new(Box::new(transport))
 }
 
+/// Helper: build a bridge whose search_facts always returns an error (simulates
+/// cognitive memory being unavailable — e.g., bridge subprocess crash).
+fn mock_bridge_search_fails() -> crate::memory_bridge::CognitiveMemoryBridge {
+    use crate::bridge_subprocess::InMemoryBridgeTransport;
+    use crate::memory_bridge::CognitiveMemoryBridge;
+    let transport = InMemoryBridgeTransport::new("test-search-fails", |method, _params| {
+        Err(crate::bridge::BridgeErrorPayload {
+            code: -32000,
+            message: format!("simulated bridge failure for method: {method}"),
+        })
+    });
+    CognitiveMemoryBridge::new(Box::new(transport))
+}
+
 /// Helper: unique temp dir for each test (avoids cross-test state pollution).
 fn tmp_state_root(tag: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("simard-test-{tag}-{}", std::process::id()));
@@ -345,6 +359,24 @@ fn load_goal_board_tier3_returns_empty_board_when_all_sources_absent() {
     let board = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
 
     assert!(board.active.is_empty(), "must return empty board (tier 3)");
+    assert!(board.backlog.is_empty());
+}
+
+/// When cognitive memory search_facts returns an error (e.g., bridge crashed),
+/// load_goal_board must fall through to Tier 3 (empty board) rather than
+/// propagating the error.  Resilience: bridge unavailability ≠ fatal.
+#[test]
+fn load_goal_board_tier2_bridge_error_falls_through_to_empty_board() {
+    let root = tmp_state_root("tier2-err");
+    // No disk file; bridge returns an error from search_facts.
+    let bridge = mock_bridge_search_fails();
+
+    let board = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
+
+    assert!(
+        board.active.is_empty(),
+        "bridge search_facts error must degrade to empty board (tier 3), not propagate"
+    );
     assert!(board.backlog.is_empty());
 }
 

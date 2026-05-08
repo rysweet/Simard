@@ -95,8 +95,17 @@ pub fn load_goal_board(bridge: &dyn CognitiveMemoryOps) -> SimardResult<GoalBoar
         }
     }
 
-    // Tier 2: cognitive memory snapshot.
-    let facts = bridge.search_facts("goal-board:snapshot", 1, 0.0)?;
+    // Tier 2: cognitive memory snapshot.  Errors here (bridge unavailable,
+    // timeout, etc.) are non-fatal: log and fall through to the empty board.
+    let facts = match bridge.search_facts("goal-board:snapshot", 1, 0.0) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!(
+                "[simard] load_goal_board: cognitive memory search_facts failed ({e}) — returning empty board"
+            );
+            vec![]
+        }
+    };
     if let Some(fact) = facts.first() {
         match serde_json::from_str::<GoalBoard>(&fact.content) {
             Ok(board) => return Ok(board),
