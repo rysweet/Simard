@@ -105,7 +105,7 @@ mod tests {
     fn goal_curation_read_probe_with_seeded_cognitive_memory() {
         let dir = TempDir::new().unwrap();
         // Seed an empty goal board through cognitive memory rather than
-        // writing the legacy goal_records.json file (issue #1590).
+        // writing the legacy on-disk goal-records file (issue #1590).
         let bridge = crate::memory_ipc::launch_writer_bridge(dir.path()).expect("writer bridge");
         crate::goal_curation::save_goal_board(
             &crate::goal_curation::GoalBoard::new(),

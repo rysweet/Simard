@@ -35,8 +35,8 @@ use crate::memory_ipc::{launch_writer_bridge, open_reader_bridge};
 
 /// Read the cognitive-memory `goal-board:snapshot` for the dashboard.
 ///
-/// Used by every dashboard handler that previously read
-/// `<state_root>/goal_records.json` from disk (issue #1590). Routes
+/// Used by every dashboard handler that previously read the legacy
+/// on-disk goal-records file from `<state_root>` (issue #1590). Routes
 /// through [`open_reader_bridge`] so the daemon's IPC writer can serve
 /// the read when running embedded; otherwise opens the on-disk DB
 /// read-only.
