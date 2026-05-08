@@ -1,14 +1,15 @@
 use axum::Json;
 use serde_json::{Value, json};
 
+use super::dashboard_goal_board_snapshot;
 use super::routes::{is_pid_alive, resolve_state_root, truncate_with_ellipsis};
 use crate::agent_registry::{AgentRegistry, FileBackedAgentRegistry};
-use crate::goal_curation::GoalBoard;
 
 /// Real-time snapshot of what Simard is doing right now.
 ///
-/// Composes data from `daemon_health.json` (cycle/phase), `goal_records.json`
-/// (active goals), and the agent registry (spawned engineers).
+/// Composes data from `daemon_health.json` (cycle/phase), the cognitive
+/// memory `goal-board:snapshot` fact (active goals), and the agent
+/// registry (spawned engineers).
 pub(crate) async fn current_work() -> Json<Value> {
     let health_path = dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("/var/tmp"))
@@ -86,12 +87,10 @@ pub(crate) async fn current_work() -> Json<Value> {
         0
     };
 
-    // Active goals from goal_records.json
+    // Active goals from the cognitive-memory goal-board snapshot.
     let state_root = resolve_state_root();
-    let goal_path = state_root.join("goal_records.json");
-    let active_goals: Vec<Value> = std::fs::read_to_string(&goal_path)
+    let active_goals: Vec<Value> = dashboard_goal_board_snapshot(&state_root)
         .ok()
-        .and_then(|content| serde_json::from_str::<GoalBoard>(&content).ok())
         .map(|board| {
             board
                 .active

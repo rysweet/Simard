@@ -3,67 +3,51 @@ use axum::extract::Path;
 use serde_json::{Value, json};
 
 use super::routes::resolve_state_root;
+use super::{dashboard_goal_board_snapshot, dashboard_save_goal_board};
 use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::goal_curation::{ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS};
-use crate::goals::{GoalRecord, goal_slug};
+use crate::goals::goal_slug;
+
+/// Load the dashboard's view of the goal board from cognitive memory.
+/// Returns an empty `GoalBoard` when the snapshot is missing or the bridge
+/// cannot be opened — the dashboard always renders rather than 500ing.
+fn load_board_or_empty() -> GoalBoard {
+    let state_root = resolve_state_root();
+    dashboard_goal_board_snapshot(&state_root).unwrap_or_default()
+}
 
 pub(crate) async fn goals() -> Json<Value> {
     let state_root = resolve_state_root();
-    let goal_path = state_root.join("goal_records.json");
-    let content = std::fs::read_to_string(&goal_path).unwrap_or_default();
+    let board = dashboard_goal_board_snapshot(&state_root).unwrap_or_default();
 
-    let (active, mut backlog) = match serde_json::from_str::<GoalBoard>(&content) {
-        // GoalBoard from OODA loop — already has the right schema.
-        Ok(board) => {
-            let a: Vec<Value> = board
-                .active
-                .into_iter()
-                .map(|g| {
-                    json!({
-                        "id": g.id,
-                        "description": g.description,
-                        "priority": g.priority,
-                        "status": g.status.to_string(),
-                        "assigned_to": g.assigned_to,
-                        "current_activity": g.current_activity,
-                        "wip_refs": g.wip_refs,
-                    })
-                })
-                .collect();
-            let b: Vec<Value> = board
-                .backlog
-                .into_iter()
-                .map(|g| {
-                    json!({
-                        "id": g.id,
-                        "description": g.description,
-                        "source": g.source,
-                        "score": g.score,
-                    })
-                })
-                .collect();
-            (a, b)
-        }
-        Err(_) => match serde_json::from_str::<Vec<GoalRecord>>(&content) {
-            // Flat array of GoalRecord from FileBackedGoalStore — map fields.
-            Ok(records) => {
-                let mapped: Vec<Value> = records
-                    .into_iter()
-                    .map(|r| {
-                        json!({
-                            "id": r.slug,
-                            "description": r.title,
-                            "priority": r.priority,
-                            "status": r.status.to_string(),
-                            "assigned_to": r.owner_identity,
-                        })
-                    })
-                    .collect();
-                (mapped, vec![])
-            }
-            Err(_) => (vec![], vec![]),
-        },
-    };
+    let active: Vec<Value> = board
+        .active
+        .into_iter()
+        .map(|g| {
+            json!({
+                "id": g.id,
+                "description": g.description,
+                "priority": g.priority,
+                "status": g.status.to_string(),
+                "assigned_to": g.assigned_to,
+                "current_activity": g.current_activity,
+                "wip_refs": g.wip_refs,
+            })
+        })
+        .collect();
+
+    let mut backlog: Vec<Value> = board
+        .backlog
+        .into_iter()
+        .map(|g| {
+            json!({
+                "id": g.id,
+                "description": g.description,
+                "source": g.source,
+                "score": g.score,
+            })
+        })
+        .collect();
 
     // Pull meeting-captured actions and decisions from cognitive memory (#415)
     if let Ok(mem) = NativeCognitiveMemory::open_read_only(&state_root) {
@@ -107,86 +91,69 @@ pub(crate) async fn goals() -> Json<Value> {
 
 pub(crate) async fn seed_goals() -> Json<Value> {
     let state_root = resolve_state_root();
-    let goal_path = state_root.join("goal_records.json");
-
-    // Only seed if no goals exist yet
-    if goal_path.exists()
-        && let Ok(content) = std::fs::read_to_string(&goal_path)
-        && let Ok(val) = serde_json::from_str::<Value>(&content)
-    {
-        let has_goals = val
-            .get("active")
-            .and_then(|a| a.as_array())
-            .is_some_and(|a| !a.is_empty());
-        if has_goals {
-            return Json(json!({"status": "already_seeded", "message": "Goals already exist"}));
-        }
+    let existing = dashboard_goal_board_snapshot(&state_root).unwrap_or_default();
+    if !existing.active.is_empty() {
+        return Json(json!({"status": "already_seeded", "message": "Goals already exist"}));
     }
 
-    let seed_board = json!({
-        "active": [
-            {
-                "id": "self-improvement",
-                "description": "Continuously improve own capabilities through gym scenarios and self-evaluation",
-                "priority": 1,
-                "status": "in_progress",
-                "assigned_to": "simard",
-                "progress": [{"timestamp": chrono::Utc::now().to_rfc3339(), "note": "Goal seeded via dashboard"}]
-            },
-            {
-                "id": "knowledge-growth",
-                "description": "Expand knowledge base through meetings, research, and cognitive memory consolidation",
-                "priority": 2,
-                "status": "in_progress",
-                "assigned_to": "simard",
-                "progress": [{"timestamp": chrono::Utc::now().to_rfc3339(), "note": "Goal seeded via dashboard"}]
-            },
-            {
-                "id": "operational-health",
-                "description": "Maintain system health: budget compliance, resource usage, and error rates within thresholds",
-                "priority": 3,
-                "status": "in_progress",
-                "assigned_to": "simard",
-                "progress": [{"timestamp": chrono::Utc::now().to_rfc3339(), "note": "Goal seeded via dashboard"}]
-            }
-        ],
-        "backlog": [
-            {
-                "id": "distributed-sync",
-                "description": "Establish hive mind sync with remote Simard instances for cross-agent knowledge sharing",
-                "source": "dashboard-seed",
-                "score": 0.7
-            },
-            {
-                "id": "meeting-quality",
-                "description": "Improve meeting facilitation quality and actionable outcome generation",
-                "source": "dashboard-seed",
-                "score": 0.6
-            }
-        ]
+    let mut board = GoalBoard::new();
+    let now = chrono::Utc::now().to_rfc3339();
+    board.active.push(ActiveGoal {
+        id: "self-improvement".to_string(),
+        description:
+            "Continuously improve own capabilities through gym scenarios and self-evaluation"
+                .to_string(),
+        priority: 1,
+        status: GoalProgress::InProgress { percent: 0 },
+        assigned_to: Some("simard".to_string()),
+        current_activity: Some(format!("Goal seeded via dashboard at {now}")),
+        wip_refs: vec![],
+    });
+    board.active.push(ActiveGoal {
+        id: "knowledge-growth".to_string(),
+        description:
+            "Expand knowledge base through meetings, research, and cognitive memory consolidation"
+                .to_string(),
+        priority: 2,
+        status: GoalProgress::InProgress { percent: 0 },
+        assigned_to: Some("simard".to_string()),
+        current_activity: Some(format!("Goal seeded via dashboard at {now}")),
+        wip_refs: vec![],
+    });
+    board.active.push(ActiveGoal {
+        id: "operational-health".to_string(),
+        description: "Maintain system health: budget compliance, resource usage, and error rates within thresholds".to_string(),
+        priority: 3,
+        status: GoalProgress::InProgress { percent: 0 },
+        assigned_to: Some("simard".to_string()),
+        current_activity: Some(format!("Goal seeded via dashboard at {now}")),
+        wip_refs: vec![],
+    });
+    board.backlog.push(BacklogItem {
+        id: "distributed-sync".to_string(),
+        description: "Establish hive mind sync with remote Simard instances for cross-agent knowledge sharing".to_string(),
+        source: "dashboard-seed".to_string(),
+        score: 0.7,
+    });
+    board.backlog.push(BacklogItem {
+        id: "meeting-quality".to_string(),
+        description: "Improve meeting facilitation quality and actionable outcome generation"
+            .to_string(),
+        source: "dashboard-seed".to_string(),
+        score: 0.6,
     });
 
-    if let Err(e) = std::fs::create_dir_all(&state_root) {
-        return Json(
-            json!({"status": "error", "error": format!("failed to create state dir: {e}")}),
-        );
-    }
-    match std::fs::write(
-        &goal_path,
-        serde_json::to_string_pretty(&seed_board).unwrap(),
-    ) {
+    match dashboard_save_goal_board(&state_root, &board) {
         Ok(()) => {
             Json(json!({"status": "ok", "message": "Seeded 3 active goals and 2 backlog items"}))
         }
-        Err(e) => Json(json!({"status": "error", "error": format!("write failed: {e}")})),
+        Err(e) => Json(json!({"status": "error", "error": format!("save failed: {e}")})),
     }
 }
 
 pub(crate) async fn add_goal(Json(body): Json<Value>) -> Json<Value> {
     let state_root = resolve_state_root();
-    let goal_path = state_root.join("goal_records.json");
-    let content = std::fs::read_to_string(&goal_path).unwrap_or_default();
-    let mut board = serde_json::from_str::<GoalBoard>(&content).unwrap_or_default();
+    let mut board = load_board_or_empty();
 
     let desc = match body.get("description").and_then(|v| v.as_str()) {
         Some(d) if !d.trim().is_empty() => d.trim().to_string(),
@@ -226,20 +193,15 @@ pub(crate) async fn add_goal(Json(body): Json<Value>) -> Json<Value> {
         });
     }
 
-    match std::fs::write(
-        &goal_path,
-        serde_json::to_string_pretty(&board).unwrap_or_default(),
-    ) {
-        Ok(_) => Json(json!({"status": "ok", "id": id})),
+    match dashboard_save_goal_board(&state_root, &board) {
+        Ok(()) => Json(json!({"status": "ok", "id": id})),
         Err(e) => Json(json!({"error": format!("{e}")})),
     }
 }
 
 pub(crate) async fn remove_goal(Path(id): Path<String>) -> Json<Value> {
     let state_root = resolve_state_root();
-    let goal_path = state_root.join("goal_records.json");
-    let content = std::fs::read_to_string(&goal_path).unwrap_or_default();
-    let mut board = serde_json::from_str::<GoalBoard>(&content).unwrap_or_default();
+    let mut board = load_board_or_empty();
 
     let before_active = board.active.len();
     let before_backlog = board.backlog.len();
@@ -250,11 +212,8 @@ pub(crate) async fn remove_goal(Path(id): Path<String>) -> Json<Value> {
         return Json(json!({"error": "goal not found"}));
     }
 
-    match std::fs::write(
-        &goal_path,
-        serde_json::to_string_pretty(&board).unwrap_or_default(),
-    ) {
-        Ok(_) => Json(json!({"status": "ok"})),
+    match dashboard_save_goal_board(&state_root, &board) {
+        Ok(()) => Json(json!({"status": "ok"})),
         Err(e) => Json(json!({"error": format!("{e}")})),
     }
 }
@@ -264,9 +223,7 @@ pub(crate) async fn update_goal_status(
     Json(body): Json<Value>,
 ) -> Json<Value> {
     let state_root = resolve_state_root();
-    let goal_path = state_root.join("goal_records.json");
-    let content = std::fs::read_to_string(&goal_path).unwrap_or_default();
-    let mut board = serde_json::from_str::<GoalBoard>(&content).unwrap_or_default();
+    let mut board = load_board_or_empty();
 
     let status_str = match body.get("status").and_then(|v| v.as_str()) {
         Some(s) => s,
@@ -301,20 +258,15 @@ pub(crate) async fn update_goal_status(
         return Json(json!({"error": "goal not found in active goals"}));
     }
 
-    match std::fs::write(
-        &goal_path,
-        serde_json::to_string_pretty(&board).unwrap_or_default(),
-    ) {
-        Ok(_) => Json(json!({"status": "ok"})),
+    match dashboard_save_goal_board(&state_root, &board) {
+        Ok(()) => Json(json!({"status": "ok"})),
         Err(e) => Json(json!({"error": format!("{e}")})),
     }
 }
 
 pub(crate) async fn promote_backlog_item(Path(id): Path<String>) -> Json<Value> {
     let state_root = resolve_state_root();
-    let goal_path = state_root.join("goal_records.json");
-    let content = std::fs::read_to_string(&goal_path).unwrap_or_default();
-    let mut board = serde_json::from_str::<GoalBoard>(&content).unwrap_or_default();
+    let mut board = load_board_or_empty();
 
     if board.active.len() >= MAX_ACTIVE_GOALS {
         return Json(json!({"error": format!(
@@ -339,20 +291,15 @@ pub(crate) async fn promote_backlog_item(Path(id): Path<String>) -> Json<Value> 
         wip_refs: vec![],
     });
 
-    match std::fs::write(
-        &goal_path,
-        serde_json::to_string_pretty(&board).unwrap_or_default(),
-    ) {
-        Ok(_) => Json(json!({"status": "ok"})),
+    match dashboard_save_goal_board(&state_root, &board) {
+        Ok(()) => Json(json!({"status": "ok"})),
         Err(e) => Json(json!({"error": format!("{e}")})),
     }
 }
 
 pub(crate) async fn demote_goal(Path(id): Path<String>) -> Json<Value> {
     let state_root = resolve_state_root();
-    let goal_path = state_root.join("goal_records.json");
-    let content = std::fs::read_to_string(&goal_path).unwrap_or_default();
-    let mut board = serde_json::from_str::<GoalBoard>(&content).unwrap_or_default();
+    let mut board = load_board_or_empty();
 
     let pos = board.active.iter().position(|g| g.id == id);
     let goal = match pos {
@@ -367,11 +314,8 @@ pub(crate) async fn demote_goal(Path(id): Path<String>) -> Json<Value> {
         score: 0.0,
     });
 
-    match std::fs::write(
-        &goal_path,
-        serde_json::to_string_pretty(&board).unwrap_or_default(),
-    ) {
-        Ok(_) => Json(json!({"status": "ok"})),
+    match dashboard_save_goal_board(&state_root, &board) {
+        Ok(()) => Json(json!({"status": "ok"})),
         Err(e) => Json(json!({"error": format!("{e}")})),
     }
 }

@@ -1,11 +1,11 @@
 use std::io::{self, BufReader};
 
 use crate::base_types::BaseTypeSession;
-use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
+use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::greeting_banner::print_greeting_banner;
 use crate::identity::OperatingMode;
 use crate::meeting_repl::run_meeting_repl;
-use crate::memory_ipc::{self, RemoteCognitiveMemory};
+use crate::memory_ipc;
 use crate::operator_commands::prompt_root;
 
 use super::live_context::build_live_meeting_context;
@@ -18,60 +18,15 @@ fn load_meeting_system_prompt() -> String {
 
 /// Launch a cognitive memory backend suitable for meeting mode.
 ///
-/// Priority:
-/// 1. If the OODA daemon is publishing its memory IPC socket, connect as a
-///    client (shared live view, no lock contention).
-/// 2. Otherwise, reap any stale open-lock and open the on-disk DB directly
-///    (no daemon is running, so we own it).
-/// 3. Only fall back to read-only if the direct open fails *and* there
-///    appears to be another writer — which should be rare once (1) and the
-///    stale-lock reaper are in place.
+/// Delegates to [`memory_ipc::launch_writer_bridge`] so the daemon-IPC →
+/// native-write → read-only ladder lives in one place (issue #1590,
+/// spec recommendation C / A2).
 fn launch_real_meeting_bridge() -> Result<Box<dyn CognitiveMemoryOps>, Box<dyn std::error::Error>> {
     let state_root = memory_ipc::default_state_root();
-    let _ = std::fs::create_dir_all(&state_root);
-
-    // (1) Prefer the running daemon when available.
-    let sock = memory_ipc::default_socket_path();
-    if sock.exists() {
-        match RemoteCognitiveMemory::connect(&sock) {
-            Ok(client) => {
-                eprintln!(
-                    "[simard] meeting: connected to OODA daemon memory IPC at {}",
-                    client.socket_path().display()
-                );
-                return Ok(Box::new(client));
-            }
-            Err(e) => {
-                eprintln!(
-                    "[simard] meeting: daemon socket present but connect failed ({e}); \
-                     falling back to direct open"
-                );
-            }
-        }
-    }
-
-    // (2) No daemon — reap any stale lock left by a prior crashed process
-    //     and open the DB ourselves.
-    if let Err(e) = memory_ipc::reap_stale_open_lock(&state_root) {
-        eprintln!("[simard] meeting: stale-lock reap failed: {e}");
-    }
-
-    match NativeCognitiveMemory::open(&state_root) {
-        Ok(mem) => Ok(Box::new(mem)),
-        Err(rw_err) => {
-            // (3) Last-resort read-only fallback — only reached if another
-            //     unidentified writer is holding the DB.
-            eprintln!(
-                "[simard] cognitive memory read-write open failed (another writer holds it): {rw_err}"
-            );
-            eprintln!(
-                "[simard] falling back to read-only mode — meeting outcomes will be saved to disk only"
-            );
-            let mem = NativeCognitiveMemory::open_read_only(&state_root)
-                .map_err(|e| format!("cognitive memory failed to open even read-only: {e}"))?;
-            Ok(Box::new(mem))
-        }
-    }
+    let bridge = memory_ipc::launch_writer_bridge(&state_root)?;
+    // Move the boxed ops out of the WriterBridge wrapper so existing call
+    // sites that hold `Box<dyn CognitiveMemoryOps>` keep working unchanged.
+    Ok(bridge.into_box())
 }
 
 /// Open an agent session for the meeting REPL using the standard base type

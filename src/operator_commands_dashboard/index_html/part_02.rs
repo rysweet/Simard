@@ -177,14 +177,15 @@ pub(crate) const PART_02: &str = r#"          if(d.ooda_transcripts?.length){
         const files=[
           {key:'memory_records',label:'Memory Records'},
           {key:'evidence_records',label:'Evidence Records'},
-          {key:'goal_records',label:'Goal Records'},
+          {key:'goal_records',label:'Goal Records (cognitive memory)'},
           {key:'handoff',label:'Latest Handoff'}];
         document.getElementById('mem-files').innerHTML=files.map(f=>{
           const info=d[f.key]||{};
-          const modStr=info.modified?timeAgo(info.modified):'N/A';
+          const modStr=info.modified?timeAgo(info.modified):(info.source?esc(info.source):'N/A');
+          const sizeBadge=(info.size_bytes!==undefined)?'<span class="badge">'+fmtB(info.size_bytes||0)+'</span>':'';
           return`<div class="mem-file">
-            <h3>${f.label} ${info.count!==undefined?'<span class="badge">'+info.count+' records</span>':''} <span class="badge">${fmtB(info.size_bytes||0)}</span></h3>
-            <div class="stat"><span class="label">Modified</span><span class="value">${modStr}</span></div>
+            <h3>${f.label} ${info.count!==undefined?'<span class="badge">'+info.count+' records</span>':''} ${sizeBadge}</h3>
+            <div class="stat"><span class="label">${info.source?'Source':'Modified'}</span><span class="value">${modStr}</span></div>
           </div>`;}).join('');
       }catch(e){document.getElementById('mem-overview').innerHTML='<span class="err">Failed to load memory data — check state root path</span>';}
     }

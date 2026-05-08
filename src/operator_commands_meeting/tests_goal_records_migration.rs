@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
+use crate::cognitive_memory::NativeCognitiveMemory;
 use crate::goal_curation::{
     ActiveGoal, GoalBoard, GoalProgress, active_goals_as_records, load_goal_board, save_goal_board,
 };
@@ -60,11 +60,8 @@ fn meeting_goal_curation_read_probe_succeeds_with_only_cognitive_memory() {
         "precondition: legacy file must not exist"
     );
 
-    let result = run_goal_curation_read_probe(
-        "local-harness",
-        "single-process",
-        Some(root.clone()),
-    );
+    let result =
+        run_goal_curation_read_probe("local-harness", "single-process", Some(root.clone()));
 
     assert!(
         result.is_ok(),
@@ -86,11 +83,8 @@ fn meeting_goal_curation_read_probe_succeeds_with_empty_cognitive_memory() {
     }
     assert!(!root.join("goal_records.json").exists());
 
-    let result = run_goal_curation_read_probe(
-        "local-harness",
-        "single-process",
-        Some(root.clone()),
-    );
+    let result =
+        run_goal_curation_read_probe("local-harness", "single-process", Some(root.clone()));
     assert!(
         result.is_ok(),
         "empty-memory read probe must succeed: {:?}",
@@ -123,7 +117,13 @@ fn active_goals_as_records_round_trips_through_cognitive_memory() {
             "non-completed seeded goals must map to GoalStatus::Active (record #{i} got {:?})",
             r.status
         );
-        assert!(!r.slug.is_empty(), "every record must have a non-empty slug");
-        assert!(!r.title.is_empty(), "every record must have a non-empty title");
+        assert!(
+            !r.slug.is_empty(),
+            "every record must have a non-empty slug"
+        );
+        assert!(
+            !r.title.is_empty(),
+            "every record must have a non-empty title"
+        );
     }
 }

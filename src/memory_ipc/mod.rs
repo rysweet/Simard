@@ -169,8 +169,10 @@ pub(crate) fn read_frame<R: Read>(r: &mut R) -> SimardResult<Vec<u8>> {
 }
 
 mod client;
+mod launcher;
 mod server;
 pub use client::RemoteCognitiveMemory;
+pub use launcher::{ReaderBridge, WriterBridge, launch_writer_bridge, open_reader_bridge};
 pub use server::{ServerHandle, spawn_server};
 
 // ============================================================================

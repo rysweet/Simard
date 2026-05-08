@@ -17,7 +17,7 @@
 
 use std::path::PathBuf;
 
-use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
+use crate::cognitive_memory::NativeCognitiveMemory;
 use crate::goal_curation::{
     ActiveGoal, GoalBoard, GoalProgress, active_goals_as_records, load_goal_board, save_goal_board,
 };

@@ -17,7 +17,6 @@ pub(crate) async fn memory_search(Json(body): Json<Value>) -> Json<Value> {
     for (file, label) in [
         ("memory_records.json", "memory"),
         ("evidence_records.json", "evidence"),
-        ("goal_records.json", "goal"),
     ] {
         let path = state_root.join(file);
         if let Ok(content) = std::fs::read_to_string(&path)
@@ -49,6 +48,53 @@ pub(crate) async fn memory_search(Json(body): Json<Value>) -> Json<Value> {
                 }
                 _ => {}
             }
+        }
+    }
+
+    // Search the cognitive-memory goal-board snapshot too (issue #1590 —
+    // goal data no longer lives on disk).
+    if let Ok(board) = super::dashboard_goal_board_snapshot(&state_root) {
+        let needle = query.to_lowercase();
+        let active_matches: Vec<&crate::goal_curation::ActiveGoal> = board
+            .active
+            .iter()
+            .filter(|g| {
+                g.id.to_lowercase().contains(&needle)
+                    || g.description.to_lowercase().contains(&needle)
+            })
+            .take(5)
+            .collect();
+        for goal in active_matches {
+            results.push(json!({
+                "source": "active_goal",
+                "data": {
+                    "id": goal.id,
+                    "description": goal.description,
+                    "priority": goal.priority,
+                    "status": goal.status.to_string(),
+                    "assigned_to": goal.assigned_to,
+                },
+            }));
+        }
+        let backlog_matches: Vec<&crate::goal_curation::BacklogItem> = board
+            .backlog
+            .iter()
+            .filter(|b| {
+                b.id.to_lowercase().contains(&needle)
+                    || b.description.to_lowercase().contains(&needle)
+            })
+            .take(5)
+            .collect();
+        for item in backlog_matches {
+            results.push(json!({
+                "source": "backlog_goal",
+                "data": {
+                    "id": item.id,
+                    "description": item.description,
+                    "source": item.source,
+                    "score": item.score,
+                },
+            }));
         }
     }
 

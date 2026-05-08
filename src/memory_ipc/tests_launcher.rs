@@ -143,7 +143,8 @@ fn writer_bridge_is_compatible_with_save_and_load_goal_board() {
     });
 
     save_goal_board(&board, writer.ops()).expect("save_goal_board via WriterBridge must succeed");
-    let loaded = load_goal_board(writer.ops()).expect("load_goal_board via WriterBridge must succeed");
+    let loaded =
+        load_goal_board(writer.ops()).expect("load_goal_board via WriterBridge must succeed");
     assert_eq!(loaded.active.len(), 1);
     assert_eq!(loaded.active[0].id, "tdd-roundtrip-active-goal");
 }
