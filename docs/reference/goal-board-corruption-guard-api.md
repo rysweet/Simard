@@ -32,9 +32,12 @@ stderr:
 
 ### When to call
 
-Call this function after receiving a `Vec<Priority>` from any orient brain
-implementation and **before** appending synthetic priorities. Synthetics are
-never sourced from the LLM so they must not be passed through the filter.
+Call this function after building the `Vec<Priority>` list from `active_goals`
+(which may include LLM-adjusted urgencies from the orient brain) and **before**
+appending synthetic priorities. The orient brain returns per-goal `OrientJudgment`
+structs, not a priority list — priorities are constructed from `goals.active` in
+`orient_with_brain` and then passed here. Synthetics are never sourced from the
+LLM so they must not be passed through the filter.
 
 The `orient_with_brain` function in `src/ooda_loop/orient.rs` calls this
 automatically. Callers outside that function (tests, alternative orient paths)
@@ -122,16 +125,17 @@ independently in tests or in additional validation sites.
 | `"goal g1"` | `true` |
 | `"GOAL abc"` | `true` |
 | `"  goal g1  "` | `true` (trimmed) |
+| `"goalg1"` | `true` (space optional) |
 | `"Ship the v1 release"` | `false` |
-| `"goal g12345"` | `false` (token too long) |
+| `"goal g1234"` | `false` (token is 5 chars, exceeds 4-char limit) |
 | `""` | `false` |
 | `"goal"` | `false` (no token after keyword) |
 
 ### Token length limit
 
 The token after `"goal "` must be 1–4 characters (`[a-z0-9]{1,4}`). This
-allows `g1`, `g12`, `g123`, `g1234` while excluding anything five characters or
-longer — which is long enough to be a plausible real id in most naming schemes.
+allows `g1`, `g12`, `g123` while excluding `g1234` (5 chars) and anything longer
+— 5 characters is long enough to be a plausible real id in most naming schemes.
 
 ---
 

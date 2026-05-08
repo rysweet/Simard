@@ -71,8 +71,9 @@ Cycle start
 ### Guard 1 — filter hallucinated priorities (orient phase)
 
 **Where:** `src/ooda_loop/orient.rs`, called from `orient_with_brain` after the
-LLM brain returns its `OrientJudgment` priorities and before synthetic goal
-priorities are appended.
+per-goal `Priority` list is built from `goals.active` (with LLM-adjusted
+urgencies from the orient brain) and before synthetic goal priorities are
+appended.
 
 **What it does:** For each `Priority` in the list returned by the brain, the
 function checks whether `priority.goal_id` is either:
