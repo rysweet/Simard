@@ -153,10 +153,21 @@ pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> Si
     if let Err(e) = std::fs::create_dir_all(&state_root) {
         eprintln!("[simard] save_goal_board: failed to create state dir: {e}");
     }
-    if let Ok(pretty) = serde_json::to_string_pretty(board)
-        && let Err(e) = std::fs::write(&goal_path, pretty)
-    {
-        eprintln!("[simard] save_goal_board: failed to write goal_records.json: {e}");
+    // Write with 0o600 so goal descriptions (internal project metadata) are
+    // not world-readable on multi-user systems.
+    if let Ok(pretty) = serde_json::to_string_pretty(board) {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let result = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&goal_path)
+            .and_then(|mut f| f.write_all(pretty.as_bytes()));
+        if let Err(e) = result {
+            eprintln!("[simard] save_goal_board: failed to write goal_records.json: {e}");
+        }
     }
 
     Ok(())
