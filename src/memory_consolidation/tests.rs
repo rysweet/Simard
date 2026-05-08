@@ -114,9 +114,9 @@ fn execution_does_not_truncate_short_output() {
 fn persistence_clears_working_and_prunes() {
     let (bridge, count) = counting_bridge();
     persistence_memory_operations(&test_session_id(), &bridge).unwrap();
-    // clear_working + prune_expired_sensory + consolidate_episodes + store_episode = 4
-    // + snapshot: search_facts("*") + recall_procedure("*") = 2 more → 6 total
-    assert_eq!(count.load(Ordering::SeqCst), 6);
+    // clear_working + prune_expired_sensory + store_episode = 3
+    // (consolidate_episodes and snapshot save are handled upstream)
+    assert_eq!(count.load(Ordering::SeqCst), 3);
 }
 
 #[test]
@@ -156,8 +156,8 @@ fn consolidation_intake_with_facts_pushes_to_working_memory() {
     let bridge = CognitiveMemoryBridge::new(Box::new(transport));
     let hydrated = consolidation_intake(&test_session_id(), "test-objective", &bridge).unwrap();
     assert_eq!(hydrated, 1);
-    // search_facts + push_working + store_episode = 3
-    assert_eq!(call_count.load(Ordering::SeqCst), 3);
+    // search_facts + push_working(recalled-fact) + push_working(summary) + store_episode = 4
+    assert_eq!(call_count.load(Ordering::SeqCst), 4);
 }
 
 #[test]

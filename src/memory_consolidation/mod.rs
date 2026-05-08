@@ -194,10 +194,9 @@ pub fn persistence_memory_operations(
     session_id: &SessionId,
     bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
-    // Consolidate episodes (batch of 10) BEFORE clearing working memory, so a
-    // consolidation failure aborts teardown rather than silently dropping the
-    // session's working-memory contents. Errors are propagated.
-    bridge.consolidate_episodes(10)?;
+    // NOTE: consolidation_persistence (called before this function) already
+    // runs consolidate_episodes(20). We skip a redundant call here to avoid
+    // double-consolidation overhead.
 
     // Clear working memory for this session.
     bridge.clear_working(session_id.as_str())?;
@@ -212,60 +211,10 @@ pub fn persistence_memory_operations(
         None,
     )?;
 
-    // Save a JSON snapshot for durable cross-session recall.  Errors are
-    // non-fatal: log and continue so a snapshot failure never aborts the
-    // session lifecycle.
-    if let Some(dir) = crate::memory_snapshot::snapshot_dir(None) {
-        match crate::memory_snapshot::save_session_snapshot(bridge, session_id.as_str(), &dir) {
-            Ok(path) => {
-                eprintln!("[simard] memory_snapshot: saved {}", path.display());
-                // Prune: keep only the 10 most recent snapshots.
-                prune_snapshots(&dir, 10);
-            }
-            Err(e) => {
-                eprintln!("[simard] memory_snapshot: save failed (non-fatal): {e}");
-            }
-        }
-    }
+    // NOTE: Snapshot saving is handled by the caller (session.rs) using the
+    // correct agent name from the manifest. We no longer duplicate it here.
 
     Ok(())
-}
-
-/// Delete all but the `keep` most-recent snapshot files in `dir`.
-///
-/// Filenames are `<agent>-<epoch>.json`; lexicographic sort == chronological.
-/// Errors during deletion are logged but not propagated.
-fn prune_snapshots(dir: &std::path::Path, keep: usize) {
-    let mut entries: Vec<std::path::PathBuf> = match std::fs::read_dir(dir) {
-        Ok(rd) => rd
-            .filter_map(|e| {
-                let e = e.ok()?;
-                let p = e.path();
-                if p.extension().and_then(|x| x.to_str()) == Some("json") {
-                    Some(p)
-                } else {
-                    None
-                }
-            })
-            .collect(),
-        Err(e) => {
-            eprintln!("[simard] memory_snapshot: prune read_dir failed (non-fatal): {e}");
-            return;
-        }
-    };
-    if entries.len() <= keep {
-        return;
-    }
-    entries.sort();
-    let to_delete = entries.len() - keep;
-    for path in entries.iter().take(to_delete) {
-        if let Err(e) = std::fs::remove_file(path) {
-            eprintln!(
-                "[simard] memory_snapshot: prune delete {} failed (non-fatal): {e}",
-                path.display()
-            );
-        }
-    }
 }
 
 // ============================================================================
@@ -286,6 +235,16 @@ pub fn consolidation_intake(
     let prior_facts = bridge.search_facts(objective, 50, 0.0)?;
     let count = prior_facts.len();
     if count > 0 {
+        // Push each recalled fact into working memory so the agent can reason
+        // over the actual content — not just a count summary.
+        for fact in &prior_facts {
+            bridge.push_working(
+                "recalled-fact",
+                &fact.content,
+                session_id.as_str(),
+                fact.confidence,
+            )?;
+        }
         let summary = format!("Hydrated {count} prior-session facts for cross-session recall");
         bridge.push_working("consolidation-intake", &summary, session_id.as_str(), 0.7)?;
         bridge.store_episode(&summary, "consolidation-intake", None)?;
