@@ -9,7 +9,6 @@ use crate::gym_scoring::GymSuiteScore;
 use crate::memory_consolidation;
 use crate::memory_consolidation::preparation_memory_operations;
 use crate::self_improve::{ImprovementCycle, ImprovementPhase};
-use crate::session::SessionId;
 
 use super::types::*;
 use super::{
@@ -69,13 +68,7 @@ fn run_ooda_cycle_inner(
     // Only replace board if loaded one is non-empty (cold memory = keep local).
     // A `.reseed_goals` marker file forces re-seeding from DEFAULT_SEED_GOALS,
     // ignoring the stale cognitive memory snapshot.
-    let state_root = std::env::var("SIMARD_STATE_ROOT")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".into());
-            std::path::PathBuf::from(home).join(".simard")
-        });
-    let reseed_marker = state_root.join(".reseed_goals");
+    let reseed_marker = crate::goal_curation::simard_state_root().join(".reseed_goals");
     if reseed_marker.exists() {
         eprintln!(
             "[simard] OODA start: .reseed_goals marker found — ignoring cognitive memory board"
@@ -89,6 +82,11 @@ fn run_ooda_cycle_inner(
     {
         state.active_goals = board;
     }
+
+    // Sweep stale assigned_to fields against live tmux sessions.
+    // Best-effort: if tmux is absent or returns no sessions, skip entirely
+    // to avoid false-positive clearing in non-tmux environments.
+    sweep_stale_assignments(&mut state.active_goals);
 
     // Seed with default goals if the board is still empty.
     let seeded = crate::goal_curation::seed_default_board(&mut state.active_goals);
@@ -164,7 +162,7 @@ fn run_ooda_cycle_inner(
         .map(|g| g.description.as_str())
         .collect::<Vec<_>>()
         .join("; ");
-    let cycle_session_id = SessionId::from_uuid(uuid::Uuid::now_v7());
+    // Reuse cycle_session_id established above — the entire cycle is one logical session.
     let ctx =
         preparation_memory_operations(&objective_summary, &cycle_session_id, &*bridges.memory)?;
     eprintln!(
@@ -380,31 +378,9 @@ fn run_ooda_cycle_inner(
     // Promote highest-scoring backlog items to fill freed slots.
     promote_from_backlog(&mut state.active_goals);
 
-    // Persist the updated board to cognitive memory (best-effort).
+    // Persist the updated board to cognitive memory and disk (best-effort).
     if let Err(e) = crate::goal_curation::persist_board(&state.active_goals, &*bridges.memory) {
         eprintln!("[simard] OODA curate: failed to persist goal board: {e}");
-    }
-
-    // Also write the board to disk so the dashboard can read it.
-    {
-        let state_root = std::env::var("SIMARD_STATE_ROOT")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".into());
-                std::path::PathBuf::from(home).join(".simard")
-            });
-        let goal_path = state_root.join("goal_records.json");
-        if let Err(e) = std::fs::create_dir_all(&state_root) {
-            eprintln!("[simard] OODA curate: failed to create state dir: {e}");
-        }
-        match serde_json::to_string_pretty(&state.active_goals) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(&goal_path, json) {
-                    eprintln!("[simard] OODA curate: failed to write goal_records.json: {e}");
-                }
-            }
-            Err(e) => eprintln!("[simard] OODA curate: failed to serialize goal board: {e}"),
-        }
     }
 
     // --- Memory consolidation: persistence at cycle end ---
@@ -432,12 +408,212 @@ fn run_ooda_cycle_inner(
     })
 }
 
-/// Truncate a detail string to max_len, appending "…" if truncated.
+/// Truncate a detail string to at most `max_len` characters (Unicode scalar
+/// values), appending "…" if truncated.
 fn truncate_detail(s: &str, max_len: usize) -> String {
     let trimmed = s.trim();
-    if trimmed.len() <= max_len {
-        trimmed.to_string()
-    } else {
-        format!("{}…", &trimmed[..max_len])
+    let mut chars = trimmed.char_indices();
+    match chars.nth(max_len) {
+        None => trimmed.to_string(),
+        Some((byte_pos, _)) => format!("{}…", &trimmed[..byte_pos]),
+    }
+}
+
+/// Clear `assigned_to` for any active goal whose assigned tmux session is no
+/// longer alive. Resets the goal status to `NotStarted` so it can be
+/// re-dispatched on the next OODA cycle.
+///
+/// Skipped entirely when:
+/// - `tmux list-sessions` fails (tmux absent or permission error)
+/// - The live session list is empty (not running inside tmux)
+///
+/// This prevents false-positive clearing when Simard is run outside a tmux
+/// environment (e.g., in CI).
+fn sweep_stale_assignments(board: &mut crate::goal_curation::GoalBoard) {
+    use std::collections::HashSet;
+    use std::process::Command;
+
+    let output = match Command::new("tmux")
+        .args(["list-sessions", "-F", "#{session_name}"])
+        .output()
+    {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return,
+    };
+
+    let live: HashSet<String> = String::from_utf8_lossy(&output)
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    sweep_stale_assignments_with_sessions(board, &live);
+}
+
+/// Core assignment-sweep logic parameterised on a pre-built live session set.
+///
+/// Exposed as `pub(crate)` so unit tests can exercise the sweep logic without
+/// spawning a real tmux process.  The public entry point is
+/// [`sweep_stale_assignments`], which populates `live_sessions` from tmux.
+///
+/// Skipped (no-op) when `live_sessions` is empty — avoids clearing all
+/// assignments when running outside a tmux environment (e.g., CI).
+pub(crate) fn sweep_stale_assignments_with_sessions(
+    board: &mut crate::goal_curation::GoalBoard,
+    live_sessions: &std::collections::HashSet<String>,
+) {
+    if live_sessions.is_empty() {
+        return;
+    }
+
+    for goal in board.active.iter_mut() {
+        let is_stale = goal
+            .assigned_to
+            .as_deref()
+            .is_some_and(|s| !live_sessions.contains(s));
+        if is_stale {
+            let session = goal.assigned_to.take().unwrap_or_default();
+            eprintln!(
+                "[simard] OODA start: cleared stale assignment '{}' for goal '{}'",
+                session, goal.id
+            );
+            goal.status = crate::goal_curation::GoalProgress::NotStarted;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests_sweep {
+    use std::collections::HashSet;
+
+    use super::sweep_stale_assignments_with_sessions;
+    use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, add_active_goal};
+
+    fn make_goal(id: &str, session: Option<&str>) -> ActiveGoal {
+        ActiveGoal {
+            id: id.to_string(),
+            description: format!("Goal {id}"),
+            priority: 1,
+            status: GoalProgress::InProgress { percent: 50 },
+            assigned_to: session.map(str::to_string),
+            current_activity: None,
+            wip_refs: vec![],
+        }
+    }
+
+    fn live(sessions: &[&str]) -> HashSet<String> {
+        sessions.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Dead session → assigned_to cleared, status reset to NotStarted.
+    #[test]
+    fn clears_dead_session_assignment() {
+        let mut board = GoalBoard::new();
+        add_active_goal(&mut board, make_goal("g1", Some("dead-session"))).unwrap();
+
+        sweep_stale_assignments_with_sessions(&mut board, &live(&["alive-session"]));
+
+        let goal = &board.active[0];
+        assert!(
+            goal.assigned_to.is_none(),
+            "assigned_to must be cleared for dead session"
+        );
+        assert!(
+            matches!(goal.status, GoalProgress::NotStarted),
+            "status must be reset to NotStarted, got {:?}",
+            goal.status
+        );
+    }
+
+    /// Live session → assignment preserved.
+    #[test]
+    fn preserves_live_session_assignment() {
+        let mut board = GoalBoard::new();
+        add_active_goal(&mut board, make_goal("g1", Some("live-session"))).unwrap();
+
+        sweep_stale_assignments_with_sessions(&mut board, &live(&["live-session"]));
+
+        let goal = &board.active[0];
+        assert_eq!(goal.assigned_to.as_deref(), Some("live-session"));
+        assert!(
+            matches!(goal.status, GoalProgress::InProgress { .. }),
+            "status must not change for live session"
+        );
+    }
+
+    /// Empty live-session set → skip sweep entirely (non-tmux environment guard).
+    #[test]
+    fn skips_sweep_when_live_sessions_empty() {
+        let mut board = GoalBoard::new();
+        add_active_goal(&mut board, make_goal("g1", Some("some-session"))).unwrap();
+
+        sweep_stale_assignments_with_sessions(&mut board, &live(&[]));
+
+        let goal = &board.active[0];
+        assert_eq!(
+            goal.assigned_to.as_deref(),
+            Some("some-session"),
+            "must not clear assignments when live_sessions is empty (non-tmux guard)"
+        );
+    }
+
+    /// Unassigned goal is untouched regardless of live sessions.
+    #[test]
+    fn ignores_unassigned_goals() {
+        let mut board = GoalBoard::new();
+        add_active_goal(&mut board, make_goal("g1", None)).unwrap();
+
+        sweep_stale_assignments_with_sessions(&mut board, &live(&["some-session"]));
+
+        let goal = &board.active[0];
+        assert!(goal.assigned_to.is_none());
+        assert!(
+            matches!(goal.status, GoalProgress::InProgress { .. }),
+            "status must be unchanged for unassigned goal"
+        );
+    }
+
+    /// Mixed board: only the goal with a dead session is cleared.
+    #[test]
+    fn clears_only_dead_assignments_in_mixed_board() {
+        let mut board = GoalBoard::new();
+        add_active_goal(&mut board, make_goal("live-goal", Some("alive"))).unwrap();
+        add_active_goal(&mut board, make_goal("dead-goal", Some("dead"))).unwrap();
+        add_active_goal(&mut board, make_goal("unassigned-goal", None)).unwrap();
+
+        sweep_stale_assignments_with_sessions(&mut board, &live(&["alive"]));
+
+        let live_goal = board.active.iter().find(|g| g.id == "live-goal").unwrap();
+        assert_eq!(live_goal.assigned_to.as_deref(), Some("alive"));
+
+        let dead_goal = board.active.iter().find(|g| g.id == "dead-goal").unwrap();
+        assert!(dead_goal.assigned_to.is_none());
+        assert!(matches!(dead_goal.status, GoalProgress::NotStarted));
+
+        let unassigned = board
+            .active
+            .iter()
+            .find(|g| g.id == "unassigned-goal")
+            .unwrap();
+        assert!(unassigned.assigned_to.is_none());
+    }
+
+    /// Goals assigned to the same session that died are all cleared.
+    #[test]
+    fn clears_all_goals_for_same_dead_session() {
+        let mut board = GoalBoard::new();
+        add_active_goal(&mut board, make_goal("g1", Some("dead"))).unwrap();
+        add_active_goal(&mut board, make_goal("g2", Some("dead"))).unwrap();
+
+        sweep_stale_assignments_with_sessions(&mut board, &live(&["other"]));
+
+        for goal in &board.active {
+            assert!(goal.assigned_to.is_none(), "g={}", goal.id);
+            assert!(
+                matches!(goal.status, GoalProgress::NotStarted),
+                "g={}",
+                goal.id
+            );
+        }
     }
 }

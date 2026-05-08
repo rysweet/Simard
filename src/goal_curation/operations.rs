@@ -57,19 +57,72 @@ fn validate_backlog_item(item: &BacklogItem) -> SimardResult<()> {
 // Persistence
 // ---------------------------------------------------------------------------
 
-/// Load a goal board from cognitive memory. Searches for the latest board
-/// snapshot stored as a semantic fact and falls back to an empty board.
-pub fn load_goal_board(bridge: &dyn CognitiveMemoryOps) -> SimardResult<GoalBoard> {
-    let facts = bridge.search_facts("goal-board:snapshot", 1, 0.0)?;
-    if let Some(fact) = facts.first() {
-        let board = serde_json::from_str::<GoalBoard>(&fact.content).map_err(|e| {
-            SimardError::InvalidGoalRecord {
-                field: "board".to_string(),
-                reason: format!("failed to deserialize goal board: {e}"),
-            }
-        })?;
-        return Ok(board);
+/// Resolve the Simard state root directory.
+///
+/// Priority: `$SIMARD_STATE_ROOT` env var → `$HOME/.simard` → `/home/azureuser/.simard`.
+pub fn simard_state_root() -> std::path::PathBuf {
+    if let Ok(v) = std::env::var("SIMARD_STATE_ROOT") {
+        return std::path::PathBuf::from(v);
     }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".into());
+    std::path::PathBuf::from(home).join(".simard")
+}
+
+/// Load a goal board using a three-tier fallback strategy:
+///
+/// 1. `$SIMARD_STATE_ROOT/goal_records.json` (or `~/.simard/goal_records.json`) — primary
+///    source of truth, written by `save_goal_board()` on every save.
+/// 2. `search_facts("goal-board:snapshot", 1, 0.0)` from cognitive memory — fallback for
+///    the first-ever run (no disk file yet) and disaster recovery.
+/// 3. `GoalBoard::new()` — empty board if both sources are absent or unreadable.
+///
+/// The disk file is always at least as recent as the last cognitive memory write, and
+/// avoids the unordered `LIMIT 1` retrieval issue in cognitive memory (issue #1574).
+pub fn load_goal_board(bridge: &dyn CognitiveMemoryOps) -> SimardResult<GoalBoard> {
+    // Tier 1: disk file — primary source of truth.
+    let goal_path = simard_state_root().join("goal_records.json");
+    match std::fs::read_to_string(&goal_path) {
+        Ok(content) => match serde_json::from_str::<GoalBoard>(&content) {
+            Ok(board) => return Ok(board),
+            Err(e) => {
+                eprintln!(
+                    "[simard] load_goal_board: goal_records.json parse error ({e}) — falling back to cognitive memory"
+                );
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // File not yet created — fall through to cognitive memory.
+        }
+        Err(e) => {
+            eprintln!(
+                "[simard] load_goal_board: failed to read goal_records.json ({e}) — falling back to cognitive memory"
+            );
+        }
+    }
+
+    // Tier 2: cognitive memory snapshot.  Errors here (bridge unavailable,
+    // timeout, etc.) are non-fatal: log and fall through to the empty board.
+    let facts = match bridge.search_facts("goal-board:snapshot", 1, 0.0) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!(
+                "[simard] load_goal_board: cognitive memory search_facts failed ({e}) — returning empty board"
+            );
+            vec![]
+        }
+    };
+    if let Some(fact) = facts.first() {
+        match serde_json::from_str::<GoalBoard>(&fact.content) {
+            Ok(board) => return Ok(board),
+            Err(e) => {
+                eprintln!(
+                    "[simard] load_goal_board: cognitive memory snapshot parse error ({e}) — returning empty board"
+                );
+            }
+        }
+    }
+
+    // Tier 3: empty board.
     Ok(GoalBoard::new())
 }
 
@@ -95,17 +148,26 @@ pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> Si
 
     // Also write to disk so intermediate saves (e.g. stale subordinate
     // clearing during Act phase) are durable across cycle boundaries.
-    let state_root = std::env::var("SIMARD_STATE_ROOT")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".into());
-            std::path::PathBuf::from(home).join(".simard")
-        });
+    let state_root = simard_state_root();
     let goal_path = state_root.join("goal_records.json");
-    if let Ok(pretty) = serde_json::to_string_pretty(board)
-        && let Err(e) = std::fs::write(&goal_path, pretty)
-    {
-        eprintln!("[simard] save_goal_board: failed to write goal_records.json: {e}");
+    if let Err(e) = std::fs::create_dir_all(&state_root) {
+        eprintln!("[simard] save_goal_board: failed to create state dir: {e}");
+    }
+    // Write with 0o600 so goal descriptions (internal project metadata) are
+    // not world-readable on multi-user systems.
+    if let Ok(pretty) = serde_json::to_string_pretty(board) {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let result = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&goal_path)
+            .and_then(|mut f| f.write_all(pretty.as_bytes()));
+        if let Err(e) = result {
+            eprintln!("[simard] save_goal_board: failed to write goal_records.json: {e}");
+        }
     }
 
     Ok(())

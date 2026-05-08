@@ -10,7 +10,8 @@ mod types;
 pub use operations::{
     DEFAULT_SEED_GOALS, DEFAULT_STEWARD_SCORE, add_active_goal, add_backlog_item,
     archive_completed, clear_goal_assignment, enqueue_stewardship_issue, load_goal_board,
-    persist_board, promote_to_active, save_goal_board, seed_default_board, update_goal_progress,
+    persist_board, promote_to_active, save_goal_board, seed_default_board, simard_state_root,
+    update_goal_progress,
 };
 pub use types::{ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS};
 
