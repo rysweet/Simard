@@ -1,9 +1,9 @@
 //! Orient phase: rank goals by urgency, informed by environment context.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::SimardResult;
-use crate::goal_curation::{GoalBoard, GoalProgress};
+use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress};
 use crate::ooda_brain::{
     BrainJudgmentRecord, DeterministicFallbackOrientBrain, OodaOrientBrain, OrientContext,
     push_brain_judgment,
@@ -125,6 +125,8 @@ pub fn orient_with_brain(
         })
         .collect();
 
+    filter_hallucinated_priorities(&mut priorities, &goals.active);
+
     if observation.memory_stats.episodic_count > 100 {
         priorities.push(Priority {
             goal_id: "__memory__".to_string(),
@@ -167,6 +169,28 @@ pub fn orient_with_brain(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     Ok(priorities)
+}
+
+/// Drop any priorities whose `goal_id` is neither in `active_goals` nor a
+/// synthetic (`__`-prefix). Called after building the priorities vec from
+/// `goals.active` and before appending synthetic priorities, so synthetics
+/// are never filtered.
+pub(crate) fn filter_hallucinated_priorities(
+    priorities: &mut Vec<Priority>,
+    active_goals: &[ActiveGoal],
+) {
+    let active_ids: HashSet<&str> = active_goals.iter().map(|g| g.id.as_str()).collect();
+    priorities.retain(|p| {
+        if p.goal_id.starts_with("__") || active_ids.contains(p.goal_id.as_str()) {
+            true
+        } else {
+            eprintln!(
+                "[simard] OODA orient: dropping hallucinated goal_id '{}' — not on active board",
+                p.goal_id
+            );
+            false
+        }
+    });
 }
 
 #[cfg(test)]
@@ -230,5 +254,161 @@ mod wire_in_tests {
         );
         assert_eq!(records[0].rationale, "llm-orient-brain: light demotion");
         assert!(!records[0].fallback);
+    }
+}
+
+#[cfg(test)]
+mod hallucination_filter_tests {
+    use super::*;
+    use crate::goal_curation::{ActiveGoal, GoalProgress};
+    use crate::ooda_loop::Priority;
+
+    fn active(id: &str) -> ActiveGoal {
+        ActiveGoal {
+            id: id.to_string(),
+            description: format!("desc {id}"),
+            priority: 1,
+            status: GoalProgress::NotStarted,
+            assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
+        }
+    }
+
+    fn priority(id: &str) -> Priority {
+        Priority {
+            goal_id: id.to_string(),
+            urgency: 0.5,
+            reason: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn retains_priorities_present_in_active_goals() {
+        let goals = vec![active("ship-v1"), active("fix-db")];
+        let mut priorities = vec![priority("ship-v1"), priority("fix-db")];
+        filter_hallucinated_priorities(&mut priorities, &goals);
+        assert_eq!(priorities.len(), 2);
+    }
+
+    #[test]
+    fn drops_priorities_absent_from_active_goals() {
+        let goals = vec![active("ship-v1")];
+        let mut priorities = vec![priority("ship-v1"), priority("g1")];
+        filter_hallucinated_priorities(&mut priorities, &goals);
+        assert_eq!(priorities.len(), 1);
+        assert_eq!(priorities[0].goal_id, "ship-v1");
+    }
+
+    #[test]
+    fn retains_synthetic_double_underscore_priorities() {
+        let goals: Vec<ActiveGoal> = vec![];
+        let mut priorities = vec![
+            priority("__memory__"),
+            priority("__improvement__"),
+            priority("__eval_watchdog__"),
+        ];
+        filter_hallucinated_priorities(&mut priorities, &goals);
+        assert_eq!(priorities.len(), 3);
+    }
+
+    #[test]
+    fn empty_active_goals_drops_non_synthetic() {
+        let goals: Vec<ActiveGoal> = vec![];
+        let mut priorities = vec![priority("orphan-goal"), priority("__memory__")];
+        filter_hallucinated_priorities(&mut priorities, &goals);
+        assert_eq!(priorities.len(), 1);
+        assert_eq!(priorities[0].goal_id, "__memory__");
+    }
+
+    #[test]
+    fn drops_all_when_all_hallucinated_and_no_active_goals() {
+        let goals: Vec<ActiveGoal> = vec![];
+        let mut priorities = vec![priority("g1"), priority("ghost-goal"), priority("made-up")];
+        filter_hallucinated_priorities(&mut priorities, &goals);
+        assert!(priorities.is_empty());
+    }
+
+    #[test]
+    fn retains_relative_order_of_remaining_priorities() {
+        // After filtering, the order of retained items must be preserved.
+        let goals = vec![active("alpha"), active("gamma")];
+        let mut priorities = vec![
+            priority("alpha"),
+            priority("hallucinated"),
+            priority("gamma"),
+        ];
+        filter_hallucinated_priorities(&mut priorities, &goals);
+        assert_eq!(priorities.len(), 2);
+        assert_eq!(priorities[0].goal_id, "alpha");
+        assert_eq!(priorities[1].goal_id, "gamma");
+    }
+
+    #[test]
+    fn single_underscore_prefix_is_not_synthetic_and_is_dropped() {
+        // "_memory_" starts with one underscore — NOT a synthetic goal.
+        let goals: Vec<ActiveGoal> = vec![];
+        let mut priorities = vec![priority("_memory_")];
+        filter_hallucinated_priorities(&mut priorities, &goals);
+        assert!(priorities.is_empty());
+    }
+
+    #[test]
+    fn double_underscore_in_middle_is_not_synthetic_and_is_dropped() {
+        // "mem__ory" contains __ but does not START with __.
+        let goals: Vec<ActiveGoal> = vec![];
+        let mut priorities = vec![priority("mem__ory")];
+        filter_hallucinated_priorities(&mut priorities, &goals);
+        assert!(priorities.is_empty());
+    }
+
+    #[test]
+    fn double_underscore_prefix_arbitrary_suffix_is_synthetic() {
+        // Any __ prefix must be retained regardless of the suffix.
+        let goals: Vec<ActiveGoal> = vec![];
+        let mut priorities = vec![priority("__new_future_system__")];
+        filter_hallucinated_priorities(&mut priorities, &goals);
+        assert_eq!(priorities.len(), 1);
+    }
+
+    #[test]
+    fn mix_of_real_hallucinated_synthetic_correct_subset_retained() {
+        let goals = vec![active("real-goal-a"), active("real-goal-b")];
+        let mut priorities = vec![
+            priority("real-goal-a"),
+            priority("hallucinated-x"),
+            priority("__memory__"),
+            priority("real-goal-b"),
+            priority("hallucinated-y"),
+            priority("__eval_watchdog__"),
+        ];
+        filter_hallucinated_priorities(&mut priorities, &goals);
+        let ids: Vec<&str> = priorities.iter().map(|p| p.goal_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "real-goal-a",
+                "__memory__",
+                "real-goal-b",
+                "__eval_watchdog__"
+            ]
+        );
+    }
+
+    #[test]
+    fn no_change_when_all_priorities_are_valid() {
+        let goals = vec![active("goal-a"), active("goal-b")];
+        let mut priorities = vec![priority("goal-a"), priority("goal-b")];
+        let original_len = priorities.len();
+        filter_hallucinated_priorities(&mut priorities, &goals);
+        assert_eq!(priorities.len(), original_len);
+    }
+
+    #[test]
+    fn empty_priorities_stays_empty() {
+        let goals = vec![active("goal-a")];
+        let mut priorities: Vec<Priority> = vec![];
+        filter_hallucinated_priorities(&mut priorities, &goals);
+        assert!(priorities.is_empty());
     }
 }
