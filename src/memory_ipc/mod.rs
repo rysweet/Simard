@@ -19,6 +19,9 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[cfg(test)]
+mod tests_launcher;
+
 use serde::{Deserialize, Serialize};
 
 use crate::cognitive_memory::CognitiveMemoryOps;

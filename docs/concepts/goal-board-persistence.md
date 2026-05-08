@@ -1,94 +1,203 @@
 ---
-title: Goal board persistence — disk-first loading and stale assignment sweep
-description: How Simard loads and saves the goal board across OODA cycles, and how stale engineer assignments are cleared automatically.
+title: Goal board persistence — cognitive-memory single source of truth
+description: How Simard loads and saves the goal board across OODA cycles, dashboard handlers, meeting flows, and the engineer loop, with cognitive memory as the sole persistence target.
 last_updated: 2026-05-08
 owner: simard
 doc_type: concept
+status: design — partially implemented
 related:
   - ../reference/goal-board-api.md
+  - ../reference/cognitive-memory-bridge-helpers.md
   - ../howto/recover-goal-board.md
   - ../architecture/overview.md
   - ../reference/subagent-tmux-tracking.md
 ---
 
-# Goal board persistence — disk-first loading and stale assignment sweep
+# Goal board persistence — cognitive-memory single source of truth
+
+> **Status: design specification — partially implemented (issue [#1590](https://github.com/rysweet/Simard/issues/1590)).**
+>
+> The persistence APIs (`load_goal_board`, `save_goal_board`,
+> `persist_board`) and the integrity guard already exist in
+> `src/goal_curation/operations.rs`, and the OODA cycle already uses them
+> as its sole goal-board persistence path.
+>
+> The migration of **other** consumers (dashboard handlers, meeting REPL
+> flows, engineer loop) onto these APIs — together with the new
+> `active_goals_as_records` adapter and the `launch_writer_bridge`/
+> `open_reader_bridge` helpers — is the in-flight work tracked by issue
+> #1590. The "Consumer matrix" below is split into **Current state** and
+> **Target state (after #1590)** to make it clear which call sites have
+> moved and which still read `goal_records.json` directly.
 
 ## The problem this solves
 
-Before issue [#1574](https://github.com/rysweet/Simard/issues/1574), the OODA
-cycle loaded the goal board exclusively from cognitive memory via
-`search_facts("goal-board:snapshot", 1, 0.0)`. Every call to
-`save_goal_board()` appended a new fact node in the graph. Over the lifetime of
-a running daemon the graph accumulates many such nodes, and `LIMIT 1` is not
-guaranteed to return the most-recently written one. This produced two classes of
-failure:
+The goal board has historically been persisted to **two** places: the
+cognitive memory graph (under the `goal-board:snapshot` fact) and a
+`goal_records.json` file in `$SIMARD_STATE_ROOT`. Different consumers read
+from different places:
 
-- **Stale board**: the cycle started with an old snapshot, discarding goal
-  progress, backlog additions, and engineer assignments written in the previous
-  cycle.
-- **Unpredictable board**: successive cycle starts could return different
-  snapshots, making operator debugging very difficult.
+- The OODA cycle wrote to both, then read disk-first on the next cycle.
+- The operator dashboard reads `goal_records.json` directly from several
+  handlers (`goals.rs`, `workboard.rs`, `current_work.rs`, `metrics.rs`)
+  and writes to it directly from the dashboard mutation paths.
+- The meeting REPL goal-curation and improvement-curation flows read
+  through `FileBackedGoalStore`, which targets `goal_records.json`.
+- The engineer loop reads its "next five goals" through the same
+  `FileBackedGoalStore`.
 
-Additionally, when an engineer's tmux session died (crash, kill, machine
-restart), the goal's `assigned_to` field retained the dead session name.
-The spawn logic would see the assignment and skip re-dispatching the goal,
-permanently blocking progress until the operator manually cleared the field.
+This produces a class of subtle bugs:
+
+- **Drift** — a dashboard write that succeeded on disk but was racing a
+  daemon cycle could be silently overwritten by the daemon's next save.
+- **Stale reads** — a consumer that read the disk file just after another
+  consumer had updated only the cognitive memory snapshot saw outdated data.
+- **Recovery confusion** — an operator restoring from a backup of one store
+  did not know whether the other store was now ahead, behind, or in sync.
+
+Issue #1590 collapses both stores into one: the
+`goal-board:snapshot` fact in cognitive memory becomes the **single source
+of truth**. After the migration, no consumer reads or writes
+`goal_records.json` in production code paths. A one-shot bootstrap
+migration imports any pre-existing disk file on first startup and deletes
+it after a successful re-write into cognitive memory.
 
 ---
 
-## How it works now
+## How it works in the target state
 
-### Three-tier load strategy
+### Single store, two access patterns
 
-`load_goal_board()` in `src/goal_curation/operations.rs` attempts three sources
-in order, stopping at the first success:
+All consumers obtain a typed bridge — see
+[Cognitive memory bridge helpers](../reference/cognitive-memory-bridge-helpers.md) —
+and route through two functions in
+[`src/goal_curation/operations.rs`](../reference/goal-board-api.md):
 
-| Tier | Source | Condition |
-|------|--------|-----------|
-| 1 | `$SIMARD_STATE_ROOT/goal_records.json` (disk) | File exists and parses as `GoalBoard` |
-| 2 | `search_facts("goal-board:snapshot", 1, 0.0)` (cognitive memory) | Fact exists and parses as `GoalBoard` |
-| 3 | `GoalBoard::new()` (empty board) | Both earlier sources absent or unreadable |
+| Operation | Function | Bridge type |
+|-----------|----------|-------------|
+| Read | `load_goal_board(bridge.ops())` | `ReaderBridge` (cheap, never contends with daemon writer lock) |
+| Write | `save_goal_board(&board, bridge.ops())` | `WriterBridge` (prefers daemon IPC when available, else takes the local writer lock; fails synchronously if no writer is obtainable) |
 
-The disk file is the canonical authority. It is written by `save_goal_board()`
-on every mutation — the same call that also writes to cognitive memory. Because
-the disk write is a single `fs::write` to a fixed path, there is no ordering
-ambiguity.
+When the OODA daemon is running, **all** writes flow through the daemon's
+IPC socket. Dashboard mutation handlers, meeting REPL flows, and any other
+out-of-process writer connect to the same socket via
+`launch_writer_bridge`'s tier 1, so writes are serialized by the daemon.
+When no daemon is running, the writer bridge takes the local LadybugDB
+writer lock directly.
 
-Cognitive memory remains the tier-2 fallback to support:
-- First-ever daemon run before `goal_records.json` exists.
-- Disaster recovery from a deleted state directory (as long as the cognitive
-  memory process still holds the graph).
+### Bridge ladders
+
+`launch_writer_bridge` resolves two writer-bearing tiers in order:
+
+1. **Daemon IPC** — connect to `~/.simard/memory.sock` if it exists.
+2. **Local writer** — open the LadybugDB store directly with the writer
+   lock, after running the stale-lock reaper.
+
+If both fail, `launch_writer_bridge` returns `Err` immediately. There is
+no silent read-only fallback — callers learn synchronously whether they
+got a writer.
+
+`open_reader_bridge` resolves two tiers:
+
+1. **Daemon IPC** — same socket as above.
+2. **Local read-only opener** — never contends with the writer lock, so
+   safe to call concurrently with a running daemon.
+
+See the [helper reference](../reference/cognitive-memory-bridge-helpers.md)
+for the full algorithm and stale-lock reaper details.
+
+### Legacy migration on first startup
+
+`load_goal_board` calls `migrate_legacy_disk_file_if_present(bridge)` as
+its first step. When the legacy `$SIMARD_STATE_ROOT/goal_records.json`
+file exists:
+
+1. The file is read and parsed as a `GoalBoard`.
+2. The board is written into cognitive memory via `bridge.store_fact`.
+3. On successful store, the file is deleted from disk.
+
+Any failure at any step is logged to stderr and is **non-fatal** — the
+file is left in place for the next startup to retry. Once the file no
+longer exists, the migration step costs only a single `metadata` syscall.
+
+This means operators upgrading a host where `goal_records.json` already
+contains live state never need to manually move data: the next daemon
+startup picks it up and migrates it. After a single successful migration,
+no production code path reads or writes the legacy file.
 
 ### Stale assignment sweep
 
 `sweep_stale_assignments()` in `src/ooda_loop/cycle.rs` runs early in each
 OODA cycle, after board load and before `seed_default_board`:
 
-1. Calls `tmux list-sessions -F #{session_name}` to collect live session names
-   into a `HashSet<String>`.
-2. For each active goal whose `assigned_to` matches a session **not** in that
-   set, clears `assigned_to = None` and resets `status = NotStarted`.
-3. Skips the entire sweep if tmux is unavailable or returns an empty list —
-   this prevents false-positive clearing when Simard is run outside a tmux
-   environment (e.g., in CI or unit tests).
+1. Calls `tmux list-sessions -F #{session_name}` to collect live session
+   names into a `HashSet<String>`.
+2. For each active goal whose `assigned_to` matches a session **not** in
+   that set, clears `assigned_to = None` and resets
+   `status = NotStarted`.
+3. **Skips the entire sweep if tmux is unavailable or returns an empty
+   list.** This prevents false-positive clearing when Simard is run
+   outside a tmux environment (e.g., in CI or unit tests). The trade-off
+   is that in non-tmux environments, `assigned_to` values can outlive a
+   real engineer death indefinitely — see "Not guaranteed" below.
 
-Once cleared, the goal re-enters the spawn path on the same cycle or the next
-one, so engineer work resumes automatically without operator intervention.
+Once cleared in a tmux environment, the goal re-enters the spawn path on
+the same cycle or the next one, so engineer work resumes automatically
+without operator intervention.
+
+---
+
+## Consumer matrix — current state
+
+| Consumer | File | Pattern today |
+|----------|------|---------------|
+| OODA cycle | `src/ooda_loop/cycle.rs` | ✅ Uses `load_goal_board` + `persist_board` against the daemon's in-process bridge |
+| Dashboard goals API | `src/operator_commands_dashboard/goals.rs` | ❌ `std::fs::read_to_string("…/goal_records.json")` + `serde_json::from_str` for reads; `std::fs::write` for mutations |
+| Dashboard workboard | `src/operator_commands_dashboard/workboard.rs` | ❌ `std::fs::read_to_string("…/goal_records.json")` |
+| Dashboard current work | `src/operator_commands_dashboard/current_work.rs` | ❌ inline file read |
+| Dashboard metrics panel | `src/operator_commands_dashboard/metrics.rs` | ❌ inline file read |
+| Meeting goal curation | `src/operator_commands_meeting/goal_curation.rs:58` | ❌ `FileBackedGoalStore::try_new(state_root.join("goal_records.json"))` |
+| Meeting improvement curation | `src/operator_commands_meeting/improvement_curation.rs:123` | ❌ `FileBackedGoalStore::try_new(state_root.join("goal_records.json"))` |
+| Engineer loop | `src/engineer_loop/mod.rs:276` | ❌ `FileBackedGoalStore::try_new(state_root.join("goal_records.json")).active_top_goals(5)` |
+| Meeting bridge acquisition | `src/operator_commands_meeting/meeting_session.rs:29` | ⚠️ Inline three-tier ladder (`launch_real_meeting_bridge`) — works correctly, but pattern is duplicated everywhere |
+
+✅ already on cognitive-memory-only; ❌ still reads `goal_records.json`;
+⚠️ correct behaviour but not yet extracted as a shared helper.
+
+## Consumer matrix — target state (after #1590)
+
+| Consumer | File | Bridge helper | Read fn | Write fn | Notes |
+|----------|------|---------------|---------|----------|-------|
+| OODA cycle | `src/ooda_loop/cycle.rs` | (uses daemon's own bridge) | `load_goal_board` | `persist_board` | Records an episode in addition to saving the snapshot |
+| Dashboard goals API | `src/operator_commands_dashboard/goals.rs` | `launch_writer_bridge` (writes), `open_reader_bridge` (reads) | `load_goal_board` | `save_goal_board` (×6 mutation handlers) | Replaces six prior `std::fs::write` sites |
+| Dashboard workboard | `src/operator_commands_dashboard/workboard.rs` | `open_reader_bridge` | `load_goal_board` | — | Read-only |
+| Dashboard current work | `src/operator_commands_dashboard/current_work.rs` | `open_reader_bridge` | `load_goal_board` | — | Read-only |
+| Dashboard metrics panel | `src/operator_commands_dashboard/metrics.rs` | `open_reader_bridge` | `load_goal_board` | — | Reports `{ source: "cognitive-memory:goal-board:snapshot", count: N }` |
+| Dashboard memory panel | `src/operator_commands_dashboard/memory.rs` | (n/a) | (n/a) | (n/a) | The `goal_records.json` artefact label is removed; only on-disk artefacts are listed here |
+| Meeting goal curation | `src/operator_commands_meeting/goal_curation.rs` | `open_reader_bridge` (read-curation), `launch_writer_bridge` (mutation paths) | `load_goal_board` + `active_goals_as_records` | `save_goal_board` | Replaces `FileBackedGoalStore` |
+| Meeting improvement curation | `src/operator_commands_meeting/improvement_curation.rs` | `launch_writer_bridge` | `load_goal_board` + `active_goals_as_records` | `save_goal_board` | Replaces `FileBackedGoalStore` |
+| Engineer loop | `src/engineer_loop/mod.rs` | `open_reader_bridge` | `load_goal_board` + `active_goals_as_records` | — | Reads top 5 active goals as `GoalRecord`s |
+| Meeting bridge acquisition | `src/operator_commands_meeting/meeting_session.rs` | `launch_writer_bridge` | — | — | `launch_real_meeting_bridge` becomes a thin wrapper around `launch_writer_bridge(&default_state_root())` |
+
+Once all rows above are landed, `FileBackedGoalStore` is no longer
+instantiated in any production goal-board code path. It remains in
+`src/goals/store.rs` as a value type used by `meeting_backend` and tests.
 
 ---
 
 ## State root resolution
 
-Both `load_goal_board()` and `save_goal_board()` resolve the state root
-directory in the same way:
+Both helpers resolve the state root directory in the same way (delegating to
+`memory_ipc::default_state_root()`):
 
 ```
 1. $SIMARD_STATE_ROOT env var (if set)
-2. $HOME/.simard (fallback)
+2. $HOME/.simard/state (fallback)
 ```
 
-The `goal_records.json` file lives directly under the resolved root. The
-directory is created automatically on first save.
+The state root contains the LadybugDB cognitive memory store. After the
+one-shot legacy migration completes on first startup, **it does not
+contain `goal_records.json`.**
 
 ---
 
@@ -97,48 +206,74 @@ directory is created automatically on first save.
 ```
 run_ooda_cycle_inner
 ├─ check .reseed_goals marker  ← if present: reset board to empty + skip load
-├─ load_goal_board()           ← disk-first, 3-tier fallback (skipped if marker found)
+├─ load_goal_board(bridge)
+│   ├─ migrate_legacy_disk_file_if_present(bridge)  ← one-shot bootstrap
+│   └─ search_facts("goal-board:snapshot", 1, 0.0)  ← primary read
+│       (failure → log + Ok(GoalBoard::new()))
 │   └─ only applied if board.active is non-empty
-├─ sweep_stale_assignments()   ← clear dead tmux sessions
+├─ sweep_stale_assignments()   ← clear dead tmux sessions (no-op outside tmux)
 ├─ seed_default_board()        ← only if board still empty
 ├─ check_meeting_handoffs()
 └─ [Observe → Orient → Decide → Act → Curate]
-    └─ persist_board()         ← writes cognitive memory + disk
+    └─ persist_board(bridge)   ← writes goal-board:snapshot fact + episode
+        (rejects suspect boards via integrity guard before any write)
 ```
 
-Two important notes on the load step:
+Three important notes on the load step:
 
 1. **Reseed marker takes precedence.** If `$SIMARD_STATE_ROOT/.reseed_goals`
    exists at cycle start, the daemon resets the in-memory board to
    `GoalBoard::new()`, removes the marker file, and **skips `load_goal_board`
-   entirely**. The three-tier load only runs when no marker is present.
+   entirely**.
 
 2. **Empty boards are not applied.** The loaded board replaces the in-memory
-   state only if `board.active.is_empty() == false`. An empty board — from
-   tier-3 fallback or a disk file with no active goals — leaves the existing
-   in-memory state untouched. An operator restoring a `goal_records.json`
-   that contains no active goals will find that file ignored at load time.
+   state only if `board.active.is_empty() == false`. An empty board leaves
+   the existing in-memory state untouched.
+
+3. **`load_goal_board` never raises an error.** Snapshot parse failures and
+   bridge IPC errors are logged and degrade to `Ok(GoalBoard::new())`. The
+   cycle that performs the read continues to run; the next `persist_board`
+   writes a fresh snapshot.
 
 ---
 
 ## Guarantees and non-guarantees
 
 **Guaranteed:**
-- A daemon restarted after a clean shutdown always loads the board state from
-  the previous cycle's end, not an arbitrary earlier snapshot.
-- Goals assigned to dead tmux sessions are automatically unblocked within one
-  OODA cycle.
-- Load failures (corrupted JSON, permission errors) fall through gracefully to
-  the next tier rather than crashing the daemon.
+- A daemon restarted after a clean shutdown always loads the board state
+  from the previous cycle's end, because the same fact key
+  (`goal-board:snapshot`) is written on every save and the cognitive memory
+  graph orders fact revisions by recency.
+- Writes from the dashboard, the meeting REPL, and the daemon never race
+  against each other when the daemon is running, because they all flow
+  through the same daemon IPC socket.
+- `save_goal_board` rejects boards containing placeholder descriptions or
+  suspiciously short IDs **before** any write, preventing LLM
+  hallucinations during the Decide phase from silently overwriting the
+  authoritative snapshot.
+- `load_goal_board` never panics or raises an error from a corrupt
+  snapshot — it logs and degrades to an empty board, leaving the in-memory
+  state untouched (because the OODA cycle only applies non-empty loaded
+  boards).
 
 **Not guaranteed:**
-- **Concurrent daemons**: if two Simard daemons share the same `SIMARD_STATE_ROOT`,
-  writes from one can be overwritten by the other. Run one daemon per state root.
-- **Atomic disk writes**: `save_goal_board()` uses `fs::write` which is not
-  atomic. A partial write leaves a corrupted `goal_records.json`; the daemon
-  falls back to cognitive memory and logs a parse error.
-- **Assignment safety**: `sweep_stale_assignments()` uses session-name
-  presence, not heartbeat or PID. A session that just started and has not yet
-  announced itself may be cleared on the first cycle after its tmux session
-  was created. This is unlikely in practice because `load_goal_board` runs
-  before engineer dispatch in the same cycle.
+- **Concurrent daemons**: if two Simard daemons share the same
+  `SIMARD_STATE_ROOT`, the second one will fail to take the writer lock
+  and exit. This is enforced by LadybugDB.
+- **Bridge writes when no writer can be acquired**: `launch_writer_bridge`
+  returns `Err` synchronously rather than returning a degraded bridge.
+  Callers must handle the error — they cannot silently fall through to a
+  read-only path. This is rare and indicates a stale lock the reaper
+  could not free — see the
+  [recovery how-to](../howto/recover-goal-board.md).
+- **Assignment safety in tmux**: `sweep_stale_assignments()` uses
+  session-name presence, not heartbeat or PID. A session that just started
+  and has not yet announced itself may be cleared on the first cycle after
+  its tmux session was created. This is unlikely in practice because
+  `load_goal_board` runs before engineer dispatch in the same cycle.
+- **Assignment safety outside tmux**: when tmux is not present (CI,
+  unit tests, headless servers), the sweep is a no-op. `assigned_to`
+  values can outlive a real engineer death indefinitely. Operators
+  running Simard outside tmux should clear stale assignments via the
+  `simard goals clear-assignment` CLI (see the recovery how-to) — or run
+  Simard inside tmux.

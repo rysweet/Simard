@@ -1,20 +1,49 @@
 ---
 title: Goal board API reference
-description: Rust API reference for goal board persistence and mutation functions in src/goal_curation/operations.rs.
+description: Rust API reference for goal board persistence, mutation, and adapter functions in src/goal_curation/operations.rs.
 last_updated: 2026-05-08
 owner: simard
 doc_type: reference
+status: design — partially implemented
 related:
   - ../concepts/goal-board-persistence.md
   - ../howto/recover-goal-board.md
   - ../howto/inspect-durable-goal-register.md
+  - ./cognitive-memory-bridge-helpers.md
 ---
 
 # Goal board API reference
 
+> **Status: design specification — partially implemented (issue [#1590](https://github.com/rysweet/Simard/issues/1590)).**
+>
+> The persistence functions (`load_goal_board`, `save_goal_board`,
+> `persist_board`) and mutation helpers (`add_active_goal`,
+> `enqueue_stewardship_issue`, `promote_to_active`, `update_goal_progress`,
+> `clear_goal_assignment`, `archive_completed`) **exist today** in
+> [`src/goal_curation/operations.rs`](https://github.com/rysweet/Simard/blob/main/src/goal_curation/operations.rs)
+> and behave as documented below.
+>
+> The `active_goals_as_records` adapter is **not yet implemented** — it is part
+> of the issue #1590 migration work and is documented here as the target
+> design that the engineer-loop and meeting-curation consumers will use to
+> obtain `Vec<GoalRecord>` from a `GoalBoard`.
+>
+> The bridge-acquisition helpers used in the examples
+> (`launch_writer_bridge`, `open_reader_bridge`) are also part of the
+> migration spec — see
+> [Cognitive memory bridge helpers](./cognitive-memory-bridge-helpers.md).
+
 This document covers the public functions in
-`src/goal_curation/operations.rs` that load, save, and mutate the goal board
-(`GoalBoard`) used by the OODA cycle.
+`src/goal_curation/operations.rs` that load, save, mutate, and adapt the goal
+board (`GoalBoard`) used by the OODA cycle, the dashboard, the meeting REPL,
+and the engineer loop.
+
+> **Single source of truth (target state).** Issue #1590 collapses the goal
+> board onto the `goal-board:snapshot` fact in cognitive memory. After the
+> migration, no consumer reads or writes `goal_records.json` directly. A
+> one-time bootstrap migration in `load_goal_board` continues to import any
+> legacy disk file and delete it after successful re-write into cognitive
+> memory — see "Legacy migration" below.
 
 ---
 
@@ -26,39 +55,58 @@ This document covers the public functions in
 pub fn load_goal_board(bridge: &dyn CognitiveMemoryOps) -> SimardResult<GoalBoard>
 ```
 
-Loads the goal board using a three-tier fallback strategy:
+Loads the goal board from cognitive memory. The function is intentionally
+**resilient** — every recoverable failure is logged to stderr and degrades to
+an empty `GoalBoard` rather than propagating an `Err`. The cycle that
+performs the read continues to run and the next `save_goal_board` writes a
+fresh snapshot.
 
-| Priority | Source | Notes |
-|----------|--------|-------|
-| 1 (primary) | `$SIMARD_STATE_ROOT/goal_records.json` | Written by `save_goal_board` on every save |
-| 2 (fallback) | `search_facts("goal-board:snapshot", 1, 0.0)` | Cognitive memory; used before disk file exists |
-| 3 (last resort) | `GoalBoard::new()` | Empty board if both sources fail |
+**Resolution order (in this order, each step optional):**
+
+1. **Legacy bootstrap.** Calls `migrate_legacy_disk_file_if_present(bridge)`.
+   If `$SIMARD_STATE_ROOT/goal_records.json` exists, the file is read,
+   converted to a `GoalBoard`, written to cognitive memory via `store_fact`,
+   and the file is deleted. Failures here are logged and non-fatal — the
+   file is left in place for the next startup to retry. Once migrated, this
+   step costs only a single `metadata` syscall.
+2. **Read snapshot.** Calls `bridge.search_facts("goal-board:snapshot", 1, 0.0)`
+   and parses the most-recent matching fact's payload as `GoalBoard`.
 
 **Parameters**
 
 | Name | Type | Description |
 |------|------|-------------|
-| `bridge` | `&dyn CognitiveMemoryOps` | Cognitive memory adapter (tier-2 source) |
+| `bridge` | `&dyn CognitiveMemoryOps` | Cognitive memory adapter — typically obtained via `open_reader_bridge` for read-only consumers (see [bridge helpers](./cognitive-memory-bridge-helpers.md)) or via the daemon's own in-process bridge for the OODA cycle |
 
-**Return value**
+**Return contract**
 
-Returns `Ok(GoalBoard)` in the common case. Disk read and parse errors (tiers
-1) fall through silently to tier 2 and are logged to stderr. Cognitive memory
-bridge failures at tier 2 are propagated as `Err` via the `?` operator — the
-function does not fall through to tier 3 if `search_facts` itself fails.
-Tier-3 empty board is returned only when `search_facts` succeeds but finds no
-matching snapshot.
+| Outcome | Behaviour |
+|---------|-----------|
+| Snapshot fact found and parses | `Ok(GoalBoard)` with the deserialized board |
+| `search_facts` returns 0 results | `Ok(GoalBoard::new())` — empty board |
+| `search_facts` returns a fact whose payload fails to parse | `Ok(GoalBoard::new())` + stderr warning `cognitive memory snapshot parse error (…) — returning empty board` |
+| `bridge.search_facts` itself fails (IPC error, lock contention, …) | `Ok(GoalBoard::new())` + stderr warning `cognitive memory search_facts failed (…) — returning empty board` |
+| Legacy migration encounters a corrupt or unreadable file | Logged, non-fatal; the function continues to step 2 |
 
-**Note on empty boards:** the calling cycle only applies the loaded board to
+The function returns `Err` **only** for unrecoverable internal panics
+(none currently exist). The corruption-guard recovery path described in
+[`docs/concepts/goal-board-corruption-guards.md`](../concepts/goal-board-corruption-guards.md)
+is layered on top of this resilient read by the OODA cycle and the
+integrity guard in `save_goal_board` — see below.
+
+**Note on empty boards:** the OODA cycle only applies the loaded board to
 in-memory state if `board.active.is_empty() == false`. Callers that need
-unconditional replacement must apply the returned board themselves.
+unconditional replacement (the dashboard, for example) must apply the
+returned board themselves.
 
-**Example**
+**Example — read-only dashboard handler**
 
 ```rust
 use simard::goal_curation::load_goal_board;
+use simard::memory_ipc::open_reader_bridge;
 
-let board = load_goal_board(&*bridges.memory)?;
+let bridge = open_reader_bridge(&state_root)?;       // ReaderBridge
+let board = load_goal_board(bridge.ops())?;          // .ops() → &dyn CognitiveMemoryOps
 eprintln!("Loaded {} active goal(s)", board.active.len());
 ```
 
@@ -67,22 +115,67 @@ eprintln!("Loaded {} active goal(s)", board.active.len());
 ### `save_goal_board`
 
 ```rust
-pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> SimardResult<()>
+pub fn save_goal_board(
+    board: &GoalBoard,
+    bridge: &dyn CognitiveMemoryOps,
+) -> SimardResult<()>
 ```
 
-Saves the board to two destinations in the following order:
+Persists the board to cognitive memory. Internally calls:
 
-1. Cognitive memory (`store_fact("goal-board:snapshot", …, tags=["goal-board"])`)
-2. `$SIMARD_STATE_ROOT/goal_records.json` — pretty-printed JSON, best-effort
-   (disk write failure is logged but not propagated)
+```rust
+bridge.store_fact(
+    "goal-board:snapshot",   // concept
+    &serde_json::to_string(board)?,  // content
+    1.0,                     // confidence
+    &["goal-board".to_string()],  // tags
+    "goal-curator",          // source_id
+)?;
+```
 
-Prefer `persist_board` for end-of-cycle saves — it calls `save_goal_board`
-and additionally records a durable episode for cross-session recall.
+There is no disk write — cognitive memory is the sole authoritative store.
+`persist_board` should be preferred for end-of-cycle saves: it calls
+`save_goal_board` and additionally records a durable episode for
+cross-session recall.
+
+**Integrity guard (runs before any write)**
+
+`save_goal_board` calls `board_integrity_suspect(board)` first. If that
+returns `Some(reason)`, the function returns
+`Err(SimardError::InvalidGoalRecord)` **without** invoking
+`bridge.store_fact`. This blocks two classes of corruption:
+
+- Active goals whose `id` is shorter than 5 characters (catches `g1`,
+  `g12`, …).
+- Active goals whose description matches the placeholder pattern
+  `^\s*goal\s+[a-z0-9]{1,4}\s*$` (case-insensitive).
+
+A board mutated by an LLM hallucination during the Decide phase that emits
+goals like `Goal g1` is therefore rejected at write time and the previous
+snapshot remains the authoritative state.
 
 **Errors**
 
-Returns `Err` only if the cognitive memory write fails. Disk write failures
-are silently logged.
+| Outcome | Behaviour |
+|---------|-----------|
+| `board_integrity_suspect` returns `Some(_)` | `Err(SimardError::InvalidGoalRecord { field: "board", reason: format!("refusing to persist suspect board: {reason}") })` — `store_fact` is not called |
+| `serde_json::to_string(board)` fails | `Err(SimardError::InvalidGoalRecord { field: "board", reason: format!("failed to serialize goal board: {e}") })` |
+| `bridge.store_fact` fails | The underlying `SimardError` is propagated via `?` |
+
+The error is fatal for the caller: the in-memory mutation is not retained
+anywhere else.
+
+**Example — dashboard write handler**
+
+```rust
+use simard::goal_curation::{load_goal_board, save_goal_board};
+use simard::memory_ipc::launch_writer_bridge;
+
+let bridge = launch_writer_bridge(&state_root)?;     // WriterBridge or Err
+let mut board = load_goal_board(bridge.ops())?;
+board.active.retain(|g| g.id != deleted_id);
+save_goal_board(&board, bridge.ops())?;
+```
 
 ---
 
@@ -223,6 +316,70 @@ Default backlog score assigned to stewardship-filed issues by
 
 ---
 
+## Adapters
+
+### `active_goals_as_records` *(spec — not yet implemented)*
+
+```rust
+pub fn active_goals_as_records(board: &GoalBoard) -> Vec<GoalRecord>
+```
+
+Adapts a `GoalBoard` into the legacy `Vec<GoalRecord>` shape consumed by the
+meeting REPL goal-curation flow, the meeting REPL improvement-curation flow,
+and the engineer loop. Once implemented as part of issue #1590, this
+adapter will be the single point of mapping between the cognitive-memory-backed
+`GoalBoard` and the older `GoalRecord` value type that those subsystems
+expect — replacing every existing `FileBackedGoalStore::try_new(...)`
+call site.
+
+**Field mapping** (from each `ActiveGoal` to its synthesized `GoalRecord`):
+
+| `GoalRecord` field | Source on `ActiveGoal` | Notes |
+|--------------------|------------------------|-------|
+| `slug` | `slugify(active.id)` or `active.id` | If the id is already slug-shaped (lowercase, dashes, no whitespace) it passes through unchanged |
+| `title` | `active.description` | Truncated to the first line, max 120 characters |
+| `rationale` | `active.current_activity.unwrap_or_default()` | Empty string when no current activity is set |
+| `status` | `Completed → GoalStatus::Completed`, all others → `GoalStatus::Active` | `NotStarted`, `InProgress`, and `Blocked` collapse to `Active` because the legacy `GoalRecord` has no equivalent variants |
+| `priority` | `u8::try_from(active.priority).unwrap_or(u8::MAX)` | Saturates rather than panicking on overflow |
+| `owner_identity` | `active.assigned_to.clone().unwrap_or_else(\|\| "unassigned".into())` | The literal string `"unassigned"` is used as a sentinel when no engineer is assigned |
+| `source_session_id` | Sentinel `SessionId::parse("00000000-0000-0000-0000-000000000000")?` | The all-zeros UUID indicates "synthesized from goal-board snapshot, no originating session" |
+| `updated_in` | `SessionPhase::Persistence` | Marks the record as having come from the persistence layer rather than a live phase |
+
+Only goals from `board.active` are emitted. Backlog items are not adapted;
+callers that need backlog data must read `board.backlog` directly.
+
+**Example — engineer loop (target call site)**
+
+```rust
+use simard::goal_curation::{active_goals_as_records, load_goal_board};
+use simard::memory_ipc::open_reader_bridge;
+
+let bridge = open_reader_bridge(&state_root)?;
+let board = load_goal_board(bridge.ops())?;
+let next_five: Vec<GoalRecord> =
+    active_goals_as_records(&board).into_iter().take(5).collect();
+```
+
+This will replace
+`FileBackedGoalStore::try_new(state_root.join("goal_records.json"))?.active_top_goals(5)?`
+at `src/engineer_loop/mod.rs:276`.
+
+**Example — meeting REPL goal curation (target call site)**
+
+```rust
+let bridge = open_reader_bridge(&state_root)?;
+let board = load_goal_board(bridge.ops())?;
+let records = active_goals_as_records(&board);
+present_records_to_curator(&records);
+```
+
+This will replace
+`FileBackedGoalStore::try_new(state_root.join("goal_records.json"))?` at
+`src/operator_commands_meeting/goal_curation.rs:58` and the analogous call
+at `src/operator_commands_meeting/improvement_curation.rs:123`.
+
+---
+
 ## `GoalProgress` variants
 
 | Variant | Fields | Meaning |
@@ -238,8 +395,10 @@ Default backlog score assigned to stewardship-filed issues by
 
 | `SimardError` variant | When raised |
 |-----------------------|-------------|
-| `InvalidGoalRecord { field, reason }` | Validation failed (empty field, priority 0, percent > 100, capacity exceeded, duplicate id, item not found) |
+| `InvalidGoalRecord { field, reason }` | Validation failure (empty field, priority 0, percent > 100, capacity exceeded, duplicate id, item not found), serialization failure, or integrity-guard rejection of a suspect board in `save_goal_board` |
+| `BridgeTransportError { bridge, reason }` | A `bridge.store_fact` or `bridge.store_episode` call failed (propagated via `?` from `save_goal_board`/`persist_board`). `load_goal_board` does **not** raise this — it logs and degrades to an empty board instead |
 
-Disk I/O errors from tier 1 of `load_goal_board` are not propagated — they
-fall through to tier 2 and are logged to stderr. Cognitive memory bridge
-failures (tier 2) **are** propagated as `Err`.
+There is no silent disk fallback for writes — when cognitive memory is
+unavailable, `save_goal_board` fails and the in-memory mutation is lost.
+For reads, the resilience contract (log + empty board) is documented above.
+

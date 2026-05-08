@@ -6,6 +6,8 @@ mod types;
 #[cfg(test)]
 mod tests_agent_spawn;
 #[cfg(test)]
+mod tests_goal_records_migration;
+#[cfg(test)]
 mod tests_mod;
 #[cfg(test)]
 mod tests_mod_more;

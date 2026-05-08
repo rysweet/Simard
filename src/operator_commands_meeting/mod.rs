@@ -7,6 +7,8 @@ mod probes;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]
+mod tests_goal_records_migration;
+#[cfg(test)]
 mod tests_live_context;
 
 pub use goal_curation::{run_goal_curation_probe, run_goal_curation_read_probe};
