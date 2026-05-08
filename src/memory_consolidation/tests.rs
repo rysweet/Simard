@@ -201,3 +201,57 @@ fn round_trip_execution_memory_recall() {
         stats.episodic_count
     );
 }
+
+/// Cross-session recall integration test.
+///
+/// Verifies that a fact stored via `reflection_memory_operations` + `consolidation_persistence`
+/// during session 1 is retrievable in session 2 through `consolidation_intake`.
+///
+/// This is the unit-level complement to the gym KnowledgeRecall cross-session
+/// scenarios: it exercises the actual storage/retrieval path using a shared
+/// on-disk LadybugDB, not LLM behavior.
+#[test]
+fn cross_session_recall_persists_across_session_boundary() {
+    use crate::cognitive_memory::NativeCognitiveMemory;
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+
+    // ── Session 1: store a fact and flush to disk ──────────────────────────
+    {
+        let mem = NativeCognitiveMemory::open(tmp.path()).expect("open DB session 1");
+        let sid1 = SessionId::parse("session-aaaaaaaa-0000-0000-0000-000000000001").unwrap();
+
+        let facts = vec![FactExtraction {
+            concept: "cross-session-canary".to_string(),
+            content: "canary token XSRECALL_OK stored in session 1".to_string(),
+            confidence: 0.9,
+        }];
+
+        // Store the fact (reflection phase) and flush working memory (persistence phase).
+        reflection_memory_operations("session 1 transcript", &facts, &sid1, &mem).unwrap();
+        consolidation_persistence(&sid1, &mem).unwrap();
+    }
+    // NativeCognitiveMemory is dropped here; DB is on disk.
+
+    // ── Session 2: reopen the same DB and verify recall ───────────────────
+    {
+        let mem = NativeCognitiveMemory::open(tmp.path()).expect("open DB session 2");
+        let sid2 = SessionId::parse("session-bbbbbbbb-0000-0000-0000-000000000002").unwrap();
+
+        // consolidation_intake searches for facts relevant to the objective and
+        // pushes them into working memory — this is the cross-session recall path.
+        let hydrated = consolidation_intake(&sid2, "cross-session-canary", &mem).unwrap();
+
+        assert!(
+            hydrated > 0,
+            "consolidation_intake should find at least 1 fact from session 1, got {hydrated}"
+        );
+
+        // Also verify the fact is directly retrievable via search_facts.
+        let facts = mem.search_facts("cross-session-canary", 10, 0.0).unwrap();
+        assert!(
+            facts.iter().any(|f| f.content.contains("XSRECALL_OK")),
+            "session-2 search_facts must return the canary fact stored in session 1; got: {facts:?}"
+        );
+    }
+}
