@@ -3,10 +3,10 @@ use serde_json::{Value, json};
 
 use super::current_work::format_recent_actions_for_cycle;
 use super::current_work::read_recent_cycle_reports;
+use super::dashboard_goal_board_snapshot;
 use super::routes::resolve_state_root;
 use crate::agent_registry::{AgentRegistry, FileBackedAgentRegistry};
 use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
-use crate::goal_curation::GoalBoard;
 
 // ---------------------------------------------------------------------------
 // Workboard API — aggregated view of Simard's current mental state
@@ -109,24 +109,17 @@ pub(crate) async fn workboard() -> Json<Value> {
     });
 
     // --- 2. Goals with enriched status ---
-    let goal_path = state_root.join("goal_records.json");
-    let goal_content = std::fs::read_to_string(&goal_path).unwrap_or_default();
-    let goal_board = if goal_content.trim().is_empty() {
-        None
-    } else {
-        match serde_json::from_str::<GoalBoard>(&goal_content) {
-            Ok(b) => Some(b),
-            Err(e) => {
-                // Surface parse failures so the dashboard doesn't silently
-                // render "no goals" when the file is malformed. Fail-open
-                // returns None (same as before) but logs why.
-                tracing::warn!(
-                    path = %goal_path.display(),
-                    error = %e,
-                    "goal_records.json failed to parse; dashboard rendering 0 goals"
-                );
-                None
-            }
+    let goal_board = match dashboard_goal_board_snapshot(&state_root) {
+        Ok(b) => Some(b),
+        Err(e) => {
+            // Surface bridge failures so the dashboard doesn't silently
+            // render "no goals" when cognitive memory is unreachable.
+            // Fail-open returns None (same as before) but logs why.
+            tracing::warn!(
+                error = %e,
+                "cognitive-memory goal-board snapshot unavailable; dashboard rendering 0 goals"
+            );
+            None
         }
     };
 

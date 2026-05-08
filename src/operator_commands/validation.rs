@@ -39,11 +39,8 @@ pub(super) fn validate_improvement_curation_read_state_root(
         state_root,
         &state_root.join("memory_records.json"),
     )?;
-    require_existing_read_file_for_mode(
-        "improvement-curation read",
-        state_root,
-        &state_root.join("goal_records.json"),
-    )?;
+    // Goal records moved to cognitive memory (issue #1590); no on-disk
+    // file is required for this read probe anymore.
     Ok(())
 }
 

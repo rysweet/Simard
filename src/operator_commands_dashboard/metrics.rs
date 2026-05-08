@@ -1,6 +1,7 @@
 use axum::Json;
 use serde_json::{Value, json};
 
+use super::dashboard_goal_board_snapshot;
 use super::routes::resolve_state_root;
 use super::subagent::{count_json_records, file_metrics};
 use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
@@ -14,17 +15,23 @@ pub(crate) async fn memory_metrics() -> Json<Value> {
 
     let memory_path = state_root.join("memory_records.json");
     let evidence_path = state_root.join("evidence_records.json");
-    let goal_path = state_root.join("goal_records.json");
     let handoff_path = state_root.join("latest_handoff.json");
 
     let memory_info = file_metrics(&memory_path);
     let evidence_info = file_metrics(&evidence_path);
-    let goal_info = file_metrics(&goal_path);
     let handoff_info = file_metrics(&handoff_path);
 
     let fact_count = count_json_records(&memory_path);
     let evidence_count = count_json_records(&evidence_path);
-    let goal_count = count_json_records(&goal_path);
+
+    // Goal records now live in cognitive memory (issue #1590); render a
+    // metadata-only panel so the dashboard's "Goal Records" tile keeps
+    // working without any disk file.
+    let goal_board = dashboard_goal_board_snapshot(&state_root).ok();
+    let goal_count = goal_board
+        .as_ref()
+        .map(|b| (b.active.len() + b.backlog.len()) as u64)
+        .unwrap_or(0);
 
     // Query NativeCognitiveMemory (LadybugDB) for live statistics (#419).
     // Capture the error so the dashboard can show *why* data is missing
@@ -34,7 +41,7 @@ pub(crate) async fn memory_metrics() -> Json<Value> {
     let native_error = native_result.as_ref().err().map(|e| e.to_string());
     let native_stats = native_result.ok();
 
-    let last_consolidation = [&memory_path, &evidence_path, &goal_path]
+    let last_consolidation = [&memory_path, &evidence_path]
         .iter()
         .filter_map(|p| std::fs::metadata(p).ok())
         .filter_map(|m| m.modified().ok())
@@ -67,10 +74,8 @@ pub(crate) async fn memory_metrics() -> Json<Value> {
             "modified": evidence_info.1,
         },
         "goal_records": {
-            "path": goal_path.to_string_lossy().to_string(),
+            "source": "cognitive-memory:goal-board:snapshot",
             "count": goal_count,
-            "size_bytes": goal_info.0,
-            "modified": goal_info.1,
         },
         "handoff": {
             "path": handoff_path.to_string_lossy().to_string(),

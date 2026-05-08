@@ -6,6 +6,8 @@ mod types;
 #[cfg(test)]
 mod tests_agent_spawn;
 #[cfg(test)]
+mod tests_goal_records_migration;
+#[cfg(test)]
 mod tests_mod;
 #[cfg(test)]
 mod tests_mod_more;
@@ -27,7 +29,6 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::error::{SimardError, SimardResult};
-use crate::goals::{FileBackedGoalStore, GoalStore};
 use crate::runtime::RuntimeTopology;
 use crate::terminal_engineer_bridge::{SHARED_EXPLICIT_STATE_ROOT_SOURCE, TerminalBridgeContext};
 
@@ -272,8 +273,14 @@ pub fn inspect_workspace(workspace_root: &Path, state_root: &Path) -> SimardResu
     )?;
     let changed_files = parse_status_paths(&status_output.stdout);
     let worktree_dirty = !changed_files.is_empty();
-    let active_goals =
-        FileBackedGoalStore::try_new(state_root.join("goal_records.json"))?.active_top_goals(5)?;
+    let active_goals = {
+        let bridge = crate::memory_ipc::launch_writer_bridge(state_root)?;
+        let board = crate::goal_curation::load_goal_board(bridge.ops())?;
+        crate::goal_curation::active_goals_as_records(&board)
+            .into_iter()
+            .take(5)
+            .collect::<Vec<_>>()
+    };
     let carried_meeting_decisions = load_carried_meeting_decisions(state_root)?;
 
     Ok(RepoInspection {

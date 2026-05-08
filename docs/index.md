@@ -28,7 +28,10 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [How to inspect meeting records](./howto/inspect-meeting-records.md) - Read back the latest durable meeting record without mutating stored state.
 - [How to inspect improvement-curation state](./howto/inspect-improvement-curation-state.md) - Read back the latest approved, deferred, and promoted improvement state without mutation.
 - [How to inspect the durable goal register](./howto/inspect-durable-goal-register.md) - Read back the active top-5 goals and backlog without mutation.
-- [How to recover a corrupted or missing goal board](./howto/recover-goal-board.md) - Restore goal board state when `goal_records.json` is missing, corrupted, or out of sync.
+<!-- Held from index until issue #1590 implementation lands:
+- [How to recover a corrupted or missing goal board](./howto/recover-goal-board.md) — design specification for cognitive-memory-only recovery (commands not yet implemented).
+-->
+
 - [How to run the OODA daemon](./howto/run-ooda-daemon.md) - Start the continuous OODA loop for autonomous goal-driven operation and act on meeting decisions.
 - [Simard CLI reference](./reference/simard-cli.md) - Look up the shipped command tree, `engineer read` audit surface, and compatibility mappings.
 - [Runtime contracts reference](./reference/runtime-contracts.md) - Look up executable contracts, state-root guarantees, and the shipped engineer audit readback semantics.
@@ -98,8 +101,12 @@ If you are changing architecture, start with the [architecture overview](./archi
 ## Architecture
 
 - [Architecture overview](./architecture/overview.md) - System diagram, core principles, component descriptions, and module map.
-- [Goal board persistence](./concepts/goal-board-persistence.md) - Disk-first load strategy, stale assignment sweep, and cycle startup sequence.
-- [Goal board API reference](./reference/goal-board-api.md) - `load_goal_board`, `save_goal_board`, mutation helpers, and error variants.
+<!-- Held from index until issue #1590 implementation lands:
+- [Goal board persistence](./concepts/goal-board-persistence.md) — design spec for cognitive-memory single source of truth.
+- [Goal board API reference](./reference/goal-board-api.md) — design spec for `active_goals_as_records` adapter and updated load/save semantics.
+- [Cognitive memory bridge helpers](./reference/cognitive-memory-bridge-helpers.md) — design spec for `launch_writer_bridge` and `open_reader_bridge`.
+-->
+
 - [Agent composition](./architecture/agent-composition.md) - How Simard composes subordinate agents with goal assignment, supervision, and crash recovery.
 - [Cognitive memory](./architecture/cognitive-memory.md) - Six-type memory model, session lifecycle mapping, and hive mind integration.
 - [Implementation plan](./architecture/implementation-plan.md) - Phased roadmap with current status and quality gates.

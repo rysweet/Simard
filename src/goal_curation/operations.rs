@@ -190,7 +190,13 @@ pub fn load_goal_board(bridge: &dyn CognitiveMemoryOps) -> SimardResult<GoalBoar
 
     // Primary read path: cognitive memory snapshot. Bridge errors are
     // non-fatal — log and fall through to the empty board.
-    let facts = match bridge.search_facts("goal-board:snapshot", 1, 0.0) {
+    //
+    // NOTE: store_fact is append-only at the trait level (no UPSERT or
+    // DELETE), so multiple `save_goal_board` calls accumulate facts. We
+    // ask for several and pick the lexicographically-largest id — fact
+    // ids are uuid-v7 (`new_id()` in cognitive_memory/mod.rs:276) which
+    // are time-ordered, so the largest id is the most recent snapshot.
+    let facts = match bridge.search_facts("goal-board:snapshot", 64, 0.0) {
         Ok(f) => f,
         Err(e) => {
             eprintln!(
@@ -199,7 +205,11 @@ pub fn load_goal_board(bridge: &dyn CognitiveMemoryOps) -> SimardResult<GoalBoar
             vec![]
         }
     };
-    if let Some(fact) = facts.first() {
+    let latest = facts
+        .iter()
+        .filter(|f| f.concept == "goal-board:snapshot")
+        .max_by(|a, b| a.node_id.cmp(&b.node_id));
+    if let Some(fact) = latest {
         match serde_json::from_str::<GoalBoard>(&fact.content) {
             Ok(board) => return Ok(board),
             Err(e) => {
@@ -471,4 +481,71 @@ pub fn seed_default_board(board: &mut GoalBoard) -> usize {
     }
 
     DEFAULT_SEED_GOALS.len()
+}
+
+// ---------------------------------------------------------------------------
+// GoalBoard -> Vec<GoalRecord> adapter
+// ---------------------------------------------------------------------------
+
+/// Sentinel `SessionId` used to populate `GoalRecord::source_session_id`
+/// for records synthesised from the cognitive-memory-backed `GoalBoard`.
+/// The board has no per-goal session provenance, so we mark these records
+/// as originating from the "all-zeros" session so callers can distinguish
+/// them from session-sourced goals.
+fn sentinel_source_session_id() -> crate::session::SessionId {
+    crate::session::SessionId::parse("00000000-0000-0000-0000-000000000000")
+        .expect("sentinel uuid must parse")
+}
+
+/// Adapt the cognitive-memory `GoalBoard` into the flat
+/// `Vec<crate::goals::GoalRecord>` shape that the engineer loop and meeting
+/// curation paths consumed from `FileBackedGoalStore` before issue #1590.
+///
+/// Mapping (per spec section A3):
+/// | Field                | Source                                                            |
+/// |----------------------|-------------------------------------------------------------------|
+/// | `slug`               | `goal_slug(active.id)` (preserves slug-shaped ids unchanged)      |
+/// | `title`              | `active.description` (first line, truncated to 120 chars)         |
+/// | `rationale`          | `active.current_activity.unwrap_or_default()`                     |
+/// | `status`             | `Completed → GoalStatus::Completed`, all others → `GoalStatus::Active` |
+/// | `priority`           | `u8::try_from(active.priority).unwrap_or(u8::MAX)`                |
+/// | `owner_identity`     | `active.assigned_to.clone().unwrap_or_else(\|\| "unassigned".into())` |
+/// | `source_session_id`  | sentinel `00000000-0000-0000-0000-000000000000`                   |
+/// | `updated_in`         | `SessionPhase::Persistence`                                       |
+///
+/// Backlog items are not emitted — only the active goals surface here, which
+/// matches the legacy `FileBackedGoalStore::active_top_goals(...)` contract.
+pub fn active_goals_as_records(board: &GoalBoard) -> Vec<crate::goals::GoalRecord> {
+    let sentinel = sentinel_source_session_id();
+    board
+        .active
+        .iter()
+        .map(|active| {
+            let title_first_line = active.description.lines().next().unwrap_or("");
+            let title: String = title_first_line.chars().take(120).collect();
+
+            let status = if matches!(active.status, GoalProgress::Completed) {
+                crate::goals::GoalStatus::Completed
+            } else {
+                crate::goals::GoalStatus::Active
+            };
+
+            let priority = u8::try_from(active.priority).unwrap_or(u8::MAX);
+            let owner_identity = active
+                .assigned_to
+                .clone()
+                .unwrap_or_else(|| "unassigned".to_string());
+
+            crate::goals::GoalRecord {
+                slug: crate::goals::goal_slug(&active.id),
+                title,
+                rationale: active.current_activity.clone().unwrap_or_default(),
+                status,
+                priority,
+                owner_identity,
+                source_session_id: sentinel.clone(),
+                updated_in: crate::session::SessionPhase::Persistence,
+            }
+        })
+        .collect()
 }

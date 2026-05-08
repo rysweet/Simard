@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use crate::goals::{FileBackedGoalStore, GoalStore};
 use crate::operator_commands::{
     GoalRegisterView, print_display, print_text, prompt_root, resolved_goal_curation_state_root,
 };
@@ -55,8 +54,12 @@ pub fn run_goal_curation_read_probe(
     state_root_override: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let state_root = resolved_goal_curation_state_root(state_root_override, base_type, topology)?;
-    let goal_store = FileBackedGoalStore::try_new(state_root.join("goal_records.json"))?;
-    let goal_records = goal_store.list()?;
+    // Goals now live in cognitive memory (issue #1590). Adapt the
+    // GoalBoard back into the flat Vec<GoalRecord> shape that
+    // GoalRegisterView expects.
+    let bridge = crate::memory_ipc::launch_writer_bridge(&state_root)?;
+    let board = crate::goal_curation::load_goal_board(bridge.ops())?;
+    let goal_records = crate::goal_curation::active_goals_as_records(&board);
     let register = GoalRegisterView::from_records(goal_records);
 
     println!("Goal register: durable");
@@ -92,16 +95,25 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let missing = dir.path().join("nonexistent");
         let result = run_goal_curation_read_probe("local-harness", "single-process", Some(missing));
-        // FileBackedGoalStore::try_new handles missing files gracefully,
-        // but the missing parent directory for state root resolution may error.
-        // Either way, it should not panic.
+        // The launcher creates the directory if missing and the cognitive
+        // memory bridge handles an empty board gracefully, so this should
+        // succeed in most cases. The test only asserts no panic.
         let _ = result;
     }
 
     #[test]
-    fn goal_curation_read_probe_with_valid_goal_file() {
+    fn goal_curation_read_probe_with_seeded_cognitive_memory() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("goal_records.json"), "[]").unwrap();
+        // Seed an empty goal board through cognitive memory rather than
+        // writing the legacy on-disk goal-records file (issue #1590).
+        let bridge = crate::memory_ipc::launch_writer_bridge(dir.path()).expect("writer bridge");
+        crate::goal_curation::save_goal_board(
+            &crate::goal_curation::GoalBoard::new(),
+            bridge.ops(),
+        )
+        .expect("seed empty board");
+        drop(bridge);
+
         let result = run_goal_curation_read_probe(
             "local-harness",
             "single-process",
@@ -109,15 +121,22 @@ mod tests {
         );
         assert!(
             result.is_ok(),
-            "should succeed with empty goal file: {:?}",
+            "should succeed with empty seeded board: {:?}",
             result.err()
         );
     }
 
     #[test]
-    fn goal_curation_read_probe_with_empty_goal_records() {
+    fn goal_curation_read_probe_with_empty_cognitive_memory() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("goal_records.json"), "[]").unwrap();
+        let bridge = crate::memory_ipc::launch_writer_bridge(dir.path()).expect("writer bridge");
+        crate::goal_curation::save_goal_board(
+            &crate::goal_curation::GoalBoard::new(),
+            bridge.ops(),
+        )
+        .expect("seed empty board");
+        drop(bridge);
+
         let result = run_goal_curation_read_probe(
             "local-harness",
             "single-process",

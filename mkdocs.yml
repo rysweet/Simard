@@ -75,3 +75,8 @@ nav:
     - Runtime Contracts: reference/runtime-contracts.md
     - Bridge Wire Protocol: reference/bridge-wire-protocol.md
     - Dashboard E2E Tests: reference/dashboard-e2e-tests.md
+    # Hidden from nav until issue #1590 implementation lands:
+    #   - reference/cognitive-memory-bridge-helpers.md
+    #   - reference/goal-board-api.md
+    #   - concepts/goal-board-persistence.md (rewritten as spec)
+    #   - howto/recover-goal-board.md (rewritten as spec)

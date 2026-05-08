@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::goals::{FileBackedGoalStore, GoalStatus, GoalStore};
+use crate::goals::GoalStatus;
 use crate::improvements::PersistedImprovementRecord;
 use crate::operator_commands::{
     print_display, print_goal_section, print_text, prompt_root,
@@ -120,8 +120,11 @@ pub fn run_improvement_curation_read_probe(
         .ok_or("expected persisted improvement decision record")?;
     let parsed_record = PersistedImprovementRecord::parse(&latest_record.value)
         .map_err(|error| format!("{error}"))?;
-    let goal_store = FileBackedGoalStore::try_new(state_root.join("goal_records.json"))?;
-    let goal_records = goal_store.list()?;
+    let goal_records = {
+        let bridge = crate::memory_ipc::launch_writer_bridge(&state_root)?;
+        let board = crate::goal_curation::load_goal_board(bridge.ops())?;
+        crate::goal_curation::active_goals_as_records(&board)
+    };
 
     println!("Probe mode: improvement-curation-read");
     println!("Identity: simard-improvement-curator");
