@@ -470,7 +470,7 @@ pub(crate) fn sweep_stale_assignments_with_sessions(
         let is_stale = goal
             .assigned_to
             .as_deref()
-            .map_or(false, |s| !live_sessions.contains(s));
+            .is_some_and(|s| !live_sessions.contains(s));
         if is_stale {
             let session = goal.assigned_to.take().unwrap_or_default();
             eprintln!(
