@@ -794,4 +794,194 @@ mod tests_board_integrity {
         let board = GoalBoard::new();
         assert!(board_integrity_suspect(&board).is_none());
     }
+
+    // --- is_placeholder_description: boundary / edge cases ---
+
+    #[test]
+    fn placeholder_description_no_space_between_goal_and_suffix() {
+        // "goalg1" — no space; strip_prefix("goal") yields "g1", which is 2-char alphanumeric.
+        assert!(is_placeholder_description("goalg1"));
+    }
+
+    #[test]
+    fn placeholder_description_single_digit_suffix() {
+        assert!(is_placeholder_description("goal 1"));
+    }
+
+    #[test]
+    fn placeholder_description_two_char_alpha_suffix() {
+        assert!(is_placeholder_description("goal ab"));
+    }
+
+    #[test]
+    fn placeholder_description_four_char_suffix_is_accepted() {
+        // 4-char token is the maximum accepted (rest.len() <= 4).
+        assert!(is_placeholder_description("goal g123"));
+    }
+
+    #[test]
+    fn placeholder_description_five_char_suffix_is_rejected() {
+        // "g1234" is exactly 5 chars — one over the limit.
+        assert!(!is_placeholder_description("goal g1234"));
+    }
+
+    #[test]
+    fn placeholder_description_rejects_goal_alone() {
+        // No suffix at all — rest is empty after trim.
+        assert!(!is_placeholder_description("goal"));
+    }
+
+    #[test]
+    fn placeholder_description_rejects_whitespace_only_after_goal() {
+        // "goal   " — trim produces "", which is empty → false.
+        assert!(!is_placeholder_description("goal   "));
+    }
+
+    #[test]
+    fn placeholder_description_rejects_non_alphanumeric_suffix() {
+        // Hyphen is not alphanumeric; must be rejected.
+        assert!(!is_placeholder_description("goal g-1"));
+    }
+
+    #[test]
+    fn placeholder_description_rejects_mixed_real_and_keyword() {
+        // A real description that happens to start with "goal" is not a placeholder.
+        assert!(!is_placeholder_description("goal: ship the v2 release"));
+    }
+
+    // --- board_integrity_suspect: boundary / edge cases ---
+
+    #[test]
+    fn suspect_board_four_char_id_is_flagged() {
+        // len == 4 < 5 → suspect.
+        let mut board = GoalBoard::new();
+        add_active_goal(&mut board, make_goal("abcd", "A real description")).unwrap();
+        assert!(board_integrity_suspect(&board).is_some());
+    }
+
+    #[test]
+    fn clean_board_five_char_id_passes() {
+        // len == 5 — exactly at the boundary, should NOT be flagged.
+        let mut board = GoalBoard::new();
+        add_active_goal(&mut board, make_goal("abcde", "A real description")).unwrap();
+        assert!(board_integrity_suspect(&board).is_none());
+    }
+
+    #[test]
+    fn suspect_board_mixed_goals_first_bad_detected() {
+        // Board with one good goal followed by one corrupt goal — suspect detected.
+        let mut board = GoalBoard::new();
+        add_active_goal(
+            &mut board,
+            make_goal("ship-v2-feature", "Ship the v2 feature"),
+        )
+        .unwrap();
+        add_active_goal(&mut board, make_goal("g1", "Something meaningful")).unwrap();
+        assert!(board_integrity_suspect(&board).is_some());
+    }
+
+    #[test]
+    fn clean_board_multiple_good_goals() {
+        let mut board = GoalBoard::new();
+        add_active_goal(
+            &mut board,
+            make_goal("ship-v1-feature", "Ship the v1 feature"),
+        )
+        .unwrap();
+        add_active_goal(
+            &mut board,
+            make_goal("fix-db-perf", "Fix database performance regression"),
+        )
+        .unwrap();
+        add_active_goal(
+            &mut board,
+            make_goal("improve-docs", "Improve onboarding documentation"),
+        )
+        .unwrap();
+        assert!(board_integrity_suspect(&board).is_none());
+    }
+
+    // --- curate corruption guard logic ---
+    //
+    // The curate guard computes:
+    //   vanished = pre_cycle_ids - post_active_ids - archived_ids
+    // and skips persist_board when vanished is non-empty.
+    // These tests verify the set-logic directly.
+
+    #[test]
+    fn curate_guard_no_vanished_when_goal_still_active() {
+        let pre: std::collections::HashSet<String> = ["goal-abc".to_string()].into_iter().collect();
+        let post_active: std::collections::HashSet<&str> = ["goal-abc"].into_iter().collect();
+        let archived: std::collections::HashSet<&str> = [].into_iter().collect();
+        let vanished: Vec<&str> = pre
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|id| !post_active.contains(*id) && !archived.contains(*id))
+            .collect();
+        assert!(vanished.is_empty());
+    }
+
+    #[test]
+    fn curate_guard_no_vanished_when_goal_properly_archived() {
+        let pre: std::collections::HashSet<String> = ["goal-abc".to_string()].into_iter().collect();
+        let post_active: std::collections::HashSet<&str> = [].into_iter().collect();
+        let archived: std::collections::HashSet<&str> = ["goal-abc"].into_iter().collect();
+        let vanished: Vec<&str> = pre
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|id| !post_active.contains(*id) && !archived.contains(*id))
+            .collect();
+        assert!(vanished.is_empty());
+    }
+
+    #[test]
+    fn curate_guard_detects_vanished_goal() {
+        let pre: std::collections::HashSet<String> =
+            ["goal-abc".to_string(), "goal-xyz".to_string()]
+                .into_iter()
+                .collect();
+        let post_active: std::collections::HashSet<&str> = ["goal-abc"].into_iter().collect();
+        let archived: std::collections::HashSet<&str> = [].into_iter().collect();
+        let vanished: Vec<&str> = pre
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|id| !post_active.contains(*id) && !archived.contains(*id))
+            .collect();
+        assert_eq!(vanished.len(), 1);
+        assert!(vanished.contains(&"goal-xyz"));
+    }
+
+    #[test]
+    fn curate_guard_detects_multiple_vanished_goals() {
+        let pre: std::collections::HashSet<String> = [
+            "goal-a".to_string(),
+            "goal-b".to_string(),
+            "goal-c".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        let post_active: std::collections::HashSet<&str> = [].into_iter().collect();
+        let archived: std::collections::HashSet<&str> = ["goal-a"].into_iter().collect();
+        let vanished: Vec<&str> = pre
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|id| !post_active.contains(*id) && !archived.contains(*id))
+            .collect();
+        assert_eq!(vanished.len(), 2);
+        assert!(vanished.contains(&"goal-b"));
+        assert!(vanished.contains(&"goal-c"));
+    }
+
+    #[test]
+    fn curate_guard_empty_pre_cycle_always_clean() {
+        let pre: std::collections::HashSet<String> = [].into_iter().collect();
+        let post_active: std::collections::HashSet<&str> = [].into_iter().collect();
+        let archived: std::collections::HashSet<&str> = [].into_iter().collect();
+        let vanished: Vec<&str> = pre
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|id| !post_active.contains(*id) && !archived.contains(*id))
+            .collect();
+        assert!(vanished.is_empty());
+    }
 }
