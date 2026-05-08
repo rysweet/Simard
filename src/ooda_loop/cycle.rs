@@ -80,7 +80,14 @@ fn run_ooda_cycle_inner(
     } else if let Ok(board) = load_goal_board(&*bridges.memory)
         && !board.active.is_empty()
     {
-        state.active_goals = board;
+        if let Some(reason) = board_integrity_suspect(&board) {
+            eprintln!(
+                "[simard] OODA start: rejecting loaded board — integrity suspect: {reason}; \
+                 falling back to default seed"
+            );
+        } else {
+            state.active_goals = board;
+        }
     }
 
     // Sweep stale assigned_to fields against live tmux sessions.
@@ -146,6 +153,16 @@ fn run_ooda_cycle_inner(
             eprintln!("[simard] OODA cycle: resource cleanup had errors: {e}");
         }
     }
+
+    // Snapshot active goal ids before the core OODA phases run.
+    // Used at the end of the cycle to detect unexpected goal disappearance
+    // before persisting — see corruption guard near persist_board.
+    let pre_cycle_active_ids: std::collections::HashSet<String> = state
+        .active_goals
+        .active
+        .iter()
+        .map(|g| g.id.clone())
+        .collect();
 
     // --- Observe ---
     state.current_phase = OodaPhase::Observe;
@@ -378,9 +395,42 @@ fn run_ooda_cycle_inner(
     // Promote highest-scoring backlog items to fill freed slots.
     promote_from_backlog(&mut state.active_goals);
 
-    // Persist the updated board to cognitive memory and disk (best-effort).
-    if let Err(e) = crate::goal_curation::persist_board(&state.active_goals, &*bridges.memory) {
-        eprintln!("[simard] OODA curate: failed to persist goal board: {e}");
+    // Corruption guard: check that no pre-cycle active goal disappeared
+    // without going through archive_completed. A goal may legitimately leave
+    // active via archival — those will no longer be in active but will appear
+    // in archived. Any goal that is missing from active AND was not archived
+    // this cycle is a corruption signal; restore the board from the snapshot.
+    {
+        let archived_ids: std::collections::HashSet<&str> =
+            archived.iter().map(|g| g.id.as_str()).collect();
+        let post_active_ids: std::collections::HashSet<&str> = state
+            .active_goals
+            .active
+            .iter()
+            .map(|g| g.id.as_str())
+            .collect();
+        let vanished: Vec<&str> = pre_cycle_active_ids
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|id| !post_active_ids.contains(*id) && !archived_ids.contains(*id))
+            .collect();
+        if !vanished.is_empty() {
+            eprintln!(
+                "[simard] OODA curate: CORRUPTION DETECTED — {} goal(s) vanished without \
+                 archival: {}; skipping persist to protect board",
+                vanished.len(),
+                vanished.join(", "),
+            );
+            // Do not persist — return without calling persist_board so the
+            // last-known-good state on disk is preserved.
+        } else {
+            // Persist the updated board to cognitive memory and disk (best-effort).
+            if let Err(e) =
+                crate::goal_curation::persist_board(&state.active_goals, &*bridges.memory)
+            {
+                eprintln!("[simard] OODA curate: failed to persist goal board: {e}");
+            }
+        }
     }
 
     // --- Memory consolidation: persistence at cycle end ---
@@ -416,6 +466,45 @@ fn truncate_detail(s: &str, max_len: usize) -> String {
     match chars.nth(max_len) {
         None => trimmed.to_string(),
         Some((byte_pos, _)) => format!("{}…", &trimmed[..byte_pos]),
+    }
+}
+
+/// Returns `Some(reason)` if the board contains obviously corrupt or
+/// placeholder goals that should not be accepted as valid loaded state.
+///
+/// Heuristics:
+/// - Goal id shorter than 5 chars (catches `g1`, `g12`, `g123`, `g1234`)
+/// - Description matches the placeholder pattern `^goal [a-z0-9]{1,4}$` (case-insensitive)
+pub(crate) fn board_integrity_suspect(board: &crate::goal_curation::GoalBoard) -> Option<String> {
+    for goal in &board.active {
+        if goal.id.len() < 5 {
+            return Some(format!(
+                "goal '{}' has suspiciously short id (len {})",
+                goal.id,
+                goal.id.len()
+            ));
+        }
+        if is_placeholder_description(&goal.description) {
+            return Some(format!(
+                "goal '{}' has placeholder description '{}'",
+                goal.id, goal.description
+            ));
+        }
+    }
+    None
+}
+
+/// Returns `true` when `desc` matches the placeholder pattern
+/// `^\s*goal\s+[a-z0-9]{1,4}\s*$` (case-insensitive).
+///
+/// Matches strings like `Goal g1`, `goal g1`, `GOAL abc`.
+pub(crate) fn is_placeholder_description(desc: &str) -> bool {
+    let s = desc.trim().to_lowercase();
+    if let Some(rest) = s.strip_prefix("goal") {
+        let rest = rest.trim();
+        !rest.is_empty() && rest.len() <= 4 && rest.chars().all(|c| c.is_ascii_alphanumeric())
+    } else {
+        false
     }
 }
 
@@ -615,5 +704,94 @@ mod tests_sweep {
                 goal.id
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests_board_integrity {
+    use super::*;
+    use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, add_active_goal};
+
+    fn make_goal(id: &str, desc: &str) -> ActiveGoal {
+        ActiveGoal {
+            id: id.to_string(),
+            description: desc.to_string(),
+            priority: 1,
+            status: GoalProgress::NotStarted,
+            assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
+        }
+    }
+
+    // --- is_placeholder_description ---
+
+    #[test]
+    fn placeholder_description_matches_goal_g1() {
+        assert!(is_placeholder_description("Goal g1"));
+    }
+
+    #[test]
+    fn placeholder_description_matches_lowercase() {
+        assert!(is_placeholder_description("goal g1"));
+    }
+
+    #[test]
+    fn placeholder_description_matches_uppercase() {
+        assert!(is_placeholder_description("GOAL abc"));
+    }
+
+    #[test]
+    fn placeholder_description_ignores_leading_trailing_whitespace() {
+        assert!(is_placeholder_description("  goal g1  "));
+    }
+
+    #[test]
+    fn placeholder_description_rejects_real_description() {
+        assert!(!is_placeholder_description("Ship the v1 release"));
+    }
+
+    #[test]
+    fn placeholder_description_rejects_longer_suffix() {
+        // "g12345" has 6 chars — too long
+        assert!(!is_placeholder_description("goal g12345"));
+    }
+
+    #[test]
+    fn placeholder_description_rejects_empty() {
+        assert!(!is_placeholder_description(""));
+    }
+
+    // --- board_integrity_suspect ---
+
+    #[test]
+    fn suspect_board_short_id() {
+        let mut board = GoalBoard::new();
+        add_active_goal(&mut board, make_goal("g1", "Something meaningful")).unwrap();
+        assert!(board_integrity_suspect(&board).is_some());
+    }
+
+    #[test]
+    fn suspect_board_placeholder_description() {
+        let mut board = GoalBoard::new();
+        add_active_goal(&mut board, make_goal("ship-v1-release", "Goal g1")).unwrap();
+        assert!(board_integrity_suspect(&board).is_some());
+    }
+
+    #[test]
+    fn clean_board_passes() {
+        let mut board = GoalBoard::new();
+        add_active_goal(
+            &mut board,
+            make_goal("ship-v1-feature", "Ship the v1 feature"),
+        )
+        .unwrap();
+        assert!(board_integrity_suspect(&board).is_none());
+    }
+
+    #[test]
+    fn empty_board_passes() {
+        let board = GoalBoard::new();
+        assert!(board_integrity_suspect(&board).is_none());
     }
 }

@@ -1,9 +1,9 @@
 //! Orient phase: rank goals by urgency, informed by environment context.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::SimardResult;
-use crate::goal_curation::{GoalBoard, GoalProgress};
+use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress};
 use crate::ooda_brain::{
     BrainJudgmentRecord, DeterministicFallbackOrientBrain, OodaOrientBrain, OrientContext,
     push_brain_judgment,
@@ -125,6 +125,8 @@ pub fn orient_with_brain(
         })
         .collect();
 
+    filter_hallucinated_priorities(&mut priorities, &goals.active);
+
     if observation.memory_stats.episodic_count > 100 {
         priorities.push(Priority {
             goal_id: "__memory__".to_string(),
@@ -167,6 +169,28 @@ pub fn orient_with_brain(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     Ok(priorities)
+}
+
+/// Drop any priorities whose `goal_id` is neither in `active_goals` nor a
+/// synthetic (`__`-prefix). Called after building the priorities vec from
+/// `goals.active` and before appending synthetic priorities, so synthetics
+/// are never filtered.
+pub(crate) fn filter_hallucinated_priorities(
+    priorities: &mut Vec<Priority>,
+    active_goals: &[ActiveGoal],
+) {
+    let active_ids: HashSet<&str> = active_goals.iter().map(|g| g.id.as_str()).collect();
+    priorities.retain(|p| {
+        if p.goal_id.starts_with("__") || active_ids.contains(p.goal_id.as_str()) {
+            true
+        } else {
+            eprintln!(
+                "[simard] OODA orient: dropping hallucinated goal_id '{}' — not on active board",
+                p.goal_id
+            );
+            false
+        }
+    });
 }
 
 #[cfg(test)]
@@ -230,5 +254,70 @@ mod wire_in_tests {
         );
         assert_eq!(records[0].rationale, "llm-orient-brain: light demotion");
         assert!(!records[0].fallback);
+    }
+}
+
+#[cfg(test)]
+mod hallucination_filter_tests {
+    use super::*;
+    use crate::goal_curation::{ActiveGoal, GoalProgress};
+    use crate::ooda_loop::Priority;
+
+    fn active(id: &str) -> ActiveGoal {
+        ActiveGoal {
+            id: id.to_string(),
+            description: format!("desc {id}"),
+            priority: 1,
+            status: GoalProgress::NotStarted,
+            assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
+        }
+    }
+
+    fn priority(id: &str) -> Priority {
+        Priority {
+            goal_id: id.to_string(),
+            urgency: 0.5,
+            reason: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn retains_priorities_present_in_active_goals() {
+        let goals = vec![active("ship-v1"), active("fix-db")];
+        let mut priorities = vec![priority("ship-v1"), priority("fix-db")];
+        filter_hallucinated_priorities(&mut priorities, &goals);
+        assert_eq!(priorities.len(), 2);
+    }
+
+    #[test]
+    fn drops_priorities_absent_from_active_goals() {
+        let goals = vec![active("ship-v1")];
+        let mut priorities = vec![priority("ship-v1"), priority("g1")];
+        filter_hallucinated_priorities(&mut priorities, &goals);
+        assert_eq!(priorities.len(), 1);
+        assert_eq!(priorities[0].goal_id, "ship-v1");
+    }
+
+    #[test]
+    fn retains_synthetic_double_underscore_priorities() {
+        let goals: Vec<ActiveGoal> = vec![];
+        let mut priorities = vec![
+            priority("__memory__"),
+            priority("__improvement__"),
+            priority("__eval_watchdog__"),
+        ];
+        filter_hallucinated_priorities(&mut priorities, &goals);
+        assert_eq!(priorities.len(), 3);
+    }
+
+    #[test]
+    fn empty_active_goals_drops_non_synthetic() {
+        let goals: Vec<ActiveGoal> = vec![];
+        let mut priorities = vec![priority("orphan-goal"), priority("__memory__")];
+        filter_hallucinated_priorities(&mut priorities, &goals);
+        assert_eq!(priorities.len(), 1);
+        assert_eq!(priorities[0].goal_id, "__memory__");
     }
 }
