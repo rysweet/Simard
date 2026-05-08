@@ -90,6 +90,11 @@ fn run_ooda_cycle_inner(
         state.active_goals = board;
     }
 
+    // Sweep stale assigned_to fields against live tmux sessions.
+    // Best-effort: if tmux is absent or returns no sessions, skip entirely
+    // to avoid false-positive clearing in non-tmux environments.
+    sweep_stale_assignments(&mut state.active_goals);
+
     // Seed with default goals if the board is still empty.
     let seeded = crate::goal_curation::seed_default_board(&mut state.active_goals);
     if seeded > 0 {
@@ -439,5 +444,51 @@ fn truncate_detail(s: &str, max_len: usize) -> String {
         trimmed.to_string()
     } else {
         format!("{}…", &trimmed[..max_len])
+    }
+}
+
+/// Clear `assigned_to` for any active goal whose assigned tmux session is no
+/// longer alive. Resets the goal status to `NotStarted` so it can be
+/// re-dispatched on the next OODA cycle.
+///
+/// Skipped entirely when:
+/// - `tmux list-sessions` fails (tmux absent or permission error)
+/// - The live session list is empty (not running inside tmux)
+///
+/// This prevents false-positive clearing when Simard is run outside a tmux
+/// environment (e.g., in CI).
+fn sweep_stale_assignments(board: &mut crate::goal_curation::GoalBoard) {
+    use std::collections::HashSet;
+    use std::process::Command;
+
+    let output = match Command::new("tmux")
+        .args(["list-sessions", "-F", "#{session_name}"])
+        .output()
+    {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return,
+    };
+
+    let live: HashSet<String> = String::from_utf8_lossy(&output)
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if live.is_empty() {
+        return;
+    }
+
+    for goal in board.active.iter_mut() {
+        if let Some(ref session) = goal.assigned_to.clone() {
+            if !live.contains(session) {
+                eprintln!(
+                    "[simard] OODA start: cleared stale assignment '{}' for goal '{}'",
+                    session, goal.id
+                );
+                goal.assigned_to = None;
+                goal.status = crate::goal_curation::GoalProgress::NotStarted;
+            }
+        }
     }
 }

@@ -69,8 +69,25 @@ fn update_progress_and_archive() {
 
 #[test]
 fn load_empty_board_from_bridge() {
+    // Point SIMARD_STATE_ROOT at a temp dir with no goal_records.json so the
+    // disk-first tier misses and falls through to cognitive memory (also empty).
+    let tmp = std::env::temp_dir().join(format!(
+        "simard-test-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&tmp).unwrap();
+    // SAFETY: single-threaded test; no other threads are reading this env var.
+    unsafe {
+        std::env::set_var("SIMARD_STATE_ROOT", &tmp);
+    }
     let bridge = mock_bridge();
     let board = load_goal_board(&bridge).unwrap();
+    unsafe {
+        std::env::remove_var("SIMARD_STATE_ROOT");
+    }
     assert!(board.active.is_empty());
     assert!(board.backlog.is_empty());
 }
