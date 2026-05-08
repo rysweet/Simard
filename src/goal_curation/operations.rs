@@ -68,40 +68,128 @@ pub fn simard_state_root() -> std::path::PathBuf {
     std::path::PathBuf::from(home).join(".simard")
 }
 
-/// Load a goal board using a three-tier fallback strategy:
+/// Returns `Some(reason)` if the board contains obviously corrupt or
+/// placeholder goals that should not be accepted as valid loaded state.
 ///
-/// 1. `$SIMARD_STATE_ROOT/goal_records.json` (or `~/.simard/goal_records.json`) — primary
-///    source of truth, written by `save_goal_board()` on every save.
-/// 2. `search_facts("goal-board:snapshot", 1, 0.0)` from cognitive memory — fallback for
-///    the first-ever run (no disk file yet) and disaster recovery.
-/// 3. `GoalBoard::new()` — empty board if both sources are absent or unreadable.
-///
-/// The disk file is always at least as recent as the last cognitive memory write, and
-/// avoids the unordered `LIMIT 1` retrieval issue in cognitive memory (issue #1574).
-pub fn load_goal_board(bridge: &dyn CognitiveMemoryOps) -> SimardResult<GoalBoard> {
-    // Tier 1: disk file — primary source of truth.
-    let goal_path = simard_state_root().join("goal_records.json");
-    match std::fs::read_to_string(&goal_path) {
-        Ok(content) => match serde_json::from_str::<GoalBoard>(&content) {
-            Ok(board) => return Ok(board),
-            Err(e) => {
-                eprintln!(
-                    "[simard] load_goal_board: goal_records.json parse error ({e}) — falling back to cognitive memory"
-                );
-            }
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // File not yet created — fall through to cognitive memory.
+/// Heuristics:
+/// - Goal id shorter than 5 chars (catches `g1`, `g12`, `g123`, `g1234`)
+/// - Description matches the placeholder pattern `^goal [a-z0-9]{1,4}$` (case-insensitive)
+pub fn board_integrity_suspect(board: &GoalBoard) -> Option<String> {
+    for goal in &board.active {
+        if goal.id.len() < 5 {
+            return Some(format!(
+                "goal '{}' has suspiciously short id (len {})",
+                goal.id,
+                goal.id.len()
+            ));
         }
-        Err(e) => {
-            eprintln!(
-                "[simard] load_goal_board: failed to read goal_records.json ({e}) — falling back to cognitive memory"
-            );
+        if is_placeholder_description(&goal.description) {
+            return Some(format!(
+                "goal '{}' has placeholder description '{}'",
+                goal.id, goal.description
+            ));
         }
     }
+    None
+}
 
-    // Tier 2: cognitive memory snapshot.  Errors here (bridge unavailable,
-    // timeout, etc.) are non-fatal: log and fall through to the empty board.
+/// Returns `true` when `desc` matches the placeholder pattern
+/// `^\s*goal\s+[a-z0-9]{1,4}\s*$` (case-insensitive).
+///
+/// Matches strings like `Goal g1`, `goal g1`, `GOAL abc`.
+pub fn is_placeholder_description(desc: &str) -> bool {
+    let s = desc.trim().to_lowercase();
+    if let Some(rest) = s.strip_prefix("goal") {
+        let rest = rest.trim();
+        !rest.is_empty() && rest.len() <= 4 && rest.chars().all(|c| c.is_ascii_alphanumeric())
+    } else {
+        false
+    }
+}
+
+/// One-time migration: if a legacy `goal_records.json` exists on disk, read
+/// it, store it in cognitive memory as the canonical snapshot, then delete
+/// the file. Migration failures are logged and non-fatal — a corrupt or
+/// unreadable file is left in place for operator inspection and the caller
+/// proceeds to the cognitive-memory read path.
+fn migrate_legacy_disk_file_if_present(bridge: &dyn CognitiveMemoryOps) {
+    let goal_path = simard_state_root().join("goal_records.json");
+    if !goal_path.exists() {
+        return;
+    }
+    let content = match std::fs::read_to_string(&goal_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "[simard] load_goal_board: legacy goal_records.json read failed ({e}) — \
+                 leaving file in place, falling through to cognitive memory"
+            );
+            return;
+        }
+    };
+    let board: GoalBoard = match serde_json::from_str(&content) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!(
+                "[simard] load_goal_board: legacy goal_records.json parse error ({e}) — \
+                 leaving corrupt file in place for inspection, falling through to cognitive memory"
+            );
+            return;
+        }
+    };
+    let snapshot = match serde_json::to_string(&board) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "[simard] load_goal_board: legacy migration serialize failed ({e}) — \
+                 leaving file in place"
+            );
+            return;
+        }
+    };
+    if let Err(e) = bridge.store_fact(
+        "goal-board:snapshot",
+        &snapshot,
+        1.0,
+        &["goal-board".to_string()],
+        "goal-curator",
+    ) {
+        eprintln!(
+            "[simard] load_goal_board: legacy migration store_fact failed ({e}) — \
+             leaving file in place; next startup will retry"
+        );
+        return;
+    }
+    if let Err(e) = std::fs::remove_file(&goal_path) {
+        eprintln!(
+            "[simard] load_goal_board: legacy migration remove_file failed ({e}) — \
+             snapshot stored but file remains; next startup will retry deletion"
+        );
+    }
+}
+
+/// Load the goal board from cognitive memory.
+///
+/// Cognitive memory is the single source of truth: the board is stored as a
+/// `goal-board:snapshot` fact via `bridge.store_fact()` and read back via
+/// `bridge.search_facts()`.
+///
+/// On every call this also performs an idempotent one-time migration: if a
+/// legacy `goal_records.json` file exists on disk (from before the move to
+/// memory-only persistence), it is loaded, written into cognitive memory,
+/// and removed. The gate is `path.exists()`, so once migrated subsequent
+/// calls pay only one cheap `metadata` syscall. Migration failures are
+/// logged and non-fatal — the function never panics or propagates an
+/// `Err` from migration.
+///
+/// Resolution order after migration:
+/// 1. `bridge.search_facts("goal-board:snapshot", 1, 0.0)` → parsed board
+/// 2. `GoalBoard::new()` — empty board when no snapshot exists or parsing fails
+pub fn load_goal_board(bridge: &dyn CognitiveMemoryOps) -> SimardResult<GoalBoard> {
+    migrate_legacy_disk_file_if_present(bridge);
+
+    // Primary read path: cognitive memory snapshot. Bridge errors are
+    // non-fatal — log and fall through to the empty board.
     let facts = match bridge.search_facts("goal-board:snapshot", 1, 0.0) {
         Ok(f) => f,
         Err(e) => {
@@ -122,18 +210,23 @@ pub fn load_goal_board(bridge: &dyn CognitiveMemoryOps) -> SimardResult<GoalBoar
         }
     }
 
-    // Tier 3: empty board.
     Ok(GoalBoard::new())
 }
 
-/// Save the current board state as a semantic fact in cognitive memory
-/// **and** to `goal_records.json` on disk.
+/// Save the current board state to cognitive memory as the single source of
+/// truth.
 ///
-/// The on-disk write ensures that the next OODA cycle start (which loads
-/// from cognitive memory OR disk) always sees the latest board state,
-/// even when cognitive memory `search_facts` returns a stale snapshot
-/// due to unordered `LIMIT 1` retrieval across multiple fact nodes.
+/// Rejects suspect boards (placeholder descriptions, suspiciously short
+/// ids) with `SimardError::InvalidGoalRecord` before any persistence
+/// attempt — `bridge.store_fact` is not called when the integrity guard
+/// fires.
 pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> SimardResult<()> {
+    if let Some(reason) = board_integrity_suspect(board) {
+        return Err(SimardError::InvalidGoalRecord {
+            field: "board".to_string(),
+            reason: format!("refusing to persist suspect board: {reason}"),
+        });
+    }
     let snapshot = serde_json::to_string(board).map_err(|e| SimardError::InvalidGoalRecord {
         field: "board".to_string(),
         reason: format!("failed to serialize goal board: {e}"),
@@ -145,31 +238,6 @@ pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> Si
         &["goal-board".to_string()],
         "goal-curator",
     )?;
-
-    // Also write to disk so intermediate saves (e.g. stale subordinate
-    // clearing during Act phase) are durable across cycle boundaries.
-    let state_root = simard_state_root();
-    let goal_path = state_root.join("goal_records.json");
-    if let Err(e) = std::fs::create_dir_all(&state_root) {
-        eprintln!("[simard] save_goal_board: failed to create state dir: {e}");
-    }
-    // Write with 0o600 so goal descriptions (internal project metadata) are
-    // not world-readable on multi-user systems.
-    if let Ok(pretty) = serde_json::to_string_pretty(board) {
-        use std::io::Write as _;
-        use std::os::unix::fs::OpenOptionsExt as _;
-        let result = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&goal_path)
-            .and_then(|mut f| f.write_all(pretty.as_bytes()));
-        if let Err(e) = result {
-            eprintln!("[simard] save_goal_board: failed to write goal_records.json: {e}");
-        }
-    }
-
     Ok(())
 }
 

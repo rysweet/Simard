@@ -173,22 +173,66 @@ fn enqueue_stewardship_issue_amplihack_repo() {
     assert_eq!(item.source, "stewardship:rysweet/amplihack#7");
 }
 
-// ── load_goal_board: disk-first three-tier fallback (issue #1574) ────────────
+// ── load_goal_board / save_goal_board: memory-only contract (issue #1590) ──
 
 /// Serialize access to SIMARD_STATE_ROOT across parallel test threads.
 /// Without this, concurrent set_var / remove_var calls race.
 static ENV_MUTEX: std::sync::LazyLock<std::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
-/// Helper: build a minimal mock bridge. search_facts always returns empty.
-fn mock_bridge_empty() -> crate::memory_bridge::CognitiveMemoryBridge {
+/// Record of a `memory.store_fact` call captured by the in-memory bridge.
+#[derive(Clone, Debug)]
+struct StoredFactCall {
+    concept: String,
+    content: String,
+}
+
+/// Shared mutable state captured by the in-memory bridge handler closure.
+#[derive(Default)]
+struct BridgeRecording {
+    stored_facts: std::sync::Mutex<Vec<StoredFactCall>>,
+}
+
+impl BridgeRecording {
+    fn shared() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self::default())
+    }
+
+    fn calls(&self) -> Vec<StoredFactCall> {
+        self.stored_facts.lock().unwrap().clone()
+    }
+}
+
+/// Build a recording bridge whose `memory.search_facts` returns no facts and
+/// whose `memory.store_fact` records every call into the supplied recording.
+fn recording_bridge_empty(
+    recording: std::sync::Arc<BridgeRecording>,
+) -> crate::memory_bridge::CognitiveMemoryBridge {
     use crate::bridge_subprocess::InMemoryBridgeTransport;
     use crate::memory_bridge::CognitiveMemoryBridge;
     use serde_json::json;
+    let recording_for_handler = recording;
     let transport =
-        InMemoryBridgeTransport::new("test-disk-first", |method, _params| match method {
+        InMemoryBridgeTransport::new("test-record-empty", move |method, params| match method {
             "memory.search_facts" => Ok(json!({"facts": []})),
-            "memory.store_fact" => Ok(json!({"id": "sem_x"})),
+            "memory.store_fact" => {
+                let concept = params
+                    .get("concept")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let content = params
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                recording_for_handler
+                    .stored_facts
+                    .lock()
+                    .unwrap()
+                    .push(StoredFactCall { concept, content });
+                Ok(json!({"id": "sem_x"}))
+            }
             "memory.store_episode" => Ok(json!({"id": "epi_x"})),
             _ => Err(crate::bridge::BridgeErrorPayload {
                 code: -32601,
@@ -198,27 +242,47 @@ fn mock_bridge_empty() -> crate::memory_bridge::CognitiveMemoryBridge {
     CognitiveMemoryBridge::new(Box::new(transport))
 }
 
-/// Helper: build a bridge whose search_facts returns a single snapshot fact
-/// with the correct CognitiveFact wire format (node_id, concept, content,
-/// confidence, source_id, tags).
-fn mock_bridge_with_snapshot(board_json: &str) -> crate::memory_bridge::CognitiveMemoryBridge {
+/// Build a recording bridge whose `memory.search_facts` returns the given
+/// snapshot fact and whose `memory.store_fact` records every call.
+fn recording_bridge_with_snapshot(
+    snapshot_json: &str,
+    recording: std::sync::Arc<BridgeRecording>,
+) -> crate::memory_bridge::CognitiveMemoryBridge {
     use crate::bridge_subprocess::InMemoryBridgeTransport;
     use crate::memory_bridge::CognitiveMemoryBridge;
     use serde_json::json;
-    let board_json = board_json.to_string();
+    let snapshot_json = snapshot_json.to_string();
+    let recording_for_handler = recording;
     let transport =
-        InMemoryBridgeTransport::new("test-mem-fallback", move |method, _params| match method {
+        InMemoryBridgeTransport::new("test-record-snapshot", move |method, params| match method {
             "memory.search_facts" => Ok(json!({
                 "facts": [{
                     "node_id": "f1",
                     "concept": "goal-board:snapshot",
-                    "content": board_json,
+                    "content": snapshot_json,
                     "confidence": 1.0,
                     "source_id": "goal-curator",
                     "tags": ["goal-board"]
                 }]
             })),
-            "memory.store_fact" => Ok(json!({"id": "sem_x"})),
+            "memory.store_fact" => {
+                let concept = params
+                    .get("concept")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let content = params
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                recording_for_handler
+                    .stored_facts
+                    .lock()
+                    .unwrap()
+                    .push(StoredFactCall { concept, content });
+                Ok(json!({"id": "sem_x"}))
+            }
             "memory.store_episode" => Ok(json!({"id": "epi_x"})),
             _ => Err(crate::bridge::BridgeErrorPayload {
                 code: -32601,
@@ -228,9 +292,9 @@ fn mock_bridge_with_snapshot(board_json: &str) -> crate::memory_bridge::Cognitiv
     CognitiveMemoryBridge::new(Box::new(transport))
 }
 
-/// Helper: build a bridge whose search_facts always returns an error (simulates
-/// cognitive memory being unavailable — e.g., bridge subprocess crash).
-fn mock_bridge_search_fails() -> crate::memory_bridge::CognitiveMemoryBridge {
+/// Build a bridge whose `memory.search_facts` always returns an error
+/// (simulates the cognitive-memory subprocess being unavailable).
+fn bridge_search_fails() -> crate::memory_bridge::CognitiveMemoryBridge {
     use crate::bridge_subprocess::InMemoryBridgeTransport;
     use crate::memory_bridge::CognitiveMemoryBridge;
     let transport = InMemoryBridgeTransport::new("test-search-fails", |method, _params| {
@@ -244,7 +308,14 @@ fn mock_bridge_search_fails() -> crate::memory_bridge::CognitiveMemoryBridge {
 
 /// Helper: unique temp dir for each test (avoids cross-test state pollution).
 fn tmp_state_root(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("simard-test-{tag}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "simard-test-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -256,79 +327,21 @@ where
     F: FnOnce() -> R,
 {
     let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: serialised by ENV_MUTEX; no other threads observe this var.
     unsafe { std::env::set_var("SIMARD_STATE_ROOT", root) };
     let result = f();
+    // SAFETY: same as above.
     unsafe { std::env::remove_var("SIMARD_STATE_ROOT") };
     result
 }
 
-/// Tier 1: when goal_records.json exists and is valid, load_goal_board must
-/// return the board from disk without touching cognitive memory.
 #[test]
-fn load_goal_board_tier1_reads_from_disk() {
-    let root = tmp_state_root("tier1");
-    let mut expected = GoalBoard::new();
-    expected.active.push(ActiveGoal {
-        id: "disk-goal".to_string(),
-        description: "Loaded from disk".to_string(),
-        priority: 1,
-        status: GoalProgress::NotStarted,
-        assigned_to: None,
-        current_activity: None,
-        wip_refs: vec![],
-    });
-    let json = serde_json::to_string_pretty(&expected).unwrap();
-    std::fs::write(root.join("goal_records.json"), &json).unwrap();
-
-    // Bridge returns empty — so if we get the goal it came from disk.
-    let bridge = mock_bridge_empty();
-    let board = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
-
-    assert_eq!(board.active.len(), 1, "must load from disk (tier 1)");
-    assert_eq!(board.active[0].id, "disk-goal");
-}
-
-/// Tier 2: when goal_records.json is absent, load_goal_board must fall back to
-/// cognitive memory and return the snapshot stored there.
-#[test]
-fn load_goal_board_tier2_falls_back_to_cognitive_memory_when_no_disk_file() {
-    let root = tmp_state_root("tier2-missing");
-    // Do NOT create goal_records.json.
-
+fn load_goal_board_reads_from_cognitive_memory() {
+    let root = tmp_state_root("mem-read");
     let mut mem_board = GoalBoard::new();
     mem_board.active.push(ActiveGoal {
-        id: "mem-goal".to_string(),
-        description: "Loaded from memory".to_string(),
-        priority: 2,
-        status: GoalProgress::NotStarted,
-        assigned_to: None,
-        current_activity: None,
-        wip_refs: vec![],
-    });
-    let snapshot_json = serde_json::to_string(&mem_board).unwrap();
-    let bridge = mock_bridge_with_snapshot(&snapshot_json);
-
-    let board = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
-
-    assert_eq!(
-        board.active.len(),
-        1,
-        "must fall back to cognitive memory (tier 2)"
-    );
-    assert_eq!(board.active[0].id, "mem-goal");
-}
-
-/// Tier 2 (parse error path): when goal_records.json contains invalid JSON,
-/// load_goal_board must fall back to cognitive memory rather than failing.
-#[test]
-fn load_goal_board_tier2_falls_back_on_corrupt_disk_file() {
-    let root = tmp_state_root("tier2-corrupt");
-    std::fs::write(root.join("goal_records.json"), b"THIS IS NOT JSON").unwrap();
-
-    let mut mem_board = GoalBoard::new();
-    mem_board.active.push(ActiveGoal {
-        id: "recover-goal".to_string(),
-        description: "Recovered from memory after disk corruption".to_string(),
+        id: "memory-only-goal".to_string(),
+        description: "Loaded straight from cognitive memory".to_string(),
         priority: 1,
         status: GoalProgress::NotStarted,
         assigned_to: None,
@@ -336,103 +349,152 @@ fn load_goal_board_tier2_falls_back_on_corrupt_disk_file() {
         wip_refs: vec![],
     });
     let snapshot_json = serde_json::to_string(&mem_board).unwrap();
-    let bridge = mock_bridge_with_snapshot(&snapshot_json);
+    let recording = BridgeRecording::shared();
+    let bridge = recording_bridge_with_snapshot(&snapshot_json, recording.clone());
 
     let board = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
 
-    assert_eq!(
-        board.active.len(),
-        1,
-        "must recover from memory (tier 2) after disk corruption"
+    assert_eq!(board.active.len(), 1);
+    assert_eq!(board.active[0].id, "memory-only-goal");
+    assert!(
+        recording.calls().is_empty(),
+        "load_goal_board with no legacy file must not call store_fact"
     );
-    assert_eq!(board.active[0].id, "recover-goal");
 }
 
-/// Tier 3: when both disk and cognitive memory are absent, load_goal_board
-/// must return an empty board (not an error).
 #[test]
-fn load_goal_board_tier3_returns_empty_board_when_all_sources_absent() {
-    let root = tmp_state_root("tier3");
-    // No disk file, bridge returns empty facts.
-    let bridge = mock_bridge_empty();
+fn load_goal_board_returns_empty_when_memory_has_no_snapshot() {
+    let root = tmp_state_root("mem-empty");
+    let recording = BridgeRecording::shared();
+    let bridge = recording_bridge_empty(recording.clone());
 
     let board = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
 
-    assert!(board.active.is_empty(), "must return empty board (tier 3)");
+    assert!(board.active.is_empty());
+    assert!(board.backlog.is_empty());
+    assert!(recording.calls().is_empty());
+}
+
+#[test]
+fn load_goal_board_returns_empty_when_search_facts_errors() {
+    let root = tmp_state_root("mem-err");
+    let bridge = bridge_search_fails();
+
+    let board = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
+
+    assert!(board.active.is_empty());
     assert!(board.backlog.is_empty());
 }
 
-/// When cognitive memory search_facts returns an error (e.g., bridge crashed),
-/// load_goal_board must fall through to Tier 3 (empty board) rather than
-/// propagating the error.  Resilience: bridge unavailability ≠ fatal.
 #[test]
-fn load_goal_board_tier2_bridge_error_falls_through_to_empty_board() {
-    let root = tmp_state_root("tier2-err");
-    // No disk file; bridge returns an error from search_facts.
-    let bridge = mock_bridge_search_fails();
+fn load_goal_board_migrates_legacy_disk_file_into_memory_then_deletes_it() {
+    let root = tmp_state_root("migrate");
+    let mut legacy = GoalBoard::new();
+    legacy.active.push(ActiveGoal {
+        id: "legacy-goal".to_string(),
+        description: "Originally on disk".to_string(),
+        priority: 1,
+        status: GoalProgress::NotStarted,
+        assigned_to: None,
+        current_activity: None,
+        wip_refs: vec![],
+    });
+    let path = root.join("goal_records.json");
+    std::fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
 
-    let board = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
+    let recording = BridgeRecording::shared();
+    let bridge = recording_bridge_empty(recording.clone());
+    let _ = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
 
     assert!(
-        board.active.is_empty(),
-        "bridge search_facts error must degrade to empty board (tier 3), not propagate"
+        !path.exists(),
+        "legacy file must be deleted after migration"
     );
-    assert!(board.backlog.is_empty());
+    let calls = recording.calls();
+    assert_eq!(calls.len(), 1, "exactly one store_fact call expected");
+    assert_eq!(calls[0].concept, "goal-board:snapshot");
+    let migrated: GoalBoard = serde_json::from_str(&calls[0].content).unwrap();
+    assert_eq!(migrated.active.len(), 1);
+    assert_eq!(migrated.active[0].id, "legacy-goal");
 }
 
-/// Disk file wins over cognitive memory even when memory also has a snapshot.
-/// (Verifies tier ordering — disk is always the primary source of truth.)
 #[test]
-fn load_goal_board_disk_beats_cognitive_memory() {
-    let root = tmp_state_root("tier1-priority");
+fn load_goal_board_migration_is_noop_when_no_legacy_file() {
+    let root = tmp_state_root("migrate-noop");
+    let recording = BridgeRecording::shared();
+    let bridge = recording_bridge_empty(recording.clone());
 
-    let mut disk_board = GoalBoard::new();
-    disk_board.active.push(ActiveGoal {
-        id: "disk-wins".to_string(),
-        description: "From disk".to_string(),
-        priority: 1,
-        status: GoalProgress::NotStarted,
-        assigned_to: None,
-        current_activity: None,
-        wip_refs: vec![],
-    });
-    std::fs::write(
-        root.join("goal_records.json"),
-        serde_json::to_string_pretty(&disk_board).unwrap(),
-    )
-    .unwrap();
+    let _ = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
 
-    // Memory has a *different* goal — if disk is not preferred this test fails.
-    let mut mem_board = GoalBoard::new();
-    mem_board.active.push(ActiveGoal {
-        id: "mem-stale".to_string(),
-        description: "Stale cognitive memory snapshot".to_string(),
-        priority: 1,
-        status: GoalProgress::NotStarted,
-        assigned_to: None,
-        current_activity: None,
-        wip_refs: vec![],
-    });
-    let snapshot_json = serde_json::to_string(&mem_board).unwrap();
-    let bridge = mock_bridge_with_snapshot(&snapshot_json);
+    assert!(
+        recording.calls().is_empty(),
+        "no migration write expected when legacy file is absent"
+    );
+}
 
+#[test]
+fn load_goal_board_migration_handles_corrupt_legacy_file_without_panic() {
+    let root = tmp_state_root("migrate-corrupt");
+    let path = root.join("goal_records.json");
+    std::fs::write(&path, b"NOT VALID JSON").unwrap();
+
+    let recording = BridgeRecording::shared();
+    let bridge = recording_bridge_empty(recording.clone());
     let board = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
 
-    assert_eq!(
-        board.active[0].id, "disk-wins",
-        "disk must beat cognitive memory"
+    assert!(board.active.is_empty(), "must return empty board");
+    assert!(
+        recording.calls().is_empty(),
+        "corrupt file must not be migrated"
+    );
+    assert!(
+        path.exists(),
+        "corrupt legacy file must be left on disk for operator inspection"
     );
 }
 
-/// save_goal_board must write goal_records.json to disk in addition to calling
-/// the cognitive memory bridge.
 #[test]
-fn save_goal_board_writes_to_disk() {
-    let root = tmp_state_root("save-disk");
+fn load_goal_board_runs_migration_only_once_in_practice() {
+    // After the first call, the file is gone, so the second call's migration
+    // is a no-op (gated on path.exists()).  We assert:
+    //   call 1: 1 store_fact (the migration), file deleted
+    //   call 2: 0 additional store_facts, file still absent
+    let root = tmp_state_root("migrate-once");
+    let mut legacy = GoalBoard::new();
+    legacy.active.push(ActiveGoal {
+        id: "once-goal".to_string(),
+        description: "Migrate exactly once".to_string(),
+        priority: 1,
+        status: GoalProgress::NotStarted,
+        assigned_to: None,
+        current_activity: None,
+        wip_refs: vec![],
+    });
+    let path = root.join("goal_records.json");
+    std::fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
+
+    let recording = BridgeRecording::shared();
+    let bridge = recording_bridge_empty(recording.clone());
+    with_state_root(&root, || {
+        super::load_goal_board(&bridge).unwrap();
+        super::load_goal_board(&bridge).unwrap();
+    });
+
+    assert!(!path.exists());
+    assert_eq!(
+        recording.calls().len(),
+        1,
+        "migration must only run once across repeated load_goal_board calls"
+    );
+}
+
+#[test]
+fn save_goal_board_persists_only_to_memory_and_writes_no_disk_file() {
+    let root = tmp_state_root("save-mem-only");
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
-        id: "saved-goal".to_string(),
-        description: "Written to disk".to_string(),
+        id: "memory-saved-goal".to_string(),
+        description: "Persisted only to memory".to_string(),
         priority: 1,
         status: GoalProgress::NotStarted,
         assigned_to: None,
@@ -440,19 +502,123 @@ fn save_goal_board_writes_to_disk() {
         wip_refs: vec![],
     });
 
-    let bridge = mock_bridge_empty();
+    let recording = BridgeRecording::shared();
+    let bridge = recording_bridge_empty(recording.clone());
     with_state_root(&root, || super::save_goal_board(&board, &bridge).unwrap());
 
-    let disk_path = root.join("goal_records.json");
     assert!(
-        disk_path.exists(),
-        "goal_records.json must be created by save_goal_board"
+        !root.join("goal_records.json").exists(),
+        "save_goal_board must not write goal_records.json to disk"
     );
+    let calls = recording.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].concept, "goal-board:snapshot");
+    let persisted: GoalBoard = serde_json::from_str(&calls[0].content).unwrap();
+    assert_eq!(persisted.active.len(), 1);
+    assert_eq!(persisted.active[0].id, "memory-saved-goal");
+}
 
-    let content = std::fs::read_to_string(&disk_path).unwrap();
-    let reloaded: GoalBoard = serde_json::from_str(&content).unwrap();
-    assert_eq!(reloaded.active.len(), 1);
-    assert_eq!(reloaded.active[0].id, "saved-goal");
+#[test]
+fn save_goal_board_rejects_suspect_board_without_persisting() {
+    // Suspect by short id: "g1" is < 5 chars → board_integrity_suspect fires.
+    let root = tmp_state_root("save-suspect");
+    let mut board = GoalBoard::new();
+    board.active.push(ActiveGoal {
+        id: "g1".to_string(),
+        description: "Goal g1".to_string(),
+        priority: 1,
+        status: GoalProgress::NotStarted,
+        assigned_to: None,
+        current_activity: None,
+        wip_refs: vec![],
+    });
+
+    let recording = BridgeRecording::shared();
+    let bridge = recording_bridge_empty(recording.clone());
+    let err = with_state_root(&root, || {
+        super::save_goal_board(&board, &bridge).unwrap_err()
+    });
+
+    assert!(
+        err.to_string().contains("suspect"),
+        "expected 'suspect' in error: {err}"
+    );
+    assert!(
+        recording.calls().is_empty(),
+        "store_fact must not be called for a suspect board"
+    );
+    assert!(
+        !root.join("goal_records.json").exists(),
+        "no disk file must be written for a suspect board"
+    );
+}
+
+#[test]
+fn save_goal_board_accepts_a_well_formed_board() {
+    let root = tmp_state_root("save-ok");
+    let mut board = GoalBoard::new();
+    board.active.push(ActiveGoal {
+        id: "well-formed-goal".to_string(),
+        description: "Improve test coverage on the goal curation module".to_string(),
+        priority: 1,
+        status: GoalProgress::NotStarted,
+        assigned_to: None,
+        current_activity: None,
+        wip_refs: vec![],
+    });
+    let recording = BridgeRecording::shared();
+    let bridge = recording_bridge_empty(recording.clone());
+
+    with_state_root(&root, || super::save_goal_board(&board, &bridge).unwrap());
+
+    assert_eq!(recording.calls().len(), 1);
+}
+
+// ── board_integrity_suspect / is_placeholder_description (ported from cycle.rs) ──
+
+#[test]
+fn is_placeholder_description_matches_short_lowercase_goal_phrase() {
+    assert!(is_placeholder_description("Goal g1"));
+    assert!(is_placeholder_description("goal g1"));
+    assert!(is_placeholder_description("GOAL abc"));
+    assert!(is_placeholder_description("  goal g1  "));
+}
+
+#[test]
+fn is_placeholder_description_rejects_long_or_substantive_descriptions() {
+    assert!(!is_placeholder_description("Ship the v1 release"));
+    assert!(!is_placeholder_description("goal g12345"));
+    assert!(!is_placeholder_description(""));
+}
+
+#[test]
+fn board_integrity_suspect_flags_short_ids_and_placeholder_descriptions() {
+    let mut board = GoalBoard::new();
+    board.active.push(ActiveGoal {
+        id: "g1".to_string(),
+        description: "Goal g1".to_string(),
+        priority: 1,
+        status: GoalProgress::NotStarted,
+        assigned_to: None,
+        current_activity: None,
+        wip_refs: vec![],
+    });
+    assert!(board_integrity_suspect(&board).is_some());
+}
+
+#[test]
+fn board_integrity_suspect_passes_well_formed_board() {
+    let mut board = GoalBoard::new();
+    board.active.push(ActiveGoal {
+        id: "improve-amplihack-test-coverage".to_string(),
+        description: "Increase test coverage across the amplihack ecosystem".to_string(),
+        priority: 1,
+        status: GoalProgress::NotStarted,
+        assigned_to: None,
+        current_activity: None,
+        wip_refs: vec![],
+    });
+    assert!(board_integrity_suspect(&board).is_none());
 }
 
 /// clear_goal_assignment must set assigned_to = None and reset status to
