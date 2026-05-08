@@ -9,7 +9,6 @@ use crate::gym_scoring::GymSuiteScore;
 use crate::memory_consolidation;
 use crate::memory_consolidation::preparation_memory_operations;
 use crate::self_improve::{ImprovementCycle, ImprovementPhase};
-use crate::session::SessionId;
 
 use super::types::*;
 use super::{
@@ -163,7 +162,7 @@ fn run_ooda_cycle_inner(
         .map(|g| g.description.as_str())
         .collect::<Vec<_>>()
         .join("; ");
-    let cycle_session_id = SessionId::from_uuid(uuid::Uuid::now_v7());
+    // Reuse cycle_session_id established above — the entire cycle is one logical session.
     let ctx =
         preparation_memory_operations(&objective_summary, &cycle_session_id, &*bridges.memory)?;
     eprintln!(
@@ -409,13 +408,14 @@ fn run_ooda_cycle_inner(
     })
 }
 
-/// Truncate a detail string to max_len, appending "…" if truncated.
+/// Truncate a detail string to at most `max_len` characters (Unicode scalar
+/// values), appending "…" if truncated.
 fn truncate_detail(s: &str, max_len: usize) -> String {
     let trimmed = s.trim();
-    if trimmed.len() <= max_len {
-        trimmed.to_string()
-    } else {
-        format!("{}…", &trimmed[..max_len])
+    let mut chars = trimmed.char_indices();
+    match chars.nth(max_len) {
+        None => trimmed.to_string(),
+        Some((byte_pos, _)) => format!("{}…", &trimmed[..byte_pos]),
     }
 }
 
@@ -467,15 +467,17 @@ pub(crate) fn sweep_stale_assignments_with_sessions(
     }
 
     for goal in board.active.iter_mut() {
-        if let Some(ref session) = goal.assigned_to.clone() {
-            if !live_sessions.contains(session) {
-                eprintln!(
-                    "[simard] OODA start: cleared stale assignment '{}' for goal '{}'",
-                    session, goal.id
-                );
-                goal.assigned_to = None;
-                goal.status = crate::goal_curation::GoalProgress::NotStarted;
-            }
+        let is_stale = goal
+            .assigned_to
+            .as_deref()
+            .map_or(false, |s| !live_sessions.contains(s));
+        if is_stale {
+            let session = goal.assigned_to.take().unwrap_or_default();
+            eprintln!(
+                "[simard] OODA start: cleared stale assignment '{}' for goal '{}'",
+                session, goal.id
+            );
+            goal.status = crate::goal_curation::GoalProgress::NotStarted;
         }
     }
 }
