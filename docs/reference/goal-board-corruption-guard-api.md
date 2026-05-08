@@ -74,7 +74,7 @@ board looks corrupt, or `None` if the board passes all checks.
 
 | Check | Condition | Example trigger |
 |-------|-----------|-----------------|
-| Short id | `goal.id.len() < 5` | `"g1"`, `"g12"`, `"g1234"` |
+| Short id | `goal.id.len() < 5` | `"g1"`, `"g12"`, `"g123"` |
 | Placeholder description | `is_placeholder_description(&goal.description)` | `"Goal g1"`, `"GOAL abc"` |
 
 The function returns on the **first** suspicious goal it finds; it does not
@@ -108,8 +108,8 @@ pub(crate) fn is_placeholder_description(desc: &str) -> bool;
 **Module:** `simard::ooda_loop::cycle`
 
 Returns `true` when `desc` matches the placeholder pattern
-`^\s*goal\s+[a-z0-9]{1,4}\s*$` (case-insensitive, leading/trailing whitespace
-ignored).
+`^\s*goal\s*[a-z0-9]{1,4}\s*$` (case-insensitive, leading/trailing whitespace
+ignored; space between `"goal"` and the token is optional).
 
 This is a pure helper used by `board_integrity_suspect`. It may be called
 independently in tests or in additional validation sites.

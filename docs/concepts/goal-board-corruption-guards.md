@@ -114,7 +114,7 @@ loaded board and returns `Some(reason)` if any goal looks like a placeholder:
 | Heuristic | Trigger | Example |
 |-----------|---------|---------|
 | Short id | `id.len() < 5` | `"g1"`, `"g12"`, `"g123"` |
-| Placeholder description | matches `^\s*goal\s+[a-z0-9]{1,4}\s*$` (case-insensitive) | `"Goal g1"`, `"GOAL abc"` |
+| Placeholder description | matches `^\s*goal\s*[a-z0-9]{1,4}\s*$` (case-insensitive) | `"Goal g1"`, `"GOAL abc"`, `"goalg1"` |
 
 The 5-character threshold is chosen to catch single-letter + digit hallucinations
 while allowing any realistic UUID fragment, slug, or issue number as an id.
