@@ -205,8 +205,6 @@ pub fn load_goal_board(bridge: &dyn CognitiveMemoryOps) -> SimardResult<GoalBoar
             vec![]
         }
     };
-    for f in facts.iter().filter(|f| f.concept == "goal-board:snapshot").take(3) {
-        }
     let latest = facts
         .iter()
         .filter(|f| f.concept == "goal-board:snapshot")
