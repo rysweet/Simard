@@ -13,7 +13,7 @@ use crate::base_types::BaseTypeId;
 use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::error::{SimardError, SimardResult};
 use crate::evidence::{EvidenceStore, FileBackedEvidenceStore};
-use crate::goals::{FileBackedGoalStore, GoalStore};
+use crate::goals::{CognitiveMemoryGoalStore, FileBackedGoalStore, GoalStore};
 use crate::handoff::{FileBackedHandoffStore, RuntimeHandoffSnapshot, RuntimeHandoffStore};
 use crate::identity::{
     BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader, IdentityManifest, ManifestContract,
@@ -96,7 +96,38 @@ fn assemble_parts(config: &BootstrapConfig) -> SimardResult<AssembledParts> {
     let evidence_store = Arc::new(FileBackedEvidenceStore::try_new(
         config.evidence_store_path(),
     )?);
-    let goal_store = Arc::new(FileBackedGoalStore::try_new(config.goal_store_path())?);
+    // Issue #1590 (Bug 3): the goal store is now backed by cognitive
+    // memory. The legacy `FileBackedGoalStore` only persisted half of
+    // the surface area — every other consumer (the operator probes,
+    // engineer-loop, dashboard, meeting backend) reads/writes through
+    // cognitive memory, so a `FileBackedGoalStore` here meant
+    // `goal_store.put(record)` was invisible to those readers across
+    // subprocess boundaries.
+    //
+    // In `BuiltinDefaults` mode we still fall back to the file-backed
+    // store when cognitive memory cannot be opened (no LadybugDB on
+    // disk, e.g. in dev / unit tests that skip the bridge). Production
+    // mode never reaches this fallback because `build_memory_store`
+    // already returned `Err` above.
+    let goal_store: Arc<dyn GoalStore> =
+        match CognitiveMemoryGoalStore::new(config.state_root.value.clone()) {
+            Ok(store) => Arc::new(store),
+            Err(e) if config.mode == crate::bootstrap::BootstrapMode::BuiltinDefaults => {
+                eprintln!(
+                    "[simard] cognitive-memory goal store unavailable ({e}) — \
+                     falling back to file-backed goal store for testing"
+                );
+                Arc::new(FileBackedGoalStore::try_new(config.goal_store_path())?)
+            }
+            Err(e) => {
+                return Err(SimardError::RuntimeInitFailed {
+                    component: "goal-store".into(),
+                    reason: format!(
+                        "cognitive-memory goal store is required in production mode: {e}"
+                    ),
+                });
+            }
+        };
     let handoff_store = Arc::new(FileBackedHandoffStore::try_new(
         config.handoff_store_path(),
     )?);
