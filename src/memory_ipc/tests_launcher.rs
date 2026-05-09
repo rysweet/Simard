@@ -23,7 +23,9 @@
 //! Reader semantics: prefer the daemon socket; otherwise `open_read_only`
 //! (which requires the underlying DB file to already exist).
 
-use super::{clear_in_process_writer, launch_writer_bridge, open_reader_bridge, register_in_process_writer};
+use super::{
+    clear_in_process_writer, launch_writer_bridge, open_reader_bridge, register_in_process_writer,
+};
 use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::goal_curation::{GoalBoard, load_goal_board, save_goal_board};
 use std::sync::Arc;

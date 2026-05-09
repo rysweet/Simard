@@ -172,12 +172,12 @@ mod client;
 mod launcher;
 mod server;
 pub use client::RemoteCognitiveMemory;
+#[cfg(test)]
+pub use launcher::clear_in_process_writer;
 pub use launcher::{
     ReaderBridge, WriterBridge, launch_writer_bridge, open_reader_bridge,
     register_in_process_writer,
 };
-#[cfg(test)]
-pub use launcher::clear_in_process_writer;
 pub use server::{ServerHandle, spawn_server};
 
 // ============================================================================

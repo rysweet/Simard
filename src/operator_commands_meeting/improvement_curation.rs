@@ -127,8 +127,7 @@ pub fn run_improvement_curation_read_probe(
         // trait (the previous `load_goal_board` path read a different
         // fact concept and never saw curator writes).
         use crate::goals::GoalStore as _;
-        let store =
-            crate::goals::CognitiveMemoryGoalStore::new(state_root.clone())?;
+        let store = crate::goals::CognitiveMemoryGoalStore::new(state_root.clone())?;
         store.list()?
     };
 

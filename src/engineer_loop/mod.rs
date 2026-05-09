@@ -280,8 +280,7 @@ pub fn inspect_workspace(workspace_root: &Path, state_root: &Path) -> SimardResu
         // (the previous `load_goal_board` path queried a different
         // fact concept and missed every put through the goal store).
         use crate::goals::GoalStore as _;
-        let store =
-            crate::goals::CognitiveMemoryGoalStore::new(state_root.to_path_buf())?;
+        let store = crate::goals::CognitiveMemoryGoalStore::new(state_root.to_path_buf())?;
         store.active_top_goals(5)?
     };
     let carried_meeting_decisions = load_carried_meeting_decisions(state_root)?;
