@@ -220,6 +220,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(cognitive_memory)]
     fn cognitive_memory_goal_store_round_trips_active_goal() {
         let root = fresh_state_root("round-trip");
         let store = CognitiveMemoryGoalStore::new(root.clone()).expect("store should build");
@@ -254,6 +255,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(cognitive_memory)]
     fn cognitive_memory_goal_store_active_top_goals_returns_active_only() {
         let root = fresh_state_root("active-top");
         let store = CognitiveMemoryGoalStore::new(root).expect("store should build");
@@ -281,6 +283,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(cognitive_memory)]
     fn cognitive_memory_goal_store_top_goals_by_status_filters_correctly() {
         let root = fresh_state_root("top-by-status");
         let store = CognitiveMemoryGoalStore::new(root).expect("store should build");
@@ -302,6 +305,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(cognitive_memory)]
     fn cognitive_memory_goal_store_put_overwrites_existing_slug_with_latest_record() {
         let root = fresh_state_root("upsert");
         let store = CognitiveMemoryGoalStore::new(root).expect("store should build");

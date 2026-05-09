@@ -44,6 +44,7 @@ fn fresh_state_root(tag: &str) -> std::path::PathBuf {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn launch_writer_bridge_succeeds_on_fresh_state_root_without_daemon() {
     // No daemon socket → must fall through to NativeCognitiveMemory::open.
     let root = fresh_state_root("writer-fresh");
@@ -57,6 +58,7 @@ fn launch_writer_bridge_succeeds_on_fresh_state_root_without_daemon() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn writer_bridge_supports_store_fact_round_trip() {
     let root = fresh_state_root("writer-roundtrip");
     let writer = launch_writer_bridge(&root).expect("writer bridge");
@@ -84,6 +86,7 @@ fn writer_bridge_supports_store_fact_round_trip() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn open_reader_bridge_requires_existing_db() {
     // No DB has ever been opened → open_read_only would fail. The reader
     // helper is allowed to surface that as `Err`, but it must NOT panic
@@ -97,6 +100,7 @@ fn open_reader_bridge_requires_existing_db() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn open_reader_bridge_succeeds_after_writer_initialises_db() {
     let root = fresh_state_root("reader-after-writer");
     {
@@ -127,6 +131,7 @@ fn open_reader_bridge_succeeds_after_writer_initialises_db() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn writer_bridge_is_compatible_with_save_and_load_goal_board() {
     // The whole point of these helpers is to let dashboard / meeting /
     // engineer call sites flow through `save_goal_board(&board, writer.ops())`
@@ -153,6 +158,7 @@ fn writer_bridge_is_compatible_with_save_and_load_goal_board() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn writer_bridge_does_not_create_legacy_goal_records_json_on_save() {
     // Acceptance criterion #6: every save must flow through cognitive memory.
     // No writer call site is allowed to create the legacy JSON file.
@@ -205,6 +211,7 @@ fn writer_bridge_does_not_create_legacy_goal_records_json_on_save() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn register_in_process_writer_returns_registered_arc_via_launch_writer_bridge() {
     // Use an in-memory NativeCognitiveMemory so we don't depend on disk
     // state. The state_root passed to launch_writer_bridge must match
@@ -267,6 +274,7 @@ fn register_in_process_writer_returns_registered_arc_via_launch_writer_bridge() 
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn writer_bridge_construction_panics_when_inner_is_read_only() {
     // Defensive invariant: WriterBridge must refuse to wrap a read-only
     // handle. We construct a NativeCognitiveMemory via open() to create
@@ -306,6 +314,7 @@ fn writer_bridge_construction_panics_when_inner_is_read_only() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn launch_writer_bridge_returns_err_when_state_root_is_unwritable_file() {
     // Force tiers 1 and 2 to fail by passing a path that is a regular
     // file rather than a directory. Today the launcher falls through
@@ -330,6 +339,7 @@ fn launch_writer_bridge_returns_err_when_state_root_is_unwritable_file() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn native_cognitive_memory_open_read_only_reports_is_read_only_true() {
     // Trait-default contract: writers report false, the read-only
     // opener reports true. Pin both so any future regression that

@@ -52,6 +52,7 @@ fn seed_active_only(state_root: &std::path::Path, n: usize) -> GoalBoard {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn meeting_goal_curation_read_probe_succeeds_with_only_cognitive_memory() {
     let root = fresh_state_root("read-probe");
     let _seeded = seed_active_only(&root, 3);
@@ -75,6 +76,7 @@ fn meeting_goal_curation_read_probe_succeeds_with_only_cognitive_memory() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn meeting_goal_curation_read_probe_succeeds_with_empty_cognitive_memory() {
     let root = fresh_state_root("read-empty");
     {
@@ -94,6 +96,7 @@ fn meeting_goal_curation_read_probe_succeeds_with_empty_cognitive_memory() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn active_goals_as_records_round_trips_through_cognitive_memory() {
     // End-to-end: seeded active goals come back via load_goal_board +
     // active_goals_as_records as `Vec<GoalRecord>` with the right shape

@@ -153,6 +153,7 @@ fn newline_in_content_does_not_break_query() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn disk_persist_facts_survive_reopen() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().to_path_buf();
@@ -172,6 +173,7 @@ fn disk_persist_facts_survive_reopen() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn disk_persist_procedures_survive_reopen() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().to_path_buf();
@@ -201,6 +203,7 @@ fn disk_persist_procedures_survive_reopen() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn disk_persist_episodes_and_consolidation_survive_reopen() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().to_path_buf();
