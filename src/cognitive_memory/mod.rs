@@ -91,6 +91,21 @@ pub trait CognitiveMemoryOps: Send + Sync {
     fn check_triggers(&self, content: &str) -> SimardResult<Vec<CognitiveProspective>>;
 
     fn get_statistics(&self) -> SimardResult<CognitiveStatistics>;
+
+    /// Reports whether this backend was opened in read-only mode.
+    ///
+    /// Defaulted to `false` because the overwhelming majority of
+    /// implementations are writers (the IPC client, the daemon's
+    /// in-process Arc, the live `NativeCognitiveMemory::open`).
+    /// `NativeCognitiveMemory::open_read_only` overrides this to `true`.
+    ///
+    /// `WriterBridge` constructors assert that this is `false` so a
+    /// read-only handle cannot be silently wrapped as a writer — the
+    /// "hollow success" failure mode that issue #1590's follow-up
+    /// targets.
+    fn is_read_only(&self) -> bool {
+        false
+    }
 }
 
 // ============================================================================
