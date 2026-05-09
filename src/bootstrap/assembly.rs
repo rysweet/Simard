@@ -13,7 +13,7 @@ use crate::base_types::BaseTypeId;
 use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::error::{SimardError, SimardResult};
 use crate::evidence::{EvidenceStore, FileBackedEvidenceStore};
-use crate::goals::{FileBackedGoalStore, GoalStore};
+use crate::goals::{CognitiveMemoryGoalStore, GoalStore};
 use crate::handoff::{FileBackedHandoffStore, RuntimeHandoffSnapshot, RuntimeHandoffStore};
 use crate::identity::{
     BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader, IdentityManifest, ManifestContract,
@@ -56,6 +56,22 @@ fn build_memory_store(
     #![allow(clippy::type_complexity)]
     match NativeCognitiveMemory::open(&config.state_root.value) {
         Ok(native) => {
+            // Share ONE backend Arc across:
+            //   1. the in-process writer registration (so the goal store
+            //      and any other in-process bridge consumer hits the same
+            //      lbug::Database — a fresh `NativeCognitiveMemory::open`
+            //      per call would create disjoint Database instances and
+            //      writes wouldn't be visible across them);
+            //   2. the consolidation bridge handed to the runtime
+            //      (wrapped via `SharedMemory` for `Box<dyn ...>` shape);
+            //   3. the cognitive memory store overlay used for legacy
+            //      memory-record persistence.
+            let shared: Arc<dyn CognitiveMemoryOps> = Arc::new(native);
+            crate::memory_ipc::register_in_process_writer(
+                config.state_root.value.clone(),
+                Arc::clone(&shared),
+            );
+
             let native_for_store = NativeCognitiveMemory::open(&config.state_root.value)?;
             let store =
                 CognitiveBridgeMemoryStore::new(native_for_store, config.memory_store_path())?;
@@ -63,7 +79,10 @@ fn build_memory_store(
 
             eprintln!("[simard] consolidation hooks active — session lifecycle hooks enabled");
 
-            Ok((Arc::new(store), Some(Box::new(native))))
+            Ok((
+                Arc::new(store),
+                Some(Box::new(crate::memory_ipc::SharedMemory(shared))),
+            ))
         }
         Err(e) if config.mode == crate::bootstrap::BootstrapMode::BuiltinDefaults => {
             eprintln!(
@@ -96,7 +115,9 @@ fn assemble_parts(config: &BootstrapConfig) -> SimardResult<AssembledParts> {
     let evidence_store = Arc::new(FileBackedEvidenceStore::try_new(
         config.evidence_store_path(),
     )?);
-    let goal_store = Arc::new(FileBackedGoalStore::try_new(config.goal_store_path())?);
+    let goal_store = Arc::new(CognitiveMemoryGoalStore::new(
+        config.state_root_path().to_path_buf(),
+    )?);
     let handoff_store = Arc::new(FileBackedHandoffStore::try_new(
         config.handoff_store_path(),
     )?);

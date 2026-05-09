@@ -23,7 +23,7 @@
 //! Reader semantics: prefer the daemon socket; otherwise `open_read_only`
 //! (which requires the underlying DB file to already exist).
 
-use super::{launch_writer_bridge, open_reader_bridge, register_in_process_writer};
+use super::{clear_in_process_writer, launch_writer_bridge, open_reader_bridge, register_in_process_writer};
 use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::goal_curation::{GoalBoard, load_goal_board, save_goal_board};
 use std::sync::Arc;
@@ -205,21 +205,24 @@ fn writer_bridge_does_not_create_legacy_goal_records_json_on_save() {
 #[test]
 fn register_in_process_writer_returns_registered_arc_via_launch_writer_bridge() {
     // Use an in-memory NativeCognitiveMemory so we don't depend on disk
-    // state. The state_root passed to launch_writer_bridge is irrelevant
-    // when the in-process writer is registered: the launcher must short-
-    // circuit and return the registered Arc.
+    // state. The state_root passed to launch_writer_bridge must match
+    // the registered state_root for the shortcut to fire (path-aware
+    // registration so unrelated tests with different state_roots are
+    // unaffected).
+    clear_in_process_writer();
+
     let inner: Arc<dyn CognitiveMemoryOps> = Arc::new(
         NativeCognitiveMemory::in_memory()
             .expect("in-memory NativeCognitiveMemory must construct for tests"),
     );
 
-    register_in_process_writer(Arc::clone(&inner));
-
-    // Call launch_writer_bridge with a state_root that has nothing on
-    // disk — without the in-process shortcut, tier 2 would create a
-    // fresh DB at this path. With the shortcut, the launcher returns
-    // the registered Arc and never touches disk.
     let root = fresh_state_root("in-process-writer-shortcut");
+    register_in_process_writer(root.clone(), Arc::clone(&inner));
+
+    // Call launch_writer_bridge with the registered state_root — without
+    // the in-process shortcut, tier 2 would create a fresh DB on disk at
+    // this path. With the shortcut, the launcher returns the registered
+    // Arc and never touches disk.
     let writer = launch_writer_bridge(&root)
         .expect("launch_writer_bridge must succeed via the registered in-process writer");
 
@@ -256,6 +259,9 @@ fn register_in_process_writer_returns_registered_arc_via_launch_writer_bridge() 
         "tier-0 shortcut must NOT create an on-disk DB at {}",
         db_path.display()
     );
+
+    // Cleanup so other tests don't see the registration.
+    clear_in_process_writer();
 }
 
 #[test]

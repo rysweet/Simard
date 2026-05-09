@@ -75,6 +75,14 @@ pub fn run_ooda_daemon(
     let shared_mem: Arc<dyn CognitiveMemoryOps> =
         Arc::new(NativeCognitiveMemory::open(&state_root)?);
 
+    // Register the live writer for in-process callers (dashboard, OODA
+    // loop, reflection, etc.) so they bypass IPC and disk re-open and
+    // share this exact handle. This eliminates the dashboard's
+    // hollow-success failure mode where launch_writer_bridge previously
+    // fell through to a read-only handle when both IPC and direct open
+    // failed (issue #1590 follow-up).
+    memory_ipc::register_in_process_writer(state_root.clone(), Arc::clone(&shared_mem));
+
     // Spawn the memory IPC server so meetings and other clients can share
     // this live DB handle without their own locks conflicting.
     let socket_path = memory_ipc::default_socket_path();

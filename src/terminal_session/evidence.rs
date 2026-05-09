@@ -1,4 +1,5 @@
 use crate::sanitization::sanitize_terminal_text;
+use crate::util::string_truncate::truncate_to_char_boundary;
 
 use super::types::TerminalStep;
 
@@ -7,7 +8,7 @@ pub(crate) fn transcript_preview(transcript: &str) -> String {
     let mut normalized = transcript_content_lines(&sanitized).join(" | ");
 
     if normalized.len() > 512 {
-        normalized.truncate(512);
+        truncate_to_char_boundary(&mut normalized, 512);
         normalized.push_str("...");
     }
 
@@ -106,7 +107,7 @@ pub(crate) fn compact_terminal_evidence_value(raw: &str, limit: usize) -> String
         .replace('\n', "\\n")
         .replace('\t', "\\t");
     if normalized.len() > limit {
-        normalized.truncate(limit);
+        truncate_to_char_boundary(&mut normalized, limit);
         normalized.push_str("...");
     }
     normalized

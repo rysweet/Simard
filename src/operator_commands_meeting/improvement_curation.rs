@@ -121,9 +121,15 @@ pub fn run_improvement_curation_read_probe(
     let parsed_record = PersistedImprovementRecord::parse(&latest_record.value)
         .map_err(|error| format!("{error}"))?;
     let goal_records = {
-        let bridge = crate::memory_ipc::launch_writer_bridge(&state_root)?;
-        let board = crate::goal_curation::load_goal_board(bridge.ops())?;
-        crate::goal_curation::active_goals_as_records(&board)
+        // Issue #1590 follow-up: read goals through the
+        // `CognitiveMemoryGoalStore` so the read probe surfaces the
+        // same records the curator persisted via the `GoalStore`
+        // trait (the previous `load_goal_board` path read a different
+        // fact concept and never saw curator writes).
+        use crate::goals::GoalStore as _;
+        let store =
+            crate::goals::CognitiveMemoryGoalStore::new(state_root.clone())?;
+        store.list()?
     };
 
     println!("Probe mode: improvement-curation-read");

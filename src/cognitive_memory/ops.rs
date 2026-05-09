@@ -27,6 +27,10 @@ pub(crate) fn escape_cypher(s: &str) -> String {
 }
 
 impl CognitiveMemoryOps for NativeCognitiveMemory {
+    fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
     fn record_sensory(
         &self,
         modality: &str,
@@ -208,7 +212,7 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
     ) -> SimardResult<Vec<CognitiveFact>> {
         let q = escape_cypher(query);
         let rows = self.query(&format!(
-            "MATCH (f:Fact) WHERE (f.concept CONTAINS '{q}' OR f.content CONTAINS '{q}') AND f.confidence >= {min_confidence} RETURN f.id, f.concept, f.content, f.confidence, f.source_id, f.tags LIMIT {limit}"
+            "MATCH (f:Fact) WHERE (f.concept CONTAINS '{q}' OR f.content CONTAINS '{q}') AND f.confidence >= {min_confidence} RETURN f.id, f.concept, f.content, f.confidence, f.source_id, f.tags ORDER BY f.id DESC LIMIT {limit}"
         ))?;
         Ok(rows
             .iter()

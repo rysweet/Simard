@@ -25,11 +25,17 @@
 /// Stable Rust only — does not depend on the nightly
 /// `floor_char_boundary` API.
 pub fn truncate_to_char_boundary(s: &mut String, max_bytes: usize) {
-    let _ = (s, max_bytes);
-    unimplemented!(
-        "truncate_to_char_boundary: TDD stub — implementation lands in \
-         step 8 of issue #1590 follow-up"
-    );
+    if s.len() <= max_bytes {
+        return;
+    }
+    // Walk backwards from `max_bytes` to find the largest char boundary
+    // ≤ `max_bytes`. Byte 0 is always a valid boundary, so the loop
+    // terminates without underflow.
+    let mut idx = max_bytes;
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    s.truncate(idx);
 }
 
 #[cfg(test)]
