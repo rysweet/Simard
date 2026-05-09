@@ -37,9 +37,9 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [Meeting backend API reference](./reference/meeting-backend-api.md) - Rust API for the unified MeetingBackend.
 - [LightweightChatSession reference](./reference/lightweight-chat-session.md) - Direct-subprocess session used for Copilot-provider meeting turns (no PTY overhead).
 - [Terminal session idle detection](./reference/terminal-session-idle-detection.md) - How Simard determines when a PTY session is genuinely idle vs. silently computing.
-- [Cognitive memory bridge helpers](./reference/cognitive-memory-bridge-helpers.md) - `launch_writer_bridge` / `open_reader_bridge` resolution ladder, the in-process Arc shortcut, and the strict no-silent-degradation contract.
-- [Cognitive-memory goal store adapter](./reference/cognitive-memory-goal-store.md) - The `GoalStore` implementation that backs `RuntimePorts.goal_store` with cognitive memory.
-- [String truncation helpers](./reference/string-truncation-helpers.md) - `truncate_to_char_boundary` for UTF-8-safe byte-budget truncation.
+- [Cognitive memory bridge helpers](./reference/cognitive-memory-bridge-helpers.md) - `launch_writer_bridge` / `open_reader_bridge` resolution ladder; design notes for the planned in-process Arc shortcut and strict no-silent-degradation contract (issue #1590 follow-up).
+- [Cognitive-memory goal store adapter](./reference/cognitive-memory-goal-store.md) - Design for the planned `GoalStore` implementation that will back `RuntimePorts.goal_store` with cognitive memory (issue #1590 follow-up).
+- [String truncation helpers](./reference/string-truncation-helpers.md) - Design for the planned `truncate_to_char_boundary` UTF-8-safe byte-budget helper (issue #1590 follow-up).
 - [Concept: truthful runtime metadata](./concepts/truthful-runtime-metadata.md) - Read the design rationale behind the stricter runtime contract.
 
 ## Canonical executable surface
