@@ -87,6 +87,11 @@ fn no_legacy_goal_records_json_references_outside_migration_files() {
             "config.rs",
             "tests_config.rs",
             "tests_goal_records_migration.rs",
+            // The cognitive-memory-backed adapter mentions the legacy file
+            // in (a) a module-level doc comment that explains *why* the
+            // legacy artefact is no longer produced, and (b) a `#[cfg(test)]`
+            // assertion that the file is NOT created. Both are intentional.
+            "cognitive_memory_store.rs",
         ],
     );
 
