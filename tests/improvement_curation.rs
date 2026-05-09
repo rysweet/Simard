@@ -143,7 +143,13 @@ approve: Promote this pattern into a repeatable benchmark | priority=2 | status=
     assert!(
         engineer_rendered.contains("Active goal 1: p1 [active] Capture denser execution evidence")
     );
-    assert!(engineer_rendered.contains("Verification status: verified"));
+    // PR #1536 ("refactor(engineer-loop): remove plan-parse-execute, replace
+    // with agentic orchestration") removed the verification subsystem and
+    // hardcoded the post-action status to "agent-completed". This assertion
+    // was masked by the cross-process durability bug (issue #1590) — the
+    // earlier "Active goals count: 1" assertion failed first. After the
+    // #1590 fix the test reaches this line and we pin the current contract.
+    assert!(engineer_rendered.contains("Verification status: agent-completed"));
 }
 
 #[test]

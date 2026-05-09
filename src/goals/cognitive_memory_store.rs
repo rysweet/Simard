@@ -90,50 +90,23 @@ impl CognitiveMemoryGoalStore {
         // state_root), `list()` returns an empty Vec rather than
         // surfacing the error — `GoalStore::list` is best-effort and the
         // FileBackedGoalStore behaved the same way (`load_json_or_default`).
-        eprintln!(
-            "[probe-1590-list] pid={} state_root={:?} attempting open_reader_bridge",
-            std::process::id(),
-            self.state_root
-        );
         let reader = match open_reader_bridge(&self.state_root) {
-            Ok(r) => {
-                eprintln!(
-                    "[probe-1590-list] pid={} reader OPEN read_only={}",
-                    std::process::id(),
-                    r.ops().is_read_only()
-                );
-                r
-            }
+            Ok(r) => r,
+            Err(_) => return Ok(Vec::new()),
+        };
+        let facts = match reader
+            .ops()
+            .search_facts(GOAL_STORE_FACT_CONCEPT, GOAL_STORE_LIST_LIMIT, 0.0)
+        {
+            Ok(f) => f,
             Err(e) => {
                 eprintln!(
-                    "[probe-1590-list] pid={} open_reader_bridge ERR {:?}",
-                    std::process::id(),
-                    e
+                    "[simard] CognitiveMemoryGoalStore::list: search_facts failed ({e}) — \
+                     returning empty record set"
                 );
                 return Ok(Vec::new());
             }
         };
-        let facts =
-            match reader
-                .ops()
-                .search_facts(GOAL_STORE_FACT_CONCEPT, GOAL_STORE_LIST_LIMIT, 0.0)
-            {
-                Ok(f) => {
-                    eprintln!(
-                        "[probe-1590-list] pid={} search_facts OK returned={} facts",
-                        std::process::id(),
-                        f.len()
-                    );
-                    f
-                }
-                Err(e) => {
-                    eprintln!(
-                        "[simard] CognitiveMemoryGoalStore::list: search_facts failed ({e}) — \
-                     returning empty record set"
-                    );
-                    return Ok(Vec::new());
-                }
-            };
 
         // For each slug, keep the fact with the largest node_id (most
         // recent UUID-v7).
@@ -173,19 +146,7 @@ impl GoalStore for CognitiveMemoryGoalStore {
 
     fn put(&self, record: GoalRecord) -> SimardResult<()> {
         let content = Self::encode(&record)?;
-        eprintln!(
-            "[probe-1590-put] pid={} state_root={:?} slug={:?} status={:?} title={:?}",
-            std::process::id(),
-            self.state_root,
-            record.slug,
-            record.status,
-            record.title
-        );
         let writer = launch_writer_bridge(&self.state_root)?;
-        eprintln!(
-            "[probe-1590-put] pid={} writer-bridge OPENED",
-            std::process::id()
-        );
         writer.ops().store_fact(
             GOAL_STORE_FACT_CONCEPT,
             &content,
@@ -193,11 +154,6 @@ impl GoalStore for CognitiveMemoryGoalStore {
             &[GOAL_STORE_TAG.to_string()],
             GOAL_STORE_SOURCE,
         )?;
-        eprintln!(
-            "[probe-1590-put] pid={} store_fact OK slug={:?}",
-            std::process::id(),
-            record.slug
-        );
         Ok(())
     }
 
