@@ -31,7 +31,7 @@
 //! underlying DB has never been opened).
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
 
 use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::error::{SimardError, SimardResult};
@@ -116,9 +116,20 @@ impl ReaderBridge {
 // canonicalises to the registered one short-circuit. This protects tests
 // that pass arbitrary temp-dir state_roots from accidentally receiving
 // the daemon's writer.
+//
+// IMPORTANT (issue #1590): the registration stores a `Weak` reference,
+// not a strong `Arc`. Rust does NOT drop `static` items at process
+// exit, so a strong `Arc` here would prevent the inner `lbug::Database`
+// from ever dropping. lbug's `force_checkpoint_on_close` only fires on
+// `Database::drop` — keeping the strong Arc here would cause writes to
+// stay buffered in the WAL forever and never reach the main DB file.
+// Using `Weak` lets the registration coexist with the daemon's (or the
+// bootstrap's) own strong Arc; when that strong Arc drops at process
+// exit, the Database drops and checkpoints. Subsequent processes
+// opening the DB read-only then see the committed writes.
 // ---------------------------------------------------------------------------
 
-static IN_PROCESS_WRITER: RwLock<Option<(PathBuf, Arc<dyn CognitiveMemoryOps>)>> =
+static IN_PROCESS_WRITER: RwLock<Option<(PathBuf, Weak<dyn CognitiveMemoryOps>)>> =
     RwLock::new(None);
 
 fn canonical_or_self(p: &Path) -> PathBuf {
@@ -134,6 +145,15 @@ fn canonical_or_self(p: &Path) -> PathBuf {
 /// reflection loop, …) skip the IPC round-trip and the direct-open
 /// ladder entirely — they share the daemon's writer through `Arc::clone`.
 ///
+/// The registration stores a `Weak` reference; the caller must keep
+/// the strong `Arc` alive for as long as the registration is meant to
+/// be valid. When the strong Arc is dropped (e.g. at process exit),
+/// the registration silently expires — `lookup_in_process_writer`
+/// returns `None` and the launcher falls through to the next ladder
+/// tier. This avoids the static-Arc-leak that prevented
+/// `lbug::Database::drop` from running at process exit and stranded
+/// writes in the WAL (issue #1590).
+///
 /// Subsequent calls overwrite the previous registration (last writer
 /// wins). In production there is exactly one daemon writer per process,
 /// so overwriting is harmless. Tests that need to reset the registration
@@ -141,7 +161,7 @@ fn canonical_or_self(p: &Path) -> PathBuf {
 pub fn register_in_process_writer(state_root: PathBuf, writer: Arc<dyn CognitiveMemoryOps>) {
     let key = canonical_or_self(&state_root);
     if let Ok(mut g) = IN_PROCESS_WRITER.write() {
-        *g = Some((key, writer));
+        *g = Some((key, Arc::downgrade(&writer)));
     }
 }
 
@@ -158,15 +178,15 @@ pub fn clear_in_process_writer() {
 
 /// Look up a registered in-process writer for `state_root`. Returns
 /// `Some(arc)` only if both `state_root` and the registered key
-/// canonicalise to the same path.
+/// canonicalise to the same path AND the registered `Weak` still
+/// upgrades to a live strong `Arc`.
 fn lookup_in_process_writer(state_root: &Path) -> Option<Arc<dyn CognitiveMemoryOps>> {
     let g = IN_PROCESS_WRITER.read().ok()?;
-    let (registered_root, arc) = g.as_ref()?;
-    if canonical_or_self(state_root) == canonical_or_self(registered_root) {
-        Some(Arc::clone(arc))
-    } else {
-        None
+    let (registered_root, weak) = g.as_ref()?;
+    if canonical_or_self(state_root) != canonical_or_self(registered_root) {
+        return None;
     }
+    weak.upgrade()
 }
 
 /// Decide whether `state_root` matches the daemon's owned state root.
