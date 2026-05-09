@@ -56,6 +56,7 @@ fn seeded_board() -> GoalBoard {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn reader_returns_snapshot_from_cognitive_memory_without_legacy_file() {
     let root = fresh_state_root("reader");
     let board = seeded_board();
@@ -93,6 +94,7 @@ fn reader_returns_snapshot_from_cognitive_memory_without_legacy_file() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn writer_persists_through_cognitive_memory_without_legacy_file() {
     let root = fresh_state_root("writer");
     {
@@ -132,6 +134,7 @@ fn writer_persists_through_cognitive_memory_without_legacy_file() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn reader_returns_empty_board_when_snapshot_missing() {
     // Resilience contract: load_goal_board returns an empty board when no
     // snapshot exists (operations.rs:188-214). The dashboard helper must
@@ -153,6 +156,7 @@ fn reader_returns_empty_board_when_snapshot_missing() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn writer_round_trip_via_dashboard_helpers() {
     // End-to-end: save through the dashboard helper, then read through the
     // dashboard helper, must round-trip without touching disk.

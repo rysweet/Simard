@@ -76,6 +76,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    #[serial_test::serial(cognitive_memory)]
     fn goal_curation_read_probe_succeeds_with_empty_state() {
         let dir = TempDir::new().unwrap();
         let result = run_goal_curation_read_probe(

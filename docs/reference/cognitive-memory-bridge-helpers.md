@@ -1,10 +1,9 @@
 ---
 title: Cognitive memory bridge helpers
-description: Reference for launch_writer_bridge and open_reader_bridge — the canonical entry points for obtaining a CognitiveMemoryOps adapter from non-daemon contexts.
-last_updated: 2026-05-08
+description: Reference for launch_writer_bridge and open_reader_bridge — the canonical entry points for obtaining a CognitiveMemoryOps adapter, including the planned in-process Arc shortcut and strict no-silent-degradation contract.
+last_updated: 2026-05-09
 owner: simard
 doc_type: reference
-status: design — not yet implemented
 related:
   - ./goal-board-api.md
   - ../concepts/goal-board-persistence.md
@@ -13,34 +12,29 @@ related:
 
 # Cognitive memory bridge helpers
 
-> **Status: design specification — not yet implemented.**
->
-> Neither `launch_writer_bridge` nor `open_reader_bridge` exists in
-> [`src/memory_ipc/mod.rs`](https://github.com/rysweet/Simard/blob/main/src/memory_ipc/mod.rs)
-> today. That module currently exports `default_socket_path`,
-> `default_state_root`, `reap_stale_open_lock`, `RemoteCognitiveMemory`, and
-> `SharedMemory`. The bridge-acquisition pattern lives inline in
-> [`launch_real_meeting_bridge`](https://github.com/rysweet/Simard/blob/main/src/operator_commands_meeting/meeting_session.rs)
-> at `meeting_session.rs:29`.
->
-> This document is the **target API** that issue
-> [#1590](https://github.com/rysweet/Simard/issues/1590) will land. It
-> exists so that consumer migrations and call-site updates can be reviewed
-> against a stable contract. Once the helpers are implemented, this status
-> banner will be removed and the doc will return to mkdocs nav.
+> **Status: partially shipped + design.** The two helpers
+> (`launch_writer_bridge`, `open_reader_bridge`) and their two-tier
+> writer/reader ladders are shipped today and used by every consumer listed
+> in the [migration call-site map](#migration-call-site-map). The
+> **in-process `Arc` shortcut** (tier 0) and the **strict
+> no-silent-degradation contract** (removal of the read-only fallback) are
+> tracked under issue
+> [#1590](https://github.com/rysweet/Simard/issues/1590) and its follow-up
+> regression-fix work; sections below marked "Planned" describe behavior that
+> is **not yet present** on `main`. Sections without that marker describe
+> code that exists today.
 
-`src/memory_ipc/mod.rs` will expose two helper functions that every non-daemon
+`src/memory_ipc/launcher.rs` exposes two helper functions that every
 consumer should use to obtain a typed cognitive-memory bridge:
 
 | Helper | Returns | Use case |
 |--------|---------|----------|
-| `launch_writer_bridge` | `SimardResult<WriterBridge>` | Anything that may write — dashboard mutation handlers, meeting REPL flows, restore CLI |
-| `open_reader_bridge` | `SimardResult<ReaderBridge>` | Read-only consumers — dashboard read handlers (`workboard`, `current_work`, `metrics`, `goals` GET), engineer-loop top-5 read, inspection tools |
+| `launch_writer_bridge` | `SimardResult<WriterBridge>` | Anything that may write — dashboard mutation handlers (`promote_goal`, `demote_goal`, `dismiss_goal`, …), meeting REPL flows, restore CLI |
+| `open_reader_bridge` | `SimardResult<ReaderBridge>` | Read-only consumers — dashboard read handlers (`workboard`, `current_work`, `metrics`, GET goals), engineer-loop top-5 read, inspection tools |
 
-These helpers will encapsulate the **daemon-or-direct fallback ladder** that
-currently lives only inside `launch_real_meeting_bridge`. They replace ad-hoc
-instantiation of `NativeCognitiveMemory` and `RemoteCognitiveMemory` across
-the codebase.
+These helpers encapsulate the **daemon-or-direct fallback ladder** so that
+callers never instantiate `NativeCognitiveMemory` or `RemoteCognitiveMemory`
+directly.
 
 ---
 
@@ -88,39 +82,128 @@ reported up-front.
 pub fn launch_writer_bridge(state_root: &Path) -> SimardResult<WriterBridge>
 ```
 
-Returns a bridge that supports both reads and writes. Tries two writer
-sources in order, stopping at the first success:
+Returns a bridge that supports both reads and writes.
+
+### Today's resolution ladder
+
+The shipped implementation tries two writer sources in order, then a
+read-only fallback:
 
 | Tier | Source | Condition |
 |------|--------|-----------|
-| 1 | `RemoteCognitiveMemory::connect(default_socket_path())` | A running OODA daemon's IPC socket exists at `~/.simard/memory.sock` |
-| 2 | `NativeCognitiveMemory::open(state_root)` | No daemon socket; this process can take the writer lock directly |
+| 1 | `RemoteCognitiveMemory::connect(default_socket_path())` | A running OODA daemon's IPC socket exists at `~/.simard/memory.sock` and `state_root` matches the daemon's |
+| 2 | `NativeCognitiveMemory::open(state_root)` | No daemon socket; this process can take the writer lock directly (after `reap_stale_open_lock`) |
+| 3 (read-only fallback) | `NativeCognitiveMemory::open_read_only(state_root)` | Both writer attempts failed; the helper currently returns the read-only handle wrapped as a `WriterBridge` |
 
-If both tiers fail (the daemon socket is absent **and** another writer holds
-the local LadybugDB lock that the stale-lock reaper could not free), the
-helper returns `Err(SimardError::BridgeTransportError { … })`. There is **no
-silent read-only fallback at the writer-acquisition path** — a caller that
-asked for a writer always learns synchronously whether one was obtainable.
+Tier 3 is the **silent-degradation hazard** that issue #1590's follow-up
+work targets — see "Planned changes" below.
 
-The helper additionally:
+### Planned: tier 0 in-process `Arc` shortcut
 
-- Creates `state_root` (and parents) on first call via `fs::create_dir_all`.
-- Runs `reap_stale_open_lock` before tier 2 to clear locks left by crashed
-  writers.
+For callers that share a process with the OODA daemon (the dashboard, the
+OODA reflection loop), tier 0 is added in front of tiers 1–2:
 
-**Example — dashboard write handler**
+| Tier | Source | Condition |
+|------|--------|-----------|
+| 0 (planned) | Daemon-registered in-process `Arc<dyn CognitiveMemoryOps>` | Same-process callers when the daemon has registered its writer via `register_in_process_writer` |
+
+The OODA daemon will register its live `Arc<dyn CognitiveMemoryOps>` (the
+same handle backing the IPC server) with the launcher at startup:
+
+```rust
+// src/memory_ipc/launcher.rs (planned)
+static IN_PROCESS_WRITER: OnceLock<Arc<dyn CognitiveMemoryOps>> = OnceLock::new();
+
+pub fn register_in_process_writer(writer: Arc<dyn CognitiveMemoryOps>) {
+    let _ = IN_PROCESS_WRITER.set(writer);
+}
+```
+
+When the dashboard (which runs inside the daemon process) calls
+`launch_writer_bridge`, the launcher checks the `OnceLock` first. On a hit,
+it wraps the `Arc` in a `WriterBridge` and returns immediately — no
+Unix-socket round-trip, no lock contention, and (importantly) no risk of
+falling into the read-only fallback that today's tier-3 ladder still has.
+
+Non-daemon callers (the meeting REPL, the engineer loop, CLI tools) skip
+tier 0 because nothing has registered into the `OnceLock` in their process.
+They proceed to tier 1 (IPC) and tier 2 (direct open) as before.
+
+### Planned: remove the silent read-only fallback
+
+Tier 3 (read-only fallback wrapped as `WriterBridge`) is **removed** in the
+follow-up. After the change, if tiers 0–2 all fail to obtain a writer, the
+helper returns `Err(SimardError::RuntimeInitFailed { component:
+"memory-ipc-launcher", … })`.
+
+This matters because dashboard mutation handlers currently treat
+`launch_writer_bridge` success as "we have a writer". When the helper
+silently returns a read-only handle, `save_goal_board(&board, bridge.ops())`
+silently no-ops at the IPC transport layer (or the underlying
+`store_fact` call returns `BridgeTransportError`), and the handler's HTTP
+response body becomes whatever its post-write code path produces (today,
+`{"status":"ok"}` for the dashboard mutation handlers). This is the
+hollow-success bug class targeted by issue #1590's follow-up.
+
+### Tier 1 → 2 transition: state-root agreement
+
+Tier 1 (IPC) only fires when the requested `state_root` matches the
+daemon's owned state root, computed via `state_root_matches_daemon`. Both
+sides canonicalize their paths (resolving symlinks and `..` segments)
+before comparing. If they disagree, the launcher silently skips IPC and
+proceeds to tier 2 — this prevents a daemon owning a different DB from
+masking the writes the caller intended for its own DB.
+
+If tier 1 is selected and the IPC connection fails (socket exists but
+`RemoteCognitiveMemory::connect` errors), the launcher logs the error to
+stderr and falls through to tier 2 rather than returning early. This keeps
+short-window daemon restarts (where the socket file lingers a few hundred
+milliseconds) from producing spurious failures.
+
+### Planned: defensive `is_read_only()` invariant
+
+`CognitiveMemoryOps` gains a single defaulted method:
+
+```rust
+pub trait CognitiveMemoryOps: Send + Sync + 'static {
+    // … existing methods …
+    fn is_read_only(&self) -> bool { false }
+}
+```
+
+`NativeCognitiveMemory::open_read_only` overrides this to return `true`.
+The IPC client (`RemoteCognitiveMemory`) and the daemon's in-process Arc
+both leave the default `false` because the daemon is the writer.
+
+`WriterBridge`'s constructor calls `assert!(!ops.is_read_only(), …)` — an
+always-on assertion (not `debug_assert!`) so the invariant fails loudly
+even in release builds. With tier 3 removed, this assertion exists as a
+belt-and-braces guard against future regressions; tiers 0–2 all return
+writer-capable handles by construction.
+
+We chose `assert!` over `debug_assert!` deliberately: a silent degradation
+to read-only is exactly the bug class this work is meant to eliminate, and
+catching it in release builds is worth the negligible runtime cost of one
+virtual call per `WriterBridge` construction.
+
+**Example — dashboard write handler (post-fix)**
 
 ```rust
 use simard::goal_curation::{load_goal_board, save_goal_board};
 use simard::memory_ipc::{launch_writer_bridge, default_state_root};
 
 let state_root = default_state_root();
-let bridge = launch_writer_bridge(&state_root)?;     // Err if no writer available
+let bridge = launch_writer_bridge(&state_root)?;     // Err if no writer
 
 let mut board = load_goal_board(bridge.ops())?;
 mutate(&mut board);
 save_goal_board(&board, bridge.ops())?;
 ```
+
+After the fix, the `?` on `launch_writer_bridge` is load-bearing: where
+today's ladder might silently downgrade and let the handler return
+`{"status":"ok"}`, the post-fix ladder returns `Err`, and the HTTP handler
+converts that into a 500 with the underlying error message.
 
 ---
 
@@ -138,12 +221,12 @@ order:
 | 1 | `RemoteCognitiveMemory::connect(default_socket_path())` | A running daemon's IPC socket exists |
 | 2 | `NativeCognitiveMemory::open_read_only(state_root)` | No daemon; the read-only opener never contends with the writer lock |
 
-Read-only callers should always prefer this helper over `launch_writer_bridge`
-because:
+Read-only callers should always prefer this helper over
+`launch_writer_bridge` because:
 
 - It never attempts to take the writer lock, so it never contends with a
-  running daemon when the IPC socket happens to be missing during a
-  daemon restart.
+  running daemon when the IPC socket happens to be missing during a daemon
+  restart.
 - `open_read_only` is cheap — no WAL recovery, no lock acquisition, no
   reaper.
 
@@ -153,6 +236,9 @@ trait object exposes the full `CognitiveMemoryOps` surface) and will fail
 at runtime with `BridgeTransportError`. Callers should use `WriterBridge`
 when they intend to write — see "Typed bridge wrappers" above for the
 rationale.
+
+`open_reader_bridge` is **not** affected by the issue-#1590 follow-up; its
+ladder is unchanged.
 
 **Example — dashboard read handler**
 
@@ -169,13 +255,14 @@ render_workboard(&board);
 
 ## State root resolution
 
-Both helpers accept a `&Path`. The conventional way to compute that path is:
+Both helpers accept a `&Path`. The conventional way to compute that path
+is:
 
 ```rust
 let state_root = simard::memory_ipc::default_state_root();
 ```
 
-`default_state_root()` already exists today and resolves to:
+`default_state_root()` resolves to:
 
 1. `$SIMARD_STATE_ROOT` if set, else
 2. `$HOME/.simard/state`.
@@ -188,73 +275,41 @@ directory.
 
 ---
 
-## Migration from ad-hoc instantiation
-
-Today, each consumer either:
-
-- Instantiates `NativeCognitiveMemory` or `RemoteCognitiveMemory` inline,
-  sometimes with subtle variations in tier order, lock handling, and error
-  reporting; or
-- Reads `goal_records.json` directly via `std::fs` and `serde_json`,
-  bypassing cognitive memory entirely.
-
-The most-mature inline pattern lives in
-[`src/operator_commands_meeting/meeting_session.rs::launch_real_meeting_bridge`](https://github.com/rysweet/Simard/blob/main/src/operator_commands_meeting/meeting_session.rs).
-That function currently:
-
-1. Tries `RemoteCognitiveMemory::connect(default_socket_path())`.
-2. Falls back to `NativeCognitiveMemory::open(state_root)`.
-3. Falls back to `NativeCognitiveMemory::open_read_only(state_root)` with a
-   warning.
-
-Issue #1590 will:
-
-- Extract the writer-bearing tiers (1 + 2) into `launch_writer_bridge`.
-- Extract the read-only tier into `open_reader_bridge` (combined with
-  tier 1 of the writer ladder for daemon-aware reads).
-- Reduce `launch_real_meeting_bridge` to a thin wrapper:
-
-  ```rust
-  fn launch_real_meeting_bridge() -> SimardResult<WriterBridge> {
-      launch_writer_bridge(&default_state_root())
-  }
-  ```
-
-  with the `Box<dyn Error>` shim preserved at its current call site as long
-  as the meeting backend's caller signature still uses it.
-
-New consumers should always call the helpers directly rather than copying
-the ladder.
-
----
-
 ## Migration call-site map
 
-After issue #1590 lands, the following sites will use one of the two
-helpers in place of inline instantiation or `FileBackedGoalStore`:
+The following sites use one of the two helpers in place of inline
+instantiation, `FileBackedGoalStore`, or direct `goal_records.json` reads.
+Rows marked **(planned)** are the consumers covered by the issue-#1590
+follow-up.
 
-| File | Current pattern | Target helper |
-|------|-----------------|---------------|
-| `src/operator_commands_meeting/meeting_session.rs:29` | inline three-tier ladder | `launch_writer_bridge` (wrapped) |
-| `src/operator_commands_meeting/goal_curation.rs:58` | `FileBackedGoalStore::try_new(... goal_records.json)` | `open_reader_bridge` + `load_goal_board` + `active_goals_as_records` |
-| `src/operator_commands_meeting/improvement_curation.rs:123` | `FileBackedGoalStore::try_new(... goal_records.json)` | `launch_writer_bridge` + `load_goal_board` + `active_goals_as_records` |
-| `src/engineer_loop/mod.rs:276` | `FileBackedGoalStore::try_new(... goal_records.json).active_top_goals(5)` | `open_reader_bridge` + `load_goal_board` + `active_goals_as_records` |
-| `src/operator_commands_dashboard/goals.rs:12,48` | `std::fs::read_to_string(... goal_records.json)` + `serde_json::from_str` | `open_reader_bridge` (GET) + `launch_writer_bridge` (mutation handlers) |
-| `src/operator_commands_dashboard/workboard.rs:112` | `std::fs::read_to_string(... goal_records.json)` | `open_reader_bridge` |
-| `src/operator_commands_dashboard/current_work.rs` | inline file read | `open_reader_bridge` |
-| `src/operator_commands_dashboard/metrics.rs` | inline file read | `open_reader_bridge` |
+| Site | Helper | Status |
+|------|--------|--------|
+| `engineer_loop::engineer_loop_run_inner` (top-5 read) | `launch_writer_bridge` | shipped (uses writer for legacy migration write-back; will move to `open_reader_bridge` when migration is removed) |
+| Meeting REPL goal-curation flows | `open_reader_bridge` / `launch_writer_bridge` | shipped |
+| Meeting REPL improvement-curation flows | `launch_writer_bridge` | shipped |
+| Operator dashboard goals API (mutations) | `launch_writer_bridge` | shipped |
+| Operator dashboard goals API (GET) | `open_reader_bridge` | shipped |
+| Operator dashboard workboard / current_work / metrics | `open_reader_bridge` | shipped |
+| `bootstrap::assembly` (`RuntimePorts.goal_store`) | `CognitiveMemoryGoalStore` (planned adapter using both helpers) | **planned** — see [Cognitive-memory goal store adapter](./cognitive-memory-goal-store.md) |
+| Daemon process registers in-process writer | `register_in_process_writer` | **planned** |
 
-`FileBackedGoalStore` itself remains in `src/goals/store.rs` as a value type
-used by `meeting_backend` and tests — issue #1590 only retires its use as a
-production goal-board persistence target.
+`FileBackedGoalStore` itself remains in `src/goals/store.rs` as a value
+type. Its only remaining production-shaped consumer after the planned
+follow-up is `src/meeting_backend/mod.rs`, which constructs one through a
+file path local to that module's setup. The bootstrap adapter migration is
+what removes `FileBackedGoalStore` from the production goal-board
+persistence path.
 
 ---
 
 ## Related reading
 
-- [Goal board API reference](./goal-board-api.md) — the primary consumers of
-  these helpers.
-- [Cognitive memory bridge wire protocol](./bridge-wire-protocol.md) — what
-  the IPC tier negotiates.
-- [Goal board persistence — concept](../concepts/goal-board-persistence.md) —
-  the lifecycle the helpers participate in.
+- [Goal board API reference](./goal-board-api.md) — the primary consumers
+  of these helpers.
+- [Cognitive-memory goal store adapter](./cognitive-memory-goal-store.md)
+  — how the planned `RuntimePorts.goal_store` adapter wraps these helpers
+  behind the `GoalStore` trait.
+- [Cognitive memory bridge wire protocol](./bridge-wire-protocol.md) —
+  what the IPC tier negotiates.
+- [Goal board persistence — concept](../concepts/goal-board-persistence.md)
+  — the lifecycle the helpers participate in.

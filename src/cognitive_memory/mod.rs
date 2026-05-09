@@ -91,6 +91,21 @@ pub trait CognitiveMemoryOps: Send + Sync {
     fn check_triggers(&self, content: &str) -> SimardResult<Vec<CognitiveProspective>>;
 
     fn get_statistics(&self) -> SimardResult<CognitiveStatistics>;
+
+    /// Reports whether this backend was opened in read-only mode.
+    ///
+    /// Defaulted to `false` because the overwhelming majority of
+    /// implementations are writers (the IPC client, the daemon's
+    /// in-process Arc, the live `NativeCognitiveMemory::open`).
+    /// `NativeCognitiveMemory::open_read_only` overrides this to `true`.
+    ///
+    /// `WriterBridge` constructors assert that this is `false` so a
+    /// read-only handle cannot be silently wrapped as a writer — the
+    /// "hollow success" failure mode that issue #1590's follow-up
+    /// targets.
+    fn is_read_only(&self) -> bool {
+        false
+    }
 }
 
 // ============================================================================
@@ -107,6 +122,12 @@ pub struct NativeCognitiveMemory {
     path: PathBuf,
     #[allow(dead_code)]
     _temp_dir: Option<Arc<tempfile::TempDir>>,
+    /// Whether this handle was created via [`Self::open_read_only`].
+    /// Surfaced through [`CognitiveMemoryOps::is_read_only`] so the
+    /// `WriterBridge` defensive guard refuses to wrap a read-only
+    /// handle (issue #1590 follow-up — closes the dashboard hollow-
+    /// success failure mode).
+    read_only: bool,
 }
 
 // SAFETY: lbug::Database is thread-safe by design (internal locking).
@@ -149,6 +170,7 @@ impl NativeCognitiveMemory {
             db: Arc::new(db),
             path: db_path,
             _temp_dir: None,
+            read_only: false,
         };
         mem.ensure_schema()?;
         eprintln!(
@@ -180,6 +202,7 @@ impl NativeCognitiveMemory {
             db: Arc::new(db),
             path: db_path,
             _temp_dir: Some(Arc::new(tmp)),
+            read_only: false,
         };
         mem.ensure_schema()?;
         Ok(mem)
@@ -217,6 +240,7 @@ impl NativeCognitiveMemory {
             db: Arc::new(db),
             path: db_path,
             _temp_dir: None,
+            read_only: true,
         };
         eprintln!(
             "[simard] cognitive memory opened read-only — LadybugDB at {}",

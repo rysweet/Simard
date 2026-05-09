@@ -4,6 +4,7 @@ use super::types::{
 };
 use crate::sanitization::sanitize_terminal_text;
 use crate::terminal_session::compact_terminal_evidence_value;
+use crate::util::string_truncate::truncate_to_char_boundary;
 
 pub(super) fn classify_startup(scan: &TranscriptCheckpointScan, exited: bool) -> StartupStatus {
     if scan.has_wrapper_error {
@@ -347,9 +348,84 @@ pub(super) fn copilot_transcript_preview(
         .join(" | ");
 
     if normalized.len() > 512 {
-        normalized.truncate(512);
+        truncate_to_char_boundary(&mut normalized, 512);
         normalized.push_str("...");
     }
 
     normalized
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn flow_for_payload(payload: &str) -> CopilotSubmitFlowAsset {
+        CopilotSubmitFlowAsset {
+            launch_command: String::new(),
+            working_directory: PathBuf::new(),
+            wait_timeout_seconds: 0,
+            startup_banner: String::new(),
+            guidance_checkpoint: String::new(),
+            submit_hint: String::new(),
+            post_submit_checkpoint: None,
+            trust_prompt: None,
+            wrapper_error_signal: None,
+            workflow_noise_signals: Vec::new(),
+            payload_id: String::new(),
+            payload: payload.to_string(),
+        }
+    }
+
+    /// Issue #1590 follow-up — UTF-8 truncation panic regression test.
+    ///
+    /// `copilot_transcript_preview` calls `normalized.truncate(512)` after
+    /// joining the visible fragments. A multi-byte char (em-dash, CJK,
+    /// emoji) straddling byte 512 panics the runtime worker with
+    /// `assertion failed: self.is_char_boundary(new_len)`. After the
+    /// fix this site uses `truncate_to_char_boundary` and remains valid
+    /// UTF-8.
+    #[test]
+    fn copilot_transcript_preview_does_not_panic_on_em_dash_at_byte_512_boundary() {
+        // Build a single fragment whose byte length pushes the joined
+        // preview past byte 512 with an em-dash straddling 512.
+        let mut fragment = String::with_capacity(600);
+        fragment.push_str(&"a".repeat(511));
+        fragment.push('—'); // 3-byte UTF-8 sequence starts at byte 511
+        fragment.push_str(&"b".repeat(100));
+        let fragments = vec![fragment.clone()];
+        let flow = flow_for_payload("ignored-payload");
+
+        // Sanity: the joined preview is ≥ 512 bytes and the em-dash
+        // straddles byte 512.
+        assert!(fragment.len() > 512);
+        assert!(!fragment.is_char_boundary(512));
+
+        let preview = copilot_transcript_preview(&fragments, &flow);
+
+        assert!(
+            std::str::from_utf8(preview.as_bytes()).is_ok(),
+            "preview must remain valid UTF-8"
+        );
+        assert!(
+            preview.ends_with("..."),
+            "preview should still indicate truncation; got {preview:?}"
+        );
+    }
+
+    #[test]
+    fn copilot_transcript_preview_does_not_panic_on_emoji_at_byte_512_boundary() {
+        // 4-byte emoji 🎉 straddles byte 512 in the joined string.
+        let mut fragment = String::with_capacity(600);
+        fragment.push_str(&"a".repeat(510));
+        fragment.push('🎉'); // 4-byte UTF-8 sequence starts at byte 510
+        fragment.push_str(&"b".repeat(100));
+        let fragments = vec![fragment];
+        let flow = flow_for_payload("ignored-payload");
+
+        let preview = copilot_transcript_preview(&fragments, &flow);
+
+        assert!(std::str::from_utf8(preview.as_bytes()).is_ok());
+        assert!(preview.ends_with("..."));
+    }
 }

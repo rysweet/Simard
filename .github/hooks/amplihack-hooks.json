@@ -2,42 +2,42 @@
   "hooks": {
     "agentStop": [
       {
-        "bash": "/home/azureuser/src/Simard/worktrees/main/worktrees/feat/issue-1590-migrate-all-consumers-of-goalrecordsjson-the-file/.github/hooks/stop",
+        "bash": "/home/azureuser/src/Simard/worktrees/main/worktrees/feat/issue-1590-fix-three-related-cognitive-memory-regression-bugs/.github/hooks/stop",
         "timeoutSec": 30,
         "type": "command"
       }
     ],
     "postToolUse": [
       {
-        "bash": "/home/azureuser/src/Simard/worktrees/main/worktrees/feat/issue-1590-migrate-all-consumers-of-goalrecordsjson-the-file/.github/hooks/post-tool-use",
+        "bash": "/home/azureuser/src/Simard/worktrees/main/worktrees/feat/issue-1590-fix-three-related-cognitive-memory-regression-bugs/.github/hooks/post-tool-use",
         "timeoutSec": 30,
         "type": "command"
       }
     ],
     "preCompact": [
       {
-        "bash": "/home/azureuser/src/Simard/worktrees/main/worktrees/feat/issue-1590-migrate-all-consumers-of-goalrecordsjson-the-file/.github/hooks/pre-compact",
+        "bash": "/home/azureuser/src/Simard/worktrees/main/worktrees/feat/issue-1590-fix-three-related-cognitive-memory-regression-bugs/.github/hooks/pre-compact",
         "timeoutSec": 30,
         "type": "command"
       }
     ],
     "preToolUse": [
       {
-        "bash": "/home/azureuser/src/Simard/worktrees/main/worktrees/feat/issue-1590-migrate-all-consumers-of-goalrecordsjson-the-file/.github/hooks/pre-tool-use",
+        "bash": "/home/azureuser/src/Simard/worktrees/main/worktrees/feat/issue-1590-fix-three-related-cognitive-memory-regression-bugs/.github/hooks/pre-tool-use",
         "timeoutSec": 30,
         "type": "command"
       }
     ],
     "sessionStart": [
       {
-        "bash": "/home/azureuser/src/Simard/worktrees/main/worktrees/feat/issue-1590-migrate-all-consumers-of-goalrecordsjson-the-file/.github/hooks/session-start",
+        "bash": "/home/azureuser/src/Simard/worktrees/main/worktrees/feat/issue-1590-fix-three-related-cognitive-memory-regression-bugs/.github/hooks/session-start",
         "timeoutSec": 30,
         "type": "command"
       }
     ],
     "userPromptSubmitted": [
       {
-        "bash": "/home/azureuser/src/Simard/worktrees/main/worktrees/feat/issue-1590-migrate-all-consumers-of-goalrecordsjson-the-file/.github/hooks/user-prompt-submit",
+        "bash": "/home/azureuser/src/Simard/worktrees/main/worktrees/feat/issue-1590-fix-three-related-cognitive-memory-regression-bugs/.github/hooks/user-prompt-submit",
         "timeoutSec": 30,
         "type": "command"
       }
