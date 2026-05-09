@@ -5,7 +5,7 @@ handoff JSON contains, and how the OODA daemon (and the engineer loop)
 ingest handoff artifacts on their next cycle.
 
 > Quick reference: see the
-> [Real-Meeting & Dashboard E2E Verification section in CONTRIBUTING.md](../../CONTRIBUTING.md#real-meeting--dashboard-e2e-verification).
+> [Real-Meeting & Dashboard E2E Verification section in CONTRIBUTING.md](https://github.com/rysweet/Simard/blob/main/CONTRIBUTING.md#real-meeting--dashboard-e2e-verification).
 
 ---
 
@@ -329,7 +329,7 @@ issue tracker by hand.
 
 ## See Also
 
-- [`CONTRIBUTING.md`](../../CONTRIBUTING.md) — PR evidence requirements
+- [`CONTRIBUTING.md`](https://github.com/rysweet/Simard/blob/main/CONTRIBUTING.md) — PR evidence requirements
 - [`docs/dashboard.md`](../dashboard.md) — dashboard overview
 - [`docs/daemon-mode.md`](../daemon-mode.md) — OODA daemon overview
 - [`docs/operations/cognitive-memory-durability.md`](cognitive-memory-durability.md)

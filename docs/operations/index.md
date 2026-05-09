@@ -10,5 +10,5 @@ Simard deployment.
 | [Meeting REPL & Handoff Ingestion](meeting-handoffs.md) | Routing operator intent into the OODA loop |
 
 For contributor workflow (branching, merge policy, PR evidence
-requirements), see [`CONTRIBUTING.md`](../../CONTRIBUTING.md) at the
+requirements), see [`CONTRIBUTING.md`](https://github.com/rysweet/Simard/blob/main/CONTRIBUTING.md) at the
 repo root.

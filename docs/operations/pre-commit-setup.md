@@ -4,7 +4,7 @@ Step-by-step guide to installing and verifying the local pre-commit and
 pre-push hooks that mirror Simard's CI `pre-commit` workflow.
 
 > Quick reference: see the
-> [Local Pre-Commit Workflow section in CONTRIBUTING.md](../../CONTRIBUTING.md#local-pre-commit-workflow).
+> [Local Pre-Commit Workflow section in CONTRIBUTING.md](https://github.com/rysweet/Simard/blob/main/CONTRIBUTING.md#local-pre-commit-workflow).
 
 ---
 
@@ -17,7 +17,7 @@ pre-push hooks that mirror Simard's CI `pre-commit` workflow.
   matching the version CI uses. The repo does **not** currently pin a
   toolchain via `rust-toolchain.toml`; install whatever stable Rust
   CI is currently building against (see
-  [`.github/workflows/`](../../.github/workflows/)).
+  [`.github/workflows/`](https://github.com/rysweet/Simard/tree/main/.github/workflows)).
 - Repo cloned and you are at the repo root.
 
 ---
@@ -38,7 +38,7 @@ performs the following:
    - `pip install --user pre-commit`.
 3. Runs `pre-commit install --install-hooks`. The project pins
    `default_install_hook_types: [pre-commit, pre-push]` in
-   [`.pre-commit-config.yaml`](../../.pre-commit-config.yaml), so a
+   [`.pre-commit-config.yaml`](https://github.com/rysweet/Simard/blob/main/.pre-commit-config.yaml), so a
    single `--install-hooks` invocation creates both
    `.git/hooks/pre-commit` and `.git/hooks/pre-push`.
 4. Runs `pre-commit run --all-files` to populate caches and surface any
@@ -60,7 +60,7 @@ pre-commit run --all-files
 ## What the Hooks Check
 
 The actual configuration lives in
-[`.pre-commit-config.yaml`](../../.pre-commit-config.yaml); the table
+[`.pre-commit-config.yaml`](https://github.com/rysweet/Simard/blob/main/.pre-commit-config.yaml); the table
 below summarizes it.
 
 ### `pre-commit` stage (every `git commit`)
@@ -142,7 +142,7 @@ SKIP=cargo-clippy-precommit,cargo-fmt git commit -m "WIP"
 > **PRs pushed with `SKIP=` will be rejected at merge time.** CI runs
 > the same checks and merge is blocked on red CI. There is no
 > `--admin` override (see
-> [CONTRIBUTING.md → Merge Policy](../../CONTRIBUTING.md#merge-policy-no---admin-merges)).
+> [CONTRIBUTING.md → Merge Policy](https://github.com/rysweet/Simard/blob/main/CONTRIBUTING.md#merge-policy-no---admin-merges)).
 
 ---
 
@@ -241,7 +241,7 @@ pre-commit install --install-hooks       # re-install hooks if framework upgrade
 
 ## See Also
 
-- [`CONTRIBUTING.md`](../../CONTRIBUTING.md) — full contributor workflow
-- [`.pre-commit-config.yaml`](../../.pre-commit-config.yaml) — hook
+- [`CONTRIBUTING.md`](https://github.com/rysweet/Simard/blob/main/CONTRIBUTING.md) — full contributor workflow
+- [`.pre-commit-config.yaml`](https://github.com/rysweet/Simard/blob/main/.pre-commit-config.yaml) — hook
   configuration source of truth
 - `scripts/install-precommit.sh` — installer (added under issue #1631)

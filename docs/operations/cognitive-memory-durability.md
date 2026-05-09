@@ -5,7 +5,7 @@ backup loop that together guarantee Simard's cognitive memory survives
 graceful and forced restarts of the OODA daemon.
 
 > Quick reference for contributors: see the
-> [Cognitive Memory Durability section in CONTRIBUTING.md](../../CONTRIBUTING.md#cognitive-memory-durability-sigterm--periodic-backups).
+> [Cognitive Memory Durability section in CONTRIBUTING.md](https://github.com/rysweet/Simard/blob/main/CONTRIBUTING.md#cognitive-memory-durability-sigterm--periodic-backups).
 
 ---
 
@@ -207,7 +207,7 @@ Restart=on-failure
 `KillSignal=SIGTERM` (the systemd default) plus
 `TimeoutStopSec=30` gives the shutdown handler ample time to run; the
 sequence completes in well under a second on typical workloads. The
-[reference unit file](../../scripts/simard-ooda.service) is the source
+[reference unit file](https://github.com/rysweet/Simard/blob/main/scripts/simard-ooda.service) is the source
 of truth for production deployments.
 
 ---
@@ -396,7 +396,7 @@ daemon.
 
 - [`docs/memory.md`](../memory.md) — cognitive-memory data model
 - [`docs/daemon-mode.md`](../daemon-mode.md) — OODA daemon overview
-- [`CONTRIBUTING.md`](../../CONTRIBUTING.md) — pre-commit, merge policy,
+- [`CONTRIBUTING.md`](https://github.com/rysweet/Simard/blob/main/CONTRIBUTING.md) — pre-commit, merge policy,
   retention disclosure
 - [`docs/operations/meeting-handoffs.md`](meeting-handoffs.md) —
   meeting REPL & handoff ingestion

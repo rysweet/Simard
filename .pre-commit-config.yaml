@@ -56,3 +56,22 @@ repos:
         stages:
           - pre-push
           - manual
+
+      # ── pre-push (full clippy, mirrors CI verify.yml line 75) ────────
+      # CI invokes `pre_commit run --hook-stage pre-push cargo-clippy`
+      # explicitly (.github/workflows/verify.yml:75). The hook id MUST
+      # remain `cargo-clippy` for that invocation to succeed. This is
+      # the heavy variant — `--all-targets --all-features --locked` —
+      # the same flags CI passes. It's slower than `cargo-clippy-precommit`
+      # so it runs only at push time (and in CI), keeping commit latency
+      # low while still catching test-only or feature-gated lints before
+      # push.
+      - id: cargo-clippy
+        name: cargo clippy --all-targets --all-features --locked -- -D warnings (pre-push)
+        entry: cargo clippy --all-targets --all-features --locked -- -D warnings
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages:
+          - pre-push
+          - manual
