@@ -206,6 +206,7 @@ fn builtin_identity_loader_preserves_manifest_contract_metadata() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn bootstrap_assembly_produces_truthful_manifest_metadata() {
     let config = BootstrapConfig::resolve(BootstrapInputs {
         prompt_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")),
@@ -318,6 +319,7 @@ fn main_routes_through_the_unified_operator_cli() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn bootstrap_run_local_session_executes_the_cli_lifecycle() {
     let config = BootstrapConfig::resolve(BootstrapInputs {
         prompt_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")),
@@ -344,6 +346,7 @@ fn bootstrap_run_local_session_executes_the_cli_lifecycle() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn bootstrap_persists_durable_state_and_restores_latest_handoff() {
     let state_root = state_root("durable-restore");
     if state_root.exists() {
@@ -414,6 +417,7 @@ fn bootstrap_persists_durable_state_and_restores_latest_handoff() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn bootstrap_supports_composite_identity_execution() {
     let config = BootstrapConfig::resolve(BootstrapInputs {
         prompt_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")),
@@ -451,6 +455,7 @@ fn bootstrap_supports_composite_identity_execution() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn bootstrap_meeting_mode_persists_structured_decision_memory() {
     let config = BootstrapConfig::resolve(BootstrapInputs {
         prompt_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")),
@@ -516,6 +521,7 @@ fn bootstrap_meeting_mode_persists_structured_decision_memory() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn bootstrap_goal_curator_mode_persists_top_five_goal_state() {
     let config = BootstrapConfig::resolve(BootstrapInputs {
         prompt_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")),
@@ -550,6 +556,7 @@ fn bootstrap_goal_curator_mode_persists_top_five_goal_state() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn bootstrap_improvement_curator_mode_promotes_review_findings_into_durable_priorities() {
     let config = BootstrapConfig::resolve(BootstrapInputs {
         prompt_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")),
@@ -607,6 +614,7 @@ fn bootstrap_improvement_curator_mode_promotes_review_findings_into_durable_prio
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn bootstrap_assembly_supports_multiple_builtin_manifest_base_types() {
     // rusty-clawd and copilot-sdk now use real adapters that need external
     // processes/API keys, so they're tested separately in live tests.
@@ -676,6 +684,7 @@ fn bootstrap_assembly_supports_multiple_builtin_manifest_base_types() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn bootstrap_supports_terminal_shell_execution() {
     let config = BootstrapConfig::resolve(BootstrapInputs {
         prompt_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")),
@@ -752,6 +761,7 @@ fn bootstrap_supports_terminal_shell_execution() {
 
 #[test]
 #[ignore] // Requires rustyclawd binary or API key
+#[serial_test::serial(cognitive_memory)]
 fn bootstrap_supports_rusty_clawd_multi_process_execution() {
     let config = BootstrapConfig::resolve(BootstrapInputs {
         prompt_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")),
@@ -795,6 +805,7 @@ fn bootstrap_supports_rusty_clawd_multi_process_execution() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn bootstrap_assembly_surfaces_identity_base_type_mismatches_explicitly() {
     let config = BootstrapConfig::resolve(BootstrapInputs {
         prompt_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")),
@@ -822,6 +833,7 @@ fn bootstrap_assembly_surfaces_identity_base_type_mismatches_explicitly() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn bootstrap_assembly_surfaces_unsupported_topologies_explicitly() {
     let config = BootstrapConfig::resolve(BootstrapInputs {
         prompt_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets")),
