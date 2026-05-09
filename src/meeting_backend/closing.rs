@@ -129,6 +129,7 @@ impl MeetingBackend {
             &self.history,
             &action_items,
             &structured_decisions,
+            &self.applied_templates,
         ) {
             Ok(p) => Some(p.to_string_lossy().to_string()),
             Err(e) => {
@@ -175,6 +176,7 @@ impl MeetingBackend {
             open_questions,
             themes,
             participants,
+            applied_templates: self.applied_templates.clone(),
         })
     }
 }

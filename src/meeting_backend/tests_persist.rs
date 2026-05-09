@@ -239,4 +239,95 @@ fn extract_decisions_none_found() {
     assert!(decisions.is_empty());
 }
 
+// ── Handoff markdown report — agenda section (issue #1615) ──────
+
+#[test]
+fn handoff_report_omits_agenda_section_when_no_template_applied() {
+    use std::fs;
+
+    let topic = format!(
+        "test_no_agenda_{}",
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    );
+    let path = write_handoff_markdown_report(
+        &topic,
+        "2025-01-01T00:00:00Z",
+        "Summary",
+        &[],
+        &[],
+        &[],
+        &[],
+    )
+    .expect("write report");
+    let body = fs::read_to_string(&path).expect("read report");
+    let _ = fs::remove_file(&path);
+    assert!(
+        !body.contains("## Agenda"),
+        "agenda section should be omitted when no template applied: {body}"
+    );
+}
+
+#[test]
+fn handoff_report_includes_agenda_section_when_template_applied() {
+    use std::fs;
+
+    let topic = format!(
+        "test_with_agenda_{}",
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    );
+    let templates = vec![
+        AppliedTemplate {
+            name: "standup".to_string(),
+            agenda: "## Daily Standup\n\n1. **What did you accomplish?**\n2. **Blockers?**"
+                .to_string(),
+            applied_at: "2025-01-01T00:05:00Z".to_string(),
+        },
+        AppliedTemplate {
+            name: "retro".to_string(),
+            agenda: "## Retro\n\n1. Wins\n2. Losses".to_string(),
+            applied_at: "2025-01-01T00:30:00Z".to_string(),
+        },
+    ];
+    let path = write_handoff_markdown_report(
+        &topic,
+        "2025-01-01T00:00:00Z",
+        "Summary",
+        &[],
+        &[],
+        &[],
+        &templates,
+    )
+    .expect("write report");
+    let body = fs::read_to_string(&path).expect("read report");
+    let _ = fs::remove_file(&path);
+
+    assert!(body.contains("## Agenda"), "missing Agenda section: {body}");
+    assert!(
+        body.contains("Template: `standup`"),
+        "missing standup template header: {body}"
+    );
+    assert!(
+        body.contains("Template: `retro`"),
+        "missing retro template header: {body}"
+    );
+    assert!(
+        body.contains("Daily Standup"),
+        "missing standup agenda body: {body}"
+    );
+    assert!(body.contains("Wins"), "missing retro agenda body: {body}");
+    assert!(
+        body.contains("2025-01-01T00:05:00Z"),
+        "missing applied_at timestamp: {body}"
+    );
+
+    // Agenda must precede Decisions/Action Items so reviewers see the
+    // intended structure before the outcomes.
+    let agenda_pos = body.find("## Agenda").unwrap();
+    let decisions_pos = body.find("## Decisions").unwrap();
+    assert!(
+        agenda_pos < decisions_pos,
+        "agenda should appear before decisions: agenda@{agenda_pos} decisions@{decisions_pos}"
+    );
+}
+
 // ── Open question extraction tests ──────────────────────────────

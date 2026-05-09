@@ -26,6 +26,22 @@ pub struct MeetingResponse {
     pub message_count: usize,
 }
 
+/// A meeting template the operator applied during the session.
+///
+/// Recorded so the handoff report can render the agenda items the meeting
+/// was structured around. Tracked even if the operator skipped sections —
+/// the agenda is the *intended* discussion shape, not a guarantee of
+/// coverage.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AppliedTemplate {
+    /// Template name (e.g. "standup", "retro").
+    pub name: String,
+    /// Full agenda markdown as shown to the operator.
+    pub agenda: String,
+    /// RFC3339 timestamp of when the template was applied.
+    pub applied_at: String,
+}
+
 /// A structured action item extracted from meeting transcript on close.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HandoffActionItem {
@@ -67,6 +83,10 @@ pub struct MeetingSummary {
     /// Participants identified from the conversation.
     #[serde(default)]
     pub participants: Vec<String>,
+    /// Templates the operator applied via `/template <name>`. Drives the
+    /// `## Agenda` section in the handoff markdown report.
+    #[serde(default)]
+    pub applied_templates: Vec<AppliedTemplate>,
 }
 
 /// Current status of a meeting session.
@@ -145,6 +165,11 @@ mod tests {
             open_questions: vec!["Who will lead the effort?".to_string()],
             themes: vec!["testing".to_string(), "quality".to_string()],
             participants: vec!["operator".to_string(), "simard".to_string()],
+            applied_templates: vec![AppliedTemplate {
+                name: "retro".to_string(),
+                agenda: "## Retrospective\n1. ...".to_string(),
+                applied_at: "2025-01-01T00:10:00Z".to_string(),
+            }],
         };
         let json = serde_json::to_string(&summary).unwrap();
         let s2: MeetingSummary = serde_json::from_str(&json).unwrap();
@@ -168,6 +193,7 @@ mod tests {
         assert!(s.open_questions.is_empty());
         assert!(s.themes.is_empty());
         assert!(s.participants.is_empty());
+        assert!(s.applied_templates.is_empty());
     }
 
     #[test]
