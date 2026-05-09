@@ -21,6 +21,7 @@
 //! underlying DB has never been opened.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::error::{SimardError, SimardResult};
@@ -46,6 +47,23 @@ impl WriterBridge {
     pub fn into_box(self) -> Box<dyn CognitiveMemoryOps> {
         self.inner
     }
+
+    /// Test-only constructor.
+    ///
+    /// Wraps a caller-provided `Box<dyn CognitiveMemoryOps>` as a
+    /// `WriterBridge` so tests can pin the defensive
+    /// "writer must not be read-only" invariant directly.
+    ///
+    /// Production code MUST go through [`launch_writer_bridge`] so the
+    /// resolution ladder runs. Step 8 of issue #1590 follow-up will add
+    /// the `assert!(!inner.is_read_only())` invariant to this
+    /// constructor and route all production [`WriterBridge`] construction
+    /// through it — pinned by
+    /// `writer_bridge_construction_panics_when_inner_is_read_only`.
+    #[cfg(test)]
+    pub fn from_ops_for_test(inner: Box<dyn CognitiveMemoryOps>) -> Self {
+        Self { inner }
+    }
 }
 
 /// Reader bridge to cognitive memory. Read-only by construction (either the
@@ -59,6 +77,26 @@ impl ReaderBridge {
     pub fn ops(&self) -> &dyn CognitiveMemoryOps {
         &*self.inner
     }
+}
+
+/// Register an in-process writer that [`launch_writer_bridge`] should
+/// return immediately when called from the same process.
+///
+/// The OODA daemon calls this at startup with its live
+/// `Arc<dyn CognitiveMemoryOps>` (the same handle that backs the IPC
+/// server). After registration, in-process callers (the dashboard,
+/// reflection loop, …) skip the IPC round-trip and the direct-open
+/// ladder entirely — they share the daemon's writer through `Arc::clone`.
+///
+/// Only the first call wins; subsequent calls are silently ignored. This
+/// is sufficient because there is exactly one daemon writer per process.
+///
+/// **TDD stub** — the implementation lands in step 8 of the issue #1590
+/// follow-up. Today this is a no-op so [`launch_writer_bridge`] still
+/// proceeds through tiers 1–3 unchanged.
+pub fn register_in_process_writer(writer: Arc<dyn CognitiveMemoryOps>) {
+    let _ = writer;
+    // TDD stub — see `IN_PROCESS_WRITER` in step 8.
 }
 
 /// Decide whether `state_root` matches the daemon's owned state root.

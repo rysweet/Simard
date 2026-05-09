@@ -177,4 +177,101 @@ mod tests {
         let raw = "line1\nline2\tline3";
         assert_eq!(compact_terminal_evidence_value(raw, 12), "line1\\nline2...");
     }
+
+    // ---------------------------------------------------------------------
+    // Issue #1590 follow-up — UTF-8 truncation panic regression tests.
+    //
+    // `String::truncate(N)` panics if `N` is not a UTF-8 char boundary.
+    // The transcript_preview / compact_terminal_evidence_value sites call
+    // `normalized.truncate(N)` with `N` as a byte budget, so any input
+    // where a multi-byte sequence (em-dash, CJK, emoji) crosses byte `N`
+    // panics the runtime worker. Confirmed in production journal:
+    //
+    //   thread 'tokio-rt-worker' panicked at src/terminal_session/evidence.rs:10:20
+    //
+    // These tests assert the helpers do not panic on multi-byte input at
+    // the budget boundary. Until the implementation switches to
+    // `crate::util::string_truncate::truncate_to_char_boundary`, they fail
+    // by panicking.
+    // ---------------------------------------------------------------------
+
+    /// Build a string whose total byte length exceeds `budget` and where a
+    /// multi-byte char straddles `budget`. Returns a string built from
+    /// `prefix_ascii_bytes` ASCII bytes, then the multi-byte char `mb`,
+    /// then enough trailing ASCII to push past `budget`. The caller picks
+    /// `prefix_ascii_bytes` so that the multi-byte char crosses the
+    /// boundary they want to test.
+    fn straddle(prefix_ascii_bytes: usize, mb: char, trailing: usize) -> String {
+        let mut s = String::with_capacity(prefix_ascii_bytes + 4 + trailing);
+        s.push_str(&"a".repeat(prefix_ascii_bytes));
+        s.push(mb);
+        s.push_str(&"b".repeat(trailing));
+        s
+    }
+
+    #[test]
+    fn transcript_preview_does_not_panic_on_em_dash_at_byte_512_boundary() {
+        // `transcript_preview` uses the literal budget `512`. We need the
+        // joined preview line to be longer than 512 bytes with an em-dash
+        // straddling byte 512. The join inserts " | " between non-script
+        // lines; a single content line with an em-dash at byte 511 is
+        // simplest.
+        let body = straddle(511, '—', 100);
+        let transcript = format!("Script started on 2026-04-01\n{body}\nScript done on 2026-04-01");
+
+        // Sanity: the body's em-dash straddles byte 512.
+        assert!(
+            !body.is_char_boundary(512),
+            "test fixture invariant: em-dash should straddle byte 512"
+        );
+
+        // Today: panics with `assertion failed: self.is_char_boundary(new_len)`.
+        // After fix: returns a sanitized, valid-UTF-8 preview.
+        let preview = transcript_preview(&transcript);
+
+        assert!(
+            std::str::from_utf8(preview.as_bytes()).is_ok(),
+            "preview must remain valid UTF-8"
+        );
+        assert!(
+            preview.ends_with("..."),
+            "preview must still indicate truncation; got {preview:?}"
+        );
+    }
+
+    #[test]
+    fn compact_terminal_evidence_value_does_not_panic_on_em_dash_at_boundary() {
+        // limit = 100; em-dash straddles byte 100.
+        let raw = straddle(99, '—', 50);
+        let compacted = compact_terminal_evidence_value(&raw, 100);
+        assert!(
+            std::str::from_utf8(compacted.as_bytes()).is_ok(),
+            "compacted value must remain valid UTF-8"
+        );
+        assert!(compacted.ends_with("..."));
+    }
+
+    #[test]
+    fn compact_terminal_evidence_value_does_not_panic_on_emoji_at_boundary() {
+        // 4-byte emoji 🎉 straddles byte 50; limit = 50.
+        let raw = straddle(48, '🎉', 30);
+        let compacted = compact_terminal_evidence_value(&raw, 50);
+        assert!(
+            std::str::from_utf8(compacted.as_bytes()).is_ok(),
+            "compacted value must remain valid UTF-8"
+        );
+        assert!(compacted.ends_with("..."));
+    }
+
+    #[test]
+    fn compact_terminal_evidence_value_does_not_panic_on_cjk_at_boundary() {
+        // 3-byte CJK '日' straddles byte 64; limit = 64.
+        let raw = straddle(63, '日', 30);
+        let compacted = compact_terminal_evidence_value(&raw, 64);
+        assert!(
+            std::str::from_utf8(compacted.as_bytes()).is_ok(),
+            "compacted value must remain valid UTF-8"
+        );
+        assert!(compacted.ends_with("..."));
+    }
 }

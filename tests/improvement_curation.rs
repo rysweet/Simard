@@ -147,7 +147,6 @@ approve: Promote this pattern into a repeatable benchmark | priority=2 | status=
 }
 
 #[test]
-#[ignore = "Probe round-trip needs bootstrap/assembly.rs migration to write goals through cognitive memory (follow-up to #1590)"]
 fn improvement_curation_read_probe_surfaces_persisted_review_decisions_without_mutating_state() {
     let state_root = TempDirGuard::new("simard-improvement-curation-read-probe");
 
@@ -186,10 +185,25 @@ defer: Promote this pattern into a repeatable benchmark | rationale=wait for the
         "improvement curation probe should persist the decisions that readback inspects:\n{improvement_rendered}"
     );
 
+    // Issue #1590 follow-up: with bootstrap migrated to
+    // `CognitiveMemoryGoalStore`, the goal register is durable inside
+    // cognitive memory, NOT in `goal_records.json`. We pin the
+    // read-only contract of the read probe by snapshotting the bridge-
+    // backed `memory_records.json` (which hosts non-goal review
+    // artefacts that the read probe must leave alone) before and after
+    // the read.
     let memory_before =
         fs::read(state_root.path().join("memory_records.json")).expect("memory store should exist");
-    let goals_before =
-        fs::read(state_root.path().join("goal_records.json")).expect("goal store should exist");
+    // After the migration `goal_records.json` is no longer written by
+    // the bootstrap goal store. If it exists at all (legacy operator
+    // state), it must remain unchanged across the read; if it does not
+    // exist the absence is itself the post-migration invariant.
+    let goals_path = state_root.path().join("goal_records.json");
+    let goals_before = if goals_path.exists() {
+        Some(fs::read(&goals_path).expect("legacy goal store should be readable"))
+    } else {
+        None
+    };
 
     let read_output = Command::new(env!("CARGO_BIN_EXE_simard_operator_probe"))
         .env("SIMARD_BOOTSTRAP_MODE", "builtin-defaults")
@@ -228,15 +242,19 @@ defer: Promote this pattern into a repeatable benchmark | rationale=wait for the
 
     let memory_after =
         fs::read(state_root.path().join("memory_records.json")).expect("memory store should exist");
-    let goals_after =
-        fs::read(state_root.path().join("goal_records.json")).expect("goal store should exist");
     assert_eq!(
         memory_before, memory_after,
         "improvement curation read must stay read-only with respect to persisted decision state"
     );
+    let goals_after = if goals_path.exists() {
+        Some(fs::read(&goals_path).expect("legacy goal store should be readable"))
+    } else {
+        None
+    };
     assert_eq!(
         goals_before, goals_after,
-        "improvement curation read must not rewrite the durable goal register"
+        "improvement curation read must not create or rewrite the legacy goal register \
+         (post-migration: file should remain absent; pre-migration legacy state must stay byte-identical)"
     );
 }
 
