@@ -56,6 +56,8 @@ fn cargo_install_from_repo_succeeds() {
         "simard binary crashed (signal exit)"
     );
 
-    // Confirm the compiled-in version matches expectations.
-    assert_eq!(EXPECTED_VERSION, "0.16.1");
+    // Confirm the compiled-in version matches expectations. Update this
+    // alongside the `version = ...` line in `Cargo.toml`; the assertion
+    // exists to catch accidental version skew, not to be flexible.
+    assert_eq!(EXPECTED_VERSION, "0.17.0");
 }
