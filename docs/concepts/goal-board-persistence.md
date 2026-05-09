@@ -15,14 +15,25 @@ related:
 
 # Goal board persistence — cognitive-memory single source of truth
 
-This document describes the post-issue-[#1590](https://github.com/rysweet/Simard/issues/1590)
-state in which **cognitive memory is the sole persistence target** for the
-goal board across the OODA cycle, dashboard handlers, meeting REPL flows,
-the engineer loop, and `bootstrap`-assembled local sessions. The
-persistence APIs (`load_goal_board`, `save_goal_board`, `persist_board`)
-and the integrity guard live in `src/goal_curation/operations.rs`. The
-adapter pattern that fronts them as a `GoalStore` for `RuntimePorts` is
-the [`CognitiveMemoryGoalStore`](../reference/cognitive-memory-goal-store.md).
+> **Status: partially implemented.** Issue
+> [#1590](https://github.com/rysweet/Simard/issues/1590) and its merged
+> follow-up PRs migrated the OODA cycle, the dashboard handlers, the
+> meeting REPL flows, and the engineer loop onto cognitive memory. The
+> remaining gap — `bootstrap::assembly` still constructs an
+> `Arc<FileBackedGoalStore>` for `RuntimePorts.goal_store` — is
+> tracked under the issue-#1590 follow-up regression-fix work and the
+> ignored `improvement_curation_read_probe_…` test in
+> `tests/improvement_curation.rs`. Sections marked **planned** describe
+> the post-follow-up state.
+
+This document describes the **target state** in which **cognitive memory
+is the sole persistence target** for the goal board across the OODA cycle,
+dashboard handlers, meeting REPL flows, the engineer loop, and
+`bootstrap`-assembled local sessions. The persistence APIs
+(`load_goal_board`, `save_goal_board`, `persist_board`) and the integrity
+guard live in `src/goal_curation/operations.rs`. The adapter pattern that
+fronts them as a `GoalStore` for `RuntimePorts` is the planned
+[`CognitiveMemoryGoalStore`](../reference/cognitive-memory-goal-store.md).
 
 ## The problem this solves
 
@@ -53,10 +64,12 @@ This produced a class of subtle bugs:
 
 Issue #1590 collapses both stores into one: the
 `goal-board:snapshot` fact in cognitive memory becomes the **single source
-of truth**. After the migration, no consumer reads or writes
-`goal_records.json` in production code paths. A one-shot bootstrap
-migration imports any pre-existing disk file on first startup and deletes
-it after a successful re-write into cognitive memory.
+of truth**. After the in-progress migration completes (the
+`bootstrap::assembly` adapter swap is the last piece), no consumer reads
+or writes `goal_records.json` in production code paths that go through
+`RuntimePorts`. A one-shot bootstrap migration imports any pre-existing
+disk file on first startup and deletes it after a successful re-write
+into cognitive memory.
 
 ---
 
@@ -83,15 +96,21 @@ writer lock directly.
 
 ### Bridge ladders
 
-`launch_writer_bridge` resolves two writer-bearing tiers in order:
+`launch_writer_bridge` today resolves two writer-bearing tiers in order,
+followed by a read-only fallback:
 
 1. **Daemon IPC** — connect to `~/.simard/memory.sock` if it exists.
 2. **Local writer** — open the LadybugDB store directly with the writer
    lock, after running the stale-lock reaper.
+3. **Read-only fallback (current)** — wrap a read-only handle as a
+   `WriterBridge`. **The issue-#1590 follow-up removes this tier**; once
+   that lands, callers learn synchronously whether they got a writer
+   instead of receiving a silently-degraded handle.
 
-If both fail, `launch_writer_bridge` returns `Err` immediately. There is
-no silent read-only fallback — callers learn synchronously whether they
-got a writer.
+Planned: an in-process Arc shortcut (tier 0) lets the daemon hand its
+own `Arc<dyn CognitiveMemoryOps>` directly to in-process callers (the
+dashboard, the OODA reflection paths) without going through the Unix
+socket.
 
 `open_reader_bridge` resolves two tiers:
 
@@ -152,16 +171,17 @@ without operator intervention.
 | Dashboard workboard | `src/operator_commands_dashboard/workboard.rs` | `open_reader_bridge` | `load_goal_board` | — | Read-only |
 | Dashboard current work | `src/operator_commands_dashboard/current_work.rs` | `open_reader_bridge` | `load_goal_board` | — | Read-only |
 | Dashboard metrics panel | `src/operator_commands_dashboard/metrics.rs` | `open_reader_bridge` | `load_goal_board` | — | Reports `{ source: "cognitive-memory:goal-board:snapshot", count: N }` |
-| Dashboard memory panel | `src/operator_commands_dashboard/memory.rs` | (n/a) | (n/a) | (n/a) | The `goal_records.json` artefact label is removed; only on-disk artefacts are listed here |
-| Meeting goal curation | `src/operator_commands_meeting/goal_curation.rs` | `open_reader_bridge` (read-curation), `launch_writer_bridge` (mutation paths) | `load_goal_board` + `active_goals_as_records` | `save_goal_board` | Replaces `FileBackedGoalStore` |
+| Meeting goal curation | `src/operator_commands_meeting/goal_curation.rs` | `open_reader_bridge` (reads), `launch_writer_bridge` (mutations) | `load_goal_board` + `active_goals_as_records` | `save_goal_board` | Replaces `FileBackedGoalStore` |
 | Meeting improvement curation | `src/operator_commands_meeting/improvement_curation.rs` | `launch_writer_bridge` | `load_goal_board` + `active_goals_as_records` | `save_goal_board` | Replaces `FileBackedGoalStore` |
-| Engineer loop | `src/engineer_loop/mod.rs` | `open_reader_bridge` | `load_goal_board` + `active_goals_as_records` | — | Reads top 5 active goals as `GoalRecord`s |
-| Meeting bridge acquisition | `src/operator_commands_meeting/meeting_session.rs` | `launch_writer_bridge` | — | — | `launch_real_meeting_bridge` is a thin wrapper around `launch_writer_bridge(&default_state_root())` |
-| Bootstrap-assembled `RuntimePorts.goal_store` | `src/bootstrap/assembly.rs` | `CognitiveMemoryGoalStore` (which uses both helpers internally) | adapter `list` / `active_top_goals` | adapter `upsert` / `remove` | Replaces `FileBackedGoalStore::try_new(config.goal_store_path())` |
+| Engineer loop | `src/engineer_loop/mod.rs` | `launch_writer_bridge` (used because the load step also performs the legacy `goal_records.json` migration write-back) | `load_goal_board` + `active_goals_as_records` | — | Reads top 5 active goals as `GoalRecord`s |
+| Bootstrap-assembled `RuntimePorts.goal_store` | `src/bootstrap/assembly.rs` | **planned** `CognitiveMemoryGoalStore` (uses both helpers internally) | adapter `list` / `active_top_goals` | adapter `upsert` / `remove` | Currently still `FileBackedGoalStore::try_new(config.goal_store_path())` — see [goal-store adapter](../reference/cognitive-memory-goal-store.md) |
 
-`FileBackedGoalStore` is no longer instantiated in any production
-goal-board code path. It remains in `src/goals/store.rs` as a value type
-used by `meeting_backend` and tests.
+After the bootstrap-adapter migration lands, `FileBackedGoalStore` is no
+longer instantiated by `RuntimePorts.goal_store`. It remains in
+`src/goals/store.rs` as a value type — `src/meeting_backend/mod.rs`
+constructs one through its own setup path, and several tests use it
+directly. Both of those uses are out of scope for the issue-#1590
+follow-up.
 
 ---
 
