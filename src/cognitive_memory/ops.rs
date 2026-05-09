@@ -324,4 +324,8 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
             prospective_count: count_query("Prospective")?,
         })
     }
+
+    fn is_read_only(&self) -> bool {
+        self.read_only
+    }
 }

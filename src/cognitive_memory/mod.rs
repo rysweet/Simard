@@ -122,6 +122,7 @@ pub struct NativeCognitiveMemory {
     path: PathBuf,
     #[allow(dead_code)]
     _temp_dir: Option<Arc<tempfile::TempDir>>,
+    read_only: bool,
 }
 
 // SAFETY: lbug::Database is thread-safe by design (internal locking).
@@ -164,6 +165,7 @@ impl NativeCognitiveMemory {
             db: Arc::new(db),
             path: db_path,
             _temp_dir: None,
+            read_only: false,
         };
         mem.ensure_schema()?;
         eprintln!(
@@ -195,6 +197,7 @@ impl NativeCognitiveMemory {
             db: Arc::new(db),
             path: db_path,
             _temp_dir: Some(Arc::new(tmp)),
+            read_only: false,
         };
         mem.ensure_schema()?;
         Ok(mem)
@@ -232,6 +235,7 @@ impl NativeCognitiveMemory {
             db: Arc::new(db),
             path: db_path,
             _temp_dir: None,
+            read_only: true,
         };
         eprintln!(
             "[simard] cognitive memory opened read-only — LadybugDB at {}",

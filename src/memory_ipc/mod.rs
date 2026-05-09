@@ -172,6 +172,8 @@ mod client;
 mod launcher;
 mod server;
 pub use client::RemoteCognitiveMemory;
+#[cfg(test)]
+pub(crate) use launcher::unregister_in_process_writer_for_test;
 pub use launcher::{
     ReaderBridge, WriterBridge, launch_writer_bridge, open_reader_bridge,
     register_in_process_writer,
@@ -266,6 +268,9 @@ impl CognitiveMemoryOps for SharedMemory {
     }
     fn get_statistics(&self) -> SimardResult<CognitiveStatistics> {
         self.0.get_statistics()
+    }
+    fn is_read_only(&self) -> bool {
+        self.0.is_read_only()
     }
 }
 

@@ -23,9 +23,13 @@
 //! Reader semantics: prefer the daemon socket; otherwise `open_read_only`
 //! (which requires the underlying DB file to already exist).
 
-use super::{launch_writer_bridge, open_reader_bridge, register_in_process_writer};
+use super::{
+    launch_writer_bridge, open_reader_bridge, register_in_process_writer,
+    unregister_in_process_writer_for_test,
+};
 use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::goal_curation::{GoalBoard, load_goal_board, save_goal_board};
+use serial_test::serial;
 use std::sync::Arc;
 
 fn fresh_state_root(tag: &str) -> std::path::PathBuf {
@@ -42,7 +46,9 @@ fn fresh_state_root(tag: &str) -> std::path::PathBuf {
 }
 
 #[test]
+#[serial]
 fn launch_writer_bridge_succeeds_on_fresh_state_root_without_daemon() {
+    unregister_in_process_writer_for_test();
     // No daemon socket → must fall through to NativeCognitiveMemory::open.
     let root = fresh_state_root("writer-fresh");
     let writer = launch_writer_bridge(&root)
@@ -55,7 +61,9 @@ fn launch_writer_bridge_succeeds_on_fresh_state_root_without_daemon() {
 }
 
 #[test]
+#[serial]
 fn writer_bridge_supports_store_fact_round_trip() {
+    unregister_in_process_writer_for_test();
     let root = fresh_state_root("writer-roundtrip");
     let writer = launch_writer_bridge(&root).expect("writer bridge");
 
@@ -82,7 +90,9 @@ fn writer_bridge_supports_store_fact_round_trip() {
 }
 
 #[test]
+#[serial]
 fn open_reader_bridge_requires_existing_db() {
+    unregister_in_process_writer_for_test();
     // No DB has ever been opened → open_read_only would fail. The reader
     // helper is allowed to surface that as `Err`, but it must NOT panic
     // and must NOT silently succeed against a DB that was never created.
@@ -95,7 +105,9 @@ fn open_reader_bridge_requires_existing_db() {
 }
 
 #[test]
+#[serial]
 fn open_reader_bridge_succeeds_after_writer_initialises_db() {
+    unregister_in_process_writer_for_test();
     let root = fresh_state_root("reader-after-writer");
     {
         // Drop the writer to release the open-lock before the reader opens.
@@ -125,7 +137,9 @@ fn open_reader_bridge_succeeds_after_writer_initialises_db() {
 }
 
 #[test]
+#[serial]
 fn writer_bridge_is_compatible_with_save_and_load_goal_board() {
+    unregister_in_process_writer_for_test();
     // The whole point of these helpers is to let dashboard / meeting /
     // engineer call sites flow through `save_goal_board(&board, writer.ops())`
     // and `load_goal_board(reader.ops())` without any ceremony.
@@ -151,7 +165,9 @@ fn writer_bridge_is_compatible_with_save_and_load_goal_board() {
 }
 
 #[test]
+#[serial]
 fn writer_bridge_does_not_create_legacy_goal_records_json_on_save() {
+    unregister_in_process_writer_for_test();
     // Acceptance criterion #6: every save must flow through cognitive memory.
     // No writer call site is allowed to create the legacy JSON file.
     let root = fresh_state_root("writer-no-disk-file");
@@ -203,7 +219,9 @@ fn writer_bridge_does_not_create_legacy_goal_records_json_on_save() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial]
 fn register_in_process_writer_returns_registered_arc_via_launch_writer_bridge() {
+    unregister_in_process_writer_for_test();
     // Use an in-memory NativeCognitiveMemory so we don't depend on disk
     // state. The state_root passed to launch_writer_bridge is irrelevant
     // when the in-process writer is registered: the launcher must short-
@@ -256,10 +274,15 @@ fn register_in_process_writer_returns_registered_arc_via_launch_writer_bridge() 
         "tier-0 shortcut must NOT create an on-disk DB at {}",
         db_path.display()
     );
+
+    // Cleanup so subsequent tests in this module run with a fresh slot.
+    unregister_in_process_writer_for_test();
 }
 
 #[test]
+#[serial]
 fn writer_bridge_construction_panics_when_inner_is_read_only() {
+    unregister_in_process_writer_for_test();
     // Defensive invariant: WriterBridge must refuse to wrap a read-only
     // handle. We construct a NativeCognitiveMemory via open() to create
     // the DB, drop it, then re-open read-only and assert that the
@@ -298,7 +321,9 @@ fn writer_bridge_construction_panics_when_inner_is_read_only() {
 }
 
 #[test]
+#[serial]
 fn launch_writer_bridge_returns_err_when_state_root_is_unwritable_file() {
+    unregister_in_process_writer_for_test();
     // Force tiers 1 and 2 to fail by passing a path that is a regular
     // file rather than a directory. Today the launcher falls through
     // to tier 3 (open_read_only) which itself fails because the file
@@ -322,7 +347,9 @@ fn launch_writer_bridge_returns_err_when_state_root_is_unwritable_file() {
 }
 
 #[test]
+#[serial]
 fn native_cognitive_memory_open_read_only_reports_is_read_only_true() {
+    unregister_in_process_writer_for_test();
     // Trait-default contract: writers report false, the read-only
     // opener reports true. Pin both so any future regression that
     // forgets to override `is_read_only` for a read-only backend is

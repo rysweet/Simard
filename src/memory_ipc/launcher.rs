@@ -21,12 +21,38 @@
 //! underlying DB has never been opened.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::error::{SimardError, SimardResult};
 
-use super::{RemoteCognitiveMemory, default_socket_path, default_state_root, reap_stale_open_lock};
+use super::{
+    RemoteCognitiveMemory, SharedMemory, default_socket_path, default_state_root,
+    reap_stale_open_lock,
+};
+
+/// Process-wide registration slot for the in-process cognitive-memory
+/// writer. The OODA daemon registers its `Arc<dyn CognitiveMemoryOps>`
+/// here at startup; subsequent same-process callers (dashboard,
+/// reflection loop, goal store) skip IPC and direct-open entirely and
+/// share the daemon's writer through `Arc::clone`.
+///
+/// Production: only the first registration wins; subsequent calls are
+/// silently ignored. Tests can use [`unregister_in_process_writer_for_test`]
+/// to reset between cases — combine with `#[serial]` from `serial_test` to
+/// avoid cross-test pollution.
+fn in_process_writer_slot() -> &'static RwLock<Option<Arc<dyn CognitiveMemoryOps>>> {
+    static SLOT: std::sync::OnceLock<RwLock<Option<Arc<dyn CognitiveMemoryOps>>>> =
+        std::sync::OnceLock::new();
+    SLOT.get_or_init(|| RwLock::new(None))
+}
+
+fn current_in_process_writer() -> Option<Arc<dyn CognitiveMemoryOps>> {
+    in_process_writer_slot()
+        .read()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(Arc::clone))
+}
 
 /// Writer bridge to cognitive memory. Holds a `Box<dyn CognitiveMemoryOps>`
 /// underneath; callers should use [`WriterBridge::ops`] to access it.
@@ -48,21 +74,24 @@ impl WriterBridge {
         self.inner
     }
 
-    /// Test-only constructor.
-    ///
-    /// Wraps a caller-provided `Box<dyn CognitiveMemoryOps>` as a
-    /// `WriterBridge` so tests can pin the defensive
-    /// "writer must not be read-only" invariant directly.
-    ///
-    /// Production code MUST go through [`launch_writer_bridge`] so the
-    /// resolution ladder runs. Step 8 of issue #1590 follow-up will add
-    /// the `assert!(!inner.is_read_only())` invariant to this
-    /// constructor and route all production [`WriterBridge`] construction
-    /// through it — pinned by
-    /// `writer_bridge_construction_panics_when_inner_is_read_only`.
+    /// Defensive constructor: panics if the wrapped handle reports
+    /// `is_read_only() == true`. A `WriterBridge` wrapping a read-only
+    /// handle is exactly the silent-degradation hazard issue #1590
+    /// targets — write attempts would silently no-op or surface
+    /// `BridgeTransportError` only after the `Ok(())` path has been
+    /// threaded through dashboards / probes.
+    fn checked_new(inner: Box<dyn CognitiveMemoryOps>) -> Self {
+        assert!(
+            !inner.is_read_only(),
+            "WriterBridge cannot wrap a read-only handle — would silently swallow writes"
+        );
+        Self { inner }
+    }
+
+    /// Test-only constructor that mirrors [`Self::checked_new`].
     #[cfg(test)]
     pub fn from_ops_for_test(inner: Box<dyn CognitiveMemoryOps>) -> Self {
-        Self { inner }
+        Self::checked_new(inner)
     }
 }
 
@@ -90,13 +119,25 @@ impl ReaderBridge {
 ///
 /// Only the first call wins; subsequent calls are silently ignored. This
 /// is sufficient because there is exactly one daemon writer per process.
-///
-/// **TDD stub** — the implementation lands in step 8 of the issue #1590
-/// follow-up. Today this is a no-op so [`launch_writer_bridge`] still
-/// proceeds through tiers 1–3 unchanged.
 pub fn register_in_process_writer(writer: Arc<dyn CognitiveMemoryOps>) {
-    let _ = writer;
-    // TDD stub — see `IN_PROCESS_WRITER` in step 8.
+    if let Ok(mut guard) = in_process_writer_slot().write()
+        && guard.is_none()
+    {
+        *guard = Some(writer);
+    }
+}
+
+/// Test-only: clear any registered in-process writer so subsequent calls
+/// to [`launch_writer_bridge`] / [`open_reader_bridge`] fall through to
+/// the IPC and direct-open tiers.
+///
+/// Combine with `#[serial_test::serial]` to avoid pollution from tests
+/// that need fresh registration semantics.
+#[cfg(test)]
+pub(crate) fn unregister_in_process_writer_for_test() {
+    if let Ok(mut guard) = in_process_writer_slot().write() {
+        *guard = None;
+    }
 }
 
 /// Decide whether `state_root` matches the daemon's owned state root.
@@ -113,15 +154,28 @@ fn state_root_matches_daemon(state_root: &Path) -> bool {
 
 /// Launch a cognitive-memory writer bridge against `state_root`.
 ///
-/// Resolution ladder:
-///   1. Try `RemoteCognitiveMemory::connect(default_socket_path())` — if the
-///      OODA daemon is running, share its writer.
+/// Resolution ladder (no silent read-only fallback after issue #1590):
+///   0. If an in-process writer is registered (the OODA daemon does this
+///      at startup), return it immediately. Same-process callers skip
+///      IPC entirely and share the daemon's writer through `Arc::clone`.
+///   1. Try `RemoteCognitiveMemory::connect(default_socket_path())` — if
+///      the OODA daemon is running on a different process and owns the
+///      same `state_root`, share its writer.
 ///   2. Otherwise reap any stale open-lock and `NativeCognitiveMemory::open`
 ///      the DB directly (we own it because no daemon is running).
-///   3. Last-resort: `NativeCognitiveMemory::open_read_only` — recoverable
-///      degradation; later write calls will surface their own errors.
+///
+/// Failures at every tier propagate as `SimardError`. The previous
+/// "tier 3 = silent open_read_only fallback" path is removed: surfacing
+/// the failure loudly is the explicit contract of the launcher (issue
+/// #1590, dashboard hollow-success bug).
 pub fn launch_writer_bridge(state_root: &Path) -> SimardResult<WriterBridge> {
     let _ = std::fs::create_dir_all(state_root);
+
+    // (0) In-process Arc shortcut — the daemon registers itself at
+    // startup via `register_in_process_writer`.
+    if let Some(writer) = current_in_process_writer() {
+        return Ok(WriterBridge::checked_new(Box::new(SharedMemory(writer))));
+    }
 
     // (1) Prefer the running daemon's IPC writer — but only when our
     // requested state_root actually matches the daemon's. Otherwise we'd
@@ -130,9 +184,7 @@ pub fn launch_writer_bridge(state_root: &Path) -> SimardResult<WriterBridge> {
     if sock.exists() && state_root_matches_daemon(state_root) {
         match RemoteCognitiveMemory::connect(&sock) {
             Ok(client) => {
-                return Ok(WriterBridge {
-                    inner: Box::new(client),
-                });
+                return Ok(WriterBridge::checked_new(Box::new(client)));
             }
             Err(e) => {
                 eprintln!(
@@ -148,39 +200,36 @@ pub fn launch_writer_bridge(state_root: &Path) -> SimardResult<WriterBridge> {
         eprintln!("[simard] launch_writer_bridge: stale-lock reap failed: {e}");
     }
 
-    match NativeCognitiveMemory::open(state_root) {
-        Ok(mem) => Ok(WriterBridge {
-            inner: Box::new(mem),
-        }),
-        Err(rw_err) => {
-            // (3) Last-resort read-only fallback.
-            eprintln!(
-                "[simard] launch_writer_bridge: read-write open failed ({rw_err}); falling back \
-                 to read-only — write attempts will surface errors at call time"
-            );
-            let mem = NativeCognitiveMemory::open_read_only(state_root).map_err(|e| {
-                SimardError::RuntimeInitFailed {
-                    component: "memory-ipc-launcher".into(),
-                    reason: format!(
-                        "cognitive memory failed to open even read-only at {}: {e}",
-                        state_root.display()
-                    ),
-                }
-            })?;
-            Ok(WriterBridge {
-                inner: Box::new(mem),
-            })
-        }
-    }
+    let mem =
+        NativeCognitiveMemory::open(state_root).map_err(|e| SimardError::RuntimeInitFailed {
+            component: "memory-ipc-launcher".into(),
+            reason: format!(
+                "cognitive memory writer failed to open at {}: {e} \
+                 (no in-process writer registered, no daemon socket usable; \
+                  refusing silent read-only fallback per issue #1590)",
+                state_root.display()
+            ),
+        })?;
+    Ok(WriterBridge::checked_new(Box::new(mem)))
 }
 
 /// Open a cognitive-memory reader bridge against `state_root`.
 ///
 /// Resolution ladder:
+///   0. If an in-process writer is registered (the OODA daemon does this
+///      at startup), share it as a reader so we observe live state
+///      without contending on disk.
 ///   1. Try `RemoteCognitiveMemory::connect(default_socket_path())`.
 ///   2. Otherwise `NativeCognitiveMemory::open_read_only` — fails when the
 ///      DB has never been opened by a writer.
 pub fn open_reader_bridge(state_root: &Path) -> SimardResult<ReaderBridge> {
+    // (0) In-process Arc shortcut — sees live writes from the daemon.
+    if let Some(writer) = current_in_process_writer() {
+        return Ok(ReaderBridge {
+            inner: Box::new(SharedMemory(writer)),
+        });
+    }
+
     // (1) Prefer the daemon socket when present — but only when the
     // requested state_root matches the daemon's. Otherwise a daemon owning
     // a different DB would mask the read we actually want.
