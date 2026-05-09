@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::bridge_launcher::{find_python_dir, launch_gym_bridge, launch_knowledge_bridge};
 use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
-use crate::goal_curation::load_goal_board;
+use crate::goal_curation::{load_goal_board, persist_board};
 use crate::identity::OperatingMode;
 use crate::memory_ipc;
 use crate::ooda_loop::{
@@ -46,13 +46,18 @@ pub fn run_ooda_daemon(
     dashboard: DaemonDashboardConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // --- signal handling ------------------------------------------------
+    //
+    // ctrlc with `termination` feature catches SIGINT, SIGTERM and SIGHUP.
+    // Without `termination`, only SIGINT was caught; systemd sends SIGTERM
+    // by default, which silently bypassed our cleanup and stranded writes
+    // in the WAL (issue #1631).
     let shutdown = Arc::new(AtomicBool::new(false));
     {
         let flag = Arc::clone(&shutdown);
         ctrlc::set_handler(move || {
             flag.store(true, Ordering::SeqCst);
         })
-        .expect("failed to install SIGTERM/SIGINT handler");
+        .expect("failed to install SIGTERM/SIGINT/SIGHUP handler");
     }
     // --------------------------------------------------------------------
 
@@ -110,7 +115,8 @@ pub fn run_ooda_daemon(
         }
     };
 
-    let memory: Box<dyn CognitiveMemoryOps> = Box::new(memory_ipc::SharedMemory(shared_mem));
+    let memory: Box<dyn CognitiveMemoryOps> =
+        Box::new(memory_ipc::SharedMemory(Arc::clone(&shared_mem)));
     let knowledge = launch_knowledge_bridge(&python_dir)?;
     let gym = launch_gym_bridge(&python_dir)?;
 
@@ -254,16 +260,26 @@ pub fn run_ooda_daemon(
     }
 
     // --- periodic DB backup state -----------------------------------------
+    // Defaults: 5-minute interval and 24-backup retention give 2 hours of
+    // history, which has been sufficient to recover from every observed
+    // WAL-corruption incident. Override with the env vars below.
     let db_backup_interval_secs: u64 = std::env::var("SIMARD_DB_BACKUP_INTERVAL_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(3600);
+        .unwrap_or(300);
+    let db_backup_keep: usize = std::env::var("SIMARD_DB_BACKUP_KEEP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(24);
     let mut last_db_backup = Instant::now()
         .checked_sub(Duration::from_secs(db_backup_interval_secs))
         .unwrap_or_else(Instant::now);
+    let backup_consecutive_failures = AtomicU32::new(0);
     daemon_log(
         &state_root,
-        &format!("[simard] OODA daemon: DB backup interval = {db_backup_interval_secs}s"),
+        &format!(
+            "[simard] OODA daemon: DB backup interval = {db_backup_interval_secs}s, keep = {db_backup_keep}"
+        ),
     );
     // -------------------------------------------------------------------
 
@@ -311,16 +327,42 @@ pub fn run_ooda_daemon(
 
         // --- periodic DB backup (at START of cycle) ------------------------
         if last_db_backup.elapsed() >= Duration::from_secs(db_backup_interval_secs) {
+            // Checkpoint first so committed-but-WAL-resident writes are
+            // captured by the file copy. Failures here are warnings only —
+            // we still attempt the copy because the prior backup may already
+            // be missing recent writes.
+            if let Err(e) = shared_mem.checkpoint() {
+                daemon_log(
+                    &state_root,
+                    &format!("[simard] DB backup: pre-copy checkpoint failed: {e}"),
+                );
+            }
             match NativeCognitiveMemory::create_verified_backup(&state_root) {
                 Ok(backup_path) => {
                     daemon_log(
                         &state_root,
                         &format!("[simard] DB backup created: {}", backup_path.display()),
                     );
-                    NativeCognitiveMemory::prune_old_backups(&state_root, 5);
+                    NativeCognitiveMemory::prune_old_backups(&state_root, db_backup_keep);
+                    backup_consecutive_failures.store(0, Ordering::SeqCst);
                 }
                 Err(e) => {
-                    daemon_log(&state_root, &format!("[simard] DB backup failed: {e}"));
+                    let n = backup_consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
+                    if n >= 3 {
+                        daemon_log(
+                            &state_root,
+                            &format!(
+                                "[simard] ERROR: DB backup failed {n} consecutive times \
+                                 — last error at {}: {e}",
+                                state_root.join("backups").display()
+                            ),
+                        );
+                    } else {
+                        daemon_log(
+                            &state_root,
+                            &format!("[simard] WARN: DB backup failed (#{n}): {e}"),
+                        );
+                    }
                 }
             }
             last_db_backup = Instant::now();
@@ -415,10 +457,95 @@ pub fn run_ooda_daemon(
         interruptible_sleep(Duration::from_secs(interval_secs), &shutdown);
     }
 
-    // Close the session cleanly if it was opened.
-    if let Some(ref mut session) = bridges.session {
-        let _ = session.close();
+    // Final shutdown: flush board, drop in-process writer registration,
+    // close session, then drop bridges (triggers Database::drop ->
+    // force_checkpoint_on_close). Errors at this point only get warned —
+    // we are exiting anyway and cannot recover.
+    if let Err(e) = shutdown_daemon(
+        &state_root,
+        &shared_mem,
+        &mut state,
+        &mut bridges,
+        /* signal_driven */ true,
+    ) {
+        daemon_log(
+            &state_root,
+            &format!("[simard] OODA daemon: shutdown sequence reported error: {e}"),
+        );
     }
 
+    Ok(())
+}
+
+/// Graceful shutdown sequence for the OODA daemon.
+///
+/// Order matters — see issue #1631 for the WAL-corruption regression
+/// this fixes:
+///
+/// 1. Persist the current `state.active_goals` board through the live
+///    writer (so the snapshot survives the restart).
+/// 2. Force a `CHECKPOINT;` so all writes (including the persist_board
+///    call above) are committed to the main DB file rather than left in
+///    the WAL.
+/// 3. Close the LLM session cleanly.
+/// 4. Clear the in-process writer registration so the global `Weak` no
+///    longer holds a path that would prevent the writer Arc from being
+///    dropped by name elsewhere.
+/// 5. Drop the caller-owned bridges (the daemon's `bridges.memory` Box,
+///    other Arc<dyn> references). Once the last strong Arc to the
+///    `lbug::Database` drops, `Database::drop` runs
+///    `force_checkpoint_on_close` as a defense-in-depth backstop.
+///
+/// `signal_driven=true` makes errors warnings only (we cannot recover
+/// during signal-induced exit). `signal_driven=false` propagates errors
+/// so test harnesses and normal exits can assert on them.
+fn shutdown_daemon(
+    state_root: &std::path::Path,
+    shared_mem: &Arc<dyn CognitiveMemoryOps>,
+    state: &mut OodaState,
+    bridges: &mut OodaBridges,
+    signal_driven: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    daemon_log(state_root, "[simard] OODA daemon: shutdown sequence start");
+
+    // 1. Persist the goal board through the live writer.
+    if let Err(e) = persist_board(&state.active_goals, &*bridges.memory) {
+        let msg = format!("[simard] shutdown: persist_board failed: {e}");
+        daemon_log(state_root, &msg);
+        if !signal_driven {
+            return Err(msg.into());
+        }
+    }
+
+    // 2. Checkpoint so the persist_board write reaches the main DB file.
+    if let Err(e) = shared_mem.checkpoint() {
+        let msg = format!("[simard] shutdown: pre-exit checkpoint failed: {e}");
+        daemon_log(state_root, &msg);
+        if !signal_driven {
+            return Err(msg.into());
+        }
+    }
+
+    // 3. Close the LLM session.
+    if let Some(ref mut session) = bridges.session
+        && let Err(e) = session.close()
+    {
+        let msg = format!("[simard] shutdown: session.close failed: {e}");
+        daemon_log(state_root, &msg);
+        if !signal_driven {
+            return Err(msg.into());
+        }
+    }
+
+    // 4. Clear in-process writer registration so the Weak ref drops.
+    memory_ipc::clear_in_process_writer();
+
+    // 5. Bridges (and the daemon-owned strong Arc to NativeCognitiveMemory)
+    //    drop on function return — the inherent Database::drop runs
+    //    force_checkpoint_on_close as a backstop.
+    daemon_log(
+        state_root,
+        "[simard] OODA daemon: shutdown complete (writer Arc will drop on return)",
+    );
     Ok(())
 }

@@ -8,6 +8,47 @@ use crate::error::{SimardError, SimardResult};
 
 use super::NativeCognitiveMemory;
 
+/// Atomically copy `src` to `dst`: write to `<dst>.tmp`, fsync the bytes
+/// and the directory entry, then rename. The result is either the new
+/// `dst` is fully present and durable, or `dst` is unchanged.
+fn atomic_copy_with_fsync(src: &Path, dst: &Path) -> SimardResult<()> {
+    let tmp = {
+        let mut s = dst.as_os_str().to_owned();
+        s.push(".tmp");
+        PathBuf::from(s)
+    };
+    // Best-effort cleanup of any leftover .tmp from a prior crashed backup.
+    let _ = std::fs::remove_file(&tmp);
+
+    std::fs::copy(src, &tmp).map_err(|e| SimardError::PersistentStoreIo {
+        store: "cognitive-memory".into(),
+        action: "backup-copy-tmp".into(),
+        path: tmp.clone(),
+        reason: e.to_string(),
+    })?;
+
+    // fsync the file contents so a crash between copy and rename does not
+    // leave a torn payload that becomes the next durable backup.
+    if let Ok(f) = std::fs::OpenOptions::new().read(true).open(&tmp) {
+        let _ = f.sync_all();
+    }
+
+    std::fs::rename(&tmp, dst).map_err(|e| SimardError::PersistentStoreIo {
+        store: "cognitive-memory".into(),
+        action: "backup-rename".into(),
+        path: dst.to_path_buf(),
+        reason: e.to_string(),
+    })?;
+
+    // fsync the parent directory so the rename itself is durable.
+    if let Some(parent) = dst.parent()
+        && let Ok(d) = std::fs::File::open(parent)
+    {
+        let _ = d.sync_all();
+    }
+    Ok(())
+}
+
 impl NativeCognitiveMemory {
     /// Return the WAL file paths that LadybugDB may use for a given DB path.
     fn wal_paths(db_path: &Path) -> [PathBuf; 2] {
@@ -253,6 +294,13 @@ impl NativeCognitiveMemory {
 
     /// Create a verified backup of the DB file. Returns the backup path on
     /// success. Used by the OODA daemon for periodic backups.
+    ///
+    /// Captures the main DB file and any associated `.wal` files atomically:
+    /// each is copied to a `.tmp` sibling, fsynced, then renamed into place
+    /// with a shared timestamp suffix. Restore = copy both files back.
+    /// Callers should call [`Self::checkpoint`] on a live writer **before**
+    /// invoking this so committed-but-WAL-resident writes are flushed
+    /// (issue #1631).
     #[cfg(unix)]
     pub fn create_verified_backup(state_root: &Path) -> SimardResult<PathBuf> {
         let db_path = state_root.join("cognitive_memory.ladybug");
@@ -277,12 +325,25 @@ impl NativeCognitiveMemory {
             .as_secs();
         let backup_path = backup_dir.join(format!("cognitive_memory.ladybug.{ts}"));
 
-        std::fs::copy(&db_path, &backup_path).map_err(|e| SimardError::PersistentStoreIo {
-            store: "cognitive-memory".into(),
-            action: "backup-copy".into(),
-            path: backup_path.clone(),
-            reason: e.to_string(),
-        })?;
+        // Atomic copy: write to .tmp, fsync, then rename. Same TS suffix
+        // for the main file and any .wal sibling so a restore is unambiguous.
+        atomic_copy_with_fsync(&db_path, &backup_path)?;
+
+        // Capture WAL siblings alongside (same TS). Either, both, or neither
+        // may exist depending on lbug version; whichever exist are paired.
+        for wal_src in Self::wal_paths(&db_path) {
+            if !wal_src.exists() {
+                continue;
+            }
+            let wal_name = wal_src
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("cognitive_memory.ladybug.wal");
+            // The destination filename is `<wal_name>.<ts>` so the pair is
+            // discoverable next to the main backup with the same timestamp.
+            let wal_dst = backup_dir.join(format!("{wal_name}.{ts}"));
+            atomic_copy_with_fsync(&wal_src, &wal_dst)?;
+        }
 
         // Verify the backup by opening read-only and running a health check.
         let config = lbug::SystemConfig::default().read_only(true);
@@ -308,7 +369,8 @@ impl NativeCognitiveMemory {
         Ok(backup_path)
     }
 
-    /// Remove old backups, keeping only the `keep` most recent ones.
+    /// Remove old backups, keeping only the `keep` most recent ones. Removes
+    /// any paired `.wal` backup files that share the same timestamp suffix.
     pub fn prune_old_backups(state_root: &Path, keep: usize) {
         let backup_dir = state_root.join("backups");
         if !backup_dir.is_dir() {
@@ -320,6 +382,8 @@ impl NativeCognitiveMemory {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
+                // Index only the main-DB backups by epoch; .wal siblings are
+                // pruned alongside their main file by epoch.
                 if let Some(epoch_str) = name_str.strip_prefix(prefix)
                     && let Ok(epoch) = epoch_str.parse::<u64>()
                 {
@@ -328,12 +392,20 @@ impl NativeCognitiveMemory {
             }
         }
         backups.sort_by_key(|x| std::cmp::Reverse(x.0));
-        for (_, path) in backups.into_iter().skip(keep) {
+        for (epoch, path) in backups.into_iter().skip(keep) {
             if let Err(e) = std::fs::remove_file(&path) {
                 eprintln!(
                     "[simard] failed to remove old backup {}: {e}",
                     path.display()
                 );
+            }
+            // Remove paired .wal files with the same epoch (any of the two
+            // wal_name variants lbug may use).
+            for wal_name in ["cognitive_memory.ladybug.wal", "cognitive_memory.wal"] {
+                let paired = backup_dir.join(format!("{wal_name}.{epoch}"));
+                if paired.exists() {
+                    let _ = std::fs::remove_file(&paired);
+                }
             }
         }
     }
