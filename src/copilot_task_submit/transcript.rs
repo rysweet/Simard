@@ -4,6 +4,7 @@ use super::types::{
 };
 use crate::sanitization::sanitize_terminal_text;
 use crate::terminal_session::compact_terminal_evidence_value;
+use crate::util::string_truncate::truncate_to_char_boundary;
 
 pub(super) fn classify_startup(scan: &TranscriptCheckpointScan, exited: bool) -> StartupStatus {
     if scan.has_wrapper_error {
@@ -347,7 +348,7 @@ pub(super) fn copilot_transcript_preview(
         .join(" | ");
 
     if normalized.len() > 512 {
-        normalized.truncate(512);
+        truncate_to_char_boundary(&mut normalized, 512);
         normalized.push_str("...");
     }
 
