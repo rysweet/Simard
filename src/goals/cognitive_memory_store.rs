@@ -94,19 +94,20 @@ impl CognitiveMemoryGoalStore {
             Ok(r) => r,
             Err(_) => return Ok(Vec::new()),
         };
-        let facts = match reader
-            .ops()
-            .search_facts(GOAL_STORE_FACT_CONCEPT, GOAL_STORE_LIST_LIMIT, 0.0)
-        {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!(
-                    "[simard] CognitiveMemoryGoalStore::list: search_facts failed ({e}) — \
+        let facts =
+            match reader
+                .ops()
+                .search_facts(GOAL_STORE_FACT_CONCEPT, GOAL_STORE_LIST_LIMIT, 0.0)
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!(
+                        "[simard] CognitiveMemoryGoalStore::list: search_facts failed ({e}) — \
                      returning empty record set"
-                );
-                return Ok(Vec::new());
-            }
-        };
+                    );
+                    return Ok(Vec::new());
+                }
+            };
 
         // For each slug, keep the fact with the largest node_id (most
         // recent UUID-v7).
