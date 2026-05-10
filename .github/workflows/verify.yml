@@ -39,7 +39,14 @@ jobs:
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: simard-ci
+          # Bumped 2026-05-10: previous `simard-ci` cache held stale test
+          # binaries from before tests were renamed/deleted (notably
+          # `engineer_loop_probe_fails_visibly_when_structured_replacement_target_is_missing`
+          # deleted in 1fcd9bb0 and `version_string_is_semver` updated past
+          # 0.16.1 → 0.17.0). Cargo's mtime-based fingerprint trusted the
+          # restored .rmeta files and re-ran the dead tests against new
+          # source. Bump key to force a clean rebuild.
+          shared-key: simard-ci-v2
           # Single writer: only the main branch refreshes the shared cache.
           # PR runs read it but never overwrite, eliminating cache thrashing
           # across concurrent PRs.
@@ -68,17 +75,8 @@ jobs:
           #     `cargo install --path . --root <tmp>` from scratch and runs
           #     ~25 min on a cold cache; running it twice (here AND in
           #     install-real) doubles total verify wall time for no gain.
-          #   engineer_loop_probe_fails_visibly_when_structured_replacement_target_is_missing
-          #     — tracked in https://github.com/rysweet/Simard/issues/1639.
-          #     Test asserts the engineer loop FAILS on a deliberately broken
-          #     replace target, but the prompt-driven RustyClawd brain
-          #     creatively repairs the plan (appends the verify-contains
-          #     string) so the loop legitimately succeeds. Test redesign is
-          #     out of scope for the current PR; tracked & skipped per
-          #     CONTRIBUTING.md "Pre-Existing Test Failure Disposition".
           cargo test --all-features --locked --no-fail-fast \
             -- --skip install_packages_runs_and_self_installs \
-               --skip engineer_loop_probe_fails_visibly_when_structured_replacement_target_is_missing \
             2>&1 | tee target/ci-logs/cargo-test.log
 
       - name: Run pre-push stage (cargo-clippy only)
@@ -132,7 +130,7 @@ jobs:
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: simard-ci
+          shared-key: simard-ci-v2
           # Read-only on PRs and non-pre-commit jobs; pre-commit on main is
           # the single writer to avoid cache contention.
           save-if: false
