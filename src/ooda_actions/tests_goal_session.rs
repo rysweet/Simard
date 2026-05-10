@@ -104,12 +104,13 @@ fn session_progress_comes_from_agent_response_not_auto_bump() {
 }
 
 #[test]
-fn session_no_progress_marker_routes_prose_to_engineer_fallback() {
+fn session_no_progress_marker_routes_prose_to_engineer_task() {
     // When the LLM returns prose instead of structured JSON, the dispatcher
-    // now treats the response as the engineer's task description (the
-    // engineer is itself an LLM that reads prose). Goal progress MUST still
-    // be preserved — only the engineer subprocess can advance progress, and
-    // in unit tests the spawn is blocked by the recursion depth guard.
+    // treats the prose as the engineer subprocess's task description (the
+    // engineer is itself an LLM that reads natural language). Goal progress
+    // MUST still be preserved — only the engineer subprocess can advance
+    // progress, and in unit tests the spawn is blocked by the recursion
+    // depth guard.
     let (session, _captured) = MockSession::new_ok(
         "Checked the repo. Everything looks fine.",
         vec!["no markers here".to_string()],
@@ -129,7 +130,7 @@ fn session_no_progress_marker_routes_prose_to_engineer_fallback() {
     let detail = outcomes[0].detail.to_lowercase();
     assert!(
         detail.contains("spawn_engineer") || detail.contains("subordinate"),
-        "outcome should reference spawn_engineer fallback, got: {}",
+        "outcome should reference spawn_engineer, got: {}",
         outcomes[0].detail,
     );
     // Progress MUST stay at 40% — only a successful engineer run could
@@ -137,7 +138,7 @@ fn session_no_progress_marker_routes_prose_to_engineer_fallback() {
     assert_eq!(
         state.active_goals.active[0].status,
         GoalProgress::InProgress { percent: 40 },
-        "progress must be preserved when only prose-fallback fired in tests"
+        "progress must be preserved when only the prose-to-engineer path fired in tests"
     );
 }
 

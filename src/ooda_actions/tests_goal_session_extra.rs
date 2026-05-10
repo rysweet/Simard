@@ -90,9 +90,9 @@ fn dispatch_assess_only_updates_progress_from_json() {
 }
 
 #[test]
-fn dispatch_records_prose_fallback_outcome_detail() {
-    // LLM returns prose with no JSON — parser returns None and the
-    // dispatcher routes the response into the engineer subprocess as a
+fn dispatch_records_prose_to_engineer_outcome_detail() {
+    // LLM returns prose with no JSON. Prose is a valid response shape — the
+    // dispatcher routes the response into the engineer subprocess as the
     // task description ("the engineer reads natural language too"). The
     // test harness blocks the actual spawn via the depth limit, so the
     // visible outcome describes the spawn attempt rather than the legacy
@@ -111,14 +111,14 @@ fn dispatch_records_prose_fallback_outcome_detail() {
     let detail = outcomes[0].detail.to_lowercase();
     assert!(
         detail.contains("spawn_engineer") || detail.contains("subordinate"),
-        "outcome detail must reference the spawn_engineer fallback, got: {}",
+        "outcome detail must reference spawn_engineer, got: {}",
         outcomes[0].detail
     );
     // Progress MUST stay at 25% (no silent mutation, no auto-bump).
     assert_eq!(
         state.active_goals.active[0].status,
         GoalProgress::InProgress { percent: 25 },
-        "progress must be preserved when only prose-fallback fired in tests"
+        "progress must be preserved when only the prose-to-engineer path fired in tests"
     );
 }
 

@@ -10,16 +10,17 @@ literally into your response. A response whose `task`, `reason`, or
 similar `<placeholder>`) is a bug and will be rejected.
 
 You SHOULD respond with a single JSON object matching one of the seven
-schemas below. JSON lets Simard run direct GitHub operations (create
-issue, comment, close) without spinning a subordinate engineer subprocess.
+schemas below. JSON is preferred because it lets Simard run direct GitHub
+operations (create issue, comment, close) without spinning a subordinate
+engineer subprocess.
 
-If you cannot produce structured JSON for any reason — for example you
-need to describe a complex task that does not fit the spawn_engineer
-schema, or you are uncertain which action applies — write a single
-paragraph of plain English describing what the engineer should do next.
-Simard will treat the entire response as a `spawn_engineer` task and
-hand it directly to the autonomous coding subprocess. Prose responses
-ARE valid; the engineer is itself an LLM and reads natural language.
+If a JSON action does not fit (for example, you need to describe a complex
+task that does not fit the `spawn_engineer` schema, or you are uncertain
+which action applies), write a single paragraph of plain English describing
+what the engineer should do next. Simard will spawn a `spawn_engineer`
+subprocess with the entire prose response as the task description. Prose
+is a first-class response shape — the engineer is itself an LLM and reads
+natural language directly.
 
 # Issue-first workflow
 
@@ -145,8 +146,13 @@ Update the assessed completion percentage with no other side effects.
 
 # Failure mode
 
-If you emit anything other than one of the seven JSON objects above, the
-cycle FAILS LOUDLY. There is no fallback that scrapes prose. Pick an action.
+The only response that fails the cycle is an empty/whitespace-only
+response. Both shapes succeed:
 
-Output requirement: emit ONLY the JSON object. No surrounding text, no code
-fences, no markdown.
+- A valid JSON object → Simard executes it directly.
+- Any non-empty prose       → Simard spawns an engineer subprocess with the
+                              prose as its task description.
+
+Output requirement: emit either a single JSON object **or** a single
+paragraph of prose. Do not mix both. No code fences, no markdown around
+the JSON.
