@@ -45,6 +45,53 @@ pub(crate) fn amplihack_binary() -> String {
     std::env::var("SIMARD_AMPLIHACK_BIN").unwrap_or_else(|_| "amplihack".to_string())
 }
 
+/// Which amplihack agent subcommand to use for engineering work.
+///
+/// The pivot in PR #1652 hardcoded `RustyClawd` as the engineer subprocess.
+/// In practice multiple amplihack autonomous agents are valid choices
+/// (e.g. `amplihack copilot -p <prompt>`), and operators need to be able
+/// to swap kinds without recompiling Simard.
+///
+/// Configure via the `SIMARD_ENGINEER_AGENT` env var. Recognised values
+/// (case-insensitive): `rustyclawd` (default), `copilot`. Unknown values
+/// fall back to the default with a stderr warning so operator typos do
+/// not silently change behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentKind {
+    RustyClawd,
+    Copilot,
+}
+
+impl AgentKind {
+    /// Subcommand name as accepted by `amplihack <subcommand>`.
+    pub(crate) fn subcommand(self) -> &'static str {
+        match self {
+            AgentKind::RustyClawd => "RustyClawd",
+            AgentKind::Copilot => "copilot",
+        }
+    }
+
+    /// Resolve the configured agent kind from the `SIMARD_ENGINEER_AGENT`
+    /// environment variable. Unknown values warn to stderr and fall back
+    /// to the default (`RustyClawd`).
+    pub(crate) fn from_env() -> AgentKind {
+        match std::env::var("SIMARD_ENGINEER_AGENT") {
+            Err(_) => AgentKind::RustyClawd,
+            Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+                "" | "rustyclawd" | "rusty-clawd" | "rusty_clawd" => AgentKind::RustyClawd,
+                "copilot" => AgentKind::Copilot,
+                other => {
+                    eprintln!(
+                        "[simard] SIMARD_ENGINEER_AGENT={other:?} not recognised; \
+                         falling back to RustyClawd. Valid: rustyclawd, copilot."
+                    );
+                    AgentKind::RustyClawd
+                }
+            },
+        }
+    }
+}
+
 pub(crate) fn build_agent_prompt(objective: &str, inspection: &RepoInspection) -> String {
     let files = if inspection.changed_files.is_empty() {
         "none".to_string()
@@ -90,19 +137,40 @@ pub(crate) fn build_agent_prompt(objective: &str, inspection: &RepoInspection) -
     prompt
 }
 
-/// Build the argv passed to `amplihack RustyClawd --auto`. Exposed for tests.
+/// Build the argv passed to `amplihack <subcommand>` for the chosen
+/// [`AgentKind`]. Each kind has its own prompt-passing convention.
+///
+/// * `RustyClawd` uses `--auto -- -p <prompt>` (the `--` separator is
+///   required so the inner `-p` reaches the autonomous loop).
+/// * `copilot` accepts `-p <prompt>` directly with `--allow-all-paths`
+///   so it can read/write across the workspace.
+pub(crate) fn engineer_argv(kind: AgentKind, prompt: &str, max_turns: u32) -> Vec<String> {
+    match kind {
+        AgentKind::RustyClawd => vec![
+            kind.subcommand().to_string(),
+            "--auto".to_string(),
+            "--subprocess-safe".to_string(),
+            "--no-reflection".to_string(),
+            "--max-turns".to_string(),
+            max_turns.to_string(),
+            "--".to_string(),
+            "-p".to_string(),
+            prompt.to_string(),
+        ],
+        AgentKind::Copilot => vec![
+            kind.subcommand().to_string(),
+            "--allow-all-paths".to_string(),
+            "-p".to_string(),
+            prompt.to_string(),
+        ],
+    }
+}
+
+/// Backwards-compatible wrapper kept so existing callers (and tests pinned
+/// to the RustyClawd argv shape) keep working unchanged.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn rustyclawd_argv(prompt: &str, max_turns: u32) -> Vec<String> {
-    vec![
-        "RustyClawd".to_string(),
-        "--auto".to_string(),
-        "--subprocess-safe".to_string(),
-        "--no-reflection".to_string(),
-        "--max-turns".to_string(),
-        max_turns.to_string(),
-        "--".to_string(),
-        "-p".to_string(),
-        prompt.to_string(),
-    ]
+    engineer_argv(AgentKind::RustyClawd, prompt, max_turns)
 }
 
 fn keep_summary_tail(buf: &[u8]) -> String {
@@ -119,11 +187,16 @@ fn keep_summary_tail(buf: &[u8]) -> String {
     s
 }
 
-/// Run the `amplihack RustyClawd` subprocess and return its trailing output.
-pub(crate) fn run_rustyclawd_subprocess(prompt: &str, workspace: &Path) -> SimardResult<String> {
+/// Run the `amplihack <agent>` subprocess and return its trailing output.
+/// `kind` selects which agent subcommand to invoke; see [`AgentKind`].
+pub(crate) fn run_engineer_subprocess(
+    prompt: &str,
+    workspace: &Path,
+    kind: AgentKind,
+) -> SimardResult<String> {
     let bin = amplihack_binary();
-    let argv = rustyclawd_argv(prompt, DEFAULT_MAX_TURNS);
-    let action_label = format!("{bin} RustyClawd --auto");
+    let argv = engineer_argv(kind, prompt, DEFAULT_MAX_TURNS);
+    let action_label = format!("{bin} {}", kind.subcommand());
 
     let mut child = Command::new(&bin)
         .args(&argv)
@@ -175,7 +248,8 @@ pub(crate) fn run_rustyclawd_subprocess(prompt: &str, workspace: &Path) -> Simar
         return Err(SimardError::ActionExecutionFailed {
             action: action_label,
             reason: format!(
-                "RustyClawd exited with status {}; stderr_tail=\n{}",
+                "{} exited with status {}; stderr_tail=\n{}",
+                kind.subcommand(),
                 output.status,
                 stderr_tail.trim()
             ),
@@ -190,16 +264,27 @@ pub(crate) fn run_rustyclawd_subprocess(prompt: &str, workspace: &Path) -> Simar
     Ok(summary)
 }
 
+/// Backwards-compatible wrapper that always uses [`AgentKind::RustyClawd`].
+///
+/// Older test code and any callers that pre-date the configurable agent
+/// kind keep using this entrypoint unchanged. Production code paths read
+/// the kind from the environment via [`AgentKind::from_env`].
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn run_rustyclawd_subprocess(prompt: &str, workspace: &Path) -> SimardResult<String> {
+    run_engineer_subprocess(prompt, workspace, AgentKind::RustyClawd)
+}
+
 /// Start an agent session in a background thread and return the channel
-/// receiver. The thread spawns `amplihack RustyClawd --auto` as a subprocess
-/// and reports its summary back to the caller.
+/// receiver. The thread spawns the configured `amplihack <agent>` subprocess
+/// (via [`AgentKind::from_env`]) and reports its summary back to the caller.
 pub(crate) fn start_agent_session(
     prompt: String,
     workspace: PathBuf,
 ) -> mpsc::Receiver<SimardResult<String>> {
     let (tx, rx) = mpsc::channel();
+    let kind = AgentKind::from_env();
     thread::spawn(move || {
-        let result = run_rustyclawd_subprocess(&prompt, &workspace);
+        let result = run_engineer_subprocess(&prompt, &workspace, kind);
         let _ = tx.send(result);
     });
     rx
@@ -363,5 +448,84 @@ mod tests {
             err.contains("failed to spawn") || err.contains("RustyClawd"),
             "unexpected error message: {err}"
         );
+    }
+
+    #[test]
+    fn agent_kind_subcommand_strings_are_stable() {
+        assert_eq!(AgentKind::RustyClawd.subcommand(), "RustyClawd");
+        assert_eq!(AgentKind::Copilot.subcommand(), "copilot");
+    }
+
+    #[test]
+    fn agent_kind_from_env_defaults_to_rustyclawd() {
+        let original = std::env::var("SIMARD_ENGINEER_AGENT").ok();
+        unsafe {
+            std::env::remove_var("SIMARD_ENGINEER_AGENT");
+        }
+        assert_eq!(AgentKind::from_env(), AgentKind::RustyClawd);
+        unsafe {
+            if let Some(v) = original {
+                std::env::set_var("SIMARD_ENGINEER_AGENT", v);
+            }
+        }
+    }
+
+    #[test]
+    fn agent_kind_from_env_recognises_copilot_case_insensitive() {
+        let original = std::env::var("SIMARD_ENGINEER_AGENT").ok();
+        for raw in ["copilot", "Copilot", "COPILOT", "  copilot  "] {
+            unsafe {
+                std::env::set_var("SIMARD_ENGINEER_AGENT", raw);
+            }
+            assert_eq!(AgentKind::from_env(), AgentKind::Copilot, "raw={raw:?}");
+        }
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("SIMARD_ENGINEER_AGENT", v),
+                None => std::env::remove_var("SIMARD_ENGINEER_AGENT"),
+            }
+        }
+    }
+
+    #[test]
+    fn agent_kind_from_env_unknown_falls_back_to_default() {
+        let original = std::env::var("SIMARD_ENGINEER_AGENT").ok();
+        unsafe {
+            std::env::set_var("SIMARD_ENGINEER_AGENT", "totally-not-a-real-agent");
+        }
+        // Falls back rather than panicking; warning is emitted to stderr.
+        assert_eq!(AgentKind::from_env(), AgentKind::RustyClawd);
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("SIMARD_ENGINEER_AGENT", v),
+                None => std::env::remove_var("SIMARD_ENGINEER_AGENT"),
+            }
+        }
+    }
+
+    #[test]
+    fn engineer_argv_copilot_uses_p_without_dash_separator() {
+        let argv = engineer_argv(AgentKind::Copilot, "hello world", 7);
+        assert_eq!(argv[0], "copilot");
+        assert!(argv.iter().any(|a| a == "--allow-all-paths"));
+        assert!(argv.iter().any(|a| a == "-p"));
+        assert!(argv.iter().any(|a| a == "hello world"));
+        // copilot does not use the `--` separator that RustyClawd needs.
+        assert!(
+            !argv.iter().any(|a| a == "--"),
+            "copilot argv should not include `--` separator: {argv:?}"
+        );
+        // copilot is not driven by --auto / --max-turns; ensure those
+        // RustyClawd-specific flags are absent so behaviour matches the
+        // amplihack copilot subcommand surface.
+        assert!(!argv.iter().any(|a| a == "--auto"));
+        assert!(!argv.iter().any(|a| a == "--max-turns"));
+    }
+
+    #[test]
+    fn engineer_argv_rustyclawd_matches_legacy_wrapper() {
+        let new = engineer_argv(AgentKind::RustyClawd, "x", 30);
+        let legacy = rustyclawd_argv("x", 30);
+        assert_eq!(new, legacy);
     }
 }

@@ -311,23 +311,53 @@ pub(crate) fn advance_goal_with_session(
                     }
                 }
                 None => {
-                    // FAIL LOUD per PHILOSOPHY.md: when the LLM returns prose
-                    // instead of the required JSON object, this is a planning
-                    // failure. We do NOT fall back to PROGRESS-line scraping —
-                    // that masked broken planning for months. Surface the
-                    // failure so the cooldown machinery can demote this goal.
-                    let raw = truncate_for_outcome(&outcome.execution_summary);
-                    eprintln!(
-                        "[simard] OODA goal-action PARSE FAILED for '{}': LLM returned non-JSON response: {}",
-                        goal.id, raw,
-                    );
-                    let detail = format!(
-                        "goal-action parse failed for goal '{}': LLM did not emit a recognised JSON action (one of spawn_engineer / noop / assess_only / gh_issue_create / gh_issue_comment / gh_issue_close / gh_pr_comment). Raw response head: {}",
-                        goal.id, raw,
-                    );
-                    GoalSessionResult {
-                        outcome: make_outcome(action, false, detail),
-                        action: None,
+                    // The LLM did not emit a recognised JSON action — but it
+                    // may still have emitted prose describing what to do.
+                    // The engineer is itself an LLM that reads natural
+                    // language, so we fall back to spawning an engineer
+                    // with the response as its task description rather than
+                    // discarding the cycle's planning work.
+                    //
+                    // Structured JSON actions (noop / assess_only / spawn /
+                    // gh_*) remain the preferred contract — they let Simard
+                    // perform GH ops directly without spinning a subprocess.
+                    // But "no JSON parsed" no longer kills the cycle.
+                    match prose_fallback_action(&outcome.execution_summary) {
+                        Some(prose_action) => {
+                            let task = match &prose_action {
+                                GoalAction::SpawnEngineer { task, .. } => task.as_str(),
+                                _ => "",
+                            };
+                            let truncated = truncate_for_outcome(task);
+                            eprintln!(
+                                "[simard] OODA goal-action prose fallback for '{}': spawning engineer with raw response as task: {}",
+                                goal.id, truncated,
+                            );
+                            let detail = format!(
+                                "prose-fallback spawn_engineer for goal '{}': {}",
+                                goal.id, truncated,
+                            );
+                            GoalSessionResult {
+                                outcome: make_outcome(action, true, detail),
+                                action: Some(prose_action),
+                            }
+                        }
+                        None => {
+                            // Truly empty response — nothing for the engineer
+                            // to act on, so this is a real failure.
+                            eprintln!(
+                                "[simard] OODA goal-action EMPTY response for '{}': LLM returned no content",
+                                goal.id,
+                            );
+                            let detail = format!(
+                                "goal-action empty response for goal '{}': LLM returned no content",
+                                goal.id,
+                            );
+                            GoalSessionResult {
+                                outcome: make_outcome(action, false, detail),
+                                action: None,
+                            }
+                        }
                     }
                 }
             }
@@ -340,5 +370,78 @@ pub(crate) fn advance_goal_with_session(
             ),
             action: None,
         },
+    }
+}
+
+/// Build the prose-fallback `GoalAction` from a raw LLM response.
+///
+/// When the orchestrator LLM emits free-form prose instead of a JSON
+/// action, treat the trimmed response as the task description for a
+/// subordinate engineer subprocess. This is the user-facing answer to
+/// "why does it have to be JSON?" — it doesn't, the engineer reads
+/// natural language too.
+///
+/// Returns `None` only when the response trims to the empty string;
+/// every non-empty response yields a `SpawnEngineer` action.
+pub(super) fn prose_fallback_action(response: &str) -> Option<GoalAction> {
+    let trimmed = response.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(GoalAction::SpawnEngineer {
+        task: trimmed.to_string(),
+        files: Vec::new(),
+        issue: None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prose_fallback_action_returns_spawn_engineer_for_pure_prose() {
+        let response = "Run `cargo test --lib prioritization` and report which tests fail.";
+        let action = prose_fallback_action(response).expect("non-empty prose yields action");
+        match action {
+            GoalAction::SpawnEngineer { task, files, issue } => {
+                assert_eq!(task, response);
+                assert!(files.is_empty(), "files defaults to empty");
+                assert!(issue.is_none(), "issue defaults to None");
+            }
+            other => panic!("expected SpawnEngineer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prose_fallback_action_trims_surrounding_whitespace() {
+        let action =
+            prose_fallback_action("\n\n   fix the meeting REPL  \n\n").expect("yields action");
+        match action {
+            GoalAction::SpawnEngineer { task, .. } => {
+                assert_eq!(task, "fix the meeting REPL");
+            }
+            other => panic!("expected SpawnEngineer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prose_fallback_action_returns_none_for_empty_or_whitespace() {
+        assert!(prose_fallback_action("").is_none());
+        assert!(prose_fallback_action("   ").is_none());
+        assert!(prose_fallback_action("\n\t  \r\n").is_none());
+    }
+
+    #[test]
+    fn prose_fallback_action_preserves_multiline_task_descriptions() {
+        let response = "First, check the current state with `git status`.\n\nThen, if dirty, stash and proceed to fix issue #1234.";
+        let action = prose_fallback_action(response).expect("yields action");
+        match action {
+            GoalAction::SpawnEngineer { task, .. } => {
+                assert!(task.contains("git status"));
+                assert!(task.contains("issue #1234"));
+            }
+            other => panic!("expected SpawnEngineer, got {other:?}"),
+        }
     }
 }

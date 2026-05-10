@@ -9,9 +9,17 @@ literally into your response. A response whose `task`, `reason`, or
 `assessment` field equals `<one-paragraph concrete task>` (or any
 similar `<placeholder>`) is a bug and will be rejected.
 
-You MUST respond with a single JSON object and nothing else (no prose, no
-code fences, no markdown). The object must match exactly one of the seven
-schemas below.
+You SHOULD respond with a single JSON object matching one of the seven
+schemas below. JSON lets Simard run direct GitHub operations (create
+issue, comment, close) without spinning a subordinate engineer subprocess.
+
+If you cannot produce structured JSON for any reason — for example you
+need to describe a complex task that does not fit the spawn_engineer
+schema, or you are uncertain which action applies — write a single
+paragraph of plain English describing what the engineer should do next.
+Simard will treat the entire response as a `spawn_engineer` task and
+hand it directly to the autonomous coding subprocess. Prose responses
+ARE valid; the engineer is itself an LLM and reads natural language.
 
 # Issue-first workflow
 
