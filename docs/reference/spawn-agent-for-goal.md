@@ -12,11 +12,16 @@ related:
 # `spawn_agent_for_goal` — API Reference
 
 `spawn_agent_for_goal` is the primary entry point for delegating concrete
-engineering work to a subordinate Copilot agent session. It replaces the
-old `plan_objective` + `execute_plan` pair from the removed
-`src/engineer_plan` module.
+engineering work to an autonomous agent session. It is a **thin subprocess
+wrapper around `amplihack RustyClawd --auto`** — Simard does not implement
+its own LLM loop, tool selection, or reflection. The subprocess IS the
+engineer.
 
-**Module**: `simard::engineer_agent` (re-exported as
+This replaces the earlier in-process `SessionBuilder` integration which
+duplicated agent-loop logic in custom Rust. See ADR-0024 in
+`Specs/ARCHITECTURAL_DECISIONS.md` (issue #1648) for the rationale.
+
+**Module**: `simard::engineer_loop::agent_spawn` (re-exported as
 `simard::engineer_loop::spawn_agent_for_goal`)
 
 ---
@@ -48,9 +53,9 @@ in `ExecutedEngineerAction.selected.plan_summary` and appears verbatim in
 the cycle report.
 
 Returns `Err(SimardError::ActionExecutionFailed { reason })` on:
-- Agent session failure (non-zero exit from the Copilot SDK)
-- Session timeout (wall time exceeds 3600 s)
-- SDK initialisation error
+- Subprocess spawn failure (e.g., `amplihack` not on PATH)
+- `amplihack RustyClawd` exited non-zero (full stderr tail in `reason`)
+- Subprocess wall time exceeds 3600 s (`SimardError::CommandTimeout`)
 
 ### Panics
 
@@ -86,25 +91,35 @@ autonomously, calling whatever tools it needs to complete the work.
 ## Timeout behaviour
 
 The call blocks the calling thread for up to **3600 seconds**. Internally it
-uses `std::thread::spawn` + `std::sync::mpsc::channel::recv_timeout` so the
-calling thread is not permanently blocked if the agent hangs:
+spawns the `amplihack RustyClawd --auto` subprocess and polls it on a
+background thread; the calling thread receives the result over an
+`mpsc::channel`, so it is never permanently blocked if the subprocess
+hangs:
 
 ```rust
-let (tx, rx) = std::sync::mpsc::channel();
+use std::process::Command;
+use std::sync::mpsc;
+use std::time::Duration;
+
+let (tx, rx) = mpsc::channel();
 std::thread::spawn(move || {
-    let result = session.run_turn(turn_input); // blocking Copilot SDK call
+    // Spawns: amplihack RustyClawd --auto --subprocess-safe
+    //                  --no-reflection --max-turns 30 -- -p <prompt>
+    let result = run_rustyclawd_subprocess(&prompt, &workspace);
     let _ = tx.send(result);
 });
-match rx.recv_timeout(Duration::from_secs(3600)) {
-    Ok(result) => result.map(|r| r.execution_summary),
-    Err(_) => Err(SimardError::ActionExecutionFailed {
-        reason: "agent session timed out after 3600s".to_string(),
-    }),
+match rx.recv_timeout(Duration::from_secs(3600 + 30)) {
+    Ok(result) => result,
+    Err(_) => Err(SimardError::ActionExecutionFailed { /* timeout */ }),
 }
 ```
 
 The 3600-second limit matches `CARGO_COMMAND_TIMEOUT_SECS` defined in
 `src/engineer_loop/mod.rs`.
+
+The amplihack binary path is resolved from `PATH` by default; override
+via the `SIMARD_AMPLIHACK_BIN` environment variable for tests or
+non-standard installs.
 
 ---
 
@@ -163,5 +178,5 @@ not be used:
 
 | `SimardError` variant          | When raised                                          |
 |--------------------------------|------------------------------------------------------|
-| `ActionExecutionFailed`        | Agent returned non-zero exit, timeout elapsed, or `workspace_path` does not exist / is not a git repo |
-| `PlanningUnavailable`          | Copilot SDK unavailable / session failed to start    |
+| `ActionExecutionFailed`        | Subprocess spawn failed, `amplihack RustyClawd` returned non-zero exit, or `workspace_path` does not exist / is not a git repo |
+| `CommandTimeout`               | Subprocess wall time exceeded `AGENT_SESSION_TIMEOUT_SECS` (3600 s); subprocess was killed |

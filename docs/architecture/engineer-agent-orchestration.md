@@ -83,66 +83,46 @@ handled autonomously by the agent.
 
 ---
 
-## EngineerActionKind::AgentSession
+## Subprocess delegation (architectural pivot — issue #1648)
 
-The `EngineerActionKind` enum has one new variant:
+The agent session is **not** an in-process LLM SDK call. It is a subprocess
+invocation of the upstream `amplihack RustyClawd --auto` autonomous engineer.
+Simard's role is to act as a PM architect orchestrating fleets of coding
+agents — not to reimplement the agent loop in custom Rust.
 
-```rust
-pub enum EngineerActionKind {
-    // …existing variants…
-    AgentSession { outcome_summary: String },   // subordinate Copilot agent managed the work
-}
-```
-
-`AgentSession` is treated as **mutating** by `run_optional_review` — it is
-included in the `is_mutating` `matches!` arm in `review_persist.rs`.
-
-For `compute_diff_for_review`, `AgentSession` requires a dedicated match arm
-that diffs against the SHA captured **before** the agent was spawned (stored
-as `inspection.head`). The wildcard arm runs `git diff` (uncommitted
-working-tree only) — insufficient when the agent commits before returning:
-
-```rust
-EngineerActionKind::AgentSession { .. } => {
-    &["git", "diff", inspection.head.as_str(), "HEAD"]
-}
-```
-
-`inspection.head` already exists in `RepoInspection` and holds the HEAD SHA
-captured at the time of workspace inspection — before the agent is spawned.
-Without this dedicated arm, an agent run that commits its work produces an
-empty diff and the review silently skips.
-
-An `ExecutedEngineerAction` whose `selected.kind` is `AgentSession` has:
-
-| Field              | Content                                              |
-|--------------------|------------------------------------------------------|
-| `label`            | `"agent-session"`                                    |
-| `rationale`        | The natural-language prompt sent to the agent        |
-| `argv`             | `["copilot", "agent", "--goal", "<objective>"]`      |
-| `plan_summary`     | The `execution_summary` returned by the agent        |
-| `exit_code`        | `0` on success, non-zero on agent failure or timeout |
-| `stdout`           | Agent's final output text                            |
-| `stderr`           | Copilot SDK stderr / timeout message                 |
-| `changed_files`    | Files touched (from `git diff --name-only`)          |
-
----
-
-## Timeout
-
-`spawn_agent_for_goal()` enforces a **3600-second** wall-clock timeout
-(matching `CARGO_COMMAND_TIMEOUT_SECS`). If the agent session does not return
-within that window the call returns:
+The exact subprocess invocation is:
 
 ```
-Err(SimardError::ActionExecutionFailed {
-    reason: "agent session timed out after 3600s"
-})
+amplihack RustyClawd --auto --subprocess-safe --no-reflection \
+                     --max-turns 30 -- -p "<prompt>"
 ```
 
-The engineer loop records this as a `PhaseOutcome::Failed` and proceeds to
-persist the (incomplete) cycle report so the OODA daemon can re-schedule the
-goal.
+| Flag                | Why                                                                    |
+|---------------------|------------------------------------------------------------------------|
+| `--auto`            | enables the autonomous agentic loop (clarify → plan → execute → eval)  |
+| `--subprocess-safe` | skip staging mutations from a child invocation                         |
+| `--no-reflection`   | Simard owns reflection separately via `review_pipeline`                |
+| `--max-turns 30`    | upper bound on autonomous turns; matches amplihack complex-task guide  |
+
+The amplihack binary is resolved from `PATH` by default; override with
+`SIMARD_AMPLIHACK_BIN` for tests / non-standard installs.
+
+### Why a subprocess and not an in-process SDK call?
+
+The previous in-process `SessionBuilder` integration kept hitting two failure
+modes that the subprocess model cleanly resolves:
+
+1. **SIGTERM ignored mid-call.** The in-process LLM SDK held the engineer
+   thread inside a single blocking `run_turn()` call. SIGTERM to Simard
+   could not interrupt the call, so the daemon would start NEW autonomous
+   turns after a stop request.
+2. **Capability duplication.** Tool selection, retry policy, prompt
+   construction, and reflection were all duplicated between Simard and the
+   upstream `amplihack` agent loop — every upgrade to one had to be
+   re-implemented in the other.
+
+With the subprocess model, `kill(simard_pid)` orphans the child to init
+(reaped naturally), and the agent-loop logic lives in exactly one place.
 
 ---
 
