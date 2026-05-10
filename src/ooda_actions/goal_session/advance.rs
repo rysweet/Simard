@@ -311,18 +311,16 @@ pub(crate) fn advance_goal_with_session(
                     }
                 }
                 None => {
-                    // The LLM did not emit a recognised JSON action — but it
-                    // may still have emitted prose describing what to do.
-                    // The engineer is itself an LLM that reads natural
-                    // language, so we fall back to spawning an engineer
-                    // with the response as its task description rather than
-                    // discarding the cycle's planning work.
-                    //
-                    // Structured JSON actions (noop / assess_only / spawn /
-                    // gh_*) remain the preferred contract — they let Simard
-                    // perform GH ops directly without spinning a subprocess.
-                    // But "no JSON parsed" no longer kills the cycle.
-                    match prose_fallback_action(&outcome.execution_summary) {
+                    // The LLM did not emit a recognised JSON action. JSON is
+                    // the preferred contract because it lets Simard run
+                    // direct GH ops (noop / assess_only / spawn / gh_*)
+                    // without spawning a subprocess. But prose is also a
+                    // valid response shape: the engineer subprocess is
+                    // itself an LLM that reads natural language, so any
+                    // non-empty prose response IS a usable engineer task
+                    // description. Only a literally empty response is a
+                    // failure here.
+                    match engineer_task_from_prose(&outcome.execution_summary) {
                         Some(prose_action) => {
                             let task = match &prose_action {
                                 GoalAction::SpawnEngineer { task, .. } => task.as_str(),
@@ -330,11 +328,11 @@ pub(crate) fn advance_goal_with_session(
                             };
                             let truncated = truncate_for_outcome(task);
                             eprintln!(
-                                "[simard] OODA goal-action prose fallback for '{}': spawning engineer with raw response as task: {}",
+                                "[simard] OODA goal-action: LLM emitted prose for '{}'; spawning engineer with prose as task: {}",
                                 goal.id, truncated,
                             );
                             let detail = format!(
-                                "prose-fallback spawn_engineer for goal '{}': {}",
+                                "spawn_engineer (from prose) for goal '{}': {}",
                                 goal.id, truncated,
                             );
                             GoalSessionResult {
@@ -373,17 +371,20 @@ pub(crate) fn advance_goal_with_session(
     }
 }
 
-/// Build the prose-fallback `GoalAction` from a raw LLM response.
+/// Build a `SpawnEngineer` `GoalAction` from a free-form LLM prose response.
 ///
-/// When the orchestrator LLM emits free-form prose instead of a JSON
-/// action, treat the trimmed response as the task description for a
-/// subordinate engineer subprocess. This is the user-facing answer to
-/// "why does it have to be JSON?" — it doesn't, the engineer reads
-/// natural language too.
+/// The orchestrator LLM may answer in two equally-valid shapes:
+///   1. A structured JSON action (preferred — Simard executes it directly).
+///   2. Free-form prose describing what should be done.
+///
+/// Prose is **not** a fallback or error-recovery path; it is a first-class
+/// input format. The engineer subprocess is itself an LLM that reads
+/// natural language, so a prose response IS a usable engineer task
+/// description with no transformation beyond trimming.
 ///
 /// Returns `None` only when the response trims to the empty string;
 /// every non-empty response yields a `SpawnEngineer` action.
-pub(super) fn prose_fallback_action(response: &str) -> Option<GoalAction> {
+pub(super) fn engineer_task_from_prose(response: &str) -> Option<GoalAction> {
     let trimmed = response.trim();
     if trimmed.is_empty() {
         return None;
@@ -400,9 +401,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prose_fallback_action_returns_spawn_engineer_for_pure_prose() {
+    fn engineer_task_from_prose_returns_spawn_engineer_for_pure_prose() {
         let response = "Run `cargo test --lib prioritization` and report which tests fail.";
-        let action = prose_fallback_action(response).expect("non-empty prose yields action");
+        let action = engineer_task_from_prose(response).expect("non-empty prose yields action");
         match action {
             GoalAction::SpawnEngineer { task, files, issue } => {
                 assert_eq!(task, response);
@@ -414,9 +415,9 @@ mod tests {
     }
 
     #[test]
-    fn prose_fallback_action_trims_surrounding_whitespace() {
+    fn engineer_task_from_prose_trims_surrounding_whitespace() {
         let action =
-            prose_fallback_action("\n\n   fix the meeting REPL  \n\n").expect("yields action");
+            engineer_task_from_prose("\n\n   fix the meeting REPL  \n\n").expect("yields action");
         match action {
             GoalAction::SpawnEngineer { task, .. } => {
                 assert_eq!(task, "fix the meeting REPL");
@@ -426,16 +427,16 @@ mod tests {
     }
 
     #[test]
-    fn prose_fallback_action_returns_none_for_empty_or_whitespace() {
-        assert!(prose_fallback_action("").is_none());
-        assert!(prose_fallback_action("   ").is_none());
-        assert!(prose_fallback_action("\n\t  \r\n").is_none());
+    fn engineer_task_from_prose_returns_none_for_empty_or_whitespace() {
+        assert!(engineer_task_from_prose("").is_none());
+        assert!(engineer_task_from_prose("   ").is_none());
+        assert!(engineer_task_from_prose("\n\t  \r\n").is_none());
     }
 
     #[test]
-    fn prose_fallback_action_preserves_multiline_task_descriptions() {
+    fn engineer_task_from_prose_preserves_multiline_task_descriptions() {
         let response = "First, check the current state with `git status`.\n\nThen, if dirty, stash and proceed to fix issue #1234.";
-        let action = prose_fallback_action(response).expect("yields action");
+        let action = engineer_task_from_prose(response).expect("yields action");
         match action {
             GoalAction::SpawnEngineer { task, .. } => {
                 assert!(task.contains("git status"));
