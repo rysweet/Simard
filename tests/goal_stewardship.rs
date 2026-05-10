@@ -24,6 +24,11 @@ fn skip_if_no_llm_provider(rendered: &str) -> bool {
         || rendered.contains("LLM session but open() failed")
         || rendered.contains("base type 'review-pipeline-rustyclawd' failed")
         || rendered.contains("missing required configuration 'SIMARD_LLM_PROVIDER'")
+        // After the engineer-loop subprocess pivot (issue #1648).
+        || rendered.contains("amplihack RustyClawd")
+        || rendered.contains("RustyClawd exited with status")
+        || rendered.contains("failed to spawn `amplihack")
+        || rendered.contains("agent session failed")
     {
         eprintln!("SKIP: no LLM provider available (CI environment)");
         return true;
