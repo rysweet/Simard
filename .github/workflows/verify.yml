@@ -63,8 +63,11 @@ jobs:
           set -o pipefail
           mkdir -p target/ci-logs
           # Skip list (each entry must have a tracking issue):
-          #   cargo_install_from_repo_succeeds — pre-existing CI-flaky
-          #     network test (legacy skip).
+          #   install_packages_runs_and_self_installs — covered by the
+          #     dedicated `install-real` job below. The test does a full
+          #     `cargo install --path . --root <tmp>` from scratch and runs
+          #     ~25 min on a cold cache; running it twice (here AND in
+          #     install-real) doubles total verify wall time for no gain.
           #   engineer_loop_probe_fails_visibly_when_structured_replacement_target_is_missing
           #     — tracked in https://github.com/rysweet/Simard/issues/1639.
           #     Test asserts the engineer loop FAILS on a deliberately broken
@@ -74,7 +77,7 @@ jobs:
           #     out of scope for the current PR; tracked & skipped per
           #     CONTRIBUTING.md "Pre-Existing Test Failure Disposition".
           cargo test --all-features --locked --no-fail-fast \
-            -- --skip cargo_install_from_repo_succeeds \
+            -- --skip install_packages_runs_and_self_installs \
                --skip engineer_loop_probe_fails_visibly_when_structured_replacement_target_is_missing \
             2>&1 | tee target/ci-logs/cargo-test.log
 
