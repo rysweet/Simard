@@ -121,6 +121,23 @@ The amplihack binary path is resolved from `PATH` by default; override
 via the `SIMARD_AMPLIHACK_BIN` environment variable for tests or
 non-standard installs.
 
+### Choosing the agent kind
+
+The subprocess defaults to `amplihack RustyClawd --auto`, but the agent
+kind is configurable via the `SIMARD_ENGINEER_AGENT` environment
+variable. Recognised values (case-insensitive):
+
+| Value         | Subcommand invoked            | Argv shape (after the binary)                                                     |
+|---------------|-------------------------------|-----------------------------------------------------------------------------------|
+| `rustyclawd`  | `amplihack RustyClawd`        | `RustyClawd --auto --subprocess-safe --no-reflection --max-turns 30 -- -p <prompt>` |
+| `copilot`     | `amplihack copilot`           | `copilot --allow-all-paths -p <prompt>`                                           |
+
+Unknown values fall back to `rustyclawd` with a stderr warning so a typo
+does not silently change the engineer behaviour. Adding more agent kinds
+is a matter of extending `AgentKind` in
+`src/engineer_loop/agent_spawn.rs` and providing the per-kind argv in
+`engineer_argv()`.
+
 ---
 
 ## Example usage

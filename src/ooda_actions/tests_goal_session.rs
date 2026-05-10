@@ -104,9 +104,12 @@ fn session_progress_comes_from_agent_response_not_auto_bump() {
 }
 
 #[test]
-fn session_no_progress_marker_preserves_current() {
-    // Agent returns prose instead of valid JSON — action MUST fail loudly,
-    // progress MUST be preserved, no silent fallback.
+fn session_no_progress_marker_routes_prose_to_engineer_fallback() {
+    // When the LLM returns prose instead of structured JSON, the dispatcher
+    // now treats the response as the engineer's task description (the
+    // engineer is itself an LLM that reads prose). Goal progress MUST still
+    // be preserved — only the engineer subprocess can advance progress, and
+    // in unit tests the spawn is blocked by the recursion depth guard.
     let (session, _captured) = MockSession::new_ok(
         "Checked the repo. Everything looks fine.",
         vec!["no markers here".to_string()],
@@ -121,21 +124,20 @@ fn session_no_progress_marker_preserves_current() {
     };
     let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
 
-    // Non-JSON response = parse failure = failed outcome.
+    // The outcome detail must reflect the spawn attempt (not the legacy
+    // "parse failed" path).
+    let detail = outcomes[0].detail.to_lowercase();
     assert!(
-        !outcomes[0].success,
-        "non-JSON LLM response must produce a failed outcome (no silent fallback)"
-    );
-    assert!(
-        outcomes[0].detail.contains("parse failed"),
-        "outcome detail should explain the parse failure, got: {}",
+        detail.contains("spawn_engineer") || detail.contains("subordinate"),
+        "outcome should reference spawn_engineer fallback, got: {}",
         outcomes[0].detail,
     );
-    // Progress MUST stay at 40% (no silent mutation).
+    // Progress MUST stay at 40% — only a successful engineer run could
+    // advance it, and the test harness blocks that.
     assert_eq!(
         state.active_goals.active[0].status,
         GoalProgress::InProgress { percent: 40 },
-        "progress must be preserved when LLM emits invalid action"
+        "progress must be preserved when only prose-fallback fired in tests"
     );
 }
 

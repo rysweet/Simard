@@ -90,10 +90,13 @@ fn dispatch_assess_only_updates_progress_from_json() {
 }
 
 #[test]
-fn dispatch_records_parse_failure_outcome_detail() {
+fn dispatch_records_prose_fallback_outcome_detail() {
     // LLM returns prose with no JSON — parser returns None and the
-    // dispatcher MUST fail loudly (no silent fallback). The outcome detail
-    // must explain the parse failure so operators can diagnose.
+    // dispatcher routes the response into the engineer subprocess as a
+    // task description ("the engineer reads natural language too"). The
+    // test harness blocks the actual spawn via the depth limit, so the
+    // visible outcome describes the spawn attempt rather than the legacy
+    // "parse failed" message.
     let (session, _) = MockSession::new_ok("I have no idea what to do. PROGRESS: 30", vec![]);
     let mut bridges = bridges_with_session(session);
     let board = board_with_goal("g1", GoalProgress::InProgress { percent: 25 }, None);
@@ -105,21 +108,17 @@ fn dispatch_records_parse_failure_outcome_detail() {
     };
     let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
 
-    assert!(
-        !outcomes[0].success,
-        "non-JSON LLM response must produce a failed outcome, got success"
-    );
     let detail = outcomes[0].detail.to_lowercase();
     assert!(
-        detail.contains("parse failed"),
-        "outcome detail must explain the parse failure, got: {}",
+        detail.contains("spawn_engineer") || detail.contains("subordinate"),
+        "outcome detail must reference the spawn_engineer fallback, got: {}",
         outcomes[0].detail
     );
-    // Progress MUST stay at 25% (no silent mutation).
+    // Progress MUST stay at 25% (no silent mutation, no auto-bump).
     assert_eq!(
         state.active_goals.active[0].status,
         GoalProgress::InProgress { percent: 25 },
-        "progress must be preserved when LLM emits invalid action"
+        "progress must be preserved when only prose-fallback fired in tests"
     );
 }
 
