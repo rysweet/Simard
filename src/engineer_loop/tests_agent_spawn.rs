@@ -11,7 +11,9 @@
 
 use std::path::PathBuf;
 
-use super::agent_spawn::{AGENT_SESSION_TIMEOUT_SECS, build_agent_prompt};
+use super::agent_spawn::{
+    AGENT_SESSION_TIMEOUT_SECS, DEFAULT_MAX_TURNS, build_agent_prompt, rustyclawd_argv,
+};
 use super::review_persist::compute_diff_for_review;
 use super::types::{
     EngineerActionKind, ExecutedEngineerAction, RepoInspection, SelectedEngineerAction,
@@ -289,11 +291,8 @@ fn run_local_engineer_loop_emits_agent_prompt_build_phase() {
             assert!(
                 msg.contains("agent-spawn")
                     || msg.contains("agent session")
-                    // CI runners do not have SIMARD_LLM_PROVIDER configured.
-                    // The loop fails earlier (config validation) before
-                    // reaching agent-spawn — that is still a valid early
-                    // termination outcome for this test, which only asserts
-                    // "phase boundaries are observable".
+                    || msg.contains("RustyClawd")
+                    || msg.contains("amplihack")
                     || msg.contains("SIMARD_LLM_PROVIDER")
                     || msg.contains("llm_provider"),
                 "expected failure at agent-spawn or earlier config gate; got: {msg}"
@@ -323,4 +322,45 @@ fn run_local_engineer_loop_emits_agent_wait_phase_on_success() {
 
     const PROMPT_PHASE: &str = "agent-prompt-build";
     assert_eq!(PROMPT_PHASE, "agent-prompt-build");
+}
+
+// ─── 7. RustyClawd subprocess delegation contract ──────────────────────────
+
+/// The new architectural contract: the engineer loop spawns
+/// `amplihack RustyClawd --auto -- -p <prompt>` as a subprocess. The argv
+/// builder must produce that exact shape so the subprocess is wired
+/// correctly.
+#[test]
+fn rustyclawd_argv_matches_amplihack_auto_contract() {
+    let argv = rustyclawd_argv("Implement feature X", DEFAULT_MAX_TURNS);
+    // Subcommand must be RustyClawd (PascalCase per `amplihack --help`).
+    assert_eq!(argv[0], "RustyClawd");
+    // --auto enables the autonomous agentic loop.
+    assert!(argv.iter().any(|a| a == "--auto"));
+    // --subprocess-safe avoids staging mutations from a child invocation.
+    assert!(argv.iter().any(|a| a == "--subprocess-safe"));
+    // --no-reflection: simard owns reflection separately via review_pipeline.
+    assert!(argv.iter().any(|a| a == "--no-reflection"));
+    // --max-turns must be passed as a separate token (defends against
+    // accidental `--max-turns=N` form which amplihack may not accept).
+    let mt = argv
+        .iter()
+        .position(|a| a == "--max-turns")
+        .expect("--max-turns");
+    assert!(mt + 1 < argv.len(), "--max-turns missing value");
+    // After `--`, the inner arg list must start with `-p <prompt>` so
+    // amplihack's `--auto -- -p ...` documented form is honoured.
+    let dash = argv.iter().position(|a| a == "--").expect("`--` separator");
+    assert_eq!(argv.get(dash + 1).map(String::as_str), Some("-p"));
+    assert_eq!(
+        argv.get(dash + 2).map(String::as_str),
+        Some("Implement feature X")
+    );
+}
+
+/// The agent session timeout must remain at 3600s — it bounds how long
+/// Simard will wait for the RustyClawd subprocess before SIGKILL'ing it.
+#[test]
+fn agent_session_timeout_bounded_for_subprocess_wait() {
+    assert_eq!(AGENT_SESSION_TIMEOUT_SECS, 3600);
 }

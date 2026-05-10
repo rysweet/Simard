@@ -123,27 +123,16 @@ pub fn run_local_engineer_loop(
         outcome: PhaseOutcome::Success,
     });
 
-    // Phase: agent-spawn — open session and start background thread
+    // Phase: agent-spawn — start background thread that runs the
+    // `amplihack RustyClawd --auto` subprocess. Spawning is infallible
+    // here because subprocess errors surface during agent-wait.
     let phase_start = Instant::now();
-    let rx = agent_spawn::start_agent_session(agent_prompt, &inspection.repo_root);
-    let rx = match rx {
-        Ok(rx) => {
-            phase_traces.push(PhaseTrace {
-                name: "agent-spawn".to_string(),
-                duration: phase_start.elapsed(),
-                outcome: PhaseOutcome::Success,
-            });
-            rx
-        }
-        Err(e) => {
-            phase_traces.push(PhaseTrace {
-                name: "agent-spawn".to_string(),
-                duration: phase_start.elapsed(),
-                outcome: PhaseOutcome::Failed(e.to_string()),
-            });
-            return Err(e);
-        }
-    };
+    let rx = agent_spawn::start_agent_session(agent_prompt, inspection.repo_root.clone());
+    phase_traces.push(PhaseTrace {
+        name: "agent-spawn".to_string(),
+        duration: phase_start.elapsed(),
+        outcome: PhaseOutcome::Success,
+    });
 
     // Phase: agent-wait — block until agent session completes
     let phase_start = Instant::now();
