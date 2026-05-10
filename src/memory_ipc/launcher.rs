@@ -167,9 +167,14 @@ pub fn register_in_process_writer(state_root: PathBuf, writer: Arc<dyn Cognitive
 
 /// Clear any registered in-process writer.
 ///
-/// Test-only helper that lets tests reset the global registration so
-/// they don't leak state across runs.
-#[cfg(test)]
+/// **Shutdown-only — do not call from request paths.** This drops the
+/// `Weak` reference so the next [`launch_writer_bridge`] call falls
+/// through to the IPC/disk ladder. The OODA daemon's signal-driven
+/// shutdown sequence calls this immediately after `persist_board` so
+/// the writer Arc can drop deterministically before
+/// `Database::drop` runs `force_checkpoint_on_close` (issue #1631).
+///
+/// Tests also call this between runs to reset global state.
 pub fn clear_in_process_writer() {
     if let Ok(mut g) = IN_PROCESS_WRITER.write() {
         *g = None;

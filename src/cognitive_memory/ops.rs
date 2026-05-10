@@ -31,6 +31,12 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
         self.read_only
     }
 
+    /// Trait-level `checkpoint` delegates to the inherent
+    /// [`NativeCognitiveMemory::checkpoint`] (issue #1631).
+    fn checkpoint(&self) -> SimardResult<()> {
+        NativeCognitiveMemory::checkpoint(self)
+    }
+
     fn record_sensory(
         &self,
         modality: &str,

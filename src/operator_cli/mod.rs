@@ -57,6 +57,8 @@ Product modes:
   cleanup
   act-on-decisions
   install
+  version           — print the compiled-in semver and exit
+  --version, -V     — alias for `version`
 
 Operator utilities:
   review run <base-type> <topology> <objective> [state-root]
@@ -78,6 +80,12 @@ where
 
     if matches!(command.as_str(), "--help" | "-h" | "help") {
         print!("{}", operator_cli_help());
+        return Ok(());
+    }
+
+    if matches!(command.as_str(), "--version" | "-V" | "version") {
+        reject_extra_args(args)?;
+        println!("simard {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 

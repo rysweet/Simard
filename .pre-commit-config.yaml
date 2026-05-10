@@ -1,27 +1,55 @@
 fail_fast: false
+minimum_pre_commit_version: "3.7.0"
 default_install_hook_types:
   - pre-commit
   - pre-push
 
+# All hooks are `language: system` — they shell out to the locally
+# installed cargo. There are no upstream hook revisions to pin (no
+# `rev: main` references anywhere). Pinning the framework itself
+# happens via `minimum_pre_commit_version` above.
+
 repos:
   - repo: local
     hooks:
+      # ── pre-commit (fast: < 30s incremental) ─────────────────────────
       - id: cargo-fmt
         name: cargo fmt --all -- --check
         entry: cargo fmt --all -- --check
         language: system
         pass_filenames: false
-        # always_run so rebase/merge drift in unstaged files still fails the
-        # commit. Filtering by changed files lets formatting drift land via
-        # commits that don't touch src/, then CI fails. fmt --check is ~1s.
+        # always_run so rebase/merge drift in unstaged files still fails
+        # the commit. fmt --check is ~1s incrementally.
+        always_run: true
+        stages:
+          - pre-commit
+          - pre-push
+          - manual
+
+      - id: cargo-clippy-precommit
+        name: cargo clippy --release --no-deps -- -D warnings (pre-commit)
+        entry: cargo clippy --release --no-deps -- -D warnings
+        language: system
+        pass_filenames: false
         always_run: true
         stages:
           - pre-commit
           - manual
 
-      - id: cargo-clippy
-        name: cargo clippy --all-targets --all-features --locked -- -D warnings
-        entry: cargo clippy --all-targets --all-features --locked -- -D warnings
+      # ── pre-push (race-catching test subset) ─────────────────────────
+      # Spec budget for the pre-push gate is ≤ 90s on a dev host. The
+      # full `--all-targets --all-features --locked` clippy belongs in
+      # CI (`.github/workflows/verify.yml`) — running it locally at
+      # push time would blow the budget. Pre-commit already runs
+      # `cargo clippy --release --no-deps`, which catches workspace-only
+      # warnings before push.
+      #
+      # Runs the lib tests for cognitive_memory / bootstrap / memory_ipc /
+      # memory_consolidation in parallel mode so race conditions surface
+      # locally before push (issue #1631). Total budget: ≤ 90s on dev host.
+      - id: cargo-test-race-subset
+        name: cargo test --release --lib (cognitive_memory|bootstrap|memory_ipc|memory_consolidation) --test-threads=$(nproc)
+        entry: bash -c 'cargo test --release --lib -- --test-threads=$(nproc) cognitive_memory bootstrap memory_ipc memory_consolidation'
         language: system
         pass_filenames: false
         always_run: true
@@ -29,9 +57,18 @@ repos:
           - pre-push
           - manual
 
-      - id: cargo-test
-        name: cargo test --all-features --locked (skip install_smoke)
-        entry: cargo test --all-features --locked -- --skip cargo_install_from_repo_succeeds --test-threads=4
+      # ── pre-push (full clippy, mirrors CI verify.yml line 75) ────────
+      # CI invokes `pre_commit run --hook-stage pre-push cargo-clippy`
+      # explicitly (.github/workflows/verify.yml:75). The hook id MUST
+      # remain `cargo-clippy` for that invocation to succeed. This is
+      # the heavy variant — `--all-targets --all-features --locked` —
+      # the same flags CI passes. It's slower than `cargo-clippy-precommit`
+      # so it runs only at push time (and in CI), keeping commit latency
+      # low while still catching test-only or feature-gated lints before
+      # push.
+      - id: cargo-clippy
+        name: cargo clippy --all-targets --all-features --locked -- -D warnings (pre-push)
+        entry: cargo clippy --all-targets --all-features --locked -- -D warnings
         language: system
         pass_filenames: false
         always_run: true

@@ -106,6 +106,18 @@ pub trait CognitiveMemoryOps: Send + Sync {
     fn is_read_only(&self) -> bool {
         false
     }
+
+    /// Force a WAL checkpoint, collapsing the WAL into the main DB file.
+    ///
+    /// Defaults to a no-op for backends where this is not meaningful
+    /// (IPC client, bridge clients). Overridden by [`NativeCognitiveMemory`]
+    /// to issue a `CHECKPOINT;` Cypher statement.
+    ///
+    /// Call this **before** taking a backup or shutting down the host
+    /// process so committed-but-WAL-resident writes are captured (issue #1631).
+    fn checkpoint(&self) -> SimardResult<()> {
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -308,6 +320,37 @@ impl NativeCognitiveMemory {
             .map_err(|_| SimardError::ClockBeforeUnixEpoch {
                 reason: "system clock before Unix epoch".into(),
             })
+    }
+
+    /// Force a WAL checkpoint, collapsing the WAL into the main DB file.
+    ///
+    /// Call this **before** copying the DB file (e.g. for a snapshot or
+    /// backup) so committed-but-WAL-resident writes are captured. Also
+    /// useful in shutdown paths where the host process is about to exit
+    /// without a clean `Database::drop` (issue #1631).
+    ///
+    /// Idempotent and safe to call concurrently with reads. Issues a
+    /// `CHECKPOINT;` Cypher statement over a fresh connection. Read-only
+    /// handles are a no-op (returns `Ok(())`).
+    pub fn checkpoint(&self) -> SimardResult<()> {
+        if self.read_only {
+            return Ok(());
+        }
+        // CHECKPOINT is the lbug/Kuzu Cypher statement that flushes the WAL.
+        // Some lbug versions may parse it as `CALL CHECKPOINT()`; try both
+        // before propagating an error so the caller doesn't have to know.
+        let conn = self.conn()?;
+        match conn.query("CHECKPOINT;") {
+            Ok(_) => Ok(()),
+            Err(first_err) => match conn.query("CALL CHECKPOINT();") {
+                Ok(_) => Ok(()),
+                Err(_) => Err(SimardError::BridgeCallFailed {
+                    bridge: "cognitive-memory-native".into(),
+                    method: "checkpoint".into(),
+                    reason: format!("CHECKPOINT not accepted by lbug: {first_err}"),
+                }),
+            },
+        }
     }
 }
 
