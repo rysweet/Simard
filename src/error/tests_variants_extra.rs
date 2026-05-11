@@ -165,3 +165,29 @@ fn display_stewardship_invalid_run_summary() {
     assert!(msg.contains("stewardship"), "{msg}");
     assert!(msg.contains("run_id"), "{msg}");
 }
+
+// --- Display: MergeAuthorityGhCommandFailed ---
+
+#[test]
+fn display_merge_authority_gh_command_failed() {
+    let err = SimardError::MergeAuthorityGhCommandFailed {
+        reason: "exit 1: 'gh' not found".to_string(),
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("merge-authority"), "{msg}");
+    assert!(msg.contains("gh command failed"), "{msg}");
+    assert!(msg.contains("'gh' not found"), "{msg}");
+}
+
+// --- Display: MergeAuthorityEvaluationFailed ---
+
+#[test]
+fn display_merge_authority_evaluation_failed() {
+    let err = SimardError::MergeAuthorityEvaluationFailed {
+        reason: "could not parse statusCheckRollup JSON".to_string(),
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("merge-authority"), "{msg}");
+    assert!(msg.contains("evaluation failed"), "{msg}");
+    assert!(msg.contains("statusCheckRollup"), "{msg}");
+}

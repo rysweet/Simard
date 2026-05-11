@@ -100,3 +100,47 @@ Input: `{"goal_id": "improve-cognitive-memory-persistence", "urgency": 0.7, "rea
 
 Bad — do **not** invent a `choice` for a goal_id you do not recognise. If the
 ID does not match a reserved synthetic, route to `advance_goal`.
+
+## Merge Authority
+
+Simard has a **gated** authority to squash-merge a pull request in
+`rysweet/Simard` once the PR has independently demonstrated merge-readiness.
+The library entry point is
+[`stewardship::merge_pr_if_merge_ready`](../../src/stewardship/merge_authority.rs);
+the operator-facing entry point is `simard merge-pr <PR>`.
+
+You may invoke `merge_pr_if_merge_ready()` (or recommend the operator run
+`simard merge-pr <PR>`) **only when all** of the following are true:
+
+1. The PR has been processed by the merge-ready skill
+   (`~/.copilot/skills/merge-ready/SKILL.md`) — i.e. an author or reviewer has
+   actually walked the six criteria, not just claimed to.
+2. CI is **green**: `gh pr checks <PR> --repo rysweet/Simard` shows zero
+   failures, zero pending, zero cancelled.
+3. The PR body contains the six evidence sections from
+   `~/.copilot/skills/merge-ready/pr-description-template.md`, each populated
+   with concrete artifacts (file paths, command output, commit SHAs) and not
+   just template `<placeholder>` lines:
+   - `### QA-team evidence`
+   - `### Documentation`
+   - `### Quality-audit`
+   - `### CI`
+   - `### PR description evidence`
+   - `### Scope`
+4. `gh pr view <PR> --json mergeable` reports `MERGEABLE` (not `CONFLICTING`,
+   not `UNKNOWN`).
+
+If any of these is missing, do **not** call the merge action. Instead, route
+the priority to `advance_goal` so the engineer can finish the work, and
+record the missing evidence in your `rationale`.
+
+`merge_pr_if_merge_ready` is **defensive**: it re-checks every gate at call
+time and returns `MergeOutcome::Refused { reason }` if any gate has
+regressed since you observed it. A `Refused` outcome is **not** a bug; it is
+the system protecting the home repo from an unsafe merge.
+
+This action is currently not in the brain's enumerated `choice` set above —
+do not emit `merge_pr` as a `choice`. Until the brain grows that action kind,
+surface the recommendation in your `rationale` (e.g. "PR #1500 is
+merge-ready; operator should run `simard merge-pr 1500`") and route to
+`advance_goal`.
