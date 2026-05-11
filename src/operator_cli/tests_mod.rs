@@ -87,6 +87,9 @@ fn test_help_text_contains_all_top_level_commands() {
         "handover",
         "update",
         "self-test",
+        "safe-update",
+        "rollback",
+        "rollback-watchdog",
         "act-on-decisions",
         "install",
         "review",
@@ -286,6 +289,48 @@ fn test_self_test_rejects_extra_args() {
             .unwrap_err()
             .to_string()
             .contains("unexpected trailing arguments")
+    );
+}
+
+// ── safe-update / rollback / rollback-watchdog dispatch ──
+
+#[test]
+fn test_safe_update_rejects_extra_args() {
+    let result = dispatch_operator_cli(vec!["safe-update".to_string(), "extra".to_string()]);
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("unexpected trailing arguments")
+    );
+}
+
+#[test]
+fn test_rollback_rejects_extra_args() {
+    let result = dispatch_operator_cli(vec!["rollback".to_string(), "extra".to_string()]);
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("unexpected trailing arguments")
+    );
+}
+
+#[test]
+fn test_rollback_watchdog_max_iterations_zero_exits_cleanly() {
+    // --max-iterations=0 means the loop body still runs once but exits before sleeping.
+    // This proves the dispatch path wires the flag; no real rollback work is performed
+    // because the temporary state dir contains no upgrade-status.json.
+    let result = dispatch_operator_cli(vec![
+        "rollback-watchdog".to_string(),
+        "--max-iterations=1".to_string(),
+        "--interval=1".to_string(),
+    ]);
+    assert!(
+        result.is_ok(),
+        "rollback-watchdog --max-iterations=1 should exit cleanly, got: {result:?}"
     );
 }
 

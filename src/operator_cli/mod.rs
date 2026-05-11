@@ -7,6 +7,7 @@ mod gym;
 mod meeting;
 mod ooda;
 mod review;
+mod safe_update;
 
 use std::path::PathBuf;
 
@@ -53,6 +54,10 @@ Product modes:
   handover [--canary-dir=PATH] [--manifest-dir=PATH]
   update
   self-test
+  safe-update            — drain → snapshot → pre-test → swap → exec
+  rollback               — restore the latest backup over the install path
+  rollback-watchdog [--once] [--interval=SECS] [--max-iterations=N]
+                         — watch upgrade-status.json; rollback on validate_timeout
   ensure-deps
   cleanup
   act-on-decisions
@@ -113,6 +118,15 @@ where
             reject_extra_args(args)?;
             handle_self_test()
         }
+        "safe-update" => {
+            reject_extra_args(args)?;
+            safe_update::handle_safe_update()
+        }
+        "rollback" => {
+            reject_extra_args(args)?;
+            safe_update::handle_rollback()
+        }
+        "rollback-watchdog" => safe_update::handle_rollback_watchdog(args),
         "ensure-deps" => {
             reject_extra_args(args)?;
             handle_ensure_deps()
@@ -130,7 +144,7 @@ where
 }
 
 pub fn operator_cli_usage() -> &'static str {
-    "usage: simard <engineer|meeting|goal-curation|improvement-curation|gym|ooda|spawn|handover|update|install|review|bootstrap> ..."
+    "usage: simard <engineer|meeting|goal-curation|improvement-curation|gym|ooda|spawn|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap> ..."
 }
 
 pub fn operator_cli_help() -> &'static str {
