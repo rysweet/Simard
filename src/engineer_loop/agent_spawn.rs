@@ -318,14 +318,43 @@ pub(crate) fn await_agent_session(
 /// This delegates fully to `amplihack RustyClawd --auto`: Simard does not
 /// implement its own LLM loop, tool selection, or reflection. The summary
 /// returned is the trailing window of the subprocess's stdout/stderr.
+///
+/// **Drain-aware**: refuses to dispatch when the safe-update orchestrator
+/// has marked `~/.simard/state/draining.flag`. The brain wires this so a
+/// safe-update in progress can quiesce in-flight work without racing
+/// against new dispatches.
 pub fn spawn_agent_for_goal(
     objective: &str,
     inspection: &RepoInspection,
     workspace_path: &Path,
 ) -> SimardResult<String> {
+    let state_dir = crate::safe_update::default_state_dir();
+    refuse_if_draining(&state_dir)?;
     let prompt = build_agent_prompt(objective, inspection);
     let rx = start_agent_session(prompt, workspace_path.to_path_buf());
     await_agent_session(rx)
+}
+
+/// Refuse a dispatch if the safe-update orchestrator has marked the
+/// dispatch gate closed. Logs to stderr so operator-facing tools can see
+/// the refusal.
+pub(crate) fn refuse_if_draining(state_dir: &Path) -> SimardResult<()> {
+    if crate::safe_update::is_draining(state_dir) {
+        let flag = crate::safe_update::draining_flag_path(state_dir);
+        eprintln!(
+            "[engineer] dispatch refused: safe-update is draining (flag at {})",
+            flag.display()
+        );
+        return Err(SimardError::BridgeCallFailed {
+            bridge: "engineer".to_string(),
+            method: "spawn_agent_for_goal".to_string(),
+            reason: format!(
+                "safe-update in progress: draining flag {} is present",
+                flag.display()
+            ),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -557,5 +586,26 @@ mod tests {
         let new = engineer_argv(AgentKind::RustyClawd, "x", 30);
         let legacy = rustyclawd_argv("x", 30);
         assert_eq!(new, legacy);
+    }
+
+    #[test]
+    fn refuse_if_draining_returns_ok_when_flag_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        // No draining.flag in this state_dir — dispatch is allowed.
+        assert!(refuse_if_draining(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn refuse_if_draining_returns_bridge_error_when_flag_present() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("draining.flag"), b"").unwrap();
+        let err = refuse_if_draining(dir.path()).unwrap_err();
+        match err {
+            SimardError::BridgeCallFailed { bridge, method, .. } => {
+                assert_eq!(bridge, "engineer");
+                assert_eq!(method, "spawn_agent_for_goal");
+            }
+            other => panic!("expected BridgeCallFailed, got {other:?}"),
+        }
     }
 }
