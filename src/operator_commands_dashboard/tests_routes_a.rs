@@ -215,6 +215,43 @@ mod tests {
     }
 
     #[test]
+    fn index_html_has_per_tab_intros_and_tooltips() {
+        // Issue #1662 pass-1: every tab gets a hover-tooltip and a one-sentence intro
+        // so first-time readers can orient without clicking through to documentation.
+        assert!(
+            INDEX_HTML.contains(r#"class="page-intro""#),
+            "page-intro CSS class should be used at least once"
+        );
+        // .page-intro CSS rule is registered (style block).
+        assert!(INDEX_HTML.contains(".page-intro{"));
+        // Spot-check a few tab tooltips so future refactors keep them in sync.
+        assert!(INDEX_HTML.contains(r#"data-tab="overview" title="System health"#));
+        assert!(INDEX_HTML.contains(r#"data-tab="goals" title="Active goals"#));
+        assert!(INDEX_HTML.contains(r#"data-tab="terminal" title="Attach to the agent"#));
+        // All 11 tab-content containers should now precede a page-intro div.
+        let intro_count = INDEX_HTML.matches(r#"class="page-intro""#).count();
+        assert!(
+            intro_count >= 11,
+            "expected at least 11 .page-intro divs (one per tab), found {intro_count}"
+        );
+    }
+
+    #[test]
+    fn index_html_has_format_time_helper() {
+        // Issue #1662 pass-1: a single formatTime() helper centralises ISO/Unix-epoch
+        // -> human-readable rendering so we do not sprinkle new Date(...).toLocaleString()
+        // across the SPA. timeAgo() now delegates to the same parseTs() helper.
+        assert!(INDEX_HTML.contains("function formatTime(ts)"));
+        assert!(INDEX_HTML.contains("function parseTs(ts)"));
+        // Live header clock must use formatTime, not a raw toLocaleString call.
+        assert!(INDEX_HTML.contains("getElementById('clock').textContent=formatTime("));
+        assert!(
+            !INDEX_HTML.contains("new Date().toLocaleString()"),
+            "no remaining `new Date().toLocaleString()` call sites should exist"
+        );
+    }
+
+    #[test]
     fn login_html_has_code_input() {
         assert!(crate::operator_commands_dashboard::auth::LOGIN_HTML.contains(r#"type="text""#));
         assert!(crate::operator_commands_dashboard::auth::LOGIN_HTML.contains("maxlength"));

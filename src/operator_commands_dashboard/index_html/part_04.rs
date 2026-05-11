@@ -343,7 +343,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
     /* --- Azlin tmux sessions panel (WS-1) --- */
     function fmtUnixTs(ts){
       if(typeof ts !== 'number' || !isFinite(ts) || ts <= 0) return '—';
-      try { return new Date(ts*1000).toLocaleString(); } catch(_) { return String(ts); }
+      return formatTime(ts);
     }
     async function fetchTmuxSessions(){
       const body = document.getElementById('tmux-sessions-body');
