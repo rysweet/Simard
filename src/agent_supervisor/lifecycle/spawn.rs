@@ -6,7 +6,7 @@ use crate::error::{SimardError, SimardResult};
 use crate::subagent_sessions::session_name_for;
 
 use super::{open_agent_log, query_pane_pid, supervisor_state_root};
-use crate::agent_supervisor::tmux::build_tmux_wrapped_command;
+use crate::agent_supervisor::tmux::{build_tmux_wrapped_command, compute_tmux_env};
 use crate::agent_supervisor::types::{SubordinateConfig, SubordinateHandle};
 
 /// Spawn a subordinate agent as a real child process.
@@ -91,47 +91,10 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
         // them on `tmux_cmd` only reaches the tmux client; the long-running
         // tmux server forks new sessions from its own env. Without explicit
         // `-e`, vars like CARGO_TARGET_DIR silently fail to propagate and
-        // each engineer worktree builds its own ~12 GB cargo target dir.
-        let mut tmux_env: Vec<(String, String)> = vec![
-            ("SIMARD_AGENT_NAME".to_string(), config.agent_name.clone()),
-            (
-                "SIMARD_SUBORDINATE_DEPTH".to_string(),
-                (config.current_depth + 1).to_string(),
-            ),
-            ("CARGO_BUILD_JOBS".to_string(), "4".to_string()),
-        ];
-        if let Some(existing) = std::env::var_os("CARGO_TARGET_DIR") {
-            tmux_env.push((
-                "CARGO_TARGET_DIR".to_string(),
-                existing.to_string_lossy().into_owned(),
-            ));
-        } else {
-            tmux_env.push((
-                "CARGO_TARGET_DIR".to_string(),
-                "/tmp/simard-engineer-target".to_string(),
-            ));
-        }
-        // Forward every SIMARD_* env var from the daemon's environment to the
-        // engineer subprocess (issue #4537 / fix/forward-engineer-env-and-copilot-default).
-        // Without this loop, `SIMARD_ENGINEER_AGENT=copilot` set on the systemd
-        // unit reaches the daemon but is silently dropped at the tmux boundary
-        // because the long-running tmux server forks new sessions from its own
-        // environment, not from the tmux client's. The result: engineers
-        // ignored the operator's agent override and fell back to the broken
-        // upstream RustyClawd default. Convention: any SIMARD_* var present in
-        // the daemon environment is propagated; vars already explicitly added
-        // above (SIMARD_AGENT_NAME, SIMARD_SUBORDINATE_DEPTH) are skipped to
-        // avoid double-add.
-        let already_set: std::collections::HashSet<&str> = tmux_env
-            .iter()
-            .map(|(k, _)| k.as_str())
-            .collect::<std::collections::HashSet<_>>();
-        let mut simard_extras: Vec<(String, String)> = std::env::vars()
-            .filter(|(k, _)| k.starts_with("SIMARD_") && !already_set.contains(k.as_str()))
-            .collect();
-        // Stable ordering helps test/debug reproducibility.
-        simard_extras.sort_by(|a, b| a.0.cmp(&b.0));
-        tmux_env.extend(simard_extras);
+        // each engineer worktree builds its own ~12 GB cargo target dir
+        // (issue #1197), and operator-set `SIMARD_ENGINEER_AGENT=copilot`
+        // never reaches the engineer (issue #1658 / PR #1661).
+        let tmux_env = compute_tmux_env(config, std::env::vars());
         let argv = build_tmux_wrapped_command(&session_name, &inner_argv, &log_path, &tmux_env);
 
         // Run the tmux command. `tmux new-session -d` returns immediately
