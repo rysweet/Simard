@@ -15,6 +15,7 @@
 
 pub mod dedup;
 pub mod gh_client;
+pub mod merge_authority;
 pub mod routing;
 pub mod types;
 
@@ -25,6 +26,10 @@ mod tests_extra;
 
 pub use dedup::{failure_signature, find_existing, normalize};
 pub use gh_client::{GhClient, GhIssue, RealGhClient};
+pub use merge_authority::{
+    MergeOutcome, PrGhClient, PrSnapshot, REQUIRED_EVIDENCE_HEADINGS, RealPrGhClient,
+    merge_pr_if_merge_ready,
+};
 pub use routing::route_failure;
 pub use types::{OrchestratorRunSummary, StewardshipOutcome, TargetRepo};
 

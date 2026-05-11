@@ -5,6 +5,7 @@ mod decisions;
 mod engineer;
 mod gym;
 mod meeting;
+mod merge;
 mod ooda;
 mod review;
 
@@ -50,6 +51,7 @@ Product modes:
   ooda run [--cycles=N] [--no-auto-reload] [state-root]
   dashboard serve [--port=8080]
   spawn <agent-name> <goal> <worktree-path> [--depth=N]
+  merge-pr <pr-number>   — squash-merge PR in rysweet/Simard if it is merge-ready
   handover [--canary-dir=PATH] [--manifest-dir=PATH]
   update
   self-test
@@ -99,6 +101,7 @@ where
         "ooda" => ooda::dispatch_ooda_command(args),
         "dashboard" => dashboard::dispatch_dashboard_command(args),
         "spawn" => dispatch_spawn_command(args),
+        "merge-pr" => merge::dispatch_merge_pr_command(args),
         "handover" => dispatch_handover_command(args),
         "bootstrap" => dispatch_bootstrap_command(args),
         "act-on-decisions" => {
@@ -130,7 +133,7 @@ where
 }
 
 pub fn operator_cli_usage() -> &'static str {
-    "usage: simard <engineer|meeting|goal-curation|improvement-curation|gym|ooda|spawn|handover|update|install|review|bootstrap> ..."
+    "usage: simard <engineer|meeting|goal-curation|improvement-curation|gym|ooda|spawn|merge-pr|handover|update|install|review|bootstrap> ..."
 }
 
 pub fn operator_cli_help() -> &'static str {

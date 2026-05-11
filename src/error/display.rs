@@ -286,6 +286,12 @@ impl Display for SimardError {
                     "stewardship: orchestrator run summary missing required field '{field}'"
                 )
             }
+            Self::MergeAuthorityGhCommandFailed { reason } => {
+                write!(f, "merge-authority: gh command failed: {reason}")
+            }
+            Self::MergeAuthorityEvaluationFailed { reason } => {
+                write!(f, "merge-authority: evaluation failed: {reason}")
+            }
         }
     }
 }
