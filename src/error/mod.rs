@@ -242,6 +242,17 @@ pub enum SimardError {
     StewardshipInvalidRunSummary {
         field: &'static str,
     },
+    /// Merge authority: a `gh pr` subprocess invocation failed.
+    MergeAuthorityGhCommandFailed {
+        reason: String,
+    },
+    /// Merge authority: a refusal that the operator must investigate
+    /// (e.g. malformed `gh` output that prevented evaluation). This is
+    /// distinct from the structured `MergeOutcome::Refused` returned on a
+    /// well-understood block.
+    MergeAuthorityEvaluationFailed {
+        reason: String,
+    },
 }
 
 pub type SimardResult<T> = Result<T, SimardError>;

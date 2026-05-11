@@ -141,8 +141,44 @@ pub(crate) fn build_agent_prompt(objective: &str, inspection: &RepoInspection) -
         prompt.push_str(&inspection.architecture_gap_summary);
     }
 
+    prompt.push_str("\n\n");
+    prompt.push_str(QUALITY_STANDARDS_BLOCK);
+
     prompt
 }
+
+/// Merge-ready contract appended to every engineer brief.
+///
+/// This block is appended verbatim to every prompt produced by
+/// [`build_agent_prompt`] so that engineers always see the six merge-ready
+/// criteria and the forbidden-paths guardrail. The brain may add
+/// task-specific instructions in the objective itself, but this block is
+/// always present.
+///
+/// The ordered list mirrors the canonical six criteria documented in
+/// `prompt_assets/simard/engineer_system.md` (the "Merge-Ready Contract"
+/// section). When updating one, update the other.
+pub(crate) const QUALITY_STANDARDS_BLOCK: &str = "## Quality Standards\n\
+Every PR you open MUST satisfy the merge-ready criteria before you mark it \
+ready for review or request merge.\n\
+\n\
+1. qa-team scenarios written, validated with `gadugi-test validate`, run with `gadugi-test run`.\n\
+2. Docs updated for any user-facing surfaces OR explicit list of changed surfaces with internal-only justification.\n\
+3. quality-audit completed >=3 SEEK→VALIDATE→FIX cycles, ended on a clean final cycle (zero critical/high; zero medium correctness/security findings).\n\
+4. CI 100% green with 0 failures.\n\
+5. PR description contains concrete evidence for criteria 1–4 and 6.\n\
+6. Diff focused; no unrelated edits.\n\
+\n\
+Do NOT mark a PR ready for review or merge until merge-ready criteria are \
+satisfied AND the PR description has been updated with evidence for criteria \
+1–4 and 6.\n\
+\n\
+### Forbidden paths\n\
+You may NEVER write to or modify any file under `~/.simard/prompt_assets/` \
+or any path under `$SIMARD_PROMPT_ASSETS_DIR`. All prompt changes must be \
+PRs to the Simard repository under `prompt_assets/`. The deployed prompts \
+at `~/.simard/prompt_assets/` are derived from main; do not edit the \
+deployed copy.\n";
 
 /// Build the argv passed to `amplihack <subcommand>` for the chosen
 /// [`AgentKind`]. Each kind has its own prompt-passing convention.
@@ -607,5 +643,49 @@ mod tests {
             }
             other => panic!("expected BridgeCallFailed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn agent_brief_includes_quality_standards_block() {
+        let prompt = build_agent_prompt("any objective", &fake_inspection());
+        assert!(
+            prompt.contains("## Quality Standards"),
+            "brief must always include the '## Quality Standards' header; got:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn agent_brief_lists_six_merge_ready_criteria() {
+        let prompt = build_agent_prompt("any objective", &fake_inspection());
+        for marker in [
+            "1. qa-team scenarios",
+            "2. Docs updated",
+            "3. quality-audit",
+            "4. CI 100% green",
+            "5. PR description contains concrete evidence",
+            "6. Diff focused",
+        ] {
+            assert!(
+                prompt.contains(marker),
+                "merge-ready criterion missing from brief: {marker:?}\nfull brief:\n{prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_brief_contains_forbidden_paths_section() {
+        let prompt = build_agent_prompt("any objective", &fake_inspection());
+        assert!(
+            prompt.contains("### Forbidden paths"),
+            "brief must include the '### Forbidden paths' sub-section; got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("~/.simard/prompt_assets/"),
+            "brief must mention the deployed prompt assets path; got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("SIMARD_PROMPT_ASSETS_DIR"),
+            "brief must mention the env-var override; got:\n{prompt}"
+        );
     }
 }
