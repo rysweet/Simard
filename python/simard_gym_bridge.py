@@ -203,6 +203,21 @@ class GymBridgeServer(BridgeServer):
 
     def _handle_run_suite(self, params: dict[str, Any]) -> dict[str, Any]:
         suite_id = params.get("suite_id", "progressive")
+        # Workaround for upstream amplihack metacognition_grader rejecting
+        # reasoning_effort=medium and hanging the Observe phase for 25+ min
+        # per cycle (tracked separately; see follow-up issue linked from
+        # fix/forward-engineer-env-and-copilot-default PR). When the daemon
+        # exports SIMARD_SKIP_GYM=1, return a synthetic success immediately
+        # so OODA cycles can complete. Remove once the upstream fix lands.
+        if os.environ.get("SIMARD_SKIP_GYM") == "1":
+            logger.info("SIMARD_SKIP_GYM=1; returning synthetic success for suite %s", suite_id)
+            return {
+                "suite_id": suite_id, "success": True, "overall_score": 0.0,
+                "dimensions": _zero_dims(), "scenario_results": [],
+                "scenarios_passed": 0, "scenarios_total": 0,
+                "error_message": None,
+                "degraded_sources": ["SIMARD_SKIP_GYM=1 workaround"],
+            }
         if self._progressive is None:
             return {
                 "suite_id": suite_id, "success": False, "overall_score": 0.0,
