@@ -167,6 +167,7 @@ pub(crate) fn board_with_goal(
     board
 }
 
+#[allow(dead_code)] // Kept for future integration tests that drive the full dispatch path.
 pub(crate) fn bridges_with_session(session: MockSession) -> OodaBridges {
     OodaBridges {
         memory: mock_memory(),
