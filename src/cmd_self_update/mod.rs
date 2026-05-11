@@ -11,4 +11,4 @@ mod tests;
 mod tests_download;
 
 // Re-export all public items so `crate::cmd_self_update::X` still works.
-pub use update::{handle_self_test, handle_self_update};
+pub use update::{handle_self_test, handle_self_update, handle_self_update_download_only};

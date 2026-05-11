@@ -92,6 +92,22 @@ pub fn handle_self_update() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Download-only variant used by `simard safe-update`. Returns the path
+/// to the freshly extracted candidate binary, or `None` if the running
+/// version is already the latest. The caller is responsible for moving
+/// the binary into the install location after pre-test passes.
+pub fn handle_self_update_download_only()
+-> Result<Option<std::path::PathBuf>, Box<dyn std::error::Error>> {
+    println!("simard safe-update (current: v{CURRENT_VERSION})");
+    let (url, version) = find_latest_release()?;
+    if version == CURRENT_VERSION {
+        return Ok(None);
+    }
+    println!("New version available: v{CURRENT_VERSION} → v{version}");
+    let bin = super::download::download_to_temp(&url, &version)?;
+    Ok(Some(bin))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
