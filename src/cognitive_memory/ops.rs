@@ -31,6 +31,13 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
         self.read_only
     }
 
+    fn checkpoint(&self) -> SimardResult<()> {
+        if self.read_only {
+            return Ok(());
+        }
+        self.execute_pub("CHECKPOINT;")
+    }
+
     fn record_sensory(
         &self,
         modality: &str,

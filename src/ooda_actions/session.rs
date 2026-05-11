@@ -137,8 +137,51 @@ mod tests {
         assert_eq!(ActionKind::LaunchSession.to_string(), "launch-session");
     }
 
+    /// Returns `true` if `amplihack copilot` is functional in this environment:
+    /// the binary is present and `amplihack copilot -p ""` exits within
+    /// 10 seconds. Tests that spawn a real PTY session should skip when this
+    /// returns `false` (CI without auth, broken SDK install, etc.) so the
+    /// suite doesn't hang on `session.finish()`'s 5-minute idle timeout.
+    fn amplihack_copilot_available() -> bool {
+        use std::process::{Command, Stdio};
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        // Cheap binary-existence check first.
+        if Command::new("amplihack")
+            .args(["copilot", "--help"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| !s.success())
+            .unwrap_or(true)
+        {
+            return false;
+        }
+
+        // Functional probe: invoke with empty prompt and bound runtime.
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let status = Command::new("amplihack")
+                .args(["copilot", "-p", "ping"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            let _ = tx.send(status);
+        });
+        match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(Ok(s)) => s.success(),
+            _ => false,
+        }
+    }
+
     #[test]
     fn dispatch_launch_session_produces_outcome_without_panic() {
+        if !amplihack_copilot_available() {
+            eprintln!("SKIP: amplihack copilot not available in this environment");
+            return;
+        }
         let action = PlannedAction {
             kind: ActionKind::LaunchSession,
             goal_id: Some("goal-77".into()),
@@ -154,6 +197,10 @@ mod tests {
 
     #[test]
     fn dispatch_launch_session_with_special_chars_in_description() {
+        if !amplihack_copilot_available() {
+            eprintln!("SKIP: amplihack copilot not available in this environment");
+            return;
+        }
         let action = PlannedAction {
             kind: ActionKind::LaunchSession,
             goal_id: None,
@@ -166,6 +213,10 @@ mod tests {
 
     #[test]
     fn dispatch_launch_session_empty_description() {
+        if !amplihack_copilot_available() {
+            eprintln!("SKIP: amplihack copilot not available in this environment");
+            return;
+        }
         let action = PlannedAction {
             kind: ActionKind::LaunchSession,
             goal_id: None,

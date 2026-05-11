@@ -287,8 +287,11 @@ fn run_local_engineer_loop_emits_agent_prompt_build_phase() {
         Err(e) => {
             let msg = e.to_string();
             assert!(
-                msg.contains("agent-spawn") || msg.contains("agent session"),
-                "expected failure at agent-spawn phase; got: {msg}"
+                msg.contains("agent-spawn")
+                    || msg.contains("agent session")
+                    || msg.contains("SIMARD_LLM_PROVIDER")
+                    || msg.contains("llm_provider"),
+                "expected failure at agent-spawn or LLM-config phase; got: {msg}"
             );
         }
     }

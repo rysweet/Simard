@@ -254,16 +254,25 @@ pub fn run_ooda_daemon(
     }
 
     // --- periodic DB backup state -----------------------------------------
+    // Default 300s (5 min) interval and 24 retained backups so an unexpected
+    // crash loses at most ~5 minutes of writes and we always have ~2 hours
+    // of point-in-time recovery on hand. Both knobs are env-overridable.
     let db_backup_interval_secs: u64 = std::env::var("SIMARD_DB_BACKUP_INTERVAL_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(3600);
+        .unwrap_or(300);
+    let db_backup_retention: usize = std::env::var("SIMARD_DB_BACKUP_RETENTION")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(24);
     let mut last_db_backup = Instant::now()
         .checked_sub(Duration::from_secs(db_backup_interval_secs))
         .unwrap_or_else(Instant::now);
     daemon_log(
         &state_root,
-        &format!("[simard] OODA daemon: DB backup interval = {db_backup_interval_secs}s"),
+        &format!(
+            "[simard] OODA daemon: DB backup interval = {db_backup_interval_secs}s, retention = {db_backup_retention}"
+        ),
     );
     // -------------------------------------------------------------------
 
@@ -311,13 +320,21 @@ pub fn run_ooda_daemon(
 
         // --- periodic DB backup (at START of cycle) ------------------------
         if last_db_backup.elapsed() >= Duration::from_secs(db_backup_interval_secs) {
+            // Flush WAL → main DB file before copying so the backup
+            // includes any writes still in the write-ahead log.
+            if let Err(e) = bridges.memory.checkpoint() {
+                daemon_log(
+                    &state_root,
+                    &format!("[simard] DB pre-backup checkpoint failed: {e}"),
+                );
+            }
             match NativeCognitiveMemory::create_verified_backup(&state_root) {
                 Ok(backup_path) => {
                     daemon_log(
                         &state_root,
                         &format!("[simard] DB backup created: {}", backup_path.display()),
                     );
-                    NativeCognitiveMemory::prune_old_backups(&state_root, 5);
+                    NativeCognitiveMemory::prune_old_backups(&state_root, db_backup_retention);
                 }
                 Err(e) => {
                     daemon_log(&state_root, &format!("[simard] DB backup failed: {e}"));
@@ -415,10 +432,37 @@ pub fn run_ooda_daemon(
         interruptible_sleep(Duration::from_secs(interval_secs), &shutdown);
     }
 
-    // Close the session cleanly if it was opened.
+    // Graceful shutdown sequence: persist board, flush WAL, close session,
+    // and clear the in-process writer registration so the Weak in
+    // IN_PROCESS_WRITER doesn't outlast the strong Arc the launcher might
+    // try to upgrade. Order matters — checkpoint must happen while
+    // bridges.memory is still alive, and clearing the writer registration
+    // must come last.
+    daemon_log(
+        &state_root,
+        "[simard] OODA daemon: shutdown — persisting board",
+    );
+    if let Err(e) = crate::goal_curation::persist_board(&state.active_goals, &*bridges.memory) {
+        daemon_log(
+            &state_root,
+            &format!("[simard] shutdown: persist_board failed: {e}"),
+        );
+    }
+    daemon_log(
+        &state_root,
+        "[simard] OODA daemon: shutdown — checkpointing cognitive memory",
+    );
+    if let Err(e) = bridges.memory.checkpoint() {
+        daemon_log(
+            &state_root,
+            &format!("[simard] shutdown: cognitive-memory checkpoint failed: {e}"),
+        );
+    }
     if let Some(ref mut session) = bridges.session {
         let _ = session.close();
     }
+    memory_ipc::clear_in_process_writer();
+    daemon_log(&state_root, "[simard] OODA daemon: clean shutdown complete");
 
     Ok(())
 }

@@ -334,3 +334,8 @@ pub use terminal_engineer_bridge::{
     SHARED_EXPLICIT_STATE_ROOT_SOURCE, TERMINAL_HANDOFF_FILE_NAME, TERMINAL_MODE_BOUNDARY,
     TerminalBridgeContext,
 };
+
+/// Greets a person by name.
+fn greet(name: &str) -> String {
+    format!("Hello, {}!", name)
+}

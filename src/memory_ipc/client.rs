@@ -269,4 +269,11 @@ impl CognitiveMemoryOps for RemoteCognitiveMemory {
             other => Err(Self::unexpected("get_statistics", other)),
         }
     }
+
+    fn checkpoint(&self) -> SimardResult<()> {
+        match self.call(MemoryRequest::Checkpoint)? {
+            MemoryResponse::Ack => Ok(()),
+            other => Err(Self::unexpected("checkpoint", other)),
+        }
+    }
 }

@@ -167,9 +167,9 @@ pub fn register_in_process_writer(state_root: PathBuf, writer: Arc<dyn Cognitive
 
 /// Clear any registered in-process writer.
 ///
-/// Test-only helper that lets tests reset the global registration so
-/// they don't leak state across runs.
-#[cfg(test)]
+/// Called during graceful daemon shutdown so the registered `Weak` is
+/// dropped before the strong `Arc` it points to. Tests also use it to
+/// reset state across runs.
 pub fn clear_in_process_writer() {
     if let Ok(mut g) = IN_PROCESS_WRITER.write() {
         *g = None;
@@ -187,6 +187,14 @@ fn lookup_in_process_writer(state_root: &Path) -> Option<Arc<dyn CognitiveMemory
         return None;
     }
     weak.upgrade()
+}
+
+/// Public alias of `lookup_in_process_writer` used by the backup helper
+/// (in another module) to ask the live writer to checkpoint before the
+/// backup file is copied. The `_for_test` suffix is historical — this is
+/// production code; tests just happen to exercise the same codepath.
+pub fn lookup_in_process_writer_for_test(state_root: &Path) -> Option<Arc<dyn CognitiveMemoryOps>> {
+    lookup_in_process_writer(state_root)
 }
 
 /// Decide whether `state_root` matches the daemon's owned state root.

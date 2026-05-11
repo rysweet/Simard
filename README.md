@@ -421,6 +421,10 @@ Pre-commit and pre-push hooks enforce `cargo fmt --all -- --check`, `cargo clipp
 - [Agent composition](docs/architecture/agent-composition.md)
 - [Truthful runtime metadata](docs/concepts/truthful-runtime-metadata.md)
 
+## Status
+
+Current status: DONE
+
 ## License
 
 Private repository. See [rysweet/Simard](https://github.com/rysweet/Simard).

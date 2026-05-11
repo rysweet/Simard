@@ -253,6 +253,12 @@ impl NativeCognitiveMemory {
 
     /// Create a verified backup of the DB file. Returns the backup path on
     /// success. Used by the OODA daemon for periodic backups.
+    ///
+    /// If a writer for this `state_root` has been registered via
+    /// [`crate::memory_ipc::register_in_process_writer`], the writer is
+    /// asked to `CHECKPOINT` first so the on-disk file is consistent
+    /// before the copy. Any `*.wal` companion file is also copied so the
+    /// backup contains data that has not yet been checkpointed.
     #[cfg(unix)]
     pub fn create_verified_backup(state_root: &Path) -> SimardResult<PathBuf> {
         let db_path = state_root.join("cognitive_memory.ladybug");
@@ -261,6 +267,16 @@ impl NativeCognitiveMemory {
                 component: "cognitive-memory".into(),
                 reason: "DB file does not exist, nothing to back up".into(),
             });
+        }
+
+        // Best-effort: ask the registered live writer (the daemon) to
+        // flush its WAL into the main DB file before we copy. Without
+        // this, periodic backups silently captured an empty `.ladybug`
+        // file and missed all writes still in the WAL.
+        if let Some(live) = crate::memory_ipc::lookup_in_process_writer_for_test(state_root)
+            && let Err(e) = live.checkpoint()
+        {
+            eprintln!("[simard] backup pre-checkpoint failed: {e}");
         }
 
         let backup_dir = state_root.join("backups");
@@ -283,6 +299,23 @@ impl NativeCognitiveMemory {
             path: backup_path.clone(),
             reason: e.to_string(),
         })?;
+
+        // Also copy the WAL file (if present) so any writes that
+        // happened after the checkpoint are not lost. lbug replays the
+        // WAL on open.
+        let wal_src = state_root.join("cognitive_memory.ladybug.wal");
+        if wal_src.exists() {
+            let wal_dst = backup_dir.join(format!("cognitive_memory.ladybug.{ts}.wal"));
+            if let Err(e) = std::fs::copy(&wal_src, &wal_dst) {
+                let _ = std::fs::remove_file(&backup_path);
+                return Err(SimardError::PersistentStoreIo {
+                    store: "cognitive-memory".into(),
+                    action: "backup-copy-wal".into(),
+                    path: wal_dst,
+                    reason: e.to_string(),
+                });
+            }
+        }
 
         // Verify the backup by opening read-only and running a health check.
         let config = lbug::SystemConfig::default().read_only(true);
@@ -320,15 +353,41 @@ impl NativeCognitiveMemory {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                if let Some(epoch_str) = name_str.strip_prefix(prefix)
-                    && let Ok(epoch) = epoch_str.parse::<u64>()
-                {
-                    backups.push((epoch, entry.path()));
+                if let Some(rest) = name_str.strip_prefix(prefix) {
+                    // Only group on the bare DB snapshot, not its `.wal`
+                    // companion. The companion is removed alongside its
+                    // matching DB file below.
+                    if rest.ends_with(".wal") {
+                        continue;
+                    }
+                    if let Ok(epoch) = rest.parse::<u64>() {
+                        backups.push((epoch, entry.path()));
+                    }
                 }
             }
         }
         backups.sort_by_key(|x| std::cmp::Reverse(x.0));
         for (_, path) in backups.into_iter().skip(keep) {
+            // Remove the .wal companion first so we never leave an
+            // orphan WAL pointing at a deleted DB file. Build the
+            // companion path by appending `.wal` to the timestamped
+            // backup file name (e.g.
+            // `cognitive_memory.ladybug.<ts>` → `..<ts>.wal`).
+            let wal_companion = {
+                let mut p = path.clone();
+                let mut name = p.file_name().unwrap_or_default().to_os_string();
+                name.push(".wal");
+                p.set_file_name(name);
+                p
+            };
+            if wal_companion.exists()
+                && let Err(e) = std::fs::remove_file(&wal_companion)
+            {
+                eprintln!(
+                    "[simard] failed to remove old backup wal {}: {e}",
+                    wal_companion.display()
+                );
+            }
             if let Err(e) = std::fs::remove_file(&path) {
                 eprintln!(
                     "[simard] failed to remove old backup {}: {e}",

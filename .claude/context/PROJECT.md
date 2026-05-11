@@ -10,7 +10,7 @@ Replace the sections below with information about your project.
 
 ---
 
-## Project: issue-1574-fix-goal-board-persistence-race-condition-in-simar
+## Project: main
 
 ## Overview
 

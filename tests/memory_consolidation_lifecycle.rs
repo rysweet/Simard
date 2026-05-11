@@ -35,6 +35,7 @@ fn counting_bridge() -> (CognitiveMemoryBridge, Arc<AtomicU32>) {
             "memory.clear_working" => Ok(json!({"count": 2})),
             "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
             "memory.consolidate_episodes" => Ok(json!({"id": null})),
+            "memory.get_working" => Ok(json!({"slots": []})),
             _ => Err(BridgeErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),

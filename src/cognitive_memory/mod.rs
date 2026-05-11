@@ -106,6 +106,22 @@ pub trait CognitiveMemoryOps: Send + Sync {
     fn is_read_only(&self) -> bool {
         false
     }
+
+    /// Force a checkpoint: flush the WAL into the main database file
+    /// so that recent writes are durable on disk even if the process
+    /// is killed before `Database::drop` runs.
+    ///
+    /// Required for SIGTERM-safe shutdown and for taking consistent
+    /// backups (otherwise a copy of the `.ladybug` file misses any
+    /// writes still in the WAL).
+    ///
+    /// Default implementation is a no-op so backends that cannot
+    /// checkpoint (read-only, in-memory, IPC clients) compile without
+    /// modification. `NativeCognitiveMemory` overrides to run the
+    /// `CHECKPOINT;` Cypher statement.
+    fn checkpoint(&self) -> SimardResult<()> {
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -275,6 +291,12 @@ impl NativeCognitiveMemory {
     }
 
     fn execute(&self, cypher: &str) -> SimardResult<()> {
+        self.execute_pub(cypher)
+    }
+
+    /// Public wrapper around `execute` so other modules in this crate
+    /// (e.g. the `CognitiveMemoryOps` impl) can issue Cypher.
+    pub(crate) fn execute_pub(&self, cypher: &str) -> SimardResult<()> {
         self.conn()?
             .query(cypher)
             .map_err(|e| SimardError::BridgeCallFailed {

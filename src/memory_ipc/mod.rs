@@ -121,6 +121,7 @@ pub enum MemoryRequest {
         content: String,
     },
     GetStatistics,
+    Checkpoint,
 }
 
 /// Response types matching each request.
@@ -136,6 +137,7 @@ pub enum MemoryResponse {
     Procedures(Vec<CognitiveProcedure>),
     Prospectives(Vec<CognitiveProspective>),
     Statistics(CognitiveStatistics),
+    Ack,
     Error(String),
 }
 
@@ -172,11 +174,10 @@ mod client;
 mod launcher;
 mod server;
 pub use client::RemoteCognitiveMemory;
-#[cfg(test)]
 pub use launcher::clear_in_process_writer;
 pub use launcher::{
-    ReaderBridge, WriterBridge, launch_writer_bridge, open_reader_bridge,
-    register_in_process_writer,
+    ReaderBridge, WriterBridge, launch_writer_bridge, lookup_in_process_writer_for_test,
+    open_reader_bridge, register_in_process_writer,
 };
 pub use server::{ServerHandle, spawn_server};
 
@@ -268,6 +269,12 @@ impl CognitiveMemoryOps for SharedMemory {
     }
     fn get_statistics(&self) -> SimardResult<CognitiveStatistics> {
         self.0.get_statistics()
+    }
+    fn is_read_only(&self) -> bool {
+        self.0.is_read_only()
+    }
+    fn checkpoint(&self) -> SimardResult<()> {
+        self.0.checkpoint()
     }
 }
 

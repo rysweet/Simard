@@ -209,5 +209,9 @@ fn dispatch(memory: &dyn CognitiveMemoryOps, req: MemoryRequest) -> MemoryRespon
             Ok(s) => MemoryResponse::Statistics(s),
             Err(e) => MemoryResponse::Error(e.to_string()),
         },
+        MemoryRequest::Checkpoint => match memory.checkpoint() {
+            Ok(()) => MemoryResponse::Ack,
+            Err(e) => MemoryResponse::Error(e.to_string()),
+        },
     }
 }
