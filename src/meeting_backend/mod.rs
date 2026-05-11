@@ -44,11 +44,6 @@ const RECENT_WINDOW: usize = 30;
 /// Maximum time to wait for LLM summary generation before falling back.
 const SUMMARY_TIMEOUT: Duration = Duration::from_secs(90);
 
-/// Sentinel content returned when the LLM yields no usable text after
-/// sanitisation. Surfacing this to the dashboard is preferable to an empty
-/// bubble — operators can see that the turn completed but produced nothing.
-pub const EMPTY_RESPONSE_SENTINEL: &str = "[empty response]";
-
 /// The unified meeting backend.
 ///
 /// Maintains conversation state, delegates to an LLM agent, and handles

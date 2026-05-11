@@ -27,6 +27,11 @@ pub fn write_meeting_handoff(dir: &Path, handoff: &MeetingHandoff) -> SimardResu
 
 /// Find the newest handoff file in a directory (timestamped `handoff-*.json`
 /// or legacy `meeting_handoff.json`). Returns `None` if no file exists.
+///
+/// **Note**: this is the historical "newest by filename" selector kept for
+/// callers that want a single representative handoff regardless of state
+/// (e.g. CLI display, observe scan). The OODA dispatch queue must use
+/// [`find_oldest_unprocessed_handoff`] instead — see #1649.
 pub fn find_newest_handoff(dir: &Path) -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
@@ -50,6 +55,75 @@ pub fn find_newest_handoff(dir: &Path) -> Option<PathBuf> {
     // Newest by filename (timestamps sort lexicographically).
     candidates.sort();
     candidates.pop()
+}
+
+/// List all handoff files in a directory sorted by filename ascending
+/// (oldest first, since timestamps sort lexicographically). Includes both
+/// timestamped `handoff-*.json` files and the legacy `meeting_handoff.json`.
+fn list_handoff_files(dir: &Path) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    let legacy = dir.join(MEETING_HANDOFF_FILENAME);
+    if legacy.is_file() {
+        candidates.push(legacy);
+    }
+
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with("handoff-") && name_str.ends_with(".json") {
+                candidates.push(entry.path());
+            }
+        }
+    }
+
+    candidates.sort(); // oldest first
+    candidates
+}
+
+/// Find the **oldest unprocessed** handoff file in a directory — i.e. the
+/// FIFO-next pending handoff for OODA ingestion.
+///
+/// This replaces the previous "newest by filename" behaviour for the
+/// dispatch queue (#1649): a fresh empty handoff (e.g. emitted by a
+/// dashboard chat that closes with zero items) was permanently shadowing
+/// older content-rich handoffs because `find_newest_handoff` ignored the
+/// `processed` flag and the older file would never be selected after a
+/// newer one had been marked processed.
+///
+/// Each candidate file is read and parsed to inspect its `processed`
+/// field; malformed JSON is skipped (an old half-written file should not
+/// block dispatch). Returns `Ok(None)` when no unprocessed handoff exists.
+pub fn find_oldest_unprocessed_handoff(dir: &Path) -> SimardResult<Option<PathBuf>> {
+    for path in list_handoff_files(dir) {
+        let raw = match fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "skipping unreadable handoff while scanning for oldest unprocessed"
+                );
+                continue;
+            }
+        };
+        let handoff: MeetingHandoff = match serde_json::from_str(&raw) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "skipping malformed handoff JSON while scanning for oldest unprocessed"
+                );
+                continue;
+            }
+        };
+        if !handoff.processed {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
 }
 
 /// Load a meeting handoff artifact from a directory. Returns `None` if no
