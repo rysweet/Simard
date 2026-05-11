@@ -73,19 +73,26 @@ impl AgentKind {
 
     /// Resolve the configured agent kind from the `SIMARD_ENGINEER_AGENT`
     /// environment variable. Unknown values warn to stderr and fall back
-    /// to the default (`RustyClawd`).
+    /// to the default (`Copilot`).
+    ///
+    /// Default flipped from `RustyClawd` to `Copilot` on
+    /// fix/forward-engineer-env-and-copilot-default: upstream RustyClawd
+    /// crashes with `aclose(): asynchronous generator is already running`
+    /// (rysweet/amplihack#4537), so every engineer dispatch fails closed
+    /// with the previous default. Operators who still want RustyClawd
+    /// can opt in by setting `SIMARD_ENGINEER_AGENT=rustyclawd`.
     pub(crate) fn from_env() -> AgentKind {
         match std::env::var("SIMARD_ENGINEER_AGENT") {
-            Err(_) => AgentKind::RustyClawd,
+            Err(_) => AgentKind::Copilot,
             Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
-                "" | "rustyclawd" | "rusty-clawd" | "rusty_clawd" => AgentKind::RustyClawd,
-                "copilot" => AgentKind::Copilot,
+                "" | "copilot" => AgentKind::Copilot,
+                "rustyclawd" | "rusty-clawd" | "rusty_clawd" => AgentKind::RustyClawd,
                 other => {
                     eprintln!(
                         "[simard] SIMARD_ENGINEER_AGENT={other:?} not recognised; \
-                         falling back to RustyClawd. Valid: rustyclawd, copilot."
+                         falling back to Copilot. Valid: copilot, rustyclawd."
                     );
-                    AgentKind::RustyClawd
+                    AgentKind::Copilot
                 }
             },
         }
@@ -457,15 +464,38 @@ mod tests {
     }
 
     #[test]
-    fn agent_kind_from_env_defaults_to_rustyclawd() {
+    fn agent_kind_from_env_defaults_to_copilot() {
         let original = std::env::var("SIMARD_ENGINEER_AGENT").ok();
         unsafe {
             std::env::remove_var("SIMARD_ENGINEER_AGENT");
         }
-        assert_eq!(AgentKind::from_env(), AgentKind::RustyClawd);
+        assert_eq!(AgentKind::from_env(), AgentKind::Copilot);
         unsafe {
             if let Some(v) = original {
                 std::env::set_var("SIMARD_ENGINEER_AGENT", v);
+            }
+        }
+    }
+
+    #[test]
+    fn agent_kind_from_env_recognises_rustyclawd_explicitly() {
+        let original = std::env::var("SIMARD_ENGINEER_AGENT").ok();
+        for raw in [
+            "rustyclawd",
+            "RustyClawd",
+            "RUSTYCLAWD",
+            "rusty-clawd",
+            "  rusty_clawd  ",
+        ] {
+            unsafe {
+                std::env::set_var("SIMARD_ENGINEER_AGENT", raw);
+            }
+            assert_eq!(AgentKind::from_env(), AgentKind::RustyClawd, "raw={raw:?}");
+        }
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("SIMARD_ENGINEER_AGENT", v),
+                None => std::env::remove_var("SIMARD_ENGINEER_AGENT"),
             }
         }
     }
@@ -494,7 +524,7 @@ mod tests {
             std::env::set_var("SIMARD_ENGINEER_AGENT", "totally-not-a-real-agent");
         }
         // Falls back rather than panicking; warning is emitted to stderr.
-        assert_eq!(AgentKind::from_env(), AgentKind::RustyClawd);
+        assert_eq!(AgentKind::from_env(), AgentKind::Copilot);
         unsafe {
             match original {
                 Some(v) => std::env::set_var("SIMARD_ENGINEER_AGENT", v),
