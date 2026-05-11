@@ -161,3 +161,236 @@ fn empty_extra_env_emits_no_dash_e_flags() {
         "empty extra_env must not emit any -e flags: {argv:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// compute_tmux_env unit tests (issue #1658).
+//
+// These pin the contract that PR #1661 / commit aca976ea established: every
+// SIMARD_* var present in the daemon's environment must be forwarded to the
+// engineer subprocess via `tmux new-session -e KEY=VAL`. A future refactor
+// that drops the SIMARD_* propagation loop would otherwise silently regress
+// the operator-set `SIMARD_ENGINEER_AGENT=copilot` override.
+// ---------------------------------------------------------------------------
+
+use super::tmux::compute_tmux_env;
+use crate::agent_roles::AgentRole;
+use crate::agent_supervisor::types::SubordinateConfig;
+
+fn make_test_config(name: &str, depth: u32) -> SubordinateConfig {
+    SubordinateConfig {
+        agent_name: name.to_string(),
+        goal: "test goal".to_string(),
+        role: AgentRole::Engineer,
+        worktree_path: PathBuf::from("/fake/worktree"),
+        current_depth: depth,
+    }
+}
+
+fn env_value<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+}
+
+#[test]
+fn compute_tmux_env_seeds_required_simard_vars_from_config() {
+    let config = make_test_config("engineer-abc", 2);
+    let env = compute_tmux_env(&config, std::iter::empty::<(String, String)>());
+
+    assert_eq!(
+        env_value(&env, "SIMARD_AGENT_NAME"),
+        Some("engineer-abc"),
+        "SIMARD_AGENT_NAME must come from config.agent_name"
+    );
+    assert_eq!(
+        env_value(&env, "SIMARD_SUBORDINATE_DEPTH"),
+        Some("3"),
+        "SIMARD_SUBORDINATE_DEPTH must be config.current_depth + 1"
+    );
+    assert_eq!(
+        env_value(&env, "CARGO_BUILD_JOBS"),
+        Some("4"),
+        "CARGO_BUILD_JOBS must be capped at 4 (issue #373 OOM guard)"
+    );
+}
+
+#[test]
+fn compute_tmux_env_uses_default_cargo_target_when_parent_unset() {
+    let config = make_test_config("e1", 0);
+    let env = compute_tmux_env(&config, std::iter::empty::<(String, String)>());
+    assert_eq!(
+        env_value(&env, "CARGO_TARGET_DIR"),
+        Some("/tmp/simard-engineer-target"),
+        "CARGO_TARGET_DIR default must be /tmp/simard-engineer-target (issue #1197)"
+    );
+}
+
+#[test]
+fn compute_tmux_env_honors_parent_cargo_target_override() {
+    let config = make_test_config("e1", 0);
+    let parent = vec![(
+        "CARGO_TARGET_DIR".to_string(),
+        "/srv/shared-target".to_string(),
+    )];
+    let env = compute_tmux_env(&config, parent);
+    assert_eq!(
+        env_value(&env, "CARGO_TARGET_DIR"),
+        Some("/srv/shared-target"),
+        "CARGO_TARGET_DIR from parent_env must override the default"
+    );
+}
+
+#[test]
+fn compute_tmux_env_forwards_simard_vars_from_parent_env() {
+    // Regression target: PR #1661 added a loop that forwards every SIMARD_*
+    // parent env var. If a future refactor drops this loop, the operator's
+    // SIMARD_ENGINEER_AGENT=copilot override silently fails to reach the
+    // engineer and engineers fall back to the broken default agent.
+    let config = make_test_config("e1", 0);
+    let parent = vec![
+        ("SIMARD_ENGINEER_AGENT".to_string(), "copilot".to_string()),
+        ("SIMARD_KEEP_TRANSCRIPTS".to_string(), "1".to_string()),
+        ("SIMARD_LLM_PROVIDER".to_string(), "openai".to_string()),
+        // Non-SIMARD vars must NOT be forwarded.
+        ("HOME".to_string(), "/home/azureuser".to_string()),
+        ("PATH".to_string(), "/usr/bin".to_string()),
+    ];
+    let env = compute_tmux_env(&config, parent);
+
+    assert_eq!(env_value(&env, "SIMARD_ENGINEER_AGENT"), Some("copilot"));
+    assert_eq!(env_value(&env, "SIMARD_KEEP_TRANSCRIPTS"), Some("1"));
+    assert_eq!(env_value(&env, "SIMARD_LLM_PROVIDER"), Some("openai"));
+    assert!(
+        env_value(&env, "HOME").is_none(),
+        "non-SIMARD_ vars must not leak into tmux_env: {env:?}"
+    );
+    assert!(
+        env_value(&env, "PATH").is_none(),
+        "non-SIMARD_ vars must not leak into tmux_env: {env:?}"
+    );
+}
+
+#[test]
+fn compute_tmux_env_does_not_double_add_seeded_vars() {
+    // SIMARD_AGENT_NAME and SIMARD_SUBORDINATE_DEPTH are seeded from config.
+    // Even if they appear in parent_env, the seeded values must win and the
+    // key must appear exactly once.
+    let config = make_test_config("from-config", 5);
+    let parent = vec![
+        (
+            "SIMARD_AGENT_NAME".to_string(),
+            "from-parent-env".to_string(),
+        ),
+        ("SIMARD_SUBORDINATE_DEPTH".to_string(), "999".to_string()),
+        ("SIMARD_OTHER".to_string(), "ok".to_string()),
+    ];
+    let env = compute_tmux_env(&config, parent);
+
+    let agent_name_count = env.iter().filter(|(k, _)| k == "SIMARD_AGENT_NAME").count();
+    let depth_count = env
+        .iter()
+        .filter(|(k, _)| k == "SIMARD_SUBORDINATE_DEPTH")
+        .count();
+    assert_eq!(
+        agent_name_count, 1,
+        "SIMARD_AGENT_NAME must be unique: {env:?}"
+    );
+    assert_eq!(
+        depth_count, 1,
+        "SIMARD_SUBORDINATE_DEPTH must be unique: {env:?}"
+    );
+    assert_eq!(
+        env_value(&env, "SIMARD_AGENT_NAME"),
+        Some("from-config"),
+        "config-seeded SIMARD_AGENT_NAME must win over parent_env"
+    );
+    assert_eq!(
+        env_value(&env, "SIMARD_SUBORDINATE_DEPTH"),
+        Some("6"),
+        "config-derived SIMARD_SUBORDINATE_DEPTH (depth+1) must win over parent_env"
+    );
+    assert_eq!(env_value(&env, "SIMARD_OTHER"), Some("ok"));
+}
+
+#[test]
+fn compute_tmux_env_sorts_simard_extras_for_stable_ordering() {
+    let config = make_test_config("e1", 0);
+    let parent = vec![
+        ("SIMARD_ZULU".to_string(), "z".to_string()),
+        ("SIMARD_ALPHA".to_string(), "a".to_string()),
+        ("SIMARD_MIKE".to_string(), "m".to_string()),
+    ];
+    let env = compute_tmux_env(&config, parent);
+
+    // Find the positions of the SIMARD_ extras (they come after the seeded vars).
+    let positions: Vec<(String, usize)> = env
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (k, _))| {
+            if matches!(k.as_str(), "SIMARD_ALPHA" | "SIMARD_MIKE" | "SIMARD_ZULU") {
+                Some((k.clone(), i))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(positions.len(), 3, "all three extras must appear: {env:?}");
+    let alpha_idx = positions
+        .iter()
+        .find(|(k, _)| k == "SIMARD_ALPHA")
+        .unwrap()
+        .1;
+    let mike_idx = positions
+        .iter()
+        .find(|(k, _)| k == "SIMARD_MIKE")
+        .unwrap()
+        .1;
+    let zulu_idx = positions
+        .iter()
+        .find(|(k, _)| k == "SIMARD_ZULU")
+        .unwrap()
+        .1;
+    assert!(
+        alpha_idx < mike_idx && mike_idx < zulu_idx,
+        "SIMARD_ extras must be sorted alphabetically: alpha={alpha_idx} mike={mike_idx} zulu={zulu_idx}"
+    );
+}
+
+#[test]
+fn compute_tmux_env_output_threads_through_build_tmux_wrapped_command() {
+    // Round-trip: compute_tmux_env's output must be accepted by
+    // build_tmux_wrapped_command and produce the corresponding `-e KEY=VAL`
+    // flags on the resulting tmux argv.
+    let config = make_test_config("engineer-x", 0);
+    let parent = vec![("SIMARD_ENGINEER_AGENT".to_string(), "copilot".to_string())];
+    let tmux_env = compute_tmux_env(&config, parent);
+    let argv = build_tmux_wrapped_command(
+        "simard-engineer-x",
+        &["/bin/printenv".to_string()],
+        &PathBuf::from("/tmp/x.log"),
+        &tmux_env,
+    );
+
+    let env_flags: Vec<&String> = argv
+        .iter()
+        .enumerate()
+        .filter_map(|(i, a)| {
+            if a == "-e" && i + 1 < argv.len() {
+                Some(&argv[i + 1])
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert!(
+        env_flags
+            .iter()
+            .any(|s| s.as_str() == "SIMARD_ENGINEER_AGENT=copilot"),
+        "tmux argv must carry SIMARD_ENGINEER_AGENT=copilot via -e: {env_flags:?}"
+    );
+    assert!(
+        env_flags
+            .iter()
+            .any(|s| s.as_str() == "SIMARD_AGENT_NAME=engineer-x"),
+        "tmux argv must carry seeded SIMARD_AGENT_NAME via -e: {env_flags:?}"
+    );
+}
