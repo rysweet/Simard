@@ -116,7 +116,7 @@ mod tests {
     use crate::ooda_loop::{ActionKind, PlannedAction};
 
     #[test]
-    #[ignore] // Requires amplihack copilot — run with `cargo test -- --ignored`
+    #[ignore = "spawns real `amplihack copilot` subprocess; runs pip install and can take 30+ minutes — opt in with `cargo test -- --ignored`"]
     fn launch_session_returns_failure_when_amplihack_unavailable() {
         let action = PlannedAction {
             kind: ActionKind::LaunchSession,
@@ -138,6 +138,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "spawns real `amplihack copilot` subprocess (see sibling); opt in with `cargo test -- --ignored`"]
     fn dispatch_launch_session_produces_outcome_without_panic() {
         let action = PlannedAction {
             kind: ActionKind::LaunchSession,
@@ -153,6 +154,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "spawns real `amplihack copilot` subprocess (see sibling); opt in with `cargo test -- --ignored`"]
     fn dispatch_launch_session_with_special_chars_in_description() {
         let action = PlannedAction {
             kind: ActionKind::LaunchSession,
@@ -165,6 +167,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "spawns real `amplihack copilot` subprocess (see sibling); opt in with `cargo test -- --ignored`"]
     fn dispatch_launch_session_empty_description() {
         let action = PlannedAction {
             kind: ActionKind::LaunchSession,

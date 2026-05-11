@@ -1,364 +1,163 @@
 //! Session-based goal advancement — delegates work to a base-type agent.
-
-use serde::Deserialize;
+//!
+//! The orchestrator LLM emits **prose only** (no JSON). Two response
+//! shapes are supported:
+//!
+//! 1. Free-form prose → dispatched as a `SpawnEngineer` task description.
+//!    The engineer subprocess is itself a full coding agent that can run
+//!    `gh issue create`, `gh pr comment`, edit files, open PRs, etc.
+//! 2. A response containing `NO ACTION` on its own line → dispatched as
+//!    a `NoAction` outcome (no engineer subprocess spawned, no work done
+//!    this cycle).
+//!
+//! Both shapes optionally accept a `PROGRESS: NN` marker (0..=100) that
+//! updates the goal's recorded completion percentage.
+//!
+//! See `prompt_assets/simard/goal_session_objective.md` for the operator-
+//! facing version of this contract.
 
 use crate::ooda_loop::ActionOutcome;
 
-/// Maximum LLM response size accepted by [`parse_goal_action`] (64 KiB).
-///
-/// Larger inputs are rejected without parsing to bound CPU and memory cost.
-const MAX_RESPONSE_BYTES: usize = 64 * 1024;
-
-/// Maximum brace-nesting depth permitted while extracting a JSON object
-/// from prose. Anything deeper is rejected as a parser-DoS attempt.
-const MAX_BRACE_DEPTH: usize = 256;
-
-/// Maximum length of user-derived text (task, reason, assessment) included
-/// in outcome detail strings before truncation.
+/// Maximum length of user-derived text (task, reason) included in outcome
+/// detail strings before truncation.
 pub(super) const OUTCOME_TEXT_MAX: usize = 256;
 
-/// A structured action returned by the goal-advance LLM session.
+/// A decision returned by the goal-advance LLM session.
 ///
-/// Used internally to dispatch to spawn / noop / assess_only branches.
-/// The variants are tagged by the `action` field per the prompt asset
-/// `prompt_assets/simard/goal_session_objective.md`.
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+/// The dispatcher in `advance.rs` consumes this to either spawn a
+/// subordinate engineer or record a no-op outcome.
+#[derive(Debug, PartialEq, Eq)]
 pub(super) enum GoalAction {
     /// Spawn a subordinate engineer to do the concrete `task`.
     SpawnEngineer {
         task: String,
-        #[serde(default)]
+        /// Reserved for future use by callers that want to seed the
+        /// engineer with a file list. Currently always empty in the
+        /// prose path; kept in the type signature so the downstream
+        /// dispatcher in `advance_goal/mod.rs` can keep its existing
+        /// destructuring pattern unchanged.
         files: Vec<String>,
-        /// Optional GitHub issue number this work advances. When present,
-        /// the engineer's task description is enriched with the issue body.
-        #[serde(default)]
+        /// Optional GitHub issue number this work advances. Reserved
+        /// for future structured input; currently always `None` in the
+        /// prose path.
         issue: Option<u64>,
     },
-    /// Skip this cycle for the supplied human-readable `reason`.
-    Noop { reason: String },
-    /// Update the assessed completion percentage without spawning.
-    AssessOnly {
-        assessment: String,
-        progress_pct: u8,
-    },
-    /// Create a new GitHub issue against `rysweet/Simard` (or `repo` when
-    /// supplied). Orchestrator-owned: no engineer subprocess needed.
-    GhIssueCreate {
-        title: String,
-        body: String,
-        #[serde(default)]
-        repo: Option<String>,
-        #[serde(default)]
-        labels: Vec<String>,
-    },
-    /// Add a comment to an existing GitHub issue.
-    GhIssueComment {
-        issue: u64,
-        body: String,
-        #[serde(default)]
-        repo: Option<String>,
-    },
-    /// Close an existing GitHub issue with an optional comment explaining why.
-    GhIssueClose {
-        issue: u64,
-        #[serde(default)]
-        comment: Option<String>,
-        #[serde(default)]
-        repo: Option<String>,
-    },
-    /// Add a comment to an existing GitHub pull request.
-    GhPrComment {
-        pr: u64,
-        body: String,
-        #[serde(default)]
-        repo: Option<String>,
-    },
+    /// No engineer subprocess this cycle. The orchestrator emitted the
+    /// `NO ACTION` marker. The full prose response is preserved as the
+    /// `reason` so operators can audit why a cycle did nothing.
+    NoAction { reason: String },
+}
+
+/// The decision the orchestrator LLM made for this cycle, paired with
+/// any progress percentage extracted from a `PROGRESS: NN` marker.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct OrchestratorDecision {
+    pub action: GoalAction,
+    /// Goal completion percentage (0..=100) extracted from a
+    /// `PROGRESS: NN` marker anywhere in the response. `None` when no
+    /// such marker is present.
+    pub progress_pct: Option<u8>,
 }
 
 /// The outcome of a single LLM-driven goal-advance turn.
 ///
 /// Carries both the user-visible [`ActionOutcome`] and the parsed
-/// [`GoalAction`] (when the LLM emitted a recognisable JSON object), so
-/// the dispatcher can take side-effecting follow-up steps such as
-/// spawning a subordinate.
+/// [`GoalAction`] (when the LLM emitted a non-empty response), so the
+/// upstream dispatcher in `advance_goal/mod.rs` can take side-effecting
+/// follow-up steps such as actually spawning the engineer subprocess.
 pub(crate) struct GoalSessionResult {
     pub(super) outcome: ActionOutcome,
     pub(super) action: Option<GoalAction>,
 }
 
-/// Parse a structured [`GoalAction`] from an LLM response.
+/// Parse the orchestrator LLM's prose response into a structured decision.
 ///
-/// The function accepts either a clean JSON object or a JSON object
-/// embedded in surrounding prose / code fences. Returns `None` when:
-///   * the input exceeds [`MAX_RESPONSE_BYTES`],
-///   * brace-nesting exceeds [`MAX_BRACE_DEPTH`],
-///   * no candidate JSON object parses cleanly,
-///   * the parsed object fails the per-variant invariants
-///     (empty/whitespace `task`, `progress_pct > 100`, etc.).
+/// Returns `None` only when the response trims to the empty string.
+/// Every non-empty response yields a decision:
 ///
-/// The function never panics.
-pub(super) fn parse_goal_action(response: &str) -> Option<GoalAction> {
-    if response.len() > MAX_RESPONSE_BYTES {
+/// * If any line of the response trims to exactly `NO ACTION` (case-
+///   insensitive, also matches `NO_ACTION`), the whole response becomes
+///   the `reason` of a [`GoalAction::NoAction`] decision.
+/// * Otherwise, the trimmed response becomes the `task` of a
+///   [`GoalAction::SpawnEngineer`] decision.
+///
+/// In both branches, [`extract_progress_marker`] scans the response for
+/// a `PROGRESS: NN` marker and threads it into `progress_pct`.
+pub(super) fn parse_orchestrator_response(response: &str) -> Option<OrchestratorDecision> {
+    let trimmed = response.trim();
+    if trimmed.is_empty() {
         return None;
     }
 
-    let trimmed = response.trim();
+    let progress_pct = extract_progress_marker(trimmed);
 
-    // Fast path: the LLM followed instructions and emitted only a JSON object.
-    if trimmed.starts_with('{')
-        && trimmed.ends_with('}')
-        && let Some(action) = try_parse_action(trimmed)
-    {
-        return Some(action);
-    }
-
-    // Slow path: scan for embedded JSON objects in prose / code fences and
-    // return the first one that parses cleanly into a GoalAction.
-    let bytes = response.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'{' {
-            match scan_json_block(&response[i..]) {
-                Ok(Some(end)) => {
-                    let candidate = &response[i..i + end];
-                    if let Some(action) = try_parse_action(candidate) {
-                        return Some(action);
-                    }
-                    // Move past this opening brace and keep scanning.
-                    i += 1;
-                }
-                Ok(None) => {
-                    // Unterminated JSON candidate — no further '{' can form
-                    // a valid object inside this region without first
-                    // closing this one, but the rest of the input may still
-                    // contain a valid block, so we just advance.
-                    i += 1;
-                }
-                Err(_) => {
-                    // Hit the depth cap or other structural error — bail.
-                    return None;
-                }
-            }
-        } else {
-            i += 1;
+    let action = if has_no_action_marker(trimmed) {
+        GoalAction::NoAction {
+            reason: trimmed.to_string(),
         }
-    }
-
-    None
-}
-
-/// Attempt to deserialize `s` as a [`GoalAction`] and validate it.
-fn try_parse_action(s: &str) -> Option<GoalAction> {
-    let action: GoalAction = serde_json::from_str(s).ok()?;
-    if action_is_valid(&action) {
-        Some(action)
     } else {
-        None
-    }
+        GoalAction::SpawnEngineer {
+            task: trimmed.to_string(),
+            files: Vec::new(),
+            issue: None,
+        }
+    };
+
+    Some(OrchestratorDecision {
+        action,
+        progress_pct,
+    })
 }
 
-/// Per-variant invariants beyond what serde enforces.
-pub(super) fn action_is_valid(action: &GoalAction) -> bool {
-    match action {
-        GoalAction::SpawnEngineer { task, .. } => {
-            let trimmed = task.trim();
-            !trimmed.is_empty() && !is_placeholder_echo(trimmed)
-        }
-        GoalAction::Noop { reason } => !is_placeholder_echo(reason.trim()),
-        GoalAction::AssessOnly { progress_pct, .. } => *progress_pct <= 100,
-        GoalAction::GhIssueCreate { title, body, .. } => {
-            let t = title.trim();
-            !t.is_empty()
-                && !t.contains('\n')
-                && !body.trim().is_empty()
-                && !is_placeholder_echo(t)
-                && !is_placeholder_echo(body.trim())
-                && !is_makework_title(t)
-        }
-        GoalAction::GhIssueComment { issue, body, .. } => {
-            // Reject prompt template example (issue 1234)
-            *issue > 0
-                && *issue != 1234
-                && !body.trim().is_empty()
-                && !is_placeholder_echo(body.trim())
-        }
-        GoalAction::GhIssueClose { issue, comment, .. } => {
-            // Reject the example value from the prompt template (issue 1234,
-            // comment "Fixed in PR #1199.") that can leak through when the
-            // Copilot adapter terminal session times out and the transcript
-            // (containing the echoed prompt) is parsed as the response.
-            if *issue == 1234 {
-                return false;
-            }
-            if let Some(c) = comment
-                && is_placeholder_echo(c.trim())
+/// Detect the `NO ACTION` marker.
+///
+/// True when any single line of the input, after trimming, equals
+/// `NO ACTION` or `NO_ACTION` case-insensitively. Requires the marker
+/// to appear on its own line so that prose containing the literal
+/// phrase ("we should take no action against ...") does not accidentally
+/// trigger a no-op.
+pub(super) fn has_no_action_marker(s: &str) -> bool {
+    s.lines().any(|line| {
+        let upper = line.trim().to_uppercase();
+        upper == "NO ACTION" || upper == "NO_ACTION"
+    })
+}
+
+/// Scan for a `PROGRESS: NN` marker and return the parsed percentage.
+///
+/// Returns the first occurrence's value, clamped to 0..=100. Matches
+/// `PROGRESS:` case-insensitively, allows optional whitespace between
+/// the colon and the digits, and stops at the first non-digit
+/// character. Returns `None` when no such marker is present or the
+/// digits parse to a value that does not fit in a `u8` after clamping
+/// (impossible — a 1..3 digit string is always representable).
+pub(super) fn extract_progress_marker(s: &str) -> Option<u8> {
+    let lower = s.to_lowercase();
+    let needle = "progress:";
+    let mut search_from = 0;
+    while let Some(rel) = lower[search_from..].find(needle) {
+        let abs = search_from + rel;
+        // Require the marker to be at start-of-string or preceded by
+        // whitespace / punctuation, so we do not match the middle of a
+        // word like `inprogress:`.
+        let is_word_boundary = abs == 0
+            || lower
+                .as_bytes()
+                .get(abs - 1)
+                .is_some_and(|b| !b.is_ascii_alphanumeric() && *b != b'_');
+        if is_word_boundary {
+            let after = &s[abs + needle.len()..];
+            let after = after.trim_start();
+            let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if !digits.is_empty()
+                && let Ok(n) = digits.parse::<u32>()
             {
-                return false;
-            }
-            *issue > 0
-        }
-        GoalAction::GhPrComment { pr, body, .. } => {
-            // Reject prompt template example (pr 1199)
-            *pr > 0 && *pr != 1199 && !body.trim().is_empty() && !is_placeholder_echo(body.trim())
-        }
-    }
-}
-
-/// Detect when the LLM echoed the schema-example placeholder verbatim
-/// instead of filling it in with a real task description.
-///
-/// Observed failure mode (2026-04-23, daemon 555909/556323 at ~0.5% goal
-/// throughput): the model returned
-/// `{"task": "<one-paragraph concrete task>", ...}` literally, which then
-/// propagated into `engineer_plan::plan_objective` as the objective and
-/// caused "LLM plan returned zero steps" every cycle.
-///
-/// Heuristic: any task that is entirely a `<...>` angle-bracketed token,
-/// or begins/ends with one of the known schema placeholders. Kept narrow
-/// on purpose — legitimate tasks may legitimately include angle brackets
-/// when citing HTML/generics, so we only reject whole-string templates.
-pub(super) fn is_placeholder_echo(task: &str) -> bool {
-    // Strip surrounding quotes/backticks the LLM sometimes adds around
-    // the value even though the JSON string already terminates them.
-    let stripped = task
-        .trim()
-        .trim_matches(|c: char| c == '"' || c == '`' || c == '\'');
-
-    // Exact-match the schema placeholders we ship in prompt_assets.
-    const KNOWN_PLACEHOLDERS: &[&str] = &[
-        "<one-paragraph concrete task>",
-        "<short explanation of why no action is needed>",
-        "<short explanation>",
-        "<short status>",
-        "<title>",
-        "<body>",
-        "<description>",
-        "<short title, single line>",
-        "<markdown body, can be multi-line>",
-        "<markdown body>",
-        "<comment body, can be multi-line>",
-        "<reason for closing>",
-    ];
-    if KNOWN_PLACEHOLDERS.contains(&stripped) {
-        return true;
-    }
-
-    // Whole-string angle-bracket token with generic meta words (e.g.
-    // `<your task here>`, `<TODO>`). Requires: starts with '<', ends
-    // with '>', contains only template-ish characters, and is short.
-    if stripped.starts_with('<')
-        && stripped.ends_with('>')
-        && stripped.len() < 120
-        && !stripped.contains("```")
-        && stripped[1..stripped.len().saturating_sub(1)]
-            .chars()
-            .all(|c| c.is_alphanumeric() || c.is_whitespace() || "-_/:.,".contains(c))
-    {
-        return true;
-    }
-
-    false
-}
-
-/// Reject titles that match well-known make-work patterns (#1243 / P3).
-///
-/// Observed 2026-04-25: 5 issues filed as `verify existing issue #1177`
-/// (now closed as duplicates). Other recurring patterns: `test-only`,
-/// `monitor-pr-NNNN`, `rebase-and-merge-pr-NNNN`, single-verb titles
-/// like `observe` / `check` with no noun. These are dashboard theater;
-/// they create no engineering value and consume operator review time.
-///
-/// Conservative — case-insensitive prefix match on a short curated list.
-pub(super) fn is_makework_title(title: &str) -> bool {
-    let lc = title.trim().to_lowercase();
-    const REJECT_PREFIXES: &[&str] = &[
-        "test-only ",
-        "test-only:",
-        "verify existing ",
-        "verify existing:",
-        "monitor-pr-",
-        "monitor pr ",
-        "rebase-and-merge-pr-",
-        "rebase and merge pr ",
-        "observe ",
-        "observe:",
-        "check ",
-        "check:",
-    ];
-    for p in REJECT_PREFIXES {
-        if lc.starts_with(p) {
-            return true;
-        }
-    }
-    // Single-verb titles with no noun ("observe", "check") even without
-    // trailing space are make-work too. Also include bare slug titles
-    // observed in #1260/#1261 (e.g. exact title `test-only`, `monitor-pr`).
-    if matches!(
-        lc.as_str(),
-        "observe"
-            | "check"
-            | "monitor"
-            | "verify"
-            | "test-only"
-            | "verify-existing"
-            | "monitor-pr"
-            | "rebase-and-merge-pr"
-    ) {
-        return true;
-    }
-    false
-}
-/// (exclusive) of the matching closing `}`, respecting JSON string
-/// literals and escape sequences.
-///
-/// Returns:
-///   * `Ok(Some(end))` — a balanced object was found ending at byte `end`.
-///   * `Ok(None)` — input ended before the object closed.
-///   * `Err(())` — brace-nesting exceeded [`MAX_BRACE_DEPTH`].
-fn scan_json_block(s: &str) -> Result<Option<usize>, ()> {
-    let bytes = s.as_bytes();
-    debug_assert_eq!(bytes.first(), Some(&b'{'));
-
-    let mut depth: usize = 0;
-    let mut in_string = false;
-    let mut escape = false;
-    let mut i = 0;
-
-    while i < bytes.len() {
-        let c = bytes[i];
-
-        if in_string {
-            if escape {
-                escape = false;
-            } else if c == b'\\' {
-                escape = true;
-            } else if c == b'"' {
-                in_string = false;
-            }
-        } else {
-            match c {
-                b'"' => in_string = true,
-                b'{' => {
-                    depth += 1;
-                    if depth > MAX_BRACE_DEPTH {
-                        return Err(());
-                    }
-                }
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Ok(Some(i + 1));
-                    }
-                }
-                _ => {}
+                return Some(n.min(100) as u8);
             }
         }
-
-        i += 1;
+        search_from = abs + needle.len();
     }
-
-    Ok(None)
+    None
 }
 
 /// Truncate a user-derived string for safe inclusion in outcome details / logs.
@@ -375,28 +174,138 @@ pub(super) fn truncate_for_outcome(s: &str) -> String {
     }
 }
 
-/// Apply an `assess_only` LLM decision to the goal board, returning the
-/// resulting [`ActionOutcome`].
-///
-/// Computes a [`GoalProgress`] from `progress_pct`, calls
-/// [`update_goal_progress`], and explicitly handles both arms:
-///
-/// * `Ok(())` — emits a `[simard] OODA goal-action assess_only ...`
-///   success log and produces a successful outcome.
-/// * `Err(e)` — emits a `[simard] OODA goal-action assess_only FAILED ...`
-///   error log (no misleading success log) and produces a failed outcome
-///   whose `detail` carries the underlying [`SimardError`] so operators
-///   and the OODA journal can see the cause.
-///
-/// Fixes #1258: the previous `let _ = update_goal_progress(...)` swallowed
-/// the error and the next log line lied about success.
 mod advance;
-mod gh;
 
-// `assess_only_outcome` is consumed by cfg(test) module `tests_goal_session_inline`;
-// `is_plausible_label` is consumed by cfg(test) module `tests_goal_session_validators`.
-// Clippy flags both as unused in non-test compilation; suppress to keep the test API stable.
-#[allow(unused_imports)]
-pub(crate) use advance::{advance_goal_with_session, assess_only_outcome};
-#[allow(unused_imports)]
-pub(crate) use gh::is_plausible_label;
+pub(crate) use advance::advance_goal_with_session;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_response_returns_none() {
+        assert_eq!(parse_orchestrator_response(""), None);
+        assert_eq!(parse_orchestrator_response("   "), None);
+        assert_eq!(parse_orchestrator_response("\n\t  \r\n"), None);
+    }
+
+    #[test]
+    fn pure_prose_becomes_spawn_engineer() {
+        let response = "Run cargo test --lib prioritization and report which tests fail.";
+        let decision = parse_orchestrator_response(response).expect("non-empty yields decision");
+        assert_eq!(decision.progress_pct, None);
+        match decision.action {
+            GoalAction::SpawnEngineer { task, files, issue } => {
+                assert_eq!(task, response);
+                assert!(files.is_empty());
+                assert!(issue.is_none());
+            }
+            other => panic!("expected SpawnEngineer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_action_marker_on_its_own_line_routes_to_noaction() {
+        let response =
+            "NO ACTION\nAnother subordinate (engineer-foo-1234) is already working this goal.";
+        let decision = parse_orchestrator_response(response).expect("non-empty yields decision");
+        match decision.action {
+            GoalAction::NoAction { reason } => {
+                assert!(reason.contains("NO ACTION"));
+                assert!(reason.contains("subordinate"));
+            }
+            other => panic!("expected NoAction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_action_marker_inside_a_sentence_does_not_trigger() {
+        // Prose that mentions "no action" in the middle of a sentence
+        // must NOT be treated as a NoAction signal — the marker must be
+        // on its own line.
+        let response = "We should take no action against this issue until QA confirms.";
+        let decision = parse_orchestrator_response(response).expect("non-empty yields decision");
+        match decision.action {
+            GoalAction::SpawnEngineer { task, .. } => {
+                assert_eq!(task, response);
+            }
+            other => panic!("expected SpawnEngineer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_action_marker_case_insensitive_and_underscore_form() {
+        for marker in [
+            "NO ACTION",
+            "no action",
+            "No Action",
+            "NO_ACTION",
+            "no_action",
+        ] {
+            let response = format!("{marker}\nblocked on external review");
+            let decision = parse_orchestrator_response(&response).expect("yields decision");
+            assert!(
+                matches!(decision.action, GoalAction::NoAction { .. }),
+                "marker '{marker}' should route to NoAction"
+            );
+        }
+    }
+
+    #[test]
+    fn progress_marker_extracted_from_prose() {
+        let response = "Run cargo build. PROGRESS: 60 — about two thirds done.";
+        let decision = parse_orchestrator_response(response).expect("yields decision");
+        assert_eq!(decision.progress_pct, Some(60));
+        assert!(matches!(decision.action, GoalAction::SpawnEngineer { .. }));
+    }
+
+    #[test]
+    fn progress_marker_extracted_from_no_action() {
+        let response = "NO ACTION\nWaiting on PR review. PROGRESS: 80";
+        let decision = parse_orchestrator_response(response).expect("yields decision");
+        assert_eq!(decision.progress_pct, Some(80));
+        assert!(matches!(decision.action, GoalAction::NoAction { .. }));
+    }
+
+    #[test]
+    fn progress_marker_clamped_to_100() {
+        let response = "Done. PROGRESS: 250";
+        let decision = parse_orchestrator_response(response).expect("yields decision");
+        assert_eq!(decision.progress_pct, Some(100));
+    }
+
+    #[test]
+    fn progress_marker_case_insensitive() {
+        let response = "Working. progress:45 still going";
+        let decision = parse_orchestrator_response(response).expect("yields decision");
+        assert_eq!(decision.progress_pct, Some(45));
+    }
+
+    #[test]
+    fn progress_word_inside_token_does_not_match() {
+        // `inprogress:` must NOT be treated as the marker — it lacks a
+        // word boundary before "progress:".
+        let response = "Build inprogress:waiting for tests";
+        let decision = parse_orchestrator_response(response).expect("yields decision");
+        assert_eq!(decision.progress_pct, None);
+    }
+
+    #[test]
+    fn no_progress_marker_means_none() {
+        let response = "Just spawn the engineer to fix #1234.";
+        let decision = parse_orchestrator_response(response).expect("yields decision");
+        assert_eq!(decision.progress_pct, None);
+    }
+
+    #[test]
+    fn truncate_handles_utf8_char_boundary() {
+        // 256 bytes of ASCII + a multi-byte char — must not split the char.
+        let s = format!("{}é", "x".repeat(OUTCOME_TEXT_MAX - 1));
+        let truncated = truncate_for_outcome(&s);
+        // The 'é' is 2 bytes; we should truncate at byte 254 to keep it whole
+        // (or earlier), then append the ellipsis.
+        assert!(truncated.ends_with('…'));
+        // Must be valid UTF-8 (would have panicked on slice boundary otherwise).
+        assert!(truncated.is_ascii() || truncated.chars().count() > 0);
+    }
+}

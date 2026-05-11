@@ -12,17 +12,29 @@ use super::workflow_guard::{WorkflowRestoreGuard, capture_workflow_restore_guard
 
 struct TranscriptGuard {
     path: PathBuf,
+    preserve: bool,
 }
 
 impl TranscriptGuard {
     fn new(path: PathBuf) -> Self {
-        Self { path }
+        // Honour SIMARD_KEEP_TRANSCRIPTS=1 from process start so operators can
+        // collect every transcript even on healthy sessions.
+        let preserve = std::env::var("SIMARD_KEEP_TRANSCRIPTS").as_deref() == Ok("1");
+        Self { path, preserve }
+    }
+
+    /// Mark this transcript file as "do not delete on Drop". Called when we
+    /// detect a hang so the post-mortem evidence survives.
+    fn preserve(&mut self) {
+        self.preserve = true;
     }
 }
 
 impl Drop for TranscriptGuard {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        if !self.preserve {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -186,15 +198,40 @@ impl PtyTerminalSession {
                 //  1. Wait indefinitely for the process to exit naturally.
                 //     Agentic sessions (engineers, Copilot adapter) may run
                 //     for hours — arbitrary timeouts cause premature termination.
-                //  2. If the transcript stops growing for 5 minutes after stdin
-                //     is closed, the copilot likely finished but the `script`
-                //     wrapper shell is hung at a prompt. Send SIGTERM.
+                //  2. If the transcript stops growing for `IDLE_TIMEOUT_SECS`
+                //     after stdin is closed, the copilot likely finished but
+                //     the `script` wrapper shell is hung at a prompt. Send
+                //     SIGTERM, dumping the transcript first so post-mortem is
+                //     possible.
+                //
+                // Diagnostic surface:
+                //  - Every `HEARTBEAT_INTERVAL_SECS` we print the elapsed wait
+                //    time, the current transcript byte count, and the last
+                //    `HEARTBEAT_TAIL_BYTES` of the transcript. This lets an
+                //    operator (or a test harness watching stderr) see *what*
+                //    the subprocess is actually doing when it appears stuck —
+                //    no need to guess at PIDs or hunt for transcript files.
+                //  - On idle-timeout we dump the full transcript before
+                //    SIGTERM and disarm the auto-deletion guard so the file
+                //    survives for post-mortem.
+                //  - Both intervals are tunable via env vars so that tests
+                //    and CI can shorten them without recompiling.
                 let mut idle_start: Option<std::time::Instant> = None;
                 let mut last_transcript_size: u64 = std::fs::metadata(&self.transcript_path)
                     .ok()
                     .map(|m| m.len())
                     .unwrap_or(0);
-                const IDLE_TIMEOUT_SECS: u64 = 300; // 5 min of no transcript growth
+                let wait_start = std::time::Instant::now();
+                let mut last_heartbeat = wait_start;
+
+                let idle_timeout = std::time::Duration::from_secs(env_secs(
+                    "SIMARD_TERMINAL_IDLE_TIMEOUT_SECS",
+                    300,
+                ));
+                let heartbeat_interval =
+                    std::time::Duration::from_secs(env_secs("SIMARD_TERMINAL_HEARTBEAT_SECS", 30));
+                let heartbeat_tail_bytes: usize =
+                    env_secs("SIMARD_TERMINAL_HEARTBEAT_TAIL_BYTES", 512) as usize;
 
                 loop {
                     match self.child.try_wait() {
@@ -214,22 +251,55 @@ impl PtyTerminalSession {
                                 idle_start = Some(std::time::Instant::now());
                             }
 
-                            // If transcript has been idle for IDLE_TIMEOUT_SECS
-                            // AND no LLM work process is still running, the
-                            // copilot finished but the wrapper shell is hung.
-                            // We suppress SIGTERM while work processes are alive
-                            // so silent LLM computation is not interrupted.
+                            // Periodic heartbeat: who are we waiting on, what
+                            // is the transcript saying right now?
+                            if last_heartbeat.elapsed() >= heartbeat_interval {
+                                last_heartbeat = std::time::Instant::now();
+                                let elapsed_total = wait_start.elapsed().as_secs();
+                                let idle_for =
+                                    idle_start.map(|i| i.elapsed().as_secs()).unwrap_or(0);
+                                let tail =
+                                    transcript_tail(&self.transcript_path, heartbeat_tail_bytes);
+                                eprintln!(
+                                    "[simard] terminal heartbeat base_type={} pid={} \
+                                     waiting={}s idle={}s transcript_bytes={} \
+                                     transcript_path={} tail={:?}",
+                                    self.base_type,
+                                    self.child.id(),
+                                    elapsed_total,
+                                    idle_for,
+                                    current_size,
+                                    self.transcript_path.display(),
+                                    tail,
+                                );
+                            }
+
+                            // If transcript has been idle for the timeout AND
+                            // no LLM work process is still running, the copilot
+                            // finished but the wrapper shell is hung. Suppress
+                            // SIGTERM while work processes are alive so silent
+                            // LLM computation is not interrupted.
                             if let Some(start) = idle_start
-                                && start.elapsed()
-                                    >= std::time::Duration::from_secs(IDLE_TIMEOUT_SECS)
+                                && start.elapsed() >= idle_timeout
                                 && !has_active_work_processes(self.child.id())
                             {
+                                let dump = std::fs::read_to_string(&self.transcript_path)
+                                    .unwrap_or_default();
                                 eprintln!(
-                                    "[simard] terminal session pid={} idle for {}s after \
-                                         copilot exit — sending SIGTERM",
+                                    "[simard] terminal HUNG base_type={} pid={} \
+                                     idle={}s — preserving transcript at {} and sending SIGTERM. \
+                                     Full transcript follows:\n--- BEGIN HUNG TRANSCRIPT ---\n\
+                                     {}\n--- END HUNG TRANSCRIPT ---",
+                                    self.base_type,
                                     self.child.id(),
-                                    IDLE_TIMEOUT_SECS,
+                                    start.elapsed().as_secs(),
+                                    self.transcript_path.display(),
+                                    dump,
                                 );
+                                // Disarm the guard so the file survives for
+                                // post-mortem. The path is already echoed
+                                // above so the operator can find it.
+                                self._transcript_guard.preserve();
                                 #[cfg(unix)]
                                 {
                                     unsafe {
@@ -406,6 +476,27 @@ fn open_exclusive_temp_file(path: &Path, base_type: &str) -> SimardResult<File> 
         })
 }
 
+/// Read at most `max_bytes` from the tail of `path` for diagnostic logging.
+///
+/// Returns a `String` rather than bytes so callers can format it directly.
+/// Non-UTF-8 bytes are replaced with `U+FFFD` via lossy conversion. Returns
+/// an empty string if the file cannot be read.
+fn transcript_tail(path: &Path, max_bytes: usize) -> String {
+    let bytes = std::fs::read(path).unwrap_or_default();
+    let start = bytes.len().saturating_sub(max_bytes);
+    String::from_utf8_lossy(&bytes[start..]).into_owned()
+}
+
+/// Read a non-negative integer from an env var, falling back to `default`
+/// when the var is unset or unparseable. Used for the heartbeat / idle
+/// timeout knobs so tests and CI can shorten them without recompiling.
+fn env_secs(var: &str, default: u64) -> u64 {
+    std::env::var(var)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,5 +615,93 @@ mod tests {
     fn transcript_path_ends_with_log_extension() {
         let path = unique_transcript_path("transcript");
         assert_eq!(path.extension().and_then(|e| e.to_str()), Some("log"));
+    }
+
+    // ── transcript diagnostics: tail / preserve / env_secs ──────────────
+
+    #[test]
+    fn transcript_tail_returns_empty_for_missing_file() {
+        let path = std::env::temp_dir().join(format!(
+            "simard-transcript-tail-missing-{}.log",
+            uuid::Uuid::now_v7()
+        ));
+        assert_eq!(transcript_tail(&path, 64), "");
+    }
+
+    #[test]
+    fn transcript_tail_returns_at_most_max_bytes_from_end() {
+        let path = std::env::temp_dir().join(format!(
+            "simard-transcript-tail-content-{}.log",
+            uuid::Uuid::now_v7()
+        ));
+        let body = b"abcdefghijklmnopqrstuvwxyz0123456789";
+        std::fs::write(&path, body).expect("write");
+
+        let tail = transcript_tail(&path, 10);
+        assert_eq!(tail, "0123456789");
+
+        let full = transcript_tail(&path, body.len() + 100);
+        assert_eq!(full.as_bytes(), body);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn transcript_guard_preserve_skips_drop_deletion() {
+        let path = std::env::temp_dir().join(format!(
+            "simard-transcript-guard-preserve-{}.log",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::write(&path, b"persistent evidence").expect("write");
+        {
+            let mut guard = TranscriptGuard::new(path.clone());
+            guard.preserve();
+        } // drop here — must NOT delete because preserve() was called
+        assert!(path.exists(), "preserved transcript must survive Drop");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn transcript_guard_default_drop_deletes_file() {
+        let path = std::env::temp_dir().join(format!(
+            "simard-transcript-guard-delete-{}.log",
+            uuid::Uuid::now_v7()
+        ));
+        // Bypass the env-var check so this test stays deterministic
+        // regardless of caller environment.
+        std::fs::write(&path, b"ephemeral evidence").expect("write");
+        {
+            let guard = TranscriptGuard {
+                path: path.clone(),
+                preserve: false,
+            };
+            drop(guard);
+        }
+        assert!(!path.exists(), "default Drop must delete the transcript");
+    }
+
+    #[test]
+    fn env_secs_returns_default_when_unset() {
+        // Use a uniquely named env var so we know it's unset.
+        let var = format!("SIMARD_ENV_SECS_TEST_{}", uuid::Uuid::now_v7().simple());
+        // SAFETY: tests are not parallel here; we only touch a unique var name.
+        unsafe { std::env::remove_var(&var) };
+        assert_eq!(env_secs(&var, 42), 42);
+    }
+
+    #[test]
+    fn env_secs_returns_parsed_value_when_set() {
+        let var = format!("SIMARD_ENV_SECS_TEST_{}", uuid::Uuid::now_v7().simple());
+        unsafe { std::env::set_var(&var, "7") };
+        assert_eq!(env_secs(&var, 42), 7);
+        unsafe { std::env::remove_var(&var) };
+    }
+
+    #[test]
+    fn env_secs_returns_default_when_unparseable() {
+        let var = format!("SIMARD_ENV_SECS_TEST_{}", uuid::Uuid::now_v7().simple());
+        unsafe { std::env::set_var(&var, "not-a-number") };
+        assert_eq!(env_secs(&var, 42), 42);
+        unsafe { std::env::remove_var(&var) };
     }
 }
