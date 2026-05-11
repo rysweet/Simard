@@ -87,6 +87,7 @@ pub mod runtime;
 pub mod runtime_config;
 pub mod runtime_ipc;
 pub mod runtime_reflection;
+pub mod safe_update;
 mod sanitization;
 pub mod self_improve;
 pub mod self_improve_executor;
