@@ -232,6 +232,20 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
     match backend.close() {
         Ok(summary) => {
             spinner.stop();
+            // One-line headline summary, shown before the detailed sections
+            // and before any handoff/transcript paths. Helps the operator
+            // see the bottom-line outcome at a glance.
+            let action_count = summary.action_items.len();
+            let plural = if action_count == 1 { "" } else { "s" };
+            writeln!(
+                output,
+                "\n{}",
+                cyan(&format!(
+                    "✓ Meeting closed: \"{}\" — {} action item{}",
+                    summary.topic, action_count, plural
+                ))
+            )
+            .ok();
             writeln!(output, "\n── Meeting Summary ──").ok();
             writeln!(output, "{}", summary.summary_text).ok();
 

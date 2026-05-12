@@ -319,3 +319,47 @@ fn repl_help_includes_theme_recap_preview() {
         "help should mention /preview: {output_str}"
     );
 }
+
+#[test]
+#[serial]
+fn repl_close_prints_one_line_headline_summary() {
+    // Suppress ANSI color codes so substring assertions are robust.
+    // SAFETY: serial_test guards against parallel env mutations.
+    unsafe { std::env::set_var("NO_COLOR", "1") };
+
+    let bridge = mock_bridge();
+    let agent = MockAgentSession::new("noted");
+    // Two conversational turns, then close. MockAgent emits no action items
+    // so the count should render as "0 action items".
+    let input = b"Discuss release plan\nAny blockers?\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Release planning",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    unsafe { std::env::remove_var("NO_COLOR") };
+
+    let output_str = String::from_utf8(output).unwrap();
+    // One-line headline must include the topic, the bottom-line action item
+    // count, and must appear before the detailed "Meeting Summary" section.
+    let headline_pos = output_str
+        .find("✓ Meeting closed: \"Release planning\" — 0 action items")
+        .unwrap_or_else(|| {
+            panic!("missing one-line headline summary in output: {output_str}");
+        });
+    let detailed_pos = output_str
+        .find("── Meeting Summary ──")
+        .unwrap_or_else(|| panic!("missing detailed summary section: {output_str}"));
+    assert!(
+        headline_pos < detailed_pos,
+        "headline summary must precede the detailed Meeting Summary section: {output_str}"
+    );
+}
