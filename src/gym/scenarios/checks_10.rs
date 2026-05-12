@@ -117,6 +117,49 @@ pub(super) fn checks_for_self_introspection(
                 || combined.contains("not llm");
             observe_named && deterministic_named && pr_cited && empty_version_named
         }
+        "self-introspection-l9-abstain-on-missing-cycle" => {
+            let abstain_named = combined.contains("cannot")
+                || combined.contains("can't")
+                || combined.contains("refuse")
+                || combined.contains("ask for")
+                || combined.contains("need")
+                || combined.contains("missing")
+                || combined.contains("unable");
+            let cycle_data_referenced = combined.contains("cycle 99")
+                || combined.contains("cycle_99")
+                || combined.contains("cycle-report")
+                || combined.contains("cycle report")
+                || combined.contains("cycle_reports");
+            let no_confabulation = !combined.contains("dispatch_engineer")
+                && !combined.contains("ggg777000888")
+                && !combined.contains("ddd444000555");
+            abstain_named && cycle_data_referenced && no_confabulation
+        }
+        "self-introspection-l10-prompt-version-prefix-cited" => {
+            let prefix_cited = combined.contains("ggg777000888");
+            let llm_named = combined.contains("llm") || combined.contains("brain");
+            let goal_named = combined.contains("add-more-gym-benchmark-scenarios");
+            let schema_named = combined.contains("judgment_record")
+                || combined.contains("ooda_brain")
+                || combined.contains("prompt_version");
+            prefix_cited && llm_named && goal_named && schema_named
+        }
+        "self-introspection-l11-skipped-cycle-detection" => {
+            let gap_named = combined.contains("missing")
+                || combined.contains("gap")
+                || combined.contains("skipped")
+                || combined.contains("discontinu");
+            let cycles_named =
+                combined.contains("14") && combined.contains("15") && combined.contains("16");
+            let cause_named = combined.contains("daemon restart")
+                || combined.contains("observe-only")
+                || combined.contains("observe only")
+                || combined.contains("no decide")
+                || combined.contains("restart");
+            let location_named =
+                combined.contains("cycle_reports") || combined.contains("cycle reports");
+            gap_named && cycles_named && cause_named && location_named
+        }
         _ => false,
     };
 

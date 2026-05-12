@@ -23,6 +23,8 @@ mod tests_reporting_more;
 #[cfg(test)]
 mod tests_scenarios;
 #[cfg(test)]
+mod tests_scenarios_10;
+#[cfg(test)]
 mod tests_scenarios_2;
 #[cfg(test)]
 mod tests_scenarios_3;

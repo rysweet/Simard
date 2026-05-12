@@ -5,6 +5,7 @@ use super::types::BenchmarkScenario;
 // NEEDLE-XYZ-GYM-MARKER: long-context-needle-in-haystack benchmark searches for this exact comment.
 
 mod data_1;
+mod data_10;
 mod data_2;
 mod data_3;
 mod data_4;
@@ -21,7 +22,7 @@ static ALL_BENCHMARK_SCENARIOS: OnceLock<Vec<BenchmarkScenario>> = OnceLock::new
 fn all_benchmark_scenarios() -> &'static [BenchmarkScenario] {
     ALL_BENCHMARK_SCENARIOS
         .get_or_init(|| {
-            let mut v = Vec::with_capacity(194);
+            let mut v = Vec::with_capacity(200);
             v.extend_from_slice(&data_1::SCENARIOS);
             v.extend_from_slice(&data_2::SCENARIOS);
             v.extend_from_slice(&data_3::SCENARIOS);
@@ -31,6 +32,7 @@ fn all_benchmark_scenarios() -> &'static [BenchmarkScenario] {
             v.extend_from_slice(&data_7::SCENARIOS);
             v.extend_from_slice(&data_8::SCENARIOS);
             v.extend_from_slice(&data_9::SCENARIOS);
+            v.extend_from_slice(&data_10::SCENARIOS);
             v
         })
         .as_slice()

@@ -339,6 +339,36 @@ pub(super) fn checks_for_knowledge_recall(
                     || combined.contains("~/.simard/bin/simard")
                     || combined.contains(".simard/bin/simard"))
         }
+        "knowledge-recall-tool-cargo-clippy-strict" => {
+            let cmd_named = combined.contains("cargo clippy");
+            let all_targets_named = combined.contains("--all-targets");
+            let all_features_named = combined.contains("--all-features");
+            let locked_named = combined.contains("--locked");
+            let deny_warnings_named =
+                combined.contains("-d warnings") || combined.contains("-d  warnings");
+            cmd_named
+                && all_targets_named
+                && all_features_named
+                && locked_named
+                && deny_warnings_named
+        }
+        "knowledge-recall-user-pref-no-sycophancy" => {
+            let stance_named = combined.contains("sycophan") || combined.contains("no sycophancy");
+            let opener_named = combined.contains("great idea")
+                || combined.contains("excellent point")
+                || combined.contains("absolutely")
+                || combined.contains("you're right");
+            let doc_named = combined.contains("trust.md") || combined.contains("trust");
+            stance_named && opener_named && doc_named
+        }
+        "knowledge-recall-repo-cycle-reports-dir" => {
+            let dir_named = combined.contains("cycle_reports");
+            let serializer_named = combined.contains("persist_cycle_report")
+                || combined.contains("operator_commands_ooda/persistence")
+                || combined.contains("brainjudgmentrecord")
+                || combined.contains("brain_judgment_record");
+            dir_named && serializer_named
+        }
         _ => false,
     };
 
