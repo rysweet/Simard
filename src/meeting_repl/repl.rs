@@ -135,6 +135,9 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                     writeln!(output, "\nUsage: /template <name>").ok();
                 } else if let Some(tmpl) = find_template(&name) {
                     writeln!(output, "\n{}\n", tmpl.agenda).ok();
+                    // Record the agenda on the session so /close can include
+                    // an `## Agenda` section in the handoff markdown report.
+                    backend.apply_template(tmpl.name, tmpl.agenda);
                     // Inject template as context via a message to the backend
                     let ctx = format!(
                         "The operator has selected the '{}' meeting template. \

@@ -9,7 +9,7 @@ use crate::meeting_facilitator::MeetingDecision;
 
 use super::extract::{extract_open_questions, extract_themes};
 use super::{meetings_dir, sanitize_filename};
-use crate::meeting_backend::types::{ConversationMessage, HandoffActionItem};
+use crate::meeting_backend::types::{AppliedTemplate, ConversationMessage, HandoffActionItem};
 
 pub fn write_markdown_export(
     topic: &str,
@@ -94,6 +94,7 @@ pub fn write_handoff_markdown_report(
     messages: &[ConversationMessage],
     action_items: &[HandoffActionItem],
     decisions: &[MeetingDecision],
+    applied_templates: &[AppliedTemplate],
 ) -> SimardResult<PathBuf> {
     let dir = meetings_dir();
     std::fs::create_dir_all(&dir).map_err(|e| SimardError::ActionExecutionFailed {
@@ -149,6 +150,22 @@ pub fn write_handoff_markdown_report(
     md.push_str("## Summary\n\n");
     md.push_str(summary);
     md.push_str("\n\n");
+
+    // Agenda from any templates applied during the meeting. Renders the
+    // template name plus its full agenda body so reviewers can see the
+    // intended structure of the discussion. Skipped entirely if no
+    // template was applied (avoid an empty section).
+    if !applied_templates.is_empty() {
+        md.push_str("## Agenda\n\n");
+        for tmpl in applied_templates {
+            md.push_str(&format!(
+                "### Template: `{}` (applied {})\n\n",
+                tmpl.name, tmpl.applied_at
+            ));
+            md.push_str(tmpl.agenda.trim_end());
+            md.push_str("\n\n");
+        }
+    }
 
     md.push_str("## Decisions\n\n");
     if decisions.is_empty() {

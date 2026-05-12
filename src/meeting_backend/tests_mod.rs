@@ -311,3 +311,73 @@ fn auto_save_does_not_panic() {
     backend.send_message("Test message").unwrap();
     assert_eq!(backend.status().message_count, 2);
 }
+
+#[test]
+fn apply_template_records_agenda() {
+    let agent = MockAgent::new("noted");
+    let mut backend = MeetingBackend::new_session("Test", Box::new(agent), None, String::new());
+
+    assert!(backend.applied_templates().is_empty());
+    backend.apply_template("retro", "## Retro\n1. Wins\n2. Losses\n");
+
+    let templates = backend.applied_templates();
+    assert_eq!(templates.len(), 1);
+    assert_eq!(templates[0].name, "retro");
+    assert!(templates[0].agenda.contains("Wins"));
+    assert!(
+        !templates[0].applied_at.is_empty(),
+        "applied_at should be set"
+    );
+}
+
+#[test]
+fn apply_template_dedupes_by_name_case_insensitive() {
+    let agent = MockAgent::new("noted");
+    let mut backend = MeetingBackend::new_session("Test", Box::new(agent), None, String::new());
+
+    backend.apply_template("standup", "## Standup A");
+    backend.apply_template("STANDUP", "## Standup B");
+    backend.apply_template("Standup", "## Standup C");
+
+    let templates = backend.applied_templates();
+    assert_eq!(templates.len(), 1, "duplicate template names should dedupe");
+    assert_eq!(templates[0].name, "standup", "first applied wins");
+    assert!(
+        templates[0].agenda.contains("Standup A"),
+        "first agenda preserved"
+    );
+}
+
+#[test]
+fn apply_template_records_distinct_templates() {
+    let agent = MockAgent::new("noted");
+    let mut backend = MeetingBackend::new_session("Test", Box::new(agent), None, String::new());
+
+    backend.apply_template("standup", "agenda 1");
+    backend.apply_template("retro", "agenda 2");
+
+    let templates = backend.applied_templates();
+    assert_eq!(templates.len(), 2);
+    assert_eq!(templates[0].name, "standup");
+    assert_eq!(templates[1].name, "retro");
+}
+
+#[test]
+fn close_summary_includes_applied_templates() {
+    let agent = MockAgent::new("Summary text.");
+    let mut backend = MeetingBackend::new_session("Sprint", Box::new(agent), None, String::new());
+    backend.apply_template(
+        "standup",
+        "## Standup\n1. Yesterday\n2. Today\n3. Blockers\n",
+    );
+    backend.send_message("hello").unwrap();
+
+    let summary = backend.close().unwrap();
+    assert_eq!(
+        summary.applied_templates.len(),
+        1,
+        "summary should carry applied templates"
+    );
+    assert_eq!(summary.applied_templates[0].name, "standup");
+    assert!(summary.applied_templates[0].agenda.contains("Blockers"));
+}

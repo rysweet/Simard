@@ -31,8 +31,8 @@ use crate::error::SimardResult;
 
 pub use command::{MeetingCommand, parse_command};
 pub use types::{
-    ConversationMessage, HandoffActionItem, MeetingResponse, MeetingSummary, MeetingTranscript,
-    Role, SessionStatus,
+    AppliedTemplate, ConversationMessage, HandoffActionItem, MeetingResponse, MeetingSummary,
+    MeetingTranscript, Role, SessionStatus,
 };
 
 /// Maximum messages kept in conversation history.
@@ -58,6 +58,9 @@ pub struct MeetingBackend {
     is_open: bool,
     /// Explicit themes recorded via the `/theme` command.
     themes: Vec<String>,
+    /// Templates applied via the `/template <name>` command. Surfaced in the
+    /// handoff markdown report as the `## Agenda` section.
+    applied_templates: Vec<AppliedTemplate>,
 }
 
 impl MeetingBackend {
@@ -87,6 +90,7 @@ impl MeetingBackend {
             started_at,
             is_open: true,
             themes: Vec::new(),
+            applied_templates: Vec::new(),
         }
     }
 
@@ -132,6 +136,31 @@ impl MeetingBackend {
     /// Read the explicit themes recorded so far.
     pub fn explicit_themes(&self) -> &[String] {
         &self.themes
+    }
+
+    /// Record that the operator applied a meeting template (e.g. `/template
+    /// standup`). Dedupes by template name (case-insensitive) so re-applying
+    /// the same template is a no-op. The first application wins so the
+    /// `applied_at` timestamp reflects when the agenda was first introduced.
+    pub fn apply_template(&mut self, name: &str, agenda: &str) {
+        let lower = name.to_lowercase();
+        if self
+            .applied_templates
+            .iter()
+            .any(|t| t.name.to_lowercase() == lower)
+        {
+            return;
+        }
+        self.applied_templates.push(AppliedTemplate {
+            name: name.to_string(),
+            agenda: agenda.to_string(),
+            applied_at: Utc::now().to_rfc3339(),
+        });
+    }
+
+    /// Read the templates applied during this meeting.
+    pub fn applied_templates(&self) -> &[AppliedTemplate] {
+        &self.applied_templates
     }
 
     // --- Private helpers ---
