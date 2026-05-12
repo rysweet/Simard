@@ -397,6 +397,7 @@ pub(crate) fn refuse_if_draining(state_dir: &Path) -> SimardResult<()> {
 mod tests {
     use super::*;
     use crate::engineer_loop::types::RepoInspection;
+    use serial_test::serial;
 
     fn fake_inspection() -> RepoInspection {
         RepoInspection {
@@ -543,6 +544,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(simard_engineer_agent_env)]
     fn agent_kind_from_env_recognises_rustyclawd_explicitly() {
         let original = std::env::var("SIMARD_ENGINEER_AGENT").ok();
         for raw in [
@@ -566,6 +568,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(simard_engineer_agent_env)]
     fn agent_kind_from_env_recognises_copilot_case_insensitive() {
         let original = std::env::var("SIMARD_ENGINEER_AGENT").ok();
         for raw in ["copilot", "Copilot", "COPILOT", "  copilot  "] {
@@ -583,6 +586,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(simard_engineer_agent_env)]
     fn agent_kind_from_env_unknown_falls_back_to_default() {
         let original = std::env::var("SIMARD_ENGINEER_AGENT").ok();
         unsafe {
