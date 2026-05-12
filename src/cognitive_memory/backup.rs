@@ -115,12 +115,17 @@ impl NativeCognitiveMemory {
         }
     }
 
-    /// Find the most recent verified backup in `{state_root}/backups/`.
-    fn find_latest_backup(db_path: &Path) -> Option<PathBuf> {
-        let state_root = db_path.parent()?;
+    /// Return all verified backup files in `{state_root}/backups/`, newest
+    /// epoch first. Empty `Vec` if the directory is missing or has no
+    /// matching entries. Used by `try_restore_from_backup` so it can fall
+    /// through to older snapshots when newer ones fail verification.
+    fn find_backups_newest_first(db_path: &Path) -> Vec<PathBuf> {
+        let Some(state_root) = db_path.parent() else {
+            return Vec::new();
+        };
         let backup_dir = state_root.join("backups");
         if !backup_dir.is_dir() {
-            return None;
+            return Vec::new();
         }
         let prefix = "cognitive_memory.ladybug.";
         let mut candidates: Vec<(u64, PathBuf)> = Vec::new();
@@ -136,60 +141,152 @@ impl NativeCognitiveMemory {
             }
         }
         candidates.sort_by_key(|x| std::cmp::Reverse(x.0));
-        candidates.into_iter().next().map(|(_, p)| p)
+        candidates.into_iter().map(|(_, p)| p).collect()
     }
 
-    /// Try to restore from the most recent verified backup.
+    /// Iterate through every available backup (newest first) and return the
+    /// first one that opens cleanly and passes the health check. Each
+    /// candidate is copied into place at `db_path`; if the open or health
+    /// check fails, the corrupt copy is removed before the next candidate
+    /// is tried so we don't leave a half-restored DB behind. Returns
+    /// `Err(...)` only when zero backups exist OR every candidate failed
+    /// verification.
     fn try_restore_from_backup(db_path: &Path) -> SimardResult<lbug::Database> {
-        let backup_path =
-            Self::find_latest_backup(db_path).ok_or_else(|| SimardError::RuntimeInitFailed {
+        let backups = Self::find_backups_newest_first(db_path);
+        if backups.is_empty() {
+            return Err(SimardError::RuntimeInitFailed {
                 component: "cognitive-memory".into(),
                 reason: "No backups available for restore".into(),
-            })?;
+            });
+        }
 
-        let epoch_str = backup_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .and_then(|n| n.strip_prefix("cognitive_memory.ladybug."))
-            .unwrap_or("unknown");
-        eprintln!(
-            "[simard] restoring from backup at {} (created epoch {epoch_str})",
-            backup_path.display()
-        );
+        let total = backups.len();
+        let mut last_err: Option<String> = None;
 
-        std::fs::copy(&backup_path, db_path).map_err(|e| SimardError::PersistentStoreIo {
-            store: "cognitive-memory".into(),
-            action: "restore-backup-copy".into(),
-            path: db_path.to_path_buf(),
-            reason: e.to_string(),
-        })?;
+        for (idx, backup_path) in backups.into_iter().enumerate() {
+            let epoch_str = backup_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_prefix("cognitive_memory.ladybug."))
+                .unwrap_or("unknown");
+            let epoch_secs: u64 = epoch_str.parse().unwrap_or(0);
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(epoch_secs);
+            let age_seconds = now_secs.saturating_sub(epoch_secs);
 
-        // Clean WAL files before opening restored copy.
-        Self::preemptive_wal_cleanup(db_path);
+            eprintln!(
+                "[simard] attempting restore from backup {} (candidate {}/{}, epoch {epoch_str}, {age_seconds}s old)",
+                backup_path.display(),
+                idx + 1,
+                total
+            );
 
-        let db = Self::with_open_lock(db_path, || {
-            lbug::Database::new(db_path, lbug::SystemConfig::default()).map_err(|e| {
-                SimardError::RuntimeInitFailed {
-                    component: "cognitive-memory".into(),
-                    reason: format!("Failed to open restored backup: {e}"),
+            // Clear any prior partial restore at db_path. We don't keep a
+            // separate corrupt-backup here because Step 3 of the recovery
+            // sequence already preserved the original under a `.corrupt-*`
+            // suffix before reaching this code.
+            if db_path.exists() {
+                let _ = std::fs::remove_file(db_path);
+            }
+
+            if let Err(e) = std::fs::copy(&backup_path, db_path) {
+                let msg = format!("copy from {} failed: {e}", backup_path.display());
+                eprintln!("[simard] {msg}");
+                last_err = Some(msg);
+                continue;
+            }
+
+            // Clean WAL files before opening the restored copy.
+            Self::preemptive_wal_cleanup(db_path);
+
+            // Open with catch_unwind because a corrupt backup can panic
+            // inside lbug just like a corrupt main DB does — without this
+            // a single bad backup file would crash the whole recovery
+            // sequence and prevent us from trying older candidates.
+            let db_path_owned = db_path.to_path_buf();
+            let opened = catch_unwind(AssertUnwindSafe(|| {
+                Self::with_open_lock(&db_path_owned, || {
+                    lbug::Database::new(&db_path_owned, lbug::SystemConfig::default()).map_err(
+                        |e| SimardError::RuntimeInitFailed {
+                            component: "cognitive-memory".into(),
+                            reason: format!("Failed to open restored backup: {e}"),
+                        },
+                    )
+                })
+                .and_then(|db| Self::verify_db_health(&db).map(|_| db))
+            }));
+
+            match opened {
+                Ok(Ok(db)) => {
+                    eprintln!(
+                        "[simard] recovered from backup {} ({age_seconds}s old)",
+                        backup_path.display()
+                    );
+                    return Ok(db);
                 }
-            })
-        })?;
+                Ok(Err(e)) => {
+                    let msg = format!(
+                        "backup {} failed open/health-check: {e}",
+                        backup_path.display()
+                    );
+                    eprintln!("[simard] {msg}");
+                    last_err = Some(msg);
+                }
+                Err(panic_info) => {
+                    let panic_msg = panic_info
+                        .downcast_ref::<String>()
+                        .map(|s| s.as_str())
+                        .or_else(|| panic_info.downcast_ref::<&str>().copied())
+                        .unwrap_or("unknown panic");
+                    let msg = format!(
+                        "backup {} panicked on open: {panic_msg}",
+                        backup_path.display()
+                    );
+                    eprintln!("[simard] {msg}");
+                    last_err = Some(msg);
+                }
+            }
 
-        Self::verify_db_health(&db)?;
-        eprintln!("[simard] successfully restored from backup");
-        Ok(db)
+            // This candidate failed; clear the partial copy + WAL before
+            // trying the next one so we never present a half-restored DB
+            // as "successfully recovered".
+            if db_path.exists() {
+                let _ = std::fs::remove_file(db_path);
+            }
+            Self::preemptive_wal_cleanup(db_path);
+        }
+
+        Err(SimardError::RuntimeInitFailed {
+            component: "cognitive-memory".into(),
+            reason: format!(
+                "All {total} backups failed verification (last error: {})",
+                last_err.unwrap_or_else(|| "<none>".into())
+            ),
+        })
     }
 
     /// Open LadybugDB with WAL corruption recovery and backup restore.
     ///
-    /// Strategy:
+    /// Strategy (issue #1710 — restore-from-backup must precede empty-DB):
     /// 1. Preemptively remove empty/unreadable WAL files
     /// 2. Try opening with `catch_unwind` to survive WAL corruption panics
     /// 3. On success, verify the DB is usable with a health-check query
-    /// 4. On panic: back up corrupt DB, remove WAL, retry
-    /// 5. If retry also fails: try restoring from most recent verified backup
-    /// 6. If no backup: create a fresh empty DB (data loss — logged clearly)
+    /// 4. On panic / health-check failure: rename corrupt DB aside,
+    ///    remove WAL siblings
+    /// 5. **Attempt backup-restore FIRST** — iterate every available backup
+    ///    newest-first via `try_restore_from_backup`; the first one that
+    ///    opens cleanly and passes the health check wins
+    /// 6. Only if **all** backups failed (or none exist) do we fall through
+    ///    to creating a fresh empty DB — and we log the data loss loudly
+    ///
+    /// The previous implementation retried `try_open_and_verify(db_path)`
+    /// at step 5, which always succeeded by creating a fresh empty DB
+    /// (because step 4 had renamed the corrupt original away). That made
+    /// the subsequent `try_restore_from_backup` call dead code and caused
+    /// real data loss. See `recovery_uses_backup_when_main_corrupt` in
+    /// `src/cognitive_memory/tests_mod.rs` for the regression pin.
     #[cfg(unix)]
     pub(super) fn open_db_with_recovery(db_path: &Path) -> SimardResult<lbug::Database> {
         // Step 1: preemptive WAL cleanup.
@@ -230,7 +327,8 @@ impl NativeCognitiveMemory {
             }
         }
 
-        // Step 3: back up the corrupt DB and remove WAL files.
+        // Step 3: rename the corrupt DB aside (preserve for forensics) and
+        // remove WAL siblings so a subsequent open is unambiguous.
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -253,42 +351,44 @@ impl NativeCognitiveMemory {
             }
         }
 
-        // Step 4: retry open (DB was renamed away, so this creates a fresh one
-        // OR we try restore first).
-        eprintln!("[simard] retrying LadybugDB open after recovery...");
-        let second = catch_unwind(AssertUnwindSafe(|| try_open_and_verify(&db_path_owned)));
-        match second {
-            Ok(Ok(db)) => {
-                eprintln!(
-                    "[simard] recovery created new empty DB — data loss occurred. \
-                     Old data backed up to {}",
-                    corrupt_backup.display()
-                );
-                return Ok(db);
-            }
-            Ok(Err(e)) => {
-                eprintln!("[simard] retry also failed: {e}");
-            }
-            Err(_) => {
-                eprintln!("[simard] retry also panicked");
+        // Step 4 (was Step 5): try restoring from backup BEFORE creating an
+        // empty DB. This is the issue-#1710 fix: the previous ordering let
+        // the retry-open path silently succeed with a fresh empty DB and
+        // never reached the restore code, destroying user data.
+        //
+        // `try_restore_from_backup` iterates every backup newest-first and
+        // returns Ok with the first one that opens + passes health check;
+        // it returns Err only when no backups exist OR every candidate
+        // failed verification.
+        let backup_count = Self::find_backups_newest_first(db_path).len();
+        match Self::try_restore_from_backup(db_path) {
+            Ok(db) => return Ok(db),
+            Err(e) => {
+                if backup_count == 0 {
+                    eprintln!(
+                        "[simard] no backups available — creating fresh empty DB \
+                         (DATA LOSS). Corrupt original preserved at {}",
+                        corrupt_backup.display()
+                    );
+                } else {
+                    eprintln!(
+                        "[simard] all {backup_count} backups failed verification — \
+                         creating fresh empty DB (DATA LOSS). Last error: {e}. \
+                         Corrupt original preserved at {}",
+                        corrupt_backup.display()
+                    );
+                }
             }
         }
 
-        // Step 5: try restoring from backup.
-        if let Ok(db) = Self::try_restore_from_backup(db_path) {
-            return Ok(db);
-        }
-
-        // Step 6: last resort — ensure clean slate and create fresh DB.
+        // Step 5 (was Step 6): last resort — ensure clean slate and create
+        // fresh empty DB. This branch is now reached ONLY when restore
+        // truly cannot recover anything; the data-loss log line above is
+        // unconditional so a crash here will always leave a paper trail.
         if db_path.exists() {
             let _ = std::fs::remove_file(db_path);
         }
         Self::preemptive_wal_cleanup(db_path);
-        eprintln!(
-            "[simard] all recovery options exhausted — creating fresh empty DB (data loss). \
-             Corrupt data backed up to {}",
-            corrupt_backup.display()
-        );
         try_open(db_path)
     }
 

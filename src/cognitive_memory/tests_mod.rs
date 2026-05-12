@@ -255,3 +255,253 @@ fn consolidate_episodes_deduplicates() {
         "should show dedup ratio, got: {content}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Backup-restore recovery tests (issue #1710)
+//
+// These tests pin the contract for `open_db_with_recovery`:
+// when the main DB file is corrupt, recovery MUST attempt restore from
+// available backups (newest-first, skipping any that fail verification)
+// BEFORE falling back to a fresh empty DB. Falling back silently destroys
+// user data — the previous implementation did exactly this because Step 4
+// of the recovery sequence always succeeded with an empty DB and made
+// Step 5 (restore-from-backup) dead code.
+// ---------------------------------------------------------------------------
+
+/// Overwrite a file with garbage bytes so LadybugDB will refuse to open it
+/// or fail the post-open health check. Used by the recovery tests below.
+fn corrupt_db_file(path: &std::path::Path) {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .expect("open file for corruption");
+    // 4 KiB of non-zero garbage — enough to defeat any header check while
+    // also not being a recognizable empty/zeroed file.
+    let garbage = vec![0xABu8; 4096];
+    f.write_all(&garbage).expect("write garbage");
+    f.sync_all().expect("fsync garbage");
+}
+
+/// Move the most recent verified backup file to a deterministic epoch suffix
+/// so tests don't race against the wall clock. Returns the new path.
+fn rename_backup_to_epoch(state_root: &std::path::Path, epoch: u64) -> std::path::PathBuf {
+    let backup_dir = state_root.join("backups");
+    let prefix = "cognitive_memory.ladybug.";
+    let mut found: Option<std::path::PathBuf> = None;
+    let mut newest_ts: u64 = 0;
+    for entry in std::fs::read_dir(&backup_dir)
+        .expect("read backup_dir")
+        .flatten()
+    {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy().into_owned();
+        if let Some(ts_str) = name_str.strip_prefix(prefix)
+            && let Ok(ts) = ts_str.parse::<u64>()
+            && ts >= newest_ts
+        {
+            newest_ts = ts;
+            found = Some(entry.path());
+        }
+    }
+    let src = found.expect("at least one backup file present");
+    let dst = backup_dir.join(format!("{prefix}{epoch}"));
+    if src != dst {
+        std::fs::rename(&src, &dst).expect("rename backup to deterministic epoch");
+    }
+    dst
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn recovery_uses_backup_when_main_corrupt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state_root = tmp.path().to_path_buf();
+    let db_path = state_root.join("cognitive_memory.ladybug");
+
+    // Step 1: open, store a marker fact, close.
+    {
+        let mem = NativeCognitiveMemory::open(&state_root).unwrap();
+        mem.store_fact("marker_one", "from-original-db", 0.9, &[], "test")
+            .unwrap();
+    }
+
+    // Step 2: snapshot via the production backup path — this verifies the
+    // backup before returning, so we know it's restorable.
+    NativeCognitiveMemory::create_verified_backup(&state_root)
+        .expect("create_verified_backup should succeed for a healthy DB");
+    rename_backup_to_epoch(&state_root, 100);
+
+    // Step 3: corrupt the main DB so open_db_with_recovery is forced into
+    // its recovery path.
+    corrupt_db_file(&db_path);
+
+    // Step 4: re-open. The CONTRACT under test: recovery must restore from
+    // the verified backup (NOT silently create a fresh empty DB).
+    let mem2 = NativeCognitiveMemory::open(&state_root)
+        .expect("open should succeed via backup-restore recovery");
+
+    // Step 5: the marker fact must still be searchable. On the buggy
+    // implementation this returns 0 results because Step 4 of the recovery
+    // sequence created a fresh empty DB and never tried the backup.
+    let facts = mem2.search_facts("marker_one", 10, 0.0).unwrap();
+    assert_eq!(
+        facts.len(),
+        1,
+        "recovery must restore from backup, not create empty DB (issue #1710)"
+    );
+    assert_eq!(facts[0].concept, "marker_one");
+    assert_eq!(facts[0].content, "from-original-db");
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn recovery_falls_back_to_empty_when_no_backups() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state_root = tmp.path().to_path_buf();
+    let db_path = state_root.join("cognitive_memory.ladybug");
+
+    // Open + store + close so a real DB file exists to corrupt. No backup
+    // is ever taken.
+    {
+        let mem = NativeCognitiveMemory::open(&state_root).unwrap();
+        mem.store_fact("would_be_lost", "no-backup", 0.5, &[], "test")
+            .unwrap();
+    }
+    corrupt_db_file(&db_path);
+
+    // No backups exist → recovery must produce a usable empty DB rather
+    // than propagating an error.
+    let mem = NativeCognitiveMemory::open(&state_root)
+        .expect("open should fall through to empty-DB creation");
+    let facts = mem.search_facts("would_be_lost", 10, 0.0).unwrap();
+    assert_eq!(facts.len(), 0, "fresh empty DB must contain no facts");
+    let stats = mem.get_statistics().unwrap();
+    assert_eq!(stats.total(), 0, "fresh empty DB must be empty");
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn recovery_falls_back_to_empty_when_all_backups_corrupt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state_root = tmp.path().to_path_buf();
+    let db_path = state_root.join("cognitive_memory.ladybug");
+    let backup_dir = state_root.join("backups");
+
+    // Create a real DB and two backups, then corrupt every backup AND the
+    // main file. Recovery must report data loss but still hand back a
+    // usable empty DB.
+    {
+        let mem = NativeCognitiveMemory::open(&state_root).unwrap();
+        mem.store_fact("first", "v1", 0.9, &[], "test").unwrap();
+    }
+    NativeCognitiveMemory::create_verified_backup(&state_root).unwrap();
+    let backup_a = rename_backup_to_epoch(&state_root, 100);
+
+    {
+        let mem = NativeCognitiveMemory::open(&state_root).unwrap();
+        mem.store_fact("second", "v2", 0.9, &[], "test").unwrap();
+    }
+    NativeCognitiveMemory::create_verified_backup(&state_root).unwrap();
+    let backup_b = rename_backup_to_epoch(&state_root, 200);
+
+    // Sanity: both backup files are present before we corrupt them.
+    assert!(backup_a.exists(), "backup A should exist before corruption");
+    assert!(backup_b.exists(), "backup B should exist before corruption");
+    // Drop any paired .wal sibling backups too so they can't accidentally
+    // make a half-corrupt restore succeed.
+    for wal_name in ["cognitive_memory.ladybug.wal", "cognitive_memory.wal"] {
+        for epoch in [100u64, 200] {
+            let p = backup_dir.join(format!("{wal_name}.{epoch}"));
+            if p.exists() {
+                std::fs::remove_file(&p).unwrap();
+            }
+        }
+    }
+
+    corrupt_db_file(&backup_a);
+    corrupt_db_file(&backup_b);
+    corrupt_db_file(&db_path);
+
+    let mem = NativeCognitiveMemory::open(&state_root)
+        .expect("open should succeed with empty DB when all backups are corrupt");
+
+    let stats = mem.get_statistics().unwrap();
+    assert_eq!(
+        stats.total(),
+        0,
+        "all backups corrupt → recovery must fall back to empty DB (data loss)"
+    );
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn recovery_skips_corrupt_backups_uses_next() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state_root = tmp.path().to_path_buf();
+    let db_path = state_root.join("cognitive_memory.ladybug");
+    let backup_dir = state_root.join("backups");
+
+    // Build three DB snapshots whose contents differ so we can identify
+    // which one was restored:
+    //   epoch 100 (oldest valid)  → contains {fact_a}
+    //   epoch 200 (middle valid)  → contains {fact_a, fact_b}
+    //   epoch 300 (newest, will be corrupted) → contains {fact_a, fact_b, fact_c}
+
+    {
+        let mem = NativeCognitiveMemory::open(&state_root).unwrap();
+        mem.store_fact("fact_a", "alpha", 0.9, &[], "test").unwrap();
+    }
+    NativeCognitiveMemory::create_verified_backup(&state_root).unwrap();
+    rename_backup_to_epoch(&state_root, 100);
+
+    {
+        let mem = NativeCognitiveMemory::open(&state_root).unwrap();
+        mem.store_fact("fact_b", "bravo", 0.9, &[], "test").unwrap();
+    }
+    NativeCognitiveMemory::create_verified_backup(&state_root).unwrap();
+    rename_backup_to_epoch(&state_root, 200);
+
+    {
+        let mem = NativeCognitiveMemory::open(&state_root).unwrap();
+        mem.store_fact("fact_c", "charlie", 0.9, &[], "test")
+            .unwrap();
+    }
+    NativeCognitiveMemory::create_verified_backup(&state_root).unwrap();
+    let backup_newest = rename_backup_to_epoch(&state_root, 300);
+
+    // Drop any .wal sibling backups so corruption of the main backup file
+    // is the only signal recovery sees.
+    for wal_name in ["cognitive_memory.ladybug.wal", "cognitive_memory.wal"] {
+        for epoch in [100u64, 200, 300] {
+            let p = backup_dir.join(format!("{wal_name}.{epoch}"));
+            if p.exists() {
+                std::fs::remove_file(&p).unwrap();
+            }
+        }
+    }
+
+    // Corrupt the NEWEST backup and the main DB. Recovery must skip the
+    // corrupt newest backup and fall through to the next-newest (epoch 200).
+    corrupt_db_file(&backup_newest);
+    corrupt_db_file(&db_path);
+
+    let mem = NativeCognitiveMemory::open(&state_root)
+        .expect("open should succeed by skipping the corrupt newest backup");
+
+    let a = mem.search_facts("fact_a", 10, 0.0).unwrap();
+    let b = mem.search_facts("fact_b", 10, 0.0).unwrap();
+    let c = mem.search_facts("fact_c", 10, 0.0).unwrap();
+    assert_eq!(a.len(), 1, "fact_a (in oldest+middle) must be restored");
+    assert_eq!(
+        b.len(),
+        1,
+        "fact_b (in middle backup) must be restored — proves middle was used, not oldest"
+    );
+    assert_eq!(
+        c.len(),
+        0,
+        "fact_c (only in corrupt newest backup) must NOT appear"
+    );
+}
