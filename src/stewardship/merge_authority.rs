@@ -5,16 +5,21 @@
 //! `~/.copilot/skills/merge-ready/SKILL.md` for the canonical six criteria.
 //!
 //! Pipeline:
-//! 1. `gh pr view <PR> --json body,statusCheckRollup,mergeable,reviewDecision`
-//! 2. Parse the PR body for the six merge-ready evidence headings (each
+//! 1. `gh pr view <PR> --json body,statusCheckRollup,mergeable,reviewDecision,baseRefName`
+//! 2. Verify `baseRefName` is in the configured allow-list (default `["main"]`,
+//!    overridable via the `SIMARD_MERGE_BASE_ALLOWLIST` env var as a
+//!    comma-separated list). This is the **first** gate evaluated so a PR
+//!    targeting a stale or wrong base branch (the PR #1549 footgun) is
+//!    refused before any other inspection runs.
+//! 3. Parse the PR body for the six merge-ready evidence headings (each
 //!    must contain non-trivial evidence, not just a placeholder).
-//! 3. Verify `mergeable == "MERGEABLE"`.
-//! 4. Verify every entry in `statusCheckRollup` is `SUCCESS`, `NEUTRAL`, or
+//! 4. Verify `mergeable == "MERGEABLE"`.
+//! 5. Verify every entry in `statusCheckRollup` is `SUCCESS`, `NEUTRAL`, or
 //!    `SKIPPED`. Any `FAILURE`, `CANCELLED`, `TIMED_OUT`, `STARTUP_FAILURE`,
 //!    `ACTION_REQUIRED`, `PENDING`, `QUEUED`, or `IN_PROGRESS` blocks the merge.
-//! 5. If all checks pass: `gh pr merge <PR> --squash --delete-branch
+//! 6. If all checks pass: `gh pr merge <PR> --squash --delete-branch
 //!    --repo rysweet/Simard` and return [`MergeOutcome::Merged`].
-//! 6. Otherwise return [`MergeOutcome::Refused`] with a single human-readable
+//! 7. Otherwise return [`MergeOutcome::Refused`] with a single human-readable
 //!    reason (the *first* failing gate, in order, so the operator gets a
 //!    deterministic message).
 //!
@@ -50,13 +55,17 @@ pub enum MergeOutcome {
     Refused { pr_number: u32, reason: String },
 }
 
-/// Snapshot of `gh pr view --json body,statusCheckRollup,mergeable,reviewDecision`.
+/// Snapshot of `gh pr view --json body,statusCheckRollup,mergeable,reviewDecision,baseRefName`.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct PrSnapshot {
     pub body: String,
     pub mergeable: String,
     pub review_decision: String,
     pub checks: Vec<CheckRollupEntry>,
+    /// `baseRefName` from `gh pr view` — the branch this PR will merge **into**.
+    /// Compared against [`base_allowlist_from_env`] by the first gate so PRs
+    /// targeting stale or wrong base branches are refused early.
+    pub base_ref_name: String,
 }
 
 /// One row from `statusCheckRollup`. Both check runs and statuses get
@@ -76,7 +85,7 @@ pub struct CheckRollupEntry {
 /// keeps the evaluation logic testable; production wires it to
 /// [`RealPrGhClient`] which shells out to `gh`.
 pub trait PrGhClient {
-    /// `gh pr view <pr> --repo <repo> --json body,statusCheckRollup,mergeable,reviewDecision`.
+    /// `gh pr view <pr> --repo <repo> --json body,statusCheckRollup,mergeable,reviewDecision,baseRefName`.
     fn view_pr(&self, repo: &str, pr_number: u32) -> SimardResult<PrSnapshot>;
     /// `gh pr merge <pr> --squash --delete-branch --repo <repo>`.
     fn squash_merge(&self, repo: &str, pr_number: u32) -> SimardResult<()>;
@@ -103,7 +112,7 @@ impl PrGhClient for RealPrGhClient {
                 "--repo",
                 repo,
                 "--json",
-                "body,statusCheckRollup,mergeable,reviewDecision",
+                "body,statusCheckRollup,mergeable,reviewDecision,baseRefName",
             ])
             .output()
             .map_err(|e| SimardError::MergeAuthorityGhCommandFailed {
@@ -150,7 +159,7 @@ impl PrGhClient for RealPrGhClient {
     }
 }
 
-/// Parse `gh pr view --json body,statusCheckRollup,mergeable,reviewDecision`
+/// Parse `gh pr view --json body,statusCheckRollup,mergeable,reviewDecision,baseRefName`
 /// stdout into a [`PrSnapshot`]. Public so the CLI can reuse it for dry-run
 /// flows; tests cover both happy and malformed paths.
 pub fn parse_pr_view_json(stdout: &[u8]) -> SimardResult<PrSnapshot> {
@@ -164,6 +173,8 @@ pub fn parse_pr_view_json(stdout: &[u8]) -> SimardResult<PrSnapshot> {
         review_decision: String,
         #[serde(default, rename = "statusCheckRollup")]
         status_check_rollup: Vec<RawCheck>,
+        #[serde(default, rename = "baseRefName")]
+        base_ref_name: String,
     }
     #[derive(serde::Deserialize)]
     struct RawCheck {
@@ -210,7 +221,36 @@ pub fn parse_pr_view_json(stdout: &[u8]) -> SimardResult<PrSnapshot> {
         mergeable: raw.mergeable,
         review_decision: raw.review_decision,
         checks,
+        base_ref_name: raw.base_ref_name,
     })
+}
+
+/// Env var that overrides the base-branch allow-list (comma-separated).
+/// Empty entries are ignored. Falls back to `["main"]` if unset/empty.
+pub const BASE_ALLOWLIST_ENV: &str = "SIMARD_MERGE_BASE_ALLOWLIST";
+
+/// The default base-branch allow-list when the env var is unset.
+pub const DEFAULT_BASE_ALLOWLIST: &[&str] = &["main"];
+
+/// Read [`BASE_ALLOWLIST_ENV`] from the environment, splitting on commas.
+/// Returns the default list (`["main"]`) if the env var is unset, empty, or
+/// contains only whitespace/empty entries.
+pub fn base_allowlist_from_env() -> Vec<String> {
+    let raw = std::env::var(BASE_ALLOWLIST_ENV).unwrap_or_default();
+    let parsed: Vec<String> = raw
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    if parsed.is_empty() {
+        DEFAULT_BASE_ALLOWLIST
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        parsed
+    }
 }
 
 /// Minimum bytes of evidence under each heading before we consider it
@@ -255,7 +295,31 @@ fn evidence_is_nontrivial(section: &str) -> bool {
 }
 
 /// First gate that fails (in order). Returns `Ok(())` if every gate passes.
-fn evaluate_gates(snapshot: &PrSnapshot) -> Result<(), String> {
+/// `base_allowlist` is the set of base branches a PR is allowed to target;
+/// production callers obtain this from [`base_allowlist_from_env`].
+fn evaluate_gates(snapshot: &PrSnapshot, base_allowlist: &[String]) -> Result<(), String> {
+    // Gate 0 (highest priority): base-branch allow-list.
+    //
+    // A PR whose `baseRefName` is not in the allow-list is the PR #1549
+    // footgun: branched from a stale parent so the diff includes thousands
+    // of unrelated lines that look like deletions when targeted at main.
+    // Refuse early — before any evidence/CI inspection — and tell the
+    // operator exactly how to re-target.
+    if !base_allowlist
+        .iter()
+        .any(|allowed| allowed == &snapshot.base_ref_name)
+    {
+        return Err(format!(
+            "PR base branch '{}' is not in the merge allow-list ({}). \
+             Re-target this PR to an allowed base and rebase before retrying: \
+             `gh pr edit <PR> --base {}` followed by `git rebase origin/{}`.",
+            snapshot.base_ref_name,
+            base_allowlist.join(", "),
+            base_allowlist.first().map(String::as_str).unwrap_or("main"),
+            base_allowlist.first().map(String::as_str).unwrap_or("main"),
+        ));
+    }
+
     // Gate 1-6: each evidence heading present + non-trivial.
     for heading in REQUIRED_EVIDENCE_HEADINGS {
         match evidence_section(&snapshot.body, heading) {
@@ -295,10 +359,14 @@ fn is_passing_state(state: &str) -> bool {
     matches!(state, "SUCCESS" | "NEUTRAL" | "SKIPPED")
 }
 
-/// Evaluate the six merge-ready gates for `pr_number` against `repo`. If
+/// Evaluate the merge-ready gates for `pr_number` against `repo`. If
 /// every gate passes, squash-merge with branch deletion and return
 /// [`MergeOutcome::Merged`]. Otherwise return [`MergeOutcome::Refused`] with
 /// the single most-actionable reason (the first failing gate).
+///
+/// The base-branch allow-list is read from the `SIMARD_MERGE_BASE_ALLOWLIST`
+/// environment variable (comma-separated, default `"main"`). See
+/// [`base_allowlist_from_env`].
 ///
 /// Errors (as opposed to [`MergeOutcome::Refused`]) only surface when we
 /// could not even *evaluate* the PR — `gh` failed to run, returned malformed
@@ -309,8 +377,20 @@ pub fn merge_pr_if_merge_ready(
     repo: &str,
     gh: &dyn PrGhClient,
 ) -> SimardResult<MergeOutcome> {
+    merge_pr_if_merge_ready_with_allowlist(pr_number, repo, gh, &base_allowlist_from_env())
+}
+
+/// Variant of [`merge_pr_if_merge_ready`] that takes an explicit base-branch
+/// allow-list. Used by tests; production paths should call the env-driven
+/// [`merge_pr_if_merge_ready`] instead.
+pub fn merge_pr_if_merge_ready_with_allowlist(
+    pr_number: u32,
+    repo: &str,
+    gh: &dyn PrGhClient,
+    base_allowlist: &[String],
+) -> SimardResult<MergeOutcome> {
     let snapshot = gh.view_pr(repo, pr_number)?;
-    if let Err(reason) = evaluate_gates(&snapshot) {
+    if let Err(reason) = evaluate_gates(&snapshot, base_allowlist) {
         return Ok(MergeOutcome::Refused { pr_number, reason });
     }
     gh.squash_merge(repo, pr_number)?;
@@ -397,7 +477,12 @@ prompt_assets/simard/ooda_decide.md. Unrelated changes: none.
                     state: "NEUTRAL".into(),
                 },
             ],
+            base_ref_name: "main".to_string(),
         }
+    }
+
+    fn default_allowlist() -> Vec<String> {
+        vec!["main".to_string()]
     }
 
     #[derive(Default)]
@@ -448,7 +533,13 @@ prompt_assets/simard/ooda_decide.md. Unrelated changes: none.
         let gh = FakePrGhClient::new();
         gh.seed_view(Ok(good_snapshot()));
         gh.seed_merge(Ok(()));
-        let outcome = merge_pr_if_merge_ready(1500, "rysweet/Simard", &gh).unwrap();
+        let outcome = merge_pr_if_merge_ready_with_allowlist(
+            1500,
+            "rysweet/Simard",
+            &gh,
+            &default_allowlist(),
+        )
+        .unwrap();
         assert_eq!(
             outcome,
             MergeOutcome::Merged {
@@ -470,7 +561,9 @@ prompt_assets/simard/ooda_decide.md. Unrelated changes: none.
             .replace("### QA-team evidence", "### qa-something-else");
         let gh = FakePrGhClient::new();
         gh.seed_view(Ok(snap));
-        let outcome = merge_pr_if_merge_ready(42, "rysweet/Simard", &gh).unwrap();
+        let outcome =
+            merge_pr_if_merge_ready_with_allowlist(42, "rysweet/Simard", &gh, &default_allowlist())
+                .unwrap();
         match outcome {
             MergeOutcome::Refused { pr_number, reason } => {
                 assert_eq!(pr_number, 42);
@@ -508,7 +601,9 @@ prompt_assets/simard/ooda_decide.md. Unrelated changes: none.
 
         let gh = FakePrGhClient::new();
         gh.seed_view(Ok(snap));
-        let outcome = merge_pr_if_merge_ready(42, "rysweet/Simard", &gh).unwrap();
+        let outcome =
+            merge_pr_if_merge_ready_with_allowlist(42, "rysweet/Simard", &gh, &default_allowlist())
+                .unwrap();
         match outcome {
             MergeOutcome::Refused { reason, .. } => {
                 assert!(
@@ -535,7 +630,9 @@ prompt_assets/simard/ooda_decide.md. Unrelated changes: none.
         });
         let gh = FakePrGhClient::new();
         gh.seed_view(Ok(snap));
-        let outcome = merge_pr_if_merge_ready(7, "rysweet/Simard", &gh).unwrap();
+        let outcome =
+            merge_pr_if_merge_ready_with_allowlist(7, "rysweet/Simard", &gh, &default_allowlist())
+                .unwrap();
         match outcome {
             MergeOutcome::Refused { reason, .. } => {
                 assert!(reason.contains("integration-tests"), "{reason}");
@@ -555,7 +652,9 @@ prompt_assets/simard/ooda_decide.md. Unrelated changes: none.
         });
         let gh = FakePrGhClient::new();
         gh.seed_view(Ok(snap));
-        let outcome = merge_pr_if_merge_ready(7, "rysweet/Simard", &gh).unwrap();
+        let outcome =
+            merge_pr_if_merge_ready_with_allowlist(7, "rysweet/Simard", &gh, &default_allowlist())
+                .unwrap();
         assert!(matches!(outcome, MergeOutcome::Refused { .. }));
     }
 
@@ -567,7 +666,9 @@ prompt_assets/simard/ooda_decide.md. Unrelated changes: none.
         snap.mergeable = "CONFLICTING".to_string();
         let gh = FakePrGhClient::new();
         gh.seed_view(Ok(snap));
-        let outcome = merge_pr_if_merge_ready(7, "rysweet/Simard", &gh).unwrap();
+        let outcome =
+            merge_pr_if_merge_ready_with_allowlist(7, "rysweet/Simard", &gh, &default_allowlist())
+                .unwrap();
         match outcome {
             MergeOutcome::Refused { reason, .. } => {
                 assert!(reason.contains("CONFLICTING"), "{reason}");
@@ -584,7 +685,9 @@ prompt_assets/simard/ooda_decide.md. Unrelated changes: none.
         snap.mergeable = "UNKNOWN".to_string();
         let gh = FakePrGhClient::new();
         gh.seed_view(Ok(snap));
-        let outcome = merge_pr_if_merge_ready(7, "rysweet/Simard", &gh).unwrap();
+        let outcome =
+            merge_pr_if_merge_ready_with_allowlist(7, "rysweet/Simard", &gh, &default_allowlist())
+                .unwrap();
         assert!(matches!(outcome, MergeOutcome::Refused { .. }));
     }
 
@@ -596,7 +699,9 @@ prompt_assets/simard/ooda_decide.md. Unrelated changes: none.
         gh.seed_view(Err(SimardError::MergeAuthorityGhCommandFailed {
             reason: "gh: not found".into(),
         }));
-        let err = merge_pr_if_merge_ready(7, "rysweet/Simard", &gh).unwrap_err();
+        let err =
+            merge_pr_if_merge_ready_with_allowlist(7, "rysweet/Simard", &gh, &default_allowlist())
+                .unwrap_err();
         assert!(matches!(
             err,
             SimardError::MergeAuthorityGhCommandFailed { .. }
@@ -610,7 +715,13 @@ prompt_assets/simard/ooda_decide.md. Unrelated changes: none.
         gh.seed_merge(Err(SimardError::MergeAuthorityGhCommandFailed {
             reason: "branch protection requires CODEOWNERS approval".into(),
         }));
-        let err = merge_pr_if_merge_ready(1500, "rysweet/Simard", &gh).unwrap_err();
+        let err = merge_pr_if_merge_ready_with_allowlist(
+            1500,
+            "rysweet/Simard",
+            &gh,
+            &default_allowlist(),
+        )
+        .unwrap_err();
         match err {
             SimardError::MergeAuthorityGhCommandFailed { reason } => {
                 assert!(reason.contains("branch protection"), "{reason}");
@@ -634,7 +745,9 @@ prompt_assets/simard/ooda_decide.md. Unrelated changes: none.
         });
         let gh = FakePrGhClient::new();
         gh.seed_view(Ok(snap));
-        let outcome = merge_pr_if_merge_ready(7, "rysweet/Simard", &gh).unwrap();
+        let outcome =
+            merge_pr_if_merge_ready_with_allowlist(7, "rysweet/Simard", &gh, &default_allowlist())
+                .unwrap();
         match outcome {
             MergeOutcome::Refused { reason, .. } => {
                 assert!(reason.contains("QA-team evidence"), "{reason}");
@@ -706,6 +819,179 @@ prompt_assets/simard/ooda_decide.md. Unrelated changes: none.
                 "### PR description evidence",
                 "### Scope",
             ]
+        );
+    }
+
+    // ── Base-branch allow-list gate (PR #1549 footgun) ──
+
+    #[test]
+    fn refuses_when_base_ref_not_in_allowlist() {
+        let mut snap = good_snapshot();
+        snap.base_ref_name = "feat/some-stale-parent".to_string();
+        let gh = FakePrGhClient::new();
+        gh.seed_view(Ok(snap));
+        let outcome = merge_pr_if_merge_ready_with_allowlist(
+            1549,
+            "rysweet/Simard",
+            &gh,
+            &default_allowlist(),
+        )
+        .unwrap();
+        match outcome {
+            MergeOutcome::Refused { pr_number, reason } => {
+                assert_eq!(pr_number, 1549);
+                assert!(
+                    reason.contains("feat/some-stale-parent"),
+                    "reason should report the detected base: {reason}"
+                );
+                assert!(
+                    reason.contains("main"),
+                    "reason should list the allowed base(s): {reason}"
+                );
+                assert!(
+                    reason.contains("gh pr edit"),
+                    "reason should hint at the re-target command: {reason}"
+                );
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+        assert_eq!(
+            gh.merge_call_count(),
+            0,
+            "must not call gh pr merge on base-branch refusal"
+        );
+    }
+
+    #[test]
+    fn allows_pr_when_base_in_custom_allowlist() {
+        let mut snap = good_snapshot();
+        snap.base_ref_name = "release/0.18".to_string();
+        let gh = FakePrGhClient::new();
+        gh.seed_view(Ok(snap));
+        gh.seed_merge(Ok(()));
+        let allowlist = vec!["main".to_string(), "release/0.18".to_string()];
+        let outcome =
+            merge_pr_if_merge_ready_with_allowlist(2000, "rysweet/Simard", &gh, &allowlist)
+                .unwrap();
+        assert_eq!(
+            outcome,
+            MergeOutcome::Merged {
+                pr_number: 2000,
+                repo: "rysweet/Simard".to_string(),
+            }
+        );
+        assert_eq!(gh.merge_call_count(), 1);
+    }
+
+    #[test]
+    fn base_branch_gate_runs_before_evidence_check() {
+        // Even with broken evidence + bad base, the base-branch refusal wins
+        // because it's a faster, more actionable signal.
+        let mut snap = good_snapshot();
+        snap.base_ref_name = "wrong-base".to_string();
+        snap.body = snap.body.replace("### QA-team evidence", "### qa-other");
+        let gh = FakePrGhClient::new();
+        gh.seed_view(Ok(snap));
+        let outcome =
+            merge_pr_if_merge_ready_with_allowlist(7, "rysweet/Simard", &gh, &default_allowlist())
+                .unwrap();
+        match outcome {
+            MergeOutcome::Refused { reason, .. } => {
+                assert!(
+                    reason.contains("wrong-base"),
+                    "base-branch reason must win: {reason}"
+                );
+                assert!(
+                    !reason.contains("QA-team evidence"),
+                    "evidence reason should not appear: {reason}"
+                );
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn base_allowlist_from_env_default_is_main() {
+        // Test deterministically: clear the env var and assert the default.
+        // SAFETY: tests in the same process share env; this test does not
+        // run under cargo's parallel runner if `--test-threads=1`, but for
+        // belt-and-braces we restore afterwards.
+        // SAFETY: std::env::remove_var/set_var are unsafe in 2024 edition;
+        // we accept that this test must run single-threaded if other tests
+        // touch the same env var (none do today).
+        unsafe {
+            std::env::remove_var(BASE_ALLOWLIST_ENV);
+        }
+        let list = base_allowlist_from_env();
+        assert_eq!(list, vec!["main".to_string()]);
+    }
+
+    #[test]
+    fn base_allowlist_from_env_parses_csv() {
+        unsafe {
+            std::env::set_var(BASE_ALLOWLIST_ENV, "main, release/0.18 ,, dev");
+        }
+        let list = base_allowlist_from_env();
+        unsafe {
+            std::env::remove_var(BASE_ALLOWLIST_ENV);
+        }
+        assert_eq!(
+            list,
+            vec![
+                "main".to_string(),
+                "release/0.18".to_string(),
+                "dev".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn base_allowlist_from_env_empty_string_falls_back_to_default() {
+        unsafe {
+            std::env::set_var(BASE_ALLOWLIST_ENV, "   ,  , ");
+        }
+        let list = base_allowlist_from_env();
+        unsafe {
+            std::env::remove_var(BASE_ALLOWLIST_ENV);
+        }
+        assert_eq!(list, vec!["main".to_string()]);
+    }
+
+    #[test]
+    fn parse_pr_view_json_includes_base_ref_name() {
+        let json = br#"{
+            "body": "hi",
+            "mergeable": "MERGEABLE",
+            "reviewDecision": "APPROVED",
+            "baseRefName": "main",
+            "statusCheckRollup": []
+        }"#;
+        let snap = parse_pr_view_json(json).unwrap();
+        assert_eq!(snap.base_ref_name, "main");
+    }
+
+    #[test]
+    fn parse_pr_view_json_missing_base_ref_name_defaults_empty() {
+        // Older `gh` versions or unusual payloads may omit baseRefName.
+        // We default to the empty string, which then fails the base
+        // allow-list gate — strictly safer than guessing "main".
+        let json = br#"{
+            "body": "hi",
+            "mergeable": "MERGEABLE",
+            "reviewDecision": "APPROVED",
+            "statusCheckRollup": []
+        }"#;
+        let snap = parse_pr_view_json(json).unwrap();
+        assert_eq!(snap.base_ref_name, "");
+
+        let gh = FakePrGhClient::new();
+        gh.seed_view(Ok(snap));
+        let outcome =
+            merge_pr_if_merge_ready_with_allowlist(99, "rysweet/Simard", &gh, &default_allowlist())
+                .unwrap();
+        assert!(
+            matches!(outcome, MergeOutcome::Refused { .. }),
+            "missing baseRefName must fail the gate, not silently pass"
         );
     }
 }
