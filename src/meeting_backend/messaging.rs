@@ -1,13 +1,13 @@
 //! Send-message turn handling: prompt construction + LLM dispatch.
 
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::base_types::BaseTypeTurnInput;
 use crate::error::{SimardError, SimardResult};
 
+use super::MeetingBackend;
 use super::sanitize::extract_response;
 use super::types::{MeetingResponse, Role};
-use super::{EMPTY_RESPONSE_SENTINEL, MeetingBackend};
 
 impl MeetingBackend {
     /// Send a user message and get Simard's response.
@@ -65,18 +65,27 @@ impl MeetingBackend {
                 return Err(e);
             }
         };
-        let response_text = {
-            let extracted = extract_response(&outcome);
-            if extracted.trim().is_empty() {
-                tracing::warn!(
-                    raw_len = outcome.execution_summary.len(),
-                    "MeetingBackend: extract_response produced empty result"
-                );
-                EMPTY_RESPONSE_SENTINEL.to_string()
-            } else {
-                extracted
-            }
-        };
+        let extracted = extract_response(&outcome);
+        if extracted.trim().is_empty() {
+            // Fail loud on empty adapter output rather than substituting a
+            // sentinel string that downstream code (transcript writers,
+            // /act-on-decisions, dashboard chat) treats as legitimate
+            // assistant content. See #1671.
+            error!(
+                raw_len = outcome.execution_summary.len(),
+                topic = self.topic,
+                "MeetingBackend: adapter returned empty response — failing the turn"
+            );
+            return Err(SimardError::ActionExecutionFailed {
+                action: "send-message".to_string(),
+                reason: format!(
+                    "empty_adapter_response: extract_response produced empty result \
+                     (raw_summary_len={})",
+                    outcome.execution_summary.len()
+                ),
+            });
+        }
+        let response_text = extracted;
 
         // Append assistant response
         self.push_message(Role::Assistant, response_text.clone());

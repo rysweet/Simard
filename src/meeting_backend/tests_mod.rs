@@ -119,14 +119,42 @@ fn send_message_after_close_fails() {
 }
 
 #[test]
-fn send_message_returns_sentinel_when_response_empty() {
+fn send_message_returns_err_on_empty_adapter_response() {
     // Whitespace-only LLM output sanitises to empty; backend must
-    // surface the explicit sentinel rather than an empty bubble.
+    // surface a structured error (handoff `failed` with reason
+    // `empty_adapter_response`) rather than substituting a sentinel
+    // string that downstream code treats as successful content. See #1671.
     let agent = MockAgent::new("   \n\n   ");
     let mut backend = MeetingBackend::new_session("Test", Box::new(agent), None, String::new());
-    let resp = backend.send_message("ping").unwrap();
-    assert_eq!(resp.content, EMPTY_RESPONSE_SENTINEL);
-    assert_eq!(resp.message_count, 2);
+    let result = backend.send_message("ping");
+    let err = result.expect_err("empty adapter response must produce Err");
+    match err {
+        crate::error::SimardError::ActionExecutionFailed { action, reason } => {
+            assert_eq!(action, "send-message");
+            assert!(
+                reason.starts_with("empty_adapter_response"),
+                "reason should be structured 'empty_adapter_response: ...', got: {reason}"
+            );
+        }
+        other => panic!("expected ActionExecutionFailed, got: {other:?}"),
+    }
+
+    // Transcript history must NOT contain a sentinel-bearing assistant
+    // message for the failed turn — only the user's prompt remains.
+    let history = backend.history();
+    assert_eq!(
+        history.len(),
+        1,
+        "only the user message should be persisted on a failed turn, got {history:?}"
+    );
+    assert!(matches!(history[0].role, Role::User));
+    let any_sentinel = history
+        .iter()
+        .any(|m| m.content.contains("[empty response]"));
+    assert!(
+        !any_sentinel,
+        "no sentinel string should leak into the transcript"
+    );
 }
 
 #[test]
