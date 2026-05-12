@@ -7,6 +7,20 @@
 //! verification race that was preventing the OODA daemon from shipping PRs.
 //!
 //! See `docs/reference/engineer-worktree-isolation.md` for the full contract.
+//!
+//! # Cargo target dir isolation (issue #1697)
+//!
+//! Each engineer subprocess inherits a per-worktree `CARGO_TARGET_DIR`
+//! computed by [`crate::agent_supervisor::tmux::compute_tmux_env`]. The
+//! default is `<HOME>/.cargo-targets/<worktree-basename>`, configurable
+//! via the `SIMARD_CARGO_TARGETS_ROOT` env var. The basename is unique
+//! per engineer (it embeds the goal id and a per-allocation suffix), so
+//! two concurrent engineers never collide on cargo's build lock and never
+//! corrupt each other's incremental output.
+//!
+//! Routing target dirs to a single shared root prevents the disk-fill
+//! incident where each of N engineer worktrees grew its own ~7 GB `target/`
+//! inside the worktree itself (8 worktrees ⇒ ~60 GB lost).
 
 use std::fs;
 use std::path::{Path, PathBuf};

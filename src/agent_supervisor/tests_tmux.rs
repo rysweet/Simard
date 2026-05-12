@@ -213,13 +213,114 @@ fn compute_tmux_env_seeds_required_simard_vars_from_config() {
 }
 
 #[test]
-fn compute_tmux_env_uses_default_cargo_target_when_parent_unset() {
+fn compute_tmux_env_uses_per_worktree_default_when_parent_unset() {
+    // No HOME, no SIMARD_CARGO_TARGETS_ROOT, no CARGO_TARGET_DIR — must
+    // fall back to /tmp/simard-cargo-targets/<basename>. The basename is
+    // taken from config.worktree_path so concurrent engineers never share
+    // one cargo target dir.
     let config = make_test_config("e1", 0);
     let env = compute_tmux_env(&config, std::iter::empty::<(String, String)>());
     assert_eq!(
         env_value(&env, "CARGO_TARGET_DIR"),
-        Some("/tmp/simard-engineer-target"),
-        "CARGO_TARGET_DIR default must be /tmp/simard-engineer-target (issue #1197)"
+        Some("/tmp/simard-cargo-targets/worktree"),
+        "fallback default must be /tmp/simard-cargo-targets/<basename>"
+    );
+}
+
+#[test]
+fn compute_tmux_env_default_uses_home_when_present() {
+    // Production case: the OODA daemon inherits HOME from the operator
+    // shell. Default must be <HOME>/.cargo-targets/<basename>.
+    let config = make_test_config("e1", 0);
+    let parent = vec![("HOME".to_string(), "/home/azureuser".to_string())];
+    let env = compute_tmux_env(&config, parent);
+    assert_eq!(
+        env_value(&env, "CARGO_TARGET_DIR"),
+        Some("/home/azureuser/.cargo-targets/worktree"),
+        "default must be <HOME>/.cargo-targets/<basename>"
+    );
+}
+
+#[test]
+fn compute_tmux_env_default_honors_simard_cargo_targets_root_override() {
+    // Operators can pin a custom root via SIMARD_CARGO_TARGETS_ROOT —
+    // useful for routing cargo target dirs onto a separate, larger
+    // filesystem (e.g. ephemeral SSD).
+    let config = make_test_config("e1", 0);
+    let parent = vec![
+        ("HOME".to_string(), "/home/azureuser".to_string()),
+        (
+            "SIMARD_CARGO_TARGETS_ROOT".to_string(),
+            "/srv/cargo-targets".to_string(),
+        ),
+    ];
+    let env = compute_tmux_env(&config, parent);
+    assert_eq!(
+        env_value(&env, "CARGO_TARGET_DIR"),
+        Some("/srv/cargo-targets/worktree"),
+        "SIMARD_CARGO_TARGETS_ROOT must override the HOME-derived default"
+    );
+}
+
+#[test]
+fn compute_tmux_env_default_is_per_worktree_basename() {
+    // Two configs with different worktree paths must produce two distinct
+    // CARGO_TARGET_DIR values. This is the property that prevents the
+    // disk-fill incident's "concurrent cargo builds collide on shared
+    // target dir" failure mode.
+    let mut a = make_test_config("e1", 0);
+    a.worktree_path = PathBuf::from("/tmp/wt-a-12345");
+    let mut b = make_test_config("e2", 0);
+    b.worktree_path = PathBuf::from("/tmp/wt-b-67890");
+
+    let parent = || vec![("HOME".to_string(), "/h".to_string())];
+    let env_a = compute_tmux_env(&a, parent());
+    let env_b = compute_tmux_env(&b, parent());
+
+    let target_a = env_value(&env_a, "CARGO_TARGET_DIR").expect("a has target");
+    let target_b = env_value(&env_b, "CARGO_TARGET_DIR").expect("b has target");
+    assert_ne!(
+        target_a, target_b,
+        "different worktree basenames must yield different CARGO_TARGET_DIR (got {target_a} vs {target_b})"
+    );
+    assert!(
+        target_a.ends_with("/wt-a-12345"),
+        "target_a must end with worktree basename: {target_a}"
+    );
+    assert!(
+        target_b.ends_with("/wt-b-67890"),
+        "target_b must end with worktree basename: {target_b}"
+    );
+}
+
+#[test]
+fn compute_tmux_env_default_falls_back_when_home_empty() {
+    // Defensive: an explicitly-empty HOME must not produce
+    // `<empty>/.cargo-targets/<basename>` (which would be a relative path
+    // and thus depend on CWD). Treat empty HOME as missing.
+    let config = make_test_config("e1", 0);
+    let parent = vec![("HOME".to_string(), String::new())];
+    let env = compute_tmux_env(&config, parent);
+    assert_eq!(
+        env_value(&env, "CARGO_TARGET_DIR"),
+        Some("/tmp/simard-cargo-targets/worktree"),
+        "empty HOME must be treated as missing and fall back to /tmp"
+    );
+}
+
+#[test]
+fn compute_tmux_env_uses_default_cargo_target_when_parent_unset() {
+    // Backwards-compatible alias for the original test name. Some external
+    // grep-based tooling looks for this exact identifier; keep it pointing
+    // at the new contract so that tooling does not silently miss the
+    // regression target.
+    let config = make_test_config("e1", 0);
+    let env = compute_tmux_env(&config, std::iter::empty::<(String, String)>());
+    assert!(
+        env_value(&env, "CARGO_TARGET_DIR")
+            .map(|v| v.starts_with("/tmp/simard-cargo-targets/"))
+            .unwrap_or(false),
+        "fallback default must live under /tmp/simard-cargo-targets/ (issue #1697)"
     );
 }
 
