@@ -168,6 +168,127 @@ fn consolidation_persistence_flushes_and_consolidates() {
     assert_eq!(count.load(Ordering::SeqCst), 3);
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// G10 (issue #1604): persistence_memory_operations must propagate snapshot
+// save failures rather than silently swallowing them via `eprintln!`.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Build a counting bridge that satisfies every call needed by the
+/// persistence phase *and* the snapshot save (search_facts + recall_procedure).
+fn persistence_capable_bridge() -> CognitiveMemoryBridge {
+    let transport = InMemoryBridgeTransport::new("snapshot-fail", |method, _params| match method {
+        "memory.consolidate_episodes" => Ok(json!({"id": null})),
+        "memory.clear_working" => Ok(json!({"count": 0})),
+        "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
+        "memory.store_episode" => Ok(json!({"id": "epi_1"})),
+        "memory.search_facts" => Ok(json!({"facts": []})),
+        "memory.recall_procedure" => Ok(json!({"procedures": []})),
+        _ => Err(crate::bridge::BridgeErrorPayload {
+            code: -32601,
+            message: format!("unknown: {method}"),
+        }),
+    });
+    CognitiveMemoryBridge::new(Box::new(transport))
+}
+
+#[test]
+fn persistence_propagates_snapshot_save_error_when_dir_is_a_file() {
+    // The snapshot-save path resolves to `<dir>/<agent>-<epoch>.json`.
+    // If `dir` is actually a regular file, `std::fs::write` returns
+    // `ENOTDIR`.  The fix for G10 (issue #1604) propagates that error
+    // instead of swallowing it via `eprintln!`.
+    let bridge = persistence_capable_bridge();
+    let tmp_file = tempfile::NamedTempFile::new().expect("create tmp file");
+    let dir_that_is_a_file = tmp_file.path().to_path_buf();
+
+    let err = persistence_memory_operations_with_snapshot_dir(
+        &test_session_id(),
+        &bridge,
+        Some(&dir_that_is_a_file),
+    )
+    .expect_err("snapshot save into a non-directory must propagate as Err");
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("memory-snapshot")
+            || msg.contains("memory_snapshot")
+            || msg.to_lowercase().contains("not a directory")
+            || msg.to_lowercase().contains("notadirectory"),
+        "expected error to mention snapshot/IO failure, got: {msg}",
+    );
+}
+
+#[test]
+fn persistence_with_valid_override_dir_writes_snapshot_and_returns_ok() {
+    // Sanity check: the override mechanism still writes a snapshot when
+    // pointed at a real directory, so the G10 propagation path does not
+    // regress the happy case.
+    let bridge = persistence_capable_bridge();
+    let tmp_dir = tempfile::tempdir().expect("create tmp dir");
+
+    persistence_memory_operations_with_snapshot_dir(
+        &test_session_id(),
+        &bridge,
+        Some(tmp_dir.path()),
+    )
+    .expect("happy-path snapshot save must succeed");
+
+    let entries: Vec<_> = std::fs::read_dir(tmp_dir.path())
+        .expect("read snapshot dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
+        .collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "expected exactly one snapshot file, found {}",
+        entries.len()
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// G11 (issue #1604): prune_snapshots must remain non-fatal AND switch its
+// telemetry from `eprintln!` to `tracing::warn!`.  We cannot intercept the
+// `tracing` event in a unit test without pulling in a subscriber, so the
+// behavioural assertion focuses on the contract: pruning still removes the
+// oldest entries, leaves the newest `keep` files intact, and never panics
+// when individual deletions fail (e.g. read-only files).
+// ───────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn prune_snapshots_keeps_newest_and_deletes_oldest() {
+    let tmp_dir = tempfile::tempdir().expect("create tmp dir");
+    // Create five snapshot-like files with embedded epochs so lexicographic
+    // sort matches chronological order.
+    for epoch in 1_000_000..1_000_005u64 {
+        let p = tmp_dir.path().join(format!("agent-{epoch}.json"));
+        std::fs::write(&p, b"{}").expect("write tmp snapshot");
+    }
+    super::prune_snapshots(tmp_dir.path(), 2);
+    let mut remaining: Vec<String> = std::fs::read_dir(tmp_dir.path())
+        .expect("read tmp dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    remaining.sort();
+    assert_eq!(
+        remaining,
+        vec![
+            "agent-1000003.json".to_string(),
+            "agent-1000004.json".to_string()
+        ],
+        "prune_snapshots must keep the two newest entries and delete the rest",
+    );
+}
+
+#[test]
+fn prune_snapshots_does_not_panic_when_dir_missing() {
+    // read_dir failure path — the function must log via tracing::warn!
+    // (no eprintln, no panic, no propagated error).
+    let missing = std::path::Path::new("/nonexistent/simard/prune-target");
+    super::prune_snapshots(missing, 1); // must not panic
+}
+
 /// Round-trip verification: intake → execution → persistence → recall.
 ///
 /// Uses `NativeCognitiveMemory` (in-memory LadybugDB) so that stored

@@ -189,10 +189,30 @@ pub fn reflection_memory_operations(
 /// This is the final phase of a session. Working memory for this session is
 /// cleared, expired sensory items are pruned, and episode consolidation is
 /// attempted to keep episodic memory compact.
+///
+/// A JSON snapshot is also saved to the default snapshot directory
+/// (`~/.simard/snapshots/`) so cross-session recall survives process exit.
+/// Snapshot save failures are **propagated** (issue #1604, gap G10) so that
+/// disk-full / permission errors fail loudly rather than silently degrading
+/// durability.
 #[tracing::instrument(skip_all)]
 pub fn persistence_memory_operations(
     session_id: &SessionId,
     bridge: &dyn CognitiveMemoryOps,
+) -> SimardResult<()> {
+    persistence_memory_operations_with_snapshot_dir(session_id, bridge, None)
+}
+
+/// Same as [`persistence_memory_operations`] but allows callers (typically
+/// tests) to override the snapshot directory.  When `snapshot_dir_override`
+/// is `None`, the default location (`~/.simard/snapshots/`) is used.
+///
+/// Snapshot save errors are propagated via `?` (issue #1604, gap G10).
+#[tracing::instrument(skip_all)]
+pub fn persistence_memory_operations_with_snapshot_dir(
+    session_id: &SessionId,
+    bridge: &dyn CognitiveMemoryOps,
+    snapshot_dir_override: Option<&std::path::Path>,
 ) -> SimardResult<()> {
     // Consolidate episodes (batch of 10) BEFORE clearing working memory, so a
     // consolidation failure aborts teardown rather than silently dropping the
@@ -213,19 +233,31 @@ pub fn persistence_memory_operations(
     )?;
 
     // Save a JSON snapshot for durable cross-session recall.  Errors are
-    // non-fatal: log and continue so a snapshot failure never aborts the
-    // session lifecycle.
-    if let Some(dir) = crate::memory_snapshot::snapshot_dir(None) {
-        match crate::memory_snapshot::save_session_snapshot(bridge, session_id.as_str(), &dir) {
-            Ok(path) => {
-                eprintln!("[simard] memory_snapshot: saved {}", path.display());
-                // Prune: keep only the 10 most recent snapshots.
-                prune_snapshots(&dir, 10);
-            }
-            Err(e) => {
-                eprintln!("[simard] memory_snapshot: save failed (non-fatal): {e}");
-            }
+    // PROPAGATED so the operator can fix the underlying disk/permission
+    // issue (issue #1604, gap G10).  Previously these errors were swallowed
+    // via `eprintln!`, which is exactly the silent-degradation bug class
+    // that #1427 was filed against.
+    if let Some(dir) = crate::memory_snapshot::snapshot_dir(snapshot_dir_override) {
+        let path =
+            crate::memory_snapshot::save_session_snapshot(bridge, session_id.as_str(), &dir)?;
+        tracing::info!(path = %path.display(), "memory_snapshot: saved");
+        // Prune: keep only the 10 most recent snapshots.
+        prune_snapshots(&dir, 10);
+    } else {
+        // `snapshot_dir` returned `None`.  When the caller supplied an
+        // explicit override and we still got `None`, that is a hard error
+        // (the override was unusable).  Otherwise it just means the home
+        // directory could not be resolved — log and continue so headless
+        // environments without `$HOME` are not broken.
+        if let Some(override_path) = snapshot_dir_override {
+            return Err(crate::error::SimardError::PersistentStoreIo {
+                store: "memory_snapshot".to_string(),
+                action: "snapshot_dir".to_string(),
+                path: override_path.to_path_buf(),
+                reason: "snapshot_dir() returned None for the supplied override".to_string(),
+            });
         }
+        tracing::info!("memory_snapshot: home directory not resolved — skipping save");
     }
 
     Ok(())
@@ -234,7 +266,11 @@ pub fn persistence_memory_operations(
 /// Delete all but the `keep` most-recent snapshot files in `dir`.
 ///
 /// Filenames are `<agent>-<epoch>.json`; lexicographic sort == chronological.
-/// Errors during deletion are logged but not propagated.
+/// Errors during deletion are logged via `tracing::warn!` (issue #1604,
+/// gap G11) so a stuck pruner is detectable through the existing
+/// `tracing-subscriber` / `tracing-opentelemetry` pipeline.  Errors are
+/// intentionally not propagated: leaving stale snapshots is preferable to
+/// failing the session teardown.
 fn prune_snapshots(dir: &std::path::Path, keep: usize) {
     let mut entries: Vec<std::path::PathBuf> = match std::fs::read_dir(dir) {
         Ok(rd) => rd
@@ -249,7 +285,11 @@ fn prune_snapshots(dir: &std::path::Path, keep: usize) {
             })
             .collect(),
         Err(e) => {
-            eprintln!("[simard] memory_snapshot: prune read_dir failed (non-fatal): {e}");
+            tracing::warn!(
+                dir = %dir.display(),
+                error = %e,
+                "memory_snapshot: prune read_dir failed (non-fatal)",
+            );
             return;
         }
     };
@@ -260,9 +300,10 @@ fn prune_snapshots(dir: &std::path::Path, keep: usize) {
     let to_delete = entries.len() - keep;
     for path in entries.iter().take(to_delete) {
         if let Err(e) = std::fs::remove_file(path) {
-            eprintln!(
-                "[simard] memory_snapshot: prune delete {} failed (non-fatal): {e}",
-                path.display()
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "memory_snapshot: prune delete failed (non-fatal)",
             );
         }
     }
