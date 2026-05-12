@@ -113,6 +113,50 @@ impl EngineerWorktree {
             reason,
         })?;
 
+        // 0b. Disk-pressure precheck (issue #1697 follow-up). Refuses to
+        //     allocate when the filesystem hosting `state_root` is below
+        //     half the configured threshold (default 20 GiB). The OODA
+        //     cycle treats `Refuse` as a transient failure and should
+        //     run `simard worktree-gc --apply` before retrying. The
+        //     check stat()s the closest existing ancestor of `state_root`
+        //     so it works even if the worktrees subdir has not been
+        //     created yet on a fresh install.
+        //
+        //     Disabled in three cases:
+        //       (a) `cfg(test)` — the in-crate unit tests run against a
+        //           tempdir on whatever filesystem the CI runner happens
+        //           to have; we can't gate them on 20 GiB free, and the
+        //           disk_pressure module has its own dedicated tests.
+        //       (b) `SIMARD_DISK_PRESSURE_DISABLE=1` — escape hatch for
+        //           constrained CI runners and one-off operator probes.
+        //       (c) `SIMARD_DISK_PRESSURE_MIN_FREE_GB=0` is handled
+        //           inside `configured_min_free_gb()` (it falls back to
+        //           the default, not to disabled).
+        if !cfg!(test) && std::env::var("SIMARD_DISK_PRESSURE_DISABLE").as_deref() != Ok("1") {
+            let probe_target = first_existing_ancestor(state_root)
+                .unwrap_or_else(|| std::path::PathBuf::from("/"));
+            match crate::disk_pressure::check_with_default_threshold(&probe_target) {
+                Ok(report) if report.should_refuse() => {
+                    return Err(SimardError::ActionExecutionFailed {
+                        action: format!("engineer_worktree::allocate(goal={goal_id})"),
+                        reason: report.refuse_message(),
+                    });
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    // statvfs failure is non-fatal: log loud and proceed.
+                    // Better to over-allocate during a stat outage than
+                    // to block the OODA cycle on a syscall hiccup.
+                    tracing::warn!(
+                        target: "simard::engineer_worktree",
+                        error = %e,
+                        path = %probe_target.display(),
+                        "disk_pressure stat failed; proceeding without precheck",
+                    );
+                }
+            }
+        }
+
         // 1. Resolve the parent repo's `main` HEAD. No fallback.
         let main_sha = git_capture(parent_repo, &["rev-parse", "main"]).map_err(|reason| {
             SimardError::ActionExecutionFailed {
@@ -342,3 +386,18 @@ use cleanup::{assert_under_root, cleanup_inner, create_worktrees_root, unique_su
 mod sweep;
 pub use sweep::sweep_orphaned_worktrees;
 use sweep::{git_capture, is_valid_sha40, validate_goal_id};
+
+/// Walk up from `path`, returning the first ancestor that exists on
+/// disk. Used by the disk-pressure precheck to find a path that
+/// `statvfs` can stat — on a fresh install, `state_root` (and the
+/// `engineer-worktrees` subdir under it) does not yet exist.
+fn first_existing_ancestor(path: &Path) -> Option<std::path::PathBuf> {
+    let mut cur: Option<&Path> = Some(path);
+    while let Some(p) = cur {
+        if p.exists() {
+            return Some(p.to_path_buf());
+        }
+        cur = p.parent();
+    }
+    None
+}
