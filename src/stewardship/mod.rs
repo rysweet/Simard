@@ -27,8 +27,9 @@ mod tests_extra;
 pub use dedup::{failure_signature, find_existing, normalize};
 pub use gh_client::{GhClient, GhIssue, RealGhClient};
 pub use merge_authority::{
-    MergeOutcome, PrGhClient, PrSnapshot, REQUIRED_EVIDENCE_HEADINGS, RealPrGhClient,
-    merge_pr_if_merge_ready,
+    BASE_ALLOWLIST_ENV, DEFAULT_BASE_ALLOWLIST, MergeOutcome, PrGhClient, PrSnapshot,
+    REQUIRED_EVIDENCE_HEADINGS, RealPrGhClient, base_allowlist_from_env, merge_pr_if_merge_ready,
+    merge_pr_if_merge_ready_with_allowlist,
 };
 pub use routing::route_failure;
 pub use types::{OrchestratorRunSummary, StewardshipOutcome, TargetRepo};
