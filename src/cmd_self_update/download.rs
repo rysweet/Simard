@@ -12,12 +12,52 @@ pub(crate) fn download_and_replace(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let current_exe =
         std::env::current_exe().map_err(|e| format!("Cannot determine current executable: {e}"))?;
+    let new_bin = download_to_temp(url, version)?;
+
+    // Replace current binary — atomic rename, with copy for cross-device installs
+    println!("Replacing binary...");
+    let backup = current_exe.with_extension("old");
+    if backup.exists() {
+        let _ = fs::remove_file(&backup);
+    }
+    fs::rename(&current_exe, &backup)
+        .map_err(|e| format!("Failed to backup current binary (try running with sudo): {e}"))?;
+
+    // rename is O(1) on same filesystem; copy handles cross-device moves
+    if fs::rename(&new_bin, &current_exe).is_err() {
+        fs::copy(&new_bin, &current_exe)
+            .map_err(|e| format!("Failed to install new binary: {e}"))?;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&current_exe, fs::Permissions::from_mode(0o755))?;
+    }
+
+    // Clean up
+    let _ = fs::remove_file(&backup);
+    if let Some(parent) = new_bin.parent() {
+        let _ = fs::remove_dir_all(parent);
+    }
+
+    println!("Updated simard: {CURRENT_VERSION} → {version}");
+    Ok(())
+}
+
+/// Download and extract the simard release into a temp directory, returning
+/// the path to the extracted binary. Used by both `download_and_replace`
+/// (which then rename()s into the live install) and the safe-update flow
+/// (which copies to a candidate path and runs pre-test before swapping).
+pub(crate) fn download_to_temp(
+    url: &str,
+    version: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let tmp_dir = std::env::temp_dir().join(format!("simard-update-{}", std::process::id()));
     fs::create_dir_all(&tmp_dir)?;
     let archive_path = tmp_dir.join("simard.tar.gz");
 
     println!("Downloading simard v{version}...");
-
     let archive_str = archive_path.to_str().unwrap_or("simard.tar.gz");
     let mut last_err = String::from("Download failed");
     let mut downloaded = false;
@@ -50,22 +90,16 @@ pub(crate) fn download_and_replace(
                 downloaded = true;
                 break;
             }
-            Ok(status) => {
-                last_err = format!("curl exited with status {status}");
-            }
-            Err(e) => {
-                last_err = format!("Failed to run curl: {e}");
-            }
+            Ok(status) => last_err = format!("curl exited with status {status}"),
+            Err(e) => last_err = format!("Failed to run curl: {e}"),
         }
     }
-
     if !downloaded {
         let _ = fs::remove_dir_all(&tmp_dir);
         return Err(format!("Download failed after 3 attempts: {last_err}").into());
     }
 
     println!("Extracting...");
-
     let tar_status = std::process::Command::new("tar")
         .args([
             "xzf",
@@ -82,41 +116,11 @@ pub(crate) fn download_and_replace(
         ])
         .status()
         .map_err(|e| format!("Failed to extract archive: {e}"))?;
-
     if !tar_status.success() {
         let _ = fs::remove_dir_all(&tmp_dir);
         return Err("Extraction failed".into());
     }
-
-    let new_bin = find_binary_in_dir(&tmp_dir)?;
-
-    // Replace current binary — atomic rename, with copy for cross-device installs
-    println!("Replacing binary...");
-    let backup = current_exe.with_extension("old");
-    if backup.exists() {
-        let _ = fs::remove_file(&backup);
-    }
-    fs::rename(&current_exe, &backup)
-        .map_err(|e| format!("Failed to backup current binary (try running with sudo): {e}"))?;
-
-    // rename is O(1) on same filesystem; copy handles cross-device moves
-    if fs::rename(&new_bin, &current_exe).is_err() {
-        fs::copy(&new_bin, &current_exe)
-            .map_err(|e| format!("Failed to install new binary: {e}"))?;
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&current_exe, fs::Permissions::from_mode(0o755))?;
-    }
-
-    // Clean up
-    let _ = fs::remove_file(&backup);
-    let _ = fs::remove_dir_all(&tmp_dir);
-
-    println!("Updated simard: {CURRENT_VERSION} → {version}");
-    Ok(())
+    find_binary_in_dir(&tmp_dir)
 }
 
 /// Find the simard binary in an extracted directory tree (max depth 3).

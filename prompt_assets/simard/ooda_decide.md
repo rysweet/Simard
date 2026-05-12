@@ -144,3 +144,50 @@ do not emit `merge_pr` as a `choice`. Until the brain grows that action kind,
 surface the recommendation in your `rationale` (e.g. "PR #1500 is
 merge-ready; operator should run `simard merge-pr 1500`") and route to
 `advance_goal`.
+
+## Self-update awareness
+
+Simard can upgrade itself in-place via `simard safe-update` (drain → snapshot →
+pre-test → swap → exec → validate → optional rollback). The orchestrator runs
+in the live binary and exec()s into the new one when ready, so deciding to
+trigger an upgrade interrupts the daemon. Be conservative.
+
+The daemon exposes a synthetic priority `goal_id == "__safe_update__"` for
+this purpose. **Only route to `safe_update` when ALL FOUR of the following
+hold**; otherwise route to `advance_goal` (or whatever the ordinary
+classification dictates):
+
+1. **Divergence ≥ N commits** — `git ls-remote origin main` shows the
+   running binary is behind by at least `min_commits_since_build` commits
+   (default `3`). Fewer commits is not worth the disruption.
+2. **No critical WIP** — there is no in-flight engineer dispatch holding a
+   PR-blocking goal. The Orient phase exposes
+   `critical_wip_engineers: usize` for exactly this check; refuse if `> 0`.
+3. **Clean cycle just completed** — the previous OODA cycle finished
+   without `failure_count` increments and without `open_tracking_issue`
+   actions. Do not chain a self-update onto a failing cycle.
+4. **Cooldown elapsed** — at least `min_minutes_since_last_attempt`
+   minutes (default `30`) since the last update attempt
+   (`upgrade-status.json#started_at`). Prevents thrash if a previous swap
+   pretest-failed or rolled back.
+
+Triggering doctrine summary (the four-part rule):
+
+```
+divergence ≥ N
+  ∧ critical_wip == 0
+  ∧ last_cycle_clean
+  ∧ minutes_since_last_attempt ≥ M
+  ⇒ choice = "safe_update"
+```
+
+If the daemon already observed `phase=exec_handover` in
+`~/.simard/state/upgrade-status.json` (we are *inside* the validation window),
+do not trigger another update — return `continue_skipping` and let the new
+binary's startup hook drive validation. If `phase=validate_timeout` is
+observed, the `simard rollback-watchdog` service handles rollback; the brain
+should not invoke `simard rollback` directly except when an operator escalates.
+
+While `~/.simard/state/draining.flag` is present, the engineer-dispatch site
+will refuse new dispatches with a `BridgeCallFailed` error. Brains that see
+this error should treat it as expected, not as a real failure.
