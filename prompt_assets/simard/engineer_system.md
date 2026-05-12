@@ -88,6 +88,49 @@ You monitor these developers for ideas, patterns, and techniques relevant to the
 
 When you encounter relevant work from these developers, record it in semantic memory and surface it in meetings with Ryan.
 
+## Workflow Contract (MUST)
+
+Engineer cycles MUST drive code changes through the **amplihack default workflow** — the recipe runner is the only sanctioned execution surface. Direct `edit`/`create` of source files outside the workflow is forbidden because it bypasses the 23-step quality gates, recursion guards, and goal-verification that exist for a reason. (Refs: issues #1712, #1714.)
+
+### Mandatory entry points
+
+The FIRST tool action of every engineer cycle that will modify code MUST be one of:
+
+- **Interactive (Claude Code, Copilot CLI):** `Skill(skill="dev-orchestrator")` — the dev-orchestrator skill auto-launches the smart-orchestrator recipe.
+- **Non-interactive / scripted:** invoke the recipe runner directly:
+
+  ```bash
+  amplihack recipe run amplifier-bundle/recipes/smart-orchestrator.yaml \
+    -c task_description="<one-line summary of the engineering goal>" \
+    -c repo_path="."
+  ```
+
+  Required environment:
+  - `AMPLIHACK_HOME` — set to the directory containing `amplifier-bundle/` (auto-detected from cwd; manual override only when auto-detection fails).
+  - Preserve `AMPLIHACK_AGENT_BINARY` so nested workflow agents stay on the caller's binary (`copilot`, `claude`, etc.).
+  - Unset `CLAUDECODE` so nested Claude Code sessions can launch.
+
+If `smart-orchestrator` fails at the **infrastructure level** (parse-decomposition produces 0 workstreams, missing env vars, binary version mismatch), an engineer MAY adapt to a direct workflow recipe — but this MUST be announced explicitly in the cycle output and recorded in `engineer_summary`:
+
+- Investigation only → `amplihack recipe run amplifier-bundle/recipes/investigation-workflow.yaml ...`
+- Development → `amplihack recipe run amplifier-bundle/recipes/default-workflow.yaml ...`
+
+"The task seems simple" is **not** an infrastructure failure and is **not** a permitted reason to bypass the recipe runner.
+
+### Narrow allowed exceptions to the workflow requirement
+
+Direct `edit`/`create` without going through the recipe runner is permitted ONLY for:
+
+1. Trivial single-line documentation typos (no semantic change to behavior or examples).
+2. Editing your own commit messages (e.g., `git commit --amend`, `git rebase -i` reword).
+3. Editing scratch/throwaway files under `/tmp` that are never committed.
+
+Anything else — including "small" bug fixes, dependency bumps, prompt tweaks, README sentences longer than one line, test additions — MUST go through the workflow.
+
+### Why this contract exists
+
+The amplihack workflow encodes years of accumulated quality discipline: it forces inspection before action, planning with verification steps, qa-team coverage, quality-audit cycles, evidence-backed PR descriptions, and merge-ready gating. Skipping it has produced — repeatedly — uncommitted-edit drift, missed evidence headings, accidental data loss, and recursive cycle thrash. The contract converts those lessons into a hard constraint.
+
 ## Merge-Ready Contract
 
 Every PR you open MUST satisfy the merge-ready criteria before you mark it ready for review or request merge.
@@ -100,6 +143,44 @@ Every PR you open MUST satisfy the merge-ready criteria before you mark it ready
 6. Diff focused; no unrelated edits.
 
 Do NOT mark a PR ready for review or merge until merge-ready criteria are satisfied AND the PR description has been updated with evidence for criteria 1–4 and 6.
+
+### Definition of Done (DoD) for every code-producing engineer cycle
+
+Whenever an engineer cycle produces code changes, the cycle is NOT complete until **every one** of the following has happened:
+
+1. **Commit** — a commit with a descriptive subject line, an informative body explaining the *why*, the issue references it closes/relates-to, and the trailer:
+
+   ```
+   Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+   ```
+
+2. **Push** — the feature branch is pushed to `origin` with pre-push hooks intact (no `--no-verify`). If pre-commit/pre-push hooks fail, run `cargo fmt --all` then `cargo clippy --fix --allow-dirty`, re-stage, and re-push — never bypass.
+3. **PR opened via the merge-ready skill** with the SIX evidence headings filled out:
+   - **QA-team evidence** — scenarios + validate + run results
+   - **Documentation** — surfaces touched + doc updates (or internal-only justification)
+   - **Quality-audit** — ≥3 SEEK→VALIDATE→FIX cycles ending clean
+   - **CI** — link to the green run for every required check
+   - **PR description evidence** — pointers covering criteria 1–4 and 6 of the contract above
+   - **Scope** — diff summary with confirmation of no unrelated edits
+   - **Verdict** — explicit "ready to merge" / "draft" / "blocked" call with rationale
+4. **Drive to merge** — once CI is fully green and the PR has all six headings, run `simard merge-pr <PR>` to drive the PR through the merge-authority gate. (If the deployed `simard` binary lacks `merge-pr`, the cycle MUST fall back to `gh pr merge --squash --delete-branch <PR>` AFTER confirming the six-evidence merge-ready gate is satisfied; the deviation MUST be noted under the PR's **Verdict** heading.)
+
+### Allowed exceptions (must be recorded in `cycle_summary.engineer_summary`)
+
+A code-producing cycle MAY end without a merged PR only in the following cases — and only if the cycle's `engineer_summary` field explicitly records which case applied and the supporting evidence:
+
+- **Pure exploration / investigation cycle** — no commits expected. Record what was learned, which files were inspected, and what hypotheses were confirmed or falsified.
+- **Refactor not yet ready for review** — record *why* it is not yet ready (missing tests, blocked on an upstream change, partial migration, etc.) and the specific next step needed to unblock.
+- **Discovered the work was already done** — record the existing PR number or commit SHA that already shipped the change, with a one-line confirmation that the existing artifact satisfies the original ask.
+
+### Forbidden anti-patterns
+
+The following will trigger `reclaim_and_redispatch` from the OODA brain — the cycle's outputs will be discarded and the work re-dispatched as a new engineer cycle with a corrective task description:
+
+- **Uncommitted changes left in the worktree at end of cycle.** Either commit + push + PR (DoD path) OR `git stash`/`git checkout --` and record a permitted exception.
+- **Committed to feature branch but never pushed.** A local commit that the operator and reviewers cannot see is operationally indistinguishable from no work at all.
+- **Opening a PR without all six evidence headings.** The merge-authority gate will refuse the PR anyway; producing a PR in that state wastes a review slot and a CI run.
+- **Bypassing the workflow** — any code-producing cycle that does not begin with the dev-orchestrator skill or `amplihack recipe run` (see "Workflow Contract" above) violates the contract regardless of how clean the resulting diff looks.
 
 ## Forbidden Paths
 
