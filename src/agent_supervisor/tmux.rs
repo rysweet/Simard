@@ -70,6 +70,59 @@ pub fn build_tmux_wrapped_command(
     argv
 }
 
+/// Default fallback root for per-worktree cargo target dirs when neither
+/// `CARGO_TARGET_DIR` nor `SIMARD_CARGO_TARGETS_ROOT` is set in the parent
+/// env, AND `HOME` is also absent. Kept under `/tmp` so a missing-HOME
+/// edge case can never escalate into writing target artifacts somewhere
+/// the operator did not anticipate.
+pub const DEFAULT_CARGO_TARGETS_ROOT_FALLBACK: &str = "/tmp/simard-cargo-targets";
+
+/// Default subdirectory of `$HOME` used as the per-worktree cargo targets
+/// root when `SIMARD_CARGO_TARGETS_ROOT` is unset.
+pub const DEFAULT_CARGO_TARGETS_HOME_SUBDIR: &str = ".cargo-targets";
+
+/// Compute the default `CARGO_TARGET_DIR` for an engineer worktree at
+/// `worktree_path`. Pure — pulls `HOME` and `SIMARD_CARGO_TARGETS_ROOT`
+/// from `parent_pairs` only (never `std::env`).
+///
+/// Resolution order:
+/// 1. `<SIMARD_CARGO_TARGETS_ROOT>/<worktree_basename>` if the env var is set.
+/// 2. `<HOME>/.cargo-targets/<worktree_basename>` if `HOME` is set in
+///    parent_pairs (the production case — the OODA daemon always inherits
+///    `HOME` from the operator shell).
+/// 3. `/tmp/simard-cargo-targets/<worktree_basename>` as a last-resort fallback.
+///
+/// The basename is taken from `worktree_path.file_name()`. If the path has
+/// no terminal component (extremely unlikely — would require `/`), the
+/// literal string `"engineer-worktree"` is substituted so the resulting
+/// path is still well-formed and per-engineer (the worktree path's full
+/// hash gets folded in by callers via the directory layout, but for this
+/// purely defensive branch we accept a shared fallback dir).
+fn default_cargo_target_for_worktree(
+    worktree_path: &Path,
+    parent_pairs: &[(String, String)],
+) -> String {
+    let basename = worktree_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "engineer-worktree".to_string());
+
+    let lookup = |key: &str| -> Option<String> {
+        parent_pairs
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+            .filter(|v| !v.is_empty())
+    };
+
+    let root = lookup("SIMARD_CARGO_TARGETS_ROOT")
+        .or_else(|| lookup("HOME").map(|h| format!("{h}/{DEFAULT_CARGO_TARGETS_HOME_SUBDIR}")))
+        .unwrap_or_else(|| DEFAULT_CARGO_TARGETS_ROOT_FALLBACK.to_string());
+
+    format!("{root}/{basename}")
+}
+
 /// Build the `(KEY, VALUE)` pairs that must be passed to
 /// `tmux new-session -e KEY=VAL` so the engineer subprocess inherits them.
 ///
@@ -80,8 +133,21 @@ pub fn build_tmux_wrapped_command(
 ///    - `SIMARD_SUBORDINATE_DEPTH` = `config.current_depth + 1`
 ///    - `CARGO_BUILD_JOBS`         = `"4"` (issue #373 OOM guard)
 /// 2. `CARGO_TARGET_DIR` honors a `parent_env` override; otherwise defaults
-///    to `/tmp/simard-engineer-target` (issue #1197 — share one target dir
-///    across all engineer worktrees).
+///    to a **per-worktree** path so concurrent engineers never share one
+///    cargo target dir (which would deadlock cargo's file lock or corrupt
+///    incremental output). The default is
+///    `<root>/<basename(config.worktree_path)>`, where `<root>` resolves
+///    in this order:
+///     1. `SIMARD_CARGO_TARGETS_ROOT` env (operator override),
+///     2. `<HOME>/.cargo-targets` (production default),
+///     3. `/tmp/simard-cargo-targets` (last-resort fallback when HOME
+///        is absent — should never happen under the OODA daemon).
+///
+///    This intentionally REPLACES the previous shared
+///    `/tmp/simard-engineer-target` default: that path caused 7-12 GB
+///    target dirs to be created in every engineer worktree once
+///    concurrent engineers deadlocked on the cargo build lock and fell
+///    back to per-worktree builds (the disk-fill incident, issue #1697).
 /// 3. Every `SIMARD_*` entry from `parent_env` that isn't already in (1) is
 ///    appended, sorted by key for stable test/debug ordering.
 ///
@@ -108,7 +174,8 @@ where
         .iter()
         .find(|(k, _)| k == "CARGO_TARGET_DIR")
         .map(|(_, v)| v.clone())
-        .unwrap_or_else(|| "/tmp/simard-engineer-target".to_string());
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| default_cargo_target_for_worktree(&config.worktree_path, &parent_pairs));
     tmux_env.push(("CARGO_TARGET_DIR".to_string(), cargo_target));
 
     // Forward every SIMARD_* var from parent_env that isn't already set.
