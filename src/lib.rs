@@ -109,6 +109,7 @@ mod tests_base_type_copilot;
 mod tests_memory_ipc;
 pub mod trace_collector;
 pub mod util;
+pub mod worktree_gc;
 
 pub use agent_goal_assignment::{
     SubordinateProgress, assign_goal, poll_progress, read_assigned_goal, report_progress,

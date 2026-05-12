@@ -9,6 +9,7 @@ mod merge;
 mod ooda;
 mod review;
 mod safe_update;
+mod worktree_gc;
 
 use std::path::PathBuf;
 
@@ -53,6 +54,8 @@ Product modes:
   dashboard serve [--port=8080]
   spawn <agent-name> <goal> <worktree-path> [--depth=N]
   merge-pr <pr-number>   — squash-merge PR in rysweet/Simard if it is merge-ready
+  worktree-gc [--apply] [--idle-days=N] [--root=PATH ...] [--parent-repo=PATH]
+                         — prune merged/stale engineer worktrees (dry-run by default)
   handover [--canary-dir=PATH] [--manifest-dir=PATH]
   update
   self-test
@@ -107,6 +110,7 @@ where
         "dashboard" => dashboard::dispatch_dashboard_command(args),
         "spawn" => dispatch_spawn_command(args),
         "merge-pr" => merge::dispatch_merge_pr_command(args),
+        "worktree-gc" => worktree_gc::dispatch_worktree_gc_command(args),
         "handover" => dispatch_handover_command(args),
         "bootstrap" => dispatch_bootstrap_command(args),
         "act-on-decisions" => {
@@ -147,7 +151,7 @@ where
 }
 
 pub fn operator_cli_usage() -> &'static str {
-    "usage: simard <engineer|meeting|goal-curation|improvement-curation|gym|ooda|spawn|merge-pr|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap> ..."
+    "usage: simard <engineer|meeting|goal-curation|improvement-curation|gym|ooda|spawn|merge-pr|worktree-gc|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap> ..."
 }
 
 pub fn operator_cli_help() -> &'static str {
