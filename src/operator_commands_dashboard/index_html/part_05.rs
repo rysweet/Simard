@@ -7,7 +7,7 @@ pub(crate) const PART_05: &str = r#"      try {
           body.innerHTML = hosts.map(h => renderTmuxHost(h)).join('');
         }
         const ts = document.getElementById('tmux-last-refreshed');
-        if(ts) ts.textContent = data.refreshed_at ? new Date(data.refreshed_at).toLocaleString() : new Date().toLocaleString();
+        if(ts) ts.textContent = data.refreshed_at ? formatTime(data.refreshed_at) : formatTime(Date.now());
       } catch(e) {
         body.innerHTML = '<div style="color:#f85149;font-size:.85rem">Failed to load tmux sessions: '+esc(e.message||e)+'</div>';
       }

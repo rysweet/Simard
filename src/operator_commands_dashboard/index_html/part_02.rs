@@ -159,7 +159,7 @@ pub(crate) const PART_02: &str = r#"          if(d.ooda_transcripts?.length){
         const d=await apiFetch('/api/memory');
         let overviewHtml=`
           <div class="stat"><span class="label">Total Facts</span><span class="value">${d.total_facts}</span></div>
-          <div class="stat"><span class="label">Last Consolidation</span><span class="value">${d.last_consolidation?timeAgo(d.last_consolidation)+' ('+new Date(d.last_consolidation).toLocaleString()+')':'Never'}</span></div>
+          <div class="stat"><span class="label">Last Consolidation</span><span class="value">${d.last_consolidation?timeAgo(d.last_consolidation)+' ('+formatTime(d.last_consolidation)+')':'Never'}</span></div>
           <div class="stat"><span class="label">State Root</span><span class="value" style="font-size:.8rem;word-break:break-all">${esc(d.state_root)}</span></div>`;
         if(d.native_memory){
           const nm=d.native_memory;

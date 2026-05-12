@@ -15,6 +15,7 @@ pub(crate) const PART_01: &str = r#"      </div>
   </div>
 
   <div class="tab-content" id="tab-terminal">
+    <div class="page-intro">Attach to the live tmux terminal session of a running subordinate agent and watch its stdout/stderr stream.</div>
     <div class="card" style="max-width:980px">
       <h2>Agent Terminal</h2>
       <div style="background:#1a1a2e;border:1px solid #333;border-radius:6px;padding:.6rem;margin-bottom:.75rem;font-size:.8rem;color:#8b949e">
@@ -79,12 +80,21 @@ pub(crate) const PART_01: &str = r#"      </div>
     }
     function timeAgo(ts){
       if(!ts)return'—';
-      const d=new Date(ts);if(isNaN(d))return ts;
+      const d=parseTs(ts);if(!d||isNaN(d))return String(ts);
       const s=Math.floor((Date.now()-d.getTime())/1000);
       if(s<5)return'just now';if(s<60)return s+'s ago';
       const m=Math.floor(s/60);if(m<60)return m+'m ago';
       const h=Math.floor(m/60);if(h<24)return h+'h ago';
       const days=Math.floor(h/24);return days+'d ago';
+    }
+    function parseTs(ts){
+      if(ts==null||ts==='')return null;
+      if(typeof ts==='number'&&isFinite(ts)){return new Date(ts<1e12?ts*1000:ts);}
+      const d=new Date(ts);return isNaN(d)?null:d;
+    }
+    function formatTime(ts){
+      const d=parseTs(ts);if(!d)return ts==null?'—':String(ts);
+      try{return d.toLocaleString();}catch(_){return d.toISOString();}
     }
     function copyLogContent(id){
       const el=document.getElementById(id);if(!el)return;
@@ -194,7 +204,7 @@ pub(crate) const PART_01: &str = r#"      </div>
         if(tab.dataset.tab==='terminal') {initAgentLogTerminal();fetchSubagentSessions();tabRefreshTimers.subagent=setInterval(fetchSubagentSessions,5000);fetchTmuxSessions();tabRefreshTimers.tmux=setInterval(fetchTmuxSessions,10000);}
       });
     });
-    setInterval(()=>{document.getElementById('clock').textContent=new Date().toLocaleString()},1000);
+    setInterval(()=>{document.getElementById('clock').textContent=formatTime(Date.now())},1000);
 
     /* --- Status --- */
     async function fetchStatus(){

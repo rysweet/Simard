@@ -215,6 +215,426 @@ mod tests {
     }
 
     #[test]
+    fn index_html_has_per_tab_intros_and_tooltips() {
+        // Issue #1662 pass-1: every tab gets a hover-tooltip and a one-sentence intro
+        // so first-time readers can orient without clicking through to documentation.
+        assert!(
+            INDEX_HTML.contains(r#"class="page-intro""#),
+            "page-intro CSS class should be used at least once"
+        );
+        // .page-intro CSS rule is registered (style block).
+        assert!(INDEX_HTML.contains(".page-intro{"));
+        // Spot-check a few tab tooltips so future refactors keep them in sync.
+        assert!(INDEX_HTML.contains(r#"data-tab="overview" title="System health"#));
+        assert!(INDEX_HTML.contains(r#"data-tab="goals" title="Active goals"#));
+        assert!(INDEX_HTML.contains(r#"data-tab="terminal" title="Attach to the agent"#));
+        // All 11 tab-content containers should now precede a page-intro div.
+        let intro_count = INDEX_HTML.matches(r#"class="page-intro""#).count();
+        assert!(
+            intro_count >= 11,
+            "expected at least 11 .page-intro divs (one per tab), found {intro_count}"
+        );
+    }
+
+    #[test]
+    fn index_html_has_format_time_helper() {
+        // Issue #1662 pass-1: a single formatTime() helper centralises ISO/Unix-epoch
+        // -> human-readable rendering so we do not sprinkle new Date(...).toLocaleString()
+        // across the SPA. timeAgo() now delegates to the same parseTs() helper.
+        assert!(INDEX_HTML.contains("function formatTime(ts)"));
+        assert!(INDEX_HTML.contains("function parseTs(ts)"));
+        // Live header clock must use formatTime, not a raw toLocaleString call.
+        assert!(INDEX_HTML.contains("getElementById('clock').textContent=formatTime("));
+        assert!(
+            !INDEX_HTML.contains("new Date().toLocaleString()"),
+            "no remaining `new Date().toLocaleString()` call sites should exist"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Issue #1662 pass-1 — TDD CONTRACT TESTS
+    //
+    // The two tests above are spot-checks. The block below is the formal
+    // behavioural contract for the three pass-1 changes (tab tooltips,
+    // per-tab intros, formatTime/parseTs helpers + migrated call sites).
+    // Each test should:
+    //   * pass against the committed implementation (commit 6a47e540)
+    //   * fail against pre-implementation HEAD or a regressed impl
+    //
+    // If you add a new tab, retire one, or refactor the time helpers,
+    // these tests are the source-of-truth for what the dashboard owes
+    // a first-time user and which call sites must funnel through the
+    // shared formatter.
+    // -------------------------------------------------------------------
+
+    /// Every one of the eleven top-level SPA tabs must carry a non-empty
+    /// `title="…"` hover-tooltip. Iterates the canonical tab list so that
+    /// adding/removing a tab in `part_00.rs` immediately surfaces a missing
+    /// tooltip via this test rather than a silent UX regression.
+    #[test]
+    fn index_html_all_eleven_tabs_have_tooltips() {
+        // Canonical SPA tab set (see part_00.rs:99-109). This list is the
+        // contract — keep in sync if tabs are added or removed.
+        let tabs = [
+            "overview",
+            "goals",
+            "traces",
+            "logs",
+            "processes",
+            "memory",
+            "costs",
+            "chat",
+            "workboard",
+            "thinking",
+            "terminal",
+        ];
+        assert_eq!(tabs.len(), 11, "expected exactly 11 top-level tabs");
+
+        for tab in &tabs {
+            let needle = format!(r#"data-tab="{tab}" title=""#);
+            assert!(
+                INDEX_HTML.contains(&needle),
+                "tab `{tab}` is missing a title=\"…\" hover-tooltip — \
+                 first-time users will have no idea what this tab does. \
+                 Looked for: `{needle}`"
+            );
+        }
+    }
+
+    /// Tooltips must be substantive prose, not a one-word echo of the tab
+    /// label. A meaningful threshold is ≥18 chars after the `title="`
+    /// opening — long enough to communicate intent, short enough to fit
+    /// in a browser tooltip.
+    #[test]
+    fn index_html_tab_tooltips_are_substantive() {
+        const MIN_LEN: usize = 18;
+        let tabs = [
+            "overview",
+            "goals",
+            "traces",
+            "logs",
+            "processes",
+            "memory",
+            "costs",
+            "chat",
+            "workboard",
+            "thinking",
+            "terminal",
+        ];
+        for tab in &tabs {
+            let prefix = format!(r#"data-tab="{tab}" title=""#);
+            let start = INDEX_HTML
+                .find(&prefix)
+                .unwrap_or_else(|| panic!("tab `{tab}` declaration not found"));
+            let after = &INDEX_HTML[start + prefix.len()..];
+            let end = after
+                .find('"')
+                .unwrap_or_else(|| panic!("tab `{tab}` title attr is unterminated"));
+            let title = &after[..end];
+            assert!(
+                title.len() >= MIN_LEN,
+                "tab `{tab}` tooltip is too short to be useful (got {} chars: {:?})",
+                title.len(),
+                title
+            );
+        }
+    }
+
+    /// Each of the eleven `tab-content` containers (`id="tab-<name>"`)
+    /// must contain at least one `<div class="page-intro">…</div>` inside
+    /// its body — i.e. between the opening `id="tab-<name>"` and the next
+    /// `id="tab-` of any kind (the next sibling tab-content). Guarantees
+    /// the intro banner is scoped to each page rather than leaking from a
+    /// neighbour.
+    #[test]
+    fn index_html_each_tab_content_has_intro_inside_it() {
+        let tabs = [
+            "overview",
+            "goals",
+            "traces",
+            "logs",
+            "processes",
+            "memory",
+            "costs",
+            "chat",
+            "workboard",
+            "thinking",
+            "terminal",
+        ];
+        for tab in &tabs {
+            let open = format!(r#"id="tab-{tab}""#);
+            let start = INDEX_HTML
+                .find(&open)
+                .unwrap_or_else(|| panic!("`{open}` container not found"));
+            // Find the next tab-content opening (any tab); use end-of-doc
+            // as the boundary for the final tab.
+            let after = &INDEX_HTML[start + open.len()..];
+            let end_rel = after.find(r#"id="tab-"#).unwrap_or(after.len());
+            let body = &after[..end_rel];
+            assert!(
+                body.contains(r#"class="page-intro""#),
+                "tab `{tab}` (id=tab-{tab}) is missing its `<div class=\"page-intro\">` intro \
+                 banner inside the tab-content body — first-time readers won't get the \
+                 'What is this page?' orientation sentence."
+            );
+        }
+    }
+
+    /// The `.page-intro` CSS rule must use the accent-border styling
+    /// agreed in the design spec (a discreet left border in the accent
+    /// colour). Locks the visual contract so future stylesheet refactors
+    /// cannot silently drop the affordance.
+    #[test]
+    fn index_html_page_intro_css_uses_accent_border() {
+        // Locate the CSS rule body and assert it carries the accent border.
+        let rule_start = INDEX_HTML
+            .find(".page-intro{")
+            .expect(".page-intro{ CSS rule must be present");
+        let rule_end_rel = INDEX_HTML[rule_start..]
+            .find('}')
+            .expect(".page-intro CSS rule must be closed by `}`");
+        let rule = &INDEX_HTML[rule_start..rule_start + rule_end_rel];
+        assert!(
+            rule.contains("border-left:") && rule.contains("var(--accent)"),
+            ".page-intro CSS rule must use a left border in the accent colour \
+             (got: {rule:?})"
+        );
+        assert!(
+            rule.contains("padding"),
+            ".page-intro should be padded so prose isn't flush against the border"
+        );
+    }
+
+    /// `parseTs` is the shared input normaliser. Its source must encode
+    /// the four-input contract: null/empty → null, finite number →
+    /// auto-detect seconds-vs-milliseconds via the 1e12 heuristic, ISO
+    /// string → `new Date()`, anything else → null. We assert against the
+    /// JS source rather than executing it because the SPA bundle is a
+    /// static string at build time.
+    #[test]
+    fn index_html_parse_ts_encodes_full_input_contract() {
+        // Find the parseTs body.
+        let start = INDEX_HTML
+            .find("function parseTs(ts){")
+            .expect("parseTs(ts) helper must exist");
+        let body_after = &INDEX_HTML[start..];
+        let end_rel = body_after
+            .find("function ")
+            .and_then(|first| {
+                body_after[first + 9..]
+                    .find("function ")
+                    .map(|n| first + 9 + n)
+            })
+            .unwrap_or_else(|| body_after.len().min(400));
+        let body = &body_after[..end_rel];
+
+        assert!(
+            body.contains("ts==null") || body.contains("ts === null") || body.contains("ts==='"),
+            "parseTs must guard against null/empty input — body: {body:?}"
+        );
+        assert!(
+            body.contains("ts===''") || body.contains(r#"ts==="""#) || body.contains("''"),
+            "parseTs must treat the empty string as null — body: {body:?}"
+        );
+        assert!(
+            body.contains("typeof ts==='number'") || body.contains("typeof ts === 'number'"),
+            "parseTs must distinguish number inputs from strings — body: {body:?}"
+        );
+        assert!(
+            body.contains("1e12"),
+            "parseTs must use the 1e12 heuristic to auto-detect seconds vs milliseconds \
+             (anything < 1e12 is seconds, multiplied by 1000 before `new Date(…)`) — \
+             body: {body:?}"
+        );
+        assert!(
+            body.contains("new Date(ts"),
+            "parseTs must fall back to `new Date(ts)` for ISO strings — body: {body:?}"
+        );
+        assert!(
+            body.contains("isNaN"),
+            "parseTs must reject invalid date strings via isNaN — body: {body:?}"
+        );
+    }
+
+    /// `timeAgo` must delegate to `parseTs` rather than calling
+    /// `new Date(ts)` directly — otherwise a Unix-epoch number passed to
+    /// `timeAgo` would be misinterpreted as a millisecond value. The
+    /// shared helper is the single chokepoint that fixes that bug class.
+    #[test]
+    fn index_html_time_ago_delegates_to_parse_ts() {
+        let start = INDEX_HTML
+            .find("function timeAgo(ts){")
+            .expect("timeAgo(ts) helper must exist");
+        let body_after = &INDEX_HTML[start..];
+        // timeAgo body ends at the next `function ` declaration.
+        let end_rel = body_after[20..]
+            .find("function ")
+            .map(|n| 20 + n)
+            .unwrap_or(body_after.len().min(400));
+        let body = &body_after[..end_rel];
+
+        assert!(
+            body.contains("parseTs(ts)"),
+            "timeAgo must call parseTs(ts) so it accepts the same input types as \
+             formatTime — body: {body:?}"
+        );
+        assert!(
+            !body.contains("new Date(ts)"),
+            "timeAgo must NOT call new Date(ts) directly — that bypasses the \
+             seconds-vs-milliseconds heuristic in parseTs. Found: {body:?}"
+        );
+    }
+
+    /// `formatTime` must:
+    ///   * return an em-dash `'—'` for null inputs (the canonical "no
+    ///     value" indicator used elsewhere in the SPA),
+    ///   * delegate parsing to `parseTs`,
+    ///   * fall back to ISO format when `toLocaleString()` throws (some
+    ///     locales reject certain timezones).
+    #[test]
+    fn index_html_format_time_handles_null_and_locale_errors() {
+        let start = INDEX_HTML
+            .find("function formatTime(ts){")
+            .expect("formatTime(ts) helper must exist");
+        let body_after = &INDEX_HTML[start..];
+        let end_rel = body_after[24..]
+            .find("function ")
+            .map(|n| 24 + n)
+            .unwrap_or(body_after.len().min(400));
+        let body = &body_after[..end_rel];
+
+        assert!(
+            body.contains("parseTs(ts)"),
+            "formatTime must delegate to parseTs — body: {body:?}"
+        );
+        assert!(
+            body.contains("'—'") || body.contains(r#""—""#),
+            "formatTime must return em-dash '—' for null/empty input \
+             (canonical no-value indicator) — body: {body:?}"
+        );
+        assert!(
+            body.contains("toLocaleString()"),
+            "formatTime must use toLocaleString() as the primary renderer — body: {body:?}"
+        );
+        assert!(
+            body.contains("toISOString()"),
+            "formatTime must fall back to toISOString() if toLocaleString throws \
+             (some locales reject certain timezones) — body: {body:?}"
+        );
+        assert!(
+            body.contains("catch"),
+            "formatTime must wrap toLocaleString() in try/catch — body: {body:?}"
+        );
+    }
+
+    /// The Memory tab's "Last Consolidation" stat (part_02.rs) must render
+    /// its absolute timestamp via the shared `formatTime` helper, not via
+    /// a direct `new Date(...).toLocaleString()` call. This was one of the
+    /// three migrated call sites named in the design spec.
+    #[test]
+    fn index_html_last_consolidation_uses_format_time() {
+        // The stat appears as a single template-literal line; locate by label.
+        let pos = INDEX_HTML
+            .find("Last Consolidation")
+            .expect("'Last Consolidation' stat must exist on the Memory tab");
+        let window_end = (pos + 600).min(INDEX_HTML.len());
+        let window = &INDEX_HTML[pos..window_end];
+        assert!(
+            window.contains("formatTime(d.last_consolidation)"),
+            "Last Consolidation stat must call formatTime(d.last_consolidation) — \
+             window: {window:?}"
+        );
+        assert!(
+            !window.contains("new Date(d.last_consolidation).toLocaleString()"),
+            "Last Consolidation stat must not bypass formatTime — \
+             window: {window:?}"
+        );
+    }
+
+    /// The cluster topology panel (part_05.rs) refresh timestamp must
+    /// render via `formatTime`. This was the third migrated call site.
+    #[test]
+    fn index_html_topology_refresh_uses_format_time() {
+        // part_05 sets text content on the refresh-stamp element via formatTime.
+        assert!(
+            INDEX_HTML.contains("formatTime(data.refreshed_at)"),
+            "Topology refresh timestamp must use formatTime(data.refreshed_at)"
+        );
+        // Fallback path also goes through formatTime when no server timestamp.
+        assert!(
+            INDEX_HTML.contains("formatTime(Date.now())"),
+            "Topology refresh fallback must also use formatTime(Date.now()) so \
+             both branches produce identical formatting"
+        );
+    }
+
+    /// Belt-and-braces guard: the SPA bundle must not contain any
+    /// remaining `new Date(...)` followed by `.toLocaleString()`,
+    /// regardless of the operand. The legitimate uses of `.toLocaleString()`
+    /// elsewhere in the bundle are on plain numbers (e.g. `v.toLocaleString()`
+    /// for token counts), which this assertion does not flag.
+    #[test]
+    fn index_html_no_new_date_to_locale_string_call_sites_remain() {
+        // Walk every `new Date(` occurrence and verify the next 80 chars
+        // do not contain `.toLocaleString(` before a closing semicolon or
+        // `}`.
+        let bytes: &str = &INDEX_HTML;
+        let mut search_start = 0;
+        let mut violations: Vec<String> = Vec::new();
+        while let Some(rel) = bytes[search_start..].find("new Date(") {
+            let abs = search_start + rel;
+            let snippet_end = (abs + 120).min(bytes.len());
+            let snippet = &bytes[abs..snippet_end];
+            // Look only within this expression — stop at `;` or newline so we
+            // don't bleed into a sibling statement's `toLocaleString` call.
+            let stmt_end = snippet.find([';', '\n']).unwrap_or(snippet.len());
+            let stmt = &snippet[..stmt_end];
+            if stmt.contains(".toLocaleString(") {
+                violations.push(stmt.to_string());
+            }
+            search_start = abs + 9;
+        }
+        assert!(
+            violations.is_empty(),
+            "found `new Date(...).toLocaleString()` call sites that bypass formatTime: \
+             {violations:#?}"
+        );
+    }
+
+    /// The live header clock must update every second via the shared
+    /// `formatTime(Date.now())` path — not via a hand-rolled
+    /// `new Date().toLocaleString()` call. Locks the migration of the
+    /// most visible timestamp on the page.
+    #[test]
+    fn index_html_header_clock_uses_format_time() {
+        // The setInterval lives on a single line in part_01.rs:207.
+        assert!(
+            INDEX_HTML.contains("getElementById('clock').textContent=formatTime(Date.now())"),
+            "Header clock must use formatTime(Date.now()) on every tick"
+        );
+        // And the tick interval should be 1 second so the displayed time
+        // matches the wall clock.
+        assert!(
+            INDEX_HTML.contains(",1000)"),
+            "Header clock setInterval must use a 1000 ms (1 s) tick"
+        );
+    }
+
+    /// Sanity-check on the page-intro count: there must be exactly 11
+    /// (one per tab) — a stricter bound than the existing `>= 11`
+    /// assertion. If a refactor accidentally adds a 12th, we want to
+    /// know immediately so we can decide whether the new container is
+    /// actually a new tab or a misuse of the class.
+    #[test]
+    fn index_html_has_exactly_eleven_page_intros() {
+        let count = INDEX_HTML.matches(r#"class="page-intro""#).count();
+        assert_eq!(
+            count, 11,
+            "expected exactly 11 page-intro divs (one per top-level tab), got {count}"
+        );
+    }
+
+    #[test]
     fn login_html_has_code_input() {
         assert!(crate::operator_commands_dashboard::auth::LOGIN_HTML.contains(r#"type="text""#));
         assert!(crate::operator_commands_dashboard::auth::LOGIN_HTML.contains("maxlength"));
