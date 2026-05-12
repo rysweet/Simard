@@ -32,7 +32,7 @@ mod prompt_store_tests;
 #[cfg(test)]
 mod tests;
 
-pub use context::{gather_engineer_lifecycle_ctx, redact_secrets};
+pub use context::{count_live_engineer_claims, gather_engineer_lifecycle_ctx, redact_secrets};
 pub use decide::{
     DecideContext, DecideJudgment, DeterministicFallbackDecideBrain, OodaDecideBrain,
     PROMPT_NAME as DECIDE_PROMPT_NAME, RustyClawdDecideBrain, build_rustyclawd_decide_brain,
@@ -71,6 +71,27 @@ pub struct EngineerLifecycleCtx {
     pub worktree_mtime_secs_ago: u64,
     pub sentinel_pid: Option<i32>,
     pub last_engineer_log_tail: String,
+    /// How many commits the running binary's embedded git SHA is behind
+    /// `origin/main` HEAD (best-effort `git rev-list` count). 0 if equal,
+    /// missing, or unparseable. Used by the `consider_self_update` doctrine.
+    #[serde(default)]
+    pub commits_behind: u32,
+    /// How many engineer worktrees currently have a live `.simard-engineer-claim`
+    /// heartbeat (alive sentinel pid). Includes the worktree under inspection.
+    /// `consider_self_update` is unsafe to act on while this is > 1 (or > 0
+    /// from a non-engineer-lifecycle site) because the safe-update drain phase
+    /// would block on the in-flight engineer.
+    #[serde(default)]
+    pub in_flight_engineer_count: u32,
+    /// Minutes since the last safe-update attempt (success or failure).
+    /// `u64::MAX` means "never attempted on this host". Compared against
+    /// `safe_update::UpdateConfig::min_minutes_since_last_attempt` (default 30).
+    #[serde(default = "default_minutes_since_last_update")]
+    pub minutes_since_last_update_attempt: u64,
+}
+
+fn default_minutes_since_last_update() -> u64 {
+    u64::MAX
 }
 
 // ---------------------------------------------------------------------------
@@ -103,6 +124,21 @@ pub enum EngineerLifecycleDecision {
     },
     /// Cannot proceed without external input. Mark goal blocked.
     MarkGoalBlocked { rationale: String, reason: String },
+    /// The running binary is meaningfully behind `origin/main` and conditions
+    /// look right for a safe-update. The brain only emits this after weighing
+    /// the four-part doctrine documented in `prompt_assets/simard/ooda_brain.md`:
+    ///
+    /// 1. `commits_behind >= UpdateConfig::min_commits_since_build` (default 3)
+    /// 2. `in_flight_engineer_count == 0` (or ≤1 from this site, since we
+    ///    are inspecting one engineer when this brain runs)
+    /// 3. `minutes_since_last_update_attempt >= min_minutes_since_last_attempt`
+    ///    (default 30 — backoff to avoid thrash)
+    /// 4. The current goal's engineer is healthy enough to be safely paused
+    ///
+    /// The act-phase dispatcher re-validates the safety predicate before
+    /// invoking `simard safe-update`; if it cannot run safely the choice is
+    /// recorded as deferred (success-equivalent, no state mutation).
+    ConsiderSelfUpdate { rationale: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +227,14 @@ pub fn apply_decision_to_state(
                 g.status = crate::goal_curation::GoalProgress::Blocked(reason.clone());
             }
             format!("brain: mark_goal_blocked ({rationale}); reason={reason}")
+        }
+        EngineerLifecycleDecision::ConsiderSelfUpdate { rationale } => {
+            // Pure-state helper: the brain has emitted the choice but the
+            // act-phase dispatcher decides whether to actually invoke
+            // `simard safe-update` based on the live in-flight predicate.
+            // We do NOT mutate state here — the failure-counter / blocked
+            // status logic is irrelevant to a self-update decision.
+            format!("brain: consider_self_update ({rationale})")
         }
     }
 }

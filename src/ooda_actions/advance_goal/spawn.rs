@@ -343,7 +343,11 @@ fn apply_lifecycle_decision(
     live_worktree: &std::path::Path,
     decision: EngineerLifecycleDecision,
 ) -> ActionOutcome {
-    let success = matches!(decision, EngineerLifecycleDecision::ContinueSkipping { .. });
+    let success = matches!(
+        decision,
+        EngineerLifecycleDecision::ContinueSkipping { .. }
+            | EngineerLifecycleDecision::ConsiderSelfUpdate { .. }
+    );
 
     if let EngineerLifecycleDecision::ReclaimAndRedispatch { .. } = &decision {
         if let Some(pid) = read_sentinel_pid(live_worktree)
@@ -392,6 +396,60 @@ fn apply_lifecycle_decision(
                 error = %e,
                 "open_tracking_issue: gh issue create failed",
             );
+        }
+    }
+
+    if let EngineerLifecycleDecision::ConsiderSelfUpdate { rationale } = &decision {
+        // Re-validate the safety predicate at action time. The engineer-
+        // lifecycle brain is invoked while AT LEAST ONE engineer (the one
+        // we are inspecting) is live for this goal — calling
+        // `simard safe-update` now would block in the drain phase. Honour
+        // the choice as a recorded judgment but defer the actual update.
+        //
+        // Future PR: a non-engineer-lifecycle brain site can call this same
+        // dispatch path when `count_live_engineer_claims == 0`, at which
+        // point the act-phase will spawn the orchestrator.
+        let state_root = engineer_worktree_state_root();
+        let live = crate::ooda_brain::count_live_engineer_claims(&state_root);
+        if live > 0 {
+            tracing::info!(
+                target: "simard::ooda_brain",
+                goal = %goal_id,
+                live_engineer_count = live,
+                rationale = %rationale,
+                "consider_self_update deferred: engineers in flight",
+            );
+        } else {
+            // Spawn `simard safe-update` as a detached child process so
+            // the daemon can finish the current cycle cleanly while the
+            // orchestrator drives drain → snapshot → pretest → swap+exec
+            // independently. We deliberately do NOT call
+            // `safe_update::SafeUpdateOrchestrator::run()` inline because
+            // its `swap` phase exec()s into the new binary — replacing
+            // the still-running cycle mid-flight would corrupt state.
+            let bin =
+                std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("simard"));
+            let result = std::process::Command::new(bin)
+                .arg("safe-update")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .stdin(std::process::Stdio::null())
+                .spawn();
+            match result {
+                Ok(child) => tracing::info!(
+                    target: "simard::ooda_brain",
+                    goal = %goal_id,
+                    pid = child.id(),
+                    rationale = %rationale,
+                    "consider_self_update: spawned `simard safe-update` (detached)",
+                ),
+                Err(e) => tracing::warn!(
+                    target: "simard::ooda_brain",
+                    goal = %goal_id,
+                    error = %e,
+                    "consider_self_update: failed to spawn `simard safe-update`",
+                ),
+            }
         }
     }
 

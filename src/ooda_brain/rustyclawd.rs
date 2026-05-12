@@ -63,6 +63,19 @@ impl<S: LlmSubmitter> RustyClawdBrain<S> {
             )
             .replace("{sentinel_pid}", &sentinel)
             .replace("{last_engineer_log_tail}", &ctx.last_engineer_log_tail)
+            .replace("{commits_behind}", &ctx.commits_behind.to_string())
+            .replace(
+                "{in_flight_engineer_count}",
+                &ctx.in_flight_engineer_count.to_string(),
+            )
+            .replace(
+                "{minutes_since_last_update_attempt}",
+                &if ctx.minutes_since_last_update_attempt == u64::MAX {
+                    "never".to_string()
+                } else {
+                    ctx.minutes_since_last_update_attempt.to_string()
+                },
+            )
     }
 }
 
