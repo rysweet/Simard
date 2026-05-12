@@ -49,7 +49,7 @@ sha2 = "0.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 ctrlc = { version = "3.4", features = ["termination"] }
-nix = { version = "0.29", features = ["signal"] }
+nix = { version = "0.29", features = ["signal", "fs"] }
 opentelemetry = "0.27"
 opentelemetry-otlp = "0.27"
 tracing-opentelemetry = "0.28"

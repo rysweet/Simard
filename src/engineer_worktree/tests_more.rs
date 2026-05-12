@@ -264,3 +264,43 @@ fn sweep_skips_symlinks_and_preserves_targets() {
 // Already covered by the no-main test; add an explicit shape check via the
 // happy path: branch must point at the resolved 40-hex sha.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Disk-pressure precheck helper (issue #1697 follow-up). The precheck
+// itself is bypassed under `cfg(test)` (see allocate()), but the helper
+// it depends on — `first_existing_ancestor` — is reachable directly.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn first_existing_ancestor_returns_path_when_state_root_exists() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let got = super::first_existing_ancestor(tmp.path()).expect("dir exists");
+    // Canonicalize both sides because macOS tempdirs live behind a /private/ symlink.
+    assert_eq!(
+        got.canonicalize().unwrap(),
+        tmp.path().canonicalize().unwrap()
+    );
+}
+
+#[test]
+fn first_existing_ancestor_walks_up_when_subdirs_missing() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let nested = tmp.path().join("a/b/c/not-yet-created");
+    let got = super::first_existing_ancestor(&nested).expect("ancestor exists");
+    assert_eq!(
+        got.canonicalize().unwrap(),
+        tmp.path().canonicalize().unwrap()
+    );
+}
+
+#[test]
+fn first_existing_ancestor_returns_none_for_completely_synthetic_path() {
+    // A path whose every component is invalid on Unix (root is "/", which
+    // exists, so we synthesize via a bogus relative descendant that the
+    // helper would never bottom out on if the root were stripped — but
+    // since "/" exists, this test pins the actual contract: there IS
+    // always an existing ancestor on a real filesystem, even if it's "/".
+    let bogus = std::path::PathBuf::from("/this/path/does/not/exist/either");
+    let got = super::first_existing_ancestor(&bogus).expect("/ always exists");
+    assert_eq!(got, std::path::PathBuf::from("/"));
+}
