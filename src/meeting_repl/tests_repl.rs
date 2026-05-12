@@ -208,6 +208,86 @@ fn repl_preview_shows_handoff_preview() {
 
 #[test]
 #[serial]
+fn repl_live_output_uses_colored_prompt_and_assistant_label() {
+    // Ensure NO_COLOR is unset so ANSI escapes are emitted.
+    // SAFETY: serial_test guards against parallel access to env vars.
+    unsafe { std::env::remove_var("NO_COLOR") };
+
+    let bridge = mock_bridge();
+    let agent = MockAgentSession::new("Acknowledged.");
+    let input = b"Quick check\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Live label test",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    let output_str = String::from_utf8(output).unwrap();
+    // Prompt text is preserved literally so existing tests/scripts still match.
+    assert!(
+        output_str.contains("simard:meeting>"),
+        "prompt text should be present: {output_str}"
+    );
+    // Cyan ANSI escape (\x1b[36m) should wrap the prompt when NO_COLOR is unset.
+    assert!(
+        output_str.contains("\x1b[36msimard:meeting> \x1b[0m"),
+        "prompt should be color-coded cyan: {output_str:?}"
+    );
+    // Assistant responses get a green-coded "Simard:" role label.
+    assert!(
+        output_str.contains("\x1b[32mSimard:\x1b[0m Acknowledged."),
+        "assistant response should be prefixed with colored role label: {output_str:?}"
+    );
+}
+
+#[test]
+#[serial]
+fn repl_no_color_env_strips_prompt_and_label_escapes() {
+    // SAFETY: serial_test guards against parallel access to env vars.
+    unsafe { std::env::set_var("NO_COLOR", "1") };
+
+    let bridge = mock_bridge();
+    let agent = MockAgentSession::new("Plain reply.");
+    let input = b"Plain please\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "NO_COLOR test",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    unsafe { std::env::remove_var("NO_COLOR") };
+
+    let output_str = String::from_utf8(output).unwrap();
+    assert!(
+        !output_str.contains("\x1b["),
+        "no ANSI escapes should appear when NO_COLOR is set: {output_str:?}"
+    );
+    assert!(
+        output_str.contains("simard:meeting>"),
+        "plain prompt still present: {output_str}"
+    );
+    assert!(
+        output_str.contains("Simard: Plain reply."),
+        "plain assistant label still present: {output_str}"
+    );
+}
+
+#[test]
+#[serial]
 fn repl_help_includes_theme_recap_preview() {
     let bridge = mock_bridge();
     let agent = MockAgentSession::new("ok");

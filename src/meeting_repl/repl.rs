@@ -14,7 +14,22 @@ use crate::meeting_facilitator::MeetingSession;
 use super::color::{cyan, green, yellow};
 use super::spinner::Spinner;
 
-const PROMPT: &str = "simard:meeting> ";
+const PROMPT_TEXT: &str = "simard:meeting> ";
+
+/// Build the live REPL prompt, optionally color-coded.
+///
+/// The literal text is always `simard:meeting> ` so non-TTY callers and tests
+/// can match on it without dealing with ANSI codes; color is applied via the
+/// `color::cyan` helper which already honors `NO_COLOR`.
+fn prompt_string() -> String {
+    cyan(PROMPT_TEXT)
+}
+
+/// Role label shown before each assistant response in the live conversation
+/// view. Color-coded green to mirror `simard:meeting>` (cyan) for the user.
+fn assistant_label() -> String {
+    green("Simard:")
+}
 
 /// Run the interactive meeting REPL.
 ///
@@ -52,9 +67,10 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
     )
     .ok();
 
+    let prompt = prompt_string();
     let mut line = String::new();
     loop {
-        write!(output, "{PROMPT}").ok();
+        write!(output, "{prompt}").ok();
         output.flush().ok();
 
         line.clear();
@@ -149,7 +165,7 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                         Ok(resp) => {
                             spinner.stop();
                             if !resp.content.is_empty() {
-                                writeln!(output, "{}\n", resp.content).ok();
+                                writeln!(output, "{} {}\n", assistant_label(), resp.content).ok();
                             }
                         }
                         Err(e) => {
@@ -199,7 +215,7 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                     Ok(resp) => {
                         spinner.stop();
                         if !resp.content.is_empty() {
-                            writeln!(output, "\n{}\n", resp.content).ok();
+                            writeln!(output, "\n{} {}\n", assistant_label(), resp.content).ok();
                         }
                     }
                     Err(e) => {
