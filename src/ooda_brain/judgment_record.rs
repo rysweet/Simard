@@ -97,6 +97,9 @@ impl BrainJudgmentRecord {
             EngineerLifecycleDecision::MarkGoalBlocked { rationale, .. } => {
                 ("mark_goal_blocked", rationale.as_str())
             }
+            EngineerLifecycleDecision::ConsiderSelfUpdate { rationale } => {
+                ("consider_self_update", rationale.as_str())
+            }
         };
         Self {
             phase: BrainPhase::Act,

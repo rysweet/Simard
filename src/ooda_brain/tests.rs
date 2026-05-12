@@ -65,6 +65,9 @@ fn sample_ctx() -> EngineerLifecycleCtx {
         worktree_mtime_secs_ago: 25_200, // 7h
         sentinel_pid: Some(1_541_109),
         last_engineer_log_tail: "engineer alive — heartbeat ok\n".into(),
+        commits_behind: 0,
+        in_flight_engineer_count: 1,
+        minutes_since_last_update_attempt: u64::MAX,
     }
 }
 
@@ -141,6 +144,41 @@ fn decision_mark_blocked_json_roundtrips() {
         parsed,
         EngineerLifecycleDecision::MarkGoalBlocked { .. }
     ));
+}
+
+#[test]
+fn decision_consider_self_update_json_roundtrips() {
+    let raw = r#"{"choice":"consider_self_update","rationale":"binary 12 commits behind, no engineers in flight, last attempt 4h ago"}"#;
+    let parsed: EngineerLifecycleDecision = serde_json::from_str(raw).expect("parse");
+    match parsed {
+        EngineerLifecycleDecision::ConsiderSelfUpdate { rationale } => {
+            assert!(rationale.contains("12 commits behind"));
+        }
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
+fn apply_decision_consider_self_update_does_not_mutate_state() {
+    use super::apply_decision_to_state;
+    use crate::goal_curation::GoalBoard;
+    use crate::ooda_loop::OodaState;
+
+    let mut state = OodaState::new(GoalBoard::default());
+    let goal_id = "g";
+    let before = state.goal_failure_counts.clone();
+    let decision = EngineerLifecycleDecision::ConsiderSelfUpdate {
+        rationale: "binary 5 commits behind, no engineers in flight, last attempt 2h ago".into(),
+    };
+    let detail = apply_decision_to_state(&decision, &mut state, goal_id);
+    assert!(
+        detail.contains("consider_self_update") || detail.contains("self_update"),
+        "detail must reference the choice, got: {detail}"
+    );
+    assert_eq!(
+        state.goal_failure_counts, before,
+        "ConsiderSelfUpdate must be a no-op for failure counts (it's a doctrinal recommendation, not a goal failure)"
+    );
 }
 
 #[test]

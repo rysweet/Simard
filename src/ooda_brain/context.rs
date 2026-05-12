@@ -51,6 +51,10 @@ pub fn gather_engineer_lifecycle_ctx(
 
     let last_engineer_log_tail = read_engineer_log_tail(state_root, goal_id);
 
+    let commits_behind = compute_commits_behind();
+    let in_flight_engineer_count = count_live_engineer_claims(state_root);
+    let minutes_since_last_update_attempt = minutes_since_last_safe_update_attempt(state_root);
+
     EngineerLifecycleCtx {
         goal_id: goal_id.to_string(),
         goal_description,
@@ -61,7 +65,89 @@ pub fn gather_engineer_lifecycle_ctx(
         worktree_mtime_secs_ago,
         sentinel_pid,
         last_engineer_log_tail: redact_secrets(&last_engineer_log_tail),
+        commits_behind,
+        in_flight_engineer_count,
+        minutes_since_last_update_attempt,
     }
+}
+
+/// Compare the running binary's embedded git SHA (`SIMARD_GIT_HASH` from
+/// `build.rs`) against the local view of `origin/main` HEAD. Returns the
+/// number of commits the binary is behind (0 if equal, missing, or the
+/// `git rev-list` shell-out fails). Best-effort — never panics, never
+/// propagates.
+///
+/// We use the *local* view of `origin/main` rather than fetching, because
+/// (a) fetching from inside an OODA cycle would add network IO and
+/// authentication coupling we want to avoid, and (b) the brain reasons in
+/// terms of "what does this host already know about", not "what's
+/// theoretically out there".
+pub(crate) fn compute_commits_behind() -> u32 {
+    let embedded = env!("SIMARD_GIT_HASH");
+    if embedded == "unknown" || embedded.is_empty() {
+        return 0;
+    }
+    let out = std::process::Command::new("git")
+        .args(["rev-list", "--count", &format!("{embedded}..origin/main")])
+        .output();
+    let out = match out {
+        Ok(o) if o.status.success() => o,
+        _ => return 0,
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0)
+}
+
+/// Count engineer worktrees under `<state_root>/engineer-worktrees/` that
+/// have a live `.simard-engineer-claim` heartbeat (sentinel pid still alive).
+/// Best-effort — returns 0 on missing dir / IO failure / parse failure.
+///
+/// Used by the `consider_self_update` doctrine: the safe-update orchestrator
+/// drains in-flight engineers as phase 1, so a non-zero count means the
+/// drain would block (or time out). The brain uses this to decide whether
+/// "now" is the right moment to consider an upgrade.
+pub fn count_live_engineer_claims(state_root: &Path) -> u32 {
+    let worktrees_root = state_root.join(crate::engineer_worktree::WORKTREES_SUBDIR);
+    let entries = match std::fs::read_dir(&worktrees_root) {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+    let mut count: u32 = 0;
+    for entry in entries.flatten() {
+        let claim = entry
+            .path()
+            .join(crate::engineer_worktree::ENGINEER_CLAIM_FILE);
+        let raw = match std::fs::read_to_string(&claim) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let pid: i32 = match raw.lines().next().and_then(|s| s.trim().parse().ok()) {
+            Some(p) => p,
+            None => continue,
+        };
+        if crate::engineer_worktree::is_pid_alive_public(pid) {
+            count = count.saturating_add(1);
+        }
+    }
+    count
+}
+
+/// Minutes since the last safe-update attempt (success or failure), inferred
+/// from the mtime of `<state_root>/upgrade-status.json` written by the
+/// safe-update orchestrator. Returns `u64::MAX` when no attempt has ever
+/// been recorded on this host (file missing / unreadable).
+pub(crate) fn minutes_since_last_safe_update_attempt(state_root: &Path) -> u64 {
+    let path = state_root.join("upgrade-status.json");
+    let mtime = match std::fs::metadata(&path).and_then(|m| m.modified()) {
+        Ok(m) => m,
+        Err(_) => return u64::MAX,
+    };
+    SystemTime::now()
+        .duration_since(mtime)
+        .map(|d| d.as_secs() / 60)
+        .unwrap_or(u64::MAX)
 }
 
 /// Walk `cycle_reports` newest-to-oldest and count how many in a row contain
