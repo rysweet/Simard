@@ -319,9 +319,13 @@ pub fn reap_stale_open_lock(state_root: &Path) -> SimardResult<bool> {
 
 fn is_pid_alive(pid: u32) -> bool {
     // kill(pid, 0) returns 0 if the process exists and we can signal it,
-    // ESRCH if it doesn't exist.
+    // ESRCH if it doesn't exist. Use std::io::Error::last_os_error() to read
+    // errno portably (macOS exposes __error(), Linux exposes __errno_location()).
     let pid_i = pid as i32;
-    unsafe { libc::kill(pid_i, 0) == 0 || *libc::__errno_location() != libc::ESRCH }
+    if unsafe { libc::kill(pid_i, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
 fn flock_held(path: &Path) -> bool {

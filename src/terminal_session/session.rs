@@ -68,10 +68,27 @@ impl PtyTerminalSession {
         let _transcript_file = open_exclusive_temp_file(&transcript_path, base_type)?;
         let workflow_restore_guards =
             capture_workflow_restore_guards(base_type, launch_command, working_directory)?;
-        let mut child = Command::new(PTY_LAUNCHER)
-            .arg("-qefc")
-            .arg(launch_command)
-            .arg(&transcript_path)
+        let mut command = Command::new(PTY_LAUNCHER);
+        // GNU `script` (Linux util-linux) uses `-qefc <command> <file>`.
+        // BSD `script` (macOS) uses positional `script [-qFe] <file> <command...>`
+        // and has no `-c` flag — the command and its args are passed positionally.
+        #[cfg(target_os = "macos")]
+        {
+            command
+                .arg("-qFe")
+                .arg(&transcript_path)
+                .arg("/bin/sh")
+                .arg("-c")
+                .arg(launch_command);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            command
+                .arg("-qefc")
+                .arg(launch_command)
+                .arg(&transcript_path);
+        }
+        let mut child = command
             .current_dir(working_directory)
             .env("TERM", "dumb")
             .stdin(Stdio::piped())

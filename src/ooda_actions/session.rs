@@ -56,7 +56,11 @@ fn dispatch_launch_session_copilot(action: &PlannedAction) -> ActionOutcome {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
     // Launch bash in a PTY — we'll send the copilot command ourselves.
-    let mut session = match PtyTerminalSession::launch("terminal-shell", "/usr/bin/bash", &cwd) {
+    #[cfg(target_os = "macos")]
+    const SHELL_PATH: &str = "/bin/bash";
+    #[cfg(not(target_os = "macos"))]
+    const SHELL_PATH: &str = "/usr/bin/bash";
+    let mut session = match PtyTerminalSession::launch("terminal-shell", SHELL_PATH, &cwd) {
         Ok(s) => s,
         Err(e) => {
             return make_outcome(
