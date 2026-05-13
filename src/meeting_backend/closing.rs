@@ -138,6 +138,37 @@ impl MeetingBackend {
             }
         };
 
+        // ── Per-meeting structured handoff bundle ──
+        // Writes ~/.simard/meetings/<meeting_id>/{meeting_handoff.json,
+        // meeting_handoff.md, transcript.json}. Independent of the legacy
+        // OODA artifact above so existing downstream consumers keep working
+        // while new consumers can rely on the canonical layout.
+        let bundle_open_questions: Vec<crate::meeting_facilitator::OpenQuestion> = open_questions
+            .iter()
+            .cloned()
+            .map(|text| crate::meeting_facilitator::OpenQuestion {
+                text,
+                explicit: false,
+            })
+            .collect();
+        let bundle_dir = match persist::write_handoff_bundle(
+            &self.topic,
+            &summary_text,
+            Some(&self.started_at),
+            &self.history,
+            &action_items,
+            &decisions,
+            bundle_open_questions,
+            themes.clone(),
+            participants.clone(),
+        ) {
+            Ok(p) => Some(p.to_string_lossy().to_string()),
+            Err(e) => {
+                warn!("Failed to write meeting handoff bundle: {e}");
+                None
+            }
+        };
+
         // ── Memory consolidation ──
         if let Some(ref bridge) = self.bridge {
             persist::store_enriched_cognitive_memory(
@@ -177,6 +208,7 @@ impl MeetingBackend {
             themes,
             participants,
             applied_templates: self.applied_templates.clone(),
+            bundle_dir,
         })
     }
 }

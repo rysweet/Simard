@@ -30,8 +30,17 @@ pub fn default_handoff_dir() -> PathBuf {
 /// action items, and open questions extracted from the meeting session.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MeetingHandoff {
+    /// Stable, sortable identifier for this meeting. Derived from
+    /// `started_at` plus a slug of the topic. Empty in legacy artifacts —
+    /// callers reading old handoffs should fall back to
+    /// [`derive_meeting_id`] for a synthesized id.
+    #[serde(default)]
+    pub meeting_id: String,
     pub topic: String,
     pub started_at: String,
+    /// Time the meeting ended, RFC3339. Accepts the legacy field name
+    /// `closed_at` on read so older handoffs deserialize cleanly.
+    #[serde(alias = "closed_at")]
     pub closed_at: String,
     pub decisions: Vec<MeetingDecision>,
     pub action_items: Vec<ActionItem>,
@@ -42,11 +51,63 @@ pub struct MeetingHandoff {
     pub duration_secs: Option<u64>,
     #[serde(default)]
     pub transcript: Vec<String>,
+    /// Filesystem path to the full transcript artifact (e.g. the
+    /// `transcript.json` inside the per-meeting bundle directory). Empty
+    /// for legacy handoffs that inlined only a summary into `transcript`.
+    #[serde(default)]
+    pub transcript_path: Option<String>,
     #[serde(default)]
     pub participants: Vec<String>,
     /// High-level themes or recurring topics identified during the meeting.
     #[serde(default)]
     pub themes: Vec<String>,
+}
+
+/// Build a stable, sortable meeting id from a started-at timestamp and a
+/// topic. Format is `YYYYMMDDTHHMMSSZ-<slug>` so ids sort by time and are
+/// safe as a directory name.
+///
+/// Falls back to the current UTC time when `started_at` is empty or not
+/// parseable — never panics.
+pub fn derive_meeting_id(started_at: &str, topic: &str) -> String {
+    let ts = chrono::DateTime::parse_from_rfc3339(started_at)
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now())
+        .format("%Y%m%dT%H%M%SZ")
+        .to_string();
+    let slug = slugify_topic(topic);
+    if slug.is_empty() {
+        ts
+    } else {
+        format!("{ts}-{slug}")
+    }
+}
+
+/// Lower-case slug of a topic suitable for a filesystem path component.
+/// Keeps `[a-z0-9-]`, collapses runs of separators, and caps length.
+fn slugify_topic(topic: &str) -> String {
+    let mut out = String::with_capacity(topic.len());
+    let mut prev_dash = false;
+    for c in topic.chars() {
+        let lower = c.to_ascii_lowercase();
+        if lower.is_ascii_alphanumeric() {
+            out.push(lower);
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.len() > 64 {
+        out.truncate(64);
+        while out.ends_with('-') {
+            out.pop();
+        }
+    }
+    out
 }
 
 /// Check whether a note looks like a rhetorical question (short, common
@@ -177,6 +238,7 @@ impl MeetingHandoff {
         }
 
         Self {
+            meeting_id: derive_meeting_id(&session.started_at, &session.topic),
             topic: session.topic.clone(),
             started_at: session.started_at.clone(),
             closed_at: Utc::now().to_rfc3339(),
@@ -188,6 +250,7 @@ impl MeetingHandoff {
             transcript,
             participants: all_participants,
             themes,
+            transcript_path: None,
         }
     }
 
@@ -237,7 +300,9 @@ mod persistence;
 // clippy flags it as unused in non-test compilation. Keep the re-export stable.
 #[allow(unused_imports)]
 pub use persistence::{
-    find_newest_handoff, find_oldest_unprocessed_handoff, load_meeting_handoff, load_session_wip,
-    mark_handoff_processed_in_place, mark_meeting_handoff_processed, remove_session_wip,
-    save_session_wip, write_meeting_handoff,
+    BundleTranscriptLine, bundle_handoff_path, bundle_markdown_path, bundle_transcript_path,
+    default_bundle_root, find_newest_handoff, find_oldest_unprocessed_handoff,
+    load_meeting_handoff, load_session_wip, mark_handoff_processed_in_place,
+    mark_meeting_handoff_processed, meeting_bundle_dir, remove_session_wip, save_session_wip,
+    write_meeting_bundle, write_meeting_handoff,
 };

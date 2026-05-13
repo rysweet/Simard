@@ -39,6 +39,7 @@ fn sample_action() -> ActionItem {
         owner: "bob".to_string(),
         priority: 1,
         due_description: Some("end of sprint".to_string()),
+        linked_issue: None,
     }
 }
 

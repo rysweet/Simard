@@ -41,6 +41,7 @@ fn start_and_close_meeting_round_trip() {
             owner: "bob".to_string(),
             priority: 1,
             due_description: Some("end of sprint".to_string()),
+            linked_issue: None,
         },
     )
     .unwrap();
@@ -88,6 +89,7 @@ fn rejects_zero_priority_action_item() {
             owner: "me".to_string(),
             priority: 0,
             due_description: None,
+            linked_issue: None,
         },
     )
     .unwrap_err();
@@ -122,6 +124,7 @@ fn edit_action_item_description() {
             owner: "alice".to_string(),
             priority: 1,
             due_description: None,
+            linked_issue: None,
         },
     )
     .unwrap();
@@ -193,6 +196,7 @@ fn remove_action_item() {
             owner: "me".to_string(),
             priority: 1,
             due_description: None,
+            linked_issue: None,
         },
     )
     .unwrap();

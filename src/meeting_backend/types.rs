@@ -87,6 +87,13 @@ pub struct MeetingSummary {
     /// `## Agenda` section in the handoff markdown report.
     #[serde(default)]
     pub applied_templates: Vec<AppliedTemplate>,
+    /// Directory of the per-meeting structured handoff bundle, if it was
+    /// successfully written. Layout is
+    /// `~/.simard/meetings/<meeting_id>/{meeting_handoff.json,
+    /// meeting_handoff.md, transcript.json}`. Surfaced in the CLI exit
+    /// summary so operators (and downstream tools) can find the artifact.
+    #[serde(default)]
+    pub bundle_dir: Option<String>,
 }
 
 /// Current status of a meeting session.
@@ -170,6 +177,7 @@ mod tests {
                 agenda: "## Retrospective\n1. ...".to_string(),
                 applied_at: "2025-01-01T00:10:00Z".to_string(),
             }],
+            bundle_dir: Some("/home/user/.simard/meetings/20250101T000000Z-sprint/".to_string()),
         };
         let json = serde_json::to_string(&summary).unwrap();
         let s2: MeetingSummary = serde_json::from_str(&json).unwrap();
@@ -194,6 +202,7 @@ mod tests {
         assert!(s.themes.is_empty());
         assert!(s.participants.is_empty());
         assert!(s.applied_templates.is_empty());
+        assert!(s.bundle_dir.is_none());
     }
 
     #[test]

@@ -120,6 +120,7 @@ mod tests {
                 owner: "bob".to_string(),
                 priority: 1,
                 due_description: Some("next week".to_string()),
+                linked_issue: None,
             }],
             open_questions: vec![OpenQuestion {
                 text: "What about Python?".to_string(),
@@ -130,6 +131,8 @@ mod tests {
             transcript: vec![],
             participants: vec!["alice".to_string(), "bob".to_string()],
             themes: Vec::new(),
+            meeting_id: String::new(),
+            transcript_path: None,
         }
     }
 
@@ -190,6 +193,8 @@ mod tests {
             transcript: vec![],
             participants: vec![],
             themes: Vec::new(),
+            meeting_id: String::new(),
+            transcript_path: None,
         };
         let json = serde_json::to_string(&h).unwrap();
         let h2: MeetingHandoff = serde_json::from_str(&json).unwrap();

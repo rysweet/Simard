@@ -16,10 +16,12 @@ mod types;
 
 // Re-export all public items so `crate::meeting_facilitator::X` still works.
 pub use handoff::{
-    MEETING_HANDOFF_FILENAME, MEETING_SESSION_WIP_FILENAME, MeetingHandoff, default_handoff_dir,
-    find_newest_handoff, find_oldest_unprocessed_handoff, load_meeting_handoff, load_session_wip,
-    mark_handoff_processed_in_place, mark_meeting_handoff_processed, remove_session_wip,
-    save_session_wip, write_meeting_handoff,
+    BundleTranscriptLine, MEETING_HANDOFF_FILENAME, MEETING_SESSION_WIP_FILENAME, MeetingHandoff,
+    bundle_handoff_path, bundle_markdown_path, bundle_transcript_path, default_bundle_root,
+    default_handoff_dir, derive_meeting_id, find_newest_handoff, find_oldest_unprocessed_handoff,
+    load_meeting_handoff, load_session_wip, mark_handoff_processed_in_place,
+    mark_meeting_handoff_processed, meeting_bundle_dir, remove_session_wip, save_session_wip,
+    write_meeting_bundle, write_meeting_handoff,
 };
 pub use session::{
     add_note, add_question, close_meeting, edit_item, record_action_item, record_decision,
@@ -94,6 +96,7 @@ mod tests {
                 owner: "dev".to_string(),
                 priority: 0,
                 due_description: None,
+                linked_issue: None,
             },
         );
         assert!(result.is_err(), "priority 0 should be rejected");
@@ -130,6 +133,7 @@ mod tests {
                 owner: "ops".to_string(),
                 priority: 1,
                 due_description: None,
+                linked_issue: None,
             }],
             notes: vec![],
             status: MeetingSessionStatus::Open,
