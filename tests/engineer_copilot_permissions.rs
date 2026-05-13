@@ -39,9 +39,7 @@
 use std::path::{Path, PathBuf};
 
 use serial_test::serial;
-use simard::engineer_loop::{
-    TestVisibleAgentKind, test_visible_engineer_argv, test_visible_run_engineer_subprocess,
-};
+use simard::engineer_loop::{AgentKind, engineer_argv, run_engineer_subprocess};
 
 /// RAII guard for `SIMARD_AMPLIHACK_BIN`. Restores the prior value (or
 /// removes the variable) on `Drop` so concurrent / subsequent tests are not
@@ -132,7 +130,7 @@ fn read_observations(dir: &Path) -> String {
 
 #[test]
 fn copilot_argv_contract_includes_both_permission_flags_in_order() {
-    let argv = test_visible_engineer_argv(TestVisibleAgentKind::Copilot, "objective", 7);
+    let argv = engineer_argv(AgentKind::Copilot, "objective", 7);
 
     let tools_pos = argv
         .iter()
@@ -187,11 +185,7 @@ fn spawned_copilot_subprocess_receives_allow_all_tools_in_argv() {
     let shim = write_amplihack_observation_shim(dir.path());
     let _guard = AmplihackBinEnv::set(&shim);
 
-    let result = test_visible_run_engineer_subprocess(
-        "engineer prompt body",
-        dir.path(),
-        TestVisibleAgentKind::Copilot,
-    );
+    let result = run_engineer_subprocess("engineer prompt body", dir.path(), AgentKind::Copilot);
     assert!(
         result.is_ok(),
         "stub shim should exit 0 and helper should return Ok; got: {result:?}"
@@ -253,11 +247,7 @@ fn spawned_copilot_subprocess_inherits_copilot_allow_all_env() {
     let shim = write_amplihack_observation_shim(dir.path());
     let _guard = AmplihackBinEnv::set(&shim);
 
-    let result = test_visible_run_engineer_subprocess(
-        "another prompt",
-        dir.path(),
-        TestVisibleAgentKind::Copilot,
-    );
+    let result = run_engineer_subprocess("another prompt", dir.path(), AgentKind::Copilot);
     assert!(result.is_ok(), "stub shim should succeed; got: {result:?}");
 
     let log = read_observations(dir.path());
@@ -303,8 +293,7 @@ fn engineer_dispatch_with_write_commit_pr_prompt_returns_ok_with_full_grant() {
     // prompt content.
     let prompt = "Write CHANGELOG.md, run `git commit -am wip`, run \
                   `gh pr create --title fix --body fix`, then summarize.";
-    let result =
-        test_visible_run_engineer_subprocess(prompt, dir.path(), TestVisibleAgentKind::Copilot);
+    let result = run_engineer_subprocess(prompt, dir.path(), AgentKind::Copilot);
 
     assert!(
         result.is_ok(),

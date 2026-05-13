@@ -51,10 +51,7 @@ pub use review_persist::{persist_engineer_loop_artifacts, run_optional_review};
 // internal to the engineer loop. Kept under `#[doc(hidden)]` so they do not
 // appear in user-facing rustdoc and are not treated as a stable surface.
 #[doc(hidden)]
-pub use agent_spawn::{
-    AgentKind as TestVisibleAgentKind, engineer_argv as test_visible_engineer_argv,
-    run_engineer_subprocess as test_visible_run_engineer_subprocess,
-};
+pub use agent_spawn::{AgentKind, engineer_argv, run_engineer_subprocess};
 
 pub(crate) const ENGINEER_IDENTITY: &str = "simard-engineer";
 pub(crate) const ENGINEER_BASE_TYPE: &str = "terminal-shell";
