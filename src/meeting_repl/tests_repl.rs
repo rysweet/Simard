@@ -363,3 +363,267 @@ fn repl_close_prints_one_line_headline_summary() {
         "headline summary must precede the detailed Meeting Summary section: {output_str}"
     );
 }
+
+// ── /state slash command (issue #1646 — TDD red phase) ──────────────────
+//
+// The /state command re-displays the running list of decisions, open
+// questions, and action items extracted from the live meeting transcript
+// without closing the meeting. Sections are rendered in a canonical order
+// (Decisions → Open Questions → Action Items), each with a colored heading
+// and `_(none)_` placeholders when empty. Reuses the existing extractors in
+// `meeting_backend::persist::extract` — no new parsing logic.
+
+/// /state on an empty transcript renders all three section headings with
+/// `_(none)_` placeholders so the operator gets a predictable, complete UI
+/// instead of a blank screen. Headings are always present.
+#[test]
+#[serial]
+fn repl_state_empty_renders_all_section_headings_with_none_placeholders() {
+    let bridge = mock_bridge();
+    // Use a benign canned response so any history entries don't accidentally
+    // trip the heuristic extractors.
+    let agent = MockAgentSession::new("ok");
+    let input = b"/state\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Empty state test",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    let output_str = String::from_utf8(output).unwrap();
+
+    // All three section headings appear when /state is invoked on an empty
+    // transcript. Match on the section labels (color-stripped) so the test
+    // is robust to ANSI changes.
+    assert!(
+        output_str.contains("Decisions"),
+        "state output should include 'Decisions' heading: {output_str}"
+    );
+    assert!(
+        output_str.contains("Open Questions"),
+        "state output should include 'Open Questions' heading: {output_str}"
+    );
+    assert!(
+        output_str.contains("Action Items"),
+        "state output should include 'Action Items' heading: {output_str}"
+    );
+
+    // The empty-state placeholder convention is `_(none)_`. We expect at
+    // least three occurrences (one per section) for a fully empty state.
+    let none_count = output_str.matches("_(none)_").count();
+    assert!(
+        none_count >= 3,
+        "expected at least 3 '_(none)_' placeholders (one per section) on empty state, got {none_count}: {output_str}"
+    );
+}
+
+/// /state on a populated transcript renders the extracted decisions, open
+/// questions, and action items derived from the in-memory history via the
+/// existing `meeting_backend::persist::extract` helpers.
+#[test]
+#[serial]
+fn repl_state_populated_renders_extracted_decisions_action_items_open_questions() {
+    let bridge = mock_bridge();
+    // Agent response embeds explicit signals the extractors recognize:
+    //   - "Decision:" → extract_decisions
+    //   - "TODO:"     → extract_action_items
+    //   - "OPEN:"     → extract_open_questions (explicit marker)
+    let agent = MockAgentSession::new(
+        "Decision: We will adopt TDD. TODO: Set up CI pipeline. OPEN: Who will own the rollout plan for the new pipeline?",
+    );
+    // First send a user message so the agent reply (with all the signals)
+    // is appended to backend.history(); then invoke /state.
+    let input = b"Let's plan the sprint\n/state\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Populated state test",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    let output_str = String::from_utf8(output).unwrap();
+
+    // Find the /state output region by locating the first "Decisions"
+    // heading after the opening prompt — this is the /state-rendered block,
+    // not the post-/close summary block (which appears later).
+    let state_region_start = output_str
+        .find("Decisions")
+        .unwrap_or_else(|| panic!("expected /state to render a 'Decisions' heading: {output_str}"));
+    // Bound the region by the next prompt or by the end-of-meeting summary.
+    let state_region_end = output_str[state_region_start..]
+        .find("simard:meeting>")
+        .map(|i| state_region_start + i)
+        .unwrap_or(output_str.len());
+    let state_region = &output_str[state_region_start..state_region_end];
+
+    // Each extracted item should appear in the /state output region.
+    assert!(
+        state_region.contains("TDD"),
+        "state output should include the extracted decision (TDD): {state_region}"
+    );
+    assert!(
+        state_region.contains("CI pipeline"),
+        "state output should include the extracted action item (CI pipeline): {state_region}"
+    );
+    assert!(
+        state_region.contains("rollout plan"),
+        "state output should include the extracted open question (rollout plan): {state_region}"
+    );
+}
+
+/// /state must render sections in the canonical order specified by the
+/// task: Decisions → Open Questions → Action Items. This is intentionally
+/// different from the /close summary order; verify the ordering directly.
+#[test]
+#[serial]
+fn repl_state_renders_sections_in_canonical_order_decisions_then_questions_then_actions() {
+    let bridge = mock_bridge();
+    let agent = MockAgentSession::new(
+        "Decision: Use Rust. TODO: Write the migration script. OPEN: What is the rollback strategy here?",
+    );
+    let input = b"Plan the migration\n/state\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Order test",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    let output_str = String::from_utf8(output).unwrap();
+
+    // Bound the region to the /state-rendered block (between the input echo
+    // and the next prompt) so we don't accidentally match the post-/close
+    // "── Decisions ──" / "── Action Items ──" summary headings (which use a
+    // different ordering and would hide a real bug).
+    let first_state_idx = output_str
+        .find("Decisions")
+        .unwrap_or_else(|| panic!("expected /state output to contain 'Decisions': {output_str}"));
+    let region_end = output_str[first_state_idx..]
+        .find("simard:meeting>")
+        .map(|i| first_state_idx + i)
+        .unwrap_or(output_str.len());
+    let region = &output_str[first_state_idx..region_end];
+
+    let dec_pos = region
+        .find("Decisions")
+        .unwrap_or_else(|| panic!("missing 'Decisions' in /state region: {region}"));
+    let oq_pos = region
+        .find("Open Questions")
+        .unwrap_or_else(|| panic!("missing 'Open Questions' in /state region: {region}"));
+    let ai_pos = region
+        .find("Action Items")
+        .unwrap_or_else(|| panic!("missing 'Action Items' in /state region: {region}"));
+
+    assert!(
+        dec_pos < oq_pos,
+        "Decisions must appear before Open Questions in /state output. \
+         dec_pos={dec_pos} oq_pos={oq_pos} region={region}"
+    );
+    assert!(
+        oq_pos < ai_pos,
+        "Open Questions must appear before Action Items in /state output. \
+         oq_pos={oq_pos} ai_pos={ai_pos} region={region}"
+    );
+}
+
+/// Security S1: any ANSI escape sequence (e.g. `\x1b[2J` clear-screen)
+/// embedded in an LLM-sourced message must be stripped before /state
+/// renders the bullet content to the terminal — otherwise an attacker
+/// controlling the LLM could reposition the cursor, clear the screen,
+/// or hijack the operator's terminal session.
+#[test]
+#[serial]
+fn repl_state_strips_ansi_escapes_from_llm_sourced_content_before_rendering() {
+    // Force NO_COLOR off so the REPL itself emits ANSI for headings — but
+    // any ANSI in the LLM content must still be stripped.
+    unsafe { std::env::remove_var("NO_COLOR") };
+
+    let bridge = mock_bridge();
+    // Embed a clear-screen escape inside the canned agent reply. After
+    // sanitization the literal ESC byte must NOT appear inside any extracted
+    // bullet shown by /state.
+    let agent =
+        MockAgentSession::new("Decision: Use \x1b[2JRust for the rewrite project unconditionally.");
+    let input = b"Make a call\n/state\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Sanitize test",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    let output_str = String::from_utf8(output).unwrap();
+
+    // Locate the /state region (between first Decisions heading and next prompt).
+    let region_start = output_str
+        .find("Decisions")
+        .unwrap_or_else(|| panic!("expected /state to render Decisions heading: {output_str}"));
+    let region_end = output_str[region_start..]
+        .find("simard:meeting>")
+        .map(|i| region_start + i)
+        .unwrap_or(output_str.len());
+    let region = &output_str[region_start..region_end];
+
+    // The decision text body should still be present (so we know the bullet
+    // was rendered) but the malicious clear-screen escape must be stripped.
+    assert!(
+        region.contains("Rust for the rewrite"),
+        "decision body should still be rendered after sanitization: {region}"
+    );
+    assert!(
+        !region.contains("\x1b[2J"),
+        "clear-screen escape from LLM content must be stripped from /state output: {region:?}"
+    );
+}
+
+/// /help text must mention the new /state command so operators discover it.
+#[test]
+#[serial]
+fn repl_help_mentions_state_command() {
+    let bridge = mock_bridge();
+    let agent = MockAgentSession::new("ok");
+    let input = b"/help\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Help mentions /state",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    let output_str = String::from_utf8(output).unwrap();
+    assert!(
+        output_str.contains("/state"),
+        "help text should advertise the new /state command: {output_str}"
+    );
+}

@@ -19,6 +19,9 @@ pub enum MeetingCommand {
     Recap,
     /// Preview what the handoff artifact will look like when the meeting closes.
     Preview,
+    /// Re-display the running list of decisions, open questions, and action items
+    /// extracted from the live meeting transcript. Read-only — does not close.
+    State,
     /// Natural language — forwarded to the LLM.
     Conversation(String),
 }
@@ -41,6 +44,7 @@ pub fn parse_command(input: &str) -> MeetingCommand {
         "/export" => MeetingCommand::Export,
         "/recap" => MeetingCommand::Recap,
         "/preview" => MeetingCommand::Preview,
+        "/state" => MeetingCommand::State,
         "/template" => MeetingCommand::Template(String::new()),
         _ if lower.starts_with("/template ") => {
             let arg = trimmed["/template ".len()..].trim().to_string();
@@ -169,6 +173,36 @@ mod tests {
         assert_eq!(
             parse_command("   "),
             MeetingCommand::Conversation(String::new()),
+        );
+    }
+
+    // ── /state command (issue #1646 — TDD red phase) ─────────────────
+
+    #[test]
+    fn parse_state_exact_token() {
+        // "/state" with no surplus tokens parses to State variant.
+        assert_eq!(parse_command("/state"), MeetingCommand::State);
+    }
+
+    #[test]
+    fn parse_state_case_and_whitespace_insensitive() {
+        // Mirrors /help, /close, /status conventions.
+        assert_eq!(parse_command("  /STATE  "), MeetingCommand::State);
+        assert_eq!(parse_command("/State"), MeetingCommand::State);
+    }
+
+    #[test]
+    fn parse_state_with_surplus_tokens_is_conversation() {
+        // Security M4 / S5: /state takes no arguments. Surplus tokens must
+        // NOT be silently coerced into a State command — they fall through
+        // to Conversation so the operator's intent isn't misread.
+        assert_eq!(
+            parse_command("/state foo"),
+            MeetingCommand::Conversation("/state foo".to_string()),
+        );
+        assert_eq!(
+            parse_command("/state extra args"),
+            MeetingCommand::Conversation("/state extra args".to_string()),
         );
     }
 }

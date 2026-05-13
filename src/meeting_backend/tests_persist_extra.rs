@@ -187,3 +187,389 @@ fn write_handoff_empty_data_uses_defaults() {
         std::env::remove_var("SIMARD_HANDOFF_DIR");
     }
 }
+
+// ── JSON sibling artifact (issue #1646 — TDD red phase) ──────────────────
+//
+// The markdown handoff writer emits a structured JSON sibling artifact next
+// to the markdown report (same dir, same basename, `.json` extension). The
+// JSON shape is documented in `docs/operations/meeting-handoffs.md` and
+// includes: schema_version, participants, decisions, action_items
+// (each with title/owner/acceptance_criteria), open_questions, transcript_ref.
+//
+// Tests below set SIMARD_MEETINGS_DIR to a tempdir to redirect output.
+// The env override mirrors the SIMARD_HANDOFF_DIR idiom in
+// meeting_facilitator::default_handoff_dir().
+
+use crate::meeting_backend::persist::{
+    JsonHandoffActionItem, JsonHandoffSibling, write_handoff_markdown_report,
+};
+use crate::meeting_facilitator::MeetingDecision;
+
+fn populated_messages() -> Vec<ConversationMessage> {
+    vec![
+        make_msg(Role::User, "We need to ship the migration."),
+        make_msg(
+            Role::Assistant,
+            "Decision: We will adopt TDD. OPEN: Who owns the rollback plan for the migration?",
+        ),
+    ]
+}
+
+fn populated_action_items() -> Vec<HandoffActionItem> {
+    vec![
+        HandoffActionItem {
+            description: "Set up CI pipeline".to_string(),
+            assignee: Some("alice".to_string()),
+            deadline: Some("Friday".to_string()),
+            linked_goal: None,
+            priority: Some(1),
+        },
+        HandoffActionItem {
+            description: "Document migration steps".to_string(),
+            assignee: None,
+            deadline: None,
+            linked_goal: None,
+            priority: None,
+        },
+    ]
+}
+
+fn populated_decisions() -> Vec<MeetingDecision> {
+    vec![MeetingDecision {
+        description: "We will adopt TDD".to_string(),
+        rationale: "Better quality bar.".to_string(),
+        participants: vec!["operator".to_string(), "simard".to_string()],
+    }]
+}
+
+/// The markdown handoff writer must emit a JSON sibling file with the same
+/// basename and a `.json` extension, in the same directory as the markdown
+/// report. Markdown remains the canonical artifact; JSON is a side-effect.
+#[test]
+#[serial]
+fn markdown_handoff_writes_json_sibling_with_same_basename() {
+    let dir = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("SIMARD_MEETINGS_DIR", dir.path().as_os_str());
+    }
+
+    let md_path = write_handoff_markdown_report(
+        "Sprint planning",
+        "2025-01-01T00:00:00Z",
+        "Good meeting summary.",
+        &populated_messages(),
+        &populated_action_items(),
+        &populated_decisions(),
+        &[],
+    )
+    .expect("markdown handoff write should succeed under SIMARD_MEETINGS_DIR override");
+
+    // Sibling lives at the same path with `.json` extension.
+    let json_path = md_path.with_extension("json");
+    assert!(
+        json_path.exists(),
+        "expected JSON sibling at {} alongside markdown {}",
+        json_path.display(),
+        md_path.display(),
+    );
+
+    // Same parent directory as the markdown report.
+    assert_eq!(
+        json_path.parent(),
+        md_path.parent(),
+        "JSON sibling must live in the same directory as the markdown report",
+    );
+
+    // Same basename (stem) — only the extension differs.
+    assert_eq!(
+        json_path.file_stem(),
+        md_path.file_stem(),
+        "JSON sibling must share the markdown report's basename",
+    );
+
+    unsafe {
+        std::env::remove_var("SIMARD_MEETINGS_DIR");
+    }
+}
+
+/// JSON sibling deserializes into the `JsonHandoffSibling` DTO with all
+/// expected fields populated. This is the contract consumers depend on:
+/// - schema_version (string, "v1")
+/// - participants (Vec<String>)
+/// - decisions (Vec<String>)
+/// - action_items: Vec<JsonHandoffActionItem { title, owner, acceptance_criteria }>
+/// - open_questions (Vec<String>)
+/// - transcript_ref (String)
+#[test]
+#[serial]
+fn json_sibling_round_trips_all_fields_via_serde_json() {
+    let dir = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("SIMARD_MEETINGS_DIR", dir.path().as_os_str());
+    }
+
+    let md_path = write_handoff_markdown_report(
+        "Sprint planning",
+        "2025-01-01T00:00:00Z",
+        "Good summary.",
+        &populated_messages(),
+        &populated_action_items(),
+        &populated_decisions(),
+        &[],
+    )
+    .unwrap();
+
+    let json_path = md_path.with_extension("json");
+    let json_text = std::fs::read_to_string(&json_path).unwrap_or_else(|e| {
+        panic!(
+            "failed to read JSON sibling at {}: {e}",
+            json_path.display()
+        )
+    });
+
+    // Must deserialize into the canonical DTO.
+    let sibling: JsonHandoffSibling = serde_json::from_str(&json_text)
+        .unwrap_or_else(|e| panic!("JSON sibling failed to deserialize into JsonHandoffSibling: {e}\n--- json ---\n{json_text}"));
+
+    // schema_version is "v1" so consumers can branch on future schema changes.
+    assert_eq!(
+        sibling.schema_version, "v1",
+        "schema_version must be 'v1' for the initial schema",
+    );
+
+    // Participants must include the operator role at minimum (derived from
+    // the user message in populated_messages()).
+    assert!(
+        sibling.participants.iter().any(|p| p == "operator"),
+        "participants should include 'operator' from messages: {:?}",
+        sibling.participants,
+    );
+
+    // Decisions vector contains the structured decision descriptions.
+    assert!(
+        sibling
+            .decisions
+            .iter()
+            .any(|d| d.contains("adopt TDD") || d.contains("TDD")),
+        "decisions should include the TDD decision: {:?}",
+        sibling.decisions,
+    );
+
+    // Action items map title := description, owner := assignee.
+    assert_eq!(
+        sibling.action_items.len(),
+        2,
+        "expected 2 action items in sibling: {:?}",
+        sibling.action_items,
+    );
+    let ci = sibling
+        .action_items
+        .iter()
+        .find(|a| a.title == "Set up CI pipeline")
+        .unwrap_or_else(|| {
+            panic!(
+                "missing 'Set up CI pipeline' action item: {:?}",
+                sibling.action_items
+            )
+        });
+    assert_eq!(ci.owner.as_deref(), Some("alice"));
+
+    // Open questions are extracted from the transcript via existing
+    // extract_open_questions helper (no duplicate parsing).
+    assert!(
+        !sibling.open_questions.is_empty(),
+        "open_questions should be populated from message extraction: {:?}",
+        sibling.open_questions,
+    );
+
+    // transcript_ref locates the markdown file. Per the design, it is the
+    // markdown report's basename (privacy: no full local paths leak into the
+    // handoff artifact).
+    let md_basename = md_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        sibling.transcript_ref, md_basename,
+        "transcript_ref should be the markdown report's basename, not a full path",
+    );
+
+    // Round-trip through serde_json::to_string preserves equality.
+    let reserialized = serde_json::to_string(&sibling).unwrap();
+    let sibling2: JsonHandoffSibling = serde_json::from_str(&reserialized).unwrap();
+    assert_eq!(sibling, sibling2);
+
+    unsafe {
+        std::env::remove_var("SIMARD_MEETINGS_DIR");
+    }
+}
+
+/// Empty extraction must serialize as JSON empty arrays (`[]`), NOT as
+/// `null`. Consumers (dashboards, downstream tools) iterate over these
+/// arrays and would crash on `null`.
+#[test]
+#[serial]
+fn json_sibling_with_empty_extraction_serializes_empty_arrays_not_null() {
+    let dir = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("SIMARD_MEETINGS_DIR", dir.path().as_os_str());
+    }
+
+    let md_path = write_handoff_markdown_report(
+        "Empty meeting",
+        "2025-01-01T00:00:00Z",
+        "Nothing was discussed.",
+        &[],
+        &[],
+        &[],
+        &[],
+    )
+    .unwrap();
+
+    let json_path = md_path.with_extension("json");
+    let json_text = std::fs::read_to_string(&json_path).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&json_text).unwrap();
+
+    for field in &[
+        "participants",
+        "decisions",
+        "action_items",
+        "open_questions",
+    ] {
+        let val = &v[field];
+        assert!(
+            val.is_array(),
+            "field `{field}` must serialize as a JSON array (not null/missing): {json_text}"
+        );
+        assert!(
+            val.as_array().unwrap().is_empty(),
+            "field `{field}` should be an empty array on empty extraction: {json_text}"
+        );
+    }
+
+    // schema_version still present even on empty meeting.
+    assert_eq!(
+        v["schema_version"],
+        serde_json::Value::String("v1".to_string())
+    );
+
+    // transcript_ref is always a non-empty string (the markdown basename).
+    assert!(
+        v["transcript_ref"].is_string(),
+        "transcript_ref must be a string: {json_text}"
+    );
+    assert!(
+        !v["transcript_ref"].as_str().unwrap().is_empty(),
+        "transcript_ref must not be empty: {json_text}"
+    );
+
+    unsafe {
+        std::env::remove_var("SIMARD_MEETINGS_DIR");
+    }
+}
+
+/// Security S2: JSON sibling must be world-unreadable (mode 0o600) on Unix
+/// to mirror the markdown report and transcript privacy guarantees. This
+/// prevents meeting content leaking via shared `~` directories or backups
+/// readable by other users on the same host.
+#[cfg(unix)]
+#[test]
+#[serial]
+fn json_sibling_has_owner_only_permissions_on_unix() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("SIMARD_MEETINGS_DIR", dir.path().as_os_str());
+    }
+
+    let md_path = write_handoff_markdown_report(
+        "Permission test",
+        "2025-01-01T00:00:00Z",
+        "Some summary.",
+        &populated_messages(),
+        &populated_action_items(),
+        &populated_decisions(),
+        &[],
+    )
+    .unwrap();
+
+    let json_path = md_path.with_extension("json");
+    let meta = std::fs::metadata(&json_path).unwrap();
+    let mode = meta.permissions().mode() & 0o777;
+    assert_eq!(
+        mode,
+        0o600,
+        "JSON sibling at {} must be 0o600, got {:o}",
+        json_path.display(),
+        mode,
+    );
+
+    unsafe {
+        std::env::remove_var("SIMARD_MEETINGS_DIR");
+    }
+}
+
+/// `JsonHandoffActionItem::from(&HandoffActionItem)` maps fields exactly as
+/// specified: `title := description`, `owner := assignee`,
+/// `acceptance_criteria := None` (reserved slot for future extractor work).
+#[test]
+fn json_handoff_action_item_from_handoff_action_item_maps_fields() {
+    let src = HandoffActionItem {
+        description: "Ship v1.0".to_string(),
+        assignee: Some("bob".to_string()),
+        deadline: Some("EOD".to_string()),
+        linked_goal: Some("release-train".to_string()),
+        priority: Some(1),
+    };
+    let dst: JsonHandoffActionItem = (&src).into();
+    assert_eq!(dst.title, "Ship v1.0");
+    assert_eq!(dst.owner.as_deref(), Some("bob"));
+    assert_eq!(
+        dst.acceptance_criteria, None,
+        "acceptance_criteria is a reserved slot; current extractor never populates it",
+    );
+
+    // Unassigned action item maps to owner=None (NOT empty string, NOT 'unassigned').
+    let unassigned = HandoffActionItem {
+        description: "Triage backlog".to_string(),
+        assignee: None,
+        deadline: None,
+        linked_goal: None,
+        priority: None,
+    };
+    let dst2: JsonHandoffActionItem = (&unassigned).into();
+    assert_eq!(dst2.title, "Triage backlog");
+    assert_eq!(dst2.owner, None);
+}
+
+/// Per design A2 (resolve to explicit `null`), `Option<String>` fields on
+/// `JsonHandoffActionItem` must serialize as JSON `null` when None — NOT
+/// be omitted via `skip_serializing_if`. This is a contract consumers can
+/// rely on (every action_item entry has the same shape).
+#[test]
+fn json_handoff_action_item_none_fields_serialize_as_explicit_null() {
+    let item = JsonHandoffActionItem {
+        title: "Triage backlog".to_string(),
+        owner: None,
+        acceptance_criteria: None,
+    };
+    let json = serde_json::to_string(&item).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        v["owner"],
+        serde_json::Value::Null,
+        "owner=None must serialize as explicit JSON null: {json}"
+    );
+    assert_eq!(
+        v["acceptance_criteria"],
+        serde_json::Value::Null,
+        "acceptance_criteria=None must serialize as explicit JSON null: {json}"
+    );
+    // The `title` field is always present.
+    assert_eq!(
+        v["title"],
+        serde_json::Value::String("Triage backlog".to_string())
+    );
+}

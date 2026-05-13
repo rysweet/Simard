@@ -43,8 +43,16 @@ pub fn sanitize_filename(input: &str) -> String {
     }
 }
 
-/// Directory for meeting transcripts: `~/.simard/meetings/`.
+/// Directory for meeting transcripts: `$SIMARD_MEETINGS_DIR` if set, else
+/// `~/.simard/meetings/`.
+///
+/// The env var override mirrors the `SIMARD_HANDOFF_DIR` idiom in
+/// [`meeting_facilitator::default_handoff_dir`] so tests (and operators) can
+/// redirect meeting artifacts to a tempdir without touching `$HOME`.
 pub(super) fn meetings_dir() -> PathBuf {
+    if let Some(override_path) = std::env::var_os("SIMARD_MEETINGS_DIR") {
+        return PathBuf::from(override_path);
+    }
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".simard/meetings")
@@ -239,6 +247,7 @@ mod markdown;
 pub use markdown::{write_handoff_markdown_report, write_markdown_export};
 mod cognitive;
 mod extract;
+mod json_sibling;
 mod templates;
 
 pub use cognitive::{store_cognitive_memory, store_enriched_cognitive_memory};
@@ -251,4 +260,5 @@ pub use extract::{
     extract_action_items, extract_decision_participants_pub, extract_decision_rationale_pub,
     extract_decisions, extract_open_questions, extract_themes, link_action_items_to_goals,
 };
+pub use json_sibling::{JsonHandoffActionItem, JsonHandoffSibling};
 pub use templates::{MeetingTemplate, TEMPLATES, find_template};

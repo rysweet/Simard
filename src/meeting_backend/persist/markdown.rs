@@ -262,5 +262,23 @@ pub fn write_handoff_markdown_report(
     }
 
     info!(path = %path.display(), "Meeting handoff report written");
+
+    // Emit the structured JSON sibling artifact alongside the markdown
+    // report (issue #1646). Markdown remains the canonical artifact —
+    // a JSON write failure is logged and skipped, never propagated.
+    match super::json_sibling::write_json_sibling_for_markdown(
+        &path,
+        messages,
+        action_items,
+        decisions,
+    ) {
+        Ok(json_path) => {
+            info!(path = %json_path.display(), "Meeting handoff JSON sibling written");
+        }
+        Err(e) => {
+            warn!(error = %e, "Failed to write JSON sibling for handoff report — markdown remains canonical");
+        }
+    }
+
     Ok(path)
 }
