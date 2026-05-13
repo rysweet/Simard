@@ -506,9 +506,16 @@ mod tests {
     }
 
     #[test]
+    #[serial(simard_amplihack_bin_env)]
     fn amplihack_binary_respects_env_override() {
         // Use a sentinel value that is not a real binary; verify the function
         // honours the override regardless of whether the file exists.
+        //
+        // `#[serial(simard_amplihack_bin_env)]` shares the named lock with
+        // sibling tests that mutate `SIMARD_AMPLIHACK_BIN` — including
+        // `run_rustyclawd_subprocess_propagates_spawn_failure` below and the
+        // integration tests in `tests/engineer_copilot_permissions.rs` — so
+        // concurrent mutation cannot race the assertion. See issue #1722.
         let original = std::env::var("SIMARD_AMPLIHACK_BIN").ok();
         // SAFETY: this test runs in a single-thread per test runner; env var
         // mutation is bounded by the cleanup below.
@@ -540,9 +547,16 @@ mod tests {
     }
 
     #[test]
+    #[serial(simard_amplihack_bin_env)]
     fn run_rustyclawd_subprocess_propagates_spawn_failure() {
         // Override binary to a path that does not exist; spawn must fail with
         // ActionExecutionFailed (not panic, not block).
+        //
+        // `#[serial(simard_amplihack_bin_env)]` shares the named lock with
+        // sibling tests that mutate `SIMARD_AMPLIHACK_BIN` — including the
+        // integration tests in `tests/engineer_copilot_permissions.rs` and
+        // the spawn helper test above — so concurrent mutation across the
+        // subprocess spawn cannot race. See issue #1722.
         let original = std::env::var("SIMARD_AMPLIHACK_BIN").ok();
         unsafe {
             std::env::set_var(
@@ -572,7 +586,12 @@ mod tests {
     }
 
     #[test]
+    #[serial(simard_engineer_agent_env)]
     fn agent_kind_from_env_defaults_to_copilot() {
+        // Shares the `simard_engineer_agent_env` named lock with the sibling
+        // tests below that also mutate `SIMARD_ENGINEER_AGENT`, so a
+        // concurrent setter cannot race this `remove_var` + assertion. See
+        // issue #1722.
         let original = std::env::var("SIMARD_ENGINEER_AGENT").ok();
         unsafe {
             std::env::remove_var("SIMARD_ENGINEER_AGENT");
