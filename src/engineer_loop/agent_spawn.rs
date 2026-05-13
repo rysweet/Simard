@@ -56,15 +56,23 @@ pub(crate) fn amplihack_binary() -> String {
 /// (case-insensitive): `rustyclawd` (default), `copilot`. Unknown values
 /// fall back to the default with a stderr warning so operator typos do
 /// not silently change behaviour.
+///
+/// Visibility is `pub` (rather than `pub(crate)`) so the integration test
+/// `tests/engineer_copilot_permissions.rs` can drive `engineer_argv` /
+/// `run_engineer_subprocess` end-to-end against a stub `amplihack` shim.
+/// This is not part of the long-term stable API; treat it as test-visible
+/// internal scaffolding.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AgentKind {
+pub enum AgentKind {
     RustyClawd,
     Copilot,
 }
 
 impl AgentKind {
     /// Subcommand name as accepted by `amplihack <subcommand>`.
-    pub(crate) fn subcommand(self) -> &'static str {
+    #[doc(hidden)]
+    pub fn subcommand(self) -> &'static str {
         match self {
             AgentKind::RustyClawd => "RustyClawd",
             AgentKind::Copilot => "copilot",
@@ -187,7 +195,12 @@ deployed copy.\n";
 ///   required so the inner `-p` reaches the autonomous loop).
 /// * `copilot` accepts `-p <prompt>` directly with `--allow-all-paths`
 ///   so it can read/write across the workspace.
-pub(crate) fn engineer_argv(kind: AgentKind, prompt: &str, max_turns: u32) -> Vec<String> {
+///
+/// Visibility note: `pub` for the integration regression test
+/// `tests/engineer_copilot_permissions.rs`. Treat as test-visible internal
+/// scaffolding, not a stable API.
+#[doc(hidden)]
+pub fn engineer_argv(kind: AgentKind, prompt: &str, max_turns: u32) -> Vec<String> {
     match kind {
         AgentKind::RustyClawd => vec![
             kind.subcommand().to_string(),
@@ -202,6 +215,15 @@ pub(crate) fn engineer_argv(kind: AgentKind, prompt: &str, max_turns: u32) -> Ve
         ],
         AgentKind::Copilot => vec![
             kind.subcommand().to_string(),
+            // Issue #1717: without --allow-all-tools the Copilot CLI's
+            // tool allow-list defaults to interactive prompting, and a
+            // headless engineer subprocess (no TTY) can only *read*: every
+            // file write, `git commit`, `gh pr create`, `amplihack recipe
+            // run`, etc. fail with "Permission denied and could not request
+            // permission from user". Both permission flags MUST precede -p
+            // so the Copilot CLI parser treats them as flags rather than
+            // prompt content.
+            "--allow-all-tools".to_string(),
             "--allow-all-paths".to_string(),
             "-p".to_string(),
             prompt.to_string(),
@@ -232,7 +254,12 @@ fn keep_summary_tail(buf: &[u8]) -> String {
 
 /// Run the `amplihack <agent>` subprocess and return its trailing output.
 /// `kind` selects which agent subcommand to invoke; see [`AgentKind`].
-pub(crate) fn run_engineer_subprocess(
+///
+/// Visibility note: `pub` for the integration regression test
+/// `tests/engineer_copilot_permissions.rs`. Treat as test-visible internal
+/// scaffolding, not a stable API.
+#[doc(hidden)]
+pub fn run_engineer_subprocess(
     prompt: &str,
     workspace: &Path,
     kind: AgentKind,
@@ -241,12 +268,27 @@ pub(crate) fn run_engineer_subprocess(
     let argv = engineer_argv(kind, prompt, DEFAULT_MAX_TURNS);
     let action_label = format!("{bin} {}", kind.subcommand());
 
-    let mut child = Command::new(&bin)
-        .args(&argv)
+    let mut cmd = Command::new(&bin);
+    cmd.args(&argv)
         .current_dir(workspace)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // Belt-and-suspenders permission grant for the Copilot CLI subprocess.
+    //
+    // `--allow-all-tools` (in `engineer_argv`) is the primary mechanism for
+    // auto-approving non-interactive write/git/gh tool calls. If a future
+    // upstream Copilot CLI release renames or removes that flag, the
+    // documented `COPILOT_ALLOW_ALL` env var keeps the engineer subprocess
+    // from regressing back to the symptom motivating issue #1717 (every
+    // engineer plan ending in a permission-denied table). Setting only for
+    // the Copilot kind keeps the RustyClawd path byte-identical.
+    if matches!(kind, AgentKind::Copilot) {
+        cmd.env("COPILOT_ALLOW_ALL", "1");
+    }
+
+    let mut child = cmd
         .spawn()
         .map_err(|e| SimardError::ActionExecutionFailed {
             action: action_label.clone(),
@@ -606,6 +648,16 @@ mod tests {
     fn engineer_argv_copilot_uses_p_without_dash_separator() {
         let argv = engineer_argv(AgentKind::Copilot, "hello world", 7);
         assert_eq!(argv[0], "copilot");
+        // The original (broken) contract only granted filesystem reads via
+        // --allow-all-paths. Issue #1717 added --allow-all-tools so writes
+        // (gh/git/file/amplihack) are also auto-approved in non-interactive
+        // mode. Both must be present and both must come before -p so the
+        // Copilot CLI parser sees them as flags rather than prompt content.
+        assert!(
+            argv.iter().any(|a| a == "--allow-all-tools"),
+            "copilot argv must include --allow-all-tools so non-interactive \
+             writes/git/gh/amplihack tools are auto-approved (issue #1717): {argv:?}"
+        );
         assert!(argv.iter().any(|a| a == "--allow-all-paths"));
         assert!(argv.iter().any(|a| a == "-p"));
         assert!(argv.iter().any(|a| a == "hello world"));
@@ -619,6 +671,52 @@ mod tests {
         // amplihack copilot subcommand surface.
         assert!(!argv.iter().any(|a| a == "--auto"));
         assert!(!argv.iter().any(|a| a == "--max-turns"));
+    }
+
+    /// Pin the exact positional ordering of the Copilot permission flags.
+    ///
+    /// The Copilot CLI's argument parser treats anything after `-p` as
+    /// part of the prompt (or as a positional argument). If
+    /// `--allow-all-tools` or `--allow-all-paths` ever lands *after* `-p`,
+    /// the subprocess will silently regress to interactive prompting and
+    /// fail closed in headless mode (the symptom that motivated #1717:
+    /// engineer plans with empty PR pipelines).
+    ///
+    /// This test pins the canonical order:
+    ///   `copilot --allow-all-tools --allow-all-paths -p <prompt>`
+    #[test]
+    fn engineer_argv_copilot_grants_tool_permissions_for_non_interactive() {
+        let argv = engineer_argv(AgentKind::Copilot, "any prompt", 1);
+
+        let tools_pos = argv.iter().position(|a| a == "--allow-all-tools").expect(
+            "--allow-all-tools must be present in Copilot argv (issue #1717: \
+                 non-interactive writes were failing closed without it)",
+        );
+        let paths_pos = argv
+            .iter()
+            .position(|a| a == "--allow-all-paths")
+            .expect("--allow-all-paths must be present in Copilot argv");
+        let p_pos = argv
+            .iter()
+            .position(|a| a == "-p")
+            .expect("-p must be present in Copilot argv");
+
+        assert!(
+            tools_pos < paths_pos,
+            "--allow-all-tools must precede --allow-all-paths: {argv:?}"
+        );
+        assert!(
+            paths_pos < p_pos,
+            "permission flags must precede -p so the parser treats them as \
+             flags not prompt content: {argv:?}"
+        );
+
+        // The subcommand itself stays at index 0; permission flags follow.
+        assert_eq!(argv[0], "copilot");
+        assert_eq!(argv[1], "--allow-all-tools", "exact slot 1: {argv:?}");
+        assert_eq!(argv[2], "--allow-all-paths", "exact slot 2: {argv:?}");
+        assert_eq!(argv[3], "-p", "exact slot 3: {argv:?}");
+        assert_eq!(argv[4], "any prompt", "exact slot 4: {argv:?}");
     }
 
     #[test]
