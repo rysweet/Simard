@@ -8,7 +8,10 @@ use std::io::{BufRead, Write};
 use crate::base_types::BaseTypeSession;
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
-use crate::meeting_backend::{MeetingBackend, MeetingCommand, parse_command};
+use crate::meeting_backend::persist::{
+    extract_action_items, extract_decisions, extract_open_questions,
+};
+use crate::meeting_backend::{MeetingBackend, MeetingCommand, parse_command, strip_ansi_escapes};
 use crate::meeting_facilitator::MeetingSession;
 
 use super::color::{cyan, green, yellow};
@@ -92,7 +95,7 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
             MeetingCommand::Help => {
                 writeln!(
                     output,
-                    "Commands:\n  /status    — show session info\n  /template  — list meeting templates\n  /template <name> — apply a template (standup, 1on1, retro, planning)\n  /theme <text>    — record a theme for this meeting\n  /recap     — show color-coded session recap\n  /preview   — preview the handoff artifact\n  /export    — export meeting as markdown\n  /close     — end meeting and persist\n  /help      — this message\n\nEverything else is natural conversation with Simard."
+                    "Commands:\n  /status    — show session info\n  /state     — show current decisions, open questions, action items\n  /template  — list meeting templates\n  /template <name> — apply a template (standup, 1on1, retro, planning)\n  /theme <text>    — record a theme for this meeting\n  /recap     — show color-coded session recap\n  /preview   — preview the handoff artifact\n  /export    — export meeting as markdown\n  /close     — end meeting and persist\n  /help      — this message\n\nEverything else is natural conversation with Simard."
                 )
                 .ok();
             }
@@ -101,6 +104,62 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                 writeln!(output, "Meeting: {}", status.topic).ok();
                 writeln!(output, "  Messages: {}", status.message_count).ok();
                 writeln!(output, "  Started:  {}", status.started_at).ok();
+            }
+            MeetingCommand::State => {
+                // Re-display the running list of decisions, open questions, and
+                // action items extracted from the live transcript. Read-only —
+                // does not close or summarize the meeting. Reuses the existing
+                // extractors in `meeting_backend::persist::extract` (issue #1646).
+                let messages = backend.history();
+                let decisions = extract_decisions(messages);
+                let open_questions = extract_open_questions(messages);
+                let action_items = extract_action_items(messages);
+
+                // Canonical order per task spec: Decisions → Open Questions →
+                // Action Items. (Different from the post-/close summary order.)
+                writeln!(output, "\n{}", cyan("── Decisions ──")).ok();
+                if decisions.is_empty() {
+                    writeln!(output, "  _(none)_").ok();
+                } else {
+                    for (i, d) in decisions.iter().enumerate() {
+                        // Sanitize LLM-sourced content (S1): strip ANSI escapes
+                        // before rendering to the terminal so a malicious model
+                        // can't reposition the cursor or clear the screen.
+                        let safe = strip_ansi_escapes(d);
+                        writeln!(output, "  {}. {safe}", i + 1).ok();
+                    }
+                }
+
+                writeln!(output, "\n{}", yellow("── Open Questions ──")).ok();
+                if open_questions.is_empty() {
+                    writeln!(output, "  _(none)_").ok();
+                } else {
+                    for q in &open_questions {
+                        let safe = strip_ansi_escapes(&q.text);
+                        let tag = if q.explicit { " *(explicit)*" } else { "" };
+                        writeln!(output, "  - {safe}{tag}").ok();
+                    }
+                }
+
+                writeln!(output, "\n{}", green("── Action Items ──")).ok();
+                if action_items.is_empty() {
+                    writeln!(output, "  _(none)_").ok();
+                } else {
+                    for (i, item) in action_items.iter().enumerate() {
+                        let safe_desc = strip_ansi_escapes(&item.description);
+                        let mut line = format!("  {}. {safe_desc}", i + 1);
+                        if let Some(ref who) = item.assignee {
+                            let safe_who = strip_ansi_escapes(who);
+                            line.push_str(&format!(" [→ {safe_who}]"));
+                        }
+                        if let Some(ref when) = item.deadline {
+                            let safe_when = strip_ansi_escapes(when);
+                            line.push_str(&format!(" ({safe_when})"));
+                        }
+                        writeln!(output, "{line}").ok();
+                    }
+                }
+                writeln!(output).ok();
             }
             MeetingCommand::Theme(text) => {
                 backend.push_theme(text.clone());

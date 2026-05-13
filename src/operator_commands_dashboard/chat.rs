@@ -279,6 +279,58 @@ pub(crate) async fn handle_ws_chat(mut socket: WebSocket) {
                             ))
                             .await;
                     }
+                    MeetingCommand::State => {
+                        // Re-display the running list of decisions, open
+                        // questions, and action items (issue #1646). Reuses
+                        // the existing extractors — no duplicate parsing.
+                        use crate::meeting_backend::persist::{
+                            extract_action_items, extract_decisions, extract_open_questions,
+                        };
+                        let messages = backend.history();
+                        let decisions = extract_decisions(messages);
+                        let open_questions = extract_open_questions(messages);
+                        let action_items = extract_action_items(messages);
+
+                        let mut body = String::new();
+                        body.push_str("── Decisions ──\n");
+                        if decisions.is_empty() {
+                            body.push_str("  _(none)_\n");
+                        } else {
+                            for (i, d) in decisions.iter().enumerate() {
+                                body.push_str(&format!("  {}. {d}\n", i + 1));
+                            }
+                        }
+                        body.push_str("\n── Open Questions ──\n");
+                        if open_questions.is_empty() {
+                            body.push_str("  _(none)_\n");
+                        } else {
+                            for q in &open_questions {
+                                let tag = if q.explicit { " *(explicit)*" } else { "" };
+                                body.push_str(&format!("  - {}{tag}\n", q.text));
+                            }
+                        }
+                        body.push_str("\n── Action Items ──\n");
+                        if action_items.is_empty() {
+                            body.push_str("  _(none)_\n");
+                        } else {
+                            for (i, item) in action_items.iter().enumerate() {
+                                let mut line = format!("  {}. {}", i + 1, item.description);
+                                if let Some(ref who) = item.assignee {
+                                    line.push_str(&format!(" [→ {who}]"));
+                                }
+                                if let Some(ref when) = item.deadline {
+                                    line.push_str(&format!(" ({when})"));
+                                }
+                                body.push_str(&line);
+                                body.push('\n');
+                            }
+                        }
+                        let _ = socket
+                            .send(Message::Text(
+                                json!({"role":"system","content": body}).to_string().into(),
+                            ))
+                            .await;
+                    }
                     MeetingCommand::Conversation(user_text) => {
                         // send_message is synchronous — use spawn_blocking
                         // wrapped with catch_unwind so a panic in the agent
