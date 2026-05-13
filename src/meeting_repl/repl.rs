@@ -95,7 +95,7 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
             MeetingCommand::Help => {
                 writeln!(
                     output,
-                    "Commands:\n  /status    — show session info\n  /state     — show current decisions, open questions, action items\n  /template  — list meeting templates\n  /template <name> — apply a template (standup, 1on1, retro, planning)\n  /theme <text>    — record a theme for this meeting\n  /recap     — show color-coded session recap\n  /preview   — preview the handoff artifact\n  /export    — export meeting as markdown\n  /close     — end meeting and persist\n  /help      — this message\n\nEverything else is natural conversation with Simard."
+                    "Commands:\n  /status    — show session info\n  /state     — show current decisions, open questions, action items\n  /template  — list meeting templates\n  /template <name> — apply a template (standup, 1on1, retro, planning)\n  /theme <text>    — record a theme for this meeting\n  /decision <text> — record a decision deterministically (skips heuristic extraction)\n  /action <text>   — record an action item (assignee/deadline parsed inline)\n  /question <text> — record an open question deterministically\n  /recap     — show color-coded session recap\n  /preview   — preview the handoff artifact\n  /export    — export meeting as markdown\n  /close     — end meeting and persist\n  /help      — this message\n\nEverything else is natural conversation with Simard."
                 )
                 .ok();
             }
@@ -110,10 +110,55 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                 // action items extracted from the live transcript. Read-only —
                 // does not close or summarize the meeting. Reuses the existing
                 // extractors in `meeting_backend::persist::extract` (issue #1646).
+                //
+                // Explicit items recorded inline via `/decision`, `/action`,
+                // and `/question` are prepended (issue #1730 seam (b)) so the
+                // operator sees them immediately even though they don't land
+                // in the conversation history.
                 let messages = backend.history();
-                let decisions = extract_decisions(messages);
-                let open_questions = extract_open_questions(messages);
-                let action_items = extract_action_items(messages);
+                let inferred_decisions = extract_decisions(messages);
+                let inferred_questions = extract_open_questions(messages);
+                let inferred_actions = extract_action_items(messages);
+
+                let mut decisions: Vec<String> = backend.explicit_decisions().to_vec();
+                for d in inferred_decisions {
+                    let lower = d.to_lowercase();
+                    if !decisions.iter().any(|e| e.to_lowercase() == lower) {
+                        decisions.push(d);
+                    }
+                }
+
+                let explicit_q_set: std::collections::HashSet<String> = backend
+                    .explicit_questions()
+                    .iter()
+                    .map(|q| q.to_lowercase())
+                    .collect();
+                let mut open_questions: Vec<crate::meeting_facilitator::OpenQuestion> = backend
+                    .explicit_questions()
+                    .iter()
+                    .map(|text| crate::meeting_facilitator::OpenQuestion {
+                        text: text.clone(),
+                        explicit: true,
+                    })
+                    .collect();
+                for q in inferred_questions {
+                    let lower = q.text.to_lowercase();
+                    if !explicit_q_set.contains(&lower) {
+                        open_questions.push(q);
+                    }
+                }
+
+                let mut action_items: Vec<crate::meeting_backend::HandoffActionItem> =
+                    backend.explicit_action_items().to_vec();
+                for a in inferred_actions {
+                    let lower = a.description.to_lowercase();
+                    if !action_items
+                        .iter()
+                        .any(|e| e.description.to_lowercase() == lower)
+                    {
+                        action_items.push(a);
+                    }
+                }
 
                 // Canonical order per task spec: Decisions → Open Questions →
                 // Action Items. (Different from the post-/close summary order.)
@@ -164,6 +209,18 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
             MeetingCommand::Theme(text) => {
                 backend.push_theme(text.clone());
                 writeln!(output, "{}", green(&format!("Theme recorded: {text}"))).ok();
+            }
+            MeetingCommand::Decision(text) => {
+                backend.push_explicit_decision(&text);
+                writeln!(output, "{}", cyan(&format!("Decision recorded: {text}"))).ok();
+            }
+            MeetingCommand::Action(text) => {
+                backend.push_explicit_action_item(&text);
+                writeln!(output, "{}", green(&format!("Action recorded: {text}"))).ok();
+            }
+            MeetingCommand::Question(text) => {
+                backend.push_explicit_question(&text);
+                writeln!(output, "{}", yellow(&format!("Question recorded: {text}"))).ok();
             }
             MeetingCommand::Recap => {
                 let status = backend.status();

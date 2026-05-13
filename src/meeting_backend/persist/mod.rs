@@ -152,6 +152,22 @@ pub fn write_handoff(
     action_items: &[HandoffActionItem],
     decisions: &[String],
 ) -> SimardResult<()> {
+    write_handoff_with_explicit(topic, summary, messages, action_items, decisions, &[])
+}
+
+/// Variant of [`write_handoff`] that accepts a list of operator-supplied
+/// explicit open questions (recorded inline via `/question`). Explicit
+/// questions are prepended to the inferred ones with `explicit=true`, and
+/// inferred questions whose text duplicates an explicit one are dropped.
+/// Issue #1730 seam (b).
+pub fn write_handoff_with_explicit(
+    topic: &str,
+    summary: &str,
+    messages: &[ConversationMessage],
+    action_items: &[HandoffActionItem],
+    decisions: &[String],
+    explicit_questions: &[String],
+) -> SimardResult<()> {
     let started_at = messages
         .first()
         .map(|m| m.timestamp.clone())
@@ -196,8 +212,24 @@ pub fn write_handoff(
         })
         .collect();
 
-    // Extract open questions from message content.
-    let open_questions = extract_open_questions(messages);
+    // Extract open questions from message content; prepend explicit ones.
+    let inferred_questions = extract_open_questions(messages);
+    let mut open_questions: Vec<crate::meeting_facilitator::OpenQuestion> = explicit_questions
+        .iter()
+        .map(|q| crate::meeting_facilitator::OpenQuestion {
+            text: q.clone(),
+            explicit: true,
+        })
+        .collect();
+    for q in inferred_questions {
+        let lower = q.text.to_lowercase();
+        if !open_questions
+            .iter()
+            .any(|e| e.text.to_lowercase() == lower)
+        {
+            open_questions.push(q);
+        }
+    }
 
     // Collect unique participants from messages.
     let mut participants: Vec<String> = Vec::new();
@@ -366,3 +398,26 @@ pub use extract::{
 };
 pub use json_sibling::{JsonHandoffActionItem, JsonHandoffSibling};
 pub use templates::{MeetingTemplate, TEMPLATES, find_template};
+
+// ─── Public wrappers around extract helpers used by the inline /action ───
+// command path (issue #1730 seam (b)). Kept thin so the heuristic logic
+// stays in one place and any future tweak to the extractors automatically
+// flows through to operator-typed action items.
+
+/// Public wrapper around [`extract::extract_assignee`] for use by the
+/// `MeetingBackend::push_explicit_action_item` inline-recording path.
+pub fn extract_assignee_pub(sentence: &str) -> Option<String> {
+    extract::extract_assignee(sentence)
+}
+
+/// Public wrapper around [`extract::extract_deadline`] for use by the
+/// `MeetingBackend::push_explicit_action_item` inline-recording path.
+pub fn extract_deadline_pub(lower_sentence: &str) -> Option<String> {
+    extract::extract_deadline(lower_sentence)
+}
+
+/// Public wrapper around [`extract::clean_action_description`] for use by
+/// the `MeetingBackend::push_explicit_action_item` inline-recording path.
+pub fn clean_action_description_pub(sentence: &str) -> String {
+    extract::clean_action_description(sentence)
+}

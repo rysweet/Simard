@@ -627,3 +627,164 @@ fn repl_help_mentions_state_command() {
         "help text should advertise the new /state command: {output_str}"
     );
 }
+
+// ── Inline /decision /action /question (issue #1730 seam (b)) ─────────
+
+#[test]
+#[serial]
+fn repl_help_mentions_inline_recording_commands() {
+    let bridge = mock_bridge();
+    let agent = MockAgentSession::new("ok");
+    let input = b"/help\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Help mentions inline commands",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    let output_str = String::from_utf8(output).unwrap();
+    for cmd in ["/decision", "/action", "/question"] {
+        assert!(
+            output_str.contains(cmd),
+            "help should advertise {cmd}: {output_str}"
+        );
+    }
+}
+
+#[test]
+#[serial]
+fn repl_decision_command_records_and_confirms() {
+    let bridge = mock_bridge();
+    let agent = MockAgentSession::new("ok");
+    let input = b"/decision Adopt TDD for new modules\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Decision recording test",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    let output_str = String::from_utf8(output).unwrap();
+    assert!(
+        output_str.contains("Decision recorded:"),
+        "REPL should confirm explicit decision: {output_str}"
+    );
+    assert!(
+        output_str.contains("Adopt TDD for new modules"),
+        "REPL should echo the decision text back: {output_str}"
+    );
+}
+
+#[test]
+#[serial]
+fn repl_action_command_records_and_confirms() {
+    let bridge = mock_bridge();
+    let agent = MockAgentSession::new("ok");
+    let input = b"/action Bob will write tests by friday\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Action recording test",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    let output_str = String::from_utf8(output).unwrap();
+    assert!(
+        output_str.contains("Action recorded:"),
+        "REPL should confirm explicit action item: {output_str}"
+    );
+    assert!(
+        output_str.contains("write tests"),
+        "REPL should echo the action text back: {output_str}"
+    );
+}
+
+#[test]
+#[serial]
+fn repl_question_command_records_and_confirms() {
+    let bridge = mock_bridge();
+    let agent = MockAgentSession::new("ok");
+    let input = b"/question What is our SLO target?\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Question recording test",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    let output_str = String::from_utf8(output).unwrap();
+    assert!(
+        output_str.contains("Question recorded:"),
+        "REPL should confirm explicit open question: {output_str}"
+    );
+    assert!(
+        output_str.contains("What is our SLO target?"),
+        "REPL should echo the question text back: {output_str}"
+    );
+}
+
+#[test]
+#[serial]
+fn repl_state_shows_explicit_items_immediately() {
+    // /decision, /action, /question add items that don't enter the
+    // conversation history; /state must still surface them so the operator
+    // sees the running list.
+    let bridge = mock_bridge();
+    let agent = MockAgentSession::new("ok");
+    let input = b"/decision Use Rust for CLI\n/action Carol will set up CI by next sprint\n/question Who owns rollout?\n/state\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Inline state test",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    let output_str = String::from_utf8(output).unwrap();
+    assert!(
+        output_str.contains("Use Rust for CLI"),
+        "/state should show explicit decision: {output_str}"
+    );
+    assert!(
+        output_str.contains("Who owns rollout?"),
+        "/state should show explicit question: {output_str}"
+    );
+    assert!(
+        output_str.contains("Carol will set up CI") || output_str.contains("set up CI"),
+        "/state should show explicit action item: {output_str}"
+    );
+    assert!(
+        output_str.contains("*(explicit)*"),
+        "/state should mark explicit questions as such: {output_str}"
+    );
+}
