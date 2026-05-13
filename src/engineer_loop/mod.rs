@@ -45,6 +45,14 @@ pub use types::{
 pub use agent_spawn::spawn_agent_for_goal;
 pub use review_persist::{persist_engineer_loop_artifacts, run_optional_review};
 
+// Test-visible re-exports for the integration regression suite that pins the
+// Copilot subprocess permission contract (issue #1717,
+// `tests/engineer_copilot_permissions.rs`). These helpers are otherwise
+// internal to the engineer loop. Kept under `#[doc(hidden)]` so they do not
+// appear in user-facing rustdoc and are not treated as a stable surface.
+#[doc(hidden)]
+pub use agent_spawn::{AgentKind, engineer_argv, run_engineer_subprocess};
+
 pub(crate) const ENGINEER_IDENTITY: &str = "simard-engineer";
 pub(crate) const ENGINEER_BASE_TYPE: &str = "terminal-shell";
 pub(crate) const EXECUTION_SCOPE: &str = "local-only";
