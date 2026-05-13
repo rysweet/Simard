@@ -19,6 +19,12 @@ pub struct ActionItem {
     pub owner: String,
     pub priority: u32,
     pub due_description: Option<String>,
+    /// Optional reference to an external issue this action item tracks
+    /// (e.g. `rysweet/Simard#1730` or a full URL). Set by downstream
+    /// consumers (engineer loop, `act-on-decisions`) once an issue is
+    /// filed; carried through subsequent re-loads so the link survives.
+    #[serde(default)]
+    pub linked_issue: Option<String>,
 }
 
 /// An open question recorded during or inferred from a meeting.
@@ -146,6 +152,7 @@ mod tests {
             owner: "dev".to_string(),
             priority: 1,
             due_description: Some("next sprint".to_string()),
+            linked_issue: None,
         };
         let json = serde_json::to_string(&a).unwrap();
         let a2: ActionItem = serde_json::from_str(&json).unwrap();
@@ -159,6 +166,7 @@ mod tests {
             owner: "ops".to_string(),
             priority: 3,
             due_description: None,
+            linked_issue: None,
         };
         let json = serde_json::to_string(&a).unwrap();
         let a2: ActionItem = serde_json::from_str(&json).unwrap();
@@ -172,6 +180,7 @@ mod tests {
             owner: "x".to_string(),
             priority: 0,
             due_description: None,
+            linked_issue: None,
         };
         assert_eq!(a.priority, 0);
     }
@@ -236,6 +245,7 @@ mod tests {
                 owner: "bob".to_string(),
                 priority: 1,
                 due_description: Some("Friday".to_string()),
+                linked_issue: None,
             }],
             notes: vec!["Good discussion".to_string()],
             status: MeetingSessionStatus::Open,

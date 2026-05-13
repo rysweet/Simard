@@ -52,12 +52,14 @@ fn sample_handoff() -> MeetingHandoff {
                 owner: "bob".to_string(),
                 priority: 1,
                 due_description: Some("end of sprint".to_string()),
+                linked_issue: None,
             },
             ActionItem {
                 description: "Update docs".to_string(),
                 owner: "carol".to_string(),
                 priority: 2,
                 due_description: None,
+                linked_issue: None,
             },
         ],
         notes: vec!["Should we add metrics?".to_string()],
@@ -136,6 +138,7 @@ fn action_item_issue_title_is_prefixed_with_action() {
         owner: "bob".to_string(),
         priority: 1,
         due_description: Some("end of sprint".to_string()),
+        linked_issue: None,
     };
 
     let title = format!("Action: {}", item.description);
@@ -149,6 +152,7 @@ fn action_item_body_contains_owner_priority_and_due() {
         owner: "bob".to_string(),
         priority: 1,
         due_description: Some("end of sprint".to_string()),
+        linked_issue: None,
     };
     let topic = "Sprint planning";
 
@@ -171,6 +175,7 @@ fn action_item_without_due_shows_unspecified() {
         owner: "carol".to_string(),
         priority: 2,
         due_description: None,
+        linked_issue: None,
     };
 
     let due = item.due_description.as_deref().unwrap_or("(unspecified)");

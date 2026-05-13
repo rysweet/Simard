@@ -74,6 +74,7 @@ fn meeting_full_lifecycle() {
             owner: "bob".to_string(),
             priority: 1,
             due_description: Some("before merge".to_string()),
+            linked_issue: None,
         },
     )
     .unwrap();
@@ -112,6 +113,7 @@ fn meeting_rejects_operations_on_closed_session_and_double_close() {
                 owner: "x".to_string(),
                 priority: 1,
                 due_description: None,
+                linked_issue: None,
             }
         )
         .is_err()
@@ -326,6 +328,7 @@ fn meeting_action_items_become_research_topics() {
             owner: "researcher".to_string(),
             priority: 2,
             due_description: None,
+            linked_issue: None,
         },
     )
     .unwrap();

@@ -180,6 +180,8 @@ mod tests {
             transcript: Vec::new(),
             participants: Vec::new(),
             themes: Vec::new(),
+            meeting_id: String::new(),
+            transcript_path: None,
         }
     }
 
@@ -199,6 +201,8 @@ mod tests {
             transcript: Vec::new(),
             participants: Vec::new(),
             themes: Vec::new(),
+            meeting_id: String::new(),
+            transcript_path: None,
         }
     }
 
@@ -216,6 +220,7 @@ mod tests {
             owner: owner.to_string(),
             priority,
             due_description: None,
+            linked_issue: None,
         }
     }
 
@@ -462,6 +467,8 @@ mod tests {
             transcript: Vec::new(),
             participants: Vec::new(),
             themes: Vec::new(),
+            meeting_id: String::new(),
+            transcript_path: None,
         };
         let path_b = dir.path().join("handoff-2026-04-03T00-05-01_00-00.json");
         fs::write(&path_b, serde_json::to_string_pretty(&handoff_b).unwrap()).unwrap();

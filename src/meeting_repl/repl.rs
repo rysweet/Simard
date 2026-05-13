@@ -303,6 +303,16 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
             if let Some(ref path) = summary.markdown_report_path {
                 writeln!(output, "{}", green(&format!("Report: {path}"))).ok();
             }
+            if let Some(ref dir) = summary.bundle_dir {
+                writeln!(
+                    output,
+                    "{}",
+                    green(&format!(
+                        "Handoff bundle: {dir}\n  - meeting_handoff.json (structured artifact)\n  - meeting_handoff.md (human-readable)\n  - transcript.json (full conversation)"
+                    ))
+                )
+                .ok();
+            }
         }
         Err(e) => {
             // spinner dropped here, which also cleans up

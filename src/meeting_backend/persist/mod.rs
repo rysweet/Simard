@@ -170,6 +170,7 @@ pub fn write_handoff(
                 .unwrap_or_else(|| "unassigned".to_string()),
             priority: 0,
             due_description: a.deadline.clone(),
+            linked_issue: None,
         })
         .collect();
 
@@ -216,6 +217,7 @@ pub fn write_handoff(
     let themes = extract_themes(messages);
 
     let handoff = MeetingHandoff {
+        meeting_id: crate::meeting_facilitator::derive_meeting_id(&started_at, topic),
         topic: topic.to_string(),
         started_at,
         closed_at,
@@ -227,12 +229,114 @@ pub fn write_handoff(
         transcript: vec![summary.to_string()],
         participants,
         themes,
+        transcript_path: None,
     };
 
     let dir = default_handoff_dir();
     write_meeting_handoff(&dir, &handoff)?;
     info!("Meeting handoff artifact written");
     Ok(())
+}
+
+/// Build a [`MeetingHandoff`] from a closing meeting and write it to the
+/// per-meeting bundle directory under `~/.simard/meetings/<meeting_id>/`.
+///
+/// Returns the bundle directory path on success. The `started_at` timestamp
+/// is taken from `started_at_override` when provided (to match the backend's
+/// session-creation time) and otherwise inferred from the first message.
+///
+/// Does NOT touch the legacy `default_handoff_dir()` artifact — that is
+/// still written by [`write_handoff`] for OODA queue compatibility.
+#[allow(clippy::too_many_arguments)]
+pub fn write_handoff_bundle(
+    topic: &str,
+    summary: &str,
+    started_at_override: Option<&str>,
+    messages: &[ConversationMessage],
+    action_items: &[HandoffActionItem],
+    decisions: &[String],
+    open_questions: Vec<crate::meeting_facilitator::OpenQuestion>,
+    themes: Vec<String>,
+    participants: Vec<String>,
+) -> SimardResult<std::path::PathBuf> {
+    use crate::meeting_facilitator::{
+        ActionItem as FacilitatorActionItem, MeetingDecision as FacilitatorDecision,
+        derive_meeting_id, write_meeting_bundle,
+    };
+
+    let started_at = started_at_override
+        .map(|s| s.to_string())
+        .or_else(|| messages.first().map(|m| m.timestamp.clone()))
+        .unwrap_or_default();
+    let closed_at = chrono::Utc::now().to_rfc3339();
+    let duration_secs = chrono::DateTime::parse_from_rfc3339(&started_at)
+        .ok()
+        .map(|start| {
+            chrono::Utc::now()
+                .signed_duration_since(start)
+                .num_seconds()
+                .max(0) as u64
+        });
+
+    let facilitator_actions: Vec<FacilitatorActionItem> = action_items
+        .iter()
+        .map(|a| FacilitatorActionItem {
+            description: a.description.clone(),
+            owner: a
+                .assignee
+                .clone()
+                .unwrap_or_else(|| "unassigned".to_string()),
+            priority: a.priority.unwrap_or(0),
+            due_description: a.deadline.clone(),
+            linked_issue: None,
+        })
+        .collect();
+
+    let facilitator_decisions: Vec<FacilitatorDecision> = decisions
+        .iter()
+        .map(|d| FacilitatorDecision {
+            description: d.clone(),
+            rationale: extract::extract_decision_rationale_pub(d, messages),
+            participants: extract::extract_decision_participants_pub(d, messages),
+        })
+        .collect();
+
+    let meeting_id = derive_meeting_id(&started_at, topic);
+    let mut handoff = MeetingHandoff {
+        meeting_id,
+        topic: topic.to_string(),
+        started_at,
+        closed_at,
+        decisions: facilitator_decisions,
+        action_items: facilitator_actions,
+        open_questions,
+        processed: false,
+        duration_secs,
+        transcript: vec![summary.to_string()],
+        participants,
+        themes,
+        transcript_path: None,
+    };
+
+    let lines: Vec<crate::meeting_facilitator::BundleTranscriptLine> = messages
+        .iter()
+        .map(|m| {
+            let role = match m.role {
+                super::types::Role::User => "operator",
+                super::types::Role::Assistant => "simard",
+                super::types::Role::System => "system",
+            };
+            crate::meeting_facilitator::BundleTranscriptLine {
+                role: role.to_string(),
+                content: m.content.clone(),
+                timestamp: m.timestamp.clone(),
+            }
+        })
+        .collect();
+
+    let dir = write_meeting_bundle(&mut handoff, &lines)?;
+    info!(meeting_id = %handoff.meeting_id, dir = %dir.display(), "Meeting handoff bundle written");
+    Ok(dir)
 }
 
 mod markdown;

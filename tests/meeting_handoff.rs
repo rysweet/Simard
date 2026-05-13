@@ -51,12 +51,14 @@ fn sample_session_with_questions() -> MeetingSession {
                 owner: "bob".to_string(),
                 priority: 1,
                 due_description: Some("end of sprint".to_string()),
+                linked_issue: None,
             },
             ActionItem {
                 description: "Update docs".to_string(),
                 owner: "carol".to_string(),
                 priority: 2,
                 due_description: None,
+                linked_issue: None,
             },
         ],
         notes: vec![
@@ -446,6 +448,7 @@ fn handoff_with_only_action_items_no_decisions() {
             owner: "alice".to_string(),
             priority: 1,
             due_description: Some("today".to_string()),
+            linked_issue: None,
         }],
         notes: vec![],
         status: MeetingSessionStatus::Closed,
