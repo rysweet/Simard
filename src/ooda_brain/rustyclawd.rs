@@ -93,24 +93,234 @@ impl<S: LlmSubmitter> OodaBrain for RustyClawdBrain<S> {
     }
 }
 
-/// Extract a JSON object from the LLM response (LLMs sometimes wrap JSON in
-/// prose / markdown fences) and parse it as a decision.
+/// Closed set of `EngineerLifecycleDecision` variant tags. Kept in sync
+/// with the `#[serde(tag = "choice", rename_all = "snake_case")]` enum in
+/// `mod.rs`. Used by the prose-first DECISION marker parser to validate
+/// the variant token before attempting deserialisation.
+const VALID_VARIANTS: &[&str] = &[
+    "continue_skipping",
+    "reclaim_and_redispatch",
+    "deprioritize",
+    "open_tracking_issue",
+    "mark_goal_blocked",
+    "consider_self_update",
+];
+
+/// Cap on raw response text embedded in error messages so a runaway model
+/// output cannot flood `~/.simard/logs`. 8 KiB matches the limit used by
+/// `truncate_for_log` in `ooda_actions/advance_goal/spawn.rs`.
+const MAX_RAW_LOG_BYTES: usize = 8 * 1024;
+
+/// Truncate a string to at most `MAX_RAW_LOG_BYTES` bytes for log inclusion.
+/// UTF-8 safe: walks `char_indices` so no slice ever splits a codepoint.
+/// Appends a marker noting the original size so operators see the response
+/// was truncated rather than the model emitting a short response.
+fn truncate_for_log(s: &str) -> String {
+    if s.len() <= MAX_RAW_LOG_BYTES {
+        return s.to_string();
+    }
+    // Find the largest char boundary <= MAX_RAW_LOG_BYTES so the slice is
+    // valid UTF-8. `char_indices` yields each char's start byte index.
+    let cutoff = s
+        .char_indices()
+        .map(|(i, _)| i)
+        .take_while(|&i| i <= MAX_RAW_LOG_BYTES)
+        .last()
+        .unwrap_or(0);
+    format!("{}... (truncated from {} bytes)", &s[..cutoff], s.len())
+}
+
+/// Sibling-module-visible re-export of [`truncate_for_log`] so the parser
+/// helpers in `decide.rs` and `orient.rs` (which share the same lossy
+/// `got N bytes` anti-pattern fixed in #1711) can reuse the same
+/// truncation policy without duplicating the constant or the
+/// UTF-8-safe slicing logic.
+pub(super) fn truncate_for_log_pub(s: &str) -> String {
+    truncate_for_log(s)
+}
+
+/// Extract the prose `DECISION: <variant>` marker from the first non-blank
+/// line of `text`. Returns `(variant_token, remainder_after_first_line)`.
+///
+/// Security: only the **first non-blank line** is inspected. A `DECISION:`
+/// token appearing later in the response is ignored — this prevents a
+/// malfunctioning or hostile model from injecting a marker mid-response.
+///
+/// The word `DECISION` itself is matched case-insensitively. The variant
+/// token is returned verbatim (whitespace-trimmed) so callers can do the
+/// exact-match snake_case validation against [`VALID_VARIANTS`].
+fn extract_decision_marker(text: &str) -> Option<(&str, &str)> {
+    let first_line = text.lines().find(|l| !l.trim().is_empty())?;
+    let trimmed = first_line.trim();
+    // Case-insensitive prefix check on "decision:". We compare the lowercased
+    // first 9 bytes (the length of "decision:") rather than allocating a full
+    // lowercase copy of the whole line.
+    if trimmed.len() < "decision:".len() {
+        return None;
+    }
+    let prefix = &trimmed[.."decision:".len()];
+    if !prefix.eq_ignore_ascii_case("decision:") {
+        return None;
+    }
+    let after_marker = trimmed["decision:".len()..].trim();
+    let variant = after_marker.split_whitespace().next()?;
+    // Remainder = everything after the first newline of the original text
+    // (preserves the rest of the response verbatim, including subsequent
+    // blank lines and any JSON body).
+    let remainder = text.split_once('\n').map(|(_, r)| r).unwrap_or("");
+    Some((variant, remainder))
+}
+
+/// Parse a brain response that begins with a `DECISION:` marker. The variant
+/// from the marker is the authoritative source of truth — if the optional
+/// JSON body contains a conflicting `choice` field, the marker wins
+/// (security: prevents variant smuggling via JSON body).
+///
+/// For variants requiring extra fields (`open_tracking_issue`,
+/// `mark_goal_blocked`, `reclaim_and_redispatch`) the body MUST contain a
+/// JSON object with those fields. For marker-only variants
+/// (`continue_skipping`, `deprioritize`, `consider_self_update`) the
+/// remainder of the response (after stripping an optional `rationale:`
+/// prefix) becomes the `rationale` field.
+fn parse_with_marker(
+    variant: &str,
+    rest: &str,
+    raw: &str,
+) -> Result<EngineerLifecycleDecision, String> {
+    if !VALID_VARIANTS.contains(&variant) {
+        return Err(format!(
+            "brain DECISION marker variant `{variant}` is not one of {VALID_VARIANTS:?}; \
+             raw_response={:?}",
+            truncate_for_log(raw)
+        ));
+    }
+
+    // Try to extract a JSON object from the remainder for variant-specific
+    // fields. We use the same `find('{') .. rfind('}')` extraction the
+    // legacy parser uses, so a body that mixes prose and JSON still works.
+    let trimmed_rest = rest.trim();
+    let json_value: serde_json::Value = if let Some(start) = trimmed_rest.find('{')
+        && let Some(end) = trimmed_rest.rfind('}')
+        && end >= start
+    {
+        let candidate = &trimmed_rest[start..=end];
+        match serde_json::from_str::<serde_json::Value>(candidate) {
+            Ok(v) if v.is_object() => v,
+            // Body looks like JSON but isn't valid → treat as no JSON
+            // present and fall through to prose-rationale derivation. The
+            // marker is authoritative; we don't fail just because the
+            // optional body has a syntax error.
+            _ => serde_json::Value::Object(serde_json::Map::new()),
+        }
+    } else {
+        serde_json::Value::Object(serde_json::Map::new())
+    };
+
+    let mut obj = match json_value {
+        serde_json::Value::Object(m) => m,
+        _ => serde_json::Map::new(),
+    };
+
+    // Marker wins over any `choice` field in the JSON body.
+    obj.insert(
+        "choice".to_string(),
+        serde_json::Value::String(variant.to_string()),
+    );
+
+    // If the body did not provide a rationale, derive one from the prose
+    // remainder. Strip a leading `rationale:` prefix if present so
+    // `DECISION: continue_skipping\nrationale: hb ok` ends up with
+    // `rationale = "hb ok"` rather than `"rationale: hb ok"`.
+    if !obj.contains_key("rationale") {
+        let prose_rationale = if trimmed_rest.is_empty() {
+            "(no rationale provided)".to_string()
+        } else {
+            // Try to derive prose rationale by stripping JSON body if any.
+            // For variants with no JSON body, `trimmed_rest` IS the rationale.
+            // For variants with a JSON body that nonetheless omits rationale,
+            // we use the trimmed remainder verbatim as a best-effort.
+            let candidate = trimmed_rest;
+            let stripped = candidate
+                .strip_prefix("rationale:")
+                .or_else(|| candidate.strip_prefix("Rationale:"))
+                .or_else(|| candidate.strip_prefix("RATIONALE:"))
+                .unwrap_or(candidate)
+                .trim();
+            if stripped.is_empty() {
+                "(no rationale provided)".to_string()
+            } else {
+                stripped.to_string()
+            }
+        };
+        obj.insert(
+            "rationale".to_string(),
+            serde_json::Value::String(prose_rationale),
+        );
+    }
+
+    serde_json::from_value::<EngineerLifecycleDecision>(serde_json::Value::Object(obj)).map_err(
+        |e| {
+            format!(
+                "brain DECISION marker `{variant}` present but field validation failed: {e}; \
+                 raw_response={:?}",
+                truncate_for_log(raw)
+            )
+        },
+    )
+}
+
+/// Parse the brain's response into an [`EngineerLifecycleDecision`]. Accepts
+/// three input shapes (see [issue #1711](https://github.com/rysweet/Simard/issues/1711)):
+///
+/// 1. **Prose-first** (preferred, new in #1711): `DECISION: <variant>` on
+///    the first non-blank line, optionally followed by a JSON object
+///    carrying variant-specific fields, or by free-form prose used as the
+///    `rationale`. Marker is case-insensitive on the word `DECISION`.
+/// 2. **Pure JSON** (legacy, still supported): a `{...}` object somewhere
+///    in the response — extracted with `find('{') .. rfind('}')` and
+///    parsed via `serde_json::from_str`.
+/// 3. **JSON wrapped in markdown fences or prose** (legacy, still
+///    supported): the same extraction handles `` ```json ... ``` `` and
+///    leading/trailing commentary.
+///
+/// On total parse failure the returned error embeds the **full raw response
+/// text** (truncated to [`MAX_RAW_LOG_BYTES`] for log safety) so operators
+/// can diagnose the model behaviour without hunting through transcripts.
+/// This replaces the legacy `got N bytes` byte-count format that
+/// originated the production `improve-amplihack-test-coverage` failure.
 fn parse_decision_from_response(raw: &str) -> Result<EngineerLifecycleDecision, String> {
-    // Strip markdown fences if present.
     let stripped = raw.trim();
-    let candidate = if let Some(start) = stripped.find('{')
+    if stripped.is_empty() {
+        return Err(format!(
+            "brain returned an empty response (raw_response={:?})",
+            raw
+        ));
+    }
+
+    // Prose-first: try to extract a `DECISION:` marker from the first
+    // non-blank line. If present, the marker is authoritative.
+    if let Some((variant, rest)) = extract_decision_marker(stripped) {
+        return parse_with_marker(variant, rest, raw);
+    }
+
+    // Backward-compat: legacy JSON object extraction.
+    if let Some(start) = stripped.find('{')
         && let Some(end) = stripped.rfind('}')
         && end >= start
     {
-        &stripped[start..=end]
-    } else {
-        return Err(format!(
-            "no JSON object found in LLM response (got {} bytes)",
-            raw.len()
-        ));
-    };
-    serde_json::from_str::<EngineerLifecycleDecision>(candidate)
-        .map_err(|e| format!("brain-parse-error: {e}; payload={candidate}"))
+        let candidate = &stripped[start..=end];
+        return serde_json::from_str::<EngineerLifecycleDecision>(candidate).map_err(|e| {
+            format!(
+                "brain JSON parse error: {e}; payload={candidate}; raw_response={:?}",
+                truncate_for_log(raw)
+            )
+        });
+    }
+
+    Err(format!(
+        "brain response had no DECISION marker and no JSON object; raw_response={:?}",
+        truncate_for_log(raw)
+    ))
 }
 
 // ---------------------------------------------------------------------------

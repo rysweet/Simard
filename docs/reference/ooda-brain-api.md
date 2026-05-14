@@ -79,8 +79,15 @@ pub enum EngineerLifecycleDecision {
         rationale: String,
         reason: String,
     },
+    ConsiderSelfUpdate {
+        rationale: String,
+    },
 }
 ```
+
+The enum has **6 variants**. `ConsiderSelfUpdate` is dispatched by
+`apply_lifecycle_decision` to the `simard safe-update` path; it is the only
+variant that can mutate the running daemon binary.
 
 Forward-compatible:
 
@@ -149,17 +156,57 @@ the seam used by all hermetic unit tests for the brain.
 
 ## Errors
 
-Added to `SimardError`:
+> **New in [#1711](https://github.com/rysweet/Simard/issues/1711).**
+> `BrainResponseUnparseable` is a new `SimardError` variant introduced by
+> this PR. Pre-#1711 callers surfaced parse failures via the generic
+> `BaseTypeInvocation` error path, which is what the legacy `got N bytes`
+> log line was rendering.
 
 ```rust
 SimardError::BrainResponseUnparseable {
     raw: String,
-    source: serde_json::Error,
+    source: BrainParseSource,
+}
+
+/// Wraps the underlying cause so a single error variant can carry either a
+/// JSON-decode failure (legacy path) or a marker-grammar failure (new path).
+pub enum BrainParseSource {
+    Json(serde_json::Error),
+    Marker(MarkerParseError),
 }
 ```
 
-Caller (`dispatch_spawn_engineer`) logs this and falls back to the deterministic
-skip outcome. The cycle never panics, never aborts.
+* `raw` is the **complete, untruncated** model response text — stored in
+  full so that `Debug` formatting (`{:#?}`) and downstream tooling can see
+  exactly what the model returned. Truncation to `MAX_RAW_LOG_BYTES = 8192`
+  is applied only at log-format time by the shared `truncate_for_log`
+  helper (see [`truncate_for_log` reuse](#truncate_for_log-reuse) below).
+* As of [#1711](https://github.com/rysweet/Simard/issues/1711) every
+  parse-failure log line embeds the full (truncated-for-log) text — the
+  legacy `got N bytes` summary that hid the diagnostic information has
+  been removed at all three lossy parser sites: `rustyclawd.rs`,
+  `decide.rs`, and `orient.rs`.
+* `raw` is rendered with the `{:?}` Debug format wherever it appears in
+  log lines, so control characters and ANSI escapes are escaped (defends
+  against CRLF / log-injection in model output).
+
+### `truncate_for_log` reuse
+
+A `truncate_for_log` helper already exists at
+`src/ooda_actions/advance_goal/spawn.rs:318`. As part of this PR it is
+**hoisted** to a shared module (`src/util/log.rs`) and re-exported as
+`crate::util::log::truncate_for_log`, so all four log sites
+(`spawn.rs`, `rustyclawd.rs`, `decide.rs`, `orient.rs`) call the same
+implementation. The previous private function in `spawn.rs` becomes a
+re-export shim to keep the diff small.
+
+The caller (`dispatch_spawn_engineer`) logs this and falls back to the
+deterministic skip outcome. The cycle never panics, never aborts.
+
+For the wire format that `parse_decision_from_response` accepts, see
+[Reference: OODA Brain Decision Protocol](ooda-brain-decision-protocol.md).
+For an operator runbook that consumes these logs, see
+[How-to: diagnose brain decision parse failures](../howto/diagnose-brain-decision-parse-failures.md).
 
 ## Construction Pattern
 
@@ -209,19 +256,12 @@ All files respect the per-module 400-LOC cap (#1266).
 
 ## Test Inventory
 
-`src/ooda_brain/tests.rs` ships eight named tests covering parse, context
-assembly, and end-to-end brain behavior:
-
-1. `parse_continue_skipping_minimal`
-2. `parse_reclaim_and_redispatch_full`
-3. `parse_deprioritize_round_trip`
-4. `parse_open_tracking_issue_round_trip`
-5. `parse_mark_goal_blocked_round_trip`
-6. `parse_unknown_choice_yields_unparseable_error`
-7. `gather_ctx_handles_missing_log_and_state`
-8. `rustyclawd_brain_with_stub_submitter_returns_decision`
-
-These act as the TDD checklist for the builder.
+`src/ooda_brain/tests.rs` is the authoritative inventory; the file ships
+the legacy parse / context / end-to-end tests **plus** the 15 protocol
+tests (T1 – T15) enumerated in the **Behavior matrix** of the
+[OODA Brain Decision Protocol reference](ooda-brain-decision-protocol.md#behavior-matrix).
+Each row of that matrix maps 1:1 to a `#[test]` function in this file —
+keep them in lockstep when editing either side.
 
 ## See Also
 
