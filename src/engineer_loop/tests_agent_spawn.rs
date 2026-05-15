@@ -229,6 +229,16 @@ fn compute_diff_for_review_agent_session_uses_git_diff() {
 /// It requires no LLM: the loop is expected to fail at the agent-spawn phase
 /// (no session configured), but the prompt-build trace must already exist.
 #[test]
+// INV-1 (issue #1779): this test spawns `git` subprocesses via `inspect_workspace`
+// inside `run_local_engineer_loop`. If a peer test running in parallel calls
+// `reap_zombies()` (see `src/agent_supervisor/tests_lifecycle.rs::reaper_tests`),
+// its process-wide `waitpid(-1, …)` can reap our child before `Command::output()`
+// has a chance to call `wait()`, producing the ECHILD error:
+//   "git branch --show-current failed: failed to poll child process:
+//    No child processes (os error 10)"
+// Joining the `subprocess_reaper` named-key cohort serializes against any test
+// in the binary that participates in process-wide child reaping.
+#[serial_test::serial(subprocess_reaper)]
 fn run_local_engineer_loop_emits_agent_prompt_build_phase() {
     use crate::engineer_loop::run_local_engineer_loop;
     use crate::runtime::RuntimeTopology;

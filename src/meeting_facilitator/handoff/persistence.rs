@@ -527,15 +527,55 @@ fn render_bundle_markdown(
 mod bundle_tests {
     use super::*;
     use crate::meeting_facilitator::{ActionItem, MeetingDecision, OpenQuestion};
+    use serial_test::serial;
+    use std::ffi::OsString;
+    use tempfile::TempDir;
 
-    fn temp_root(label: &str) -> PathBuf {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("{label}-{unique}"));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    // INV-2 (issue #1779): every test in this module reads/writes the
+    // process-global env var `SIMARD_MEETINGS_ROOT`. `std::env::set_var` is not
+    // thread-safe on all libcs, so even with unique temp paths the tests
+    // could observe each other's values when run in parallel — the second
+    // pass of the full-binary suite would intermittently fail
+    // `write_meeting_bundle_creates_canonical_files` because another
+    // bundle_tests test (or any peer that touches the same var) had cleared
+    // it mid-flight.
+    //
+    // Two-part fix:
+    //   1. `#[serial(meetings_root)]` named-key cohort — ensures only one
+    //      bundle_tests function (and any sibling that joins this cohort)
+    //      mutates the var at a time.
+    //   2. `EnvGuard` RAII — restores the *prior* value (including absence)
+    //      on Drop, even on panic, so a poisoned env can't leak out of one
+    //      test into another.
+    struct EnvGuard {
+        key: &'static str,
+        prior: Option<OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &Path) -> Self {
+            let prior = std::env::var_os(key);
+            // SAFETY: serialized via `#[serial(meetings_root)]` on every
+            // caller, so no other thread in this binary is racing on this
+            // var while we mutate it.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, prior }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: see EnvGuard::set — caller holds the `meetings_root`
+            // serial-test cohort lock for the duration of `self`.
+            unsafe {
+                match self.prior.take() {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
     }
 
     fn sample_handoff() -> MeetingHandoff {
@@ -585,20 +625,17 @@ mod bundle_tests {
     }
 
     #[test]
+    #[serial(meetings_root)]
     fn write_meeting_bundle_creates_canonical_files() {
-        let root = temp_root("bundle-canonical");
-        // SAFETY: tests in this binary that touch SIMARD_MEETINGS_ROOT serialize
-        // via the temp_root suffix being unique per call; we still need the env
-        // override during the brief write. set_var is unsafe in 2024-edition.
-        unsafe {
-            std::env::set_var("SIMARD_MEETINGS_ROOT", &root);
-        }
+        let tmp = TempDir::new().expect("create tempdir");
+        let _env = EnvGuard::set("SIMARD_MEETINGS_ROOT", tmp.path());
+
         let mut handoff = sample_handoff();
         let lines = sample_lines();
 
         let dir = write_meeting_bundle(&mut handoff, &lines).expect("write bundle");
 
-        assert_eq!(dir, root.join(&handoff.meeting_id));
+        assert_eq!(dir, tmp.path().join(&handoff.meeting_id));
         assert!(dir.join("meeting_handoff.json").is_file());
         assert!(dir.join("meeting_handoff.md").is_file());
         assert!(dir.join("transcript.json").is_file());
@@ -608,19 +645,14 @@ mod bundle_tests {
         // transcript_path now points inside the bundle
         let tp = handoff.transcript_path.as_deref().unwrap();
         assert!(tp.ends_with("transcript.json"), "got transcript_path={tp}");
-
-        unsafe {
-            std::env::remove_var("SIMARD_MEETINGS_ROOT");
-        }
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
+    #[serial(meetings_root)]
     fn write_meeting_bundle_round_trips_handoff_json() {
-        let root = temp_root("bundle-roundtrip");
-        unsafe {
-            std::env::set_var("SIMARD_MEETINGS_ROOT", &root);
-        }
+        let tmp = TempDir::new().expect("create tempdir");
+        let _env = EnvGuard::set("SIMARD_MEETINGS_ROOT", tmp.path());
+
         let mut handoff = sample_handoff();
         let dir = write_meeting_bundle(&mut handoff, &sample_lines()).expect("write bundle");
 
@@ -647,19 +679,14 @@ mod bundle_tests {
             typed.action_items[0].linked_issue.as_deref(),
             Some("rysweet/Simard#1730")
         );
-
-        unsafe {
-            std::env::remove_var("SIMARD_MEETINGS_ROOT");
-        }
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
+    #[serial(meetings_root)]
     fn write_meeting_bundle_markdown_contains_sections() {
-        let root = temp_root("bundle-md");
-        unsafe {
-            std::env::set_var("SIMARD_MEETINGS_ROOT", &root);
-        }
+        let tmp = TempDir::new().expect("create tempdir");
+        let _env = EnvGuard::set("SIMARD_MEETINGS_ROOT", tmp.path());
+
         let mut handoff = sample_handoff();
         let dir = write_meeting_bundle(&mut handoff, &sample_lines()).expect("write bundle");
 
@@ -670,11 +697,6 @@ mod bundle_tests {
         assert!(md.contains("## Open questions"));
         assert!(md.contains("rysweet/Simard#1730"));
         assert!(md.contains("Wire bundle writer into close() flow"));
-
-        unsafe {
-            std::env::remove_var("SIMARD_MEETINGS_ROOT");
-        }
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
