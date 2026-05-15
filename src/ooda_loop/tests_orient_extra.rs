@@ -98,6 +98,51 @@ fn orient_no_improvement_priority_when_gym_above_70() {
 }
 
 #[test]
+fn orient_no_improvement_priority_when_gym_has_zero_scenarios() {
+    let board = make_board_with_goals(vec![]);
+    let mut empty_gym = make_gym_score(0.0, 0.0);
+    empty_gym.scenario_count = 0;
+    empty_gym.scenarios_passed = 0;
+    empty_gym.pass_rate = 0.0;
+    let obs = Observation {
+        goal_statuses: Vec::new(),
+        gym_health: Some(empty_gym),
+        memory_stats: CognitiveStatistics::default(),
+        pending_improvements: Vec::new(),
+        environment: EnvironmentSnapshot::default(),
+        eval_watchdog: None,
+    };
+    let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
+    assert!(
+        !priorities.iter().any(|p| p.goal_id == "__improvement__"),
+        "0 scenarios means 0% overall is meaningless; do not synthesize __improvement__ priority"
+    );
+}
+
+#[test]
+fn orient_includes_scenario_count_in_improvement_priority_reason() {
+    let board = make_board_with_goals(vec![]);
+    let obs = Observation {
+        goal_statuses: Vec::new(),
+        gym_health: Some(make_gym_score(0.5, 0.6)),
+        memory_stats: CognitiveStatistics::default(),
+        pending_improvements: Vec::new(),
+        environment: EnvironmentSnapshot::default(),
+        eval_watchdog: None,
+    };
+    let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
+    let p = priorities
+        .iter()
+        .find(|p| p.goal_id == "__improvement__")
+        .expect("improvement priority should be present (5 scenarios @ 50%)");
+    assert!(
+        p.reason.contains("5 scenarios"),
+        "improvement priority reason should mention the scenario count for operator clarity, got: {}",
+        p.reason
+    );
+}
+
+#[test]
 fn orient_priorities_sorted_by_urgency_descending() {
     let goals = vec![
         ActiveGoal {
