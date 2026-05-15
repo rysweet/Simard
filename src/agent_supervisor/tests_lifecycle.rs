@@ -198,29 +198,23 @@ fn validate_artifacts_returns_zero_for_nonexistent_path() {
 #[cfg(all(test, unix))]
 mod reaper_tests {
     use super::reap_zombies;
+    use serial_test::serial;
     use std::process::Command;
-    use std::sync::{Mutex, MutexGuard};
     use std::thread;
     use std::time::{Duration, Instant};
 
     // `reap_zombies()` is process-wide: it reaps ANY <defunct> child of this
     // process, regardless of which test spawned it. Without serialization,
-    // peer tests in this module race with each other — e.g. one test's
-    // `drain()` can steal another test's zombie before the assertion runs,
-    // producing flaky "got 0" failures in CI. Serialize all reaper tests
-    // through this module-local mutex so each test owns the process state
-    // for its duration.
-    static REAPER_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    fn lock_reaper() -> MutexGuard<'static, ()> {
-        // If a previous test panicked while holding the lock the mutex is
-        // poisoned — that's still safe to use here because the protected
-        // state is process-global and we always re-drain at the start of
-        // each test.
-        REAPER_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
+    // peer tests in this module race with each other AND with subprocess-
+    // spawning tests elsewhere in the lib (e.g. the engineer_loop tests that
+    // run `git branch --show-current` via `try_wait()`). A concurrent
+    // `reap_zombies()` can steal those tests' SIGCHLDs, leaving `try_wait()`
+    // to fail with ECHILD ("No child processes"). See issue #1779.
+    //
+    // Serialize all reaper tests through the `simard_process_reaper` named
+    // lock from `serial_test`; subprocess-spawning tests that race against
+    // this reaper (e.g. `run_local_engineer_loop_emits_agent_prompt_build_phase`)
+    // must join the same group.
 
     /// Drain any pre-existing zombies left behind by other tests in the same
     /// process so each test starts from a clean baseline.
@@ -247,8 +241,8 @@ mod reaper_tests {
     }
 
     #[test]
+    #[serial(simard_process_reaper)]
     fn reaps_dropped_child_within_one_cycle() {
-        let _guard = lock_reaper();
         drain();
         spawn_short_lived_unwaited();
 
@@ -271,8 +265,8 @@ mod reaper_tests {
     }
 
     #[test]
+    #[serial(simard_process_reaper)]
     fn idempotent_when_no_zombies() {
-        let _guard = lock_reaper();
         drain();
         // With no unwaited children, two consecutive calls must both return 0.
         let first = reap_zombies();
@@ -288,8 +282,8 @@ mod reaper_tests {
     }
 
     #[test]
+    #[serial(simard_process_reaper)]
     fn never_blocks_when_live_child_exists() {
-        let _guard = lock_reaper();
         drain();
         // Spawn a child that lives longer than the call to reap_zombies.
         // WNOHANG must guarantee non-blocking behaviour even when a child
