@@ -139,6 +139,46 @@ fn rustyclawd_brain_unparseable_returns_error() {
     assert!(msg.contains("ooda-decide-brain"), "got: {msg}");
 }
 
+// ---------------------------------------------------------------------------
+// Issue #1711 — Error messages must embed the **raw response text**, not a
+// lossy `got N bytes` byte-count. Same anti-regression as rustyclawd.rs.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn issue_1711_unparseable_error_embeds_raw_response_text() {
+    // The legacy code logged `no JSON object found in LLM response (got N bytes)`
+    // which dropped the actual response on the floor. This test pins that the
+    // raw response text is now embedded in the error so operators can diagnose.
+    let stub = StubSubmitter::new("OK");
+    let brain = RustyClawdDecideBrain::new(stub);
+    let err = brain.judge_decision(&ctx("ship-v1")).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("OK"),
+        "decide-brain error MUST embed the raw response text 'OK' (issue #1711 \
+         anti-regression for lossy `got N bytes` log format), got: {msg}"
+    );
+    assert!(
+        !msg.contains("got 2 bytes") && !msg.contains("got 3 bytes"),
+        "decide-brain error must NOT use the legacy `got N bytes` byte-count \
+         format that issue #1711 eliminated, got: {msg}"
+    );
+}
+
+#[test]
+fn issue_1711_empty_response_error_does_not_silently_say_zero_bytes() {
+    // Empty response: error must clearly indicate emptiness (e.g. "empty
+    // response" or `""`) rather than the unhelpful `got 0 bytes`.
+    let stub = StubSubmitter::new("");
+    let brain = RustyClawdDecideBrain::new(stub);
+    let err = brain.judge_decision(&ctx("ship-v1")).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.to_lowercase().contains("empty") || msg.contains("\"\""),
+        "decide-brain empty-response error must indicate emptiness, got: {msg}"
+    );
+}
+
 #[test]
 fn rustyclawd_brain_renders_prompt_with_context_fields() {
     let stub = StubSubmitter::new(r#"{"choice":"advance_goal","rationale":"ok"}"#);
