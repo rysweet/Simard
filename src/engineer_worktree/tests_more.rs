@@ -185,18 +185,18 @@ fn rejects_invalid_goal_id() {
         );
     }
 
-    // 65-byte input must fail; 64-byte must succeed.
-    let too_long = "a".repeat(65);
+    // 201-byte input must fail; 200-byte must succeed (see MAX_GOAL_ID_LEN).
+    let too_long = "a".repeat(201);
     let err = EngineerWorktree::allocate(&parent_repo, state_dir.path(), &too_long)
-        .expect_err("65-byte goal_id must be rejected");
+        .expect_err("201-byte goal_id must be rejected");
     assert!(
         matches!(err, SimardError::ActionExecutionFailed { .. }),
         "got {err:?}"
     );
 
-    let max_ok = "a".repeat(64);
+    let max_ok = "a".repeat(200);
     let wt = EngineerWorktree::allocate(&parent_repo, state_dir.path(), &max_ok)
-        .expect("64-byte goal_id must be accepted");
+        .expect("200-byte goal_id must be accepted");
     wt.cleanup().expect("cleanup max-len worktree");
 
     // Confirm the worktrees root was NOT polluted by any of the rejected ids.
