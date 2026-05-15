@@ -139,12 +139,17 @@ pub fn orient_with_brain(
     }
 
     if let Some(ref score) = observation.gym_health
+        && score.scenario_count > 0
         && score.overall < 0.7
     {
         priorities.push(Priority {
             goal_id: "__improvement__".to_string(),
             urgency: 0.7,
-            reason: format!("gym overall {:.1}% below 70% target", score.overall * 100.0),
+            reason: format!(
+                "gym overall {:.1}% below 70% target ({} scenarios)",
+                score.overall * 100.0,
+                score.scenario_count
+            ),
         });
     }
 
