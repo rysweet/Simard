@@ -160,7 +160,6 @@ Whenever an engineer cycle produces code changes, the cycle is NOT complete unti
    - **Documentation** — surfaces touched + doc updates (or internal-only justification)
    - **Quality-audit** — ≥3 SEEK→VALIDATE→FIX cycles ending clean
    - **CI** — link to the green run for every required check
-   - **PR description evidence** — pointers covering criteria 1–4 and 6 of the contract above
    - **Scope** — diff summary with confirmation of no unrelated edits
    - **Verdict** — explicit "ready to merge" / "draft" / "blocked" call with rationale
 4. **Drive to merge** — once CI is fully green and the PR has all six headings, run `simard merge-pr <PR>` to drive the PR through the merge-authority gate. (If the deployed `simard` binary lacks `merge-pr`, the cycle MUST fall back to `gh pr merge --squash --delete-branch <PR>` AFTER confirming the six-evidence merge-ready gate is satisfied; the deviation MUST be noted under the PR's **Verdict** heading.)

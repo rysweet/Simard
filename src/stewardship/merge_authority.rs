@@ -33,7 +33,9 @@ use crate::error::{SimardError, SimardResult};
 
 /// The six merge-ready evidence headings that MUST appear (and contain
 /// non-trivial evidence) in the PR body. The headings come from
-/// `~/.copilot/skills/merge-ready/pr-description-template.md`.
+/// `~/.copilot/skills/merge-ready/pr-description-template.md` and the set
+/// is intentionally exactly the skill's six template sections — the gate
+/// MUST NOT add criteria the skill doesn't define.
 ///
 /// Order matters: refusal messages report the *first* missing section.
 pub const REQUIRED_EVIDENCE_HEADINGS: [&str; 6] = [
@@ -41,8 +43,8 @@ pub const REQUIRED_EVIDENCE_HEADINGS: [&str; 6] = [
     "### Documentation",
     "### Quality-audit",
     "### CI",
-    "### PR description evidence",
     "### Scope",
+    "### Verdict",
 ];
 
 /// Result of a merge-authority evaluation.
@@ -443,17 +445,18 @@ across the 14 GitHub Actions jobs (cargo test, clippy, fmt, doctests, MSRV,
 release-build, OS matrix). Skipped checks: none. Flaky reruns performed:
 none. Real failures fixed: none in this PR.
 
-### PR description evidence
-
-This PR description itself contains the six merge-ready evidence sections,
-each with concrete artifacts (file paths, command output, commit SHAs)
-rather than template placeholders.
-
 ### Scope
 
 Changed files reviewed via git diff --name-only origin/main...HEAD.
 Touched: src/stewardship/merge_authority.rs, src/operator_cli/merge.rs,
 prompt_assets/simard/ooda_decide.md. Unrelated changes: none.
+
+### Verdict
+
+Merge-ready: yes. Remaining blockers: none. Reviewer sign-off recorded
+in the review-decision field. CI green across all required jobs and the
+six evidence sections above each contain concrete artifacts rather than
+template placeholders.
 "#
         .to_string()
     }
@@ -807,8 +810,9 @@ prompt_assets/simard/ooda_decide.md. Unrelated changes: none.
 
     #[test]
     fn required_headings_match_skill_template() {
-        // Hard-pin the six headings to prevent accidental reordering;
-        // see ~/.copilot/skills/merge-ready/pr-description-template.md.
+        // Hard-pin the six headings to prevent accidental reordering and
+        // to keep the gate's required set identical to
+        // ~/.copilot/skills/merge-ready/pr-description-template.md.
         assert_eq!(
             REQUIRED_EVIDENCE_HEADINGS,
             [
@@ -816,8 +820,8 @@ prompt_assets/simard/ooda_decide.md. Unrelated changes: none.
                 "### Documentation",
                 "### Quality-audit",
                 "### CI",
-                "### PR description evidence",
                 "### Scope",
+                "### Verdict",
             ]
         );
     }
