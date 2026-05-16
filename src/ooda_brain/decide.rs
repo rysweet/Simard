@@ -16,6 +16,7 @@ use super::prompt_store;
 use super::rustyclawd::LlmSubmitter;
 use crate::error::{SimardError, SimardResult};
 use crate::ooda_loop::ActionKind;
+use crate::ooda_loop::SyntheticPriorityKind;
 
 const ADAPTER_TAG: &str = "ooda-decide-brain";
 
@@ -124,12 +125,23 @@ pub struct DeterministicFallbackDecideBrain;
 impl OodaDecideBrain for DeterministicFallbackDecideBrain {
     fn judge_decision(&self, ctx: &DecideContext) -> SimardResult<DecideJudgment> {
         let rationale = "fallback-brain: prefix-routed".to_string();
-        let judgment = match ctx.goal_id.as_str() {
-            "__memory__" => DecideJudgment::ConsolidateMemory { rationale },
-            "__improvement__" => DecideJudgment::RunImprovement { rationale },
-            "__poll_activity__" => DecideJudgment::PollDeveloperActivity { rationale },
-            "__extract_ideas__" => DecideJudgment::ExtractIdeas { rationale },
-            _ => DecideJudgment::AdvanceGoal { rationale },
+        // Route synthetic priorities via the typed enum (single source of
+        // truth in `ooda_loop::priority_kind`). Real goal_ids — and any
+        // unrecognized synthetic — fall through to AdvanceGoal.
+        let judgment = match SyntheticPriorityKind::from_synthetic_id(ctx.goal_id.as_str()) {
+            Some(SyntheticPriorityKind::ConsolidateMemory) => {
+                DecideJudgment::ConsolidateMemory { rationale }
+            }
+            Some(SyntheticPriorityKind::RunImprovement) => {
+                DecideJudgment::RunImprovement { rationale }
+            }
+            Some(SyntheticPriorityKind::PollDeveloperActivity) => {
+                DecideJudgment::PollDeveloperActivity { rationale }
+            }
+            Some(SyntheticPriorityKind::ExtractIdeas) => DecideJudgment::ExtractIdeas { rationale },
+            Some(SyntheticPriorityKind::EvalWatchdog) | None => {
+                DecideJudgment::AdvanceGoal { rationale }
+            }
         };
         Ok(judgment)
     }
