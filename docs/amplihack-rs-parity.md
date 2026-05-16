@@ -91,34 +91,31 @@ path, the missing Rust equivalent, and acceptance criteria framed as
       `claude_process_builder` and `launcher::*_launcher` paths pass prompts
       on the command line and inherit the same shell-escaping fragility that
       Simard issues #1871 and #1879 patched on the Simard side.
-      *Filed below.*
+      Tracked in **#1897**.
 - [ ] **Proxy / LLM brokering crate** — Python `src/amplihack/proxy/` and
       `src/amplihack/llm/` have no Rust counterpart; Simard cannot run
       eval-mode workloads through `amplihack-rs` without re-wiring its own
       LLM router.
-      *Filed below.*
+      Tracked in **#1898**.
 - [ ] **`amplihack engineer` subcommand (shared engineer-loop CLI surface)**
       — Neither amplihack-rs nor Python amplihack exposes an `engineer`
       verb. Simard's `simard-engineer-*` bins are the only implementation
       and embed Simard-specific OODA assumptions. Promoting a generic
       engineer loop into amplihack-rs would let Simard drop its bespoke
       bins.
-      *Filed below.*
+      Tracked in **#1899**.
 - [ ] **Dedicated `amplihack-power-steering` crate** — Power-steering
       helpers are scattered across `amplihack-utils` and `amplihack-cli`
       rather than mirroring Python's `power_steering/` module. Consolidate
       so consumers (Simard, the recipe runner, eval) can depend on a single
       crate.
-      *Filed below.*
+      Tracked in **#1900**.
 - [ ] **Behavioral parity tests for `PostToolUse` workflow enforcement
       across Python vs Rust hook strategies** — Both strategies exist but
       we lack an executable contract test asserting the Rust and Python
       strategies emit equivalent decisions for the same `tool_call`
       payload. Without it, drift can creep in unnoticed.
-      *Filed below.*
-
-Each checkbox above will be linked to its GitHub issue once filed (see
-the PR description and the issue cross-references appended below).
+      Tracked in **#1901**.
 
 ## Out of scope for this PR
 
