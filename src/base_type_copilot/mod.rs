@@ -7,6 +7,11 @@
 //! objective with memory facts and domain knowledge, and parses the copilot's
 //! structured output into [`BaseTypeOutcome`].
 
+use std::io::Write;
+use std::path::Path;
+
+use tempfile::NamedTempFile;
+
 use crate::base_type_turn::{format_turn_input, parse_turn_output, prepare_turn_context};
 use crate::base_types::{
     BaseTypeCapability, BaseTypeDescriptor, BaseTypeFactory, BaseTypeId, BaseTypeOutcome,
@@ -154,7 +159,17 @@ impl CopilotSdkSession {
     /// When `identity_context` or `prompt_preamble` are provided (e.g. in
     /// meeting mode), they are prepended to the objective so the agent
     /// receives the full conversational context.
-    fn build_enriched_objective(&self, input: &BaseTypeTurnInput) -> SimardResult<String> {
+    ///
+    /// The returned [`NamedTempFile`] holds the on-disk prompt file referenced
+    /// by the shell command. The caller must keep it alive for the duration
+    /// of the terminal turn so the copilot subprocess can `cat` it; the file
+    /// is auto-deleted when dropped (see issue #1871: passing the prompt by
+    /// file path rather than inlining it into the shell command avoids the
+    /// single-quote / `printf %s` escaping bugs that broke multi-KB prompts).
+    fn build_enriched_objective(
+        &self,
+        input: &BaseTypeTurnInput,
+    ) -> SimardResult<(String, NamedTempFile)> {
         let mut parts = Vec::new();
         if !input.prompt_preamble.is_empty() {
             parts.push(input.prompt_preamble.as_str());
@@ -171,7 +186,9 @@ impl CopilotSdkSession {
             self.knowledge_bridge.as_ref(),
         )?;
         let formatted = format_turn_input(&context);
-        Ok(build_copilot_terminal_objective(&self.config, &formatted))
+        let prompt_file = write_prompt_to_tempfile(&formatted)?;
+        let objective = build_copilot_terminal_objective(&self.config, prompt_file.path());
+        Ok((objective, prompt_file))
     }
 }
 
@@ -193,7 +210,7 @@ impl BaseTypeSession for CopilotSdkSession {
 
         self.turn_count += 1;
 
-        let enriched_objective = self.build_enriched_objective(&input)?;
+        let (enriched_objective, _prompt_file) = self.build_enriched_objective(&input)?;
         let enriched_input = BaseTypeTurnInput::objective_only(enriched_objective);
 
         tracing::info!(mode = %self.request.mode, turn = self.turn_count, "Copilot adapter: sending turn to Copilot SDK (this may take 30-90s)…");
@@ -275,16 +292,36 @@ impl BaseTypeSession for CopilotSdkSession {
 }
 
 /// Build a terminal-session-compatible objective string that launches the
-/// copilot command with the enriched prompt.
+/// copilot command and reads the prompt from a pre-written file on disk.
 ///
-/// Strategy: write the prompt to a temp file, run `<copilot-cmd> -p "$(cat file)"`
-/// in non-interactive mode with `--allow-all-tools`, then `exit` the shell.
-/// The terminal infrastructure calls `finish()` which waits for the process
-/// to exit naturally.  The copilot runs to completion however long it takes,
-/// and we read the full transcript afterward.
+/// **Why a file, not a `printf '%s' '<escaped>'` inline literal**: prior to
+/// issue #1871 this function embedded the entire enriched prompt as a
+/// single-quoted argument to `printf '%s'`. That string was then sent as
+/// PTY input via `writeln!(stdin, …)`. Two failure modes followed:
+///
+/// 1. **PTY line-buffer overflow.** Line discipline in canonical mode
+///    has a small input buffer (~4 KB on Linux); larger prompts truncated
+///    silently, leaving bash in continuation mode.
+/// 2. **Apostrophe escaping interactions.** Even within the buffer limit,
+///    the `\\` → `\\\\` + `'\''` escape sequence broke for some payloads,
+///    producing a malformed command that bash interpreted as an unterminated
+///    string. The transcript parser then returned the bootstrap noise as
+///    the "response", which downstream callers (e.g. the merge-readiness
+///    judge in PR #1870) parsed as their own prompt.
+///
+/// The fix: write the prompt to a temp file from Rust code (out-of-band,
+/// via `write_prompt_to_tempfile`), and pass only the path through the
+/// shell. Paths returned by [`NamedTempFile`] are guaranteed-safe ASCII
+/// (`/tmp/.tmpXXXXXX`), so single-quoting them is unconditional and the
+/// command line stays well under a hundred bytes regardless of prompt size.
+///
+/// Cleanup is owned by Rust: the [`NamedTempFile`] guard in `run_turn`
+/// unlinks the file on Drop. We deliberately do NOT chain `rm -f` in the
+/// shell command — that would race with the Rust guard and could mask
+/// transcript-debugging artefacts.
 pub(super) fn build_copilot_terminal_objective(
     config: &CopilotAdapterConfig,
-    formatted_prompt: &str,
+    prompt_file_path: &Path,
 ) -> String {
     let mut objective = String::new();
 
@@ -292,25 +329,52 @@ pub(super) fn build_copilot_terminal_objective(
         objective.push_str(&format!("working-directory: {cwd}\n"));
     }
 
-    // Write the prompt to a temp file and pass it to the copilot command via
-    // `-p "$(cat file)"` for non-interactive execution. The copilot CLI does
-    // NOT read prompts from piped stdin in interactive mode — it requires the
-    // `-p` flag for scripted/non-interactive usage. `--allow-all-tools` is
-    // required by copilot for non-interactive mode. `--subprocess-safe` skips
-    // interactive staging/env updates. Chain with `exit` so the shell exits
-    // after the copilot finishes.
-    let escaped = formatted_prompt
-        .replace('\\', "\\\\")
-        .replace('\'', "'\\''");
+    // Single-quote the path. NamedTempFile only produces paths from a
+    // restricted ASCII alphabet (`/`, `.`, alnum, `_`), so single-quoting is
+    // safe — but we still assert-check for defense-in-depth at construction.
+    let path_str = prompt_file_path.to_string_lossy();
+    debug_assert!(
+        !path_str.contains('\''),
+        "tempfile path unexpectedly contains a single quote: {path_str}"
+    );
+
+    // `-p "$(cat 'PATH')"` runs the copilot CLI in non-interactive mode with
+    // the full prompt body. `--subprocess-safe` skips interactive staging.
+    // `--allow-all-tools` is required by copilot for non-interactive runs.
+    // Chain with `exit` so the shell returns after the copilot finishes.
     objective.push_str(&format!(
-        "command: SIMARD_PROMPT_FILE=$(mktemp /tmp/simard-copilot-prompt.XXXXXX) && \
-         printf '%s' '{}' > \"$SIMARD_PROMPT_FILE\" && \
-         {} --subprocess-safe -p \"$(cat \"$SIMARD_PROMPT_FILE\")\" --allow-all-tools ; \
-         rm -f \"$SIMARD_PROMPT_FILE\" ; exit\n",
-        escaped, config.command,
+        "command: {} --subprocess-safe -p \"$(cat '{}')\" --allow-all-tools ; exit\n",
+        config.command, path_str,
     ));
 
     objective
+}
+
+/// Write an enriched prompt to a freshly-created `NamedTempFile` and return
+/// the handle. The file is auto-deleted on Drop, so the caller must keep
+/// the handle alive for as long as the copilot subprocess may read from it.
+///
+/// Returns [`SimardError::AdapterInvocationFailed`] if the temp file cannot
+/// be created or written — both are extremely unlikely on a healthy host
+/// but worth surfacing rather than swallowing.
+pub(super) fn write_prompt_to_tempfile(prompt: &str) -> SimardResult<NamedTempFile> {
+    let mut file = NamedTempFile::with_prefix("simard-copilot-prompt-").map_err(|error| {
+        SimardError::AdapterInvocationFailed {
+            base_type: "copilot-sdk".to_string(),
+            reason: format!("failed to create copilot prompt temp file: {error}"),
+        }
+    })?;
+    file.write_all(prompt.as_bytes())
+        .map_err(|error| SimardError::AdapterInvocationFailed {
+            base_type: "copilot-sdk".to_string(),
+            reason: format!("failed to write copilot prompt temp file: {error}"),
+        })?;
+    file.flush()
+        .map_err(|error| SimardError::AdapterInvocationFailed {
+            base_type: "copilot-sdk".to_string(),
+            reason: format!("failed to flush copilot prompt temp file: {error}"),
+        })?;
+    Ok(file)
 }
 
 /// Extract the actual copilot LLM response from the terminal transcript
