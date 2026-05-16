@@ -61,6 +61,8 @@ const DEFAULT_HOME_SUBPATH: &str = ".simard/prompt_assets/simard";
 const EMBEDDED_BRAIN: &str = include_str!("../../prompt_assets/simard/ooda_brain.md");
 const EMBEDDED_DECIDE: &str = include_str!("../../prompt_assets/simard/ooda_decide.md");
 const EMBEDDED_ORIENT: &str = include_str!("../../prompt_assets/simard/ooda_orient.md");
+const EMBEDDED_MERGE_JUDGE: &str =
+    include_str!("../../prompt_assets/simard/merge_readiness_judge.md");
 
 /// Look up the embedded fallback for a known prompt name. Returns `None` for
 /// unknown names so callers can surface a configuration error rather than
@@ -70,6 +72,7 @@ pub fn embedded_fallback(name: &str) -> Option<&'static str> {
         "ooda_brain.md" => Some(EMBEDDED_BRAIN),
         "ooda_decide.md" => Some(EMBEDDED_DECIDE),
         "ooda_orient.md" => Some(EMBEDDED_ORIENT),
+        "merge_readiness_judge.md" => Some(EMBEDDED_MERGE_JUDGE),
         _ => None,
     }
 }

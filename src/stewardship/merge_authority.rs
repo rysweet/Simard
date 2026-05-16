@@ -6,46 +6,38 @@
 //!
 //! Pipeline:
 //! 1. `gh pr view <PR> --json body,statusCheckRollup,mergeable,reviewDecision,baseRefName`
-//! 2. Verify `baseRefName` is in the configured allow-list (default `["main"]`,
-//!    overridable via the `SIMARD_MERGE_BASE_ALLOWLIST` env var as a
-//!    comma-separated list). This is the **first** gate evaluated so a PR
-//!    targeting a stale or wrong base branch (the PR #1549 footgun) is
-//!    refused before any other inspection runs.
-//! 3. Parse the PR body for the six merge-ready evidence headings (each
-//!    must contain non-trivial evidence, not just a placeholder).
-//! 4. Verify `mergeable == "MERGEABLE"`.
-//! 5. Verify every entry in `statusCheckRollup` is `SUCCESS`, `NEUTRAL`, or
-//!    `SKIPPED`. Any `FAILURE`, `CANCELLED`, `TIMED_OUT`, `STARTUP_FAILURE`,
-//!    `ACTION_REQUIRED`, `PENDING`, `QUEUED`, or `IN_PROGRESS` blocks the merge.
-//! 6. If all checks pass: `gh pr merge <PR> --squash --delete-branch
+//! 2. **Objective gates** (deterministic, never agentic):
+//!    - `baseRefName` is in the configured allow-list (default `["main"]`,
+//!      overridable via the `SIMARD_MERGE_BASE_ALLOWLIST` env var as a
+//!      comma-separated list). This is the **first** gate evaluated so a PR
+//!      targeting a stale or wrong base branch (the PR #1549 footgun) is
+//!      refused before any other inspection runs.
+//!    - `mergeable == "MERGEABLE"`.
+//!    - Every entry in `statusCheckRollup` is `SUCCESS`, `NEUTRAL`, or
+//!      `SKIPPED`. Any `FAILURE`, `CANCELLED`, `TIMED_OUT`, `STARTUP_FAILURE`,
+//!      `ACTION_REQUIRED`, `PENDING`, `QUEUED`, or `IN_PROGRESS` blocks the merge.
+//! 3. **Agentic gate** ([`super::merge_judge::MergeJudge`]): a prompt-driven
+//!    judge reads the PR body and returns a structured verdict on whether the
+//!    merge-ready skill criteria are satisfied. The judge's prompt at
+//!    `prompt_assets/simard/merge_readiness_judge.md` is the single source of
+//!    truth for the evidence criteria — editing the skill template is enough
+//!    to evolve what the judge accepts. **No hardcoded heading lists, byte
+//!    thresholds, or bracket heuristics live in this module any more.**
+//! 4. If all gates pass: `gh pr merge <PR> --squash --delete-branch
 //!    --repo rysweet/Simard` and return [`MergeOutcome::Merged`].
-//! 7. Otherwise return [`MergeOutcome::Refused`] with a single human-readable
-//!    reason (the *first* failing gate, in order, so the operator gets a
-//!    deterministic message).
+//! 5. Otherwise return [`MergeOutcome::Refused`] with the first failing
+//!    objective gate, or the judge's blocker summary if every objective gate
+//!    passed.
 //!
 //! TODO(brain-wiring): the OODA brain currently has no action kind for "merge
-//! a PR I worked on". When the brain grows a `merge_pr` action, wire
-//! [`merge_pr_if_merge_ready`] in via `src/ooda_actions/`. Until then it is
+//! a PR I worked on" (issue #1868). When the brain grows a `merge_pr` action,
+//! wire [`merge_pr_if_merge_ready`] in via `src/ooda_actions/`. Until then it is
 //! reachable via the operator CLI subcommand `simard merge-pr <PR>` (see
 //! `src/operator_cli/merge.rs`) and via direct library calls.
 
 use crate::error::{SimardError, SimardResult};
 
-/// The six merge-ready evidence headings that MUST appear (and contain
-/// non-trivial evidence) in the PR body. The headings come from
-/// `~/.copilot/skills/merge-ready/pr-description-template.md` and the set
-/// is intentionally exactly the skill's six template sections — the gate
-/// MUST NOT add criteria the skill doesn't define.
-///
-/// Order matters: refusal messages report the *first* missing section.
-pub const REQUIRED_EVIDENCE_HEADINGS: [&str; 6] = [
-    "### QA-team evidence",
-    "### Documentation",
-    "### Quality-audit",
-    "### CI",
-    "### Scope",
-    "### Verdict",
-];
+use super::merge_judge::{JudgeOutcome, MergeJudge, Verdict, build_merge_judge};
 
 /// Result of a merge-authority evaluation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -255,57 +247,24 @@ pub fn base_allowlist_from_env() -> Vec<String> {
     }
 }
 
-/// Minimum bytes of evidence under each heading before we consider it
-/// "non-trivial". A pure placeholder line like
-/// `### QA-team evidence\n\n- Scenario files: <path/to/scenario.yaml>` is ~60
-/// bytes; a real entry is hundreds. We require **at least 80 bytes of
-/// non-whitespace content under the heading AND at least one line without an
-/// unfilled `<...>` placeholder bracket.**
-const MIN_EVIDENCE_BYTES: usize = 80;
-
-fn evidence_section<'a>(body: &'a str, heading: &str) -> Option<&'a str> {
-    let start = body.find(heading)?;
-    let after = &body[start + heading.len()..];
-    let end = after.find("\n### ").unwrap_or(after.len());
-    let end_h2 = after.find("\n## ").unwrap_or(after.len());
-    Some(&after[..end.min(end_h2)])
-}
-
-fn evidence_is_nontrivial(section: &str) -> bool {
-    let stripped: String = section.chars().filter(|c| !c.is_whitespace()).collect();
-    if stripped.len() < MIN_EVIDENCE_BYTES {
-        return false;
-    }
-    // Reject sections that are *only* placeholder lines like `<path/to/x>`.
-    // Real sections must have at least one non-blank, non-list-marker line
-    // that does not contain `<...>` placeholder brackets.
-    section.lines().any(|line| {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            return false;
-        }
-        if trimmed.starts_with("###") {
-            return false;
-        }
-        // Strip leading `- ` from list items before checking.
-        let body = trimmed.trim_start_matches("- ").trim();
-        if body.is_empty() {
-            return false;
-        }
-        !body.contains('<') || !body.contains('>')
-    })
-}
-
-/// First gate that fails (in order). Returns `Ok(())` if every gate passes.
-/// `base_allowlist` is the set of base branches a PR is allowed to target;
-/// production callers obtain this from [`base_allowlist_from_env`].
-fn evaluate_gates(snapshot: &PrSnapshot, base_allowlist: &[String]) -> Result<(), String> {
+/// First objective gate that fails (in order). Returns `Ok(())` if every
+/// objective gate passes. `base_allowlist` is the set of base branches a PR
+/// is allowed to target; production callers obtain this from
+/// [`base_allowlist_from_env`].
+///
+/// **Objective gates only** — evidence judgment is handled separately by the
+/// agentic [`MergeJudge`] (see [`merge_pr_if_merge_ready_with_judge`]). Every
+/// gate here is a fact that can be checked without reading the PR body.
+fn evaluate_objective_gates(
+    snapshot: &PrSnapshot,
+    base_allowlist: &[String],
+) -> Result<(), String> {
     // Gate 0 (highest priority): base-branch allow-list.
     //
     // A PR whose `baseRefName` is not in the allow-list is the PR #1549
     // footgun: branched from a stale parent so the diff includes thousands
     // of unrelated lines that look like deletions when targeted at main.
-    // Refuse early — before any evidence/CI inspection — and tell the
+    // Refuse early — before any other inspection runs — and tell the
     // operator exactly how to re-target.
     if !base_allowlist
         .iter()
@@ -322,30 +281,14 @@ fn evaluate_gates(snapshot: &PrSnapshot, base_allowlist: &[String]) -> Result<()
         ));
     }
 
-    // Gate 1-6: each evidence heading present + non-trivial.
-    for heading in REQUIRED_EVIDENCE_HEADINGS {
-        match evidence_section(&snapshot.body, heading) {
-            None => {
-                return Err(format!(
-                    "PR body is missing the required merge-ready section '{heading}'"
-                ));
-            }
-            Some(section) if !evidence_is_nontrivial(section) => {
-                return Err(format!(
-                    "PR body section '{heading}' is empty or contains only template placeholders"
-                ));
-            }
-            Some(_) => {}
-        }
-    }
-    // Gate 7: mergeable
+    // Gate 1: mergeable
     if snapshot.mergeable != "MERGEABLE" {
         return Err(format!(
             "PR mergeable status is '{}' (expected 'MERGEABLE')",
             snapshot.mergeable
         ));
     }
-    // Gate 8: every check is success-ish
+    // Gate 2: every check is success-ish
     for check in &snapshot.checks {
         if !is_passing_state(&check.state) {
             return Err(format!(
@@ -361,19 +304,26 @@ fn is_passing_state(state: &str) -> bool {
     matches!(state, "SUCCESS" | "NEUTRAL" | "SKIPPED")
 }
 
-/// Evaluate the merge-ready gates for `pr_number` against `repo`. If
-/// every gate passes, squash-merge with branch deletion and return
+/// Evaluate the merge-ready gates for `pr_number` against `repo`. If every
+/// gate passes, squash-merge with branch deletion and return
 /// [`MergeOutcome::Merged`]. Otherwise return [`MergeOutcome::Refused`] with
-/// the single most-actionable reason (the first failing gate).
+/// the single most-actionable reason (the first failing objective gate, or
+/// the judge's blocker summary if every objective gate passed).
 ///
 /// The base-branch allow-list is read from the `SIMARD_MERGE_BASE_ALLOWLIST`
 /// environment variable (comma-separated, default `"main"`). See
 /// [`base_allowlist_from_env`].
 ///
+/// The agentic [`MergeJudge`] is constructed via [`build_merge_judge`], which
+/// resolves an LLM provider via the same path the OODA brains use. If no
+/// provider is configured, the judge refuses with an actionable "judge
+/// unavailable" message rather than silently falling back to brittle
+/// string-matching heuristics.
+///
 /// Errors (as opposed to [`MergeOutcome::Refused`]) only surface when we
 /// could not even *evaluate* the PR — `gh` failed to run, returned malformed
-/// JSON, or `gh pr merge` itself failed at the network layer despite the
-/// gates being satisfied.
+/// JSON, the judge submitter errored at the network layer, or `gh pr merge`
+/// itself failed despite the gates being satisfied.
 pub fn merge_pr_if_merge_ready(
     pr_number: u32,
     repo: &str,
@@ -391,15 +341,46 @@ pub fn merge_pr_if_merge_ready_with_allowlist(
     gh: &dyn PrGhClient,
     base_allowlist: &[String],
 ) -> SimardResult<MergeOutcome> {
+    let judge = build_merge_judge();
+    merge_pr_if_merge_ready_with_judge(pr_number, repo, gh, base_allowlist, judge.as_ref())
+}
+
+/// Full-control entrypoint that takes an explicit [`MergeJudge`]. Used by
+/// tests (with a stub judge) and by future call sites that want to provide
+/// their own judge implementation.
+///
+/// Pipeline:
+/// 1. Fetch PR snapshot via `gh`.
+/// 2. Evaluate objective gates (base-branch, mergeable, CI). If any fails,
+///    return `Refused` immediately — do not even call the judge.
+/// 3. Call the judge. If the verdict is anything other than `Ready`, return
+///    `Refused` with the judge's structured blocker summary.
+/// 4. Squash-merge.
+pub fn merge_pr_if_merge_ready_with_judge(
+    pr_number: u32,
+    repo: &str,
+    gh: &dyn PrGhClient,
+    base_allowlist: &[String],
+    judge: &dyn MergeJudge,
+) -> SimardResult<MergeOutcome> {
     let snapshot = gh.view_pr(repo, pr_number)?;
-    if let Err(reason) = evaluate_gates(&snapshot, base_allowlist) {
+    if let Err(reason) = evaluate_objective_gates(&snapshot, base_allowlist) {
         return Ok(MergeOutcome::Refused { pr_number, reason });
     }
-    gh.squash_merge(repo, pr_number)?;
-    Ok(MergeOutcome::Merged {
-        pr_number,
-        repo: repo.to_string(),
-    })
+    let outcome: JudgeOutcome = judge.judge(pr_number, repo, &snapshot)?;
+    match outcome.verdict {
+        Verdict::Ready => {
+            gh.squash_merge(repo, pr_number)?;
+            Ok(MergeOutcome::Merged {
+                pr_number,
+                repo: repo.to_string(),
+            })
+        }
+        Verdict::NotReady | Verdict::Unclear => Ok(MergeOutcome::Refused {
+            pr_number,
+            reason: outcome.summary(),
+        }),
+    }
 }
 
 // ─────────────────────────── Tests ───────────────────────────
@@ -407,58 +388,38 @@ pub fn merge_pr_if_merge_ready_with_allowlist(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stewardship::merge_judge::{Blocker, JudgeOutcome, MergeJudge, Verdict};
     use std::sync::Mutex;
 
-    /// A canonical, fully-populated PR body that should pass all six
-    /// evidence gates. Each section has a paragraph of real prose (not
-    /// `<placeholder>` lines).
+    // ─── Fixtures ──────────────────────────────────────────────────────────
+
+    /// A non-trivial PR body. After the agentic-judge refactor the body is
+    /// just an opaque blob the judge inspects; the merge_authority module no
+    /// longer parses it. We keep a realistic example here so test failures
+    /// involving the body remain easy to read.
     fn good_pr_body() -> String {
-        r#"# feat: example PR
-
-## Merge readiness
-
-### QA-team evidence
-
-Scenario file: tests/scenarios/merge_authority.yaml. Validation command
-gadugi-test validate tests/scenarios/merge_authority.yaml passed with 0
-errors. Run command gadugi-test run tests/scenarios/merge_authority.yaml
-passed against the local env on 2025-11-25, 12 of 12 cases green; full log
-at artifacts/2025-11-25-gadugi.log.
-
-### Documentation
-
-User-facing docs impact: yes. Updated docs/concepts/merge-authority.md to
-describe the gated merge action, including refusal reasons. PR description
-links to the new doc above.
-
-### Quality-audit
-
-Cycle 1 (SEEK 6 findings, all medium-low): VALIDATE confirmed 4 real, FIX
-landed in commit a1b2c3d. Cycle 2 (SEEK 2 findings, both low): VALIDATE
-confirmed both, FIX landed in commit d4e5f6a. Cycle 3 (SEEK 0 findings):
-clean — final cycle, convergence reached.
-
-### CI
-
-Checks command: gh pr checks 1500 --repo rysweet/Simard. Result: all green
-across the 14 GitHub Actions jobs (cargo test, clippy, fmt, doctests, MSRV,
-release-build, OS matrix). Skipped checks: none. Flaky reruns performed:
-none. Real failures fixed: none in this PR.
-
-### Scope
-
-Changed files reviewed via git diff --name-only origin/main...HEAD.
-Touched: src/stewardship/merge_authority.rs, src/operator_cli/merge.rs,
-prompt_assets/simard/ooda_decide.md. Unrelated changes: none.
-
-### Verdict
-
-Merge-ready: yes. Remaining blockers: none. Reviewer sign-off recorded
-in the review-decision field. CI green across all required jobs and the
-six evidence sections above each contain concrete artifacts rather than
-template placeholders.
-"#
-        .to_string()
+        "# feat: example PR\n\
+         \n\
+         ## Merge readiness\n\
+         \n\
+         ### QA-team evidence\n\
+         Scenarios under tests/scenarios/, 12/12 green.\n\
+         \n\
+         ### Documentation\n\
+         Updated docs/concepts/merge-authority.md.\n\
+         \n\
+         ### Quality-audit\n\
+         Three SEEK→VALIDATE→FIX cycles, last clean.\n\
+         \n\
+         ### CI\n\
+         All required checks green.\n\
+         \n\
+         ### Scope\n\
+         Only intended files touched.\n\
+         \n\
+         ### Verdict\n\
+         Ready to merge.\n"
+            .to_string()
     }
 
     fn good_snapshot() -> PrSnapshot {
@@ -487,6 +448,8 @@ template placeholders.
     fn default_allowlist() -> Vec<String> {
         vec!["main".to_string()]
     }
+
+    // ─── PR-gh client mock (unchanged from pre-refactor) ──────────────────
 
     #[derive(Default)]
     struct FakePrGhClient {
@@ -529,20 +492,91 @@ template placeholders.
         }
     }
 
-    // ── Happy path ──
+    // ─── Merge-judge mock (new; replaces hardcoded evidence gates) ────────
+
+    struct FakeMergeJudge {
+        canned: Mutex<Option<SimardResult<JudgeOutcome>>>,
+        calls: Mutex<u32>,
+    }
+
+    impl FakeMergeJudge {
+        fn ready() -> Self {
+            Self::new(Ok(JudgeOutcome {
+                verdict: Verdict::Ready,
+                rationale: "all six skill criteria substantive (test fixture)".to_string(),
+                blockers: vec![],
+            }))
+        }
+        fn not_ready_with(blockers: Vec<Blocker>) -> Self {
+            Self::new(Ok(JudgeOutcome {
+                verdict: Verdict::NotReady,
+                rationale: "test: judge said not_ready".to_string(),
+                blockers,
+            }))
+        }
+        fn unclear() -> Self {
+            Self::new(Ok(JudgeOutcome {
+                verdict: Verdict::Unclear,
+                rationale: "test: judge said unclear".to_string(),
+                blockers: vec![],
+            }))
+        }
+        fn errored() -> Self {
+            Self::new(Err(SimardError::AdapterInvocationFailed {
+                base_type: "merge-readiness-judge".into(),
+                reason: "test: simulated network failure".into(),
+            }))
+        }
+        fn new(canned: SimardResult<JudgeOutcome>) -> Self {
+            Self {
+                canned: Mutex::new(Some(canned)),
+                calls: Mutex::new(0),
+            }
+        }
+        fn call_count(&self) -> u32 {
+            *self.calls.lock().unwrap()
+        }
+    }
+
+    impl MergeJudge for FakeMergeJudge {
+        fn judge(
+            &self,
+            _pr: u32,
+            _repo: &str,
+            _snapshot: &PrSnapshot,
+        ) -> SimardResult<JudgeOutcome> {
+            *self.calls.lock().unwrap() += 1;
+            self.canned
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("FakeMergeJudge: no canned response")
+        }
+    }
+
+    // Convenience: every test below calls the with_judge entrypoint directly
+    // so the judge dependency is explicit and there is no hidden global state.
+    fn run(
+        pr: u32,
+        repo: &str,
+        gh: &dyn PrGhClient,
+        allow: &[String],
+        judge: &dyn MergeJudge,
+    ) -> SimardResult<MergeOutcome> {
+        merge_pr_if_merge_ready_with_judge(pr, repo, gh, allow, judge)
+    }
+
+    // ─── Happy path: objective gates pass + judge says ready ──────────────
 
     #[test]
-    fn merges_when_all_gates_pass() {
+    fn merges_when_objective_gates_pass_and_judge_says_ready() {
         let gh = FakePrGhClient::new();
         gh.seed_view(Ok(good_snapshot()));
         gh.seed_merge(Ok(()));
-        let outcome = merge_pr_if_merge_ready_with_allowlist(
-            1500,
-            "rysweet/Simard",
-            &gh,
-            &default_allowlist(),
-        )
-        .unwrap();
+        let judge = FakeMergeJudge::ready();
+
+        let outcome = run(1500, "rysweet/Simard", &gh, &default_allowlist(), &judge).unwrap();
+
         assert_eq!(
             outcome,
             MergeOutcome::Merged {
@@ -551,78 +585,79 @@ template placeholders.
             }
         );
         assert_eq!(gh.merge_call_count(), 1);
+        assert_eq!(judge.call_count(), 1, "judge must be called exactly once");
     }
 
-    // ── Missing-evidence variants (one per heading) ──
+    // ─── Judge verdicts ───────────────────────────────────────────────────
 
     #[test]
-    fn refuses_when_qa_evidence_missing() {
-        let mut snap = good_snapshot();
-        // Remove the QA section heading entirely.
-        snap.body = snap
-            .body
-            .replace("### QA-team evidence", "### qa-something-else");
+    fn refuses_when_judge_says_not_ready_and_surfaces_blockers() {
         let gh = FakePrGhClient::new();
-        gh.seed_view(Ok(snap));
-        let outcome =
-            merge_pr_if_merge_ready_with_allowlist(42, "rysweet/Simard", &gh, &default_allowlist())
-                .unwrap();
+        gh.seed_view(Ok(good_snapshot()));
+        let judge = FakeMergeJudge::not_ready_with(vec![
+            Blocker {
+                section: "Quality-audit".into(),
+                severity: "high".into(),
+                observation: "single sentence, no SHAs".into(),
+                fix: "run three SEEK→VALIDATE→FIX cycles".into(),
+            },
+            Blocker {
+                section: "CI".into(),
+                severity: "medium".into(),
+                observation: "no run link".into(),
+                fix: "add gh pr checks output".into(),
+            },
+        ]);
+
+        let outcome = run(42, "rysweet/Simard", &gh, &default_allowlist(), &judge).unwrap();
+
         match outcome {
             MergeOutcome::Refused { pr_number, reason } => {
                 assert_eq!(pr_number, 42);
-                assert!(
-                    reason.contains("### QA-team evidence"),
-                    "reason should mention the missing heading: {reason}"
-                );
+                assert!(reason.contains("not_ready"), "{reason}");
+                assert!(reason.contains("Quality-audit"), "{reason}");
+                assert!(reason.contains("CI"), "{reason}");
             }
             other => panic!("expected Refused, got {other:?}"),
         }
-        assert_eq!(
-            gh.merge_call_count(),
-            0,
-            "must not call gh pr merge on refusal"
-        );
+        assert_eq!(gh.merge_call_count(), 0, "must not merge on not_ready");
     }
 
     #[test]
-    fn refuses_when_documentation_evidence_is_only_placeholder() {
-        let mut snap = good_snapshot();
-        // Replace the entire Documentation section with the template
-        // boilerplate (all `<placeholder>` lines).
-        let placeholder = "### Documentation\n\n\
-            - User-facing docs impact: <yes / no>\n\
-            - Updated docs: <doc path>\n\
-            - PR description links added: <list of links>\n\
-            - Rationale if not applicable: <list of changed surfaces>\n\n";
-        let start = snap.body.find("### Documentation").unwrap();
-        let after = &snap.body[start..];
-        let end_offset = after[1..].find("\n### ").map(|i| i + 1).unwrap();
-        let mut new_body = snap.body[..start].to_string();
-        new_body.push_str(placeholder);
-        new_body.push_str(&snap.body[start + end_offset..]);
-        snap.body = new_body;
-
+    fn refuses_when_judge_says_unclear() {
         let gh = FakePrGhClient::new();
-        gh.seed_view(Ok(snap));
-        let outcome =
-            merge_pr_if_merge_ready_with_allowlist(42, "rysweet/Simard", &gh, &default_allowlist())
-                .unwrap();
+        gh.seed_view(Ok(good_snapshot()));
+        let judge = FakeMergeJudge::unclear();
+
+        let outcome = run(7, "rysweet/Simard", &gh, &default_allowlist(), &judge).unwrap();
+
         match outcome {
             MergeOutcome::Refused { reason, .. } => {
-                assert!(
-                    reason.contains("### Documentation"),
-                    "reason should call out Documentation section: {reason}"
-                );
-                assert!(
-                    reason.contains("placeholder") || reason.contains("empty"),
-                    "reason should explain why: {reason}"
-                );
+                assert!(reason.contains("unclear"), "{reason}");
             }
             other => panic!("expected Refused, got {other:?}"),
         }
+        assert_eq!(gh.merge_call_count(), 0);
     }
 
-    // ── CI failure ──
+    #[test]
+    fn judge_errors_propagate_as_simard_error() {
+        let gh = FakePrGhClient::new();
+        gh.seed_view(Ok(good_snapshot()));
+        let judge = FakeMergeJudge::errored();
+
+        let err = run(7, "rysweet/Simard", &gh, &default_allowlist(), &judge).unwrap_err();
+        match err {
+            SimardError::AdapterInvocationFailed { base_type, reason } => {
+                assert_eq!(base_type, "merge-readiness-judge");
+                assert!(reason.contains("simulated network failure"), "{reason}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert_eq!(gh.merge_call_count(), 0);
+    }
+
+    // ─── Objective gates: CI, mergeable, base branch ──────────────────────
 
     #[test]
     fn refuses_on_ci_failure() {
@@ -633,9 +668,9 @@ template placeholders.
         });
         let gh = FakePrGhClient::new();
         gh.seed_view(Ok(snap));
-        let outcome =
-            merge_pr_if_merge_ready_with_allowlist(7, "rysweet/Simard", &gh, &default_allowlist())
-                .unwrap();
+        let judge = FakeMergeJudge::ready();
+
+        let outcome = run(7, "rysweet/Simard", &gh, &default_allowlist(), &judge).unwrap();
         match outcome {
             MergeOutcome::Refused { reason, .. } => {
                 assert!(reason.contains("integration-tests"), "{reason}");
@@ -644,6 +679,11 @@ template placeholders.
             other => panic!("expected Refused, got {other:?}"),
         }
         assert_eq!(gh.merge_call_count(), 0);
+        assert_eq!(
+            judge.call_count(),
+            0,
+            "objective gate failure must not invoke the judge"
+        );
     }
 
     #[test]
@@ -655,13 +695,12 @@ template placeholders.
         });
         let gh = FakePrGhClient::new();
         gh.seed_view(Ok(snap));
-        let outcome =
-            merge_pr_if_merge_ready_with_allowlist(7, "rysweet/Simard", &gh, &default_allowlist())
-                .unwrap();
-        assert!(matches!(outcome, MergeOutcome::Refused { .. }));
-    }
+        let judge = FakeMergeJudge::ready();
 
-    // ── Mergeable=CONFLICTING ──
+        let outcome = run(7, "rysweet/Simard", &gh, &default_allowlist(), &judge).unwrap();
+        assert!(matches!(outcome, MergeOutcome::Refused { .. }));
+        assert_eq!(judge.call_count(), 0);
+    }
 
     #[test]
     fn refuses_when_mergeable_conflicting() {
@@ -669,9 +708,9 @@ template placeholders.
         snap.mergeable = "CONFLICTING".to_string();
         let gh = FakePrGhClient::new();
         gh.seed_view(Ok(snap));
-        let outcome =
-            merge_pr_if_merge_ready_with_allowlist(7, "rysweet/Simard", &gh, &default_allowlist())
-                .unwrap();
+        let judge = FakeMergeJudge::ready();
+
+        let outcome = run(7, "rysweet/Simard", &gh, &default_allowlist(), &judge).unwrap();
         match outcome {
             MergeOutcome::Refused { reason, .. } => {
                 assert!(reason.contains("CONFLICTING"), "{reason}");
@@ -680,6 +719,7 @@ template placeholders.
             other => panic!("expected Refused, got {other:?}"),
         }
         assert_eq!(gh.merge_call_count(), 0);
+        assert_eq!(judge.call_count(), 0);
     }
 
     #[test]
@@ -688,13 +728,13 @@ template placeholders.
         snap.mergeable = "UNKNOWN".to_string();
         let gh = FakePrGhClient::new();
         gh.seed_view(Ok(snap));
-        let outcome =
-            merge_pr_if_merge_ready_with_allowlist(7, "rysweet/Simard", &gh, &default_allowlist())
-                .unwrap();
+        let judge = FakeMergeJudge::ready();
+
+        let outcome = run(7, "rysweet/Simard", &gh, &default_allowlist(), &judge).unwrap();
         assert!(matches!(outcome, MergeOutcome::Refused { .. }));
     }
 
-    // ── Propagation: gh failures bubble as SimardError ──
+    // ─── gh failures bubble through ───────────────────────────────────────
 
     #[test]
     fn propagates_gh_view_failure() {
@@ -702,9 +742,8 @@ template placeholders.
         gh.seed_view(Err(SimardError::MergeAuthorityGhCommandFailed {
             reason: "gh: not found".into(),
         }));
-        let err =
-            merge_pr_if_merge_ready_with_allowlist(7, "rysweet/Simard", &gh, &default_allowlist())
-                .unwrap_err();
+        let judge = FakeMergeJudge::ready();
+        let err = run(7, "rysweet/Simard", &gh, &default_allowlist(), &judge).unwrap_err();
         assert!(matches!(
             err,
             SimardError::MergeAuthorityGhCommandFailed { .. }
@@ -718,13 +757,8 @@ template placeholders.
         gh.seed_merge(Err(SimardError::MergeAuthorityGhCommandFailed {
             reason: "branch protection requires CODEOWNERS approval".into(),
         }));
-        let err = merge_pr_if_merge_ready_with_allowlist(
-            1500,
-            "rysweet/Simard",
-            &gh,
-            &default_allowlist(),
-        )
-        .unwrap_err();
+        let judge = FakeMergeJudge::ready();
+        let err = run(1500, "rysweet/Simard", &gh, &default_allowlist(), &judge).unwrap_err();
         match err {
             SimardError::MergeAuthorityGhCommandFailed { reason } => {
                 assert!(reason.contains("branch protection"), "{reason}");
@@ -733,34 +767,7 @@ template placeholders.
         }
     }
 
-    // ── Order-determinism: missing evidence reported before CI failure ──
-
-    #[test]
-    fn reports_first_failing_gate_in_canonical_order() {
-        let mut snap = good_snapshot();
-        // Remove the QA evidence AND inject a CI failure. The QA missing
-        // section comes first in the canonical order, so the message must
-        // mention QA, not CI.
-        snap.body = snap.body.replace("### QA-team evidence", "### qa-other");
-        snap.checks.push(CheckRollupEntry {
-            name: "x".into(),
-            state: "FAILURE".into(),
-        });
-        let gh = FakePrGhClient::new();
-        gh.seed_view(Ok(snap));
-        let outcome =
-            merge_pr_if_merge_ready_with_allowlist(7, "rysweet/Simard", &gh, &default_allowlist())
-                .unwrap();
-        match outcome {
-            MergeOutcome::Refused { reason, .. } => {
-                assert!(reason.contains("QA-team evidence"), "{reason}");
-                assert!(!reason.contains("FAILURE"), "{reason}");
-            }
-            other => panic!("expected Refused, got {other:?}"),
-        }
-    }
-
-    // ── parse_pr_view_json ──
+    // ─── parse_pr_view_json ───────────────────────────────────────────────
 
     #[test]
     fn parses_check_run_with_conclusion() {
@@ -806,27 +813,7 @@ template placeholders.
         ));
     }
 
-    // ── REQUIRED_EVIDENCE_HEADINGS sanity ──
-
-    #[test]
-    fn required_headings_match_skill_template() {
-        // Hard-pin the six headings to prevent accidental reordering and
-        // to keep the gate's required set identical to
-        // ~/.copilot/skills/merge-ready/pr-description-template.md.
-        assert_eq!(
-            REQUIRED_EVIDENCE_HEADINGS,
-            [
-                "### QA-team evidence",
-                "### Documentation",
-                "### Quality-audit",
-                "### CI",
-                "### Scope",
-                "### Verdict",
-            ]
-        );
-    }
-
-    // ── Base-branch allow-list gate (PR #1549 footgun) ──
+    // ─── Base-branch allow-list gate (PR #1549 footgun) ──────────────────
 
     #[test]
     fn refuses_when_base_ref_not_in_allowlist() {
@@ -834,13 +821,9 @@ template placeholders.
         snap.base_ref_name = "feat/some-stale-parent".to_string();
         let gh = FakePrGhClient::new();
         gh.seed_view(Ok(snap));
-        let outcome = merge_pr_if_merge_ready_with_allowlist(
-            1549,
-            "rysweet/Simard",
-            &gh,
-            &default_allowlist(),
-        )
-        .unwrap();
+        let judge = FakeMergeJudge::ready();
+
+        let outcome = run(1549, "rysweet/Simard", &gh, &default_allowlist(), &judge).unwrap();
         match outcome {
             MergeOutcome::Refused { pr_number, reason } => {
                 assert_eq!(pr_number, 1549);
@@ -859,10 +842,11 @@ template placeholders.
             }
             other => panic!("expected Refused, got {other:?}"),
         }
+        assert_eq!(gh.merge_call_count(), 0);
         assert_eq!(
-            gh.merge_call_count(),
+            judge.call_count(),
             0,
-            "must not call gh pr merge on base-branch refusal"
+            "base-branch refusal must short-circuit before the judge"
         );
     }
 
@@ -874,9 +858,8 @@ template placeholders.
         gh.seed_view(Ok(snap));
         gh.seed_merge(Ok(()));
         let allowlist = vec!["main".to_string(), "release/0.18".to_string()];
-        let outcome =
-            merge_pr_if_merge_ready_with_allowlist(2000, "rysweet/Simard", &gh, &allowlist)
-                .unwrap();
+        let judge = FakeMergeJudge::ready();
+        let outcome = run(2000, "rysweet/Simard", &gh, &allowlist, &judge).unwrap();
         assert_eq!(
             outcome,
             MergeOutcome::Merged {
@@ -885,44 +868,45 @@ template placeholders.
             }
         );
         assert_eq!(gh.merge_call_count(), 1);
+        assert_eq!(judge.call_count(), 1);
     }
 
+    /// The objective base-branch gate must short-circuit before the judge is
+    /// consulted, regardless of what the judge would have said. This pins
+    /// the order so a future refactor can't reverse it.
     #[test]
-    fn base_branch_gate_runs_before_evidence_check() {
-        // Even with broken evidence + bad base, the base-branch refusal wins
-        // because it's a faster, more actionable signal.
+    fn base_branch_gate_runs_before_judge() {
         let mut snap = good_snapshot();
         snap.base_ref_name = "wrong-base".to_string();
-        snap.body = snap.body.replace("### QA-team evidence", "### qa-other");
         let gh = FakePrGhClient::new();
         gh.seed_view(Ok(snap));
-        let outcome =
-            merge_pr_if_merge_ready_with_allowlist(7, "rysweet/Simard", &gh, &default_allowlist())
-                .unwrap();
+        // Judge would say ready, but the objective gate must win.
+        let judge = FakeMergeJudge::ready();
+
+        let outcome = run(7, "rysweet/Simard", &gh, &default_allowlist(), &judge).unwrap();
         match outcome {
             MergeOutcome::Refused { reason, .. } => {
-                assert!(
-                    reason.contains("wrong-base"),
-                    "base-branch reason must win: {reason}"
-                );
-                assert!(
-                    !reason.contains("QA-team evidence"),
-                    "evidence reason should not appear: {reason}"
-                );
+                assert!(reason.contains("wrong-base"), "{reason}");
             }
             other => panic!("expected Refused, got {other:?}"),
         }
+        assert_eq!(judge.call_count(), 0);
+    }
+
+    // ─── base_allowlist_from_env ──────────────────────────────────────────
+    //
+    // Env mutation isn't thread-safe; cargo runs tests in parallel by
+    // default. Serialize every test that touches BASE_ALLOWLIST_ENV through
+    // this mutex so no two of them race.
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     #[test]
     fn base_allowlist_from_env_default_is_main() {
-        // Test deterministically: clear the env var and assert the default.
-        // SAFETY: tests in the same process share env; this test does not
-        // run under cargo's parallel runner if `--test-threads=1`, but for
-        // belt-and-braces we restore afterwards.
-        // SAFETY: std::env::remove_var/set_var are unsafe in 2024 edition;
-        // we accept that this test must run single-threaded if other tests
-        // touch the same env var (none do today).
+        let _g = env_lock().lock().unwrap();
+        // SAFETY: serialized via env_lock above.
         unsafe {
             std::env::remove_var(BASE_ALLOWLIST_ENV);
         }
@@ -931,7 +915,8 @@ template placeholders.
     }
 
     #[test]
-    fn base_allowlist_from_env_parses_csv() {
+    fn base_allowlist_from_env_splits_and_trims() {
+        let _g = env_lock().lock().unwrap();
         unsafe {
             std::env::set_var(BASE_ALLOWLIST_ENV, "main, release/0.18 ,, dev");
         }
@@ -951,6 +936,7 @@ template placeholders.
 
     #[test]
     fn base_allowlist_from_env_empty_string_falls_back_to_default() {
+        let _g = env_lock().lock().unwrap();
         unsafe {
             std::env::set_var(BASE_ALLOWLIST_ENV, "   ,  , ");
         }
@@ -990,9 +976,8 @@ template placeholders.
 
         let gh = FakePrGhClient::new();
         gh.seed_view(Ok(snap));
-        let outcome =
-            merge_pr_if_merge_ready_with_allowlist(99, "rysweet/Simard", &gh, &default_allowlist())
-                .unwrap();
+        let judge = FakeMergeJudge::ready();
+        let outcome = run(99, "rysweet/Simard", &gh, &default_allowlist(), &judge).unwrap();
         assert!(
             matches!(outcome, MergeOutcome::Refused { .. }),
             "missing baseRefName must fail the gate, not silently pass"
