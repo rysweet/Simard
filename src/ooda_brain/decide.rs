@@ -16,6 +16,7 @@ use super::prompt_store;
 use super::rustyclawd::LlmSubmitter;
 use crate::error::{SimardError, SimardResult};
 use crate::ooda_loop::ActionKind;
+use crate::ooda_loop::SyntheticPriorityKind;
 
 const ADAPTER_TAG: &str = "ooda-decide-brain";
 
@@ -124,12 +125,23 @@ pub struct DeterministicFallbackDecideBrain;
 impl OodaDecideBrain for DeterministicFallbackDecideBrain {
     fn judge_decision(&self, ctx: &DecideContext) -> SimardResult<DecideJudgment> {
         let rationale = "fallback-brain: prefix-routed".to_string();
-        let judgment = match ctx.goal_id.as_str() {
-            "__memory__" => DecideJudgment::ConsolidateMemory { rationale },
-            "__improvement__" => DecideJudgment::RunImprovement { rationale },
-            "__poll_activity__" => DecideJudgment::PollDeveloperActivity { rationale },
-            "__extract_ideas__" => DecideJudgment::ExtractIdeas { rationale },
-            _ => DecideJudgment::AdvanceGoal { rationale },
+        // Route synthetic priorities via the typed enum (single source of
+        // truth in `ooda_loop::priority_kind`). Real goal_ids — and any
+        // unrecognized synthetic — fall through to AdvanceGoal.
+        let judgment = match SyntheticPriorityKind::from_synthetic_id(ctx.goal_id.as_str()) {
+            Some(SyntheticPriorityKind::ConsolidateMemory) => {
+                DecideJudgment::ConsolidateMemory { rationale }
+            }
+            Some(SyntheticPriorityKind::RunImprovement) => {
+                DecideJudgment::RunImprovement { rationale }
+            }
+            Some(SyntheticPriorityKind::PollDeveloperActivity) => {
+                DecideJudgment::PollDeveloperActivity { rationale }
+            }
+            Some(SyntheticPriorityKind::ExtractIdeas) => DecideJudgment::ExtractIdeas { rationale },
+            Some(SyntheticPriorityKind::EvalWatchdog) | None => {
+                DecideJudgment::AdvanceGoal { rationale }
+            }
         };
         Ok(judgment)
     }
@@ -175,9 +187,18 @@ impl<S: LlmSubmitter> OodaDecideBrain for RustyClawdDecideBrain<S> {
 }
 
 /// Extract a JSON object from the LLM response (LLMs sometimes wrap JSON in
-/// prose / markdown fences) and parse it as a judgment.
+/// prose / markdown fences) and parse it as a judgment. On failure the error
+/// embeds the **full raw response text** (truncated for log safety) so
+/// operators can diagnose the model behaviour — this replaces the legacy
+/// `got N bytes` byte-count format that originated the issue #1711 bug.
 fn parse_judgment_from_response(raw: &str) -> Result<DecideJudgment, String> {
     let stripped = raw.trim();
+    if stripped.is_empty() {
+        return Err(format!(
+            "decide brain returned an empty response (raw_response={:?})",
+            raw
+        ));
+    }
     let candidate = if let Some(start) = stripped.find('{')
         && let Some(end) = stripped.rfind('}')
         && end >= start
@@ -185,12 +206,16 @@ fn parse_judgment_from_response(raw: &str) -> Result<DecideJudgment, String> {
         &stripped[start..=end]
     } else {
         return Err(format!(
-            "no JSON object found in LLM response (got {} bytes)",
-            raw.len()
+            "decide brain response had no JSON object; raw_response={:?}",
+            super::rustyclawd::truncate_for_log_pub(raw)
         ));
     };
-    serde_json::from_str::<DecideJudgment>(candidate)
-        .map_err(|e| format!("decide-brain-parse-error: {e}; payload={candidate}"))
+    serde_json::from_str::<DecideJudgment>(candidate).map_err(|e| {
+        format!(
+            "decide-brain-parse-error: {e}; payload={candidate}; raw_response={:?}",
+            super::rustyclawd::truncate_for_log_pub(raw)
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------

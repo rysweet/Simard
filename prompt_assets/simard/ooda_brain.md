@@ -42,13 +42,49 @@ Pick exactly one of these `choice` tags. The daemon maps each choice to a concre
 
 ## OUTPUT_FORMAT
 
-Return a single JSON object on a single line. No prose before or after, no markdown fences. Schema:
+Use the **prose-first DECISION marker protocol** (defined normatively in
+[`docs/reference/ooda-brain-decision-protocol.md`](../../docs/reference/ooda-brain-decision-protocol.md),
+introduced in [#1711](https://github.com/rysweet/Simard/issues/1711)).
 
-```json
-{"choice": "<one-of-the-tags-above>", "rationale": "<short reason citing context fields>", "...variant-specific fields..."}
+**Rule 1 — first non-blank line is the decision.** Begin your response with:
+
+```
+DECISION: <variant>
 ```
 
-Variant-specific fields:
+where `<variant>` is exactly one of the snake_case tags from the OPTIONS
+section: `continue_skipping`, `reclaim_and_redispatch`, `deprioritize`,
+`open_tracking_issue`, `mark_goal_blocked`, `consider_self_update`. The
+keyword `DECISION` is matched case-insensitively but the variant token must
+match exactly. Only the first non-blank line is inspected — a `DECISION:`
+line later in the response is ignored.
+
+**Rule 2 — variants without extra fields take prose rationale.** For
+`continue_skipping`, `deprioritize`, and `consider_self_update`, follow the
+marker line with free-form rationale prose. An optional `rationale:` prefix
+is stripped. Example:
+
+```
+DECISION: continue_skipping
+engineer touched worktree 8 seconds ago; 2 commits in last cycle
+```
+
+**Rule 3 — variants with required fields use a JSON body.** For
+`reclaim_and_redispatch`, `open_tracking_issue`, and `mark_goal_blocked`,
+follow the marker line with a JSON object carrying the variant-specific
+fields. The marker is authoritative — if the JSON `choice` field disagrees
+with the marker, the marker wins.
+
+```
+DECISION: open_tracking_issue
+{
+  "rationale": "engineer panic recurred across 3 spawns; stack trace in log",
+  "title": "Engineer panics on goal X",
+  "body": "Repro: …\nLog tail: …"
+}
+```
+
+Variant-specific JSON fields:
 
 - `reclaim_and_redispatch` requires: `redispatch_context` (string — extra task guidance for the new engineer; defaults to empty if missing).
 - `open_tracking_issue` requires: `title` (string, ≤80 chars), `body` (string, may include newlines).
@@ -56,42 +92,71 @@ Variant-specific fields:
 - `consider_self_update` needs only `choice` + `rationale` (cite the four-part doctrine fields you observed: `commits_behind=N`, `in_flight_engineer_count=N`, `minutes_since_last_update_attempt=N`).
 - `continue_skipping` and `deprioritize` need only `choice` + `rationale`.
 
-Unknown tags or malformed JSON cause the daemon to fall back to `continue_skipping`. Extra fields are silently ignored (forward compatible).
+**Backward-compat (legacy form, still accepted but discouraged):** a single
+JSON object whose `choice` discriminator names a variant, optionally wrapped
+in ```` ```json ... ``` ```` fences or surrounded by explanatory prose.
+Prefer the prose-first form; it gives operators a readable rationale on
+parse failure and matches the wire format the rest of the OODA brain has
+already migrated to.
+
+If neither a `DECISION:` marker nor a parseable JSON object can be found,
+the daemon falls back to `continue_skipping` and logs the **full raw
+response** at WARN level so operators can diagnose. Extra fields are
+silently ignored (forward compatible).
 
 ## EXAMPLES
 
+All examples use the prose-first DECISION marker form (the legacy pure-JSON
+form is still accepted by the parser but is no longer the recommended shape).
+
 Input summary: `consecutive_skip_count=3`, log tail shows recent commit activity.
 Output:
-```json
-{"choice": "continue_skipping", "rationale": "engineer committed 2 minutes ago, healthy progress"}
+```
+DECISION: continue_skipping
+engineer committed 2 minutes ago, healthy progress
 ```
 
 Input summary: `worktree_mtime_secs_ago=25200` (7 hours), log tail trails off mid-tool-call.
 Output:
-```json
-{"choice": "reclaim_and_redispatch", "rationale": "worktree idle 7h, log truncated mid-tool-call — engineer is wedged", "redispatch_context": "previous engineer hung during file edit; start by re-reading the goal and pick a fresh approach"}
-```
+````
+DECISION: reclaim_and_redispatch
+{
+  "rationale": "worktree idle 7h, log truncated mid-tool-call — engineer is wedged",
+  "redispatch_context": "previous engineer hung during file edit; start by re-reading the goal and pick a fresh approach"
+}
+````
 
 Input summary: `consecutive_skip_count=20`, `failure_count=0`, log tail shows engineer alive but spinning on the same file.
 Output:
-```json
-{"choice": "deprioritize", "rationale": "20 cycles of no-op skips while engineer churns on same file — let FAILURE_PENALTY demote so other goals get budget"}
+```
+DECISION: deprioritize
+20 cycles of no-op skips while engineer churns on same file — let FAILURE_PENALTY demote so other goals get budget
 ```
 
 Input summary: log tail contains `thread 'main' panicked at 'unwrap on None'`.
 Output:
-```json
-{"choice": "open_tracking_issue", "rationale": "engineer panic in log tail — needs a human eye", "title": "OODA stuck on goal: engineer panic", "body": "Engineer for goal X panicked. See agent_logs/engineer-X-NNN.log. Last lines:\n<tail snippet>"}
-```
+````
+DECISION: open_tracking_issue
+{
+  "rationale": "engineer panic in log tail — needs a human eye",
+  "title": "OODA stuck on goal: engineer panic",
+  "body": "Engineer for goal X panicked. See agent_logs/engineer-X-NNN.log. Last lines:\n<tail snippet>"
+}
+````
 
 Input summary: log tail shows `ANTHROPIC_API_KEY not set`, repeated 401s.
 Output:
-```json
-{"choice": "mark_goal_blocked", "rationale": "engineer cannot make API calls", "reason": "ANTHROPIC_API_KEY not set in daemon environment"}
-```
+````
+DECISION: mark_goal_blocked
+{
+  "rationale": "engineer cannot make API calls",
+  "reason": "ANTHROPIC_API_KEY not set in daemon environment"
+}
+````
 
 Input summary: `commits_behind=12`, `in_flight_engineer_count=1` (only this one), `minutes_since_last_update_attempt=240`, log tail shows healthy commit activity.
 Output:
-```json
-{"choice": "consider_self_update", "rationale": "binary is 12 commits behind origin/main, last update attempt 4h ago, no other engineers in flight, current engineer healthy — safe to consider safe-update"}
+```
+DECISION: consider_self_update
+binary is 12 commits behind origin/main, last update attempt 4h ago, no other engineers in flight, current engineer healthy — safe to consider safe-update (commits_behind=12, in_flight_engineer_count=1, minutes_since_last_update_attempt=240)
 ```

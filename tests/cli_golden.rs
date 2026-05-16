@@ -128,3 +128,59 @@ fn help_documents_compatibility_binaries() {
         "help text should mention compatibility binaries:\n{stdout}"
     );
 }
+
+// ── issue #1746: `simard meeting --help` regression suite ────────────────
+//
+// Before the fix, `simard meeting --help` (and `-h`) was silently treated as
+// the meeting topic name `--help` and entered an interactive REPL that
+// blocked on stdin forever — making the binary appear hung. These tests
+// invoke the real `simard` binary with closed stdin and a hard timeout so
+// any regression that re-introduces the hang fails fast and visibly.
+
+fn meeting_help_should_not_hang(flag: &str) {
+    let assert = simard()
+        .arg("meeting")
+        .arg(flag)
+        .timeout(std::time::Duration::from_secs(15))
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+
+    for keyword in &["meeting", "run", "read", "repl", "Usage"] {
+        assert!(
+            stdout.contains(keyword),
+            "`simard meeting {flag}` stdout should mention '{keyword}':\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn meeting_double_dash_help_succeeds_quickly() {
+    meeting_help_should_not_hang("--help");
+}
+
+#[test]
+fn meeting_short_dash_help_succeeds_quickly() {
+    meeting_help_should_not_hang("-h");
+}
+
+#[test]
+fn meeting_help_word_succeeds_quickly() {
+    meeting_help_should_not_hang("help");
+}
+
+#[test]
+fn meeting_unknown_flag_errors_quickly() {
+    let assert = simard()
+        .arg("meeting")
+        .arg("--definitely-not-a-real-flag")
+        .timeout(std::time::Duration::from_secs(15))
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+
+    assert!(
+        stderr.contains("unknown flag") && stderr.contains("--definitely-not-a-real-flag"),
+        "unknown meeting flag must produce a visible stderr error, got: {stderr}"
+    );
+}

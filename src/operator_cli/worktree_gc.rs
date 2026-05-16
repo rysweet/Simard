@@ -3,7 +3,9 @@
 //! Defaults to dry-run. Operators must pass `--apply` to perform any
 //! filesystem mutation.
 
-use crate::worktree_gc::{GcConfig, GhClientShell, default_roots, run_gc, runner::render_reason};
+use crate::worktree_gc::{
+    GcConfig, GhClientShell, ProcfsLiveProcessProbe, default_roots, run_gc, runner::render_reason,
+};
 
 use super::args::reject_extra_args;
 
@@ -73,7 +75,9 @@ pub(crate) fn dispatch_worktree_gc_command(
     }
 
     let gh = GhClientShell::new(HOME_REPO, parent_repo);
-    let report = run_gc(&cfg, &gh).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let probe = ProcfsLiveProcessProbe::new();
+    let report =
+        run_gc(&cfg, &gh, &probe).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
     eprintln!(
         "[worktree-gc] examined={} candidates={}",

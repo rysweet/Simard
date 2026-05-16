@@ -11,6 +11,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serial_test::serial;
 use simard::meeting_facilitator::{
     ActionItem, BundleTranscriptLine, MeetingDecision, MeetingHandoff, MeetingSession,
     MeetingSessionStatus, derive_meeting_id, write_meeting_bundle,
@@ -52,6 +53,7 @@ impl Drop for ScopedMeetingsRoot {
 }
 
 #[test]
+#[serial(simard_meetings_root_env)]
 fn scripted_meeting_emits_structured_handoff_bundle() {
     let root = ScopedMeetingsRoot::new("scripted");
 
@@ -194,6 +196,7 @@ fn scripted_meeting_emits_structured_handoff_bundle() {
 }
 
 #[test]
+#[serial(simard_meetings_root_env)]
 fn empty_transcript_still_produces_well_formed_bundle() {
     let _root = ScopedMeetingsRoot::new("empty-transcript");
 

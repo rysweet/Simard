@@ -14,7 +14,7 @@ use crate::ooda_brain::{
     push_brain_judgment,
 };
 
-use super::{OodaConfig, PlannedAction, Priority};
+use super::{OodaConfig, PlannedAction, Priority, is_synthetic_id};
 
 /// Decide using the deterministic fallback brain. This is the entrypoint
 /// the daemon's Act phase calls today; it preserves the pre-#1458 routing
@@ -78,7 +78,7 @@ pub fn decide_with_brain(
         };
         actions.push(PlannedAction {
             kind: judgment.action_kind(),
-            goal_id: if priority.goal_id.starts_with("__") {
+            goal_id: if is_synthetic_id(&priority.goal_id) {
                 None
             } else {
                 Some(priority.goal_id.clone())
