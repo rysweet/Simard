@@ -9,7 +9,7 @@ use crate::ooda_brain::{
     push_brain_judgment,
 };
 
-use super::{Observation, Priority};
+use super::{Observation, Priority, SyntheticPriorityKind, is_synthetic_id};
 
 /// Orient: rank goals by urgency, informed by environment context.
 ///
@@ -129,7 +129,9 @@ pub fn orient_with_brain(
 
     if observation.memory_stats.episodic_count > 100 {
         priorities.push(Priority {
-            goal_id: "__memory__".to_string(),
+            goal_id: SyntheticPriorityKind::ConsolidateMemory
+                .synthetic_id()
+                .to_string(),
             urgency: 0.5,
             reason: format!(
                 "episodic memory has {} entries, consolidation needed",
@@ -143,7 +145,9 @@ pub fn orient_with_brain(
         && score.overall < 0.7
     {
         priorities.push(Priority {
-            goal_id: "__improvement__".to_string(),
+            goal_id: SyntheticPriorityKind::RunImprovement
+                .synthetic_id()
+                .to_string(),
             urgency: 0.7,
             reason: format!(
                 "gym overall {:.1}% below 70% target ({} scenarios)",
@@ -162,7 +166,9 @@ pub fn orient_with_brain(
     // for free, but with enough urgency that it preempts ordinary work.
     if let Some(ref reason) = observation.eval_watchdog {
         priorities.push(Priority {
-            goal_id: "__eval_watchdog__".to_string(),
+            goal_id: SyntheticPriorityKind::EvalWatchdog
+                .synthetic_id()
+                .to_string(),
             urgency: 1.0,
             reason: format!("EVAL WATCHDOG: {reason}"),
         });
@@ -176,17 +182,21 @@ pub fn orient_with_brain(
     Ok(priorities)
 }
 
-/// Drop any priorities whose `goal_id` is neither in `active_goals` nor a
-/// synthetic (`__`-prefix). Called after building the priorities vec from
-/// `goals.active` and before appending synthetic priorities, so synthetics
-/// are never filtered.
+/// Drop any priorities whose `goal_id` is neither a real active-board id
+/// nor a recognized synthetic kind (see [`SyntheticPriorityKind`]).
+/// Called after building the priorities vec from `goals.active` and before
+/// appending synthetic priorities, so synthetics are never filtered.
+///
+/// Previously this used `goal_id.starts_with("__")` to detect synthetics,
+/// which would have accepted any unknown `__foo__` (typos, removed kinds)
+/// as legitimate. The enum-backed check refuses unknowns explicitly.
 pub(crate) fn filter_hallucinated_priorities(
     priorities: &mut Vec<Priority>,
     active_goals: &[ActiveGoal],
 ) {
     let active_ids: HashSet<&str> = active_goals.iter().map(|g| g.id.as_str()).collect();
     priorities.retain(|p| {
-        if p.goal_id.starts_with("__") || active_ids.contains(p.goal_id.as_str()) {
+        if is_synthetic_id(&p.goal_id) || active_ids.contains(p.goal_id.as_str()) {
             true
         } else {
             eprintln!(
@@ -368,12 +378,18 @@ mod hallucination_filter_tests {
     }
 
     #[test]
-    fn double_underscore_prefix_arbitrary_suffix_is_synthetic() {
-        // Any __ prefix must be retained regardless of the suffix.
+    fn unknown_double_underscore_string_is_dropped_not_treated_as_synthetic() {
+        // Pre-PR-#1872 behavior: any `__foo__` string was retained on the
+        // assumption that it was a future synthetic kind. That was the
+        // brittleness — typos and removed kinds passed through silently.
+        // Post-refactor: only the enum-recognized synthetic kinds survive.
         let goals: Vec<ActiveGoal> = vec![];
         let mut priorities = vec![priority("__new_future_system__")];
         filter_hallucinated_priorities(&mut priorities, &goals);
-        assert_eq!(priorities.len(), 1);
+        assert!(
+            priorities.is_empty(),
+            "unknown synthetic-shaped string must be rejected, not silently kept"
+        );
     }
 
     #[test]
