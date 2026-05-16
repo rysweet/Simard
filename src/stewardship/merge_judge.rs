@@ -119,6 +119,31 @@ impl JudgeOutcome {
     }
 }
 
+/// Which concrete merge-judge implementation is currently active. Surfaced
+/// without invoking the judge so the dashboard can render the "judge
+/// configured?" status without paying for an LLM round-trip per refresh.
+///
+/// Lower-snake-case `serde` tags so the dashboard JSON shape uses the same
+/// vocabulary documented in #1880 (`"llm"` / `"refusing"`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeJudgeKind {
+    /// [`LlmMergeJudge`] — production impl backed by an LLM provider.
+    Llm,
+    /// [`RefusingMergeJudge`] — fallback when no LLM provider is configured.
+    /// When this is the active variant, every merge will be refused; the
+    /// dashboard surfaces this in red so the operator notices.
+    Refusing,
+}
+
+impl MergeJudgeKind {
+    /// Whether the judge can issue a non-refusal verdict. Mirrors the
+    /// `judge_configured` field in the dashboard JSON contract.
+    pub fn is_configured(self) -> bool {
+        matches!(self, MergeJudgeKind::Llm)
+    }
+}
+
 /// Trait every merge judge implements. Synchronous on purpose to match the
 /// OODA brain pattern — the LLM-backed impl bridges to async internally.
 pub trait MergeJudge: Send + Sync {
@@ -128,6 +153,12 @@ pub trait MergeJudge: Send + Sync {
         repo: &str,
         snapshot: &PrSnapshot,
     ) -> SimardResult<JudgeOutcome>;
+
+    /// Identify which concrete impl this is, without invoking the judge.
+    /// Used by the operator dashboard's Merge Readiness panel (#1880) to
+    /// render "Judge: configured (LLM)" vs "Judge: unconfigured" without
+    /// paying for an LLM round-trip per refresh.
+    fn kind(&self) -> MergeJudgeKind;
 }
 
 // ─────────────────────────── Refusing fallback ──────────────────────────────
@@ -158,6 +189,10 @@ impl MergeJudge for RefusingMergeJudge {
                     .to_string(),
             }],
         })
+    }
+
+    fn kind(&self) -> MergeJudgeKind {
+        MergeJudgeKind::Refusing
     }
 }
 
@@ -195,6 +230,10 @@ impl<S: LlmSubmitter> MergeJudge for LlmMergeJudge<S> {
             base_type: ADAPTER_TAG.to_string(),
             reason,
         })
+    }
+
+    fn kind(&self) -> MergeJudgeKind {
+        MergeJudgeKind::Llm
     }
 }
 
@@ -267,6 +306,15 @@ mod tests {
         assert_eq!(out.blockers.len(), 1);
         assert_eq!(out.blockers[0].section, "judge-availability");
         assert_eq!(out.blockers[0].severity, "high");
+    }
+
+    #[test]
+    fn refusing_judge_reports_refusing_kind() {
+        // The dashboard renders the panel's "Judge: unconfigured" red badge
+        // off this signal — must stay stable.
+        let j = RefusingMergeJudge;
+        assert_eq!(j.kind(), MergeJudgeKind::Refusing);
+        assert!(!j.kind().is_configured());
     }
 
     #[test]
@@ -372,6 +420,18 @@ mod tests {
         let judge = LlmMergeJudge::new(stub);
         let out = judge.judge(1500, "rysweet/Simard", &snap()).unwrap();
         assert_eq!(out.verdict, Verdict::Ready);
+    }
+
+    #[test]
+    fn llm_judge_reports_llm_kind() {
+        // Dashboard renders the panel's green "Judge: configured (LLM)" pill
+        // off this signal — must stay stable.
+        let stub = StubSubmitter {
+            canned: "irrelevant".into(),
+        };
+        let judge = LlmMergeJudge::new(stub);
+        assert_eq!(judge.kind(), MergeJudgeKind::Llm);
+        assert!(judge.kind().is_configured());
     }
 
     #[test]

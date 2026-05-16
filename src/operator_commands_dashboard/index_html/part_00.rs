@@ -124,6 +124,10 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
         <h2>Open PRs</h2>
         <div id="open-prs-list"><span class="loading">Loading…</span></div>
       </div>
+      <div class="card" data-testid="merge-readiness-card" style="grid-column:1 / -1">
+        <h2>Merge Readiness <button class="btn" onclick="fetchMergeReadiness()" style="font-size:.75rem">Refresh</button></h2>
+        <div id="merge-readiness-panel"><span class="loading">Loading…</span></div>
+      </div>
       <div class="card"><h2>System Status</h2><div id="status"><span class="loading">Loading…</span></div></div>
       <div class="card"><h2>Open Issues</h2><ul id="issues-list"><li class="loading">Loading…</li></ul></div>
       <div class="card">

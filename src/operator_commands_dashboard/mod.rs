@@ -9,6 +9,7 @@ mod hosts;
 mod index_html;
 mod logs;
 mod memory;
+mod merge_readiness;
 mod metrics;
 mod monitoring;
 mod registry;

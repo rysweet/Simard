@@ -75,6 +75,38 @@ pub struct CheckRollupEntry {
     pub state: String,
 }
 
+/// One open-PR summary used by the dashboard's Merge Readiness panel
+/// (#1880). Sourced from
+/// `gh pr list --json number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url`.
+/// Mirrors [`PrSnapshot`] without `body` or `review_decision` — the panel
+/// only renders the cheap deterministic gates per PR.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct OpenPrSummary {
+    pub number: u32,
+    pub title: String,
+    pub head_ref_name: String,
+    pub base_ref_name: String,
+    pub mergeable: String,
+    pub checks: Vec<CheckRollupEntry>,
+    pub url: String,
+}
+
+impl OpenPrSummary {
+    /// Project this listing summary into a [`PrSnapshot`] so the same
+    /// [`evaluate_objective_gates`] used by `merge_pr_if_merge_ready` can
+    /// be called against it. `body` and `review_decision` are left empty
+    /// because the objective gates do not read them.
+    pub fn to_snapshot(&self) -> PrSnapshot {
+        PrSnapshot {
+            body: String::new(),
+            mergeable: self.mergeable.clone(),
+            review_decision: String::new(),
+            checks: self.checks.clone(),
+            base_ref_name: self.base_ref_name.clone(),
+        }
+    }
+}
+
 /// Abstract `gh pr` operations used by [`merge_pr_if_merge_ready`]. The trait
 /// keeps the evaluation logic testable; production wires it to
 /// [`RealPrGhClient`] which shells out to `gh`.
@@ -83,6 +115,15 @@ pub trait PrGhClient {
     fn view_pr(&self, repo: &str, pr_number: u32) -> SimardResult<PrSnapshot>;
     /// `gh pr merge <pr> --squash --delete-branch --repo <repo>`.
     fn squash_merge(&self, repo: &str, pr_number: u32) -> SimardResult<()>;
+    /// `gh pr list --repo <repo> --state open --json number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url --limit <limit>`.
+    ///
+    /// Added for the operator dashboard's Merge Readiness panel (#1880).
+    /// Default impl returns `Ok(vec![])` so existing test fakes that only
+    /// exercise the per-PR merge path don't need to grow a stub. The
+    /// dashboard handler relies on [`RealPrGhClient`]'s override.
+    fn list_open_prs(&self, _repo: &str, _limit: u32) -> SimardResult<Vec<OpenPrSummary>> {
+        Ok(Vec::new())
+    }
 }
 
 /// Production implementation that shells out to the `gh` binary.
@@ -150,6 +191,37 @@ impl PrGhClient for RealPrGhClient {
             });
         }
         Ok(())
+    }
+
+    fn list_open_prs(&self, repo: &str, limit: u32) -> SimardResult<Vec<OpenPrSummary>> {
+        let limit_s = limit.to_string();
+        let output = std::process::Command::new("gh")
+            .args([
+                "pr",
+                "list",
+                "--repo",
+                repo,
+                "--state",
+                "open",
+                "--json",
+                "number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url",
+                "--limit",
+                &limit_s,
+            ])
+            .output()
+            .map_err(|e| SimardError::MergeAuthorityGhCommandFailed {
+                reason: format!("failed to spawn `gh pr list`: {e}"),
+            })?;
+        if !output.status.success() {
+            return Err(SimardError::MergeAuthorityGhCommandFailed {
+                reason: format!(
+                    "`gh pr list --repo {repo} --state open` exited {}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            });
+        }
+        parse_pr_list_json(&output.stdout)
     }
 }
 
@@ -219,6 +291,80 @@ pub fn parse_pr_view_json(stdout: &[u8]) -> SimardResult<PrSnapshot> {
     })
 }
 
+/// Parse `gh pr list --json number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url`
+/// stdout into a vec of [`OpenPrSummary`]. Used by the dashboard's Merge
+/// Readiness panel (#1880). Mirrors [`parse_pr_view_json`] for the per-PR
+/// listing shape — `gh pr list` returns an array, each element shaped like
+/// the `gh pr view` JSON object minus `body`/`reviewDecision`.
+pub fn parse_pr_list_json(stdout: &[u8]) -> SimardResult<Vec<OpenPrSummary>> {
+    #[derive(serde::Deserialize)]
+    struct RawPr {
+        #[serde(default)]
+        number: u32,
+        #[serde(default)]
+        title: String,
+        #[serde(default, rename = "headRefName")]
+        head_ref_name: String,
+        #[serde(default, rename = "baseRefName")]
+        base_ref_name: String,
+        #[serde(default)]
+        mergeable: String,
+        #[serde(default, rename = "statusCheckRollup")]
+        status_check_rollup: Vec<RawCheck>,
+        #[serde(default)]
+        url: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawCheck {
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        context: Option<String>,
+        #[serde(default)]
+        conclusion: Option<String>,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        state: Option<String>,
+    }
+    let raws: Vec<RawPr> = serde_json::from_slice(stdout).map_err(|e| {
+        SimardError::MergeAuthorityEvaluationFailed {
+            reason: format!("could not parse `gh pr list` JSON: {e}"),
+        }
+    })?;
+    Ok(raws
+        .into_iter()
+        .map(|r| {
+            let checks = r
+                .status_check_rollup
+                .into_iter()
+                .map(|c| {
+                    let name = c
+                        .name
+                        .or(c.context)
+                        .unwrap_or_else(|| "<unnamed-check>".to_string());
+                    let state = match (c.conclusion, c.status, c.state) {
+                        (Some(s), _, _) if !s.is_empty() => s,
+                        (_, Some(s), _) if !s.is_empty() => s,
+                        (_, _, Some(s)) if !s.is_empty() => s,
+                        _ => "UNKNOWN".to_string(),
+                    };
+                    CheckRollupEntry { name, state }
+                })
+                .collect();
+            OpenPrSummary {
+                number: r.number,
+                title: r.title,
+                head_ref_name: r.head_ref_name,
+                base_ref_name: r.base_ref_name,
+                mergeable: r.mergeable,
+                checks,
+                url: r.url,
+            }
+        })
+        .collect())
+}
+
 /// Env var that overrides the base-branch allow-list (comma-separated).
 /// Empty entries are ignored. Falls back to `["main"]` if unset/empty.
 pub const BASE_ALLOWLIST_ENV: &str = "SIMARD_MERGE_BASE_ALLOWLIST";
@@ -255,7 +401,12 @@ pub fn base_allowlist_from_env() -> Vec<String> {
 /// **Objective gates only** — evidence judgment is handled separately by the
 /// agentic [`MergeJudge`] (see [`merge_pr_if_merge_ready_with_judge`]). Every
 /// gate here is a fact that can be checked without reading the PR body.
-fn evaluate_objective_gates(
+///
+/// Made `pub` for #1880 so the operator dashboard's Merge Readiness panel
+/// can render the cheap deterministic verdict per open PR without invoking
+/// the (expensive) judge per refresh. The dashboard is the only out-of-crate
+/// caller; the merge pipeline still uses this internally.
+pub fn evaluate_objective_gates(
     snapshot: &PrSnapshot,
     base_allowlist: &[String],
 ) -> Result<(), String> {
@@ -551,6 +702,14 @@ mod tests {
                 .unwrap()
                 .clone()
                 .expect("FakeMergeJudge: no canned response")
+        }
+
+        fn kind(&self) -> crate::stewardship::merge_judge::MergeJudgeKind {
+            // Tests only need a stable answer; the production code paths under
+            // test don't branch on `kind()`. Report `Llm` so `is_configured`
+            // returns true, matching the "judge is wired" intent of the
+            // fixture.
+            crate::stewardship::merge_judge::MergeJudgeKind::Llm
         }
     }
 
@@ -982,5 +1141,108 @@ mod tests {
             matches!(outcome, MergeOutcome::Refused { .. }),
             "missing baseRefName must fail the gate, not silently pass"
         );
+    }
+
+    // ─── #1880 dashboard surface ─────────────────────────────────────────
+
+    /// `evaluate_objective_gates` is now `pub` so the dashboard can call it
+    /// without invoking the LLM judge. Verify all three states the panel
+    /// renders (ready / not-ready / wrong-base) map to the same verdicts
+    /// the merge pipeline would produce — guards against gate drift.
+    #[test]
+    fn evaluate_objective_gates_pub_surface_matches_merge_pipeline() {
+        let allow = default_allowlist();
+
+        // Ready snapshot — all gates pass.
+        let ready = good_snapshot();
+        assert!(evaluate_objective_gates(&ready, &allow).is_ok());
+
+        // CI-failing snapshot — gate 2 must report the failing check name.
+        let mut ci_failing = good_snapshot();
+        ci_failing.checks.push(CheckRollupEntry {
+            name: "integration-tests".into(),
+            state: "FAILURE".into(),
+        });
+        let err = evaluate_objective_gates(&ci_failing, &allow).unwrap_err();
+        assert!(err.contains("integration-tests"), "{err}");
+        assert!(err.contains("FAILURE"), "{err}");
+
+        // Wrong-base snapshot — gate 0 must report the base-branch failure
+        // first (before mergeable/CI), proving the #1549 ordering invariant.
+        let mut wrong_base = good_snapshot();
+        wrong_base.base_ref_name = "develop".into();
+        wrong_base.mergeable = "CONFLICTING".into(); // would also fail gate 1
+        let err = evaluate_objective_gates(&wrong_base, &allow).unwrap_err();
+        assert!(
+            err.contains("base branch") && err.contains("develop"),
+            "wrong-base must surface first; got: {err}"
+        );
+        assert!(
+            !err.contains("CONFLICTING"),
+            "wrong-base must short-circuit before the mergeable gate; got: {err}"
+        );
+    }
+
+    /// `parse_pr_list_json` must accept the `gh pr list` JSON shape and
+    /// project it into `OpenPrSummary` rows the dashboard panel can render.
+    /// Covers the same conclusion/status/state fall-through as
+    /// `parse_pr_view_json` so a check-run mid-flight is reported as
+    /// in-progress (the panel maps that to the yellow "pending" badge).
+    #[test]
+    fn parse_pr_list_json_round_trips_dashboard_shape() {
+        let stdout = br#"[
+            {
+                "number": 1870,
+                "title": "feat: agentic merge judge",
+                "headRefName": "feat/agentic-merge-judge",
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "url": "https://github.com/rysweet/Simard/pull/1870",
+                "statusCheckRollup": [
+                    { "name": "ci",   "conclusion": "SUCCESS", "status": "COMPLETED" },
+                    { "context": "cla/google", "state": "SUCCESS" }
+                ]
+            },
+            {
+                "number": 1880,
+                "title": "dashboard: surface merge-judge config",
+                "headRefName": "feat/merge-readiness-panel",
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "url": "https://github.com/rysweet/Simard/pull/1880",
+                "statusCheckRollup": [
+                    { "name": "build", "status": "IN_PROGRESS", "conclusion": null }
+                ]
+            }
+        ]"#;
+        let prs = parse_pr_list_json(stdout).unwrap();
+        assert_eq!(prs.len(), 2);
+
+        assert_eq!(prs[0].number, 1870);
+        assert_eq!(prs[0].base_ref_name, "main");
+        assert_eq!(prs[0].mergeable, "MERGEABLE");
+        assert_eq!(prs[0].checks.len(), 2);
+        // Conclusion takes precedence over status.
+        assert_eq!(prs[0].checks[0].state, "SUCCESS");
+        // Falls through to `state` when neither conclusion nor status set.
+        assert_eq!(prs[0].checks[1].name, "cla/google");
+        assert_eq!(prs[0].checks[1].state, "SUCCESS");
+
+        // Check-run mid-flight: conclusion null → fall through to status.
+        assert_eq!(prs[1].checks[0].state, "IN_PROGRESS");
+
+        // `to_snapshot` projects the listing row into the shape
+        // `evaluate_objective_gates` consumes.
+        let snap = prs[0].to_snapshot();
+        assert_eq!(snap.base_ref_name, "main");
+        assert_eq!(snap.mergeable, "MERGEABLE");
+        assert!(snap.body.is_empty());
+    }
+
+    /// `gh pr list` returns `[]` when no PRs are open. Must not panic.
+    #[test]
+    fn parse_pr_list_json_accepts_empty_array() {
+        let prs = parse_pr_list_json(b"[]").unwrap();
+        assert!(prs.is_empty());
     }
 }

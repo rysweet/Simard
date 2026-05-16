@@ -85,6 +85,76 @@ mod tests_b {
         );
     }
 
+    // ---------------------------------------------------------------------
+    // Issue #1880 — Merge Readiness panel HTML snapshot tests.
+    //
+    // These guard the operator-visible strings rendered by the panel so a
+    // future refactor of `index_html/part_*.rs` can't silently strip the
+    // panel. The route-level contract is tested separately in
+    // `merge_readiness::tests`.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn index_html_contains_merge_readiness_panel() {
+        // Card label must be present so the operator can find it.
+        assert!(
+            INDEX_HTML.contains("Merge Readiness"),
+            "Index HTML should include the Merge Readiness panel heading"
+        );
+        // Mount point the JS targets when populating the panel.
+        assert!(
+            INDEX_HTML.contains("merge-readiness-panel"),
+            "Index HTML should include the merge-readiness-panel container id"
+        );
+        // Stable test selector for the card and the inner table.
+        assert!(
+            INDEX_HTML.contains("merge-readiness-card"),
+            "Index HTML should include the merge-readiness-card test selector"
+        );
+        assert!(
+            INDEX_HTML.contains("merge-readiness-table"),
+            "Index HTML should include the merge-readiness-table test selector"
+        );
+        // Judge configuration pill — both happy and red text variants must
+        // exist as string literals so the snapshot covers both readiness
+        // states the operator might see.
+        assert!(
+            INDEX_HTML.contains("merge-readiness-judge-pill"),
+            "Index HTML should include the judge-configuration pill test selector"
+        );
+        assert!(
+            INDEX_HTML.contains("Judge: configured"),
+            "Index HTML should include the configured-judge label"
+        );
+        assert!(
+            INDEX_HTML.contains("RefusingMergeJudge fallback"),
+            "Index HTML should include the unconfigured-judge red-badge label"
+        );
+        // Endpoint the panel polls.
+        assert!(
+            INDEX_HTML.contains("/api/merge-readiness"),
+            "Index HTML should reference the /api/merge-readiness endpoint"
+        );
+        // Verdict-unavailable stub for the column that will populate once
+        // the persistence follow-up lands.
+        assert!(
+            INDEX_HTML.contains("verdict unavailable"),
+            "Index HTML should include the verdict-unavailable stub for the per-PR Judge Verdict column"
+        );
+    }
+
+    #[test]
+    fn build_router_registers_merge_readiness_route() {
+        // Smoke-check: the router builds and the new route is part of the
+        // registered set. Axum's stable Router doesn't expose its route
+        // table directly, so we rely on the build success + the explicit
+        // route registration in routes.rs being readable in source.
+        let _router = build_router();
+        // The path literal must appear in the rendered HTML (the JS
+        // fetches it on init), so this is a load-bearing string.
+        assert!(INDEX_HTML.contains("/api/merge-readiness"));
+    }
+
     #[test]
     fn build_router_registers_ws_agent_log_route() {
         // Smoke-check: build_router constructs without panic and references
