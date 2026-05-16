@@ -4,7 +4,16 @@ use crate::meeting_facilitator::{
 
 /// Run `gh issue create` and print the result. Returns `true` on success.
 fn gh_create_issue(title: &str, body: &str, label: &str) -> bool {
-    match std::process::Command::new("gh")
+    gh_create_issue_with_bin("gh", title, body, label)
+}
+
+/// Inner implementation parameterized on the gh binary path. Tests use this
+/// with a non-existent path to verify graceful failure handling without
+/// invoking the real `gh` (which would create real issues — see issue #1711
+/// and the 10 polluted issues #1719/#1721/#1724/#1725/#1727/#1731/#1733/
+/// #1734/#1736/#1737 caused by the prior test design).
+fn gh_create_issue_with_bin(bin: &str, title: &str, body: &str, label: &str) -> bool {
+    match std::process::Command::new(bin)
         .args(["issue", "create", "--title", title, "--body", body])
         .output()
     {
@@ -138,8 +147,20 @@ mod tests {
 
     #[test]
     fn gh_create_issue_handles_missing_binary() {
-        let result = gh_create_issue("test-only", "body", "label");
-        let _ = result;
+        // Use a non-existent binary path so we exercise the IO-error branch
+        // WITHOUT invoking the real `gh` (which would actually create issues
+        // in the tracker — see #1719/#1721/#1724/#1725/#1727/#1731/#1733/
+        // #1734/#1736/#1737 polluted by the prior test design).
+        let result = gh_create_issue_with_bin(
+            "/nonexistent/gh-binary-for-test",
+            "test-only",
+            "body",
+            "label",
+        );
+        assert!(
+            !result,
+            "missing binary must produce a graceful false return, not panic or pollute"
+        );
     }
 
     #[test]

@@ -55,32 +55,121 @@ pub fn dispatch_spawn_engineer(
     let state_root_inflight = engineer_worktree_state_root();
     if let Some(live) = find_live_engineer_for_goal(&state_root_inflight, goal_id) {
         let ctx = gather_engineer_lifecycle_ctx(state, &state_root_inflight, goal_id, &live);
-        let (decision, fallback_used) = match brain.decide_engineer_lifecycle(&ctx) {
-            Ok(d) => (d, false),
+        // NO FALLBACK: brain.decide_engineer_lifecycle Err must surface as a
+        // visible cycle failure (operator constraint, issue #1711, #1748).
+        // Silent ContinueSkipping on brain Err was the bug: it cleared the
+        // failure counter and made the system look healthy while the brain
+        // was completely broken. We now propagate the error loudly:
+        //   - log at ERROR severity with full context
+        //   - return success=false outcome (cycle.rs auto-bumps
+        //     state.goal_failure_counts[goal_id])
+        //   - if the failure count crosses the deterministic safeguard
+        //     threshold (3 consecutive cycles), file a tracking issue and
+        //     mark the goal Blocked. NOTE: this is a deterministic safeguard
+        //     enforced by simard, NOT a brain decision — the brain is broken
+        //     and cannot be trusted to make decisions about itself.
+        let decision = match brain.decide_engineer_lifecycle(&ctx) {
+            Ok(d) => d,
             Err(e) => {
-                tracing::warn!(
+                let prior_failures = state.goal_failure_counts.get(goal_id).copied().unwrap_or(0);
+                tracing::error!(
                     target: "simard::ooda_brain",
                     goal = %goal_id,
                     error = %e,
-                    "brain.decide_engineer_lifecycle failed; falling back to continue_skipping",
+                    prior_consecutive_failures = prior_failures,
+                    "brain.decide_engineer_lifecycle FAILED — surfacing as cycle failure (NO silent continue_skipping fallback per issue #1711)",
                 );
-                (
-                    EngineerLifecycleDecision::ContinueSkipping {
-                        rationale: format!("brain-error fallback: {e}"),
-                    },
-                    true,
-                )
+                eprintln!(
+                    "[simard] BRAIN FAILURE goal={} error={} prior_consecutive_failures={}",
+                    goal_id, e, prior_failures
+                );
+
+                // Deterministic safeguard: with this failure the count
+                // becomes prior_failures + 1. Trigger at >= 3.
+                if prior_failures >= 2 {
+                    let new_count = prior_failures + 1;
+                    let title = format!(
+                        "OODA brain failing on goal '{}' ({} consecutive cycles)",
+                        goal_id, new_count
+                    );
+                    let body = format!(
+                        "The OODA brain has failed to produce an engineer-lifecycle decision \
+                         for goal `{}` for {} consecutive cycles.\n\n\
+                         Latest error:\n```\n{}\n```\n\n\
+                         Simard has marked this goal Blocked pending human review. \
+                         Inspect the brain logs and the relevant prompt asset \
+                         (`prompt_assets/simard/ooda_brain.md`) before reactivating.\n\n\
+                         Triggered by deterministic safeguard in \
+                         `src/ooda_actions/advance_goal/spawn.rs` (issue #1711).",
+                        goal_id, new_count, e
+                    );
+                    // Mark goal Blocked deterministically.
+                    if let Some(g) = state
+                        .active_goals
+                        .active
+                        .iter_mut()
+                        .find(|g| g.id == goal_id)
+                    {
+                        g.status = crate::goal_curation::GoalProgress::Blocked(format!(
+                            "OODA brain failing for {} consecutive cycles; needs human review",
+                            new_count
+                        ));
+                    }
+                    // File tracking issue. Failure to file is logged but
+                    // does NOT swallow the original brain failure.
+                    match std::process::Command::new("gh")
+                        .args([
+                            "issue",
+                            "create",
+                            "--title",
+                            &title,
+                            "--body",
+                            &body,
+                            "--label",
+                            "ooda-stuck",
+                        ])
+                        .output()
+                    {
+                        Ok(out) if out.status.success() => {
+                            eprintln!(
+                                "[simard] DETERMINISTIC SAFEGUARD: goal '{}' marked Blocked + tracking issue filed",
+                                goal_id
+                            );
+                        }
+                        Ok(out) => {
+                            tracing::error!(
+                                target: "simard::ooda_brain",
+                                goal = %goal_id,
+                                stderr = %String::from_utf8_lossy(&out.stderr),
+                                "deterministic safeguard: gh issue create FAILED (goal still marked Blocked)",
+                            );
+                        }
+                        Err(io_err) => {
+                            tracing::error!(
+                                target: "simard::ooda_brain",
+                                goal = %goal_id,
+                                error = %io_err,
+                                "deterministic safeguard: gh process spawn FAILED (goal still marked Blocked)",
+                            );
+                        }
+                    }
+                }
+
+                return make_outcome(
+                    action,
+                    false,
+                    format!(
+                        "brain failure: {} (prior consecutive failures: {})",
+                        e, prior_failures
+                    ),
+                );
             }
         };
         push_brain_judgment(BrainJudgmentRecord::from_engineer_lifecycle(
             goal_id,
             &decision,
-            fallback_used,
-            if fallback_used {
-                String::new()
-            } else {
-                crate::ooda_brain::prompt_store::current_version(crate::ooda_brain::ACT_PROMPT_NAME)
-            },
+            false,
+            crate::ooda_brain::prompt_store::current_version(crate::ooda_brain::ACT_PROMPT_NAME),
         ));
         return apply_lifecycle_decision(action, state, goal_id, &live, decision);
     }

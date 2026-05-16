@@ -125,8 +125,8 @@ You may invoke `merge_pr_if_merge_ready()` (or recommend the operator run
    - `### Documentation`
    - `### Quality-audit`
    - `### CI`
-   - `### PR description evidence`
    - `### Scope`
+   - `### Verdict`
 4. `gh pr view <PR> --json mergeable` reports `MERGEABLE` (not `CONFLICTING`,
    not `UNKNOWN`).
 

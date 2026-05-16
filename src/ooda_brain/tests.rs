@@ -615,3 +615,518 @@ fn embedded_prompt_has_required_sections() {
         );
     }
 }
+
+// ===========================================================================
+// Issue #1711 — Prose-first DECISION-marker protocol (T1–T15)
+//
+// These tests pin the parser contract introduced in issue #1711:
+//
+//   - Brain emits a leading line of the form `DECISION: <variant>` and the
+//     parser extracts the variant from that marker. Subsequent text is
+//     treated as either an optional JSON object (carrying variant-specific
+//     fields like `title` / `body` / `reason` / `redispatch_context`) or as
+//     the rationale.
+//   - When the response is **pure JSON** (the legacy format, no marker),
+//     the parser falls back to its existing object-extraction path so
+//     deployed prompts keep working.
+//   - When parsing fails entirely, the returned error MUST embed the **full
+//     raw response text** (truncated only for log-flood safety), NOT just a
+//     `got N bytes` byte-count — that's the production bug this issue fixes.
+//
+// All variant tags MUST round-trip via the prose marker. Marker matching is
+// security-critical: only the first non-blank line is inspected, to prevent
+// mid-response DECISION-token injection from a hostile model output.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// T1 — Pure-prose DECISION marker (`continue_skipping`) parses
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t1_prose_decision_marker_continue_skipping_parses() {
+    // The minimal happy-path: marker line alone, no following body. Per the
+    // design, variants with no required fields (continue_skipping,
+    // deprioritize, consider_self_update) accept a marker-only response.
+    let stub = StubSubmitter::new("DECISION: continue_skipping\n");
+    let brain = RustyClawdBrain::new(stub);
+    let decision = brain
+        .decide_engineer_lifecycle(&sample_ctx())
+        .expect("marker-only prose response must parse");
+    assert!(
+        matches!(decision, EngineerLifecycleDecision::ContinueSkipping { .. }),
+        "expected ContinueSkipping, got {decision:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T2 — Marker is case-insensitive on the word "DECISION"
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t2_prose_decision_marker_case_insensitive() {
+    // Lowercase "decision:" must match — LLMs vary on capitalisation. The
+    // variant tag itself is exact-match snake_case (the closed enum set).
+    for marker_word in ["DECISION", "decision", "Decision", "DeCiSiOn"] {
+        let response = format!("{marker_word}: continue_skipping\nrationale: hb ok\n");
+        let stub = StubSubmitter::new(response.clone());
+        let brain = RustyClawdBrain::new(stub);
+        let decision = brain
+            .decide_engineer_lifecycle(&sample_ctx())
+            .unwrap_or_else(|e| panic!("case variant `{marker_word}:` must parse, got error: {e}"));
+        assert!(
+            matches!(decision, EngineerLifecycleDecision::ContinueSkipping { .. }),
+            "case variant `{marker_word}:` produced wrong variant: {decision:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T3 — Prose marker followed by free-form rationale parses
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t3_prose_decision_with_following_rationale_parses() {
+    // `DECISION: continue_skipping` on line 1, then prose rationale. The
+    // remaining text becomes the `rationale` field. The parser MUST NOT
+    // require valid JSON for variants that only carry a `rationale`.
+    let response =
+        "DECISION: continue_skipping\nEngineer heartbeat is fresh, log tail looks normal.";
+    let stub = StubSubmitter::new(response);
+    let brain = RustyClawdBrain::new(stub);
+    let decision = brain
+        .decide_engineer_lifecycle(&sample_ctx())
+        .expect("prose marker + rationale must parse");
+    match decision {
+        EngineerLifecycleDecision::ContinueSkipping { rationale } => {
+            assert!(
+                !rationale.is_empty(),
+                "rationale must be populated from the prose body, was empty"
+            );
+            assert!(
+                rationale.to_lowercase().contains("heartbeat")
+                    || rationale.to_lowercase().contains("fresh")
+                    || rationale.to_lowercase().contains("log"),
+                "rationale must derive from the prose body, got: {rationale:?}"
+            );
+        }
+        other => panic!("expected ContinueSkipping, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T4 — Marker + JSON body for `open_tracking_issue` (variant with required
+//      structured fields) parses
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t4_prose_marker_plus_json_fields_for_open_tracking_issue_parses() {
+    // Variants that require fields beyond `rationale` MUST follow the
+    // marker line with a JSON object carrying those fields. The parser
+    // merges the marker variant tag with the JSON field values.
+    let response = "DECISION: open_tracking_issue\n\
+        {\"rationale\":\"engineer panicked\",\"title\":\"engineer panic in commit phase\",\"body\":\"see /tmp/engineer-x.log\"}\n";
+    let stub = StubSubmitter::new(response);
+    let brain = RustyClawdBrain::new(stub);
+    let decision = brain
+        .decide_engineer_lifecycle(&sample_ctx())
+        .expect("marker + JSON body for open_tracking_issue must parse");
+    match decision {
+        EngineerLifecycleDecision::OpenTrackingIssue {
+            title,
+            body,
+            rationale,
+        } => {
+            assert_eq!(title, "engineer panic in commit phase");
+            assert_eq!(body, "see /tmp/engineer-x.log");
+            assert_eq!(rationale, "engineer panicked");
+        }
+        other => panic!("expected OpenTrackingIssue, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T5 — Backward compat: JSON wrapped in markdown code fences still parses
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t5_json_in_code_fences_still_parses() {
+    // LLMs often wrap structured output in ```json ... ``` fences. The
+    // parser's existing `find('{') .. rfind('}')` extraction MUST keep
+    // working for legacy / no-marker responses.
+    let response = "```json\n\
+        {\"choice\":\"continue_skipping\",\"rationale\":\"healthy heartbeat\"}\n\
+        ```";
+    let stub = StubSubmitter::new(response);
+    let brain = RustyClawdBrain::new(stub);
+    let decision = brain
+        .decide_engineer_lifecycle(&sample_ctx())
+        .expect("JSON in code fences must keep parsing (backward compat)");
+    match decision {
+        EngineerLifecycleDecision::ContinueSkipping { rationale } => {
+            assert_eq!(rationale, "healthy heartbeat");
+        }
+        other => panic!("expected ContinueSkipping, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T6 — Backward compat: JSON surrounded by leading + trailing prose parses
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t6_json_with_leading_and_trailing_prose_still_parses() {
+    // Legacy prose-wrapped JSON path: no DECISION marker on line 1, but a
+    // valid JSON object embedded somewhere in the body. The parser MUST
+    // fall back to object-extraction and succeed.
+    let response = "I have considered the context carefully.\n\
+        Based on the heartbeat I conclude:\n\
+        {\"choice\":\"reclaim_and_redispatch\",\"rationale\":\"7h idle\",\"redispatch_context\":\"focus on persistence\"}\n\
+        Hope this helps. Let me know if you need clarification.";
+    let stub = StubSubmitter::new(response);
+    let brain = RustyClawdBrain::new(stub);
+    let decision = brain
+        .decide_engineer_lifecycle(&sample_ctx())
+        .expect("JSON surrounded by prose must keep parsing (backward compat)");
+    match decision {
+        EngineerLifecycleDecision::ReclaimAndRedispatch {
+            redispatch_context,
+            rationale,
+        } => {
+            assert_eq!(rationale, "7h idle");
+            assert!(redispatch_context.contains("persistence"));
+        }
+        other => panic!("expected ReclaimAndRedispatch, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T7 — Empty response → error containing raw text (or empty-response note)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t7_empty_response_returns_error_with_raw_text() {
+    let stub = StubSubmitter::new("");
+    let brain = RustyClawdBrain::new(stub);
+    let err = brain
+        .decide_engineer_lifecycle(&sample_ctx())
+        .expect_err("empty response MUST return Err so caller can fall back");
+    let msg = format!("{err}");
+    assert!(
+        msg.to_lowercase().contains("empty") || msg.contains("\"\""),
+        "empty-response error must indicate emptiness, got: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T8 — Ambiguous response → error embedding the **full raw text**
+//      (regression for the production 3-byte 'OK' bug class)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t8_ambiguous_response_returns_error_containing_raw_text() {
+    // Three bytes: "OK". No DECISION marker, no JSON object. The legacy
+    // parser logged only `got 3 bytes`. The new parser MUST embed "OK" in
+    // the error message so operators can diagnose the model behaviour
+    // without having to grep the raw transcript.
+    let stub = StubSubmitter::new("OK");
+    let brain = RustyClawdBrain::new(stub);
+    let err = brain
+        .decide_engineer_lifecycle(&sample_ctx())
+        .expect_err("ambiguous response MUST return Err");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("OK"),
+        "error message MUST embed the raw response text 'OK' (anti-regression \
+         for the lossy `got N bytes` log format), got: {msg}"
+    );
+    assert!(
+        !msg.contains("got 2 bytes") && !msg.contains("got 3 bytes"),
+        "error must NOT use the legacy `got N bytes` byte-count format that \
+         the issue-#1711 production bug originated from, got: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T9 — Regression for the EXACT production failure mode (3-byte response,
+//      no JSON, parser falls back to ContinueSkipping silently)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t9_three_byte_ok_no_longer_silently_succeeds_as_continue_skipping() {
+    // The original bug: brain returns "OK" (3 bytes), strict-JSON parser
+    // rejects, dispatcher falls back to ContinueSkipping → goal blocked
+    // forever. The parser layer MUST surface this as Err. Whether the
+    // dispatcher then chooses to fall back is a separate concern (and is
+    // documented as out-of-scope for #1711).
+    let stub = StubSubmitter::new("OK");
+    let brain = RustyClawdBrain::new(stub);
+    let result = brain.decide_engineer_lifecycle(&sample_ctx());
+    assert!(
+        result.is_err(),
+        "3-byte ambiguous response MUST surface as Err at the brain layer, \
+         not be silently coerced into ContinueSkipping. Got: {result:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T10 — Marker with unknown variant → error embeds raw text
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t10_bogus_variant_returns_error_with_raw_text() {
+    // Marker present but variant is not in the EngineerLifecycleDecision
+    // closed-set whitelist. Parser MUST reject and embed both the raw
+    // response and a hint about what was wrong.
+    let response = "DECISION: do_something_weird\nrationale: trying to be creative";
+    let stub = StubSubmitter::new(response);
+    let brain = RustyClawdBrain::new(stub);
+    let err = brain
+        .decide_engineer_lifecycle(&sample_ctx())
+        .expect_err("unknown variant tag MUST return Err");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("do_something_weird"),
+        "error must embed the offending variant token from the raw response, got: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T11 — All 6 EngineerLifecycleDecision variants round-trip via the prose
+//       DECISION marker (closed-set whitelist, no drift between code & docs)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t11_all_six_variants_round_trip_via_prose_marker() {
+    // Each variant is constructed via marker + (optional) JSON body. The
+    // parser MUST accept all six and produce the corresponding enum
+    // variant. Whitelist test: if any variant is added to the enum but
+    // missed in the parser, this test fails.
+    type VariantCheck = fn(&EngineerLifecycleDecision) -> bool;
+    let cases: &[(&str, &str, VariantCheck)] = &[
+        (
+            "continue_skipping",
+            "DECISION: continue_skipping\nrationale: hb ok",
+            |d| matches!(d, EngineerLifecycleDecision::ContinueSkipping { .. }),
+        ),
+        (
+            "reclaim_and_redispatch",
+            "DECISION: reclaim_and_redispatch\n\
+             {\"rationale\":\"7h idle\",\"redispatch_context\":\"persistence layer\"}",
+            |d| matches!(d, EngineerLifecycleDecision::ReclaimAndRedispatch { .. }),
+        ),
+        (
+            "deprioritize",
+            "DECISION: deprioritize\nrationale: chronic failures",
+            |d| matches!(d, EngineerLifecycleDecision::Deprioritize { .. }),
+        ),
+        (
+            "open_tracking_issue",
+            "DECISION: open_tracking_issue\n\
+             {\"rationale\":\"stack trace\",\"title\":\"engineer panic\",\"body\":\"see logs\"}",
+            |d| matches!(d, EngineerLifecycleDecision::OpenTrackingIssue { .. }),
+        ),
+        (
+            "mark_goal_blocked",
+            "DECISION: mark_goal_blocked\n\
+             {\"rationale\":\"needs human\",\"reason\":\"missing API key\"}",
+            |d| matches!(d, EngineerLifecycleDecision::MarkGoalBlocked { .. }),
+        ),
+        (
+            "consider_self_update",
+            "DECISION: consider_self_update\n\
+             rationale: binary 12 commits behind, no engineers in flight",
+            |d| matches!(d, EngineerLifecycleDecision::ConsiderSelfUpdate { .. }),
+        ),
+    ];
+    for (tag, response, predicate) in cases {
+        let stub = StubSubmitter::new(*response);
+        let brain = RustyClawdBrain::new(stub);
+        let decision = brain
+            .decide_engineer_lifecycle(&sample_ctx())
+            .unwrap_or_else(|e| panic!("variant `{tag}` failed to parse: {e}"));
+        assert!(
+            predicate(&decision),
+            "variant `{tag}` produced wrong enum: {decision:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T12 — Marker WINS over a conflicting `choice` field in the JSON body
+//       (security: prevents variant smuggling via JSON when the model has
+//       declared a different choice in the marker)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t12_marker_wins_over_conflicting_json_choice_field() {
+    // Marker says continue_skipping, JSON body says deprioritize. The
+    // marker is the authoritative source of truth: it appears first and
+    // came from the explicit instruction. Parser MUST NOT silently switch
+    // to deprioritize based on the JSON field.
+    let response = "DECISION: continue_skipping\n\
+        {\"choice\":\"deprioritize\",\"rationale\":\"sneaky\"}";
+    let stub = StubSubmitter::new(response);
+    let brain = RustyClawdBrain::new(stub);
+    let decision = brain
+        .decide_engineer_lifecycle(&sample_ctx())
+        .expect("marker + JSON body must parse with marker-wins precedence");
+    assert!(
+        matches!(decision, EngineerLifecycleDecision::ContinueSkipping { .. }),
+        "marker MUST take precedence over JSON `choice` field; got {decision:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T13 — Mid-response DECISION marker is IGNORED (security: only the first
+//       non-blank line is inspected, preventing prompt-injection attacks
+//       via embedded marker tokens)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t13_mid_response_decision_marker_is_ignored() {
+    // The marker appears on line 4, not line 1. Parser MUST NOT treat it
+    // as authoritative — there's no JSON object either, so the response
+    // should be rejected with raw text in the error.
+    let response = "I'm not sure what to do.\n\
+        Let me think about this.\n\
+        \n\
+        DECISION: continue_skipping\n\
+        but actually maybe we should reclaim, I don't know";
+    let stub = StubSubmitter::new(response);
+    let brain = RustyClawdBrain::new(stub);
+    let err = brain.decide_engineer_lifecycle(&sample_ctx()).expect_err(
+        "mid-response DECISION marker MUST be ignored — only the first \
+             non-blank line is authoritative (security: prevents marker injection)",
+    );
+    let msg = format!("{err}");
+    assert!(
+        // Embed at least part of the raw response so operators can diagnose.
+        msg.contains("not sure") || msg.contains("DECISION") || msg.contains("reclaim"),
+        "error must embed the raw response text, got: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T14 — Very large response is truncated in the error message (log-flood
+//       protection: a runaway model output must not flood ~/.simard/logs)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t14_large_input_truncated_in_error_message() {
+    // 100 KiB of garbage with no marker or JSON. The parser MUST return
+    // Err and the error message MUST be bounded in size (truncated to
+    // some reasonable cap, e.g. 8 KiB) — otherwise a malicious or
+    // malfunctioning model could fill the disk via the log path.
+    let huge = "x".repeat(100 * 1024);
+    let stub = StubSubmitter::new(huge.clone());
+    let brain = RustyClawdBrain::new(stub);
+    let err = brain
+        .decide_engineer_lifecycle(&sample_ctx())
+        .expect_err("100 KiB of garbage MUST return Err");
+    let msg = format!("{err}");
+    // Bound: error message smaller than the raw input. Generous upper
+    // bound (32 KiB) — implementations may pick e.g. 8 KiB; this test
+    // just enforces the *property* that some truncation happens for
+    // pathologically large inputs.
+    assert!(
+        msg.len() < huge.len(),
+        "error message ({} bytes) must be smaller than the {} byte raw input \
+         — implementations MUST truncate to prevent log-flood DoS",
+        msg.len(),
+        huge.len()
+    );
+    assert!(
+        msg.len() < 64 * 1024,
+        "error message ({} bytes) must be bounded for log-safety; \
+         pathological model output MUST NOT fill ~/.simard/logs",
+        msg.len()
+    );
+    // Some indication that truncation happened (substring varies; we
+    // just check the message references the truncation OR notes the
+    // total raw size in some form).
+    assert!(
+        msg.contains("truncat")
+            || msg.contains("…")
+            || msg.contains("...")
+            || msg.contains("bytes"),
+        "truncated error should signal that truncation occurred, got first 200 bytes: {}",
+        &msg.chars().take(200).collect::<String>()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T15 — Multibyte UTF-8 response does not panic (safety: char_indices/get
+//       slicing only — no raw byte-index slicing that could panic on a
+//       UTF-8 boundary)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t15_multibyte_utf8_response_does_not_panic() {
+    // Mix of CJK + emoji + accented chars + a marker. The parser must
+    // handle this without panicking on a byte-boundary slice. The marker
+    // is on line 1, so this should also parse successfully.
+    let response = "DECISION: continue_skipping\n\
+        理由: エンジニアの心拍音は健康です 💚 — café résumé naïve";
+    let stub = StubSubmitter::new(response);
+    let brain = RustyClawdBrain::new(stub);
+    let decision = brain
+        .decide_engineer_lifecycle(&sample_ctx())
+        .expect("multibyte UTF-8 in body MUST NOT panic and MUST parse");
+    assert!(matches!(
+        decision,
+        EngineerLifecycleDecision::ContinueSkipping { .. }
+    ));
+
+    // Also test multibyte chars in an error path — pathological mixed
+    // garbage with no marker / no JSON. Must not panic on truncation.
+    let garbage = "あいうえお".repeat(2000); // ~30 KiB of multibyte
+    let stub2 = StubSubmitter::new(garbage);
+    let brain2 = RustyClawdBrain::new(stub2);
+    let err = brain2
+        .decide_engineer_lifecycle(&sample_ctx())
+        .expect_err("garbage multibyte response MUST return Err");
+    // The fact that we got here without panicking is the test. Format
+    // the error to make sure Display also doesn't panic.
+    let _ = format!("{err}");
+}
+
+// ---------------------------------------------------------------------------
+// Prompt asset: DECISION marker protocol must be documented + all 6 variants
+// ---------------------------------------------------------------------------
+
+#[test]
+fn embedded_prompt_documents_decision_marker_protocol() {
+    // The prompt MUST instruct the model to emit the DECISION marker so
+    // production cycles use the new protocol. We don't pin the exact
+    // wording (prompts iterate frequently), only the presence of the
+    // marker token + some indication of where it goes.
+    let prompt = include_str!("../../prompt_assets/simard/ooda_brain.md");
+    assert!(
+        prompt.contains("DECISION:") || prompt.contains("DECISION marker"),
+        "prompt asset MUST document the DECISION marker protocol (issue #1711) \
+         so the model emits the new prose-first format"
+    );
+}
+
+#[test]
+fn embedded_prompt_lists_all_six_decision_variants() {
+    // Tightening of the existing 5-variant test: all 6 actual variants of
+    // EngineerLifecycleDecision MUST appear in the prompt asset so the
+    // model knows the closed set. This is the authoritative drift-detector
+    // between the enum and the prompt.
+    let prompt = include_str!("../../prompt_assets/simard/ooda_brain.md");
+    for tag in [
+        "continue_skipping",
+        "reclaim_and_redispatch",
+        "deprioritize",
+        "open_tracking_issue",
+        "mark_goal_blocked",
+        "consider_self_update",
+    ] {
+        assert!(
+            prompt.contains(tag),
+            "prompt asset must enumerate variant '{tag}' \
+             (drift detector: enum has 6 variants, prompt must list all 6)"
+        );
+    }
+}

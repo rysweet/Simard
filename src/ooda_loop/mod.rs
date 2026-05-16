@@ -10,6 +10,7 @@ mod curate;
 mod decide;
 mod observe;
 mod orient;
+mod priority_kind;
 mod review;
 mod summary;
 mod types;
@@ -29,6 +30,7 @@ pub use curate::{check_meeting_handoffs, promote_from_backlog};
 pub use decide::{decide, decide_with_brain};
 pub use observe::{gather_environment, observe};
 pub use orient::{orient, orient_with_brain};
+pub use priority_kind::{SyntheticPriorityKind, is_synthetic_id};
 pub use review::review_outcomes;
 pub use summary::summarize_cycle_report;
 pub use types::{

@@ -11,6 +11,8 @@
 
 use std::path::PathBuf;
 
+use serial_test::serial;
+
 use super::agent_spawn::{
     AGENT_SESSION_TIMEOUT_SECS, DEFAULT_MAX_TURNS, build_agent_prompt, rustyclawd_argv,
 };
@@ -229,6 +231,7 @@ fn compute_diff_for_review_agent_session_uses_git_diff() {
 /// It requires no LLM: the loop is expected to fail at the agent-spawn phase
 /// (no session configured), but the prompt-build trace must already exist.
 #[test]
+#[serial(simard_engineer_agent_env, simard_process_reaper)]
 fn run_local_engineer_loop_emits_agent_prompt_build_phase() {
     use crate::engineer_loop::run_local_engineer_loop;
     use crate::runtime::RuntimeTopology;
