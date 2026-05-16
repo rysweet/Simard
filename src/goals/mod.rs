@@ -7,7 +7,7 @@ mod types;
 pub use cognitive_memory_store::CognitiveMemoryGoalStore;
 pub use seed::seed_default_goals;
 pub use store::{FileBackedGoalStore, GoalStore, InMemoryGoalStore};
-pub use types::{GoalRecord, GoalStatus, GoalUpdate, goal_slug};
+pub use types::{GOAL_SLUG_MAX_LEN, GoalRecord, GoalStatus, GoalUpdate, goal_slug};
 
 #[cfg(test)]
 mod tests {
