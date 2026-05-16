@@ -39,6 +39,7 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+pub mod liveness;
 pub mod parse;
 pub mod policy;
 pub mod runner;
@@ -46,6 +47,7 @@ pub mod runner;
 #[cfg(test)]
 mod tests;
 
+pub use liveness::{LiveProcessProbe, ProcfsLiveProcessProbe};
 pub use parse::{WorktreeEntry, parse_worktree_list};
 pub use policy::{GcCandidate, PruneReason, evaluate_candidate};
 pub use runner::{GcReport, GhClient, GhClientShell, run_gc};
