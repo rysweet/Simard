@@ -12,6 +12,7 @@ use std::time::SystemTime;
 
 use tempfile::tempdir;
 
+use super::liveness::FakeLiveProcessProbe;
 use super::policy::{CandidateInputs, PruneReason, evaluate_candidate};
 use super::runner::{GhClient, render_reason, run_gc};
 use super::{GcConfig, parse_worktree_list, under_any_root};
@@ -119,7 +120,8 @@ fn dry_run_lists_merged_branch_but_does_not_remove() {
         idle_days: 7,
         now: SystemTime::now(),
     };
-    let report = run_gc(&cfg, &gh).expect("gc");
+    let probe = FakeLiveProcessProbe::default();
+    let report = run_gc(&cfg, &gh, &probe).expect("gc");
 
     assert_eq!(report.candidates.len(), 1, "{report:?}");
     assert!(matches!(
@@ -153,7 +155,8 @@ fn apply_prunes_merged_worktree_and_removes_dir() {
         idle_days: 7,
         now: SystemTime::now(),
     };
-    let report = run_gc(&cfg, &gh).expect("gc apply");
+    let probe = FakeLiveProcessProbe::default();
+    let report = run_gc(&cfg, &gh, &probe).expect("gc apply");
 
     assert_eq!(report.pruned.len(), 1);
     assert!(report.failures.is_empty(), "{report:?}");
@@ -186,7 +189,8 @@ fn worktree_outside_configured_roots_is_skipped() {
         idle_days: 7,
         now: SystemTime::now(),
     };
-    let report = run_gc(&cfg, &gh).expect("gc apply");
+    let probe = FakeLiveProcessProbe::default();
+    let report = run_gc(&cfg, &gh, &probe).expect("gc apply");
 
     assert_eq!(report.worktrees_examined, 0);
     assert!(report.pruned.is_empty());
@@ -212,7 +216,8 @@ fn fresh_unmerged_worktree_is_not_pruned() {
         idle_days: 7,
         now: SystemTime::now(),
     };
-    let report = run_gc(&cfg, &gh).expect("gc apply");
+    let probe = FakeLiveProcessProbe::default();
+    let report = run_gc(&cfg, &gh, &probe).expect("gc apply");
 
     assert_eq!(report.worktrees_examined, 1);
     assert_eq!(report.candidates.len(), 0, "{report:?}");
@@ -243,7 +248,8 @@ fn deleted_origin_branch_is_pruned() {
         idle_days: 7,
         now: SystemTime::now(),
     };
-    let report = run_gc(&cfg, &gh).expect("gc dry");
+    let probe = FakeLiveProcessProbe::default();
+    let report = run_gc(&cfg, &gh, &probe).expect("gc dry");
 
     assert_eq!(report.candidates.len(), 1);
     assert!(matches!(
@@ -272,9 +278,111 @@ branch refs/heads/feat/x
         merged_prs: vec![1],
         branch_on_origin: Some(true),
         last_activity: Some(SystemTime::now()),
+        has_live_process: false,
     };
     assert!(evaluate_candidate(&entries[0], &inputs, SystemTime::now(), 7).is_none());
     assert!(evaluate_candidate(&entries[1], &inputs, SystemTime::now(), 7).is_some());
+}
+
+#[test]
+fn live_process_blocks_merged_branch_prune() {
+    let parent_tmp = tempdir().unwrap();
+    let parent = parent_tmp.path();
+    init_repo(parent);
+
+    let roots_tmp = tempdir().unwrap();
+    let wt_dir = roots_tmp.path().join("eng-live");
+    add_worktree(parent, "engineer/eng-live", &wt_dir);
+
+    let gh = FakeGh::default();
+    // Branch is merged — without liveness, this would be pruned.
+    gh.merged
+        .lock()
+        .unwrap()
+        .insert("engineer/eng-live".to_string(), vec![999]);
+
+    // Mark the worktree as having a live process inside it.
+    let probe = FakeLiveProcessProbe::default();
+    probe.mark_live(&wt_dir);
+
+    let cfg = GcConfig {
+        roots: vec![roots_tmp.path().to_path_buf()],
+        parent_repo: parent.to_path_buf(),
+        apply: true,
+        idle_days: 7,
+        now: SystemTime::now(),
+    };
+    let report = run_gc(&cfg, &gh, &probe).expect("gc apply");
+
+    assert_eq!(
+        report.candidates.len(),
+        0,
+        "live worktree must not be a candidate even when branch is merged: {report:?}",
+    );
+    assert!(report.pruned.is_empty());
+    assert!(wt_dir.exists(), "live worktree must remain on disk");
+}
+
+#[test]
+fn live_process_blocks_branch_deleted_prune() {
+    let parent_tmp = tempdir().unwrap();
+    let parent = parent_tmp.path();
+    init_repo(parent);
+
+    let roots_tmp = tempdir().unwrap();
+    let wt_dir = roots_tmp.path().join("eng-live-deleted");
+    add_worktree(parent, "engineer/eng-live-deleted", &wt_dir);
+
+    let gh = FakeGh::default();
+    gh.on_origin
+        .lock()
+        .unwrap()
+        .insert("engineer/eng-live-deleted".to_string(), Some(false));
+
+    let probe = FakeLiveProcessProbe::default();
+    probe.mark_live(&wt_dir);
+
+    let cfg = GcConfig {
+        roots: vec![roots_tmp.path().to_path_buf()],
+        parent_repo: parent.to_path_buf(),
+        apply: true,
+        idle_days: 7,
+        now: SystemTime::now(),
+    };
+    let report = run_gc(&cfg, &gh, &probe).expect("gc apply");
+
+    assert_eq!(report.candidates.len(), 0, "{report:?}");
+    assert!(wt_dir.exists());
+}
+
+#[test]
+fn evaluate_candidate_drops_when_live_even_with_all_signals() {
+    let raw = "\
+worktree /tmp/wt
+HEAD abc
+branch refs/heads/feat/x
+";
+    let entries = parse_worktree_list(raw);
+    let now = SystemTime::now();
+    let inputs_with_every_signal = CandidateInputs {
+        merged_prs: vec![1, 2, 3],
+        branch_on_origin: Some(false),
+        last_activity: Some(now - std::time::Duration::from_secs(365 * 24 * 3600)),
+        has_live_process: true,
+    };
+    assert!(
+        evaluate_candidate(&entries[0], &inputs_with_every_signal, now, 7).is_none(),
+        "has_live_process must override every other prune signal",
+    );
+
+    let same_inputs_no_liveness = CandidateInputs {
+        has_live_process: false,
+        ..inputs_with_every_signal
+    };
+    let cand = evaluate_candidate(&entries[0], &same_inputs_no_liveness, now, 7)
+        .expect("without liveness the same inputs should produce a candidate");
+    // All three signals fired:
+    assert_eq!(cand.reasons.len(), 3);
 }
 
 #[test]
