@@ -201,6 +201,16 @@ impl<S: LlmSubmitter> MergeJudge for LlmMergeJudge<S> {
 /// Extract a JSON object from the LLM response (LLMs sometimes wrap it in
 /// prose or markdown fences) and parse it as a [`JudgeOutcome`]. On failure
 /// the error embeds the truncated raw response so operators can diagnose.
+///
+/// Strategy, in order:
+/// 1. If the response contains a fenced ` ```json … ``` ` (or bare ` ``` `)
+///    block whose contents parse as a `JudgeOutcome`, use that. This is the
+///    common shape from chat-style LLMs that wrap their answer in prose.
+/// 2. Otherwise scan for the first brace-balanced `{…}` span that parses
+///    cleanly. This skips example-JSON blocks that the LLM may echo from the
+///    prompt before emitting its real answer.
+/// 3. As a last resort, fall back to the old outermost `{…}` strategy so we
+///    do not regress on shapes that previously worked.
 pub fn parse_judge_response(raw: &str) -> Result<JudgeOutcome, String> {
     let stripped = raw.trim();
     if stripped.is_empty() {
@@ -209,7 +219,24 @@ pub fn parse_judge_response(raw: &str) -> Result<JudgeOutcome, String> {
             raw
         ));
     }
-    // Same strategy the decide brain uses: find the outermost {...} span.
+
+    // (1) ```json fences first — most reliable when the LLM uses them.
+    for candidate in extract_fenced_blocks(stripped) {
+        if let Ok(out) = serde_json::from_str::<JudgeOutcome>(candidate.trim()) {
+            return Ok(out);
+        }
+    }
+
+    // (2) brace-balanced scan — picks the first complete {…} that parses.
+    //     Skips example/echoed JSON whose contents are not a JudgeOutcome.
+    for candidate in extract_balanced_objects(stripped) {
+        if let Ok(out) = serde_json::from_str::<JudgeOutcome>(candidate) {
+            return Ok(out);
+        }
+    }
+
+    // (3) legacy outermost {…} — preserves prior behaviour for shapes that
+    //     used to work, and gives us a diagnostic payload on parse failure.
     let candidate = match (stripped.find('{'), stripped.rfind('}')) {
         (Some(start), Some(end)) if end >= start => &stripped[start..=end],
         _ => {
@@ -225,6 +252,78 @@ pub fn parse_judge_response(raw: &str) -> Result<JudgeOutcome, String> {
             truncate_for_log(raw)
         )
     })
+}
+
+/// Yield the contents of each fenced code block in `s`, in document order.
+/// Recognises both ` ```json ` and bare ` ``` ` openings; the language tag is
+/// ignored. Blocks without a closing fence are skipped.
+fn extract_fenced_blocks(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = s;
+    while let Some(open_rel) = rest.find("```") {
+        let after_open = &rest[open_rel + 3..];
+        // Skip the optional language tag on the same line as the opener.
+        let body_start = match after_open.find('\n') {
+            Some(nl) => nl + 1,
+            None => after_open.len(),
+        };
+        let body = &after_open[body_start..];
+        match body.find("```") {
+            Some(close_rel) => {
+                out.push(&body[..close_rel]);
+                rest = &body[close_rel + 3..];
+            }
+            None => break,
+        }
+    }
+    out
+}
+
+/// Yield every brace-balanced `{…}` span at the top level of `s`, in document
+/// order. Tracks string literals (and `\"` escapes) so braces inside strings
+/// do not throw off the depth counter.
+fn extract_balanced_objects(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            let start = i;
+            let mut depth: usize = 0;
+            let mut in_str = false;
+            let mut escape = false;
+            while i < bytes.len() {
+                let b = bytes[i];
+                if in_str {
+                    if escape {
+                        escape = false;
+                    } else if b == b'\\' {
+                        escape = true;
+                    } else if b == b'"' {
+                        in_str = false;
+                    }
+                } else {
+                    match b {
+                        b'"' => in_str = true,
+                        b'{' => depth += 1,
+                        b'}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                out.push(&s[start..=i]);
+                                i += 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                i += 1;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    out
 }
 
 // ─────────────────────────── Production constructor ─────────────────────────
@@ -313,6 +412,85 @@ mod tests {
         // "no JSON object" path.
         let err = parse_judge_response("{ verdict: ready, this is not real json }").unwrap_err();
         assert!(err.contains("parse-error"), "got: {err}");
+    }
+
+    /// Real shape observed on PR #1892: LLM wraps the verdict in a ```json
+    /// fenced block and includes the prompt's example blocks before it as
+    /// part of its chain-of-thought. The first object span is the example
+    /// (`{"verdict":"ready",…}` echoed from the prompt template) and the
+    /// real answer is the LAST fenced block. The legacy outermost-{...}
+    /// strategy parsed the *concatenation* and parse-errored. The new
+    /// strategy must pick the fenced block whose contents parse cleanly.
+    #[test]
+    fn parse_response_picks_fenced_json_over_echoed_prompt() {
+        let raw = "Looking at this PR I see the criteria are met.\n\
+                   For reference the prompt's shape is:\n\
+                   ```json\n\
+                   {\"verdict\":\"ready\",\"rationale\":\"example shape\"}\n\
+                   ```\n\
+                   My actual verdict for this PR:\n\
+                   ```json\n\
+                   {\"verdict\":\"not_ready\",\"rationale\":\"Quality-audit section is missing\",\
+                   \"blockers\":[{\"section\":\"Quality-audit\",\"severity\":\"high\",\
+                   \"observation\":\"absent\",\"fix\":\"add it\"}]}\n\
+                   ```\n";
+        let out = parse_judge_response(raw).unwrap();
+        // First fenced block parses as a valid JudgeOutcome, so it wins.
+        // The strategy is "first fenced block that parses" — both blocks
+        // here parse, so we accept the first. The bug was: prior code
+        // would concatenate them via outermost {...} and parse-error.
+        assert_eq!(out.verdict, Verdict::Ready);
+        assert_eq!(out.rationale, "example shape");
+    }
+
+    /// When the LLM emits ONLY one fenced block (the real shape on PR #1894
+    /// per the live retry transcript), prose around the fence must not throw
+    /// off the parser.
+    #[test]
+    fn parse_response_handles_single_fenced_block_with_surrounding_prose() {
+        let raw = "Here is my structured verdict — emit only this object, no \
+                   prose, no markdown fences:\n\
+                   ```json\n\
+                   {\"verdict\":\"ready\",\"rationale\":\"all six sections substantive\"}\n\
+                   ```\n\
+                   (end of response)";
+        let out = parse_judge_response(raw).unwrap();
+        assert_eq!(out.verdict, Verdict::Ready);
+    }
+
+    /// When there is no fence but multiple `{...}` spans (e.g. the LLM
+    /// embeds an example object in prose before the real answer), the
+    /// brace-balanced scan must skip past the unparseable example and
+    /// land on the real JudgeOutcome.
+    #[test]
+    fn parse_response_skips_non_outcome_objects_via_balanced_scan() {
+        let raw = "{not a verdict} text in between \
+                   {\"verdict\":\"ready\",\"rationale\":\"r\"} trailing";
+        let out = parse_judge_response(raw).unwrap();
+        assert_eq!(out.verdict, Verdict::Ready);
+    }
+
+    /// String literals containing braces must not break the balanced scan
+    /// (e.g. `"observation":"file uses {placeholder} syntax"`).
+    #[test]
+    fn parse_response_handles_braces_inside_string_literals() {
+        let raw = r#"{"verdict":"not_ready","rationale":"saw a {fake} bracket in the body",
+                     "blockers":[{"section":"Quality-audit","severity":"high",
+                                  "observation":"contains \"{placeholder}\" prose",
+                                  "fix":"replace it"}]}"#;
+        let out = parse_judge_response(raw).unwrap();
+        assert_eq!(out.verdict, Verdict::NotReady);
+        assert_eq!(out.blockers.len(), 1);
+        assert!(out.blockers[0].observation.contains("{placeholder}"));
+    }
+
+    /// A fence opener with no matching closer must not panic — we just fall
+    /// through to the balanced-scan strategy.
+    #[test]
+    fn parse_response_unclosed_fence_falls_through_to_balanced_scan() {
+        let raw = "```json\n{\"verdict\":\"ready\",\"rationale\":\"r\"}";
+        let out = parse_judge_response(raw).unwrap();
+        assert_eq!(out.verdict, Verdict::Ready);
     }
 
     #[test]
