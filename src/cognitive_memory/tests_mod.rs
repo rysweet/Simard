@@ -93,6 +93,109 @@ fn store_and_recall_procedure() {
     assert_eq!(procs[0].steps, steps);
 }
 
+// G17 (issue #1604): `recall_procedure` previously called
+// `serde_json::from_str(...).unwrap_or_default()` on the `steps` and
+// `prerequisites` columns.  A row whose JSON was corrupted (schema drift,
+// truncation, partial flush before fsync) was silently surfaced as a
+// "valid procedure with zero steps" — the exact silent-empty-recall
+// failure mode that the #1711/#1748/#1754 "no silent fallback" pattern
+// targets across the cognitive substrate.
+//
+// This test plants a Procedure node whose `steps` column is **not** valid
+// JSON and asserts that recall returns a loud `BridgeCallFailed` error
+// that names the offending node id, the column, and the corrupt payload —
+// instead of cheerfully returning an empty-steps procedure.
+#[test]
+fn recall_procedure_loudly_errors_on_corrupt_steps_json() {
+    let mem = test_mem();
+
+    // Plant a Procedure row with deliberately corrupt steps JSON.
+    // `escape_cypher` is used so the corrupt payload survives Cypher
+    // string parsing — what we want to corrupt is the *JSON* payload
+    // after escape, not the Cypher literal itself.
+    let corrupt_steps = "not-valid-json{[";
+    mem.execute(&format!(
+        "CREATE (p:Procedure {{id: 'proc_corrupt_steps', name: 'corrupt', steps: '{}', prerequisites: '[]', usage_count: 0}})",
+        escape_cypher(corrupt_steps),
+    ))
+    .expect("planted corrupt row should insert");
+
+    let err = mem
+        .recall_procedure("corrupt", 5)
+        .expect_err("recall must fail loudly on corrupt steps JSON, not return empty steps");
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("proc_corrupt_steps"),
+        "error must name offending procedure id, got: {msg}"
+    );
+    assert!(
+        msg.contains("steps"),
+        "error must name the corrupt column, got: {msg}"
+    );
+    assert!(
+        msg.contains("corrupt steps JSON")
+            || msg.contains("corrupt_steps")
+            || msg.contains("not-valid-json"),
+        "error must surface the corruption, got: {msg}"
+    );
+}
+
+// Companion test for the prerequisites column — same gap, different field.
+#[test]
+fn recall_procedure_loudly_errors_on_corrupt_prerequisites_json() {
+    let mem = test_mem();
+
+    let corrupt_prereqs = "{not valid";
+    mem.execute(&format!(
+        "CREATE (p:Procedure {{id: 'proc_corrupt_prereqs', name: 'corrupt2', steps: '[]', prerequisites: '{}', usage_count: 0}})",
+        escape_cypher(corrupt_prereqs),
+    ))
+    .expect("planted corrupt row should insert");
+
+    let err = mem
+        .recall_procedure("corrupt2", 5)
+        .expect_err("recall must fail loudly on corrupt prerequisites JSON");
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("proc_corrupt_prereqs"),
+        "error must name offending procedure id, got: {msg}"
+    );
+    assert!(
+        msg.contains("prerequisites"),
+        "error must name the corrupt column, got: {msg}"
+    );
+}
+
+// Negative control: a healthy row sitting alongside a corrupt one still
+// causes the whole recall to fail loudly, rather than partial-success
+// where the healthy row hides the corrupt one.  This protects against a
+// "skip corrupt rows" regression that would re-introduce silent recall.
+#[test]
+fn recall_procedure_corrupt_row_taints_whole_batch() {
+    let mem = test_mem();
+
+    mem.store_procedure("healthy", &["step-a".to_string()], &[])
+        .expect("healthy row should insert");
+    mem.execute(&format!(
+        "CREATE (p:Procedure {{id: 'proc_mixed_corrupt', name: 'healthy_mixed', steps: '{}', prerequisites: '[]', usage_count: 0}})",
+        escape_cypher("garbage{"),
+    ))
+    .expect("planted corrupt row should insert");
+
+    // Query that matches both rows.
+    let result = mem.recall_procedure("healthy", 10);
+    let err = result.expect_err(
+        "recall must surface corruption from any matched row — silent skip would let bad data hide",
+    );
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("proc_mixed_corrupt"),
+        "error must name the corrupt row even when a healthy row matched first, got: {msg}"
+    );
+}
+
 #[test]
 fn store_prospective_and_check_triggers() {
     let mem = test_mem();
