@@ -211,9 +211,17 @@ impl<S: LlmSubmitter> OodaOrientBrain for RustyClawdOrientBrain<S> {
 }
 
 /// Extract a JSON object from the LLM response (LLMs sometimes wrap JSON in
-/// prose / markdown fences) and parse it as a judgment.
+/// prose / markdown fences) and parse it as a judgment. On failure the error
+/// embeds the **full raw response text** (truncated for log safety) — see
+/// issue #1711.
 fn parse_judgment_from_response(raw: &str) -> Result<OrientJudgment, String> {
     let stripped = raw.trim();
+    if stripped.is_empty() {
+        return Err(format!(
+            "orient brain returned an empty response (raw_response={:?})",
+            raw
+        ));
+    }
     let candidate = if let Some(start) = stripped.find('{')
         && let Some(end) = stripped.rfind('}')
         && end >= start
@@ -221,12 +229,16 @@ fn parse_judgment_from_response(raw: &str) -> Result<OrientJudgment, String> {
         &stripped[start..=end]
     } else {
         return Err(format!(
-            "no JSON object found in LLM response (got {} bytes)",
-            raw.len()
+            "orient brain response had no JSON object; raw_response={:?}",
+            super::rustyclawd::truncate_for_log_pub(raw)
         ));
     };
-    serde_json::from_str::<OrientJudgment>(candidate)
-        .map_err(|e| format!("orient-brain-parse-error: {e}; payload={candidate}"))
+    serde_json::from_str::<OrientJudgment>(candidate).map_err(|e| {
+        format!(
+            "orient-brain-parse-error: {e}; payload={candidate}; raw_response={:?}",
+            super::rustyclawd::truncate_for_log_pub(raw)
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------

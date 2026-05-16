@@ -65,6 +65,12 @@ pub struct CandidateInputs {
     /// Most recent mtime of the worktree's claim sentinel, falling back
     /// to the worktree directory mtime when the sentinel is absent.
     pub last_activity: Option<SystemTime>,
+    /// `true` if a live process has this worktree as its CWD (issue
+    /// #1886). When set, the policy refuses to mark the worktree as a
+    /// GC candidate regardless of merged/deleted/idle signals — pruning
+    /// a worktree under a running engineer destroys its CWD and forces
+    /// the agent to spin until its 1-hour timeout fires.
+    pub has_live_process: bool,
 }
 
 /// Apply the policy to one worktree entry. Returns `Some(GcCandidate)`
@@ -79,6 +85,19 @@ pub fn evaluate_candidate(
 ) -> Option<GcCandidate> {
     // Never propose pruning the bare parent.
     if entry.is_bare {
+        return None;
+    }
+
+    // #1886: live process beats every other signal. Even if the branch
+    // is merged or the worktree is "idle" by mtime, an active engineer
+    // subprocess inside it means pruning would destroy its CWD.
+    if inputs.has_live_process {
+        tracing::info!(
+            target: "simard::worktree_gc",
+            worktree = %entry.path.display(),
+            branch = entry.branch.as_deref().unwrap_or("<detached>"),
+            "skipping prune: live process detected in worktree (#1886)",
+        );
         return None;
     }
 
@@ -166,6 +185,7 @@ mod tests {
             merged_prs: vec![],
             branch_on_origin: Some(true),
             last_activity: Some(SystemTime::now()),
+            has_live_process: false,
         };
         let now = SystemTime::now();
         assert!(evaluate_candidate(&e, &inputs, now, 7).is_none());
@@ -178,6 +198,7 @@ mod tests {
             merged_prs: vec![42],
             branch_on_origin: Some(true),
             last_activity: Some(SystemTime::now()),
+            has_live_process: false,
         };
         let cand = evaluate_candidate(&e, &inputs, SystemTime::now(), 7).expect("merged → cand");
         assert_eq!(cand.reasons.len(), 1);
@@ -194,6 +215,7 @@ mod tests {
             merged_prs: vec![],
             branch_on_origin: Some(false),
             last_activity: Some(SystemTime::now()),
+            has_live_process: false,
         };
         let cand =
             evaluate_candidate(&e, &inputs, SystemTime::now(), 7).expect("deleted → candidate");
@@ -212,6 +234,7 @@ mod tests {
             merged_prs: vec![],
             branch_on_origin: Some(true),
             last_activity: Some(activity),
+            has_live_process: false,
         };
         let cand = evaluate_candidate(&e, &inputs, now, 7).expect("idle → candidate");
         match &cand.reasons[0] {
@@ -229,6 +252,7 @@ mod tests {
             merged_prs: vec![],
             branch_on_origin: Some(true),
             last_activity: Some(activity),
+            has_live_process: false,
         };
         assert!(evaluate_candidate(&e, &inputs, now, 7).is_none());
     }
@@ -241,6 +265,7 @@ mod tests {
             merged_prs: vec![1, 2, 3],
             branch_on_origin: Some(false),
             last_activity: Some(SystemTime::UNIX_EPOCH),
+            has_live_process: false,
         };
         assert!(
             evaluate_candidate(&e, &inputs, SystemTime::now(), 7).is_none(),
@@ -260,6 +285,7 @@ mod tests {
             merged_prs: vec![],
             branch_on_origin: Some(false),
             last_activity: Some(activity),
+            has_live_process: false,
         };
         let cand = evaluate_candidate(&e, &inputs, now, 7).expect("idle still applies on detached");
         assert!(
@@ -281,6 +307,7 @@ mod tests {
             merged_prs: vec![],
             branch_on_origin: None,
             last_activity: Some(SystemTime::now()),
+            has_live_process: false,
         };
         assert!(evaluate_candidate(&e, &inputs, SystemTime::now(), 7).is_none());
     }
@@ -294,6 +321,7 @@ mod tests {
             merged_prs: vec![99],
             branch_on_origin: Some(false),
             last_activity: Some(activity),
+            has_live_process: false,
         };
         let cand = evaluate_candidate(&e, &inputs, now, 7).expect("hot in 3 ways");
         assert!(matches!(
@@ -311,6 +339,7 @@ mod tests {
             merged_prs: vec![],
             branch_on_origin: Some(false),
             last_activity: Some(activity),
+            has_live_process: false,
         };
         let cand = evaluate_candidate(&e, &inputs, now, 7).expect("hot in 2 ways");
         assert!(matches!(

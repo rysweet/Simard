@@ -527,6 +527,7 @@ fn render_bundle_markdown(
 mod bundle_tests {
     use super::*;
     use crate::meeting_facilitator::{ActionItem, MeetingDecision, OpenQuestion};
+    use serial_test::serial;
 
     fn temp_root(label: &str) -> PathBuf {
         let unique = std::time::SystemTime::now()
@@ -585,6 +586,7 @@ mod bundle_tests {
     }
 
     #[test]
+    #[serial(simard_meetings_root_env)]
     fn write_meeting_bundle_creates_canonical_files() {
         let root = temp_root("bundle-canonical");
         // SAFETY: tests in this binary that touch SIMARD_MEETINGS_ROOT serialize
@@ -616,6 +618,7 @@ mod bundle_tests {
     }
 
     #[test]
+    #[serial(simard_meetings_root_env)]
     fn write_meeting_bundle_round_trips_handoff_json() {
         let root = temp_root("bundle-roundtrip");
         unsafe {
@@ -655,6 +658,7 @@ mod bundle_tests {
     }
 
     #[test]
+    #[serial(simard_meetings_root_env)]
     fn write_meeting_bundle_markdown_contains_sections() {
         let root = temp_root("bundle-md");
         unsafe {

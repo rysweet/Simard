@@ -154,6 +154,25 @@ pub fn run_ooda_daemon(
     let decide_brain = brains::build_decide_brain(&state_root);
     let orient_brain = brains::build_orient_brain(&state_root);
 
+    // After all three brains are constructed, surface the cumulative
+    // fallback count in the dashboard. Nonzero == daemon is running in
+    // degraded mode (see issues #1711, #1748). Future health endpoints
+    // should refuse "healthy" when this is nonzero.
+    let degraded = brains::fallback_brain_count();
+    if degraded > 0 {
+        daemon_log(
+            &state_root,
+            &format!(
+                "[simard] OODA daemon: DEGRADED MODE — {degraded}/3 brains fell back to deterministic (see issues #1711, #1748)"
+            ),
+        );
+    } else {
+        daemon_log(
+            &state_root,
+            "[simard] OODA daemon: all 3 brains LLM-backed (no fallback in use)",
+        );
+    }
+
     // Surface where the daemon will look for hot-reloadable prompt assets so
     // operators know where to edit (see `docs/concepts/prompt-driven-brain-iteration.md`).
     {

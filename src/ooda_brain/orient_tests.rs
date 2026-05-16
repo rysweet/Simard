@@ -195,6 +195,45 @@ fn rustyclawd_brain_unparseable_returns_error() {
     assert!(msg.contains("ooda-orient-brain"), "got: {msg}");
 }
 
+// ---------------------------------------------------------------------------
+// Issue #1711 — Error messages must embed the **raw response text**, not a
+// lossy `got N bytes` byte-count. Same anti-regression as rustyclawd.rs.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn issue_1711_unparseable_error_embeds_raw_response_text() {
+    // Anti-regression for the production failure mode that issue #1711
+    // fixed: the legacy `no JSON object found in LLM response (got N bytes)`
+    // format dropped the raw response on the floor. The orient brain shares
+    // the same parser anti-pattern and MUST be fixed in lockstep.
+    let stub = StubSubmitter::new("OK");
+    let brain = RustyClawdOrientBrain::new(stub);
+    let err = brain.judge_orientation(&ctx(1, 0.8)).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("OK"),
+        "orient-brain error MUST embed the raw response text 'OK' (issue #1711 \
+         anti-regression for lossy `got N bytes` log format), got: {msg}"
+    );
+    assert!(
+        !msg.contains("got 2 bytes") && !msg.contains("got 3 bytes"),
+        "orient-brain error must NOT use the legacy `got N bytes` byte-count \
+         format that issue #1711 eliminated, got: {msg}"
+    );
+}
+
+#[test]
+fn issue_1711_empty_response_error_does_not_silently_say_zero_bytes() {
+    let stub = StubSubmitter::new("");
+    let brain = RustyClawdOrientBrain::new(stub);
+    let err = brain.judge_orientation(&ctx(1, 0.8)).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.to_lowercase().contains("empty") || msg.contains("\"\""),
+        "orient-brain empty-response error must indicate emptiness, got: {msg}"
+    );
+}
+
 #[test]
 fn rustyclawd_brain_rejects_escalation() {
     let stub =

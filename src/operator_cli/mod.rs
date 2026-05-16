@@ -44,6 +44,10 @@ Product modes:
   meeting repl [topic]
   goal-curation run <base-type> <topology> <objective> [state-root]
   goal-curation read <base-type> <topology> [state-root]
+                         — read goals from $SIMARD_STATE_ROOT (or
+                           $HOME/.simard/state) by default, matching the
+                           meeting greeting banner; pass [state-root] to
+                           inspect a probe-isolated sandbox instead
   improvement-curation run <base-type> <topology> <objective> [state-root]
   improvement-curation read <base-type> <topology> [state-root]
   gym list

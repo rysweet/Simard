@@ -16,6 +16,7 @@
 pub mod dedup;
 pub mod gh_client;
 pub mod merge_authority;
+pub mod merge_judge;
 pub mod routing;
 pub mod types;
 
@@ -28,8 +29,12 @@ pub use dedup::{failure_signature, find_existing, normalize};
 pub use gh_client::{GhClient, GhIssue, RealGhClient};
 pub use merge_authority::{
     BASE_ALLOWLIST_ENV, DEFAULT_BASE_ALLOWLIST, MergeOutcome, PrGhClient, PrSnapshot,
-    REQUIRED_EVIDENCE_HEADINGS, RealPrGhClient, base_allowlist_from_env, merge_pr_if_merge_ready,
-    merge_pr_if_merge_ready_with_allowlist,
+    RealPrGhClient, base_allowlist_from_env, merge_pr_if_merge_ready,
+    merge_pr_if_merge_ready_with_allowlist, merge_pr_if_merge_ready_with_judge,
+};
+pub use merge_judge::{
+    Blocker, JudgeOutcome, LlmMergeJudge, MergeJudge, RefusingMergeJudge, Verdict,
+    build_merge_judge,
 };
 pub use routing::route_failure;
 pub use types::{OrchestratorRunSummary, StewardshipOutcome, TargetRepo};
