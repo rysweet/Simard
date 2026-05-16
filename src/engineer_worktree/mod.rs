@@ -71,7 +71,21 @@ use claim::{claim_is_live, format_engineer_claim, read_engineer_claim_full};
 pub use claim::{is_pid_alive_public, read_pid_starttime_public};
 
 /// Maximum length of a `goal_id` accepted by [`EngineerWorktree::allocate`].
-pub const MAX_GOAL_ID_LEN: usize = 64;
+///
+/// The cap is bounded by:
+/// 1. ext4 NAME_MAX = 255 bytes per path segment (the worktree directory
+///    is `engineer-worktrees/<goal-id>-<suffix>/`, where suffix is ~16 bytes).
+/// 2. Git ref names accept long segments; the branch is
+///    `engineer/<goal-id>-<suffix>`, leaving the same headroom.
+///
+/// 200 leaves comfortable headroom for both. The previous value of 64 was
+/// unnecessarily conservative and caused legitimate dashboard-supplied
+/// goals (whose IDs are slug-derived from the description) to be rejected
+/// at engineer-dispatch time. See issue #1861 and the truncation logic in
+/// [`crate::goals::goal_slug`], which now also caps slugs at
+/// [`crate::goals::GOAL_SLUG_MAX_LEN`] (56 bytes) so well-formed slugs
+/// always fit even after callers prepend a prefix.
+pub const MAX_GOAL_ID_LEN: usize = 200;
 
 /// A per-engineer git worktree.
 ///

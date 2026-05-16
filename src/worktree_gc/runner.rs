@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
+use super::liveness::LiveProcessProbe;
 use super::parse::{WorktreeEntry, parse_worktree_list};
 use super::policy::{CandidateInputs, GcCandidate, PruneReason, evaluate_candidate};
 use super::{DEFAULT_REMOTE, GcConfig, under_any_root};
@@ -133,7 +134,11 @@ pub fn render_reason(r: &PruneReason) -> String {
 
 /// Drive one GC pass against `cfg`. Returns the structured report; the
 /// caller is responsible for printing whatever it wants on top of it.
-pub fn run_gc(cfg: &GcConfig, gh: &dyn GhClient) -> Result<GcReport, String> {
+pub fn run_gc(
+    cfg: &GcConfig,
+    gh: &dyn GhClient,
+    probe: &dyn LiveProcessProbe,
+) -> Result<GcReport, String> {
     let mut report = GcReport {
         roots_scanned: cfg.roots.clone(),
         ..Default::default()
@@ -155,7 +160,7 @@ pub fn run_gc(cfg: &GcConfig, gh: &dyn GhClient) -> Result<GcReport, String> {
         }
         report.worktrees_examined += 1;
 
-        let inputs = gather_inputs(entry, gh, cfg.now);
+        let inputs = gather_inputs(entry, gh, probe, cfg.now);
         if let Some(cand) = evaluate_candidate(entry, &inputs, cfg.now, cfg.idle_days) {
             report.candidates.push(cand);
         }
@@ -176,7 +181,12 @@ pub fn run_gc(cfg: &GcConfig, gh: &dyn GhClient) -> Result<GcReport, String> {
     Ok(report)
 }
 
-fn gather_inputs(entry: &WorktreeEntry, gh: &dyn GhClient, _now: SystemTime) -> CandidateInputs {
+fn gather_inputs(
+    entry: &WorktreeEntry,
+    gh: &dyn GhClient,
+    probe: &dyn LiveProcessProbe,
+    _now: SystemTime,
+) -> CandidateInputs {
     let merged_prs = if let Some(ref branch) = entry.branch {
         gh.merged_prs_for_branch(branch).unwrap_or_else(|e| {
             tracing::warn!(
@@ -207,11 +217,13 @@ fn gather_inputs(entry: &WorktreeEntry, gh: &dyn GhClient, _now: SystemTime) -> 
     };
 
     let last_activity = super::policy::worktree_last_activity(&entry.path);
+    let has_live_process = probe.worktree_has_live_process(&entry.path);
 
     CandidateInputs {
         merged_prs,
         branch_on_origin,
         last_activity,
+        has_live_process,
     }
 }
 
