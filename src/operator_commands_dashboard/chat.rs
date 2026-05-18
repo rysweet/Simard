@@ -170,7 +170,7 @@ pub(crate) async fn handle_ws_chat(mut socket: WebSocket) {
                         break;
                     }
                     MeetingCommand::Help => {
-                        let help = "Commands: /status, /template [name], /export, /theme <text>, /recap, /preview, /close, /help. Everything else is natural conversation with Simard.";
+                        let help = "Commands: /status, /template [name], /export, /theme <text>, /decision <text>, /action <text>, /question <text>, /recap, /preview, /state, /close, /help. Everything else is natural conversation with Simard.";
                         let _ = socket
                             .send(Message::Text(
                                 json!({"role":"system","content": help}).to_string().into(),
@@ -234,6 +234,39 @@ pub(crate) async fn handle_ws_chat(mut socket: WebSocket) {
                     MeetingCommand::Theme(theme) => {
                         backend.push_theme(theme.clone());
                         let content = format!("Theme recorded: {theme}");
+                        let _ = socket
+                            .send(Message::Text(
+                                json!({"role":"system","content": content})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await;
+                    }
+                    MeetingCommand::Decision(text) => {
+                        backend.push_explicit_decision(&text);
+                        let content = format!("Decision recorded: {text}");
+                        let _ = socket
+                            .send(Message::Text(
+                                json!({"role":"system","content": content})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await;
+                    }
+                    MeetingCommand::Action(text) => {
+                        backend.push_explicit_action_item(&text);
+                        let content = format!("Action recorded: {text}");
+                        let _ = socket
+                            .send(Message::Text(
+                                json!({"role":"system","content": content})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await;
+                    }
+                    MeetingCommand::Question(text) => {
+                        backend.push_explicit_question(&text);
+                        let content = format!("Question recorded: {text}");
                         let _ = socket
                             .send(Message::Text(
                                 json!({"role":"system","content": content})

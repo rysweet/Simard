@@ -34,7 +34,6 @@ pub use types::{
     AppliedTemplate, ConversationMessage, HandoffActionItem, MeetingResponse, MeetingSummary,
     MeetingTranscript, Role, SessionStatus,
 };
-
 /// Maximum messages kept in conversation history.
 pub(super) const MAX_HISTORY: usize = 500;
 
@@ -61,6 +60,20 @@ pub struct MeetingBackend {
     /// Templates applied via the `/template <name>` command. Surfaced in the
     /// handoff markdown report as the `## Agenda` section.
     applied_templates: Vec<AppliedTemplate>,
+    /// Decisions recorded inline by the operator via `/decision <text>`.
+    /// Bypass post-hoc heuristic extraction so important items cannot be
+    /// missed or mangled. Issue #1730 seam (b).
+    explicit_decisions: Vec<String>,
+    /// Action items recorded inline by the operator via `/action <text>`.
+    /// Description is taken verbatim; assignee/deadline are best-effort
+    /// extracted using the same helpers as the heuristic path. Issue #1730
+    /// seam (b).
+    explicit_action_items: Vec<HandoffActionItem>,
+    /// Open questions recorded inline by the operator via `/question <text>`.
+    /// Marked `explicit=true` in the handoff so downstream consumers can
+    /// distinguish operator-supplied items from inferred ones. Issue #1730
+    /// seam (b).
+    explicit_questions: Vec<String>,
 }
 
 impl MeetingBackend {
@@ -91,6 +104,9 @@ impl MeetingBackend {
             is_open: true,
             themes: Vec::new(),
             applied_templates: Vec::new(),
+            explicit_decisions: Vec::new(),
+            explicit_action_items: Vec::new(),
+            explicit_questions: Vec::new(),
         }
     }
 
@@ -161,6 +177,93 @@ impl MeetingBackend {
     /// Read the templates applied during this meeting.
     pub fn applied_templates(&self) -> &[AppliedTemplate] {
         &self.applied_templates
+    }
+
+    // ── Inline /decision /action /question (issue #1730 seam (b)) ─────
+
+    /// Record a decision the operator marked deterministically with
+    /// `/decision <text>`. Trailing/leading whitespace is trimmed and empty
+    /// values are ignored. Duplicates (case-insensitive) are deduplicated so
+    /// re-typing `/decision Adopt TDD` is a no-op.
+    pub fn push_explicit_decision(&mut self, text: &str) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let lower = trimmed.to_lowercase();
+        if self
+            .explicit_decisions
+            .iter()
+            .any(|d| d.to_lowercase() == lower)
+        {
+            return;
+        }
+        self.explicit_decisions.push(trimmed.to_string());
+    }
+
+    /// Read the decisions the operator recorded inline so far.
+    pub fn explicit_decisions(&self) -> &[String] {
+        &self.explicit_decisions
+    }
+
+    /// Record an action item the operator marked with `/action <text>`. The
+    /// description is taken verbatim and the same assignee/deadline
+    /// extractors used by the heuristic path are applied for free
+    /// structured fields. `priority` is set to `Some(1)` so explicit items
+    /// sort ahead of heuristic-extracted ones (which use `None`). Duplicates
+    /// (case-insensitive on description) are deduplicated.
+    pub fn push_explicit_action_item(&mut self, text: &str) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let assignee = persist::extract_assignee_pub(trimmed);
+        let deadline = persist::extract_deadline_pub(&trimmed.to_lowercase());
+        let description = persist::clean_action_description_pub(trimmed);
+        let lower_desc = description.to_lowercase();
+        if self
+            .explicit_action_items
+            .iter()
+            .any(|a| a.description.to_lowercase() == lower_desc)
+        {
+            return;
+        }
+        self.explicit_action_items.push(HandoffActionItem {
+            description,
+            assignee,
+            deadline,
+            linked_goal: None,
+            priority: Some(1),
+        });
+    }
+
+    /// Read the action items the operator recorded inline so far.
+    pub fn explicit_action_items(&self) -> &[HandoffActionItem] {
+        &self.explicit_action_items
+    }
+
+    /// Record an open question the operator marked with `/question <text>`.
+    /// Trailing/leading whitespace is trimmed; empty values are ignored.
+    /// Duplicates (case-insensitive) are deduplicated.
+    pub fn push_explicit_question(&mut self, text: &str) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let lower = trimmed.to_lowercase();
+        if self
+            .explicit_questions
+            .iter()
+            .any(|q| q.to_lowercase() == lower)
+        {
+            return;
+        }
+        self.explicit_questions.push(trimmed.to_string());
+    }
+
+    /// Read the open questions the operator recorded inline so far.
+    pub fn explicit_questions(&self) -> &[String] {
+        &self.explicit_questions
     }
 
     // --- Private helpers ---

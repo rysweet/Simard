@@ -381,3 +381,127 @@ fn close_summary_includes_applied_templates() {
     assert_eq!(summary.applied_templates[0].name, "standup");
     assert!(summary.applied_templates[0].agenda.contains("Blockers"));
 }
+
+// ── Inline /decision /action /question (issue #1730 seam (b)) ─────────
+
+#[test]
+fn push_explicit_decision_appends_and_dedupes() {
+    let agent = MockAgent::new("ok");
+    let mut backend = MeetingBackend::new_session("Planning", Box::new(agent), None, String::new());
+    backend.push_explicit_decision("Adopt TDD");
+    backend.push_explicit_decision("  Adopt TDD  "); // duplicate (case-insensitive after trim)
+    backend.push_explicit_decision("ADOPT TDD"); // case-insensitive duplicate
+    backend.push_explicit_decision("Ship phase 8");
+    backend.push_explicit_decision("   "); // empty -> ignored
+    let decisions = backend.explicit_decisions();
+    assert_eq!(
+        decisions,
+        &["Adopt TDD".to_string(), "Ship phase 8".to_string()]
+    );
+}
+
+#[test]
+fn push_explicit_question_appends_and_dedupes() {
+    let agent = MockAgent::new("ok");
+    let mut backend = MeetingBackend::new_session("Q", Box::new(agent), None, String::new());
+    backend.push_explicit_question("Who owns rollout?");
+    backend.push_explicit_question("Who owns rollout?"); // exact duplicate
+    backend.push_explicit_question("WHO OWNS ROLLOUT?"); // case-insensitive duplicate
+    backend.push_explicit_question("What is the SLO?");
+    backend.push_explicit_question(""); // empty ignored
+    assert_eq!(
+        backend.explicit_questions(),
+        &[
+            "Who owns rollout?".to_string(),
+            "What is the SLO?".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn push_explicit_action_item_extracts_assignee_and_deadline() {
+    let agent = MockAgent::new("ok");
+    let mut backend = MeetingBackend::new_session("A", Box::new(agent), None, String::new());
+    backend.push_explicit_action_item("Bob will write tests by friday");
+    backend.push_explicit_action_item("Update documentation"); // no assignee/deadline
+    backend.push_explicit_action_item("   "); // empty ignored
+
+    let items = backend.explicit_action_items();
+    assert_eq!(items.len(), 2);
+    // Explicit items get priority Some(1) so they sort ahead of heuristic ones.
+    assert_eq!(items[0].priority, Some(1));
+    // Assignee/deadline extraction reuses the heuristic helpers.
+    assert_eq!(items[0].assignee.as_deref(), Some("Bob"));
+    assert!(
+        items[0]
+            .deadline
+            .as_ref()
+            .is_some_and(|d| d.contains("friday")),
+        "deadline should be parsed from inline text, got {:?}",
+        items[0].deadline
+    );
+    // Plain item without signals: no assignee/deadline.
+    assert_eq!(items[1].assignee, None);
+    assert_eq!(items[1].deadline, None);
+    assert_eq!(items[1].priority, Some(1));
+}
+
+#[test]
+fn push_explicit_action_item_dedupes_by_description() {
+    let agent = MockAgent::new("ok");
+    let mut backend = MeetingBackend::new_session("A", Box::new(agent), None, String::new());
+    backend.push_explicit_action_item("Update documentation");
+    backend.push_explicit_action_item("update DOCUMENTATION"); // case-insensitive dup
+    backend.push_explicit_action_item("Set up CI");
+    let items = backend.explicit_action_items();
+    assert_eq!(items.len(), 2, "duplicate descriptions must be dropped");
+    assert_eq!(items[0].description, "Update documentation");
+    assert_eq!(items[1].description, "Set up CI");
+}
+
+#[test]
+fn close_summary_merges_explicit_decisions() {
+    let agent = MockAgent::new("Summary text.");
+    let mut backend =
+        MeetingBackend::new_session("Decisions", Box::new(agent), None, String::new());
+    backend.push_explicit_decision("Adopt TDD");
+    backend.push_explicit_decision("Use Rust for CLI");
+    let summary = backend.close().unwrap();
+    // Explicit decisions appear first, in registration order.
+    assert!(summary.decisions.contains(&"Adopt TDD".to_string()));
+    assert!(summary.decisions.contains(&"Use Rust for CLI".to_string()));
+    assert_eq!(summary.decisions[0], "Adopt TDD");
+}
+
+#[test]
+fn close_summary_merges_explicit_questions() {
+    let agent = MockAgent::new("Summary text.");
+    let mut backend =
+        MeetingBackend::new_session("Questions", Box::new(agent), None, String::new());
+    backend.push_explicit_question("What is our SLO target?");
+    let summary = backend.close().unwrap();
+    assert!(
+        summary
+            .open_questions
+            .contains(&"What is our SLO target?".to_string()),
+        "explicit question must appear in summary; got {:?}",
+        summary.open_questions
+    );
+    // Explicit questions sort first.
+    assert_eq!(summary.open_questions[0], "What is our SLO target?");
+}
+
+#[test]
+fn close_summary_merges_explicit_action_items() {
+    let agent = MockAgent::new("Summary text.");
+    let mut backend = MeetingBackend::new_session("Actions", Box::new(agent), None, String::new());
+    backend.push_explicit_action_item("Carol will set up CI by next sprint");
+    let summary = backend.close().unwrap();
+    assert!(
+        !summary.action_items.is_empty(),
+        "explicit action item must appear in summary"
+    );
+    let first = &summary.action_items[0];
+    assert_eq!(first.priority, Some(1), "explicit items keep priority=1");
+    assert_eq!(first.assignee.as_deref(), Some("Carol"));
+}

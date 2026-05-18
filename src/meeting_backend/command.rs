@@ -22,6 +22,16 @@ pub enum MeetingCommand {
     /// Re-display the running list of decisions, open questions, and action items
     /// extracted from the live meeting transcript. Read-only — does not close.
     State,
+    /// Operator marks a decision deterministically (e.g. `/decision Adopt TDD`).
+    /// Bypasses post-hoc heuristic extraction so the item cannot be missed.
+    Decision(String),
+    /// Operator records an action item inline (e.g.
+    /// `/action Bob will write tests by friday`). The text is parsed for
+    /// assignee/deadline using the same extractors as the heuristic path.
+    Action(String),
+    /// Operator marks an open question deterministically (e.g.
+    /// `/question What is our SLO target?`).
+    Question(String),
     /// Natural language — forwarded to the LLM.
     Conversation(String),
 }
@@ -56,6 +66,30 @@ pub fn parse_command(input: &str) -> MeetingCommand {
                 MeetingCommand::Conversation(trimmed.to_string())
             } else {
                 MeetingCommand::Theme(arg)
+            }
+        }
+        _ if lower.starts_with("/decision ") => {
+            let arg = trimmed["/decision ".len()..].trim().to_string();
+            if arg.is_empty() {
+                MeetingCommand::Conversation(trimmed.to_string())
+            } else {
+                MeetingCommand::Decision(arg)
+            }
+        }
+        _ if lower.starts_with("/action ") => {
+            let arg = trimmed["/action ".len()..].trim().to_string();
+            if arg.is_empty() {
+                MeetingCommand::Conversation(trimmed.to_string())
+            } else {
+                MeetingCommand::Action(arg)
+            }
+        }
+        _ if lower.starts_with("/question ") => {
+            let arg = trimmed["/question ".len()..].trim().to_string();
+            if arg.is_empty() {
+                MeetingCommand::Conversation(trimmed.to_string())
+            } else {
+                MeetingCommand::Question(arg)
             }
         }
         _ => MeetingCommand::Conversation(trimmed.to_string()),
@@ -94,9 +128,12 @@ mod tests {
 
     #[test]
     fn parse_conversation_unknown_slash() {
+        // Unrecognised slash commands fall through to Conversation so the
+        // operator can still type things like file paths or markdown lists
+        // that happen to start with `/`.
         assert_eq!(
-            parse_command("/decision Ship it | ready"),
-            MeetingCommand::Conversation("/decision Ship it | ready".to_string()),
+            parse_command("/notarealcommand foo bar"),
+            MeetingCommand::Conversation("/notarealcommand foo bar".to_string()),
         );
     }
 
@@ -203,6 +240,83 @@ mod tests {
         assert_eq!(
             parse_command("/state extra args"),
             MeetingCommand::Conversation("/state extra args".to_string()),
+        );
+    }
+
+    // ── Inline /decision /action /question (issue #1730 seam (b)) ─────
+
+    #[test]
+    fn parse_decision_with_arg() {
+        assert_eq!(
+            parse_command("/decision Adopt TDD for new modules"),
+            MeetingCommand::Decision("Adopt TDD for new modules".to_string()),
+        );
+        assert_eq!(
+            parse_command("  /Decision   Ship phase 8  "),
+            MeetingCommand::Decision("Ship phase 8".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_decision_empty_arg_is_conversation() {
+        // Mirrors the /theme empty-arg behaviour: a bare `/decision` (or
+        // `/decision ` with only whitespace) is not a valid recording —
+        // surface as conversation so the operator's intent isn't lost.
+        assert_eq!(
+            parse_command("/decision"),
+            MeetingCommand::Conversation("/decision".to_string()),
+        );
+        assert_eq!(
+            parse_command("/decision   "),
+            MeetingCommand::Conversation("/decision".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_action_with_arg() {
+        assert_eq!(
+            parse_command("/action Bob will write tests by friday"),
+            MeetingCommand::Action("Bob will write tests by friday".to_string()),
+        );
+        assert_eq!(
+            parse_command("  /ACTION  Update docs  "),
+            MeetingCommand::Action("Update docs".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_action_empty_arg_is_conversation() {
+        assert_eq!(
+            parse_command("/action"),
+            MeetingCommand::Conversation("/action".to_string()),
+        );
+        assert_eq!(
+            parse_command("/action    "),
+            MeetingCommand::Conversation("/action".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_question_with_arg() {
+        assert_eq!(
+            parse_command("/question What is our SLO target?"),
+            MeetingCommand::Question("What is our SLO target?".to_string()),
+        );
+        assert_eq!(
+            parse_command("  /Question   Who owns rollout?  "),
+            MeetingCommand::Question("Who owns rollout?".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_question_empty_arg_is_conversation() {
+        assert_eq!(
+            parse_command("/question"),
+            MeetingCommand::Conversation("/question".to_string()),
+        );
+        assert_eq!(
+            parse_command("/question  "),
+            MeetingCommand::Conversation("/question".to_string()),
         );
     }
 }

@@ -35,6 +35,25 @@ impl MeetingBackend {
         // ── Structured action-item extraction ──
         let mut action_items = persist::extract_action_items(&self.history);
 
+        // Prepend explicit action items recorded inline via `/action` so
+        // operator-supplied items always appear first and are never lost
+        // to extractor heuristics. Dedup against heuristic items by
+        // case-insensitive description match. Issue #1730 seam (b).
+        if !self.explicit_action_items.is_empty() {
+            let mut explicit_first: Vec<super::types::HandoffActionItem> =
+                self.explicit_action_items.clone();
+            for inferred in action_items.drain(..) {
+                let lower = inferred.description.to_lowercase();
+                if !explicit_first
+                    .iter()
+                    .any(|a| a.description.to_lowercase() == lower)
+                {
+                    explicit_first.push(inferred);
+                }
+            }
+            action_items = explicit_first;
+        }
+
         // ── Goal linkage ──
         let goal_titles = self.load_active_goal_titles();
         if !goal_titles.is_empty() {
@@ -42,7 +61,21 @@ impl MeetingBackend {
         }
 
         // ── Decision extraction ──
-        let decisions = persist::extract_decisions(&self.history);
+        let mut decisions = persist::extract_decisions(&self.history);
+
+        // Prepend explicit decisions recorded inline via `/decision`.
+        // Dedup against heuristic-extracted decisions by case-insensitive
+        // string equality. Issue #1730 seam (b).
+        if !self.explicit_decisions.is_empty() {
+            let mut explicit_first: Vec<String> = self.explicit_decisions.clone();
+            for inferred in decisions.drain(..) {
+                let lower = inferred.to_lowercase();
+                if !explicit_first.iter().any(|d| d.to_lowercase() == lower) {
+                    explicit_first.push(inferred);
+                }
+            }
+            decisions = explicit_first;
+        }
 
         // Write JSON transcript to ~/.simard/meetings/
         let transcript = MeetingTranscript {
@@ -61,22 +94,43 @@ impl MeetingBackend {
             }
         };
 
-        // Write MeetingHandoff artifact for OODA integration
-        if let Err(e) = persist::write_handoff(
+        // ── Extract open questions and themes for the summary ──
+        // Done *before* writing the handoff so explicit questions flow
+        // into the JSON artifact too. Issue #1730 seam (b).
+        let inferred_questions = persist::extract_open_questions(&self.history);
+        let mut open_questions: Vec<String> = Vec::new();
+        // Prepend explicit questions recorded via `/question` so they
+        // always appear first; dedup against heuristic ones by
+        // case-insensitive equality.
+        for q in &self.explicit_questions {
+            open_questions.push(q.clone());
+        }
+        for q in inferred_questions {
+            let lower = q.text.to_lowercase();
+            if !open_questions.iter().any(|e| e.to_lowercase() == lower) {
+                open_questions.push(q.text);
+            }
+        }
+        // Track which questions are explicit (operator-recorded) for the
+        // bundle artifact's per-question `explicit` flag.
+        let explicit_question_set: std::collections::HashSet<String> = self
+            .explicit_questions
+            .iter()
+            .map(|q| q.to_lowercase())
+            .collect();
+
+        // Write MeetingHandoff artifact for OODA integration.
+        if let Err(e) = persist::write_handoff_with_explicit(
             &self.topic,
             &summary_text,
             &self.history,
             &action_items,
             &decisions,
+            &self.explicit_questions,
         ) {
             warn!("Failed to write meeting handoff: {e}");
         }
 
-        // ── Extract open questions and themes for the summary ──
-        let open_questions: Vec<String> = persist::extract_open_questions(&self.history)
-            .into_iter()
-            .map(|q| q.text)
-            .collect();
         // Explicit /theme entries come first; inferred themes fill in the rest.
         let inferred_themes = persist::extract_themes(&self.history);
         let mut themes: Vec<String> = self.themes.clone();
@@ -146,9 +200,12 @@ impl MeetingBackend {
         let bundle_open_questions: Vec<crate::meeting_facilitator::OpenQuestion> = open_questions
             .iter()
             .cloned()
-            .map(|text| crate::meeting_facilitator::OpenQuestion {
-                text,
-                explicit: false,
+            .map(|text| {
+                let is_explicit = explicit_question_set.contains(&text.to_lowercase());
+                crate::meeting_facilitator::OpenQuestion {
+                    text,
+                    explicit: is_explicit,
+                }
             })
             .collect();
         let bundle_dir = match persist::write_handoff_bundle(
