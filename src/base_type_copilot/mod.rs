@@ -337,6 +337,9 @@ pub(super) fn extract_copilot_response_from_evidence(evidence: &[String]) -> Str
 mod transcript;
 pub use transcript::*;
 
+#[cfg(test)]
+mod tests;
+
 pub fn parse_copilot_response(raw: &str) -> SimardResult<crate::base_type_turn::TurnOutput> {
     parse_turn_output(raw)
 }
