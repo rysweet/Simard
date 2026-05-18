@@ -17,7 +17,7 @@ use crate::terminal_engineer_bridge::{
 use super::types::{
     EngineerActionKind, ExecutedEngineerAction, RepoInspection, VerificationReport,
 };
-use super::{ENGINEER_BASE_TYPE, ENGINEER_IDENTITY, EXECUTION_SCOPE};
+use super::{ENGINEER_BASE_TYPE, ENGINEER_IDENTITY, EXECUTION_SCOPE, MAX_PERSISTED_MEETING_MEMORY};
 
 /// Run the optional LLM-driven review on mutating actions.
 ///
@@ -247,6 +247,14 @@ pub fn persist_engineer_loop_artifacts(
         created_at: None,
     })?;
     session.attach_memory(decision_key);
+
+    // Bound persisted meeting memory per scope so a long chain of meeting →
+    // engineer handoffs cannot grow `memory_records.json` without limit.
+    // Pruned scopes are written in deterministic alphabetical order; each
+    // call is independent and only writes to disk when the scope is over
+    // the cap (see `FileBackedMemoryStore::prune_scope_to_cap`).
+    memory_store.prune_scope_to_cap(MemoryScope::SessionSummary, MAX_PERSISTED_MEETING_MEMORY)?;
+    memory_store.prune_scope_to_cap(MemoryScope::Decision, MAX_PERSISTED_MEETING_MEMORY)?;
 
     session.advance(SessionPhase::Complete)?;
 

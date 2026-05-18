@@ -6,6 +6,8 @@ mod types;
 #[cfg(test)]
 mod tests_agent_spawn;
 #[cfg(test)]
+mod tests_bounded_memory;
+#[cfg(test)]
 mod tests_goal_records_migration;
 #[cfg(test)]
 mod tests_mod;
@@ -57,6 +59,16 @@ pub(crate) const ENGINEER_IDENTITY: &str = "simard-engineer";
 pub(crate) const ENGINEER_BASE_TYPE: &str = "terminal-shell";
 pub(crate) const EXECUTION_SCOPE: &str = "local-only";
 pub(crate) const MAX_CARRIED_MEETING_DECISIONS: usize = 3;
+/// Per-scope cap on the number of meeting-related `MemoryRecord` entries that
+/// may remain on disk in `memory_records.json` after the engineer loop
+/// persists artifacts. When a scope exceeds this cap, the oldest records
+/// (FIFO by `(created_at, key)` ascending, with `None` timestamps treated
+/// as oldest) are evicted to bring the scope back to `MAX_PERSISTED_MEETING_MEMORY`.
+///
+/// Currently applied to `MemoryScope::Decision` and `MemoryScope::SessionSummary`
+/// only (see `review_persist::persist_engineer_loop_artifacts`). Other scopes
+/// — including `SessionScratch` — are intentionally unbounded by this cap.
+pub(crate) const MAX_PERSISTED_MEETING_MEMORY: usize = 32;
 pub(crate) const GIT_COMMAND_TIMEOUT_SECS: u64 = 60;
 pub(crate) const CARGO_COMMAND_TIMEOUT_SECS: u64 = 120;
 
