@@ -6,9 +6,15 @@ use crate::ooda_loop::{ActionOutcome, OodaBridges, OodaState, PlannedAction};
 use super::goal_session::GoalAction;
 use super::make_outcome;
 
-mod spawn;
+// `spawn` is `pub(crate)` so the issue-#1911 brain-failure marker
+// constants (`BRAIN_FAILURE_BLOCKED_PREFIX`, `BRAIN_FAILURE_BLOCKED_SUFFIX`)
+// and the `is_brain_failure_marker` predicate are reachable from
+// `crate::operator_cli::goal` (bulk-unblock scoping) and from the
+// cross-module tests in `crate::ooda_actions::tests_advance_goal` and
+// `crate::operator_cli::tests_goal`.
+pub(crate) mod spawn;
 mod subordinate;
-use spawn::dispatch_spawn_engineer;
+use spawn::{dispatch_spawn_engineer, is_brain_failure_marker};
 // Dispatch-dedup helper introduced by PR #1228; intentionally re-exported so
 // the daemon can scan engineer-worktrees for live sentinels before spawning.
 // Clippy flags it as unused at the lib level — suppress to preserve the API.
@@ -56,7 +62,48 @@ pub(super) fn dispatch_advance_goal(
     }
 
     // Blocked and completed goals short-circuit before session dispatch.
+    //
+    // Issue #1911 — auto-recovery of brain-failure-blocked goals.
+    // The deterministic safeguard in `dispatch_spawn_engineer` marks a goal
+    // `Blocked(BRAIN_FAILURE_BLOCKED_*)` after 3 consecutive brain failures.
+    // When the brain is healthy again the dispatcher would still short-
+    // circuit on the persisted marker — that was the production lockout
+    // (zero engineer activity for 44+ hours). The recovery branch below
+    // clears the marker on first arrival here:
+    //   1. confirm the `Blocked` reason was authored by the safeguard
+    //      (sentinel-bearing prefix + suffix — operator-set, scope-blocked,
+    //      dependency-blocked, and subordinate-blocked reasons are
+    //      intentionally rejected so this branch never overrides them);
+    //   2. drop the per-goal failure counter so cycle.rs's penalty stops
+    //      demoting urgency;
+    //   3. restore `GoalProgress::NotStarted` and fall through to the
+    //      normal session-based dispatch path. The next cycle that fails
+    //      will re-arm the counter from zero.
     match &goal.status {
+        GoalProgress::Blocked(reason) if is_brain_failure_marker(reason) => {
+            tracing::info!(
+                target: "simard::ooda_brain",
+                goal = %goal_id,
+                prior_failures = state.goal_failure_counts.get(&goal_id).copied().unwrap_or(0),
+                "issue #1911 auto-recovery: brain-failure marker cleared; restoring goal to NotStarted",
+            );
+            eprintln!(
+                "[simard] OODA auto-recovery: goal '{goal_id}' brain-failure marker cleared (issue #1911)"
+            );
+            state.goal_failure_counts.remove(&goal_id);
+            if let Some(g) = state
+                .active_goals
+                .active
+                .iter_mut()
+                .find(|g| g.id == goal_id)
+            {
+                g.status = GoalProgress::NotStarted;
+            }
+            // Refresh local snapshot so downstream uses (e.g. session
+            // dispatch) see the restored state.
+            // NOTE: `goal` is a clone — we deliberately keep falling
+            // through into the normal session path below.
+        }
         GoalProgress::Blocked(reason) => {
             return make_outcome(
                 action,

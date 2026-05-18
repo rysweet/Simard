@@ -375,3 +375,69 @@ fn test_help_mentions_compatibility() {
     let help = operator_cli_help();
     assert!(help.contains("Compatibility"));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Issue #1911 — `simard goal` subcommand dispatcher-wiring tests.
+//
+// T8 in the test contract: the dispatcher in `src/operator_cli/mod.rs`
+// must route `goal list`, `goal unblock <id>`, and `goal unblock-all` to
+// the goal subcommand handler. Validate the wiring by exercising
+// `dispatch_operator_cli` with argument-parsing-only paths that do NOT
+// touch cognitive memory or fork subprocesses. The deeper
+// integration-test surface (TSV schema, audit lines, override facts) lives
+// in `src/operator_cli/tests_goal.rs`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_goal_subcommand_missing_returns_error() {
+    let result = dispatch_operator_cli(vec!["goal".to_string()]);
+    assert!(
+        result.is_err(),
+        "bare `simard goal` must require a subcommand"
+    );
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("expected goal command") || msg.contains("expected goal subcommand"),
+        "error should explain the missing subcommand; got: {msg}"
+    );
+}
+
+#[test]
+fn test_goal_subcommand_unknown_verb_returns_error() {
+    let result = dispatch_operator_cli(vec!["goal".to_string(), "frobnicate".to_string()]);
+    assert!(
+        result.is_err(),
+        "unknown `simard goal frobnicate` must error"
+    );
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("unsupported command 'goal frobnicate'")
+            || msg.contains("unsupported command: goal frobnicate"),
+        "error should name the unsupported subcommand; got: {msg}"
+    );
+}
+
+#[test]
+fn test_goal_unblock_missing_id_returns_error() {
+    let result = dispatch_operator_cli(vec!["goal".to_string(), "unblock".to_string()]);
+    assert!(
+        result.is_err(),
+        "`simard goal unblock` without a goal-id must error"
+    );
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("expected goal id") || msg.contains("expected goal-id"),
+        "error should explain the missing goal id; got: {msg}"
+    );
+}
+
+#[test]
+fn test_help_text_mentions_goal_subcommands() {
+    let help = operator_cli_help();
+    for needle in &["goal list", "goal unblock", "goal unblock-all"] {
+        assert!(
+            help.contains(needle),
+            "help must document '{needle}' subcommand for issue #1911"
+        );
+    }
+}
