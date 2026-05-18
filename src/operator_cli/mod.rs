@@ -3,6 +3,7 @@ mod curation;
 mod dashboard;
 mod decisions;
 mod engineer;
+mod goal;
 mod gym;
 mod meeting;
 mod merge;
@@ -42,6 +43,14 @@ Product modes:
   meeting run <base-type> <topology> <objective> [state-root]
   meeting read <base-type> <topology> [state-root]
   meeting repl [topic]
+  goal list                — print active + backlog snapshot to stdout
+  goal unblock <goal-id>   — operator escape hatch: clear any Blocked
+                             status (unconditional) and restore to
+                             NotStarted (issue #1911)
+  goal unblock-all         — bulk-clear ONLY goals stuck on the
+                             deterministic brain-failure safeguard
+                             marker; operator-, scope-, dependency-, and
+                             subordinate-blocked goals are untouched
   goal-curation run <base-type> <topology> <objective> [state-root]
   goal-curation read <base-type> <topology> [state-root]
                          — read goals from $SIMARD_STATE_ROOT (or
@@ -106,6 +115,7 @@ where
     match command.as_str() {
         "engineer" => engineer::dispatch_engineer_command(args),
         "meeting" => meeting::dispatch_meeting_command(args),
+        "goal" => goal::dispatch_goal_command(args),
         "goal-curation" => curation::dispatch_goal_curation_command(args),
         "improvement-curation" => curation::dispatch_improvement_curation_command(args),
         "review" => review::dispatch_review_command(args),
@@ -262,3 +272,6 @@ fn dispatch_handover_command(
 
 #[cfg(test)]
 mod tests_mod;
+
+#[cfg(test)]
+mod tests_goal;

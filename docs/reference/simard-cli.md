@@ -60,6 +60,10 @@ simard
 |  `- run <identity> <base-type> <topology> <objective> [state-root]
 |- ooda
 |  `- run [--cycles=N] [state-root]
+|- goal
+|  |- list
+|  |- unblock <goal-id>
+|  `- unblock-all
 |- act-on-decisions
 |- spawn <agent-name> <goal> <worktree-path>
 |- handover [--canary-dir=PATH]
@@ -68,6 +72,55 @@ simard
 ```
 
 Bare `simard` prints this operator surface directly.
+
+## Goal subcommands
+
+The `simard goal` subcommand tree is the operator surface for inspecting
+and recovering the OODA goal board persisted in cognitive memory. It is
+the manual counterpart to the
+[brain-failure auto-recovery branch](../howto/unblock-stuck-ooda-goals.md)
+in `dispatch_advance_goal`. All subcommands resolve the state root via
+`$SIMARD_STATE_ROOT` then fall back to `$HOME/.simard`, matching the
+running daemon's resolution so the operator always reads/writes the
+same snapshot.
+
+### `simard goal list`
+
+Print the persisted goal board to stdout. Output is a header line plus
+one tab-separated row per active goal, then a one-line backlog summary
+followed (when non-empty) by tab-separated backlog rows:
+
+```text
+active goals: 5 / 5
+ID	PRIORITY	STATUS	ASSIGNED	DESCRIPTION
+enhance-simard-meeting-experience	p1	blocked: 🔒 [OODA-SAFEGUARD] OODA brain failing for 3 consecutive cycles; needs human review	-	enhance simard meeting experience
+…
+backlog: 0 item(s)
+```
+
+Exits non-zero on bridge-open / persistence errors. An empty board prints
+`(none)` and exits zero.
+
+### `simard goal unblock <goal-id>`
+
+Operator escape hatch — clears the goal's `Blocked` status
+**unconditionally** (regardless of the reason text) and restores
+`NotStarted`. Persists the snapshot via `save_goal_board`. Use this when
+overriding any single goal (brain-failure marker, operator-set Blocked,
+scope-blocked, etc.).
+
+Exits non-zero if `<goal-id>` is not on the active board or if the
+snapshot persist fails. The pre-restore status is logged to stderr.
+
+### `simard goal unblock-all`
+
+Bulk-clear scoped narrowly to the deterministic brain-failure safeguard
+marker (the `🔒 [OODA-SAFEGUARD] …` sentinel emitted by the OODA
+dispatcher after 3 consecutive brain failures). Goals with any other
+`Blocked` reason (operator-set, scope-blocked, dependency-blocked,
+subordinate-blocked) are intentionally untouched so the command is safe
+to rerun. Idempotent: empty board → no-op, exit zero. The count of
+cleared and skipped goals is logged to stderr.
 
 ## Self-management commands
 

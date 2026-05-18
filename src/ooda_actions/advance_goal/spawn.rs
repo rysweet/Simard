@@ -13,6 +13,47 @@ use crate::ooda_loop::{ActionOutcome, OodaState, PlannedAction};
 
 use crate::ooda_actions::make_outcome;
 
+// ── Issue #1911: brain-failure auto-recovery marker ────────────────────────
+//
+// The deterministic safeguard in `dispatch_spawn_engineer` writes a
+// `GoalProgress::Blocked(reason)` reason after 3 consecutive brain
+// failures. To make the persisted marker recoverable without colliding
+// with operator-set, scope-blocked, dependency-blocked, or
+// subordinate-blocked reasons, the rendered string carries a sentinel-
+// bearing prefix that no other Blocked-reason source can produce:
+//
+//   - U+1F512 LOCK code point (\u{1F512}): not typed by humans.
+//   - "OODA-SAFEGUARD" token: a literal authoring marker.
+//
+// `is_brain_failure_marker` is the single predicate that drives the
+// auto-recovery branch in `dispatch_advance_goal` and the bulk-unblock
+// scope in `simard goal unblock-all`. All match/render sites for the
+// safeguard reason go through these constants.
+
+/// Sentinel prefix of the deterministic brain-failure `Blocked` reason.
+pub const BRAIN_FAILURE_BLOCKED_PREFIX: &str = "\u{1F512} [OODA-SAFEGUARD] OODA brain failing for ";
+
+/// Trailing portion of the deterministic brain-failure `Blocked` reason.
+pub const BRAIN_FAILURE_BLOCKED_SUFFIX: &str = " consecutive cycles; needs human review";
+
+/// Returns `true` iff `reason` was authored by the deterministic
+/// brain-failure safeguard in `dispatch_spawn_engineer`. The predicate
+/// gates the issue-#1911 auto-recovery branch and the `unblock-all`
+/// bulk-clear so we never override operator-set, scope-blocked,
+/// dependency-blocked, or subordinate-blocked reasons.
+pub fn is_brain_failure_marker(reason: &str) -> bool {
+    reason.starts_with(BRAIN_FAILURE_BLOCKED_PREFIX)
+        && reason.contains(BRAIN_FAILURE_BLOCKED_SUFFIX)
+}
+
+/// Number of consecutive healthy cycles required before the auto-recovery
+/// branch clears a persisted brain-failure marker. Intentionally `1`:
+/// the first non-fallback brain signal after a marker-blocked state
+/// restores the goal so production lockouts (issue #1911) heal at
+/// minimum latency. Bumping this would re-introduce the outage window.
+#[allow(dead_code)] // Surface point for future tuning if flapping is observed.
+pub const HEALTHY_CYCLES_TO_UNBLOCK: u32 = 1;
+
 /// Spawn a subordinate engineer for a goal that the LLM picked
 /// `spawn_engineer` for, then mutate the active board to record the
 /// assignment.
@@ -103,7 +144,13 @@ pub fn dispatch_spawn_engineer(
                          `src/ooda_actions/advance_goal/spawn.rs` (issue #1711).",
                         goal_id, new_count, e
                     );
-                    // Mark goal Blocked deterministically.
+                    // Mark goal Blocked deterministically. Issue #1911:
+                    // the rendered reason uses the sentinel constants so
+                    // the `dispatch_advance_goal` auto-recovery branch
+                    // and the `simard goal unblock-all` CLI bulk-clear
+                    // can identify safeguard-authored markers and
+                    // distinguish them from operator-set, scope-blocked,
+                    // dependency-blocked, or subordinate-blocked reasons.
                     if let Some(g) = state
                         .active_goals
                         .active
@@ -111,8 +158,7 @@ pub fn dispatch_spawn_engineer(
                         .find(|g| g.id == goal_id)
                     {
                         g.status = crate::goal_curation::GoalProgress::Blocked(format!(
-                            "OODA brain failing for {} consecutive cycles; needs human review",
-                            new_count
+                            "{BRAIN_FAILURE_BLOCKED_PREFIX}{new_count}{BRAIN_FAILURE_BLOCKED_SUFFIX}"
                         ));
                     }
                     // File tracking issue. Failure to file is logged but
@@ -171,6 +217,14 @@ pub fn dispatch_spawn_engineer(
             false,
             crate::ooda_brain::prompt_store::current_version(crate::ooda_brain::ACT_PROMPT_NAME),
         ));
+        // Issue #1911 — Site 2 reset.
+        // A non-fallback `Ok(decision)` from `decide_engineer_lifecycle`
+        // proves the brain is healthy for this goal. Belt-and-suspenders:
+        // even though `cycle.rs` will reset the counter when the resulting
+        // outcome is `success`, some lifecycle decisions (e.g.
+        // `OpenTrackingIssue`) intentionally return `success=false`. Reset
+        // here so the safeguard threshold doesn't keep advancing.
+        state.goal_failure_counts.remove(goal_id);
         return apply_lifecycle_decision(action, state, goal_id, &live, decision);
     }
 

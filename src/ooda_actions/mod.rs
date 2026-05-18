@@ -4,7 +4,11 @@
 //! Each [`ActionKind`] maps to a concrete subsystem call. Failures are
 //! per-action, not cycle-wide (Pillar 11: honest degradation).
 
-mod advance_goal;
+// `advance_goal` is `pub(crate)` so the issue-#1911 brain-failure marker
+// constants and `is_brain_failure_marker` predicate in
+// `advance_goal::spawn` are reachable from `crate::operator_cli::goal`
+// (CLI bulk-unblock scoping) and from cross-module test modules.
+pub(crate) mod advance_goal;
 mod goal_session;
 mod session;
 mod simple_actions;
