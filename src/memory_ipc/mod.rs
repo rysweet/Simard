@@ -217,11 +217,31 @@ pub(crate) fn write_frame<W: Write>(w: &mut W, payload: &[u8]) -> SimardResult<(
     w.flush().map_err(|e| ipc_err("flush", e))
 }
 
+/// Maximum accepted IPC frame size (16 MiB).
+///
+/// Caps the per-message allocation triggered by [`read_frame`]. The 4-byte
+/// big-endian length prefix could theoretically request a ~4 GiB buffer,
+/// which a compromised or buggy peer could use to OOM the daemon or any
+/// client. 16 MiB comfortably exceeds every legitimate `MemoryRequest` /
+/// `MemoryResponse` (the largest realistic payloads are bulk fact searches
+/// or procedure recalls, which are bounded by client-supplied `limit`
+/// values measured in entries, not megabytes).
+pub(crate) const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
 pub(crate) fn read_frame<R: Read>(r: &mut R) -> SimardResult<Vec<u8>> {
     let mut len_buf = [0u8; 4];
     r.read_exact(&mut len_buf)
         .map_err(|e| ipc_err("read-len", e))?;
     let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_FRAME_BYTES {
+        return Err(SimardError::BridgeTransportError {
+            bridge: "memory-ipc".into(),
+            reason: format!(
+                "frame length {len} exceeds maximum {MAX_FRAME_BYTES} bytes; \
+                 refusing to allocate (possible malformed or hostile peer)"
+            ),
+        });
+    }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)
         .map_err(|e| ipc_err("read-body", e))?;

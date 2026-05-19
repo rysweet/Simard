@@ -1,5 +1,6 @@
 //! Server: spawn_server + ServerHandle + serve_connection + dispatch.
 
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -38,11 +39,36 @@ pub fn spawn_server(
     // would falsely report "socket in use" — leaving the new daemon
     // without an IPC server while meetings kept falling back to direct open.
     let _ = std::fs::remove_file(&socket_path);
-    let listener =
-        UnixListener::bind(&socket_path).map_err(|e| SimardError::BridgeSpawnFailed {
+    // Apply a restrictive umask around bind() so the socket inode lands at
+    // 0o600 regardless of the operator's umask or state_root permissions
+    // (issues #1923 / #1925 relocated the socket under `state_root`, which
+    // may live on multi-user mounts when `SIMARD_STATE_ROOT` points
+    // somewhere other than `$HOME/.simard`). The previous umask is
+    // restored immediately to avoid leaking the restriction into the
+    // surrounding process. A redundant explicit chmod follows as belt-
+    // and-braces against filesystems with default ACLs that ignore umask.
+    // SAFETY: libc::umask is thread-unsafe; the listener's lifetime is
+    // sub-millisecond and confined to startup before any worker threads
+    // exist.
+    let prev_umask = unsafe { libc::umask(0o177) };
+    let listener_result = UnixListener::bind(&socket_path);
+    unsafe {
+        libc::umask(prev_umask);
+    }
+    let listener = listener_result.map_err(|e| SimardError::BridgeSpawnFailed {
+        bridge: "memory-ipc".into(),
+        reason: format!("bind {}: {e}", socket_path.display()),
+    })?;
+    if let Err(e) = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)) {
+        let _ = std::fs::remove_file(&socket_path);
+        return Err(SimardError::BridgeSpawnFailed {
             bridge: "memory-ipc".into(),
-            reason: format!("bind {}: {e}", socket_path.display()),
-        })?;
+            reason: format!(
+                "chmod 0600 {}: {e} (socket removed to avoid leaving a permissive inode)",
+                socket_path.display()
+            ),
+        });
+    }
 
     let socket_clone = socket_path.clone();
     let mem = Arc::clone(&memory);
