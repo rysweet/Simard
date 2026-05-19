@@ -180,3 +180,4 @@ That is the intended contract for invalid or unreadable operator state. Fix the 
 - For the exact command tree and example syntax, see [Simard CLI reference](../reference/simard-cli.md).
 - For the executable contract behind the read and run paths, see [Runtime contracts reference](../reference/runtime-contracts.md).
 - For the wider tutorial flow that also exercises engineer, meeting, goal-curation, and bootstrap modes, see [Tutorial: Run your first local session](../tutorials/run-your-first-local-session.md).
+- For the durable captured-context entry behind the "Capture denser execution evidence" example goal used in step 3, see [Improvement context: denser execution evidence for the engineer loop](../concepts/improvement-context-execution-evidence-gap.md).

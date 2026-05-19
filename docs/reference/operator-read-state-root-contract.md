@@ -270,3 +270,8 @@ silent regression.
   — walkthrough that uses the required `<state-root>` argument
   explicitly across `review run`, `improvement-curation run`, and the
   read companion.
+- [Improvement context: denser execution evidence for the engineer loop](../concepts/improvement-context-execution-evidence-gap.md)
+  — captured improvement-curation context adjacent to this contract;
+  preserves the active "Capture denser execution evidence" goal and the
+  observation that the legacy `simard_operator_probe` surface does not
+  yet expose a terminal engineer-loop probe.

@@ -58,6 +58,7 @@ nav:
   - Concepts:
     - Truthful Runtime Metadata: concepts/truthful-runtime-metadata.md
     - Prompt-driven Brain Iteration: concepts/prompt-driven-brain-iteration.md
+    - Improvement context — denser execution evidence: concepts/improvement-context-execution-evidence-gap.md
   - Tutorials:
     - First Local Session: tutorials/run-your-first-local-session.md
     - First Benchmark Suite: tutorials/run-your-first-benchmark-gym.md
