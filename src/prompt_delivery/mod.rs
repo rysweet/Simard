@@ -240,13 +240,19 @@ impl FromStr for PromptDelivery {
         if trimmed.is_empty() {
             return Err(ParsePromptDeliveryError(trimmed.to_string()));
         }
-        let folded = trimmed.to_ascii_lowercase();
-        match folded.as_str() {
-            "auto" => Ok(PromptDelivery::Auto),
-            "inline" | "cli" | "argv" | "arg" => Ok(PromptDelivery::Inline),
-            "stdin" | "pipe" => Ok(PromptDelivery::Stdin),
-            "tempfile" | "temp-file" | "temp_file" | "file" => Ok(PromptDelivery::TempFile),
-            _ => Err(ParsePromptDeliveryError(trimmed.to_string())),
+        // Match aliases via `eq_ignore_ascii_case` so we don't allocate a
+        // lowercased copy on every env-var lookup (hot path on Auto mode).
+        let m = |alias: &str| trimmed.eq_ignore_ascii_case(alias);
+        if m("auto") {
+            Ok(PromptDelivery::Auto)
+        } else if m("inline") || m("cli") || m("argv") || m("arg") {
+            Ok(PromptDelivery::Inline)
+        } else if m("stdin") || m("pipe") {
+            Ok(PromptDelivery::Stdin)
+        } else if m("tempfile") || m("temp-file") || m("temp_file") || m("file") {
+            Ok(PromptDelivery::TempFile)
+        } else {
+            Err(ParsePromptDeliveryError(trimmed.to_string()))
         }
     }
 }
