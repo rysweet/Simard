@@ -13,7 +13,7 @@ Usage: simard meeting <command> [args]
 Commands:
   run <base-type> <topology> <objective> [state-root]
                             Run an automated meeting probe and exit.
-  read <base-type> <topology> [state-root]
+  read <base-type> <topology> <state-root>
                             Read the latest meeting transcript and exit.
   repl [topic]              Start an interactive meeting REPL on stdin.
   begin [topic]             Alias for `repl`.
@@ -26,7 +26,7 @@ Examples:
   simard meeting --help
   simard meeting repl \"weekly sync\"
   simard meeting run local-harness single-process \"design review\"
-  simard meeting read local-harness single-process
+  simard meeting read local-harness single-process /path/to/state-root
 ";
 
 pub(super) fn dispatch_meeting_command(

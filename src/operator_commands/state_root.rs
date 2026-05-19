@@ -132,12 +132,50 @@ pub(crate) fn resolved_review_state_root(
     )
 }
 
+/// Issue rysweet/Simard#1909: enforce explicit `<state-root>` for the
+/// three read subcommands (`meeting read`, `improvement-curation read`,
+/// and `review read`). Returns `SimardError::MissingRequiredConfig`
+/// with the unified wording when `explicit` is `None`; otherwise
+/// delegates to `bootstrap::validate_state_root`.
+///
+/// Contract:
+///   * No implicit fallback to a synthesized probe default path.
+///   * The `SIMARD_STATE_ROOT` environment variable is **not** honored
+///     for these read paths (the error message says so explicitly).
+///
+/// See: docs/reference/operator-read-state-root-contract.md
+pub(crate) fn require_explicit_state_root_for_read(
+    explicit: Option<PathBuf>,
+    subcommand: &str,
+    base_type: &str,
+) -> crate::SimardResult<PathBuf> {
+    match explicit {
+        Some(path) => crate::bootstrap::validate_state_root(path),
+        None => Err(crate::SimardError::MissingRequiredConfig {
+            key: "state-root".to_string(),
+            help: format!(
+                "state-root is required for `simard {subcommand} read {base_type}`: \
+                 pass the positional <state-root> argument explicitly. The \
+                 SIMARD_STATE_ROOT environment variable is not honored for this command."
+            ),
+        }),
+    }
+}
+
+pub(crate) fn resolved_review_read_state_root(
+    explicit: Option<PathBuf>,
+    base_type: &str,
+) -> crate::SimardResult<PathBuf> {
+    require_explicit_state_root_for_read(explicit, "review", base_type)
+}
+
 pub(crate) fn resolved_improvement_curation_read_state_root(
     explicit: Option<PathBuf>,
     base_type: &str,
-    topology: &str,
+    _topology: &str,
 ) -> crate::SimardResult<PathBuf> {
-    let state_root = resolved_review_state_root(explicit, base_type, topology)?;
+    let state_root =
+        require_explicit_state_root_for_read(explicit, "improvement-curation", base_type)?;
     validate_improvement_curation_read_state_root(&state_root)?;
     Ok(state_root)
 }
@@ -175,15 +213,9 @@ pub(crate) fn resolved_terminal_read_state_root(
 pub(crate) fn resolved_meeting_read_state_root(
     explicit: Option<PathBuf>,
     base_type: &str,
-    topology: &str,
+    _topology: &str,
 ) -> crate::SimardResult<PathBuf> {
-    let state_root = resolved_state_root(
-        explicit,
-        "simard-meeting",
-        base_type,
-        topology,
-        "meeting-run",
-    )?;
+    let state_root = require_explicit_state_root_for_read(explicit, "meeting", base_type)?;
     validate_meeting_read_state_root(&state_root)?;
     Ok(state_root)
 }
@@ -308,5 +340,107 @@ mod tests {
     fn parse_runtime_topology_case_sensitive() {
         assert!(parse_runtime_topology("Single-Process").is_err());
         assert!(parse_runtime_topology("DISTRIBUTED").is_err());
+    }
+
+    // ---------------------------------------------------------------
+    // Issue rysweet/Simard#1909 — resolver-layer hard-fail guard.
+    //
+    // These are TDD-failing tests: the function under test
+    // (`require_explicit_state_root_for_read`) does not exist yet on
+    // `main`. They pin the contract that:
+    //   * `None` → `SimardError::MissingRequiredConfig` with the
+    //     unified wording (subcommand + base-type named, env-var
+    //     fallback explicitly disclaimed).
+    //   * `Some(path)` → delegates to `bootstrap::validate_state_root`
+    //     and yields the validated path back (or a non-#1909 error).
+    // See: docs/reference/operator-read-state-root-contract.md
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn require_explicit_state_root_for_read_rejects_none_with_unified_wording() {
+        let err = require_explicit_state_root_for_read(None, "meeting", "local-harness")
+            .expect_err("missing explicit state-root must hard-fail");
+        match err {
+            crate::SimardError::MissingRequiredConfig { key, help } => {
+                assert_eq!(key, "state-root", "error key must be `state-root`");
+                assert!(
+                    help.contains("state-root is required"),
+                    "help should open with `state-root is required`, got: {help}"
+                );
+                assert!(
+                    help.contains("simard meeting read local-harness"),
+                    "help should name the failing subcommand+base-type, got: {help}"
+                );
+                assert!(
+                    help.contains("pass the positional <state-root> argument explicitly"),
+                    "help should describe the corrective action, got: {help}"
+                );
+                assert!(
+                    help.contains("SIMARD_STATE_ROOT environment variable is not honored"),
+                    "help must explicitly disclaim env-var fallback, got: {help}"
+                );
+            }
+            other => panic!("expected MissingRequiredConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn require_explicit_state_root_for_read_rejects_none_for_each_subcommand_label() {
+        for (subcommand, base) in [
+            ("meeting", "local-harness"),
+            ("improvement-curation", "local-harness"),
+            ("review", "local-harness"),
+        ] {
+            let result = require_explicit_state_root_for_read(None, subcommand, base);
+            assert!(
+                matches!(
+                    result,
+                    Err(crate::SimardError::MissingRequiredConfig { ref key, .. })
+                        if key == "state-root"
+                ),
+                "expected `MissingRequiredConfig {{ key: \"state-root\" }}` for \
+                 {subcommand} read {base}, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn require_explicit_state_root_for_read_accepts_some_existing_dir() {
+        let dir =
+            std::env::temp_dir().join(format!("simard-issue-1909-explicit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("tempdir should be creatable");
+        let result =
+            require_explicit_state_root_for_read(Some(dir.clone()), "meeting", "local-harness");
+        let _ = std::fs::remove_dir_all(&dir);
+        let resolved = result.expect("explicit existing dir must pass the guard");
+        // bootstrap::validate_state_root canonicalizes, so just compare
+        // by file_name to keep the assertion platform-agnostic.
+        assert_eq!(
+            resolved.file_name(),
+            dir.file_name(),
+            "explicit path should round-trip through the guard"
+        );
+    }
+
+    #[test]
+    fn require_explicit_state_root_for_read_some_does_not_emit_missing_config() {
+        let dir = std::env::temp_dir().join(format!(
+            "simard-issue-1909-no-missing-config-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("tempdir should be creatable");
+        let result = require_explicit_state_root_for_read(
+            Some(dir.clone()),
+            "improvement-curation",
+            "local-harness",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        match result {
+            Ok(_) => {}
+            Err(crate::SimardError::MissingRequiredConfig { .. }) => {
+                panic!("explicit state-root must never produce MissingRequiredConfig");
+            }
+            Err(other) => panic!("unexpected non-#1909 error path: {other:?}"),
+        }
     }
 }

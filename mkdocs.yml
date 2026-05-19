@@ -73,6 +73,7 @@ nav:
   - Reference:
     - CLI Reference: reference/simard-cli.md
     - Runtime Contracts: reference/runtime-contracts.md
+    - Operator Read State-Root Contract: reference/operator-read-state-root-contract.md
     - Bridge Wire Protocol: reference/bridge-wire-protocol.md
     - Dashboard E2E Tests: reference/dashboard-e2e-tests.md
     # Hidden from nav until issue #1590 implementation lands:

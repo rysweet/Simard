@@ -129,11 +129,6 @@ fn goal_curation_default_root_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-fn meeting_default_root_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
 fn engineer_default_root_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -148,34 +143,11 @@ fn default_engineer_state_root(topology: &str) -> PathBuf {
         .join(topology)
 }
 
-fn default_meeting_state_root(base_type: &str, topology: &str) -> PathBuf {
-    repo_root()
-        .join("target/operator-probe-state")
-        .join("meeting-run")
-        .join("simard-meeting")
-        .join(base_type)
-        .join(topology)
-}
-
 fn default_goal_curation_state_root(base_type: &str, topology: &str) -> PathBuf {
     repo_root()
         .join("target/operator-probe-state")
         .join("goal-curation-run")
         .join("simard-goal-curator")
-        .join(base_type)
-        .join(topology)
-}
-
-fn review_default_root_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-fn default_review_state_root(base_type: &str, topology: &str) -> PathBuf {
-    repo_root()
-        .join("target/operator-probe-state")
-        .join("review-run")
-        .join("simard-engineer")
         .join(base_type)
         .join(topology)
 }
@@ -548,7 +520,7 @@ fn simard_help_documents_meeting_read_as_the_durable_meeting_audit_surface() {
         "simard help should stay readable while the durable meeting read command is added:\n{rendered}"
     );
     assert!(
-        rendered.contains("meeting read <base-type> <topology> [state-root]"),
+        rendered.contains("meeting read <base-type> <topology> <state-root>"),
         "simard help should document the canonical read-only meeting workflow:\n{rendered}"
     );
 }
@@ -586,7 +558,7 @@ fn simard_help_documents_improvement_curation_read_as_the_durable_review_decisio
         "simard help should stay readable while the durable improvement readback command is added:\n{rendered}"
     );
     assert!(
-        rendered.contains("improvement-curation read <base-type> <topology> [state-root]"),
+        rendered.contains("improvement-curation read <base-type> <topology> <state-root>"),
         "simard help should document the canonical read-only improvement curation workflow:\n{rendered}"
     );
 }
@@ -2874,103 +2846,45 @@ goal: Preserve meeting handoff | priority=1 | status=active | rationale=carry de
     );
 }
 
+// Issue rysweet/Simard#1909: `meeting read` must HARD-FAIL when no
+// positional `<state-root>` is given — it must NOT silently fall back
+// to the synthesized run-default path. This test used to assert the
+// opposite (fallback-honored) contract and was `#[ignore]`d. It is now
+// un-ignored and inverted so the new resolver-layer guard is locked in
+// by every `cargo test` run. See:
+//   docs/reference/operator-read-state-root-contract.md
+//   tests/issue_1909_state_root_required.rs
 #[test]
-#[ignore] // Spawns simard binary — hangs in pre-commit
-fn simard_meeting_read_reuses_the_run_default_state_root_and_stays_read_only() {
-    let _lock = meeting_default_root_lock()
-        .lock()
-        .expect("meeting default root test lock should not be poisoned");
-    let state_root = default_meeting_state_root("local-harness", "single-process");
-    let _cleanup = CleanupDirGuard::new(state_root.clone());
-    let meeting_objective = "\
-agenda: align the next Simard workstream\n\
-update: durable \u{1b}[31mmemory\u{1b}[0m merged\n\
-decision: preserve meeting-to-engineer continuity\n\
-risk: workflow routing is still unreliable\n\
-next-step: keep durable priorities visible\n\
-open-question: how aggressively should Simard reprioritize?\n\
-goal: Preserve \u{1b}]8;;https://example.invalid\u{7}meeting handoff\u{1b}]8;;\u{7} | priority=1 | status=active | rationale=meeting decisions must shape later work";
-
-    let run_output = Command::new(env!("CARGO_BIN_EXE_simard"))
-        .arg("meeting")
-        .arg("run")
-        .arg("local-harness")
-        .arg("single-process")
-        .arg(meeting_objective)
-        .output()
-        .expect("simard meeting run should launch with its default state root");
-    let run_rendered = rendered_output(&run_output);
-
-    assert!(
-        run_output.status.success(),
-        "meeting run should succeed with its canonical default state root:\n{run_rendered}"
-    );
-    assert!(
-        run_rendered.contains(&format!("State root: {}", state_root.display())),
-        "meeting run should surface the canonical default durable root it writes:\n{run_rendered}"
-    );
-
-    let memory_before =
-        fs::read(state_root.join("memory_records.json")).expect("memory store should exist");
-    let goals_before =
-        fs::read(state_root.join("goal_records.json")).expect("goal store should exist");
-
+fn simard_meeting_read_hard_fails_when_run_default_state_root_is_absent() {
     let read_output = Command::new(env!("CARGO_BIN_EXE_simard"))
         .arg("meeting")
         .arg("read")
         .arg("local-harness")
         .arg("single-process")
         .output()
-        .expect("simard meeting read should launch with its default state root");
+        .expect("simard meeting read should launch");
     let read_rendered = rendered_output(&read_output);
 
     assert!(
-        read_output.status.success(),
-        "meeting read should inspect the same canonical default durable root that run populates:\n{read_rendered}"
+        !read_output.status.success(),
+        "meeting read must hard-fail when no explicit <state-root> is supplied; \
+         silent fallback to the run-default path is forbidden by #1909:\n{read_rendered}"
     );
-    for expected in [
-        "Probe mode: meeting-read",
-        "Identity: simard-meeting",
-        &format!("State root: {}", state_root.display()),
-        "Meeting records: 1",
-        "Latest agenda: align the next Simard workstream",
-        "Updates count: 1",
-        "Update 1: durable memory merged",
-        "Decisions count: 1",
-        "Decision 1: preserve meeting-to-engineer continuity",
-        "Risks count: 1",
-        "Risk 1: workflow routing is still unreliable",
-        "Next steps count: 1",
-        "Next step 1: keep durable priorities visible",
-        "Open questions count: 1",
-        "Open question 1: how aggressively should Simard reprioritize?",
-        "Goal updates count: 1",
-        "Goal update 1: p1 [active] Preserve meeting handoff",
-        "Latest meeting record: agenda=align the next Simard workstream;",
-    ] {
-        assert!(
-            read_rendered.contains(expected),
-            "meeting read should surface '{expected}' for operators:\n{read_rendered}"
-        );
-    }
-    for forbidden in ['\u{1b}', '\u{7}'] {
-        assert!(
-            !read_rendered.contains(forbidden),
-            "meeting read should sanitize persisted operator-visible text before printing it:\n{read_rendered}"
-        );
-    }
-
-    let memory_after =
-        fs::read(state_root.join("memory_records.json")).expect("memory store should exist");
-    let goals_after =
-        fs::read(state_root.join("goal_records.json")).expect("goal store should exist");
-    assert_eq!(
-        memory_before, memory_after,
-        "meeting read must not rewrite the durable memory store"
+    assert!(
+        read_rendered.contains("missing required configuration 'state-root'"),
+        "meeting read should surface the unified MissingRequiredConfig wording:\n{read_rendered}"
     );
-    assert_eq!(
-        goals_before, goals_after,
-        "meeting read must not rewrite the durable goal store"
+    assert!(
+        read_rendered.contains("simard meeting read local-harness"),
+        "meeting read should name the failing subcommand+base-type in the error:\n{read_rendered}"
+    );
+    assert!(
+        read_rendered.contains("SIMARD_STATE_ROOT environment variable is not honored"),
+        "meeting read should explicitly disclaim the SIMARD_STATE_ROOT env fallback:\n{read_rendered}"
+    );
+    assert!(
+        !read_rendered.contains("Probe mode: meeting-read"),
+        "meeting read must abort BEFORE any probe execution when state-root is absent:\n{read_rendered}"
     );
 }
 
@@ -3624,108 +3538,45 @@ approve: Promote this pattern into a repeatable benchmark | priority=2 | status=
     );
 }
 
+// Issue rysweet/Simard#1909: `improvement-curation read` must HARD-FAIL
+// when no positional `<state-root>` is given — it must NOT silently
+// fall back to the synthesized review-run default path. This test used
+// to assert the opposite (fallback-honored) contract and was `#[ignore]`d.
+// It is now un-ignored and inverted so the new resolver-layer guard is
+// locked in by every `cargo test` run. See:
+//   docs/reference/operator-read-state-root-contract.md
+//   tests/issue_1909_state_root_required.rs
 #[test]
-#[ignore] // Spawns simard binary — hangs in pre-commit
-fn simard_improvement_curation_read_reuses_the_review_default_state_root_and_stays_read_only() {
-    let _lock = review_default_root_lock()
-        .lock()
-        .expect("review default root test lock should not be poisoned");
-    let state_root = default_review_state_root("local-harness", "single-process");
-    let _cleanup = CleanupDirGuard::new(state_root.clone());
-
-    let review_output = Command::new(env!("CARGO_BIN_EXE_simard"))
-        .arg("review")
-        .arg("run")
-        .arg("local-harness")
-        .arg("single-process")
-        .arg("inspect the current Simard review surface and preserve concrete proposals")
-        .output()
-        .expect("simard review run should launch with its default state root");
-    let review_rendered = rendered_output(&review_output);
-
-    assert!(
-        review_output.status.success(),
-        "review run should succeed with its canonical default state root:\n{review_rendered}"
-    );
-    assert!(
-        review_rendered.contains(&format!("State root: {}", state_root.display())),
-        "review run should surface the canonical durable root that improvement read later inspects:\n{review_rendered}"
-    );
-
-    let improvement_objective = "\
-approve: Capture denser execution evidence | priority=1 | status=active | rationale=operators need denser execution evidence now\n\
-defer: Promote this pattern into a repeatable benchmark | rationale=wait for the next benchmark planning pass";
-    let improvement_output = Command::new(env!("CARGO_BIN_EXE_simard"))
-        .arg("improvement-curation")
-        .arg("run")
-        .arg("local-harness")
-        .arg("single-process")
-        .arg(improvement_objective)
-        .output()
-        .expect("simard improvement-curation run should launch with the review default state root");
-    let improvement_rendered = rendered_output(&improvement_output);
-
-    assert!(
-        improvement_output.status.success(),
-        "improvement-curation run should share the canonical review/improvement durable root:\n{improvement_rendered}"
-    );
-    assert!(
-        improvement_rendered.contains(&format!("State root: {}", state_root.display())),
-        "improvement-curation run should surface the shared durable root that readback reuses:\n{improvement_rendered}"
-    );
-
-    let memory_before =
-        fs::read(state_root.join("memory_records.json")).expect("memory store should exist");
-    let goals_before =
-        fs::read(state_root.join("goal_records.json")).expect("goal store should exist");
-
+fn simard_improvement_curation_read_hard_fails_when_review_default_state_root_is_absent() {
     let read_output = Command::new(env!("CARGO_BIN_EXE_simard"))
         .arg("improvement-curation")
         .arg("read")
         .arg("local-harness")
         .arg("single-process")
         .output()
-        .expect(
-            "simard improvement-curation read should launch with the review default state root",
-        );
+        .expect("simard improvement-curation read should launch");
     let read_rendered = rendered_output(&read_output);
 
     assert!(
-        read_output.status.success(),
-        "improvement-curation read should expose durable review and promotion state through the primary CLI:\n{read_rendered}"
+        !read_output.status.success(),
+        "improvement-curation read must hard-fail when no explicit <state-root> \
+         is supplied; silent fallback to the review-run default path is forbidden by #1909:\n{read_rendered}"
     );
-    for expected in [
-        "Probe mode: improvement-curation-read",
-        &format!("State root: {}", state_root.display()),
-        "Latest review artifact:",
-        "Review id:",
-        "Review target:",
-        "Approved proposals: 1",
-        "Approved proposal 1: p1 [active] Capture denser execution evidence",
-        "Deferred proposals: 1",
-        "Deferred proposal 1: Promote this pattern into a repeatable benchmark (wait for the next benchmark planning pass)",
-        "Active goals count: 1",
-        "Active goal 1: p1 [active] Capture denser execution evidence",
-        "Proposed goals count: 0",
-        "Latest improvement record: review=",
-    ] {
-        assert!(
-            read_rendered.contains(expected),
-            "improvement-curation read should surface '{expected}' for operators:\n{read_rendered}"
-        );
-    }
-
-    let memory_after =
-        fs::read(state_root.join("memory_records.json")).expect("memory store should exist");
-    let goals_after =
-        fs::read(state_root.join("goal_records.json")).expect("goal store should exist");
-    assert_eq!(
-        memory_before, memory_after,
-        "improvement-curation read must not rewrite the durable memory store"
+    assert!(
+        read_rendered.contains("missing required configuration 'state-root'"),
+        "improvement-curation read should surface the unified MissingRequiredConfig wording:\n{read_rendered}"
     );
-    assert_eq!(
-        goals_before, goals_after,
-        "improvement-curation read must not rewrite the durable goal store"
+    assert!(
+        read_rendered.contains("simard improvement-curation read local-harness"),
+        "improvement-curation read should name the failing subcommand+base-type in the error:\n{read_rendered}"
+    );
+    assert!(
+        read_rendered.contains("SIMARD_STATE_ROOT environment variable is not honored"),
+        "improvement-curation read should explicitly disclaim the SIMARD_STATE_ROOT env fallback:\n{read_rendered}"
+    );
+    assert!(
+        !read_rendered.contains("Probe mode: improvement-curation-read"),
+        "improvement-curation read must abort BEFORE any probe execution when state-root is absent:\n{read_rendered}"
     );
 }
 
