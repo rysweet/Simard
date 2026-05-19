@@ -1,17 +1,17 @@
-//! Subprocess prompt delivery — TDD stub (issue #1897).
+//! Subprocess prompt delivery — amplihack-rs / Simard parity (issue #1897).
 //!
-//! Status: **scaffold only**. Every public function and method here is a
-//! stub returning [`unimplemented!()`]. The full contract is documented in
-//! [`docs/prompt-delivery.md`](../../docs/prompt-delivery.md); the tests in
-//! [`tests/prompt_delivery.rs`](../../tests/prompt_delivery.rs) plus the
-//! inline `#[cfg(test)] mod tests` block below pin every behaviour the
-//! implementation must satisfy.
+//! Picks one of three transports for handing a prompt to a child process
+//! (inline argv, stdin pipe, or postmortem temp file + stdin) based on size,
+//! NUL-byte presence, caller override, or the `AMPLIHACK_PROMPT_DELIVERY`
+//! environment variable.
 //!
-//! Per the TDD ordering decision (plan D10), this file is committed in its
-//! stub state alongside the failing tests. The implementation commit comes
-//! next and removes every `unimplemented!()` below.
+//! The full contract — heuristic resolution order, alias grammar, RAII
+//! lifecycle, and operational guidance — lives in
+//! [`docs/prompt-delivery.md`](../../docs/prompt-delivery.md). The inline
+//! `#[cfg(test)] mod tests` block below and `tests/prompt_delivery.rs` pin
+//! every behaviour as executable specification.
 //!
-//! ## Public surface (pinned by tests)
+//! ## Public surface
 //!
 //! * [`PromptDelivery`] — variant enum with `Auto / Inline / Stdin / TempFile`.
 //!   `FromStr` accepts the case-insensitive alias grammar from the doc.
@@ -371,8 +371,7 @@ impl AppliedPromptStd {
         })?;
         sink.write_all(&bytes)?;
         sink.flush()?;
-        // Dropping `sink` closes the pipe so the child reads EOF.
-        drop(sink);
+        // `sink` drops at end of scope, closing the pipe so the child reads EOF.
         Ok(())
     }
 
@@ -420,7 +419,7 @@ impl AppliedPromptTokio {
         sink.write_all(&bytes).await?;
         sink.flush().await?;
         sink.shutdown().await?;
-        drop(sink);
+        // `sink` drops at end of scope, closing the pipe so the child reads EOF.
         Ok(())
     }
 
@@ -455,14 +454,7 @@ pub fn apply_std(
             if !args_contain_flag_terminator(cmd.get_args()) {
                 cmd.arg("--");
             }
-            #[cfg(unix)]
-            {
-                cmd.arg(prompt_as_osstr(prompt));
-            }
-            #[cfg(not(unix))]
-            {
-                cmd.arg(prompt_as_osstr(prompt));
-            }
+            cmd.arg(prompt_as_osstr(prompt));
             Ok(AppliedPromptStd {
                 mode: PromptDelivery::Inline,
                 prompt: None,
@@ -507,14 +499,7 @@ pub async fn apply_tokio(
             // injection should pass a non-Inline mode or strip the
             // duplicate `--` themselves.
             cmd.arg("--");
-            #[cfg(unix)]
-            {
-                cmd.arg(prompt_as_osstr(prompt));
-            }
-            #[cfg(not(unix))]
-            {
-                cmd.arg(prompt_as_osstr(prompt));
-            }
+            cmd.arg(prompt_as_osstr(prompt));
             Ok(AppliedPromptTokio {
                 mode: PromptDelivery::Inline,
                 prompt: None,
@@ -543,7 +528,7 @@ pub async fn apply_tokio(
 }
 
 // ===========================================================================
-// Inline unit tests (TDD red phase)
+// Inline unit tests
 // ===========================================================================
 //
 // These tests pin the *pure* parts of the contract:
