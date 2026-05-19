@@ -16,14 +16,24 @@ pub const MEETING_SESSION_WIP_FILENAME: &str = "meeting_session_wip.json";
 
 /// Default directory for meeting handoff artifacts.
 ///
-/// Respects `SIMARD_HANDOFF_DIR` when set, otherwise falls back to
-/// `$CARGO_MANIFEST_DIR/target/meeting_handoffs`.
+/// Precedence ladder (issue #1906):
+/// 1. `SIMARD_HANDOFF_DIR` — narrow override (preserves backward compat
+///    with the legacy idiom used across `tests/ooda_loop` and the
+///    `meeting_backend::tests_persist_extra` suite).
+/// 2. `SIMARD_STATE_ROOT/meeting_handoffs` — broad override via the shared
+///    [`crate::state_root`] helper.
+/// 3. `~/.simard/meeting_handoffs/` — default.
+///
+/// `CARGO_MANIFEST_DIR` is no longer consulted at runtime; previously
+/// `default_handoff_dir()` baked the manifest dir into release binaries.
 pub fn default_handoff_dir() -> PathBuf {
-    std::env::var_os("SIMARD_HANDOFF_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/meeting_handoffs")
-        })
+    if let Some(p) = std::env::var_os("SIMARD_HANDOFF_DIR") {
+        let s = p.to_string_lossy();
+        if !s.trim().is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    crate::state_root::resolve_subdir("meeting_handoffs")
 }
 
 /// A handoff artifact produced when a meeting closes. Contains decisions,

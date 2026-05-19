@@ -35,6 +35,9 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [Runtime contracts reference](./reference/runtime-contracts.md) - Look up executable contracts, state-root guarantees, and the shipped engineer audit readback semantics.
 - [Base type adapters reference](./reference/base-type-adapters.md) - Look up the pluggable agent execution substrates, their capabilities, and topology support.
 - [Meeting backend API reference](./reference/meeting-backend-api.md) - Rust API for the unified MeetingBackend.
+- [Meeting close lifecycle reference](./reference/meeting-close-lifecycle.md) - Bounded close, partial-handoff envelope, atomic writes (#1908).
+- [State-root resolution reference](./reference/state-root-resolution.md) - The shared helper honoring `SIMARD_STATE_ROOT` across every Simard mode (#1906).
+- [How to recover from a meeting close timeout](./howto/recover-from-meeting-close-timeout.md) - Playbook when `handoff_partial=true` fires.
 - [LightweightChatSession reference](./reference/lightweight-chat-session.md) - Direct-subprocess session used for Copilot-provider meeting turns (no PTY overhead).
 - [Terminal session idle detection](./reference/terminal-session-idle-detection.md) - How Simard determines when a PTY session is genuinely idle vs. silently computing.
 - [Cognitive memory bridge helpers](./reference/cognitive-memory-bridge-helpers.md) - `launch_writer_bridge` / `open_reader_bridge` resolution ladder; design notes for the planned in-process Arc shortcut and strict no-silent-degradation contract (issue #1590 follow-up).

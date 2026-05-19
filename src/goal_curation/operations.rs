@@ -77,13 +77,12 @@ fn validate_backlog_item(item: &BacklogItem) -> SimardResult<()> {
 
 /// Resolve the Simard state root directory.
 ///
-/// Priority: `$SIMARD_STATE_ROOT` env var → `$HOME/.simard` → `/home/azureuser/.simard`.
+/// Thin delegating wrapper around [`crate::state_root::simard_state_root`]
+/// so existing `use goal_curation::operations::simard_state_root` imports
+/// keep compiling. There is exactly one resolution helper; this is the
+/// migration-compat surface. Issue #1906.
 pub fn simard_state_root() -> std::path::PathBuf {
-    if let Ok(v) = std::env::var("SIMARD_STATE_ROOT") {
-        return std::path::PathBuf::from(v);
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".into());
-    std::path::PathBuf::from(home).join(".simard")
+    crate::state_root::simard_state_root()
 }
 
 /// Returns `Some(reason)` if the board contains obviously corrupt or

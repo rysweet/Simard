@@ -98,6 +98,7 @@ pub mod self_relaunch_semaphore;
 pub mod session;
 pub mod session_builder;
 pub mod skill_builder;
+pub mod state_root;
 pub mod stewardship;
 pub mod subagent_sessions;
 pub mod terminal_engineer_bridge;

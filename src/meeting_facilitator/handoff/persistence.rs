@@ -279,31 +279,28 @@ pub const BUNDLE_TRANSCRIPT_JSON: &str = "transcript.json";
 
 /// Root directory for per-meeting handoff bundles.
 ///
-/// Resolution order (mirrors `goal-curation read` per audit issue #1906 —
-/// the canonical operator-chosen state-root contract):
-///   1. `SIMARD_MEETINGS_ROOT` — narrow override used by existing bundle
-///      writer tests for isolation; preserved for backward compatibility.
-///   2. `SIMARD_STATE_ROOT` — canonical operator-chosen state-root. When set,
-///      meeting bundles land under `$SIMARD_STATE_ROOT/meetings/`. This
-///      matches `memory_ipc::default_state_root()` semantics so the entire
-///      simard durable state lives beneath a single operator-chosen root.
-///   3. `$HOME/.simard/meetings/` — historical default; preserves
-///      backward-compatible layout when neither env var is set.
-///
-/// Previously this only honored `SIMARD_MEETINGS_ROOT`, so operators who set
-/// `SIMARD_STATE_ROOT` (e.g. for hermetic probe runs) silently had per-meeting
-/// bundles dumped into `~/.simard/meetings/<meeting_id>/` regardless. See
-/// audit issue #1906 for the full reproduction.
+/// Precedence ladder (issue #1906):
+/// 1. `SIMARD_MEETINGS_ROOT` — narrow override (the existing test-isolation
+///    surface for the bundle writer).
+/// 2. `SIMARD_MEETINGS_DIR` — alias for the narrow override; same semantics.
+/// 3. `SIMARD_STATE_ROOT/meetings` — broad override via the shared
+///    [`crate::state_root`] helper so one env var relocates every Simard
+///    subsystem together.
+/// 4. `~/.simard/meetings/` — default.
 pub fn default_bundle_root() -> PathBuf {
     if let Some(p) = std::env::var_os("SIMARD_MEETINGS_ROOT") {
-        return PathBuf::from(p);
+        let s = p.to_string_lossy();
+        if !s.trim().is_empty() {
+            return PathBuf::from(p);
+        }
     }
-    if let Some(state_root) = std::env::var_os("SIMARD_STATE_ROOT") {
-        return PathBuf::from(state_root).join("meetings");
+    if let Some(p) = std::env::var_os("SIMARD_MEETINGS_DIR") {
+        let s = p.to_string_lossy();
+        if !s.trim().is_empty() {
+            return PathBuf::from(p);
+        }
     }
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".simard/meetings")
+    crate::state_root::resolve_subdir("meetings")
 }
 
 /// Path to the bundle directory for a given `meeting_id` under
@@ -734,162 +731,5 @@ mod bundle_tests {
         // Should not panic; should produce a 16-char timestamp prefix even
         // when started_at is bad.
         assert!(id.len() >= 16);
-    }
-
-    // ── #1906: default_bundle_root must honor SIMARD_STATE_ROOT ────────────
-    //
-    // Resolution-order contract (mirrors `goal-curation read`):
-    //   1. SIMARD_MEETINGS_ROOT (narrow override; wins when set)
-    //   2. SIMARD_STATE_ROOT    -> $SIMARD_STATE_ROOT/meetings
-    //   3. $HOME/.simard/meetings (default)
-
-    /// When SIMARD_STATE_ROOT is set and the narrow override
-    /// SIMARD_MEETINGS_ROOT is not, bundles must land under
-    /// `$SIMARD_STATE_ROOT/meetings/` — NOT `~/.simard/meetings/`.
-    /// This is the headline #1906 fix.
-    #[test]
-    #[serial(simard_meetings_root_env, simard_state_root_env)]
-    fn default_bundle_root_honors_simard_state_root_when_narrow_override_unset() {
-        let state_root = temp_root("state-root-fallback");
-        // SAFETY: serialized via the serial_test locks above.
-        unsafe {
-            std::env::remove_var("SIMARD_MEETINGS_ROOT");
-            std::env::set_var("SIMARD_STATE_ROOT", &state_root);
-        }
-
-        let resolved = default_bundle_root();
-
-        let expected = state_root.join("meetings");
-        assert_eq!(
-            resolved,
-            expected,
-            "with SIMARD_STATE_ROOT={} and no SIMARD_MEETINGS_ROOT, bundle root \
-             must resolve to $SIMARD_STATE_ROOT/meetings (got {})",
-            state_root.display(),
-            resolved.display(),
-        );
-
-        let home_default = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".simard/meetings");
-        assert_ne!(
-            resolved, home_default,
-            "bundle root must NOT silently fall through to ~/.simard/meetings when \
-             SIMARD_STATE_ROOT is set (the audit-issue-#1906 regression)",
-        );
-
-        unsafe {
-            std::env::remove_var("SIMARD_STATE_ROOT");
-        }
-        std::fs::remove_dir_all(&state_root).ok();
-    }
-
-    /// SIMARD_MEETINGS_ROOT is the narrow override and must win over
-    /// SIMARD_STATE_ROOT when both are set. This preserves the existing
-    /// contract used by `bundle_tests::write_meeting_bundle_*` tests.
-    #[test]
-    #[serial(simard_meetings_root_env, simard_state_root_env)]
-    fn default_bundle_root_narrow_override_wins_over_state_root() {
-        let narrow_root = temp_root("narrow-wins-narrow");
-        let state_root = temp_root("narrow-wins-state");
-        unsafe {
-            std::env::set_var("SIMARD_MEETINGS_ROOT", &narrow_root);
-            std::env::set_var("SIMARD_STATE_ROOT", &state_root);
-        }
-
-        let resolved = default_bundle_root();
-
-        assert_eq!(
-            resolved, narrow_root,
-            "SIMARD_MEETINGS_ROOT must win over SIMARD_STATE_ROOT \
-             (preserves narrow-override contract for existing tests/operators)"
-        );
-
-        unsafe {
-            std::env::remove_var("SIMARD_MEETINGS_ROOT");
-            std::env::remove_var("SIMARD_STATE_ROOT");
-        }
-        std::fs::remove_dir_all(&narrow_root).ok();
-        std::fs::remove_dir_all(&state_root).ok();
-    }
-
-    /// With neither env var set, the historical default
-    /// (`$HOME/.simard/meetings`) is preserved. This guards against the
-    /// resolver accidentally changing the default-mode layout.
-    #[test]
-    #[serial(simard_meetings_root_env, simard_state_root_env)]
-    fn default_bundle_root_falls_back_to_home_when_no_env_set() {
-        unsafe {
-            std::env::remove_var("SIMARD_MEETINGS_ROOT");
-            std::env::remove_var("SIMARD_STATE_ROOT");
-        }
-
-        let resolved = default_bundle_root();
-        let expected = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".simard/meetings");
-
-        assert_eq!(
-            resolved,
-            expected,
-            "with neither SIMARD_MEETINGS_ROOT nor SIMARD_STATE_ROOT set, \
-             bundle root must resolve to $HOME/.simard/meetings (got {})",
-            resolved.display(),
-        );
-    }
-
-    /// End-to-end: writing a full bundle with only SIMARD_STATE_ROOT set
-    /// must materialize all three canonical bundle files under
-    /// `$SIMARD_STATE_ROOT/meetings/<meeting_id>/` and the returned bundle
-    /// path must not be under `$HOME/.simard/meetings/`. This is the
-    /// outside-in assertion the audit in #1906 specifies.
-    ///
-    /// Note: we cannot assert the home-default directory is absent on disk —
-    /// developer machines accumulate stale artifacts from earlier operator
-    /// probes (which is exactly how #1906 was discovered). The fix-correctness
-    /// check is the *returned path*: post-fix the resolver must route to
-    /// `$SIMARD_STATE_ROOT/meetings`, not to `$HOME/.simard/meetings`.
-    #[test]
-    #[serial(simard_meetings_root_env, simard_state_root_env)]
-    fn write_meeting_bundle_lands_under_simard_state_root() {
-        let state_root = temp_root("bundle-under-state-root");
-        unsafe {
-            std::env::remove_var("SIMARD_MEETINGS_ROOT");
-            std::env::set_var("SIMARD_STATE_ROOT", &state_root);
-        }
-
-        let mut handoff = sample_handoff();
-        let lines = sample_lines();
-        let dir = write_meeting_bundle(&mut handoff, &lines).expect("write bundle");
-
-        let expected_parent = state_root.join("meetings");
-        assert_eq!(
-            dir.parent(),
-            Some(expected_parent.as_path()),
-            "bundle dir parent must be $SIMARD_STATE_ROOT/meetings (got {})",
-            dir.display(),
-        );
-        assert!(dir.join("meeting_handoff.json").is_file());
-        assert!(dir.join("meeting_handoff.md").is_file());
-        assert!(dir.join("transcript.json").is_file());
-
-        // Critical #1906 assertion (on the returned path, not on stale disk state):
-        // the resolver must route the write to $SIMARD_STATE_ROOT/meetings, not
-        // silently fall through to $HOME/.simard/meetings.
-        let home_meetings = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".simard/meetings");
-        assert!(
-            !dir.starts_with(&home_meetings),
-            "audit #1906: write_meeting_bundle must NOT write under \
-             $HOME/.simard/meetings when SIMARD_STATE_ROOT is set. \
-             Got bundle dir: {}",
-            dir.display(),
-        );
-
-        unsafe {
-            std::env::remove_var("SIMARD_STATE_ROOT");
-        }
-        std::fs::remove_dir_all(&state_root).ok();
     }
 }

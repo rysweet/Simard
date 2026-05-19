@@ -97,7 +97,14 @@ launching the REPL.
 
 | Setting | Default | Override |
 |---|---|---|
-| Handoff directory | `<CARGO_MANIFEST_DIR>/target/meeting_handoffs` | `SIMARD_HANDOFF_DIR=<path>` env var |
+| Handoff directory | `<state-root>/meeting_handoffs` (state-root defaults to `~/.simard`) | `SIMARD_HANDOFF_DIR=<path>` (narrow) or `SIMARD_STATE_ROOT=<path>` (broad) |
+| Per-meeting bundle directory | `<state-root>/meetings/<id>/` | `SIMARD_MEETINGS_DIR=<path>` (narrow) or `SIMARD_STATE_ROOT=<path>` (broad) |
+
+The full env-var resolution ladder (narrow wins over broad; broad
+wins over default) is documented in
+[State-root resolution](../reference/state-root-resolution.md).
+`CARGO_MANIFEST_DIR` is **no longer** consulted at runtime; previously
+it leaked into release binaries via `default_handoff_dir()`.
 
 Schema (the `MeetingHandoff` struct in
 `src/meeting_facilitator/handoff/mod.rs`):
@@ -146,12 +153,51 @@ lacks at least one decision **or** at least one action item. The
 ingestion flips it to `true` via
 `mark_meeting_handoff_processed`.
 
+### Atomic writes
+
+`meeting_handoff.json`, `meeting_handoff.md`, and `transcript.json`
+are written via a tmp-file + `fsync` + `rename` sequence. A reader
+that opens the file mid-close sees either the previous content (or
+no file) or the new full content — never a half-written JSON
+document. This invariant holds **even when the close pipeline hits
+a timeout**; see [Meeting close
+lifecycle](../reference/meeting-close-lifecycle.md).
+
 ### Permissions
 
-The handoff is written via the standard Rust file APIs and inherits
-the umask of the writing process. To restrict to owner-only access
-(`0600`), set `umask 0077` before running `simard meeting repl`, or
-place `$SIMARD_HANDOFF_DIR` on a directory that is itself owner-only.
+Newly-created state directories are created with mode `0o700` and
+the handoff files themselves with mode `0o600` on unix. Pre-existing
+directories are not retroactively `chmod`'d. On non-unix targets the
+file inherits the umask of the writing process; set `umask 0077`
+before running the REPL if owner-only access matters.
+
+### Close timeout & partial handoffs
+
+`/close` is bounded by a master timeout (default 60s, configurable
+via `SIMARD_MEETING_CLOSE_TIMEOUT_SECS`, clamped to `[1, 600]`)
+plus an inner agent-close budget (default 15s, configurable via
+`SIMARD_MEETING_AGENT_CLOSE_TIMEOUT_SECS`, clamped to `[1, 120]`)
+plus a ~2s subprocess SIGTERM→SIGKILL grace. The combined
+worst-case wall-clock ceiling is therefore 77s (well under the
+documented 90s public ceiling). If any phase (agent shutdown,
+summary extraction, cognitive-memory flush) exceeds its inner
+budget, the close still writes a deserialize-valid bundle to disk
+and emits:
+
+```
+WARN handoff_partial=true reason=<close_timeout|agent_close_timeout|summary_empty|bridge_timeout|persistence_error> meeting_id=<id>
+```
+
+The on-disk JSON schema is unchanged on a partial close — existing
+consumers parse it without modification. A partial close is
+identifiable by the tracing line above, by the REPL's post-close
+banner (literal prefix `[meeting] WARNING: partial close (reason=`),
+or by empty `decisions`/`action_items` from a productive
+conversation. See
+[Recover from a meeting close timeout](../howto/recover-from-meeting-close-timeout.md)
+for the operator playbook and
+[Meeting close lifecycle](../reference/meeting-close-lifecycle.md)
+for the full timing contract.
 
 ---
 
@@ -161,8 +207,10 @@ At the start of every OODA cycle, the daemon (see
 `src/ooda_loop/cycle.rs:104`):
 
 1. Calls `default_handoff_dir()` to compute the handoff directory
-   (`SIMARD_HANDOFF_DIR` or
-   `$CARGO_MANIFEST_DIR/target/meeting_handoffs`).
+   (`SIMARD_HANDOFF_DIR` if set, else
+   `state_root::resolve_subdir("meeting_handoffs")` which honors
+   `SIMARD_STATE_ROOT`, defaulting to `~/.simard/meeting_handoffs`).
+   See [State-root resolution](../reference/state-root-resolution.md).
 2. Calls `check_meeting_handoffs(&mut state.active_goals,
    &handoff_dir)`, which:
    - Loads the handoff via `load_meeting_handoff(handoff_dir)`.
@@ -334,6 +382,12 @@ issue tracker by hand.
 - [`docs/daemon-mode.md`](../daemon-mode.md) — OODA daemon overview
 - [`docs/operations/cognitive-memory-durability.md`](cognitive-memory-durability.md)
   — the WAL incident that prompted the verification proposal
+- [`docs/reference/meeting-close-lifecycle.md`](../reference/meeting-close-lifecycle.md)
+  — timeout budgets, partial-handoff envelope, atomic writes
+- [`docs/reference/state-root-resolution.md`](../reference/state-root-resolution.md)
+  — the env-var ladder shared by every Simard mode
+- [`docs/howto/recover-from-meeting-close-timeout.md`](../howto/recover-from-meeting-close-timeout.md)
+  — operator playbook when `handoff_partial=true` fires
 - `src/meeting_facilitator/handoff/mod.rs` — `MeetingHandoff` schema
   and helpers
 - `src/ooda_loop/cycle.rs` — OODA-side ingestion
