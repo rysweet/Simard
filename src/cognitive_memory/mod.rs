@@ -382,3 +382,6 @@ pub(crate) use ops::escape_cypher;
 
 #[cfg(test)]
 mod tests_mod;
+
+#[cfg(test)]
+mod tests_lock_vs_corruption_1967;
