@@ -91,7 +91,7 @@ read-only fallback:
 
 | Tier | Source | Condition |
 |------|--------|-----------|
-| 1 | `RemoteCognitiveMemory::connect(default_socket_path())` | A running OODA daemon's IPC socket exists at `~/.simard/memory.sock` and `state_root` matches the daemon's |
+| 1 | `RemoteCognitiveMemory::connect(socket_path_for(state_root))` | A running OODA daemon's IPC socket exists at `<state_root>/memory.sock` (or `$SIMARD_MEMORY_SOCKET` if set) |
 | 2 | `NativeCognitiveMemory::open(state_root)` | No daemon socket; this process can take the writer lock directly (after `reap_stale_open_lock`) |
 | 3 (read-only fallback) | `NativeCognitiveMemory::open_read_only(state_root)` | Both writer attempts failed; the helper currently returns the read-only handle wrapped as a `WriterBridge` |
 
@@ -218,7 +218,7 @@ order:
 
 | Tier | Source | Condition |
 |------|--------|-----------|
-| 1 | `RemoteCognitiveMemory::connect(default_socket_path())` | A running daemon's IPC socket exists |
+| 1 | `RemoteCognitiveMemory::connect(socket_path_for(state_root))` | A running daemon's IPC socket exists at `<state_root>/memory.sock` (or `$SIMARD_MEMORY_SOCKET` if set) |
 | 2 | `NativeCognitiveMemory::open_read_only(state_root)` | No daemon; the read-only opener never contends with the writer lock |
 
 Read-only callers should always prefer this helper over
@@ -267,11 +267,26 @@ let state_root = simard::memory_ipc::default_state_root();
 1. `$SIMARD_STATE_ROOT` if set, else
 2. `$HOME/.simard/state`.
 
-The Unix-domain socket path used by the IPC tier is independent of
-`SIMARD_STATE_ROOT` — see `default_socket_path()`, which always resolves to
-`$HOME/.simard/memory.sock`. This is intentional: the meeting REPL and the
-daemon must discover each other even when they disagree about the DB
-directory.
+The Unix-domain socket path used by the IPC tier is resolved by
+`memory_ipc::socket_path_for(state_root)` and follows the same state
+root as the cognitive-memory DB. Resolution order:
+
+1. `$SIMARD_MEMORY_SOCKET` if set (explicit override, used verbatim).
+2. `<state_root>/memory.sock`, where `state_root` comes from
+   `default_state_root()` above (`$SIMARD_STATE_ROOT` → `$HOME/.simard/state`).
+
+This binding is what makes `SIMARD_STATE_ROOT` actually hermetic: a
+test, or an operator running a per-state-root daemon, no longer collides
+with the live daemon's socket at `~/.simard/memory.sock`. Both tiers of
+[`launch_writer_bridge`](#launch_writer_bridge) and the dashboard /
+meeting REPL clients call the same helper, so daemon and clients always
+agree on the path for a given state root. See the
+[Shared socket-path contract](./simard-cli.md#shared-socket-path-contract)
+in the CLI reference for the operator-visible surface, and
+[How to clean a fixture leak from the live goal board](../howto/clean-fixture-leaks.md)
+for the regression that motivated the change
+([#1923](https://github.com/rysweet/Simard/issues/1923),
+[#1925](https://github.com/rysweet/Simard/issues/1925)).
 
 ---
 
