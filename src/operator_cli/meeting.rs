@@ -25,8 +25,8 @@ If no command is given, an interactive REPL is started with a timestamp topic.
 Examples:
   simard meeting --help
   simard meeting repl \"weekly sync\"
-  simard meeting run gpt-5 ring \"design review\"
-  simard meeting read gpt-5 ring
+  simard meeting run local-harness single-process \"design review\"
+  simard meeting read local-harness single-process
 ";
 
 pub(super) fn dispatch_meeting_command(
@@ -198,6 +198,46 @@ mod tests {
                 "MEETING_HELP must mention '{keyword}'"
             );
         }
+    }
+
+    #[test]
+    fn test_meeting_help_uses_registered_base_type_and_topology() {
+        // Regression for issue #1907: `simard meeting --help` previously advertised
+        // example commands using `gpt-5` as the base type and `ring` as the topology.
+        // Neither value is registered with the runtime base-type/topology registry
+        // (see Specs/ProductArchitecture.md §"Agent Base Type"), so copy-pasting the
+        // example into adjacent subcommands such as `simard goal-curation read`
+        // produced "no adapter is registered for base type 'gpt-5'" and
+        // "invalid value for configuration 'SIMARD_RUNTIME_TOPOLOGY'" errors.
+        //
+        // The help text MUST advertise only registry-valid identifiers so the
+        // examples remain runnable across every operator subcommand. We assert on
+        // `local-harness` / `single-process` because they are the canonical
+        // registered builtin pair already used throughout docs/reference/simard-cli.md.
+        //
+        // The forbidden-substring checks use space-padded " ring " specifically to
+        // avoid false positives on legitimate substrings like "string" or "differing".
+        let help = super::MEETING_HELP;
+        assert!(
+            !help.contains("gpt-5"),
+            "MEETING_HELP must not advertise unregistered base type 'gpt-5' (issue #1907); \
+             use a registry-valid identifier such as 'local-harness'"
+        );
+        assert!(
+            !help.contains(" ring "),
+            "MEETING_HELP must not advertise unregistered topology 'ring' (issue #1907); \
+             use a registry-valid topology such as 'single-process'"
+        );
+        assert!(
+            help.contains("local-harness"),
+            "MEETING_HELP must advertise the registered builtin base type 'local-harness' \
+             so the example is runnable across operator subcommands (issue #1907)"
+        );
+        assert!(
+            help.contains("single-process"),
+            "MEETING_HELP must advertise the registered topology 'single-process' \
+             so the example is runnable across operator subcommands (issue #1907)"
+        );
     }
 
     #[test]
