@@ -456,4 +456,97 @@ mod tests {
         // `Vec` skips serialisation when empty.
         assert_eq!(parsed["brain_judgments"], serde_json::json!([]));
     }
+
+    /// Issue #1890 regression: a BrainJudgmentRecord whose `parse_failure`
+    /// field is `Some(_)` MUST round-trip through `persist_cycle_report`'s
+    /// auto-derive serialisation onto the cycle JSON file. This is
+    /// visibility channel #3 from the four-channel contract (see
+    /// `docs/reference/ooda-brain-parse-failure-record.md`). Locks down the
+    /// "field added to struct but writer forgot to mirror it" class of bug
+    /// that PR #1480 had to repair for `prompt_version`.
+    #[test]
+    fn persist_cycle_report_round_trips_parse_failure_field() {
+        use crate::ooda_brain::{BrainJudgmentRecord, BrainPhase, ParseFailureRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut report = minimal_report(1890);
+        report.brain_judgments.push(BrainJudgmentRecord {
+            phase: BrainPhase::Decide,
+            context_summary: "goal_id=fix-broken-features urgency=0.900".to_string(),
+            decision: "advance_goal".to_string(),
+            rationale: "deterministic fallback (brain Err)".to_string(),
+            confidence: 0.5,
+            fallback: true,
+            prompt_version: String::new(),
+            parse_failure: Some(ParseFailureRecord {
+                phase: "decide".to_string(),
+                goal_id: "fix-broken-features".to_string(),
+                error_message:
+                    "ooda-decide-brain: decide brain response had no JSON object; raw_response=\"OK\""
+                        .to_string(),
+                raw_response_truncated: "OK".to_string(),
+                prompt_name: "ooda_decide.md".to_string(),
+                prompt_version: "abc123def456".to_string(),
+                consecutive_count: 2,
+                retry_attempted: false,
+                timestamp: "2024-01-01T00:00:00+00:00".to_string(),
+            }),
+        });
+        persist_cycle_report(dir.path(), &report);
+        let content =
+            std::fs::read_to_string(dir.path().join("cycle_reports/cycle_1890.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let arr = parsed["brain_judgments"].as_array().expect("array");
+        assert_eq!(arr.len(), 1);
+        let pf = &arr[0]["parse_failure"];
+        assert!(
+            !pf.is_null(),
+            "parse_failure MUST land on disk, got null: {arr:?}",
+        );
+        assert_eq!(pf["phase"], "decide");
+        assert_eq!(pf["goal_id"], "fix-broken-features");
+        assert_eq!(pf["raw_response_truncated"], "OK");
+        assert_eq!(pf["prompt_name"], "ooda_decide.md");
+        assert_eq!(pf["consecutive_count"], 2);
+        assert_eq!(pf["retry_attempted"], false);
+        assert!(
+            pf["error_message"]
+                .as_str()
+                .unwrap()
+                .contains("no JSON object"),
+            "error_message must echo the parser diagnostic, got: {}",
+            pf["error_message"],
+        );
+    }
+
+    /// Anti-regression for byte-for-byte cycle-JSON back-compat: a
+    /// `BrainJudgmentRecord` whose `parse_failure` is `None` (every healthy
+    /// cycle) MUST NOT emit the field at all — pre-PR consumers must see
+    /// the exact same shape they did before.
+    #[test]
+    fn persist_cycle_report_omits_parse_failure_when_none() {
+        use crate::ooda_brain::{BrainJudgmentRecord, BrainPhase};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut report = minimal_report(13);
+        report.brain_judgments.push(BrainJudgmentRecord {
+            phase: BrainPhase::Decide,
+            context_summary: "goal_id=ship-v1 urgency=0.900".to_string(),
+            decision: "advance_goal".to_string(),
+            rationale: "healthy LLM brain".to_string(),
+            confidence: 1.0,
+            fallback: false,
+            prompt_version: "abc123def456".to_string(),
+            parse_failure: None,
+        });
+        persist_cycle_report(dir.path(), &report);
+        let content =
+            std::fs::read_to_string(dir.path().join("cycle_reports/cycle_13.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let arr = parsed["brain_judgments"].as_array().expect("array");
+        assert!(
+            arr[0].get("parse_failure").is_none(),
+            "healthy record MUST NOT emit parse_failure (byte-for-byte back-compat): {arr:?}",
+        );
+    }
 }
