@@ -122,6 +122,87 @@ subordinate-blocked) are intentionally untouched so the command is safe
 to rerun. Idempotent: empty board → no-op, exit zero. The count of
 cleared and skipped goals is logged to stderr.
 
+### `simard goal remove <goal-id>…`
+
+Operator removal — drops one or more goals from the active board **and**
+from the backlog by `id`. Variadic: accepts one or more ids in a single
+invocation so a single command can sweep a known fixture vector
+(`simard goal remove stuck-a stuck-b operator-blocked working alpha`).
+
+Behaviour contract:
+
+- Routes through the daemon's IPC writer (tier 1 of
+  `launch_writer_bridge`) when a daemon socket is reachable, otherwise
+  takes the writer lock directly. The operator never needs to pause the
+  daemon.
+- Persists via [`save_goal_board_with_removals`](./goal-board-api.md#save_goal_board_with_removals)
+  so the requested ids are filtered **after** the merge-on-write step
+  introduced by [#1915](https://github.com/rysweet/Simard/issues/1915).
+  Goals whose ids are not listed are merged from the persisted snapshot
+  exactly as `save_goal_board` would merge them — concurrent unrelated
+  writers do not have their goals dropped.
+- **Idempotent.** Unknown ids are silently skipped (no error), so the
+  same command is safe to rerun. A short summary is logged to stderr:
+  `removed=N skipped_unknown=M active_after=K backlog_after=L`. No goal
+  ids or descriptions are echoed to stdout to keep the surface
+  scriptable.
+- Exits non-zero only on bridge-open / persistence failure, never on
+  unknown ids.
+- Goal payloads are not logged at any verbosity level. Operators wanting
+  before/after evidence should pipe `simard goal list` either side of
+  the call.
+
+Use this command when an operator has positively identified one or more
+goals that must leave the board — for example, the synthetic fixtures
+diagnosed in [#1923](https://github.com/rysweet/Simard/issues/1923) and
+[#1925](https://github.com/rysweet/Simard/issues/1925). For unattended
+sweeps that target the *class* of fixture-leak goal (placeholder
+descriptions of the form `Goal <id>`), prefer
+[`simard goal cleanup --placeholders`](#simard-goal-cleanup-placeholders)
+below.
+
+### `simard goal cleanup --placeholders`
+
+Defence-in-depth sweep — removes every active or backlog goal whose
+`description` matches the placeholder pattern emitted by the
+`active_goal()` test helper in `src/operator_cli/tests_goal.rs`:
+
+```text
+^Goal <id>$
+```
+
+i.e. the literal three-character prefix `Goal `, then a value byte-equal
+to the goal's `id`, with no trailing characters. This is intentionally
+narrow: production code paths never emit `Goal <id>` descriptions
+outside `#[cfg(test)]` modules (verified by
+`rg "format!\(\"Goal \{" src/`), so the false-positive risk is the
+empty set under the current source tree.
+
+Behaviour contract:
+
+- Same persistence pathway as `simard goal remove` — routes through the
+  daemon's IPC writer, persists via `save_goal_board_with_removals`,
+  preserves concurrent unrelated writers.
+- Computes the id list to remove from the freshly read board, then
+  passes those ids into the same `force_remove_ids` slot. The cleanup
+  is therefore exactly as race-safe as `goal remove` is.
+- **Idempotent.** Empty match set → no-op, exit zero. A summary is
+  logged to stderr in the same shape as `goal remove`:
+  `removed=N skipped_unknown=0 active_after=K backlog_after=L`.
+- Exits non-zero only on bridge-open / persistence failure.
+
+Use this command as the live-cleanup tool when the fixture-leak class
+of corruption is suspected but the operator does not yet know the
+exact id vector — for example, when triaging a fresh
+[#1923](https://github.com/rysweet/Simard/issues/1923)-style sighting.
+See [How to clean a fixture leak from the live goal board](../howto/clean-fixture-leaks.md)
+for the full runbook.
+
+The `--placeholders` flag is required so that future cleanup criteria
+can be added as additional flags without changing the default behaviour.
+Invoking `simard goal cleanup` with no criteria flag is an error
+(exit code 2, usage message on stderr).
+
 ## Self-management commands
 
 ### `simard update`
@@ -166,6 +247,47 @@ Rejected inputs include:
 - a symlink root
 
 Safe state roots are canonicalized once and then reused for the rest of the command.
+
+## Shared socket-path contract
+
+The cognitive-memory IPC socket (the Unix-domain socket that fronts the
+daemon's writer lock — see
+[bridge helpers](./cognitive-memory-bridge-helpers.md)) lives **next to
+the cognitive-memory database it fronts**, not at a fixed
+`$HOME/.simard/memory.sock`. This is what makes
+`SIMARD_STATE_ROOT=$TMPDIR/...` actually hermetic: a test that overrides
+the state root no longer collides with the live daemon's socket on a
+shared user account, and a per-state-root daemon can publish its own
+socket without stomping on `~/.simard/memory.sock`.
+
+Resolution order, in priority:
+
+1. `SIMARD_MEMORY_SOCKET` — explicit override. When set, every Simard
+   binary uses this path verbatim for both server bind and client
+   connect. Use this when running a daemon and clients with mismatched
+   state roots intentionally (e.g. an operator REPL that wants to
+   target a non-default DB while the system daemon owns
+   `~/.simard/state`).
+2. `<state_root>/memory.sock` — the default. `state_root` is resolved
+   via the same `default_state_root()` helper used for the DB
+   (`SIMARD_STATE_ROOT` → `$HOME/.simard/state`), so the socket
+   automatically follows any state-root override.
+
+The resolved path is exposed to library callers as
+`memory_ipc::socket_path_for(state_root: &Path) -> PathBuf` and surfaced
+to operators on stderr when the daemon binds the socket
+(`memory_ipc: bound socket at <path>`). Both call sites (daemon bind,
+client connect) MUST use the same helper — there is no inline
+`$HOME/.simard/memory.sock` literal in production code.
+
+> **Operator note.** If you migrate from a pre-fix Simard build, the
+> daemon will publish its socket at `<state_root>/memory.sock` on next
+> start. Stale `~/.simard/memory.sock` files from older daemons are
+> harmless and can be removed: nothing reads or writes them. The
+> dashboard and meeting REPL will pick up the new path automatically
+> because they share the same resolver. See
+> [How to clean a fixture leak from the live goal board](../howto/clean-fixture-leaks.md)
+> for the connected remediation.
 
 ## Terminal-to-engineer bridge
 
@@ -854,7 +976,12 @@ Key behavior:
 
 Environment variables:
 
-- `SIMARD_STATE_ROOT` — override the state root directory
+- `SIMARD_STATE_ROOT` — override the state root directory (also moves
+  the IPC socket — see [Shared socket-path contract](#shared-socket-path-contract))
+- `SIMARD_MEMORY_SOCKET` — override the IPC socket path explicitly,
+  independent of the state root. Useful when daemon and clients
+  intentionally target different state roots (rare; default is
+  `<state_root>/memory.sock`).
 - `SIMARD_AGENT_NAME` — override the agent name (default: `simard-ooda`)
 
 Example:

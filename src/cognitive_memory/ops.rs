@@ -197,6 +197,12 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
         tags: &[String],
         source_id: &str,
     ) -> SimardResult<String> {
+        #[cfg(test)]
+        crate::test_support::hermetic_guard::assert_state_root_isolated(
+            &self.path,
+            "NativeCognitiveMemory::store_fact",
+        );
+
         let id = Self::new_id("sem");
         let tags_str = tags.join(",");
         self.execute(&format!(

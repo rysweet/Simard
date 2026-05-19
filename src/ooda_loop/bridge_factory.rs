@@ -5,8 +5,8 @@
 //! Strategy:
 //!
 //! 1. Memory: prefer the live [`RemoteCognitiveMemory`] IPC client at
-//!    `default_socket_path()` so we share the daemon's open SQLite handle
-//!    when one is running. If that fails, fall back to a direct
+//!    `socket_path_for(state_root)` so we share the daemon's open SQLite
+//!    handle when one is running. If that fails, fall back to a direct
 //!    [`NativeCognitiveMemory::open`] on `state_root`. The fallback is the
 //!    correct behaviour for one-shot recipe runs (parity tests, ad-hoc
 //!    `amplihack recipe run`) when no daemon is up.
@@ -41,7 +41,7 @@ use super::OodaBridges;
 /// Returned as `Box<dyn CognitiveMemoryOps>` so callers don't need to know
 /// which path was taken.
 pub fn connect_memory(state_root: &Path) -> SimardResult<Box<dyn CognitiveMemoryOps>> {
-    let socket_path = memory_ipc::default_socket_path();
+    let socket_path = memory_ipc::socket_path_for(state_root);
     if socket_path.exists()
         && let Ok(remote) = RemoteCognitiveMemory::connect(&socket_path)
     {

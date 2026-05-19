@@ -54,7 +54,11 @@ fn seed_active_only(state_root: &std::path::Path, n: usize) -> GoalBoard {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn top_5_active_records_come_from_cognitive_memory_in_seeded_order() {
+    // Pin SIMARD_STATE_ROOT to a TempDir so the #[cfg(test)] hermetic
+    // guard in save_goal_board does not trip when seed_active_only writes.
+    let _hermetic = crate::test_support::HermeticState::new();
     let root = fresh_state_root("top5");
     let seeded = seed_active_only(&root, 7);
     assert_eq!(seeded.active.len(), 7);
@@ -102,9 +106,13 @@ fn engineer_pipeline_returns_empty_top_5_when_no_snapshot() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn engineer_pipeline_caps_at_five_even_when_more_goals_exist() {
     // Goal board enforces MAX_ACTIVE_GOALS = 5, so seeding 5 + take(5)
     // must return exactly 5 records and never panic.
+    // Pin SIMARD_STATE_ROOT to a TempDir so the #[cfg(test)] hermetic
+    // guard in save_goal_board does not trip.
+    let _hermetic = crate::test_support::HermeticState::new();
     let root = fresh_state_root("cap-at-5");
     seed_active_only(&root, 5);
 

@@ -19,25 +19,11 @@
 //! Tests below reference both helpers — they will not compile until the
 //! migration adds them, which is the intended TDD red state.
 
-use std::path::PathBuf;
-
 use crate::cognitive_memory::NativeCognitiveMemory;
 use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, load_goal_board, save_goal_board};
+use crate::test_support::HermeticState;
 
 use super::{dashboard_goal_board_snapshot, dashboard_save_goal_board};
-
-fn fresh_state_root(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "simard-dashboard-mig-{tag}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 fn seeded_board() -> GoalBoard {
     let mut board = GoalBoard::new();
@@ -58,7 +44,8 @@ fn seeded_board() -> GoalBoard {
 #[test]
 #[serial_test::serial(cognitive_memory)]
 fn reader_returns_snapshot_from_cognitive_memory_without_legacy_file() {
-    let root = fresh_state_root("reader");
+    let state = HermeticState::new();
+    let root = state.state_root().to_path_buf();
     let board = seeded_board();
     {
         let mem = NativeCognitiveMemory::open(&root).expect("open native memory");
@@ -96,7 +83,8 @@ fn reader_returns_snapshot_from_cognitive_memory_without_legacy_file() {
 #[test]
 #[serial_test::serial(cognitive_memory)]
 fn writer_persists_through_cognitive_memory_without_legacy_file() {
-    let root = fresh_state_root("writer");
+    let state = HermeticState::new();
+    let root = state.state_root().to_path_buf();
     {
         let mem = NativeCognitiveMemory::open(&root).expect("open native memory");
         save_goal_board(&GoalBoard::new(), &mem).expect("seed empty board");
@@ -140,7 +128,8 @@ fn reader_returns_empty_board_when_snapshot_missing() {
     // snapshot exists (operations.rs:188-214). The dashboard helper must
     // inherit that behaviour so a brand-new install renders "0 goals"
     // instead of returning a 500.
-    let root = fresh_state_root("reader-empty");
+    let state = HermeticState::new();
+    let root = state.state_root().to_path_buf();
     {
         let _mem = NativeCognitiveMemory::open(&root).expect("open native memory");
     }
@@ -160,7 +149,8 @@ fn reader_returns_empty_board_when_snapshot_missing() {
 fn writer_round_trip_via_dashboard_helpers() {
     // End-to-end: save through the dashboard helper, then read through the
     // dashboard helper, must round-trip without touching disk.
-    let root = fresh_state_root("roundtrip");
+    let state = HermeticState::new();
+    let root = state.state_root().to_path_buf();
     {
         let mem = NativeCognitiveMemory::open(&root).expect("open native memory");
         save_goal_board(&GoalBoard::new(), &mem).expect("init empty board");

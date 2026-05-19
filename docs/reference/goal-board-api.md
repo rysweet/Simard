@@ -279,6 +279,97 @@ This caveat applies symmetrically to `active` and `backlog`. It does
 description, assignment) — those are governed by the field-level
 last-writer-wins rule above.
 
+### `save_goal_board_with_removals`
+
+```rust
+pub fn save_goal_board_with_removals(
+    board: &GoalBoard,
+    force_remove_ids: &[String],
+    bridge: &dyn CognitiveMemoryOps,
+) -> SimardResult<()>
+```
+
+The explicit-removal sibling of [`save_goal_board`](#save_goal_board).
+Introduced for issues
+[#1923](https://github.com/rysweet/Simard/issues/1923) and
+[#1925](https://github.com/rysweet/Simard/issues/1925) so an operator
+(or a future scheduled cleanup task) can drop a known goal-id set from
+the persisted board without being defeated by the merge-on-write
+resurrection described under [Deletion semantics (RR-5)](#deletion-semantics-rr-5)
+above.
+
+**Pipeline.** Identical to `save_goal_board` up to and including the
+merge step, then with one additional filter:
+
+1. Integrity-guard the in-flight board.
+2. Read the latest persisted snapshot.
+3. Merge persisted ⨁ in-flight via `merge_boards`.
+4. **Filter:** drop every goal whose `id` is in `force_remove_ids`,
+   from both `active` and `backlog`.
+5. Apply the same deterministic active-capacity truncation as
+   `save_goal_board`.
+6. `store_fact` the filtered, truncated, merged board with the same
+   constant fact metadata as `save_goal_board`.
+
+The filter runs **after** the merge, so an id that exists only on the
+persisted snapshot (i.e. another writer's view, not the in-flight one)
+is still removed. This is precisely why `force_remove_ids` solves the
+PR #1926 failure mode: under plain `save_goal_board`, dropping a goal
+from `in_flight.active` was unioned back from the persisted snapshot
+and the deletion silently regressed on the next read.
+
+**Sibling, not replacement.** `save_goal_board` keeps its existing
+signature and behaviour. Callers that have no removal intent — the
+overwhelming majority of writers (OODA daemon end-of-cycle save, meeting
+REPL goal-curation saves, dashboard mutations) — continue to use
+`save_goal_board`. Only the two new operator subcommands
+(`simard goal remove`, `simard goal cleanup --placeholders` — see
+[CLI reference](./simard-cli.md#simard-goal-remove-goal-id)) call into
+this variant.
+
+**Semantics of `force_remove_ids`.**
+
+| Case | Behaviour |
+|------|-----------|
+| Empty slice (`&[]`) | Exactly equivalent to `save_goal_board(board, bridge)`. |
+| Id present on merged active or backlog | Removed from the persisted output. |
+| Id absent from merged active and backlog | Silently no-op. **Not** an error — preserves the idempotency contract advertised by the CLI subcommands. |
+| Same id repeated in the slice | Treated as a single removal. Implementation deduplicates internally. |
+| Length up to `MAX_ACTIVE_GOALS + reasonable backlog` (~50) | Supported; no internal cap. The CLI surface bounds list length via argv parsing. |
+
+**Logging.** Emits the same `merge=goal-board …` debug line as
+`save_goal_board`, with one additional field describing the filter:
+
+```text
+merge=goal-board persisted_active=N in_flight_active=M merged_active=K \
+  removed=R truncated=T
+```
+
+`R` is the number of ids in `force_remove_ids` that were actually
+present on the merged board (i.e. that contributed a deletion); the
+count excludes silently-skipped unknown ids. No goal ids or descriptions
+are ever logged. The same log line is emitted on the empty-slice path
+with `removed=0` so structured-log consumers always see the field.
+
+**Read-failure fallback.** Identical to `save_goal_board`: if the
+persisted-snapshot read fails or deserialization fails, the merge step
+is skipped, the filter is applied to the in-flight board alone, and the
+filtered board is persisted unchanged. A `warn!` line is emitted naming
+the bridge operation and the error kind. The filter is still applied on
+the fallback path — an operator who explicitly asked to remove an id
+should never see that id survive a degraded save.
+
+**Best-effort guarantee under concurrent writes.** The
+removal-then-merge ordering means a goal-id added by a *concurrent*
+writer with the same id will not be removed by this call (the
+concurrent writer's `store_fact` lands after the merge read). The
+documented operator workflow — list, identify, remove — already
+tolerates this: the operator's next `simard goal list` will surface any
+resurrection, and a second `simard goal remove` call is safe to issue.
+Callers that need strict serial removal must funnel through the daemon
+IPC writer (which is what the CLI subcommands do — see
+[bridge helpers](./cognitive-memory-bridge-helpers.md)).
+
 #### `merge_boards` (private helper, testable in isolation)
 
 ```rust

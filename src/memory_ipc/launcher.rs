@@ -14,7 +14,7 @@
 //!      is the hot path for same-process callers (dashboard, OODA loop,
 //!      reflection) and bypasses IPC and disk re-open entirely.
 //!   1. Connect to the running OODA daemon's UDS at
-//!      [`super::default_socket_path`] when present and the state_root
+//!      [`super::socket_path_for`] when present and the state_root
 //!      matches — used by separate-process clients (meeting REPL, engineer
 //!      subprocesses).
 //!   2. Reap any stale open-lock left by a crashed prior process and
@@ -36,10 +36,7 @@ use std::sync::{Arc, RwLock, Weak};
 use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::error::{SimardError, SimardResult};
 
-use super::{
-    RemoteCognitiveMemory, SharedMemory, default_socket_path, default_state_root,
-    reap_stale_open_lock,
-};
+use super::{RemoteCognitiveMemory, SharedMemory, reap_stale_open_lock, socket_path_for};
 
 /// Writer bridge to cognitive memory. Holds a `Box<dyn CognitiveMemoryOps>`
 /// underneath; callers should use [`WriterBridge::ops`] to access it.
@@ -194,29 +191,28 @@ fn lookup_in_process_writer(state_root: &Path) -> Option<Arc<dyn CognitiveMemory
     weak.upgrade()
 }
 
-/// Decide whether `state_root` matches the daemon's owned state root.
-/// Only when they agree should a launcher route through the daemon's IPC
-/// socket — otherwise we'd be talking to a daemon that owns a different
-/// DB.
-fn state_root_matches_daemon(state_root: &Path) -> bool {
-    let daemon_root = default_state_root();
-    match (state_root.canonicalize(), daemon_root.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
-    }
-}
-
 /// Launch a cognitive-memory writer bridge against `state_root`.
 ///
 /// Resolution ladder:
 ///   0. In-process Arc shortcut.
-///   1. IPC to the daemon's Unix socket when present and matched.
+///   1. IPC to the socket resolved by [`socket_path_for(state_root)`].
+///      The socket follows the requested `state_root`, so a hermetic
+///      TempDir reader/writer never collides with the live daemon's
+///      socket at `~/.simard/state/memory.sock` (closes
+///      [#1923](https://github.com/rysweet/Simard/issues/1923) /
+///      [#1925](https://github.com/rysweet/Simard/issues/1925)).
 ///   2. Reap any stale lock and `NativeCognitiveMemory::open` directly.
 ///
 /// **No read-only fallback.** A writer bridge that cannot write is a
 /// silent-degradation hazard (the dashboard hollow-success bug from
 /// issue #1590); if no tier yields a writer, the launcher returns `Err`.
 pub fn launch_writer_bridge(state_root: &Path) -> SimardResult<WriterBridge> {
+    #[cfg(test)]
+    crate::test_support::hermetic_guard::assert_state_root_isolated(
+        state_root,
+        "launch_writer_bridge",
+    );
+
     let _ = std::fs::create_dir_all(state_root);
 
     // (0) In-process Arc shortcut — same-process callers sharing the
@@ -225,18 +221,25 @@ pub fn launch_writer_bridge(state_root: &Path) -> SimardResult<WriterBridge> {
         return Ok(WriterBridge::checked_new(Box::new(SharedMemory(arc))));
     }
 
-    // (1) Prefer the running daemon's IPC writer — but only when our
-    // requested state_root actually matches the daemon's.
-    let sock = default_socket_path();
-    if sock.exists() && state_root_matches_daemon(state_root) {
+    // (1) Prefer the running daemon's IPC writer when the resolved socket
+    // for `state_root` is up. `socket_path_for` returns
+    // `<state_root>/memory.sock` by default, so a TempDir state root can
+    // never collide with the live daemon's socket at
+    // `~/.simard/state/memory.sock` — this is what makes
+    // `SIMARD_STATE_ROOT` actually hermetic (#1923/#1925). The
+    // `SIMARD_MEMORY_SOCKET` env var still overrides for the rare cross-
+    // mount probe.
+    let sock = socket_path_for(state_root);
+    if sock.exists() {
         match RemoteCognitiveMemory::connect(&sock) {
             Ok(client) => {
                 return Ok(WriterBridge::checked_new(Box::new(client)));
             }
             Err(e) => {
                 eprintln!(
-                    "[simard] launch_writer_bridge: daemon socket present but connect failed \
-                     ({e}); falling back to direct open"
+                    "[simard] launch_writer_bridge: socket {} present but connect failed \
+                     ({e}); falling back to direct open",
+                    sock.display()
                 );
             }
         }
@@ -264,7 +267,7 @@ pub fn launch_writer_bridge(state_root: &Path) -> SimardResult<WriterBridge> {
 ///
 /// Resolution ladder:
 ///   0. In-process Arc shortcut.
-///   1. Try `RemoteCognitiveMemory::connect(default_socket_path())`.
+///   1. Try `RemoteCognitiveMemory::connect(socket_path_for(state_root))`.
 ///   2. Otherwise `NativeCognitiveMemory::open_read_only` — fails when
 ///      the DB has never been opened.
 pub fn open_reader_bridge(state_root: &Path) -> SimardResult<ReaderBridge> {
@@ -275,10 +278,12 @@ pub fn open_reader_bridge(state_root: &Path) -> SimardResult<ReaderBridge> {
         });
     }
 
-    // (1) Prefer the daemon socket when present — but only when the
-    // requested state_root matches the daemon's.
-    let sock = default_socket_path();
-    if sock.exists() && state_root_matches_daemon(state_root) {
+    // (1) Prefer the daemon socket when present — the socket follows the
+    // requested state_root via `socket_path_for`, so this naturally
+    // routes a hermetic TempDir reader to its own DB even when the live
+    // daemon is up on `~/.simard/state/memory.sock`.
+    let sock = socket_path_for(state_root);
+    if sock.exists() {
         match RemoteCognitiveMemory::connect(&sock) {
             Ok(client) => {
                 return Ok(ReaderBridge {
@@ -287,8 +292,9 @@ pub fn open_reader_bridge(state_root: &Path) -> SimardResult<ReaderBridge> {
             }
             Err(e) => {
                 eprintln!(
-                    "[simard] open_reader_bridge: daemon socket present but connect failed ({e}); \
-                     falling back to direct open_read_only"
+                    "[simard] open_reader_bridge: socket {} present but connect failed ({e}); \
+                     falling back to direct open_read_only",
+                    sock.display()
                 );
             }
         }

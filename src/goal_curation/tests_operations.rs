@@ -1387,11 +1387,32 @@ fn save_goal_board_capacity_bound_holds_after_multiple_merges() {
 /// board containing both goals. Repeated for 50 iterations with a Barrier
 /// to maximise contention on the read-modify-write window.
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn save_goal_board_concurrent_two_writers_preserves_both_goals() {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
+    // Hold ENV_MUTEX for the entire test duration so concurrent tests
+    // using `with_state_root` cannot unset SIMARD_STATE_ROOT mid-test.
+    // Set SIMARD_STATE_ROOT explicitly (do NOT use HermeticState here —
+    // HermeticState does not coordinate with ENV_MUTEX). Spawned threads
+    // then inherit this env value when they read simard_state_root().
+    let env_guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let root = tmp_state_root("save-concurrent");
+    // SAFETY: serialised by ENV_MUTEX (and #[serial(cognitive_memory)]).
+    unsafe {
+        std::env::set_var("SIMARD_STATE_ROOT", &root);
+    }
+    // RAII restore on test exit (panic-safe).
+    struct EnvRestore;
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var("SIMARD_STATE_ROOT");
+            }
+        }
+    }
+    let _restore = EnvRestore;
 
     for iter in 0..50u32 {
         let (bridge, _facts) = stateful_bridge();
@@ -1438,7 +1459,10 @@ fn save_goal_board_concurrent_two_writers_preserves_both_goals() {
         h_a.join().expect("alpha thread must not panic");
         h_b.join().expect("beta thread must not panic");
 
-        let loaded = with_state_root(&root, || super::load_goal_board(bridge.as_ref()).unwrap());
+        // ENV_MUTEX is held for the whole test → calling with_state_root
+        // here would deadlock. SIMARD_STATE_ROOT is already pinned, so
+        // load_goal_board sees the correct value directly.
+        let loaded = super::load_goal_board(bridge.as_ref()).unwrap();
         let ids: Vec<String> = loaded.active.iter().map(|g| g.id.clone()).collect();
         assert!(
             ids.iter().any(|id| id == &alpha_id),
@@ -1449,17 +1473,36 @@ fn save_goal_board_concurrent_two_writers_preserves_both_goals() {
             "iter {iter}: beta goal {beta_id} disappeared — issue #1915 regression. ids={ids:?}"
         );
     }
+    drop(env_guard);
 }
 
 /// Companion concurrency test: backlog-only writes from two threads must
 /// also preserve both items (backlog has the same drift risk as active
 /// per requirement #2).
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn save_goal_board_concurrent_backlog_writers_preserve_both_items() {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
+    // Hold ENV_MUTEX for the entire test duration so concurrent tests
+    // using `with_state_root` cannot unset SIMARD_STATE_ROOT mid-test
+    // (see sibling test for full rationale).
+    let env_guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let root = tmp_state_root("save-concurrent-backlog");
+    // SAFETY: serialised by ENV_MUTEX (and #[serial(cognitive_memory)]).
+    unsafe {
+        std::env::set_var("SIMARD_STATE_ROOT", &root);
+    }
+    struct EnvRestore;
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var("SIMARD_STATE_ROOT");
+            }
+        }
+    }
+    let _restore = EnvRestore;
 
     for iter in 0..25u32 {
         let (bridge, _facts) = stateful_bridge();
@@ -1507,7 +1550,8 @@ fn save_goal_board_concurrent_backlog_writers_preserve_both_items() {
         h_a.join().unwrap();
         h_b.join().unwrap();
 
-        let loaded = with_state_root(&root, || super::load_goal_board(bridge.as_ref()).unwrap());
+        // ENV_MUTEX is held → must not call with_state_root (would deadlock).
+        let loaded = super::load_goal_board(bridge.as_ref()).unwrap();
         let bk_ids: Vec<String> = loaded.backlog.iter().map(|b| b.id.clone()).collect();
         assert!(
             bk_ids.iter().any(|id| id == &alpha_bk_id),
@@ -1518,4 +1562,5 @@ fn save_goal_board_concurrent_backlog_writers_preserve_both_items() {
             "iter {iter}: beta backlog item {beta_bk_id} disappeared, got {bk_ids:?}"
         );
     }
+    drop(env_guard);
 }

@@ -80,3 +80,5 @@ nav:
     #   - reference/goal-board-api.md
     #   - concepts/goal-board-persistence.md (rewritten as spec)
     #   - howto/recover-goal-board.md (rewritten as spec)
+    #   - howto/clean-fixture-leaks.md (#1923 / #1925 — graduates with the rest)
+    #   - testing/hermetic-tests.md (#1923 / #1925 — graduates with the rest)

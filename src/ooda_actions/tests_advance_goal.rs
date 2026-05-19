@@ -331,7 +331,12 @@ fn dispatch_advance_goal_missing_id_fails() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn dispatch_advance_goal_with_dead_subordinate_blocks() {
+    // Pin SIMARD_STATE_ROOT to a TempDir so the #[cfg(test)] hermetic
+    // guard in save_goal_board does not trip when dispatch_actions
+    // persists a blocked-status update.
+    let _hermetic = crate::test_support::HermeticState::new();
     let mut bridges = test_bridges();
     let board = board_with_goal("g1", GoalProgress::NotStarted, Some("sub-1"));
     let mut state = OodaState::new(board);
