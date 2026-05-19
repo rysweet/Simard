@@ -1,6 +1,7 @@
 //! `simard goal` operator subcommands: `list`, `unblock <id>`,
-//! `unblock-all`. Operator escape hatch for the issue-#1911 OODA goal
-//! lockout (and a general-purpose board-inspection tool).
+//! `unblock-all`, `delete <id>`. Operator escape hatch for the
+//! issue-#1911 OODA goal lockout (and a general-purpose board
+//! inspection / remediation tool).
 //!
 //! Subcommand semantics (asymmetric by design — see spec A4):
 //!   - `goal list`         — print active + backlog snapshot to stdout.
@@ -11,6 +12,12 @@
 //!     safeguard marker (`is_brain_failure_marker`). Operator-set,
 //!     scope-blocked, dependency-blocked, and subordinate-blocked
 //!     goals are untouched.
+//!   - `goal delete <id>`  — operator escape hatch for removing a
+//!     corrupt or fabricated placeholder goal record from the active
+//!     board (e.g. test-fixture-shaped goals that leaked into
+//!     production state via the cycle-5→6 corruption pathway tracked
+//!     in issue #1915). Removes the goal regardless of status; backlog
+//!     items are untouched.
 //!
 //! Persistence is cognitive memory via `launch_writer_bridge` against
 //! `simard_state_root()` (honours `SIMARD_STATE_ROOT`). Audit traces are
@@ -45,6 +52,11 @@ pub(super) fn dispatch_goal_command(
         "unblock-all" => {
             reject_extra_args(args)?;
             handle_unblock_all()
+        }
+        "delete" => {
+            let goal_id = next_required(&mut args, "goal id")?;
+            reject_extra_args(args)?;
+            handle_delete(&goal_id)
         }
         other => Err(format!("unsupported command 'goal {other}'").into()),
     }
@@ -115,6 +127,32 @@ fn handle_unblock(goal_id: &str) -> Result<(), Box<dyn Error>> {
     goal.status = GoalProgress::NotStarted;
     save_board(&board)?;
     eprintln!("[simard] goal unblock: '{goal_id}' restored to NotStarted (was: {prior})");
+    Ok(())
+}
+
+/// Remove a goal record from the active board by id.
+///
+/// Operator escape hatch for clearing fabricated placeholder goals (e.g.
+/// test-fixture-shaped records that leaked into the production board via
+/// the cycle-5→6 corruption pathway in issue #1915). Removes the goal
+/// regardless of its current status — operators are expected to verify
+/// the goal is legitimately disposable before invoking this. Backlog
+/// items are intentionally untouched; only the `active` board is
+/// mutated.
+///
+/// Errors when `goal_id` is not present on the active board so operators
+/// notice typos instead of silently no-opping.
+fn handle_delete(goal_id: &str) -> Result<(), Box<dyn Error>> {
+    let mut board = load_board()?;
+    let before = board.active.len();
+    board.active.retain(|g| g.id != goal_id);
+    if board.active.len() == before {
+        return Err(
+            format!("goal '{goal_id}' not found on active board (nothing to delete)").into(),
+        );
+    }
+    save_board(&board)?;
+    eprintln!("[simard] goal delete: '{goal_id}' removed from active board");
     Ok(())
 }
 

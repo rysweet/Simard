@@ -319,3 +319,123 @@ fn simard_goal_unblock_all_does_not_touch_completed_or_in_progress_goals() {
     );
     assert_eq!(by_id("pending").status, GoalProgress::NotStarted);
 }
+
+// ─── `simard goal delete <id>` — operator escape hatch for fabricated/corrupt goals ──
+//
+// Motivating incident: synthetic placeholder goals (e.g. `stuck-b` with
+// description "Goal stuck-b") leaked into the production OODA board via
+// the cycle-5→6 corruption pathway tracked in issue #1915. Operators
+// need a CLI to remove these without raw `cognitive_memory.ladybug`
+// mutation. Tests below cover the three required behaviours:
+//   1. delete-success removes the named goal and preserves the rest
+//   2. unknown-id is a hard error (no silent no-op)
+//   3. backlog items are not touched
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn simard_goal_delete_removes_named_goal_and_preserves_siblings() {
+    let (_tmp, root) = isolated_state_root();
+    seed_board(
+        &root,
+        vec![
+            active_goal("alpha-1", GoalProgress::NotStarted),
+            active_goal("beta-2", GoalProgress::InProgress { percent: 25 }),
+            active_goal("gamma-3", GoalProgress::Completed),
+        ],
+    );
+
+    let result = dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "delete".to_string(),
+        "beta-2".to_string(),
+    ]);
+    assert!(
+        result.is_ok(),
+        "`simard goal delete beta-2` must exit 0; got: {:?}",
+        result.err().map(|e| e.to_string())
+    );
+
+    let board = load_board(&root);
+    assert!(
+        board.active.iter().all(|g| g.id != "beta-2"),
+        "deleted goal must be absent from the board; got ids: {:?}",
+        board.active.iter().map(|g| &g.id).collect::<Vec<_>>()
+    );
+    // Siblings must survive untouched.
+    let surviving_ids: Vec<&str> = board.active.iter().map(|g| g.id.as_str()).collect();
+    assert!(
+        surviving_ids.contains(&"alpha-1") && surviving_ids.contains(&"gamma-3"),
+        "sibling goals must survive delete; got: {surviving_ids:?}"
+    );
+    assert_eq!(
+        board.active.len(),
+        2,
+        "exactly one goal must be removed; got {} active goal(s)",
+        board.active.len()
+    );
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn simard_goal_delete_unknown_id_returns_error_without_mutating_board() {
+    let (_tmp, root) = isolated_state_root();
+    seed_board(
+        &root,
+        vec![active_goal("alpha-1", GoalProgress::NotStarted)],
+    );
+
+    let result = dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "delete".to_string(),
+        "no-such-goal".to_string(),
+    ]);
+    assert!(
+        result.is_err(),
+        "delete of unknown goal id must return a non-zero exit"
+    );
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("no-such-goal"),
+        "error must name the unknown goal id; got: {msg}"
+    );
+
+    // Board must be untouched.
+    let board = load_board(&root);
+    assert_eq!(board.active.len(), 1, "board must be unchanged on error");
+    assert_eq!(board.active[0].id, "alpha-1");
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn simard_goal_delete_clears_brain_failure_marker_goals_via_id() {
+    // Regression scenario from the `stuck-b` engineer brief: a goal stuck
+    // on the brain-failure safeguard marker (or any other Blocked reason)
+    // can be deleted by id when the operator confirms it is fabricated.
+    use crate::ooda_actions::advance_goal::spawn::{
+        BRAIN_FAILURE_BLOCKED_PREFIX, BRAIN_FAILURE_BLOCKED_SUFFIX,
+    };
+    let marker = format!("{BRAIN_FAILURE_BLOCKED_PREFIX}5{BRAIN_FAILURE_BLOCKED_SUFFIX}");
+    let (_tmp, root) = isolated_state_root();
+    seed_board(
+        &root,
+        vec![
+            active_goal("legit-goal", GoalProgress::NotStarted),
+            active_goal("fabricated", GoalProgress::Blocked(marker)),
+        ],
+    );
+
+    let result = dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "delete".to_string(),
+        "fabricated".to_string(),
+    ]);
+    assert!(
+        result.is_ok(),
+        "delete must remove a Blocked goal regardless of reason: {:?}",
+        result.err().map(|e| e.to_string())
+    );
+
+    let board = load_board(&root);
+    assert_eq!(board.active.len(), 1);
+    assert_eq!(board.active[0].id, "legit-goal");
+}

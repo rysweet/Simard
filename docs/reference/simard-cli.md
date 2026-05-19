@@ -122,6 +122,28 @@ subordinate-blocked) are intentionally untouched so the command is safe
 to rerun. Idempotent: empty board → no-op, exit zero. The count of
 cleared and skipped goals is logged to stderr.
 
+### `simard goal delete <goal-id>`
+
+Operator escape hatch — removes a goal record from the active board
+regardless of its current status. Intended for the narrow case where a
+goal entry on the active board is **demonstrably fabricated** (e.g.
+test-fixture leakage tracked under issue #1915, where ids like
+`stuck-a`/`stuck-b` with descriptions of the shape `Goal <id>` appeared
+on the production board between cycles 6 and 7). Backlog items are not
+touched — only `active`.
+
+Exits non-zero if `<goal-id>` is not on the active board (no silent
+no-op), so operators notice typos. The removal is logged to stderr.
+
+> Safety: this is a destructive operation. Prefer
+> `simard goal unblock` for transient lockouts; only reach for
+> `delete` when the goal record itself has no legitimate body, no
+> meaningful description, and no recoverable operator intent. The
+> regression test
+> `auto_recovery_ladder_never_emits_placeholder_goal_titles_or_stuck_ids`
+> in `src/ooda_actions/tests_advance_goal.rs` enforces that the
+> brain-failure auto-recovery ladder never re-synthesises such records.
+
 ## Self-management commands
 
 ### `simard update`

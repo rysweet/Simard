@@ -434,10 +434,29 @@ fn test_goal_unblock_missing_id_returns_error() {
 #[test]
 fn test_help_text_mentions_goal_subcommands() {
     let help = operator_cli_help();
-    for needle in &["goal list", "goal unblock", "goal unblock-all"] {
+    for needle in &[
+        "goal list",
+        "goal unblock",
+        "goal unblock-all",
+        "goal delete",
+    ] {
         assert!(
             help.contains(needle),
             "help must document '{needle}' subcommand for issue #1911"
         );
     }
+}
+
+#[test]
+fn test_goal_delete_missing_id_returns_error() {
+    let result = dispatch_operator_cli(vec!["goal".to_string(), "delete".to_string()]);
+    assert!(
+        result.is_err(),
+        "`simard goal delete` without a goal-id must error"
+    );
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("expected goal id") || msg.contains("expected goal-id"),
+        "error should explain the missing goal id; got: {msg}"
+    );
 }

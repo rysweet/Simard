@@ -51,6 +51,10 @@ Product modes:
                              deterministic brain-failure safeguard
                              marker; operator-, scope-, dependency-, and
                              subordinate-blocked goals are untouched
+  goal delete <goal-id>    — operator escape hatch: remove a fabricated
+                             or corrupt goal record from the active
+                             board (e.g. test-fixture leakage tracked in
+                             issue #1915); errors if id is unknown
   goal-curation run <base-type> <topology> <objective> [state-root]
   goal-curation read <base-type> <topology> [state-root]
                          — read goals from $SIMARD_STATE_ROOT (or

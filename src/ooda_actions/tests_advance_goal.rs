@@ -168,6 +168,157 @@ fn failures_then_success_clears_marker_and_counter() {
     );
 }
 
+/// **Regression test required by the `stuck-b` engineer brief
+/// (synthetic-placeholder remediation cycle).**
+///
+/// The auto-recovery ladder in `dispatch_advance_goal` must NEVER
+/// synthesise a goal record on the active board — its single
+/// responsibility is to (a) drop the brain-failure marker, (b) clear
+/// the per-goal failure counter, and (c) restore the existing goal's
+/// status to `NotStarted`. It must NOT mint new active-board entries,
+/// and in particular must never produce ids of the form `stuck-<x>` or
+/// descriptions of the form `Goal <id>` (the test-fixture shape that
+/// leaked into the production board between cycles 6 and 7 — see
+/// session forensics under
+/// `~/.copilot/session-state/.../plan.md`).
+///
+/// This test exercises both the marker-recovery path (T1) and the
+/// non-marker path (T5) and asserts on the entire post-call active
+/// board, not just the dispatched goal.
+#[test]
+fn auto_recovery_ladder_never_emits_placeholder_goal_titles_or_stuck_ids() {
+    use crate::ooda_actions::advance_goal::spawn::{
+        BRAIN_FAILURE_BLOCKED_PREFIX, BRAIN_FAILURE_BLOCKED_SUFFIX,
+    };
+
+    let marker = format!("{BRAIN_FAILURE_BLOCKED_PREFIX}9{BRAIN_FAILURE_BLOCKED_SUFFIX}");
+
+    // Two scenarios — marker (auto-recovery fires) and non-marker
+    // (auto-recovery is gated off). Both must leave the board
+    // free of synthesised placeholder rows.
+    for (label, status) in [
+        (
+            "brain-failure-marker",
+            GoalProgress::Blocked(marker.clone()),
+        ),
+        (
+            "operator-blocked-non-marker",
+            GoalProgress::Blocked("waiting for human review".into()),
+        ),
+        ("not-started-baseline", GoalProgress::NotStarted),
+    ] {
+        let goal_id = "real-goal-with-meaningful-id";
+        let board = board_with_goal(goal_id, status.clone(), None);
+        let pre_active_count = board.active.len();
+        let pre_ids: Vec<String> = board.active.iter().map(|g| g.id.clone()).collect();
+
+        let mut bridges = test_bridges();
+        let mut state = OodaState::new(board);
+        state.goal_failure_counts.insert(goal_id.to_string(), 9);
+
+        let action = PlannedAction {
+            kind: ActionKind::AdvanceGoal,
+            goal_id: Some(goal_id.into()),
+            description: "advance".into(),
+        };
+        let _outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+
+        // (a) No NEW goals were minted by the auto-recovery ladder.
+        assert_eq!(
+            state.active_goals.active.len(),
+            pre_active_count,
+            "scenario {label}: auto-recovery must not add active-board rows; \
+             before={pre_ids:?}, after={:?}",
+            state
+                .active_goals
+                .active
+                .iter()
+                .map(|g| g.id.clone())
+                .collect::<Vec<_>>()
+        );
+
+        // (b) No `stuck-<x>` id appears (test-fixture shape from
+        //     src/operator_cli/tests_goal.rs that was observed in
+        //     production cycle_7.json).
+        for g in &state.active_goals.active {
+            assert!(
+                !is_stuck_fixture_id(&g.id),
+                "scenario {label}: auto-recovery must NEVER emit a `stuck-<letter>` placeholder id; \
+                 got id {:?}",
+                g.id,
+            );
+        }
+
+        // (c) No `Goal <id>` description appears unless it was already
+        //     present on the pre-call board (which test_helpers.rs
+        //     populates by default — the post-call board must be a
+        //     subset of the pre-call descriptions in this dimension).
+        let pre_descriptions: std::collections::HashSet<String> =
+            pre_ids.iter().map(|id| format!("Goal {id}")).collect();
+        for g in &state.active_goals.active {
+            if is_goal_id_placeholder_description(&g.description) {
+                assert!(
+                    pre_descriptions.contains(&g.description),
+                    "scenario {label}: auto-recovery must NEVER synthesise a new \
+                     `Goal <id>` placeholder description; got new description {:?}",
+                    g.description,
+                );
+            }
+        }
+    }
+}
+
+/// Helper: `stuck-<single-lowercase-letter>` is the test-fixture id
+/// pattern from `src/operator_cli/tests_goal.rs`. Catches the exact
+/// shape observed in the cycle_7.json corruption (`stuck-a`, `stuck-b`).
+fn is_stuck_fixture_id(id: &str) -> bool {
+    let Some(rest) = id.strip_prefix("stuck-") else {
+        return false;
+    };
+    rest.len() == 1 && rest.chars().all(|c| c.is_ascii_lowercase())
+}
+
+/// Helper: matches descriptions of the form `Goal <id>` (the
+/// `active_goal()` test helper's `format!("Goal {id}")` shape).
+fn is_goal_id_placeholder_description(desc: &str) -> bool {
+    let trimmed = desc.trim();
+    let Some(rest) = trimmed
+        .strip_prefix("Goal ")
+        .or_else(|| trimmed.strip_prefix("goal "))
+    else {
+        return false;
+    };
+    !rest.is_empty()
+        && rest
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+#[test]
+fn helper_is_stuck_fixture_id_catches_the_observed_corruption_pattern() {
+    assert!(is_stuck_fixture_id("stuck-a"));
+    assert!(is_stuck_fixture_id("stuck-b"));
+    assert!(is_stuck_fixture_id("stuck-z"));
+    // Negative cases: real goal slugs.
+    assert!(!is_stuck_fixture_id("enhance-simard-meeting-experience"));
+    assert!(!is_stuck_fixture_id("stuck-goal")); // pre-existing synthetic id, different shape
+    assert!(!is_stuck_fixture_id("stuck-"));
+    assert!(!is_stuck_fixture_id(""));
+    assert!(!is_stuck_fixture_id("STUCK-A")); // uppercase doesn't match
+}
+
+#[test]
+fn helper_is_goal_id_placeholder_description_catches_test_fixture_shape() {
+    assert!(is_goal_id_placeholder_description("Goal stuck-b"));
+    assert!(is_goal_id_placeholder_description("Goal alpha"));
+    assert!(is_goal_id_placeholder_description("goal working"));
+    // Negative cases: real descriptions.
+    assert!(!is_goal_id_placeholder_description("Ship the v1 release"));
+    assert!(!is_goal_id_placeholder_description("Goal "));
+    assert!(!is_goal_id_placeholder_description(""));
+    assert!(!is_goal_id_placeholder_description("Goal with spaces"));
+}
+
 /// T5 — `auto_recovery_skipped_when_blocked_reason_is_not_marker`.
 ///
 /// A goal whose `Blocked` reason does NOT match the brain-failure marker
