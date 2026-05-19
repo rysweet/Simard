@@ -20,6 +20,7 @@ mod decide;
 mod fallback;
 mod judgment_record;
 mod orient;
+pub mod parse_failure;
 pub mod prompt_store;
 mod rustyclawd;
 
@@ -47,6 +48,7 @@ pub use orient::{
     OrientContext, OrientJudgment, PROMPT_NAME as ORIENT_PROMPT_NAME, RustyClawdOrientBrain,
     build_rustyclawd_orient_brain,
 };
+pub use parse_failure::ParseFailureRecord;
 pub use rustyclawd::{
     LlmSubmitter, PROMPT_NAME as ACT_PROMPT_NAME, RustyClawdBrain, SessionLlmSubmitter,
     build_rustyclawd_brain,

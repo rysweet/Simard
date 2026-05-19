@@ -403,6 +403,7 @@ mod tests {
             confidence: 1.0,
             fallback: false,
             prompt_version: "abc123def456".to_string(),
+            parse_failure: None,
         });
         report.brain_judgments.push(BrainJudgmentRecord {
             phase: BrainPhase::Orient,
@@ -412,6 +413,7 @@ mod tests {
             confidence: 0.8,
             fallback: true,
             prompt_version: String::new(),
+            parse_failure: None,
         });
         persist_cycle_report(dir.path(), &report);
         let content =

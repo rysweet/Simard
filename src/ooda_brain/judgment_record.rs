@@ -20,12 +20,12 @@
 
 use std::cell::RefCell;
 
-use super::{DecideJudgment, EngineerLifecycleDecision, OrientJudgment};
+use super::{DecideJudgment, EngineerLifecycleDecision, OrientJudgment, ParseFailureRecord};
 
 /// Which OODA phase produced the judgment. Serialised as lowercase strings
 /// so the cycle-report JSON consumers (dashboard, ad-hoc inspection) read
 /// `"act"`, `"decide"`, `"orient"`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BrainPhase {
     Act,
@@ -59,6 +59,13 @@ pub struct BrainJudgmentRecord {
     /// Default-skipped on serialise so older cycle reports stay readable.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub prompt_version: String,
+    /// Present only when this record corresponds to a brain JSON-parse
+    /// failure (decide / orient call sites). `None` on every healthy cycle
+    /// and on every deterministic-bootstrap cycle, so consumers that don't
+    /// care about parse failures see no schema change at all. See
+    /// [`ParseFailureRecord`] and `docs/reference/ooda-brain-parse-failure-record.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parse_failure: Option<ParseFailureRecord>,
 }
 
 const CONTEXT_SUMMARY_MAX: usize = 200;
@@ -109,6 +116,7 @@ impl BrainJudgmentRecord {
             confidence: if fallback { 0.5 } else { 1.0 },
             fallback,
             prompt_version: prompt_version.into(),
+            parse_failure: None,
         }
     }
 
@@ -140,6 +148,7 @@ impl BrainJudgmentRecord {
             confidence: if fallback { 0.5 } else { 1.0 },
             fallback,
             prompt_version: prompt_version.into(),
+            parse_failure: None,
         }
     }
 
@@ -168,6 +177,7 @@ impl BrainJudgmentRecord {
             confidence: judgment.confidence as f32,
             fallback,
             prompt_version: prompt_version.into(),
+            parse_failure: None,
         }
     }
 }
@@ -234,6 +244,7 @@ mod tests {
             confidence: 0.75,
             fallback: false,
             prompt_version: "deadbeef1234".to_string(),
+            parse_failure: None,
         };
         let json = serde_json::to_string(&rec).unwrap();
         assert!(json.contains("\"phase\":\"decide\""));
@@ -254,6 +265,7 @@ mod tests {
             confidence: 0.5,
             fallback: true,
             prompt_version: String::new(),
+            parse_failure: None,
         };
         let json = serde_json::to_string(&rec).unwrap();
         assert!(
@@ -330,6 +342,7 @@ mod tests {
                     confidence: 1.0,
                     fallback: false,
                     prompt_version: String::new(),
+                    parse_failure: None,
                 });
                 push(BrainJudgmentRecord {
                     phase: BrainPhase::Decide,
@@ -339,6 +352,7 @@ mod tests {
                     confidence: 1.0,
                     fallback: false,
                     prompt_version: String::new(),
+                    parse_failure: None,
                 });
 
                 let drained = take_all();
@@ -355,6 +369,7 @@ mod tests {
                     confidence: 1.0,
                     fallback: false,
                     prompt_version: String::new(),
+                    parse_failure: None,
                 });
                 clear();
                 assert!(take_all().is_empty());
@@ -372,6 +387,7 @@ mod tests {
             confidence: 1.0,
             fallback: false,
             prompt_version: String::new(),
+            parse_failure: None,
         });
         assert!(take_all().is_empty());
     }
@@ -389,6 +405,7 @@ mod tests {
                 confidence: 1.0,
                 fallback: false,
                 prompt_version: String::new(),
+                parse_failure: None,
             });
             take_all()
         }));
@@ -419,6 +436,7 @@ mod tests {
                     confidence: 1.0,
                     fallback: false,
                     prompt_version: String::new(),
+                    parse_failure: None,
                 });
             }
             tokio::task::yield_now().await;
