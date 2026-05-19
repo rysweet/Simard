@@ -1,11 +1,29 @@
 //! Board mutation, validation, persistence, and seeding operations.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{LazyLock, Mutex};
+
 use serde_json::json;
+use tracing::{debug, warn};
 
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 
 use super::types::{ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS};
+
+/// Process-local critical section for the merge-on-write pipeline in
+/// [`save_goal_board`]. Serializes the read-merge-write window inside a
+/// single Simard process so two concurrent in-process bridge clients
+/// (daemon + dashboard, two engineer worktrees in one cargo build, …)
+/// cannot both observe the same persisted snapshot and then each store a
+/// stale-derived snapshot that drops the other writer's goals (issue
+/// [#1915](https://github.com/rysweet/Simard/issues/1915)).
+///
+/// Cross-process races still fall back to the best-effort field-level
+/// guarantees documented on `save_goal_board` (the LadybugDB flock at the
+/// storage layer prevents simultaneous writes, but does not provide
+/// snapshot isolation across separate read-then-write sequences).
+static SAVE_GOAL_BOARD_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 // ---------------------------------------------------------------------------
 // Validation helpers
@@ -183,61 +201,241 @@ fn migrate_legacy_disk_file_if_present(bridge: &dyn CognitiveMemoryOps) {
 /// `Err` from migration.
 ///
 /// Resolution order after migration:
-/// 1. `bridge.search_facts("goal-board:snapshot", 1, 0.0)` → parsed board
-/// 2. `GoalBoard::new()` — empty board when no snapshot exists or parsing fails
+/// 1. [`read_latest_snapshot`] — `bridge.search_facts("goal-board:snapshot", 64, 0.0)`
+///    filtered by `concept == "goal-board:snapshot"`, `max_by(node_id)`, parsed.
+/// 2. `GoalBoard::new()` — empty board when no snapshot exists or parsing fails.
 pub fn load_goal_board(bridge: &dyn CognitiveMemoryOps) -> SimardResult<GoalBoard> {
     migrate_legacy_disk_file_if_present(bridge);
 
-    // Primary read path: cognitive memory snapshot. Bridge errors are
-    // non-fatal — log and fall through to the empty board.
-    //
-    // NOTE: store_fact is append-only at the trait level (no UPSERT or
-    // DELETE), so multiple `save_goal_board` calls accumulate facts. We
-    // ask for several and pick the lexicographically-largest id — fact
-    // ids are uuid-v7 (`new_id()` in cognitive_memory/mod.rs:276) which
-    // are time-ordered, so the largest id is the most recent snapshot.
+    // Primary read path: cognitive memory snapshot via the shared helper.
+    // The helper returns `None` on bridge error, on zero results, or on a
+    // payload parse failure — load_goal_board folds all three into the
+    // legacy "empty board" fallback so callers see a stable contract.
+    Ok(read_latest_snapshot(bridge).unwrap_or_default())
+}
+
+/// Read the most recent `goal-board:snapshot` fact from cognitive memory,
+/// or `None` if no snapshot is available.
+///
+/// Shared by [`load_goal_board`] (initial read) and [`save_goal_board`]
+/// (merge-on-write read). All failure modes (bridge error, empty result,
+/// payload deserialization failure) return `None` with a `warn!` log line
+/// that records the bridge operation and error kind only — never the
+/// payload, never goal descriptions.
+///
+/// `search_facts` is called with `limit=64, min_confidence=0.0` so that
+/// the merge read can see recent snapshots even when the fact log has
+/// accumulated. Fact ids are uuid-v7 (see `new_id()` in
+/// `cognitive_memory/mod.rs`), so the lexicographically-largest id is the
+/// most recent snapshot.
+pub(super) fn read_latest_snapshot(bridge: &dyn CognitiveMemoryOps) -> Option<GoalBoard> {
     let facts = match bridge.search_facts("goal-board:snapshot", 64, 0.0) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!(
-                "[simard] load_goal_board: cognitive memory search_facts failed ({e}) — returning empty board"
+            warn!(
+                concept = "goal-board:snapshot",
+                op = "search_facts",
+                error_kind = %e,
+                "read_latest_snapshot: cognitive memory read failed; returning None"
             );
-            vec![]
+            return None;
         }
     };
     let latest = facts
         .iter()
         .filter(|f| f.concept == "goal-board:snapshot")
-        .max_by(|a, b| a.node_id.cmp(&b.node_id));
-    if let Some(fact) = latest {
-        match serde_json::from_str::<GoalBoard>(&fact.content) {
-            Ok(board) => return Ok(board),
-            Err(e) => {
-                eprintln!(
-                    "[simard] load_goal_board: cognitive memory snapshot parse error ({e}) — returning empty board"
-                );
-            }
+        .max_by(|a, b| a.node_id.cmp(&b.node_id))?;
+    match serde_json::from_str::<GoalBoard>(&latest.content) {
+        Ok(board) => Some(board),
+        Err(e) => {
+            warn!(
+                concept = "goal-board:snapshot",
+                op = "deserialize",
+                error_kind = %e,
+                "read_latest_snapshot: snapshot payload parse failed; returning None"
+            );
+            None
         }
     }
+}
 
-    Ok(GoalBoard::new())
+/// Merge a persisted snapshot with an in-flight board to produce a new
+/// merged board suitable for `store_fact`.
+///
+/// **Union by `id`.** Both `active` and `backlog` are unioned by `id`.
+/// On id collision the in-flight side wins for all fields (description,
+/// priority, status, assigned_to, current_activity, wip_refs). This
+/// reflects that the caller has the most recent intent for the goals it
+/// owns. Cross-set collisions (same id in `persisted.active` and
+/// `in_flight.backlog`, or vice versa) resolve to the in-flight
+/// classification — the goal/item appears exactly once in the merged
+/// board, in whichever set the in-flight board placed it.
+///
+/// **Active capacity.** If the merged active set exceeds
+/// [`MAX_ACTIVE_GOALS`] (= 5), it is truncated using a deterministic sort
+/// key:
+///
+/// 1. `priority` ascending (lower numeric value = higher importance, kept first)
+/// 2. In-flight-origin preferred over persisted-origin on tie
+/// 3. `id` lexicographic ascending on tie
+///
+/// **Backlog capacity.** Backlog has no bound and is never truncated.
+///
+/// Pure function: never panics, never `unwrap`s, never `expect`s.
+/// Iteration order is deterministic via `BTreeMap`/`BTreeSet`, so repeated
+/// merges of identical inputs produce identical outputs.
+///
+/// See issue [#1915](https://github.com/rysweet/Simard/issues/1915) for
+/// the race this prevents.
+pub(super) fn merge_boards(persisted: GoalBoard, in_flight: GoalBoard) -> GoalBoard {
+    // Collect all in-flight ids (both active and backlog) so that
+    // cross-set collisions resolve to the in-flight classification.
+    let in_flight_ids: BTreeSet<String> = in_flight
+        .active
+        .iter()
+        .map(|g| g.id.clone())
+        .chain(in_flight.backlog.iter().map(|b| b.id.clone()))
+        .collect();
+
+    // Active union. `BTreeMap` keyed on id gives deterministic iteration.
+    // For each entry we also track whether the goal originated from the
+    // in-flight board (true) or the persisted board (false) — used by the
+    // capacity-truncation tiebreak.
+    let mut active_map: BTreeMap<String, (ActiveGoal, bool)> = BTreeMap::new();
+    for goal in persisted.active {
+        // Skip persisted entries shadowed by an in-flight entry in *either*
+        // set; in-flight classification wins on cross-set collisions.
+        if in_flight_ids.contains(&goal.id) {
+            continue;
+        }
+        active_map.insert(goal.id.clone(), (goal, false));
+    }
+    for goal in in_flight.active {
+        active_map.insert(goal.id.clone(), (goal, true));
+    }
+
+    // Backlog union with the same rules.
+    let mut backlog_map: BTreeMap<String, BacklogItem> = BTreeMap::new();
+    for item in persisted.backlog {
+        if in_flight_ids.contains(&item.id) {
+            continue;
+        }
+        backlog_map.insert(item.id.clone(), item);
+    }
+    for item in in_flight.backlog {
+        backlog_map.insert(item.id.clone(), item);
+    }
+
+    let mut active_with_origin: Vec<(ActiveGoal, bool)> = active_map.into_values().collect();
+    let mut truncated_count = 0usize;
+    if active_with_origin.len() > MAX_ACTIVE_GOALS {
+        // Deterministic sort key: priority asc, in-flight (true) before
+        // persisted (false), id lex asc. We invert the bool comparison
+        // because `true > false` in Rust's default Ord — we want `true`
+        // (in-flight) to come first in ascending order, hence reverse.
+        active_with_origin.sort_by(|a, b| {
+            a.0.priority
+                .cmp(&b.0.priority)
+                .then_with(|| b.1.cmp(&a.1))
+                .then_with(|| a.0.id.cmp(&b.0.id))
+        });
+        truncated_count = active_with_origin.len() - MAX_ACTIVE_GOALS;
+        active_with_origin.truncate(MAX_ACTIVE_GOALS);
+    }
+
+    let active: Vec<ActiveGoal> = active_with_origin.into_iter().map(|(g, _)| g).collect();
+    let backlog: Vec<BacklogItem> = backlog_map.into_values().collect();
+
+    debug!(
+        merge = "goal-board",
+        merged_active = active.len(),
+        merged_backlog = backlog.len(),
+        truncated = truncated_count,
+        "merge_boards: completed"
+    );
+
+    GoalBoard { active, backlog }
 }
 
 /// Save the current board state to cognitive memory as the single source of
-/// truth.
+/// truth, using **merge-on-write** semantics to prevent concurrent
+/// `CognitiveMemoryOps` clients from silently clobbering each other's
+/// goals (issue [#1915](https://github.com/rysweet/Simard/issues/1915)).
 ///
-/// Rejects suspect boards (placeholder descriptions, suspiciously short
-/// ids) with `SimardError::InvalidGoalRecord` before any persistence
-/// attempt — `bridge.store_fact` is not called when the integrity guard
-/// fires.
+/// Pipeline:
+/// 1. Run [`board_integrity_suspect`] on the in-flight board. Returning
+///    `Some(_)` short-circuits with `SimardError::InvalidGoalRecord`
+///    before any read or write — the persisted snapshot is inductively
+///    guard-clean (every prior write went through this same guard).
+/// 2. Call [`read_latest_snapshot`] to re-read the latest persisted
+///    `goal-board:snapshot` fact. On error / empty / parse failure
+///    (already logged inside the helper), the merge step is skipped and
+///    the in-flight board is persisted unchanged — preserving write
+///    availability when the read path is temporarily unhealthy.
+/// 3. Call [`merge_boards`] to union by `id` (in-flight wins on collision)
+///    and truncate the active set to [`MAX_ACTIVE_GOALS`] using the
+///    deterministic sort key documented on `merge_boards`.
+/// 4. `bridge.store_fact("goal-board:snapshot", &serde_json::to_string(&merged)?, 1.0, &["goal-board"], "goal-curator")`.
+///    Fact metadata is constant — only the `GoalBoard` payload is merged.
+///
+/// **Best-effort guarantee.** No goal *added* on a disjoint subset
+/// *disappears* in the common multi-client race. A tight
+/// read-read-write-write interleaving across separate
+/// `CognitiveMemoryOps` clients can still produce a snapshot that omits
+/// the earlier writer's most recent fact; same-id concurrent edits
+/// resolve field-level last-writer-wins. Callers needing strict
+/// serializability must route through the daemon IPC socket.
 pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> SimardResult<()> {
+    // Step 1: guard the in-flight board. Persisted snapshot is inductively
+    // guard-clean (every prior write went through this same check), so the
+    // merged board does not need re-guarding — re-guarding would risk
+    // erroneously rejecting valid persisted goals that an LLM later
+    // contaminated locally on the in-flight side.
     if let Some(reason) = board_integrity_suspect(board) {
         return Err(SimardError::InvalidGoalRecord {
             field: "board".to_string(),
             reason: format!("refusing to persist suspect board: {reason}"),
         });
     }
-    let snapshot = serde_json::to_string(board).map_err(|e| SimardError::InvalidGoalRecord {
+
+    // Acquire the process-local merge-on-write critical section so two
+    // in-process callers serialize their read-merge-write windows. Without
+    // this, two threads can both read an empty (or stale) snapshot, each
+    // merge it with their own in-flight board, and each store a snapshot
+    // that lacks the other writer's goals — the original #1915 failure.
+    // Mutex poisoning is treated as recoverable: we take the inner guard
+    // and proceed, because a poisoned mutex still serialises us correctly.
+    let _critical = SAVE_GOAL_BOARD_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    // Step 2: read latest persisted snapshot (None on any failure).
+    let persisted = read_latest_snapshot(bridge);
+
+    // Step 3: merge in-flight on top of persisted. On read failure /
+    // empty store, persist the in-flight board unchanged.
+    let (merged, persisted_active, persisted_backlog) = match persisted {
+        Some(p) => {
+            let pa = p.active.len();
+            let pb = p.backlog.len();
+            (merge_boards(p, board.clone()), pa, pb)
+        }
+        None => (board.clone(), 0, 0),
+    };
+
+    debug!(
+        merge = "goal-board",
+        persisted_active = persisted_active,
+        persisted_backlog = persisted_backlog,
+        in_flight_active = board.active.len(),
+        in_flight_backlog = board.backlog.len(),
+        merged_active = merged.active.len(),
+        merged_backlog = merged.backlog.len(),
+        "save_goal_board: persisting merged snapshot"
+    );
+
+    // Step 4: serialize and store.
+    let snapshot = serde_json::to_string(&merged).map_err(|e| SimardError::InvalidGoalRecord {
         field: "board".to_string(),
         reason: format!("failed to serialize goal board: {e}"),
     })?;

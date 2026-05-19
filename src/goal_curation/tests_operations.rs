@@ -657,3 +657,865 @@ fn clear_goal_assignment_returns_err_for_missing_goal() {
     let err = super::clear_goal_assignment(&mut board, "nonexistent").unwrap_err();
     assert!(err.to_string().contains("not found"), "{err}");
 }
+
+// ═════════════════════════════════════════════════════════════════════════
+// Issue #1915 — merge-on-write semantics for save_goal_board
+// ═════════════════════════════════════════════════════════════════════════
+//
+// These tests specify the merge-on-write contract introduced to prevent
+// concurrent CognitiveMemoryOps clients from silently clobbering each
+// other's goals (root cause of #1915). They reference three new symbols:
+//
+//   - `merge_boards(persisted, in_flight) -> GoalBoard`     (pure helper)
+//   - `read_latest_snapshot(bridge) -> Option<GoalBoard>`   (read helper)
+//   - revised `save_goal_board(...)` that performs
+//        guard(in_flight) -> read_latest_snapshot -> merge -> store_fact
+//
+// All tests in this section MUST fail against the pre-fix code and pass
+// after the fix is applied.
+
+use super::operations::{merge_boards, read_latest_snapshot};
+
+// ── shared test helpers ─────────────────────────────────────────────────
+
+/// Build an `ActiveGoal` with id/priority/status/description set.
+/// All other fields default to `None` / `vec![]`.
+fn goal_with(id: &str, priority: u32, status: GoalProgress, desc: &str) -> ActiveGoal {
+    ActiveGoal {
+        id: id.to_string(),
+        description: desc.to_string(),
+        priority,
+        status,
+        assigned_to: None,
+        current_activity: None,
+        wip_refs: vec![],
+    }
+}
+
+/// Build a `BacklogItem` with id/description/source/score set.
+fn backlog_with(id: &str, description: &str, source: &str, score: f64) -> BacklogItem {
+    BacklogItem {
+        id: id.to_string(),
+        description: description.to_string(),
+        source: source.to_string(),
+        score,
+    }
+}
+
+/// Stateful in-memory bridge that simulates the LadybugDB append-only fact
+/// store. Every `store_fact` appends to a shared `Vec<CognitiveFact>` with a
+/// monotonically-increasing `node_id` (so `max_by(node_id)` always picks
+/// the most recent snapshot — matching production uuid-v7 semantics).
+/// Every `search_facts` returns the current shared vec.
+///
+/// Returns the bridge and a handle to the shared facts vec so tests can
+/// assert on stored counts/content.
+#[allow(clippy::type_complexity)]
+fn stateful_bridge() -> (
+    crate::memory_bridge::CognitiveMemoryBridge,
+    std::sync::Arc<std::sync::Mutex<Vec<crate::memory_cognitive::CognitiveFact>>>,
+) {
+    use crate::bridge_subprocess::InMemoryBridgeTransport;
+    use crate::memory_bridge::CognitiveMemoryBridge;
+    use crate::memory_cognitive::CognitiveFact;
+    use serde_json::json;
+
+    let facts: std::sync::Arc<std::sync::Mutex<Vec<CognitiveFact>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let facts_for_handler = facts.clone();
+    let counter_for_handler = counter.clone();
+
+    let transport = InMemoryBridgeTransport::new("test-stateful", move |method, params| {
+        match method {
+            "memory.search_facts" => {
+                let snapshot = facts_for_handler.lock().unwrap().clone();
+                let serialized = serde_json::to_value(&snapshot).unwrap();
+                Ok(json!({ "facts": serialized }))
+            }
+            "memory.store_fact" => {
+                let concept = params
+                    .get("concept")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let content = params
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let confidence = params
+                    .get("confidence")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(1.0);
+                let source_id = params
+                    .get("source_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let tags: Vec<String> = params
+                    .get("tags")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let n = counter_for_handler.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // Zero-padded so lexicographic max == numeric max.
+                let node_id = format!("fact-{n:020}");
+                facts_for_handler.lock().unwrap().push(CognitiveFact {
+                    node_id: node_id.clone(),
+                    concept,
+                    content,
+                    confidence,
+                    source_id,
+                    tags,
+                });
+                Ok(json!({ "id": node_id }))
+            }
+            "memory.store_episode" => Ok(json!({ "id": "epi_x" })),
+            _ => Err(crate::bridge::BridgeErrorPayload {
+                code: -32601,
+                message: format!("unknown method: {method}"),
+            }),
+        }
+    });
+    (CognitiveMemoryBridge::new(Box::new(transport)), facts)
+}
+
+/// Bridge whose `memory.search_facts` always errors but whose
+/// `memory.store_fact` succeeds and is recorded. Used to verify the
+/// read-failure fallback path in `save_goal_board`.
+fn bridge_search_fails_store_works(
+    recording: std::sync::Arc<BridgeRecording>,
+) -> crate::memory_bridge::CognitiveMemoryBridge {
+    use crate::bridge_subprocess::InMemoryBridgeTransport;
+    use crate::memory_bridge::CognitiveMemoryBridge;
+    use serde_json::json;
+    let recording_for_handler = recording;
+    let transport =
+        InMemoryBridgeTransport::new("test-search-fails-store-works", move |method, params| {
+            match method {
+                "memory.search_facts" => Err(crate::bridge::BridgeErrorPayload {
+                    code: -32000,
+                    message: "simulated search_facts failure".to_string(),
+                }),
+                "memory.store_fact" => {
+                    let concept = params
+                        .get("concept")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let content = params
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    recording_for_handler
+                        .stored_facts
+                        .lock()
+                        .unwrap()
+                        .push(StoredFactCall { concept, content });
+                    Ok(json!({ "id": "sem_x" }))
+                }
+                "memory.store_episode" => Ok(json!({ "id": "epi_x" })),
+                _ => Err(crate::bridge::BridgeErrorPayload {
+                    code: -32601,
+                    message: format!("unknown method: {method}"),
+                }),
+            }
+        });
+    CognitiveMemoryBridge::new(Box::new(transport))
+}
+
+// ── merge_boards: pure helper unit tests (9 cases per design spec) ──────
+
+/// (a) Disjoint active ids → union of both.
+#[test]
+fn merge_boards_disjoint_active_ids_unions_both() {
+    let persisted = GoalBoard {
+        active: vec![goal_with(
+            "alpha-goal-aaaa",
+            1,
+            GoalProgress::NotStarted,
+            "Alpha",
+        )],
+        backlog: vec![],
+    };
+    let in_flight = GoalBoard {
+        active: vec![goal_with(
+            "beta-goal-bbbb",
+            2,
+            GoalProgress::NotStarted,
+            "Beta",
+        )],
+        backlog: vec![],
+    };
+    let merged = merge_boards(persisted, in_flight);
+    assert_eq!(merged.active.len(), 2);
+    let ids: Vec<&str> = merged.active.iter().map(|g| g.id.as_str()).collect();
+    assert!(ids.contains(&"alpha-goal-aaaa"));
+    assert!(ids.contains(&"beta-goal-bbbb"));
+}
+
+/// (b) Active collision on id → in-flight wins for ALL fields
+/// (description, priority, status, assigned_to, current_activity).
+#[test]
+fn merge_boards_active_collision_in_flight_wins_all_fields() {
+    let persisted = GoalBoard {
+        active: vec![goal_with(
+            "shared-id-xxxx",
+            5,
+            GoalProgress::NotStarted,
+            "Persisted desc",
+        )],
+        backlog: vec![],
+    };
+    let mut in_flight_goal = goal_with(
+        "shared-id-xxxx",
+        1,
+        GoalProgress::InProgress { percent: 75 },
+        "In-flight desc",
+    );
+    in_flight_goal.assigned_to = Some("engineer-1".to_string());
+    in_flight_goal.current_activity = Some("compiling".to_string());
+    let in_flight = GoalBoard {
+        active: vec![in_flight_goal],
+        backlog: vec![],
+    };
+    let merged = merge_boards(persisted, in_flight);
+    assert_eq!(merged.active.len(), 1);
+    let g = &merged.active[0];
+    assert_eq!(
+        g.description, "In-flight desc",
+        "description must come from in-flight"
+    );
+    assert_eq!(g.priority, 1, "priority must come from in-flight");
+    assert!(
+        matches!(g.status, GoalProgress::InProgress { percent: 75 }),
+        "status must come from in-flight, got {:?}",
+        g.status
+    );
+    assert_eq!(g.assigned_to.as_deref(), Some("engineer-1"));
+    assert_eq!(g.current_activity.as_deref(), Some("compiling"));
+}
+
+/// (c) Backlog union by id with in-flight precedence on collision.
+#[test]
+fn merge_boards_backlog_unions_by_id_with_in_flight_precedence() {
+    let persisted = GoalBoard {
+        active: vec![],
+        backlog: vec![
+            backlog_with("b-only-persisted", "Only persisted", "p", 0.1),
+            backlog_with("b-shared", "Old persisted desc", "p", 0.2),
+        ],
+    };
+    let in_flight = GoalBoard {
+        active: vec![],
+        backlog: vec![
+            backlog_with("b-only-flight", "Only flight", "f", 0.5),
+            backlog_with("b-shared", "Newer flight desc", "f", 0.9),
+        ],
+    };
+    let merged = merge_boards(persisted, in_flight);
+    assert_eq!(
+        merged.backlog.len(),
+        3,
+        "union: only-persisted + only-flight + shared = 3"
+    );
+    let shared = merged
+        .backlog
+        .iter()
+        .find(|b| b.id == "b-shared")
+        .expect("shared backlog id must be present");
+    assert_eq!(shared.description, "Newer flight desc");
+    assert_eq!(shared.source, "f");
+    assert!((shared.score - 0.9).abs() < f64::EPSILON);
+}
+
+/// (d) Active overflow (>MAX_ACTIVE_GOALS) → truncate by priority ASC
+/// (lowest priority number = highest importance kept).
+#[test]
+fn merge_boards_active_overflow_truncates_to_max_keeping_lowest_priority() {
+    // Persisted has 3 goals with priorities 4, 5, 6.
+    // In-flight has 3 goals with priorities 1, 2, 3.
+    // Union = 6 distinct ids; MAX_ACTIVE_GOALS=5 → drop priority 6.
+    let persisted = GoalBoard {
+        active: vec![
+            goal_with("p-aaaaa", 4, GoalProgress::NotStarted, "p-a"),
+            goal_with("p-bbbbb", 5, GoalProgress::NotStarted, "p-b"),
+            goal_with("p-ccccc", 6, GoalProgress::NotStarted, "p-c"),
+        ],
+        backlog: vec![],
+    };
+    let in_flight = GoalBoard {
+        active: vec![
+            goal_with("f-aaaaa", 1, GoalProgress::NotStarted, "f-a"),
+            goal_with("f-bbbbb", 2, GoalProgress::NotStarted, "f-b"),
+            goal_with("f-ccccc", 3, GoalProgress::NotStarted, "f-c"),
+        ],
+        backlog: vec![],
+    };
+    let merged = merge_boards(persisted, in_flight);
+    assert_eq!(merged.active.len(), MAX_ACTIVE_GOALS);
+    let priorities: Vec<u32> = merged.active.iter().map(|g| g.priority).collect();
+    assert!(
+        !priorities.contains(&6),
+        "priority 6 goal must be truncated, got {priorities:?}"
+    );
+    for p in [1u32, 2, 3, 4, 5] {
+        assert!(
+            priorities.contains(&p),
+            "priority {p} must be kept, got {priorities:?}"
+        );
+    }
+}
+
+/// (e) Active overflow tiebreak on equal priority → in-flight is preferred,
+/// so a persisted goal must be the one dropped, never the in-flight one.
+#[test]
+fn merge_boards_overflow_tiebreak_prefers_in_flight() {
+    let persisted = GoalBoard {
+        active: (0..5)
+            .map(|i| {
+                goal_with(
+                    &format!("persisted-{i:02}-id"),
+                    3,
+                    GoalProgress::NotStarted,
+                    "p",
+                )
+            })
+            .collect(),
+        backlog: vec![],
+    };
+    let in_flight = GoalBoard {
+        active: vec![goal_with(
+            "flight-only-id",
+            3,
+            GoalProgress::NotStarted,
+            "f",
+        )],
+        backlog: vec![],
+    };
+    let merged = merge_boards(persisted, in_flight);
+    assert_eq!(merged.active.len(), MAX_ACTIVE_GOALS);
+    let ids: Vec<String> = merged.active.iter().map(|g| g.id.clone()).collect();
+    assert!(
+        ids.iter().any(|id| id == "flight-only-id"),
+        "in-flight goal must survive on tiebreak, got {ids:?}"
+    );
+}
+
+/// (f) Self-merge is identity at the field-set level (idempotent).
+#[test]
+fn merge_boards_self_merge_is_identity() {
+    let board = GoalBoard {
+        active: vec![
+            goal_with(
+                "self-aaaaa",
+                1,
+                GoalProgress::InProgress { percent: 10 },
+                "a",
+            ),
+            goal_with("self-bbbbb", 2, GoalProgress::NotStarted, "b"),
+        ],
+        backlog: vec![backlog_with("self-bk", "x", "s", 0.5)],
+    };
+    let merged = merge_boards(board.clone(), board.clone());
+    assert_eq!(merged.active.len(), board.active.len());
+    assert_eq!(merged.backlog.len(), board.backlog.len());
+    for g in &board.active {
+        assert!(
+            merged.active.iter().any(|m| m == g),
+            "active goal {} must be preserved",
+            g.id
+        );
+    }
+    for b in &board.backlog {
+        assert!(
+            merged.backlog.iter().any(|m| m == b),
+            "backlog item {} must be preserved",
+            b.id
+        );
+    }
+}
+
+/// (g) Empty persisted → returns in-flight content unchanged.
+#[test]
+fn merge_boards_empty_persisted_returns_in_flight_unchanged() {
+    let in_flight = GoalBoard {
+        active: vec![goal_with("only-flight", 1, GoalProgress::NotStarted, "f")],
+        backlog: vec![backlog_with("bk-flight", "x", "s", 0.1)],
+    };
+    let merged = merge_boards(GoalBoard::new(), in_flight.clone());
+    assert_eq!(merged.active.len(), 1);
+    assert_eq!(merged.active[0].id, "only-flight");
+    assert_eq!(merged.backlog.len(), 1);
+    assert_eq!(merged.backlog[0].id, "bk-flight");
+}
+
+/// (h) Empty in-flight → returns persisted content unchanged.
+#[test]
+fn merge_boards_empty_in_flight_returns_persisted_unchanged() {
+    let persisted = GoalBoard {
+        active: vec![goal_with(
+            "only-persisted",
+            1,
+            GoalProgress::NotStarted,
+            "p",
+        )],
+        backlog: vec![backlog_with("bk-persisted", "x", "s", 0.1)],
+    };
+    let merged = merge_boards(persisted.clone(), GoalBoard::new());
+    assert_eq!(merged.active.len(), 1);
+    assert_eq!(merged.active[0].id, "only-persisted");
+    assert_eq!(merged.backlog.len(), 1);
+    assert_eq!(merged.backlog[0].id, "bk-persisted");
+}
+
+/// (i) Cross-set collision (RR-5): id appears in persisted.active and
+/// in_flight.backlog → in-flight classification wins, so it ends up in
+/// backlog only.
+#[test]
+fn merge_boards_cross_set_collision_uses_in_flight_classification() {
+    let persisted = GoalBoard {
+        active: vec![goal_with(
+            "shared-cross-id",
+            1,
+            GoalProgress::InProgress { percent: 50 },
+            "from persisted active",
+        )],
+        backlog: vec![],
+    };
+    let in_flight = GoalBoard {
+        active: vec![],
+        backlog: vec![backlog_with(
+            "shared-cross-id",
+            "from in-flight backlog",
+            "f",
+            0.7,
+        )],
+    };
+    let merged = merge_boards(persisted, in_flight);
+    assert!(
+        merged.active.iter().all(|g| g.id != "shared-cross-id"),
+        "shared id must NOT appear in active after cross-set collision (got {:?})",
+        merged
+            .active
+            .iter()
+            .map(|g| g.id.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        merged.backlog.iter().any(|b| b.id == "shared-cross-id"),
+        "shared id must appear in backlog (in-flight classification wins)"
+    );
+}
+
+/// Determinism: repeated merges of the same inputs produce equal outputs.
+#[test]
+fn merge_boards_is_deterministic_across_runs() {
+    let persisted = GoalBoard {
+        active: vec![
+            goal_with("zzz-goal-id", 2, GoalProgress::NotStarted, "z"),
+            goal_with("aaa-goal-id", 2, GoalProgress::NotStarted, "a"),
+        ],
+        backlog: vec![],
+    };
+    let in_flight = GoalBoard {
+        active: vec![goal_with("mmm-goal-id", 2, GoalProgress::NotStarted, "m")],
+        backlog: vec![],
+    };
+    let merged_1 = merge_boards(persisted.clone(), in_flight.clone());
+    let merged_2 = merge_boards(persisted.clone(), in_flight.clone());
+    let merged_3 = merge_boards(persisted, in_flight);
+    assert_eq!(merged_1, merged_2);
+    assert_eq!(merged_2, merged_3);
+}
+
+// ── read_latest_snapshot: extracted helper ──────────────────────────────
+
+/// `read_latest_snapshot` returns `None` when the bridge has no snapshot.
+#[test]
+fn read_latest_snapshot_returns_none_when_empty() {
+    let (bridge, _facts) = stateful_bridge();
+    let result = read_latest_snapshot(&bridge);
+    assert!(
+        result.is_none(),
+        "expected None for empty store, got {result:?}"
+    );
+}
+
+/// With multiple snapshot facts, `read_latest_snapshot` picks the one with
+/// the largest `node_id` (most recent uuid-v7 / monotonic id).
+#[test]
+fn read_latest_snapshot_picks_max_node_id_when_multiple_present() {
+    let (bridge, _facts) = stateful_bridge();
+    let root = tmp_state_root("read-latest-multi");
+
+    let first = GoalBoard {
+        active: vec![goal_with(
+            "first-saved-goal",
+            1,
+            GoalProgress::NotStarted,
+            "first",
+        )],
+        backlog: vec![],
+    };
+    let second = GoalBoard {
+        active: vec![
+            goal_with("first-saved-goal", 1, GoalProgress::NotStarted, "first"),
+            goal_with("second-saved-goal", 2, GoalProgress::NotStarted, "second"),
+        ],
+        backlog: vec![],
+    };
+    // Pre-fix save_goal_board appends two facts; post-fix it appends two
+    // (merge of empty + first, then merge of first + second). Either way
+    // there are ≥2 facts and the latest one must be returned.
+    with_state_root(&root, || {
+        super::save_goal_board(&first, &bridge).unwrap();
+        super::save_goal_board(&second, &bridge).unwrap();
+    });
+
+    let latest =
+        read_latest_snapshot(&bridge).expect("must return Some when at least one snapshot exists");
+    let ids: Vec<&str> = latest.active.iter().map(|g| g.id.as_str()).collect();
+    assert!(
+        ids.contains(&"second-saved-goal"),
+        "latest snapshot must contain the most recently saved goal, got {ids:?}"
+    );
+}
+
+/// `read_latest_snapshot` returns `None` (not Err / panic) when the bridge
+/// errors on search_facts. The caller (save_goal_board) uses this to fall
+/// back to writing the in-flight board unchanged.
+#[test]
+fn read_latest_snapshot_returns_none_on_bridge_search_error() {
+    let bridge = bridge_search_fails();
+    let result = read_latest_snapshot(&bridge);
+    assert!(
+        result.is_none(),
+        "search_facts error must surface as None, got {result:?}"
+    );
+}
+
+// ── save_goal_board: merge-on-write integration tests ───────────────────
+
+/// I1 — Sequential two writers with disjoint goal ids. After both saves,
+/// `load_goal_board` returns BOTH goals. This is the canonical #1915
+/// regression: pre-fix, the second save clobbered the first.
+#[test]
+fn save_goal_board_sequential_two_disjoint_writers_preserves_both() {
+    let (bridge, _facts) = stateful_bridge();
+    let root = tmp_state_root("save-seq-merge");
+
+    let writer_a_board = GoalBoard {
+        active: vec![goal_with(
+            "alpha-writer-aaaa",
+            1,
+            GoalProgress::NotStarted,
+            "Alpha goal",
+        )],
+        backlog: vec![],
+    };
+    let writer_b_board = GoalBoard {
+        active: vec![goal_with(
+            "beta-writer-bbbb",
+            2,
+            GoalProgress::NotStarted,
+            "Beta goal",
+        )],
+        backlog: vec![],
+    };
+
+    with_state_root(&root, || {
+        super::save_goal_board(&writer_a_board, &bridge).unwrap();
+        super::save_goal_board(&writer_b_board, &bridge).unwrap();
+        let loaded = super::load_goal_board(&bridge).unwrap();
+        let ids: Vec<&str> = loaded.active.iter().map(|g| g.id.as_str()).collect();
+        assert!(
+            ids.contains(&"alpha-writer-aaaa"),
+            "writer A's goal must survive writer B's save (issue #1915), got {ids:?}"
+        );
+        assert!(
+            ids.contains(&"beta-writer-bbbb"),
+            "writer B's goal must be present, got {ids:?}"
+        );
+        assert_eq!(loaded.active.len(), 2);
+    });
+}
+
+/// I2 — Sequential writes with same goal id → second write's fields win
+/// (in-flight precedence on collision, applied at save time).
+#[test]
+fn save_goal_board_collision_persists_in_flight_fields() {
+    let (bridge, _facts) = stateful_bridge();
+    let root = tmp_state_root("save-collision");
+
+    let first = GoalBoard {
+        active: vec![goal_with(
+            "collision-goal-idid",
+            5,
+            GoalProgress::NotStarted,
+            "First desc",
+        )],
+        backlog: vec![],
+    };
+    let mut updated_goal = goal_with(
+        "collision-goal-idid",
+        1,
+        GoalProgress::InProgress { percent: 80 },
+        "Updated desc",
+    );
+    updated_goal.assigned_to = Some("engineer-9".to_string());
+    let second = GoalBoard {
+        active: vec![updated_goal],
+        backlog: vec![],
+    };
+
+    with_state_root(&root, || {
+        super::save_goal_board(&first, &bridge).unwrap();
+        super::save_goal_board(&second, &bridge).unwrap();
+        let loaded = super::load_goal_board(&bridge).unwrap();
+        assert_eq!(loaded.active.len(), 1);
+        let g = &loaded.active[0];
+        assert_eq!(g.description, "Updated desc");
+        assert_eq!(g.priority, 1);
+        assert!(
+            matches!(g.status, GoalProgress::InProgress { percent: 80 }),
+            "expected InProgress(80%), got {:?}",
+            g.status
+        );
+        assert_eq!(g.assigned_to.as_deref(), Some("engineer-9"));
+    });
+}
+
+/// I7 — Read-failure fallback: when `search_facts` errors, save_goal_board
+/// must NOT panic and must NOT propagate the read error — it persists the
+/// in-flight board unchanged (best-effort fail-open on read, per SR-6.1).
+#[test]
+fn save_goal_board_read_failure_falls_back_to_persisting_in_flight() {
+    let recording = BridgeRecording::shared();
+    let bridge = bridge_search_fails_store_works(recording.clone());
+    let root = tmp_state_root("save-readfail");
+
+    let board = GoalBoard {
+        active: vec![goal_with(
+            "readfail-goal-idid",
+            1,
+            GoalProgress::NotStarted,
+            "Fallback goal",
+        )],
+        backlog: vec![],
+    };
+
+    with_state_root(&root, || {
+        super::save_goal_board(&board, &bridge)
+            .expect("read-failure must not propagate from save_goal_board");
+    });
+
+    let calls = recording.calls();
+    assert_eq!(
+        calls.len(),
+        1,
+        "in-flight board must still be persisted on read failure"
+    );
+    assert_eq!(calls[0].concept, "goal-board:snapshot");
+    let persisted: GoalBoard = serde_json::from_str(&calls[0].content).unwrap();
+    assert_eq!(persisted.active.len(), 1);
+    assert_eq!(persisted.active[0].id, "readfail-goal-idid");
+}
+
+/// I4 — Capacity bound holds across many merge-on-write saves. Saving 7
+/// disjoint single-goal boards must result in a merged board of exactly
+/// MAX_ACTIVE_GOALS=5 goals (the ones with the lowest priority numbers).
+#[test]
+fn save_goal_board_capacity_bound_holds_after_multiple_merges() {
+    let (bridge, _facts) = stateful_bridge();
+    let root = tmp_state_root("save-capacity");
+
+    with_state_root(&root, || {
+        for i in 0u32..7 {
+            let board = GoalBoard {
+                active: vec![goal_with(
+                    &format!("capgoal-{i:04}-aaaa"),
+                    i + 1,
+                    GoalProgress::NotStarted,
+                    "x",
+                )],
+                backlog: vec![],
+            };
+            super::save_goal_board(&board, &bridge).unwrap();
+        }
+        let loaded = super::load_goal_board(&bridge).unwrap();
+        assert_eq!(
+            loaded.active.len(),
+            MAX_ACTIVE_GOALS,
+            "merged board must be capped at MAX_ACTIVE_GOALS, got {} goals: {:?}",
+            loaded.active.len(),
+            loaded
+                .active
+                .iter()
+                .map(|g| (g.id.as_str(), g.priority))
+                .collect::<Vec<_>>()
+        );
+        let priorities: Vec<u32> = loaded.active.iter().map(|g| g.priority).collect();
+        for p in [1u32, 2, 3, 4, 5] {
+            assert!(
+                priorities.contains(&p),
+                "priority {p} must be kept, got {priorities:?}"
+            );
+        }
+        assert!(
+            !priorities.contains(&6),
+            "priority 6 must be truncated, got {priorities:?}"
+        );
+        assert!(
+            !priorities.contains(&7),
+            "priority 7 must be truncated, got {priorities:?}"
+        );
+    });
+}
+
+// ── concurrent save_goal_board: regression test for #1915 ───────────────
+
+/// Issue #1915 concurrency regression: two threads simultaneously
+/// `save_goal_board` with disjoint single-goal boards against a shared
+/// stateful bridge. After both joins, `load_goal_board` MUST return a
+/// board containing both goals. Repeated for 50 iterations with a Barrier
+/// to maximise contention on the read-modify-write window.
+#[test]
+fn save_goal_board_concurrent_two_writers_preserves_both_goals() {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    let root = tmp_state_root("save-concurrent");
+
+    for iter in 0..50u32 {
+        let (bridge, _facts) = stateful_bridge();
+        let bridge: Arc<crate::memory_bridge::CognitiveMemoryBridge> = Arc::new(bridge);
+        let barrier = Arc::new(Barrier::new(2));
+
+        let alpha_id = format!("alpha-concur-{iter:04}");
+        let beta_id = format!("beta-concur-{iter:04}");
+
+        let bridge_a = bridge.clone();
+        let barrier_a = barrier.clone();
+        let alpha_id_thread = alpha_id.clone();
+        let h_a = thread::spawn(move || {
+            barrier_a.wait();
+            let board = GoalBoard {
+                active: vec![goal_with(
+                    &alpha_id_thread,
+                    1,
+                    GoalProgress::NotStarted,
+                    "Alpha",
+                )],
+                backlog: vec![],
+            };
+            super::save_goal_board(&board, bridge_a.as_ref()).unwrap();
+        });
+
+        let bridge_b = bridge.clone();
+        let barrier_b = barrier.clone();
+        let beta_id_thread = beta_id.clone();
+        let h_b = thread::spawn(move || {
+            barrier_b.wait();
+            let board = GoalBoard {
+                active: vec![goal_with(
+                    &beta_id_thread,
+                    2,
+                    GoalProgress::NotStarted,
+                    "Beta",
+                )],
+                backlog: vec![],
+            };
+            super::save_goal_board(&board, bridge_b.as_ref()).unwrap();
+        });
+
+        h_a.join().expect("alpha thread must not panic");
+        h_b.join().expect("beta thread must not panic");
+
+        let loaded = with_state_root(&root, || super::load_goal_board(bridge.as_ref()).unwrap());
+        let ids: Vec<String> = loaded.active.iter().map(|g| g.id.clone()).collect();
+        assert!(
+            ids.iter().any(|id| id == &alpha_id),
+            "iter {iter}: alpha goal {alpha_id} disappeared — issue #1915 regression. ids={ids:?}"
+        );
+        assert!(
+            ids.iter().any(|id| id == &beta_id),
+            "iter {iter}: beta goal {beta_id} disappeared — issue #1915 regression. ids={ids:?}"
+        );
+    }
+}
+
+/// Companion concurrency test: backlog-only writes from two threads must
+/// also preserve both items (backlog has the same drift risk as active
+/// per requirement #2).
+#[test]
+fn save_goal_board_concurrent_backlog_writers_preserve_both_items() {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    let root = tmp_state_root("save-concurrent-backlog");
+
+    for iter in 0..25u32 {
+        let (bridge, _facts) = stateful_bridge();
+        let bridge: Arc<crate::memory_bridge::CognitiveMemoryBridge> = Arc::new(bridge);
+        let barrier = Arc::new(Barrier::new(2));
+
+        // Seed a guard-clean active goal so board_integrity_suspect passes
+        // for both writers' boards (short ids would be rejected).
+        let seed_goal = goal_with(
+            &format!("seedgoal-{iter:04}-aa"),
+            1,
+            GoalProgress::NotStarted,
+            "Seed",
+        );
+
+        let alpha_bk_id = format!("alpha-bk-{iter:04}");
+        let beta_bk_id = format!("beta-bk-{iter:04}");
+
+        let bridge_a = bridge.clone();
+        let barrier_a = barrier.clone();
+        let alpha_bk_id_t = alpha_bk_id.clone();
+        let seed_a = seed_goal.clone();
+        let h_a = thread::spawn(move || {
+            barrier_a.wait();
+            let board = GoalBoard {
+                active: vec![seed_a],
+                backlog: vec![backlog_with(&alpha_bk_id_t, "alpha-bk", "a", 0.3)],
+            };
+            super::save_goal_board(&board, bridge_a.as_ref()).unwrap();
+        });
+
+        let bridge_b = bridge.clone();
+        let barrier_b = barrier.clone();
+        let beta_bk_id_t = beta_bk_id.clone();
+        let seed_b = seed_goal.clone();
+        let h_b = thread::spawn(move || {
+            barrier_b.wait();
+            let board = GoalBoard {
+                active: vec![seed_b],
+                backlog: vec![backlog_with(&beta_bk_id_t, "beta-bk", "b", 0.4)],
+            };
+            super::save_goal_board(&board, bridge_b.as_ref()).unwrap();
+        });
+
+        h_a.join().unwrap();
+        h_b.join().unwrap();
+
+        let loaded = with_state_root(&root, || super::load_goal_board(bridge.as_ref()).unwrap());
+        let bk_ids: Vec<String> = loaded.backlog.iter().map(|b| b.id.clone()).collect();
+        assert!(
+            bk_ids.iter().any(|id| id == &alpha_bk_id),
+            "iter {iter}: alpha backlog item {alpha_bk_id} disappeared, got {bk_ids:?}"
+        );
+        assert!(
+            bk_ids.iter().any(|id| id == &beta_bk_id),
+            "iter {iter}: beta backlog item {beta_bk_id} disappeared, got {bk_ids:?}"
+        );
+    }
+}

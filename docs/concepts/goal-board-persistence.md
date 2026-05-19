@@ -1,7 +1,7 @@
 ---
 title: Goal board persistence — cognitive-memory single source of truth
 description: How Simard loads and saves the goal board across OODA cycles, dashboard handlers, meeting flows, and the engineer loop, with cognitive memory as the sole persistence target.
-last_updated: 2026-05-09
+last_updated: 2026-05-19
 owner: simard
 doc_type: concept
 related:
@@ -57,6 +57,20 @@ This produced a class of subtle bugs:
 
 - **Drift** — a dashboard write that succeeded on disk but was racing a
   daemon cycle could be silently overwritten by the daemon's next save.
+  A related intra-store race in `save_goal_board` itself — two
+  `CognitiveMemoryOps` clients each writing a stale snapshot fact —
+  caused issue
+  [#1915](https://github.com/rysweet/Simard/issues/1915), where production
+  goals were silently deleted from cognitive memory between OODA cycles 5
+  and 6 during concurrent worktree/cargo build activity. The fix layers
+  **merge-on-write** semantics on top of `save_goal_board`: read the latest
+  persisted snapshot, union by `id` with the in-flight board (in-flight
+  wins on collision), truncate the active set to `MAX_ACTIVE_GOALS` using
+  a deterministic sort key, then `store_fact`. See the
+  [`save_goal_board` API reference](../reference/goal-board-api.md#save_goal_board)
+  for the merge rule, the read-failure fallback, and the best-effort
+  concurrency guarantee (no goal disappears in the common race; field-level
+  last-writer still applies on same-id concurrent edits).
 - **Stale reads** — a consumer that read the disk file just after another
   consumer had updated only the cognitive memory snapshot saw outdated data.
 - **Recovery confusion** — an operator restoring from a backup of one store
@@ -208,15 +222,19 @@ run_ooda_cycle_inner
 ├─ check .reseed_goals marker  ← if present: reset board to empty + skip load
 ├─ load_goal_board(bridge)
 │   ├─ migrate_legacy_disk_file_if_present(bridge)  ← one-shot bootstrap
-│   └─ search_facts("goal-board:snapshot", 1, 0.0)  ← primary read
-│       (failure → log + Ok(GoalBoard::new()))
+│   └─ read_latest_snapshot(bridge)                 ← shared with save_goal_board
+│       (search_facts("goal-board:snapshot", 64, 0.0) → filter → max_by(node_id))
+│       (None on error → log + Ok(GoalBoard::new()))
 │   └─ only applied if board.active is non-empty
 ├─ sweep_stale_assignments()   ← clear dead tmux sessions (no-op outside tmux)
 ├─ seed_default_board()        ← only if board still empty
 ├─ check_meeting_handoffs()
 └─ [Observe → Orient → Decide → Act → Curate]
     └─ persist_board(bridge)   ← writes goal-board:snapshot fact + episode
-        (rejects suspect boards via integrity guard before any write)
+        ├─ guard(in-flight)                       ← rejects suspect boards before any read/write
+        ├─ read_latest_snapshot(bridge)           ← re-reads latest persisted fact (None on error → skip merge)
+        ├─ merge_boards(persisted, in-flight)     ← union by id, in-flight wins, truncate to MAX_ACTIVE_GOALS
+        └─ store_fact(merged)                     ← writes goal-board:snapshot fact + episode
 ```
 
 Three important notes on the load step:
@@ -247,8 +265,19 @@ Three important notes on the load step:
 - Writes from the dashboard, the meeting REPL, and the daemon never race
   against each other when the daemon is running, because they all flow
   through the same daemon IPC socket.
+- **No goal *added* in a disjoint subset disappears in the common
+  multi-client race** (issue #1915): `save_goal_board` re-reads the latest
+  persisted snapshot and merges by-`id` union with the in-flight board
+  before storing, so two `CognitiveMemoryOps` clients writing disjoint
+  goal subsets each preserve the other's goals. See the
+  [`save_goal_board` API reference](../reference/goal-board-api.md#save_goal_board)
+  for the merge rule, deterministic truncation order, and the
+  read-failure fallback. Explicit *removals* (`archive_completed`, local
+  `retain`/`drain` followed by save) are **eventually consistent**, not
+  atomic across clients — see
+  [Deletion semantics (RR-5)](../reference/goal-board-api.md#deletion-semantics-rr-5).
 - `save_goal_board` rejects boards containing placeholder descriptions or
-  suspiciously short IDs **before** any write, preventing LLM
+  suspiciously short IDs **before** any merge or write, preventing LLM
   hallucinations during the Decide phase from silently overwriting the
   authoritative snapshot.
 - `load_goal_board` never panics or raises an error from a corrupt
@@ -257,6 +286,23 @@ Three important notes on the load step:
   boards).
 
 **Not guaranteed:**
+- **Strict linearizability of `save_goal_board`**: the merge-on-write fix
+  for issue #1915 prevents goal *disappearance* in the common race (two
+  writers on disjoint goal subsets), but a tight read-read-write-write
+  interleaving across separate `CognitiveMemoryOps` clients can still
+  produce a snapshot that omits the earlier writer's most recent fact
+  (the fact remains in the append-only log but is no longer
+  `max_by(node_id)`). Same-id concurrent edits resolve field-level
+  last-writer-wins. Callers that need strict serializability must route
+  through the daemon IPC socket.
+- **Unbounded backlog growth**: `merge_boards` does not cap
+  `board.backlog.len()`. Callers that accumulate stewardship items
+  without periodic pruning will grow the persisted snapshot fact
+  monotonically. The active set is bounded by `MAX_ACTIVE_GOALS = 5` and
+  is truncated deterministically on merge — see
+  [Active capacity truncation](../reference/goal-board-api.md#save_goal_board)
+  in the API reference for the bounded/unbounded contrast and the
+  deterministic sort key.
 - **Concurrent daemons**: if two Simard daemons share the same
   `SIMARD_STATE_ROOT`, the second one will fail to take the writer lock
   and exit. This is enforced by LadybugDB.
