@@ -309,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(simard_state_root)]
+    #[serial_test::serial(simard_state_root, cognitive_memory)]
     fn goal_curation_read_default_state_root_resolves_to_canonical_daemon_store() {
         use crate::memory_ipc::default_state_root;
 

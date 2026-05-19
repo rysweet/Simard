@@ -68,6 +68,7 @@ fn update_progress_and_archive() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn load_empty_board_from_bridge() {
     // Point SIMARD_STATE_ROOT at a temp dir with no goal_records.json so the
     // disk-first tier misses and falls through to cognitive memory (also empty).

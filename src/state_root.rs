@@ -150,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(simard_state_root_env)]
+    #[serial(simard_state_root_env, cognitive_memory)]
     fn absolute_env_var_wins() {
         let _g = EnvGuard::set(STATE_ROOT_ENV, "/tmp/simard-state-root-test");
         assert_eq!(
@@ -164,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(simard_state_root_env)]
+    #[serial(simard_state_root_env, cognitive_memory)]
     fn empty_env_var_falls_back_to_default() {
         let _g = EnvGuard::set(STATE_ROOT_ENV, "");
         let resolved = simard_state_root();
@@ -177,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(simard_state_root_env)]
+    #[serial(simard_state_root_env, cognitive_memory)]
     fn relative_env_var_is_ignored() {
         let _g = EnvGuard::set(STATE_ROOT_ENV, "relative/path");
         let resolved = simard_state_root();
@@ -191,7 +191,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(simard_state_root_env)]
+    #[serial(simard_state_root_env, cognitive_memory)]
     fn unset_env_var_falls_back_to_home_simard() {
         let _g = EnvGuard::unset(STATE_ROOT_ENV);
         let resolved = simard_state_root();
@@ -202,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(simard_state_root_env)]
+    #[serial(simard_state_root_env, cognitive_memory)]
     fn resolve_subdir_concatenates_under_root() {
         let _g = EnvGuard::set(STATE_ROOT_ENV, "/tmp/simard-rs-subdir-test");
         assert_eq!(
