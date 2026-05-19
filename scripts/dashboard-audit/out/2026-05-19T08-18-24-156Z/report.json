@@ -1,0 +1,961 @@
+{
+  "meta": {
+    "timestamp": "2026-05-19T08-18-24-156Z",
+    "tokenBytes": 8,
+    "startedAt": "2026-05-19T08:18:24.157Z",
+    "endedAt": "2026-05-19T08:18:47.079Z"
+  },
+  "baseUrl": "http://localhost:8080",
+  "auth": {
+    "winner": {
+      "method": "form-post-discovered",
+      "endpoint": "/api/login",
+      "field": "code",
+      "bodyShape": "json",
+      "status": 200,
+      "ok": true
+    },
+    "attempts": [
+      {
+        "method": "form-post-discovered",
+        "endpoint": "/api/login",
+        "field": "code",
+        "bodyShape": "json",
+        "status": 200,
+        "ok": true
+      }
+    ]
+  },
+  "apis": {
+    "/api/status": {
+      "status": 200,
+      "ok": true,
+      "bodyBytes": 405,
+      "body": {
+        "array": false,
+        "keys": [
+          "active_processes",
+          "daemon_health",
+          "disk_usage_pct",
+          "git_hash",
+          "ooda_daemon",
+          "timestamp",
+          "version"
+        ]
+      },
+      "dims": [
+        "ooda",
+        "memory"
+      ],
+      "expectMissing": false
+    },
+    "/api/goals": {
+      "status": 200,
+      "ok": true,
+      "bodyBytes": 5601,
+      "body": {
+        "array": false,
+        "keys": [
+          "active",
+          "active_count",
+          "backlog",
+          "backlog_count"
+        ]
+      },
+      "dims": [
+        "goal-board"
+      ],
+      "expectMissing": false
+    },
+    "/api/processes": {
+      "status": 200,
+      "ok": true,
+      "bodyBytes": 17568,
+      "body": {
+        "array": false,
+        "keys": [
+          "count",
+          "processes",
+          "root_pid",
+          "timestamp"
+        ]
+      },
+      "dims": [
+        "engineers"
+      ],
+      "expectMissing": false
+    },
+    "/api/memory": {
+      "status": 200,
+      "ok": true,
+      "bodyBytes": 791,
+      "body": {
+        "array": false,
+        "keys": [
+          "evidence_records",
+          "goal_records",
+          "handoff",
+          "last_consolidation",
+          "memory_records",
+          "native_memory",
+          "native_memory_db_exists",
+          "native_memory_db_path",
+          "native_memory_error",
+          "state_root",
+          "timestamp",
+          "total_facts"
+        ]
+      },
+      "dims": [
+        "memory"
+      ],
+      "expectMissing": false
+    },
+    "/api/workboard": {
+      "status": 200,
+      "ok": true,
+      "bodyBytes": 24908,
+      "body": {
+        "array": false,
+        "keys": [
+          "cognitive_statistics",
+          "cycle",
+          "goals",
+          "next_cycle_eta_seconds",
+          "recent_actions",
+          "spawned_engineers",
+          "task_memory",
+          "timestamp",
+          "uptime_seconds",
+          "working_memory"
+        ]
+      },
+      "dims": [
+        "goal-board",
+        "ooda",
+        "memory"
+      ],
+      "expectMissing": false
+    },
+    "/api/traces": {
+      "status": 200,
+      "ok": true,
+      "bodyBytes": 99289,
+      "body": {
+        "array": false,
+        "keys": [
+          "otel_enabled",
+          "otel_endpoint",
+          "span_count",
+          "spans",
+          "timestamp"
+        ]
+      },
+      "dims": [
+        "ooda"
+      ],
+      "expectMissing": false
+    },
+    "/api/logs": {
+      "status": 200,
+      "ok": true,
+      "bodyBytes": 2156327,
+      "body": {
+        "array": false,
+        "keys": [
+          "cost_log_lines",
+          "cycle_reports",
+          "daemon_log_lines",
+          "ooda_transcripts",
+          "terminal_transcripts",
+          "timestamp"
+        ]
+      },
+      "dims": [],
+      "expectMissing": false
+    },
+    "/api/costs": {
+      "status": 200,
+      "ok": true,
+      "bodyBytes": 315,
+      "body": {
+        "array": false,
+        "keys": [
+          "daily",
+          "weekly"
+        ]
+      },
+      "dims": [],
+      "expectMissing": false
+    },
+    "/api/judges": {
+      "status": 404,
+      "ok": false,
+      "bodyBytes": 0,
+      "body": {
+        "array": false,
+        "keys": null,
+        "note": "non-json or empty"
+      },
+      "dims": [
+        "merge-judge"
+      ],
+      "expectMissing": true
+    },
+    "/api/judge": {
+      "status": 404,
+      "ok": false,
+      "bodyBytes": 0,
+      "body": {
+        "array": false,
+        "keys": null,
+        "note": "non-json or empty"
+      },
+      "dims": [
+        "merge-judge"
+      ],
+      "expectMissing": true
+    },
+    "/api/merge-judge": {
+      "status": 404,
+      "ok": false,
+      "bodyBytes": 0,
+      "body": {
+        "array": false,
+        "keys": null,
+        "note": "non-json or empty"
+      },
+      "dims": [
+        "merge-judge"
+      ],
+      "expectMissing": true
+    },
+    "/api/prs": {
+      "status": 404,
+      "ok": false,
+      "bodyBytes": 0,
+      "body": {
+        "array": false,
+        "keys": null,
+        "note": "non-json or empty"
+      },
+      "dims": [
+        "per-pr"
+      ],
+      "expectMissing": true
+    },
+    "/api/pulls": {
+      "status": 404,
+      "ok": false,
+      "bodyBytes": 0,
+      "body": {
+        "array": false,
+        "keys": null,
+        "note": "non-json or empty"
+      },
+      "dims": [
+        "per-pr"
+      ],
+      "expectMissing": true
+    },
+    "/api/pr/1880": {
+      "status": 404,
+      "ok": false,
+      "bodyBytes": 0,
+      "body": {
+        "array": false,
+        "keys": null,
+        "note": "non-json or empty"
+      },
+      "dims": [
+        "per-pr"
+      ],
+      "expectMissing": true
+    },
+    "/api/brain-failures": {
+      "status": 404,
+      "ok": false,
+      "bodyBytes": 0,
+      "body": {
+        "array": false,
+        "keys": null,
+        "note": "non-json or empty"
+      },
+      "dims": [
+        "brain-failure"
+      ],
+      "expectMissing": true
+    },
+    "/api/failures": {
+      "status": 404,
+      "ok": false,
+      "bodyBytes": 0,
+      "body": {
+        "array": false,
+        "keys": null,
+        "note": "non-json or empty"
+      },
+      "dims": [
+        "brain-failure"
+      ],
+      "expectMissing": true
+    },
+    "/api/ooda-cycles": {
+      "status": 404,
+      "ok": false,
+      "bodyBytes": 0,
+      "body": {
+        "array": false,
+        "keys": null,
+        "note": "non-json or empty"
+      },
+      "dims": [
+        "ooda"
+      ],
+      "expectMissing": true
+    }
+  },
+  "routes": [
+    {
+      "slug": "landing",
+      "label": "Landing (post-login)",
+      "url": "http://localhost:8080/",
+      "httpStatus": 200,
+      "title": "Simard Dashboard v2",
+      "screenshot": "00-landing.png",
+      "panels": [
+        {
+          "title": "🌲 Simard Dashboard",
+          "sampleText": "🌲 Simard Dashboard\nv0.17.0.4 (ce418fd)\n⟨/⟩ Source\n📦 Releases"
+        },
+        {
+          "title": "🤖 Simard — Autonomous Agent",
+          "sampleText": "🤖 Simard — Autonomous Agent\nLoading agent status…"
+        },
+        {
+          "title": "Recent Actions Refresh",
+          "sampleText": "Recent Actions\nRefresh\nLoading…"
+        },
+        {
+          "title": "Open PRs",
+          "sampleText": "Open PRs\nLoading…"
+        },
+        {
+          "title": "System Status",
+          "sampleText": "System Status\nVersion\nv0.17.0.4 (ce418fd)\nOODA Daemon\nrunning (cycle #2, 2m ago)\nActive Processes\n43\nDisk Usage\n24%\nUpdated\njust now"
+        },
+        {
+          "title": "Open Issues",
+          "sampleText": "Open Issues\nLoading…"
+        },
+        {
+          "title": "Cluster Topology Refresh",
+          "sampleText": "Cluster Topology\nRefresh\nQuerying remote VMs… (this may take 10-30s)"
+        },
+        {
+          "title": "Remote VMs",
+          "sampleText": "Remote VMs\nLoading…"
+        },
+        {
+          "title": "Azlin Hosts",
+          "sampleText": "Azlin Hosts\nLoading…\nAdd Host"
+        }
+      ],
+      "latestTimestamp": null,
+      "consoleErrorsBefore": 0
+    },
+    {
+      "slug": "overview",
+      "label": "Overview",
+      "kind": "tab",
+      "selector": ".tab[data-tab=\"overview\"]",
+      "url": "http://localhost:8080/",
+      "httpStatus": null,
+      "title": "Simard Dashboard v2",
+      "screenshot": "01-overview.png",
+      "panels": [
+        {
+          "title": "🤖 Simard — Autonomous Agent",
+          "sampleText": "🤖 Simard — Autonomous Agent\n🔴 Agent Stopped\nCycle #2 · Last heartbeat 2m ago\n🎯 Top Priority: add-more-gym-benchmark-scenarios — not yet started urgency 0.80\nLast Cycle Actions:\n✅\nadvance-goal\nnot yet started\nspawn_engineer dispatched: ag"
+        },
+        {
+          "title": "Recent Actions Refresh",
+          "sampleText": "Recent Actions\nRefresh\n#369\n✅\nadvance-goal\nspawn_engineer dispatched: agent='engineer-add-more-gym-benchmark-scenarios-1776868534', task='Reference issue #915 (verify it exists with `gh issue view 915 --repo rysweet/Simard`; if missing, cre"
+        },
+        {
+          "title": "Open PRs",
+          "sampleText": "Open PRs\n#1948\nfeat(amplihack-rs): subprocess prompt delivery via temp-file and stdin (closes #1897)\n3m ago\n#1942\nfix(read-subcommands): graceful state-root fallback for meeting/improvement-curation/review (#1909)\n49m ago\n#1934\nfix(base-typ"
+        },
+        {
+          "title": "System Status",
+          "sampleText": "System Status\nVersion\nv0.17.0.4 (ce418fd)\nOODA Daemon\nrunning (cycle #2, 2m ago)\nActive Processes\n43\nDisk Usage\n24%\nUpdated\njust now"
+        },
+        {
+          "title": "Open Issues",
+          "sampleText": "Open Issues\n#1947parity: decompose #1899 into shippable unitsparityamplihack-rsamplihack-rs-parity\n#1946goal: operator-blocked — define scope, exit criteria, and first work itemgoal-charterneeds-triage\n#1945goal: alpha — define scope, exit "
+        },
+        {
+          "title": "Cluster Topology Refresh",
+          "sampleText": "Cluster Topology\nRefresh\nTopology\ndistributed\nLocal Host\nia2\nMemory Sync\nDHT+bloom gossip (peer-to-peer)\nHive Status\nstandalone\nPeers\n0\nFacts Shared\n0\nUpdated\njust now\nEvent Bus\nSubscribers\n0\nEvents/min\n0\nLast event\n—\nfact_imported: 0 subs,"
+        },
+        {
+          "title": "Event Bus",
+          "sampleText": "Cluster Topology\nRefresh\nTopology\ndistributed\nLocal Host\nia2\nMemory Sync\nDHT+bloom gossip (peer-to-peer)\nHive Status\nstandalone\nPeers\n0\nFacts Shared\n0\nUpdated\njust now\nEvent Bus\nSubscribers\n0\nEvents/min\n0\nLast event\n—\nfact_imported: 0 subs,"
+        },
+        {
+          "title": "Remote VMs",
+          "sampleText": "Remote VMs\ndevo unknown\n✕ Remove"
+        },
+        {
+          "title": "devo unknown",
+          "sampleText": "Remote VMs\ndevo unknown\n✕ Remove"
+        },
+        {
+          "title": "Azlin Hosts",
+          "sampleText": "Azlin Hosts\nLoading…\nAdd Host"
+        }
+      ],
+      "latestTimestamp": null,
+      "consoleErrorsDelta": 0
+    },
+    {
+      "slug": "goals",
+      "label": "Goals",
+      "kind": "tab",
+      "selector": ".tab[data-tab=\"goals\"]",
+      "url": "http://localhost:8080/",
+      "httpStatus": null,
+      "title": "Simard Dashboard v2",
+      "screenshot": "02-goals.png",
+      "panels": [
+        {
+          "title": "Active Goals\n        Refresh\n        Seed Default Goals\n        + Add Goal",
+          "sampleText": "Active Goals\nRefresh\nSeed Default Goals\n+ Add Goal\nPriority\tID\tDescription\tStatus\tCurrent Activity\tActions\n1\tdrive-amplihack-rs-feature-parity\tDrive amplihack-rs feature parity per the parity inventory (#1897-#1901)\tin-progress(2%)\t\nadvance"
+        },
+        {
+          "title": "Backlog",
+          "sampleText": "Backlog\nID\tDescription\tSource\tScore\tActions\nsem_019e3f49bf527251955ef0c25a0f0cf4\tpriority=3 status=proposed rationale=Act phase took 97.2s (threshold: 60s). Consider parallelizing actions or reducing scope.\tcognitive-memory/improvement-opti"
+        }
+      ],
+      "latestTimestamp": null,
+      "consoleErrorsDelta": 0
+    },
+    {
+      "slug": "traces",
+      "label": "Traces",
+      "kind": "tab",
+      "selector": ".tab[data-tab=\"traces\"]",
+      "url": "http://localhost:8080/",
+      "httpStatus": null,
+      "title": "Simard Dashboard v2",
+      "screenshot": "03-traces.png",
+      "panels": [
+        {
+          "title": "OTEL Traces Refresh",
+          "sampleText": "OTEL Traces\nRefresh\nOTEL Status\nOTEL not configured — set OTEL_EXPORTER_OTLP_ENDPOINT to enable\nCollected Entries\n127\n\n              [cost]\n              2026-05-19T08:18:25\n              copilot\n            \n\n              [cost]\n         "
+        },
+        {
+          "title": "Setup",
+          "sampleText": "Setup\n\nTo enable full OTEL tracing, set OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 and run an OTEL collector (e.g. Jaeger, Grafana Tempo).\n\nFor systemd: systemctl --user edit simard-ooda and add the env var in an [Service] override."
+        }
+      ],
+      "latestTimestamp": "2026-05-19T08:18:25",
+      "consoleErrorsDelta": 0
+    },
+    {
+      "slug": "logs",
+      "label": "Logs",
+      "kind": "tab",
+      "selector": ".tab[data-tab=\"logs\"]",
+      "url": "http://localhost:8080/",
+      "httpStatus": null,
+      "title": "Simard Dashboard v2",
+      "screenshot": "04-logs.png",
+      "panels": [
+        {
+          "title": "Daemon Log Refresh 📋 Copy",
+          "sampleText": "Daemon Log\nRefresh\n📋 Copy\nAll levels\nErrors\nWarnings\nInfo\n200/200 lines\n2026-05-19T03:05:08Z [simard] reaped 2 zombie engineer process(es)\n2026-05-19T03:05:09Z [simard] DB backup created: /home/azureuser/.simard/backups/cognitive_memory.la"
+        },
+        {
+          "title": "Cost Ledger 📋 Copy",
+          "sampleText": "Cost Ledger\n📋 Copy\n{\"timestamp\":\"2026-05-19T07:09:38.874485415Z\",\"session_id\":\"session-019e3f11-584e-7211-921e-4ecb375ecb2d\",\"model\":\"copilot\",\"prompt_tokens_est\":2186,\"completion_tokens_est\":40,\"cost_usd_est\":0.007158,\"context\":\"copilot t"
+        },
+        {
+          "title": "Cycle Reports",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #1",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #10",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #100",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #101",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #102",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #103",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #104",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #105",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #106",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #107",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #108",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #109",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #11",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #110",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #111",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #112",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #113",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #114",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #115",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #116",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #117",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #118",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #119",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #12",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #120",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #121",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #122",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #123",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #124",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #125",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #126",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #127",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #128",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #129",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #13",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #130",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        },
+        {
+          "title": "Cycle #131",
+          "sampleText": "Cycle Reports\nCycle #1\nOODA cycle #1: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #10\nOODA cycle #10: 6 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\nCycle #100\nOODA cycle #100: 6 pr"
+        }
+      ],
+      "latestTimestamp": "2026-05-19T08:18:25.913174572Z",
+      "consoleErrorsDelta": 0
+    },
+    {
+      "slug": "processes",
+      "label": "Processes",
+      "kind": "tab",
+      "selector": ".tab[data-tab=\"processes\"]",
+      "url": "http://localhost:8080/",
+      "httpStatus": null,
+      "title": "Simard Dashboard v2",
+      "screenshot": "05-processes.png",
+      "panels": [
+        {
+          "title": "Active Simard Processes Refresh ⟳ auto-refreshing",
+          "sampleText": "Active Simard Processes \nRefresh\n⟳ auto-refreshing\nLoading…"
+        },
+        {
+          "title": "Process Tree Refresh",
+          "sampleText": "Process Tree\nRefresh\n11 process(es) — OODA daemon PID 693345 — updated just now\n▼\n693345\n🤖 Simard OODA Daemon\n10:15\n/home/azureuser/.simard/bin/simard ooda run\n·\n693442\n10:15\npython3 /home/azureuser/src/Simard/worktrees/main/python/simard_"
+        }
+      ],
+      "latestTimestamp": null,
+      "consoleErrorsDelta": 0
+    },
+    {
+      "slug": "memory",
+      "label": "Memory",
+      "kind": "tab",
+      "selector": ".tab[data-tab=\"memory\"]",
+      "url": "http://localhost:8080/",
+      "httpStatus": null,
+      "title": "Simard Dashboard v2",
+      "screenshot": "06-memory.png",
+      "panels": [
+        {
+          "title": "Memory",
+          "sampleText": "What the agent has learned and remembered, organised by memory type: Working (current task), Semantic (facts), Episodic (past events), Procedural (how-to), Prospective (planned), and Sensory (raw input).\nMemory\nW:44 S:1760 E:16238 P:0 Pr:0 "
+        },
+        {
+          "title": "Memory Search",
+          "sampleText": "Memory Search\nSearch"
+        },
+        {
+          "title": "Memory Overview",
+          "sampleText": "Memory Overview\nTotal Facts\n18047\nLast Consolidation\nNever\nState Root\n/home/azureuser/.simard\nLadybugDB (Native Memory)\nSensory\n5\nWorking\n44\nEpisodic\n16238\nSemantic (Facts)\n1760\nProcedural\n0\nProspective\n0\nTotal Native\n18047"
+        },
+        {
+          "title": "LadybugDB (Native Memory)",
+          "sampleText": "Memory Overview\nTotal Facts\n18047\nLast Consolidation\nNever\nState Root\n/home/azureuser/.simard\nLadybugDB (Native Memory)\nSensory\n5\nWorking\n44\nEpisodic\n16238\nSemantic (Facts)\n1760\nProcedural\n0\nProspective\n0\nTotal Native\n18047"
+        },
+        {
+          "title": "Memory Files",
+          "sampleText": "Memory Files\nMemory Records 0 records 0 B\nModified\nN/A\nEvidence Records 0 records 0 B\nModified\nN/A\nGoal Records (cognitive memory) 5 records\nSource\ncognitive-memory:goal-board:snapshot\nLatest Handoff 0 B\nModified\nN/A"
+        },
+        {
+          "title": "Memory Records 0 records 0 B",
+          "sampleText": "Memory Files\nMemory Records 0 records 0 B\nModified\nN/A\nEvidence Records 0 records 0 B\nModified\nN/A\nGoal Records (cognitive memory) 5 records\nSource\ncognitive-memory:goal-board:snapshot\nLatest Handoff 0 B\nModified\nN/A"
+        },
+        {
+          "title": "Evidence Records 0 records 0 B",
+          "sampleText": "Memory Files\nMemory Records 0 records 0 B\nModified\nN/A\nEvidence Records 0 records 0 B\nModified\nN/A\nGoal Records (cognitive memory) 5 records\nSource\ncognitive-memory:goal-board:snapshot\nLatest Handoff 0 B\nModified\nN/A"
+        },
+        {
+          "title": "Goal Records (cognitive memory) 5 records",
+          "sampleText": "Memory Files\nMemory Records 0 records 0 B\nModified\nN/A\nEvidence Records 0 records 0 B\nModified\nN/A\nGoal Records (cognitive memory) 5 records\nSource\ncognitive-memory:goal-board:snapshot\nLatest Handoff 0 B\nModified\nN/A"
+        },
+        {
+          "title": "Latest Handoff  0 B",
+          "sampleText": "Memory Files\nMemory Records 0 records 0 B\nModified\nN/A\nEvidence Records 0 records 0 B\nModified\nN/A\nGoal Records (cognitive memory) 5 records\nSource\ncognitive-memory:goal-board:snapshot\nLatest Handoff 0 B\nModified\nN/A"
+        }
+      ],
+      "latestTimestamp": null,
+      "consoleErrorsDelta": 0
+    },
+    {
+      "slug": "costs",
+      "label": "Costs",
+      "kind": "tab",
+      "selector": ".tab[data-tab=\"costs\"]",
+      "url": "http://localhost:8080/",
+      "httpStatus": null,
+      "title": "Simard Dashboard v2",
+      "screenshot": "07-costs.png",
+      "panels": [
+        {
+          "title": "Daily Costs Refresh",
+          "sampleText": "Daily Costs\nRefresh\nAPI Calls\n327\nPeriod\ndaily:2026-05-19\nCompletion Tokens\n121,967 tokens\nEstimated Cost\n$3.7129\nPrompt Tokens\n627,806 tokens"
+        },
+        {
+          "title": "Weekly Costs",
+          "sampleText": "Weekly Costs\nAPI Calls\n6,326\nPeriod\nweekly:last-7-days\nCompletion Tokens\n1,619,336 tokens\nEstimated Cost\n$58.3515\nPrompt Tokens\n11,353,806 tokens"
+        },
+        {
+          "title": "Budget Settings",
+          "sampleText": "Budget Settings\nDaily $\nWeekly $\nSave"
+        }
+      ],
+      "latestTimestamp": null,
+      "consoleErrorsDelta": 0
+    },
+    {
+      "slug": "chat",
+      "label": "Chat",
+      "kind": "tab",
+      "selector": ".tab[data-tab=\"chat\"]",
+      "url": "http://localhost:8080/",
+      "httpStatus": null,
+      "title": "Simard Dashboard v2",
+      "screenshot": "08-chat.png",
+      "panels": [
+        {
+          "title": "Meeting Chat",
+          "sampleText": "Meeting Chat\n💡 Meeting Help: Use this chat or run simard meeting <topic> from the terminal. Commands: /close end session, /goals review goals, /status system status. Meetings generate handoff documents that the OODA daemon ingests as new g"
+        }
+      ],
+      "latestTimestamp": null,
+      "consoleErrorsDelta": 0
+    },
+    {
+      "slug": "workboard",
+      "label": "Whiteboard",
+      "kind": "tab",
+      "selector": ".tab[data-tab=\"workboard\"]",
+      "url": "http://localhost:8080/",
+      "httpStatus": null,
+      "title": "Simard Dashboard v2",
+      "screenshot": "09-workboard.png",
+      "panels": [
+        {
+          "title": "Goals",
+          "sampleText": "A kanban-style view of the agent's current work: queued / in-progress / blocked / done goals, plus the agent's working memory and recent actions. The OODA cycle indicator at the top shows where the daemon is in its current Observe → Orient "
+        },
+        {
+          "title": "Queued",
+          "sampleText": "Queued\nenhance-simard-meeting-experience\nEnhance Simard meeting experience — richer handoffs, durable state, no silent loss\n0% complete\nimprove-cognitive-memory-persistence\nImprove cognitive memory persistence — recovery ladder, schema vers"
+        },
+        {
+          "title": "In Progress",
+          "sampleText": "In Progress\ndrive-amplihack-rs-feature-parity\nDrive amplihack-rs feature parity per the parity inventory (#1897-#1901)\n2% complete · engineer-drive-amplihack-rs-feature-parity-1779178257\nfix-broken-features\nFix broken features identified in"
+        },
+        {
+          "title": "Blocked",
+          "sampleText": "Blocked\n—"
+        },
+        {
+          "title": "Done",
+          "sampleText": "Done\n—"
+        },
+        {
+          "title": "Active Engineers",
+          "sampleText": "Active Engineers\nNo spawned engineers"
+        },
+        {
+          "title": "Recent Actions",
+          "sampleText": "Recent Actions\n#2\ncurrent\nStarting cycle #2\n2m ago\n#369\nadvance-goal\nspawn_engineer dispatched: agent='engineer-add-more-gym-benchmark-scenarios-1776868534', task='Reference issue #915 (verify it exists with `gh issue view 915 --repo ryswee"
+        },
+        {
+          "title": "Working Memory 0 slots ▾",
+          "sampleText": "Working Memory 0 slots ▾\nNo active working memory"
+        },
+        {
+          "title": "Task Memory 1760 facts ▾",
+          "sampleText": "Task Memory 1760 facts ▾\nimprovement-optimize-slow-ooda-act-phase (80%)improvementooda-review\npriority=3 status=proposed rationale=Act phase took 97.2s (threshold: 60s). Consider parallelizing actions or reducing scope.\ngoal-board:snapshot "
+        },
+        {
+          "title": "Cognitive Statistics",
+          "sampleText": "Cognitive Statistics\nSensory: 5Working: 44Episodic: 16238Semantic: 1760Procedural: 0Prospective: 0Total: 18047"
+        }
+      ],
+      "latestTimestamp": null,
+      "consoleErrorsDelta": 0
+    },
+    {
+      "slug": "thinking",
+      "label": "🧠 Thinking",
+      "kind": "tab",
+      "selector": ".tab[data-tab=\"thinking\"]",
+      "url": "http://localhost:8080/",
+      "httpStatus": null,
+      "title": "Simard Dashboard v2",
+      "screenshot": "10-thinking.png",
+      "panels": [
+        {
+          "title": "OODA Internal Reasoning Refresh",
+          "sampleText": "OODA Internal Reasoning\nRefresh\nCycle #369\nOODA cycle #369: 7 priorities, 3 actions (3/3 succeeded), goals=5, issues=20, tree=dirty\n👁 Observe\n5 goals tracked\n• improve-amplihack-test-coverage: in-progress(35%)\n• enhance-simard-meeting-expe"
+        }
+      ],
+      "latestTimestamp": null,
+      "consoleErrorsDelta": 0
+    },
+    {
+      "slug": "terminal",
+      "label": "Terminal",
+      "kind": "tab",
+      "selector": ".tab[data-tab=\"terminal\"]",
+      "url": "http://localhost:8080/",
+      "httpStatus": null,
+      "title": "Simard Dashboard v2",
+      "screenshot": "11-terminal.png",
+      "panels": [
+        {
+          "title": "Agent Terminal",
+          "sampleText": "Agent Terminal\nStream the live stdout/stderr of a running subordinate agent. The viewer reconnects each time you click Connect; close the WS with Disconnect.\nAgent name\nConnect\nDisconnect\nNot connected"
+        },
+        {
+          "title": "Subagent Sessions",
+          "sampleText": "Subagent Sessions\nLive and recently-ended engineer subprocesses tracked via tmux. Click Attach to copy the tmux attach command for the corresponding simard-engineer-<id> session.\nengineer-drive-amplihack-rs-feature-parity-1779178257\ndrive-a"
+        },
+        {
+          "title": "Azlin Tmux Sessions",
+          "sampleText": "Azlin Tmux Sessions\nLast refreshed:\n5/19/2026, 8:18:45 AM\nRefresh\nPer-host listing of tmux list-sessions across configured azlin hosts. Click Open to attach a session into the terminal viewer above. Auto-refreshes every 10 s while this tab "
+        }
+      ],
+      "latestTimestamp": null,
+      "consoleErrorsDelta": 0
+    }
+  ],
+  "consoleMessages": [],
+  "dimensions": [
+    {
+      "name": "goal-board state",
+      "classification": "PRESENT",
+      "evidence": [
+        "API /api/goals → 200 (keys: active, active_count, backlog, backlog_count)",
+        "Tab .tab[data-tab=\"goals\"] (#tab-goals) screenshot: 02-goals.png",
+        "Cross-reference API /api/workboard → 200 also surfaces \"goals\" key"
+      ]
+    },
+    {
+      "name": "OODA cycle health",
+      "classification": "PARTIAL",
+      "detail": "Cycle number, phase, last summary, and timestamp are exposed via /api/status.daemon_health, but there is no dedicated OODA tab showing phase transitions over time, no /api/ooda-cycles endpoint, and no inline visualisation of the OODA loop.",
+      "evidence": [
+        "API /api/status surfaces daemon_health.cycle_number, daemon_health.cycle_phase, daemon_health.actions_taken, daemon_health.cycle_duration_secs (keys: active_processes, daemon_health, disk_usage_pct, git_hash, ooda_daemon, timestamp, version)",
+        "API /api/ooda-cycles → 404 (no per-cycle history endpoint)",
+        "Tab #tab-overview screenshot: 01-overview.png",
+        "Tab #tab-thinking present — but classified separately from OODA cycle metrics: 10-thinking.png"
+      ]
+    },
+    {
+      "name": "engineer subprocesses",
+      "classification": "PRESENT",
+      "evidence": [
+        "API /api/processes → 200 (keys: count, processes, root_pid, timestamp)",
+        "Tab .tab[data-tab=\"processes\"] (#tab-processes) screenshot: 05-processes.png"
+      ]
+    },
+    {
+      "name": "cognitive memory growth",
+      "classification": "PARTIAL",
+      "detail": "Current totals (episodic / semantic / procedural / prospective / sensory / working) are exposed, but there is no time-series of GROWTH — no per-cycle delta, no rate, no chart. Dashboard answers \"how much memory is there NOW\" but not \"is it growing\".",
+      "evidence": [
+        "API /api/memory → 200 (keys: evidence_records, goal_records, handoff, last_consolidation, memory_records, native_memory, native_memory_db_exists, native_memory_db_path, native_memory_error, state_root, timestamp, total_facts); includes native_memory.episodic/semantic counts",
+        "API /api/workboard → 200 also surfaces cognitive_statistics block (point-in-time snapshot only)",
+        "Tab .tab[data-tab=\"memory\"] (#tab-memory) screenshot: 06-memory.png"
+      ]
+    },
+    {
+      "name": "merge-judge decisions",
+      "classification": "MISSING",
+      "detail": "No dashboard surface for merge-judge: no dedicated tab, no API endpoint, no panel cites it. This is one of the dimensions that PR #1880 was scoped to address; cycle 1 confirms it is unaddressed in the live build.",
+      "evidence": [
+        "API probes: /api/judges→404, /api/judge→404, /api/merge-judge→404",
+        "no panel header mentions merge-judge"
+      ]
+    },
+    {
+      "name": "per-PR readiness for #1880, #1893, #1894",
+      "classification": "MISSING",
+      "detail": "No per-PR readiness surface in cycle 1 build: no /api/prs* endpoints respond 200, no panel header references the target PR numbers. Issue #1944 proposes refining the goal description to include this dimension; cycle 1 confirms the dashboard does not yet serve it.",
+      "evidence": [
+        "API probes: /api/prs→404, /api/pulls→404, /api/pr/1880→404",
+        "no panel header mentions #1880 / #1893 / #1894"
+      ]
+    },
+    {
+      "name": "brain-failure surfacing tied to #1890",
+      "classification": "MISSING",
+      "detail": "Issue #1890 is closed, but the surfacing it was meant to enable is not on the dashboard today: no panel, no API endpoint. Cycle 1 confirms closure ≠ delivery for self-introspection.",
+      "evidence": [
+        "API probes: /api/brain-failures→404, /api/failures→404",
+        "no panel header mentions brain-failure / EMPTY_RESPONSE_SENTINEL / #1890",
+        "Cross-ref: issue #1890 is CLOSED; this dimension scores on dashboard surface, not on issue state."
+      ]
+    }
+  ],
+  "followUps": [
+    {
+      "priority": "P2",
+      "dimension": "OODA cycle health",
+      "title": "dashboard: deepen OODA cycle health (currently point-in-time only / no history / no labels)",
+      "rationale": "Cycle number, phase, last summary, and timestamp are exposed via /api/status.daemon_health, but there is no dedicated OODA tab showing phase transitions over time, no /api/ooda-cycles endpoint, and no inline visualisation of the OODA loop."
+    },
+    {
+      "priority": "P2",
+      "dimension": "cognitive memory growth",
+      "title": "dashboard: deepen cognitive memory growth (currently point-in-time only / no history / no labels)",
+      "rationale": "Current totals (episodic / semantic / procedural / prospective / sensory / working) are exposed, but there is no time-series of GROWTH — no per-cycle delta, no rate, no chart. Dashboard answers \"how much memory is there NOW\" but not \"is it growing\"."
+    },
+    {
+      "priority": "P1",
+      "dimension": "merge-judge decisions",
+      "title": "dashboard: add merge-judge decisions surface",
+      "rationale": "No dashboard surface for merge-judge: no dedicated tab, no API endpoint, no panel cites it. This is one of the dimensions that PR #1880 was scoped to address; cycle 1 confirms it is unaddressed in the live build."
+    },
+    {
+      "priority": "P1",
+      "dimension": "per-PR readiness for #1880, #1893, #1894",
+      "title": "dashboard: add per-PR readiness for #1880, #1893, #1894 surface",
+      "rationale": "No per-PR readiness surface in cycle 1 build: no /api/prs* endpoints respond 200, no panel header references the target PR numbers. Issue #1944 proposes refining the goal description to include this dimension; cycle 1 confirms the dashboard does not yet serve it."
+    },
+    {
+      "priority": "P1",
+      "dimension": "brain-failure surfacing tied to #1890",
+      "title": "dashboard: add brain-failure surfacing tied to #1890 surface",
+      "rationale": "Issue #1890 is closed, but the surfacing it was meant to enable is not on the dashboard today: no panel, no API endpoint. Cycle 1 confirms closure ≠ delivery for self-introspection."
+    },
+    {
+      "priority": "P3",
+      "dimension": "polish / formatting",
+      "title": "dashboard: replace raw ISO timestamps + bare UUIDs with friendly relative-time + labelled identifiers",
+      "rationale": "Earlier audit (Pass 2, scripts/dashboard_audit/) flagged raw ISO and unlabelled UUIDs across tabs; carry-over."
+    }
+  ]
+}

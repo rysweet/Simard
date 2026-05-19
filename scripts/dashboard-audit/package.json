@@ -1,0 +1,14 @@
+{
+  "name": "simard-dashboard-audit",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright audit harness for the live Simard dashboard (issue #1880). Captures screenshots, route metadata, console errors, and computes a seven-dimension coverage matrix.",
+  "type": "module",
+  "scripts": {
+    "audit": "node audit.mjs",
+    "install-chromium": "npx playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0"
+  }
+}
