@@ -1,19 +1,22 @@
 # Subprocess Prompt Delivery
 
-Status: **design spec — implementation pending** · Module:
-`amplihack-utils::prompt_delivery` · Issues: closes
+Status: **implemented in Simard** (`src/prompt_delivery/`); adapter wiring
+tracked in parity follow-ups · Module: `simard::prompt_delivery` · Issues:
+closes
 [#1897](https://github.com/rysweet/Simard/issues/1897) · Parity epic:
 [#1898](https://github.com/rysweet/Simard/issues/1898)
 [#1899](https://github.com/rysweet/Simard/issues/1899)
 [#1900](https://github.com/rysweet/Simard/issues/1900)
 [#1901](https://github.com/rysweet/Simard/issues/1901)
 
-> **Canonical location.** The implementation lives in the upstream
+> **Canonical home (forward-looking).** Long-term this module is expected
+> to migrate to the upstream
 > [`amplihack-rs`](https://github.com/microsoft/amplihack) repository under
-> `crates/amplihack-utils/src/prompt_delivery.rs`. This Simard copy is the
-> parity-tracking reference held alongside Simard's adapter changes so the
-> two repos can land the work in lockstep. If the two copies diverge, the
-> `amplihack-rs` copy is authoritative.
+> `crates/amplihack-utils/src/prompt_delivery.rs` so every amplihack-derived
+> launcher can depend on it. Until that mirror lands, **the Simard copy at
+> `src/prompt_delivery/mod.rs` is authoritative** and the only build target
+> that matters for #1897. If the two copies later diverge, sync amplihack-rs
+> from Simard, not the other way around.
 
 When the Rust amplihack launcher spawns a child process (`claude`, `codex`,
 `amplifier`) it must hand that child a **prompt**. Prompts are user-controlled,
@@ -37,7 +40,7 @@ know which mode was chosen.
 ## Quick start
 
 ```rust
-use amplihack_utils::prompt_delivery::{self, PromptDelivery};
+use simard::prompt_delivery::{self, PromptDelivery};
 use tokio::process::Command;
 
 let mut cmd = Command::new("claude");
@@ -135,7 +138,7 @@ auxiliary CLI flags around the prompt.
 
 ---
 
-## Public API — `amplihack-utils::prompt_delivery`
+## Public API — `simard::prompt_delivery`
 
 ### `enum PromptDelivery`
 
@@ -486,22 +489,23 @@ reviewers grep for `Command::new("claude"`, `Command::new("codex"`, and
 
 The module ships with:
 
-* **Unit tests** (`crates/amplihack-utils/src/prompt_delivery.rs`,
-  `#[cfg(test)]` module): select-mode decision matrix, env-var parsing,
-  16 MiB cap, `NulInInlineMode` error, perm bits on Unix (`#[cfg(unix)]`).
-* **Outside-in integration test**
-  (`crates/amplihack-orchestration/tests/prompt_delivery_apostrophes.rs`):
-  spawns `/bin/cat` as a stand-in for the agent binary, pipes a 64 KiB
-  prompt containing apostrophes, double quotes, newlines, and tabs, and
-  asserts the bytes round-trip exactly across all three modes plus the
-  env-override and invalid-env-fallback paths. Gated `#[cfg(unix)]`.
+* **Unit tests** (`src/prompt_delivery/mod.rs`, `#[cfg(test)]` module):
+  select-mode decision matrix, env-var parsing, 16 MiB cap,
+  `NulInInlineMode` error, perm bits on Unix (`#[cfg(unix)]`). Env-touching
+  tests share a `#[serial(prompt_delivery_env)]` group so they can't race
+  the env-reading tests.
+* **Outside-in integration test** (`tests/prompt_delivery.rs`): spawns
+  `/bin/cat` as a stand-in for the agent binary, pipes a 64 KiB prompt
+  containing apostrophes, double quotes, newlines, and tabs, and asserts
+  the bytes round-trip exactly across all three modes plus the env-override
+  and invalid-env-fallback paths. Gated `#[cfg(unix)]`.
 
 Run with:
 
 ```bash
-cargo test -p amplihack-utils
-cargo test -p amplihack-orchestration --test prompt_delivery_apostrophes
-cargo clippy --workspace --all-targets -- -D warnings
+cargo test --lib prompt_delivery        # unit tests
+cargo test --test prompt_delivery       # integration tests
+cargo clippy --all-targets -- -D warnings
 ```
 
 > **Test-author note (Rust 2024).** The workspace is on `edition = "2024"`,
@@ -511,8 +515,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 > must wrap mutation in `unsafe { std::env::set_var(...) }` and either
 > (a) serialize across the env-touching test set with a `Mutex` /
 > `serial_test` attribute, or (b) spawn a subprocess per scenario so each
-> test gets a fresh process env. The integration test in
-> `prompt_delivery_apostrophes.rs` uses approach (b).
+> test gets a fresh process env. The unit tests use approach (a) via
+> `#[serial(prompt_delivery_env)]`; the integration test in
+> `tests/prompt_delivery.rs` uses approach (b).
 
 ---
 

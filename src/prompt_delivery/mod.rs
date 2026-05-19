@@ -665,6 +665,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(prompt_delivery_env)]
     fn select_mode_at_hard_cap_is_allowed() {
         // Cap is exclusive — len == HARD_CAP_BYTES is OK.
         let exactly_cap = vec![b'a'; HARD_CAP_BYTES];
@@ -700,6 +701,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(prompt_delivery_env)]
     fn select_mode_auto_nul_forks_to_stdin() {
         // Step 4: NUL fork in Auto mode → Stdin, never Inline.
         let prompt = b"hello\0world";
@@ -710,6 +712,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(prompt_delivery_env)]
     fn select_mode_auto_inline_threshold() {
         // Boundary at INLINE_MAX_BYTES (exclusive upper bound for Inline).
         let just_under = vec![b'a'; INLINE_MAX_BYTES - 1];
@@ -727,6 +730,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(prompt_delivery_env)]
     fn select_mode_auto_stdin_threshold() {
         // Boundary at STDIN_PREFERRED_MAX_BYTES.
         let just_under = vec![b'a'; STDIN_PREFERRED_MAX_BYTES - 1];
@@ -744,8 +748,12 @@ mod tests {
     }
 
     #[test]
+    #[serial(prompt_delivery_env)]
     fn select_mode_auto_empty_prompt_inline() {
         // Empty prompt is permitted; lands in Inline branch (smallest).
+        // Serialised with the env-mutating test below so a leaked
+        // `AMPLIHACK_PROMPT_DELIVERY` from a parallel run can't flip the
+        // Auto path to Stdin / TempFile under our feet.
         assert_eq!(
             select_mode(b"", PromptDelivery::Auto).unwrap(),
             PromptDelivery::Inline
