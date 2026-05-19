@@ -50,10 +50,11 @@ pub(crate) use recipes::{
     print_terminal_recipe,
 };
 pub(crate) use state_root::{
-    parse_runtime_topology, prompt_root, resolved_engineer_read_state_root,
-    resolved_goal_curation_state_root, resolved_improvement_curation_read_state_root,
-    resolved_meeting_read_state_root, resolved_review_state_root, resolved_state_root,
-    resolved_terminal_read_state_root, validated_runtime_segments,
+    parse_runtime_topology, prompt_root, resolve_read_state_root_with_daemon_fallback,
+    resolved_engineer_read_state_root, resolved_goal_curation_state_root,
+    resolved_improvement_curation_read_state_root, resolved_meeting_read_state_root,
+    resolved_review_read_state_root, resolved_review_state_root, resolved_state_root,
+    resolved_terminal_read_state_root,
 };
 pub(crate) use validation::{validated_engineer_read_artifacts, validated_terminal_read_artifacts};
 

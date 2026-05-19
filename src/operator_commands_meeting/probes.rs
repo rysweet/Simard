@@ -76,18 +76,26 @@ pub fn run_meeting_read_probe(
     topology: &str,
     state_root_override: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let state_root = resolved_meeting_read_state_root(state_root_override, base_type, topology)?;
-    let memory_store = FileBackedMemoryStore::try_new(state_root.join("memory_records.json"))?;
-    let meeting_records = memory_store
-        .list(MemoryScope::Decision)?
-        .into_iter()
-        .filter(|record| crate::looks_like_persisted_meeting_record(&record.value))
-        .collect::<Vec<_>>();
-    let latest_record = meeting_records
-        .last()
-        .ok_or("expected persisted meeting decision record")?;
-    let parsed_record =
-        PersistedMeetingRecord::parse(&latest_record.value).map_err(|error| format!("{error}"))?;
+    let resolved = resolved_meeting_read_state_root(state_root_override, base_type, topology)?;
+    let state_root = resolved.path;
+
+    let memory_records_path = state_root.join("memory_records.json");
+    let meeting_records: Vec<crate::MemoryRecord> = if memory_records_path.is_file() {
+        let memory_store = FileBackedMemoryStore::try_new(memory_records_path)?;
+        memory_store
+            .list(MemoryScope::Decision)?
+            .into_iter()
+            .filter(|record| crate::looks_like_persisted_meeting_record(&record.value))
+            .collect()
+    } else {
+        // The mode-specific validation in `resolved_meeting_read_state_root`
+        // already enforces that `memory_records.json` exists when the
+        // operator passed an explicit `[state-root]` (strict contract).
+        // Here we are on the daemon-fallback path with no persisted store
+        // yet; render explicit empty sections rather than hard-failing
+        // (issue #1909).
+        Vec::new()
+    };
 
     println!("Probe mode: meeting-read");
     println!("Identity: simard-meeting");
@@ -95,14 +103,42 @@ pub fn run_meeting_read_probe(
     print_text("Topology", topology);
     print_display("State root", state_root.display());
     println!("Meeting records: {}", meeting_records.len());
-    print_text("Latest agenda", &parsed_record.agenda);
-    print_string_section("Updates", &parsed_record.updates);
-    print_string_section("Decisions", &parsed_record.decisions);
-    print_string_section("Risks", &parsed_record.risks);
-    print_string_section("Next steps", &parsed_record.next_steps);
-    print_string_section("Open questions", &parsed_record.open_questions);
-    print_meeting_goal_section(&parsed_record.goals);
-    print_text("Latest meeting record", &latest_record.value);
+
+    match meeting_records.last() {
+        Some(latest_record) => {
+            let parsed_record = PersistedMeetingRecord::parse(&latest_record.value)
+                .map_err(|error| format!("{error}"))?;
+            print_text("Latest agenda", &parsed_record.agenda);
+            print_string_section("Updates", &parsed_record.updates);
+            print_string_section("Decisions", &parsed_record.decisions);
+            print_string_section("Risks", &parsed_record.risks);
+            print_string_section("Next steps", &parsed_record.next_steps);
+            print_string_section("Open questions", &parsed_record.open_questions);
+            print_meeting_goal_section(&parsed_record.goals);
+            print_text("Latest meeting record", &latest_record.value);
+        }
+        None if resolved.used_override => {
+            // Strict override contract: explicit state roots with no
+            // persisted meeting record must fail visibly. This preserves
+            // the contract tested in
+            // `simard_meeting_read_rejects_nonexistent_and_empty_state_roots_*`.
+            return Err("expected persisted meeting decision record".into());
+        }
+        None => {
+            // Daemon-fallback path with no persisted meeting record:
+            // render explicit zero-state sections so the operator sees
+            // the empty shape rather than a hard error (Pillar 11 —
+            // issue #1909).
+            print_text("Latest agenda", "<none>");
+            print_string_section("Updates", &[]);
+            print_string_section("Decisions", &[]);
+            print_string_section("Risks", &[]);
+            print_string_section("Next steps", &[]);
+            print_string_section("Open questions", &[]);
+            print_meeting_goal_section(&[]);
+            print_text("Latest meeting record", "<none>");
+        }
+    }
     Ok(())
 }
 
@@ -235,6 +271,96 @@ mod tests {
             "local-harness",
             "single-process",
             Some(dir.path().to_path_buf()),
+        );
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Issue #1909: `meeting read` without an explicit `[state-root]`
+    // argument must fall back to the canonical daemon state root
+    // (`$SIMARD_STATE_ROOT` or `$HOME/.simard/state`) and render an
+    // explicit empty report when no persisted meeting record exists —
+    // instead of hard-failing the way the prior probe-style resolution
+    // did on a fresh machine.
+    // ───────────────────────────────────────────────────────────────────
+
+    /// Helper: run a closure with `SIMARD_STATE_ROOT` temporarily
+    /// pointed at the given path. Restores the previous value (or
+    /// removes the var) on completion.
+    fn with_simard_state_root<R>(path: &std::path::Path, run: impl FnOnce() -> R) -> R {
+        let prev = std::env::var("SIMARD_STATE_ROOT").ok();
+        // SAFETY: callers gate this on `serial_test::serial(simard_state_root)`
+        // so no other test mutates the same env var concurrently.
+        unsafe {
+            std::env::set_var("SIMARD_STATE_ROOT", path);
+        }
+        let result = run();
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("SIMARD_STATE_ROOT", v),
+                None => std::env::remove_var("SIMARD_STATE_ROOT"),
+            }
+        }
+        result
+    }
+
+    #[test]
+    #[serial_test::serial(simard_state_root)]
+    fn meeting_read_probe_falls_back_to_default_state_root_when_no_override() {
+        let dir = TempDir::new().unwrap();
+        // Empty state root — no memory_records.json, no records of any kind.
+        // Pre-fix this hard-failed with `meeting read requires an existing
+        // state root directory`. Post-fix it falls back and renders empty.
+        let result = with_simard_state_root(dir.path(), || {
+            run_meeting_read_probe("local-harness", "single-process", None)
+        });
+        assert!(
+            result.is_ok(),
+            "meeting read should succeed via daemon fallback when no override is given \
+             and the daemon store is empty: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(simard_state_root)]
+    fn meeting_read_probe_falls_back_and_reads_real_records() {
+        let dir = TempDir::new().unwrap();
+        // Seed a real meeting decision record into the fallback path.
+        let record = "agenda=Daily standup; updates=[Pushed PR]; decisions=[Ship Friday]; risks=[]; next_steps=[]; open_questions=[]; goals=[]";
+        let records = serde_json::json!([{
+            "key": "session-X-meeting",
+            "scope": "decision",
+            "value": record,
+            "session_id": "session-X",
+            "recorded_in": "complete"
+        }]);
+        std::fs::write(
+            dir.path().join("memory_records.json"),
+            serde_json::to_string(&records).unwrap(),
+        )
+        .unwrap();
+        let result = with_simard_state_root(dir.path(), || {
+            run_meeting_read_probe("local-harness", "single-process", None)
+        });
+        assert!(
+            result.is_ok(),
+            "meeting read should succeed via daemon fallback and surface seeded records: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(simard_state_root)]
+    fn meeting_read_probe_fallback_rejects_bogus_topology() {
+        let dir = TempDir::new().unwrap();
+        // Even on the daemon-fallback path, base_type / topology validation
+        // must still fire — preserves the prior probe-resolution contract.
+        let result = with_simard_state_root(dir.path(), || {
+            run_meeting_read_probe("local-harness", "totally-bogus-topology", None)
+        });
+        assert!(
+            result.is_err(),
+            "bogus topology should fail validation even on the daemon-fallback path"
         );
     }
 }

@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use crate::operator_commands::{
-    GoalRegisterView, print_display, print_text, prompt_root, resolved_goal_curation_state_root,
-    validated_runtime_segments,
+    GoalRegisterView, print_display, print_text, prompt_root,
+    resolve_read_state_root_with_daemon_fallback, resolved_goal_curation_state_root,
 };
 use crate::{BootstrapConfig, BootstrapInputs, run_local_session};
 
@@ -57,37 +57,22 @@ pub fn run_goal_curation_probe(
 /// banner read from the **same** store, otherwise the operator gets two
 /// different answers to the same question (issue #1744).
 ///
-/// Resolution order:
-///   1. `state_root_override` — when the operator explicitly passes a path
-///      (e.g. to inspect the probe-isolated sandbox written by
-///      `goal-curation run`), honor it after `validate_state_root` checks.
-///   2. `memory_ipc::default_state_root()` — the canonical daemon store
-///      that both the OODA daemon and the meeting greeting banner already
-///      read from. This is `$SIMARD_STATE_ROOT` (when set) or
-///      `$HOME/.simard/state`.
-///
-/// Previously this defaulted to a probe-isolated path under
-/// `target/operator-probe-state/goal-curation-run/<identity>/<base>/<topology>/`,
-/// which is only populated when `goal-curation run` was previously executed
-/// against that exact base-type+topology pair. On a freshly-built binary
-/// the command silently reported "Active goals count: 0" while the banner
-/// showed N>0 goals from the daemon's actual store — a Pillar 11 violation.
+/// Delegates to the shared `resolve_read_state_root_with_daemon_fallback`
+/// helper so the same daemon-store fallback is applied consistently
+/// across `meeting`, `improvement-curation`, `review`, and
+/// `goal-curation` (issue #1909).
 fn resolve_goal_curation_read_state_root(
     state_root_override: Option<PathBuf>,
     base_type: &str,
     topology: &str,
 ) -> crate::SimardResult<PathBuf> {
-    match state_root_override {
-        Some(explicit) => crate::bootstrap::validate_state_root(explicit),
-        None => {
-            // Even though base-type / topology no longer drive routing for
-            // the read path, validate them so bogus values still fail fast
-            // with a clear error — preserving the prior probe-resolution
-            // contract for the operator's mental model.
-            let _ = validated_runtime_segments("simard-goal-curator", base_type, topology)?;
-            crate::bootstrap::validate_state_root(crate::memory_ipc::default_state_root())
-        }
-    }
+    let resolved = resolve_read_state_root_with_daemon_fallback(
+        state_root_override,
+        "simard-goal-curator",
+        base_type,
+        topology,
+    )?;
+    Ok(resolved.path)
 }
 
 pub fn run_goal_curation_read_probe(

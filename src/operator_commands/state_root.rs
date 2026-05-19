@@ -118,6 +118,64 @@ pub(crate) fn resolved_goal_curation_state_root(
     )
 }
 
+/// Result of resolving a read-companion's state root with the
+/// canonical-daemon-store fallback (issue #1909).
+///
+/// `used_override` records whether the path came from the operator's
+/// explicit `[state-root]` argument (strict-mode contract) or from the
+/// daemon fallback (lenient-mode contract). Callers use this flag to
+/// decide whether missing artifacts must hard-fail (override case) or
+/// should render as `<none>` / `0` (fallback case).
+pub(crate) struct ResolvedReadStateRoot {
+    pub(crate) path: PathBuf,
+    pub(crate) used_override: bool,
+}
+
+/// Shared resolver for `<mode> read` subcommands that need to fall back
+/// to the canonical daemon store (`memory_ipc::default_state_root()`,
+/// i.e. `$SIMARD_STATE_ROOT` or `$HOME/.simard/state`) when the operator
+/// does not pass an explicit `[state-root]` argument.
+///
+/// Resolution order:
+///   1. `explicit` — when the operator passes a path, honor it after
+///      `validate_state_root` checks. Strict contract: subsequent
+///      validations (mode-specific artifact requirements) still apply.
+///   2. `memory_ipc::default_state_root()` — the canonical daemon store
+///      that the OODA daemon, the meeting greeting banner, and
+///      `goal-curation read` all share (issue #1742, #1909). Lenient
+///      contract: callers should render `<none>` / `0` instead of
+///      erroring on missing artifacts.
+///
+/// `identity`, `base_type`, and `topology` are validated even on the
+/// fallback path so bogus values still fail fast with a clear error —
+/// preserving the prior probe-resolution contract for the operator's
+/// mental model.
+pub(crate) fn resolve_read_state_root_with_daemon_fallback(
+    explicit: Option<PathBuf>,
+    identity: &str,
+    base_type: &str,
+    topology: &str,
+) -> crate::SimardResult<ResolvedReadStateRoot> {
+    match explicit {
+        Some(path) => Ok(ResolvedReadStateRoot {
+            path: crate::bootstrap::validate_state_root(path)?,
+            used_override: true,
+        }),
+        None => {
+            // Validate base_type / topology so bogus values still fail
+            // fast with a clear error (preserves the prior probe
+            // resolution contract — see goal-curation #1742).
+            let _ = validated_runtime_segments(identity, base_type, topology)?;
+            let path =
+                crate::bootstrap::validate_state_root(crate::memory_ipc::default_state_root())?;
+            Ok(ResolvedReadStateRoot {
+                path,
+                used_override: false,
+            })
+        }
+    }
+}
+
 pub(crate) fn resolved_review_state_root(
     explicit: Option<PathBuf>,
     base_type: &str,
@@ -136,10 +194,17 @@ pub(crate) fn resolved_improvement_curation_read_state_root(
     explicit: Option<PathBuf>,
     base_type: &str,
     topology: &str,
-) -> crate::SimardResult<PathBuf> {
-    let state_root = resolved_review_state_root(explicit, base_type, topology)?;
-    validate_improvement_curation_read_state_root(&state_root)?;
-    Ok(state_root)
+) -> crate::SimardResult<ResolvedReadStateRoot> {
+    let resolved = resolve_read_state_root_with_daemon_fallback(
+        explicit,
+        "simard-engineer",
+        base_type,
+        topology,
+    )?;
+    if resolved.used_override {
+        validate_improvement_curation_read_state_root(&resolved.path)?;
+    }
+    Ok(resolved)
 }
 
 pub(crate) fn resolved_engineer_read_state_root(
@@ -176,16 +241,34 @@ pub(crate) fn resolved_meeting_read_state_root(
     explicit: Option<PathBuf>,
     base_type: &str,
     topology: &str,
-) -> crate::SimardResult<PathBuf> {
-    let state_root = resolved_state_root(
+) -> crate::SimardResult<ResolvedReadStateRoot> {
+    let resolved = resolve_read_state_root_with_daemon_fallback(
         explicit,
         "simard-meeting",
         base_type,
         topology,
-        "meeting-run",
     )?;
-    validate_meeting_read_state_root(&state_root)?;
-    Ok(state_root)
+    if resolved.used_override {
+        validate_meeting_read_state_root(&resolved.path)?;
+    }
+    Ok(resolved)
+}
+
+/// Resolve the state root for `review read` with the daemon-store
+/// fallback (issue #1909). Distinct from `resolved_review_state_root`,
+/// which is reused by both `review run` and `improvement-curation run`
+/// to point at the probe-isolated sandbox.
+///
+/// `review read` itself does not require a mode-specific structural
+/// validation beyond the path checks `validate_state_root` already
+/// performs; the downstream code asserts (or — on the fallback path —
+/// gracefully reports) the presence of the review artifact directory.
+pub(crate) fn resolved_review_read_state_root(
+    explicit: Option<PathBuf>,
+    base_type: &str,
+    topology: &str,
+) -> crate::SimardResult<ResolvedReadStateRoot> {
+    resolve_read_state_root_with_daemon_fallback(explicit, "simard-engineer", base_type, topology)
 }
 
 pub(crate) fn parse_runtime_topology(value: &str) -> crate::SimardResult<RuntimeTopology> {

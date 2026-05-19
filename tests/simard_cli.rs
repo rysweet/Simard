@@ -4252,3 +4252,143 @@ fn simard_rejects_unknown_commands_and_missing_required_arguments_explicitly() {
         "arity failures should come from CLI validation, not the legacy bootstrap env path:\n{arity_rendered}"
     );
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// Issue #1909: `meeting read`, `improvement-curation read`, and
+// `review read` must gracefully fall back to the canonical daemon state
+// root (`$SIMARD_STATE_ROOT` or `$HOME/.simard/state`) when the operator
+// does not pass an explicit `[state-root]` argument.
+//
+// Prior behavior: these three subcommands hard-defaulted to the
+// probe-isolated path under `target/operator-probe-state/...`, which
+// only exists if the matching `run` subcommand was executed beforehand.
+// On a fresh machine, `simard meeting read local-harness single-process`
+// (no state-root) failed with:
+//     Error: invalid state root '...': meeting read requires an existing
+//     state root directory: No such file or directory (os error 2)
+//
+// Post-fix: the fallback path renders empty sections so the operator
+// sees the shape rather than a hard error. The strict-override contract
+// (passing an explicit `[state-root]` argument) is preserved.
+// ──────────────────────────────────────────────────────────────────────────
+
+#[test]
+#[ignore] // Spawns simard binary — hangs in pre-commit
+fn simard_meeting_read_falls_back_to_simard_state_root_when_no_argument() {
+    let temp_dir = TempDirGuard::new("simard-cli-1909-meeting-read-fallback");
+    // Empty state root — simulates a fresh machine with no prior
+    // `meeting run`. Pre-fix this hard-failed; post-fix it renders empty.
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("meeting")
+        .arg("read")
+        .arg("local-harness")
+        .arg("single-process")
+        .env("SIMARD_STATE_ROOT", temp_dir.path())
+        .output()
+        .expect("meeting read fallback check should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        output.status.success(),
+        "meeting read should succeed via SIMARD_STATE_ROOT fallback on a fresh machine:\n{rendered}"
+    );
+    for expected in [
+        "Probe mode: meeting-read",
+        "Identity: simard-meeting",
+        "Meeting records: 0",
+        "Latest agenda: <none>",
+        "Updates count: 0",
+        "Updates: <none>",
+        "Decisions count: 0",
+        "Decisions: <none>",
+        "Latest meeting record: <none>",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "meeting read fallback should make empty sections explicit with '{expected}':\n{rendered}"
+        );
+    }
+    assert!(
+        !rendered.contains("expected persisted meeting decision record"),
+        "meeting read fallback must NOT hard-fail with the strict-override error:\n{rendered}"
+    );
+}
+
+#[test]
+#[ignore] // Spawns simard binary — hangs in pre-commit
+fn simard_improvement_curation_read_falls_back_to_simard_state_root_when_no_argument() {
+    let temp_dir = TempDirGuard::new("simard-cli-1909-improvement-curation-read-fallback");
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("improvement-curation")
+        .arg("read")
+        .arg("local-harness")
+        .arg("single-process")
+        .env("SIMARD_STATE_ROOT", temp_dir.path())
+        .output()
+        .expect("improvement-curation read fallback check should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        output.status.success(),
+        "improvement-curation read should succeed via SIMARD_STATE_ROOT fallback on a fresh machine:\n{rendered}"
+    );
+    for expected in [
+        "Probe mode: improvement-curation-read",
+        "Identity: simard-improvement-curator",
+        "Latest review artifact: <none>",
+        "Review proposals: 0",
+        "Approved proposals: 0",
+        "Approved proposals: <none>",
+        "Deferred proposals: 0",
+        "Deferred proposals: <none>",
+        "Latest improvement record: <none>",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "improvement-curation read fallback should make empty sections explicit with '{expected}':\n{rendered}"
+        );
+    }
+    assert!(
+        !rendered.contains("expected persisted review artifact"),
+        "improvement-curation read fallback must NOT hard-fail with the strict-override error:\n{rendered}"
+    );
+}
+
+#[test]
+#[ignore] // Spawns simard binary — hangs in pre-commit
+fn simard_review_read_falls_back_to_simard_state_root_when_no_argument() {
+    let temp_dir = TempDirGuard::new("simard-cli-1909-review-read-fallback");
+    let output = Command::new(env!("CARGO_BIN_EXE_simard"))
+        .arg("review")
+        .arg("read")
+        .arg("terminal-shell")
+        .arg("single-process")
+        .env("SIMARD_STATE_ROOT", temp_dir.path())
+        .output()
+        .expect("review read fallback check should launch");
+    let rendered = rendered_output(&output);
+
+    assert!(
+        output.status.success(),
+        "review read should succeed via SIMARD_STATE_ROOT fallback on a fresh machine:\n{rendered}"
+    );
+    for expected in [
+        "Probe mode: review-read",
+        "Identity: simard-engineer",
+        "Latest review artifact: <none>",
+        "Latest review target: <none>",
+        "Latest review summary: <none>",
+        "Review proposals: 0",
+        "Decision review records: 0",
+        "Latest decision review record: <none>",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "review read fallback should make empty sections explicit with '{expected}':\n{rendered}"
+        );
+    }
+    assert!(
+        !rendered.contains("expected persisted review artifact"),
+        "review read fallback must NOT hard-fail with the strict-override error:\n{rendered}"
+    );
+}

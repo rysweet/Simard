@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use crate::operator_commands::{
-    print_display, print_text, prompt_root, resolved_review_state_root,
+    print_display, print_text, prompt_root, resolved_review_read_state_root,
+    resolved_review_state_root,
 };
 use crate::sanitization::sanitize_terminal_text;
 use crate::{
@@ -95,15 +96,48 @@ pub fn run_review_read_probe(
     topology: &str,
     state_root_override: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let state_root = resolved_review_state_root(state_root_override, base_type, topology)?;
-    let (review_artifact_path, review) =
-        latest_review_artifact(&state_root)?.ok_or("expected persisted review artifact")?;
-    let memory_store = FileBackedMemoryStore::try_new(state_root.join("memory_records.json"))?;
-    let decision_records = memory_store
-        .list(MemoryScope::Decision)?
-        .into_iter()
-        .filter(|record| record.value.starts_with("review-summary |"))
-        .collect::<Vec<_>>();
+    let resolved = resolved_review_read_state_root(state_root_override, base_type, topology)?;
+    let state_root = resolved.path;
+
+    // `latest_review_artifact` returns Ok(None) when the artifact
+    // directory does not exist, so we use that to differentiate the
+    // strict-override path (must succeed or hard-fail) from the
+    // daemon-fallback path (render `<none>` / `0` — issue #1909).
+    let review_lookup = latest_review_artifact(&state_root)?;
+    let (review_artifact_path, review) = match review_lookup {
+        Some(pair) => pair,
+        None if resolved.used_override => {
+            return Err("expected persisted review artifact".into());
+        }
+        None => {
+            // Daemon-fallback path with no review artifact yet — render
+            // empty sections (Pillar 11 — issue #1909).
+            println!("Probe mode: review-read");
+            print_text("Identity", "simard-engineer");
+            print_text("Selected base type", base_type);
+            print_text("Topology", topology);
+            print_display("State root", state_root.display());
+            print_text("Latest review artifact", "<none>");
+            print_text("Latest review target", "<none>");
+            print_text("Latest review summary", "<none>");
+            println!("Review proposals: 0");
+            println!("Decision review records: 0");
+            print_text("Latest decision review record", "<none>");
+            return Ok(());
+        }
+    };
+
+    let memory_records_path = state_root.join("memory_records.json");
+    let decision_records: Vec<crate::MemoryRecord> = if memory_records_path.is_file() {
+        let memory_store = FileBackedMemoryStore::try_new(memory_records_path)?;
+        memory_store
+            .list(MemoryScope::Decision)?
+            .into_iter()
+            .filter(|record| record.value.starts_with("review-summary |"))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     println!("Probe mode: review-read");
     println!("Identity: {}", review.identity_name);
@@ -126,6 +160,11 @@ pub fn run_review_read_probe(
     println!("Decision review records: {}", decision_records.len());
     if let Some(record) = decision_records.last() {
         print_text("Latest decision review record", &record.value);
+    } else if !resolved.used_override {
+        // Daemon-fallback path: render `<none>` so the operator sees the
+        // empty shape (issue #1909). Strict-override path retains the
+        // prior silence to preserve test expectations.
+        print_text("Latest decision review record", "<none>");
     }
     Ok(())
 }
@@ -396,5 +435,60 @@ mod tests {
         assert!(inputs.identity.is_none());
         assert!(inputs.base_type.is_none());
         assert!(inputs.topology.is_none());
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Issue #1909: `review read` without an explicit `[state-root]`
+    // argument must fall back to the canonical daemon state root
+    // (`$SIMARD_STATE_ROOT` or `$HOME/.simard/state`) and render an
+    // explicit empty report when no persisted review artifact exists —
+    // instead of hard-failing on a fresh machine.
+    // ───────────────────────────────────────────────────────────────────
+
+    fn with_simard_state_root<R>(path: &std::path::Path, run: impl FnOnce() -> R) -> R {
+        let prev = std::env::var("SIMARD_STATE_ROOT").ok();
+        // SAFETY: gated on `serial_test::serial(simard_state_root)`.
+        unsafe {
+            std::env::set_var("SIMARD_STATE_ROOT", path);
+        }
+        let result = run();
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("SIMARD_STATE_ROOT", v),
+                None => std::env::remove_var("SIMARD_STATE_ROOT"),
+            }
+        }
+        result
+    }
+
+    #[test]
+    #[serial_test::serial(simard_state_root)]
+    fn review_read_probe_falls_back_to_default_state_root_when_no_override() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // Empty state root — no review-artifacts/, no memory_records.json.
+        // Pre-fix this hard-failed with `expected persisted review artifact`.
+        // Post-fix it falls back and renders empty.
+        let result = with_simard_state_root(dir.path(), || {
+            run_review_read_probe("terminal-shell", "single-process", None)
+        });
+        assert!(
+            result.is_ok(),
+            "review read should succeed via daemon fallback when no override is given \
+             and the daemon store is empty: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(simard_state_root)]
+    fn review_read_probe_fallback_rejects_bogus_topology() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let result = with_simard_state_root(dir.path(), || {
+            run_review_read_probe("terminal-shell", "totally-bogus-topology", None)
+        });
+        assert!(
+            result.is_err(),
+            "bogus topology should fail validation even on the daemon-fallback path"
+        );
     }
 }
