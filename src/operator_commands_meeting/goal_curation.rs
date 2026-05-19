@@ -146,11 +146,17 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(cognitive_memory)]
     fn goal_curation_read_probe_with_seeded_cognitive_memory() {
-        let dir = TempDir::new().unwrap();
+        // HermeticState pins SIMARD_STATE_ROOT and unsets
+        // SIMARD_MEMORY_SOCKET so save_goal_board's hermetic guard sees a
+        // TempDir-rooted state and the bridge socket follows that root
+        // (issues #1923 / #1925).
+        let state = crate::test_support::HermeticState::new();
         // Seed an empty goal board through cognitive memory rather than
         // writing the legacy on-disk goal-records file (issue #1590).
-        let bridge = crate::memory_ipc::launch_writer_bridge(dir.path()).expect("writer bridge");
+        let bridge =
+            crate::memory_ipc::launch_writer_bridge(state.state_root()).expect("writer bridge");
         crate::goal_curation::save_goal_board(
             &crate::goal_curation::GoalBoard::new(),
             bridge.ops(),
@@ -161,7 +167,7 @@ mod tests {
         let result = run_goal_curation_read_probe(
             "local-harness",
             "single-process",
-            Some(dir.path().to_path_buf()),
+            Some(state.state_root().to_path_buf()),
         );
         assert!(
             result.is_ok(),
@@ -171,9 +177,11 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(cognitive_memory)]
     fn goal_curation_read_probe_with_empty_cognitive_memory() {
-        let dir = TempDir::new().unwrap();
-        let bridge = crate::memory_ipc::launch_writer_bridge(dir.path()).expect("writer bridge");
+        let state = crate::test_support::HermeticState::new();
+        let bridge =
+            crate::memory_ipc::launch_writer_bridge(state.state_root()).expect("writer bridge");
         crate::goal_curation::save_goal_board(
             &crate::goal_curation::GoalBoard::new(),
             bridge.ops(),
@@ -184,7 +192,7 @@ mod tests {
         let result = run_goal_curation_read_probe(
             "local-harness",
             "single-process",
-            Some(dir.path().to_path_buf()),
+            Some(state.state_root().to_path_buf()),
         );
         assert!(result.is_ok());
     }
@@ -230,8 +238,8 @@ mod tests {
     fn banner_and_goal_curation_read_agree_on_shared_store_with_seeded_goals() {
         use crate::greeting_banner::build_greeting_banner;
 
-        let dir = TempDir::new().unwrap();
-        let state_root = dir.path().to_path_buf();
+        let state = crate::test_support::HermeticState::new();
+        let state_root = state.state_root().to_path_buf();
 
         // Seed 4 active goals into cognitive memory at this state root.
         let bridge = crate::memory_ipc::launch_writer_bridge(&state_root).expect("writer bridge");
@@ -272,8 +280,8 @@ mod tests {
     fn banner_and_goal_curation_read_agree_on_shared_store_when_empty() {
         use crate::greeting_banner::build_greeting_banner;
 
-        let dir = TempDir::new().unwrap();
-        let state_root = dir.path().to_path_buf();
+        let state = crate::test_support::HermeticState::new();
+        let state_root = state.state_root().to_path_buf();
 
         let bridge = crate::memory_ipc::launch_writer_bridge(&state_root).expect("writer bridge");
         crate::goal_curation::save_goal_board(
