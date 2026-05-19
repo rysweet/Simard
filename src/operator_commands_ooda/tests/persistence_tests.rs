@@ -152,6 +152,7 @@ fn persist_cycle_report_uses_serde_derive_for_all_fields() {
         confidence: 0.95,
         fallback: false,
         prompt_version: "abc123def456".to_string(),
+        parse_failure: None,
     };
 
     let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
