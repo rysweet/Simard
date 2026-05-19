@@ -1,6 +1,12 @@
 //! Test support utilities — provides a lightweight adapter for integration tests
 //! that need a BaseTypeFactory without requiring external processes or API keys.
 
+pub mod hermetic;
+#[cfg(test)]
+mod tests_hermetic_state;
+
+pub use hermetic::HermeticState;
+
 use crate::base_types::{
     BaseTypeCapability, BaseTypeDescriptor, BaseTypeFactory, BaseTypeId, BaseTypeOutcome,
     BaseTypeSession, BaseTypeSessionRequest, BaseTypeTurnInput, capability_set,

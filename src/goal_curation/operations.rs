@@ -448,6 +448,33 @@ pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> Si
     Ok(())
 }
 
+/// Stub for the explicit-removal sibling of [`save_goal_board`].
+///
+/// See `docs/reference/goal-board-api.md#save_goal_board_with_removals`
+/// for the full contract. Introduced for issues
+/// [#1923](https://github.com/rysweet/Simard/issues/1923) /
+/// [#1925](https://github.com/rysweet/Simard/issues/1925) so an operator
+/// can drop a known goal-id set from the persisted board without being
+/// defeated by the merge-on-write resurrection failure mode that PR #1926
+/// hit.
+///
+/// # TDD stub
+///
+/// Body is `unimplemented!` in the TDD step; replaced with the real
+/// pipeline (integrity-guard → read → merge → filter by `force_remove_ids`
+/// → truncate → `store_fact`) in the implementation step.
+pub fn save_goal_board_with_removals(
+    _board: &GoalBoard,
+    _force_remove_ids: &[String],
+    _bridge: &dyn CognitiveMemoryOps,
+) -> SimardResult<()> {
+    unimplemented!(
+        "save_goal_board_with_removals is the #1923/#1925 implementation \
+         surface — stubbed for the TDD step; see \
+         docs/reference/goal-board-api.md#save_goal_board_with_removals"
+    )
+}
+
 /// Persist the board state and record an episode for recall.
 pub fn persist_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> SimardResult<()> {
     save_goal_board(board, bridge)?;

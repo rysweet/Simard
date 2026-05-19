@@ -275,3 +275,6 @@ mod tests_mod;
 
 #[cfg(test)]
 mod tests_goal;
+
+#[cfg(test)]
+mod tests_goal_remove;

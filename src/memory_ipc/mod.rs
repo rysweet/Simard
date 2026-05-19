@@ -20,7 +20,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[cfg(test)]
+mod tests_bridge_isolation;
+#[cfg(test)]
 mod tests_launcher;
+#[cfg(test)]
+mod tests_socket_path;
 
 use serde::{Deserialize, Serialize};
 
@@ -36,10 +40,69 @@ use crate::memory_cognitive::{
 /// We intentionally put the socket under `~/.simard/` (independent of any
 /// `SIMARD_STATE_ROOT` override) so meeting and daemon discover each other
 /// even when they disagree about the DB directory.
+///
+/// **Soft-deprecated** by the issues
+/// [#1923](https://github.com/rysweet/Simard/issues/1923) /
+/// [#1925](https://github.com/rysweet/Simard/issues/1925) fix in favour of
+/// [`socket_path_for`], which follows the resolved state root and lets
+/// `SIMARD_STATE_ROOT` actually be hermetic. New call sites must use
+/// `socket_path_for(state_root)`. This helper is retained unchanged for
+/// the legacy call sites scheduled for migration in the same PR.
 pub fn default_socket_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
     PathBuf::from(home).join(".simard").join("memory.sock")
 }
+
+/// Resolve the IPC socket path for a given `state_root`.
+///
+/// Resolution ladder (priority order):
+///
+/// 1. `SIMARD_MEMORY_SOCKET` env var — explicit operator override; returned
+///    verbatim as a `PathBuf`. Used when daemon and clients must agree on
+///    a path independent of either's state root (rare; primarily test
+///    harnesses that pre-spawn a daemon).
+/// 2. `<state_root>/memory.sock` — the socket lives next to the DB it
+///    fronts. This is the default and what makes `SIMARD_STATE_ROOT`
+///    actually hermetic: pointing the env var at a `TempDir` is sufficient
+///    to keep tests off the live daemon's socket.
+///
+/// See issues [#1923](https://github.com/rysweet/Simard/issues/1923) /
+/// [#1925](https://github.com/rysweet/Simard/issues/1925) for the
+/// fixture-leak failure mode this resolution prevents, and
+/// `docs/reference/cognitive-memory-bridge-helpers.md` for the bridge-
+/// helper integration.
+///
+/// # TDD stub
+///
+/// This function is the #1923/#1925 implementation surface. The body is
+/// `unimplemented!` in the TDD step and is replaced with the real
+/// resolution ladder in the implementation step. Production call sites
+/// must not invoke it until the body lands; tests invoke it through
+/// [`HermeticState`](crate::test_support::HermeticState), whose
+/// stub similarly defers until the implementation step.
+pub fn socket_path_for(_state_root: &Path) -> PathBuf {
+    unimplemented!(
+        "socket_path_for is the #1923/#1925 implementation surface — \
+         stubbed for the TDD step; see docs/testing/hermetic-tests.md"
+    )
+}
+
+/// Environment variable that overrides the IPC socket path independent of
+/// the state root.
+///
+/// When set + non-empty, [`socket_path_for`] returns this value verbatim.
+/// Useful when daemon and clients intentionally target different state
+/// roots (e.g. cross-mount probes) or for harnesses that pre-spawn a
+/// daemon at a known path.
+pub const MEMORY_SOCKET_ENV: &str = "SIMARD_MEMORY_SOCKET";
+
+/// Environment variable that opts a test out of the hermetic-state-root
+/// guard. Read by the cfg(test)-only assertion sites
+/// (`save_goal_board` / `save_goal_board_with_removals`,
+/// `NativeCognitiveMemory::store_fact`, `launch_writer_bridge`). The
+/// only legitimate consumer is the npm install-real / install-fake
+/// harness; new uses require code-review acknowledgement.
+pub const TEST_ALLOW_LIVE_STATE_ENV: &str = "SIMARD_TEST_ALLOW_LIVE_STATE";
 
 /// Default state-root directory used by daemon, meeting, and any other client
 /// that needs to know where the on-disk cognitive-memory DB lives.
