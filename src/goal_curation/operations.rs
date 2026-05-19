@@ -383,73 +383,7 @@ pub(super) fn merge_boards(persisted: GoalBoard, in_flight: GoalBoard) -> GoalBo
 /// resolve field-level last-writer-wins. Callers needing strict
 /// serializability must route through the daemon IPC socket.
 pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> SimardResult<()> {
-    #[cfg(test)]
-    crate::test_support::hermetic_guard::assert_state_root_isolated(
-        &simard_state_root(),
-        "save_goal_board",
-    );
-
-    // Step 1: guard the in-flight board. Persisted snapshot is inductively
-    // guard-clean (every prior write went through this same check), so the
-    // merged board does not need re-guarding — re-guarding would risk
-    // erroneously rejecting valid persisted goals that an LLM later
-    // contaminated locally on the in-flight side.
-    if let Some(reason) = board_integrity_suspect(board) {
-        return Err(SimardError::InvalidGoalRecord {
-            field: "board".to_string(),
-            reason: format!("refusing to persist suspect board: {reason}"),
-        });
-    }
-
-    // Acquire the process-local merge-on-write critical section so two
-    // in-process callers serialize their read-merge-write windows. Without
-    // this, two threads can both read an empty (or stale) snapshot, each
-    // merge it with their own in-flight board, and each store a snapshot
-    // that lacks the other writer's goals — the original #1915 failure.
-    // Mutex poisoning is treated as recoverable: we take the inner guard
-    // and proceed, because a poisoned mutex still serialises us correctly.
-    let _critical = SAVE_GOAL_BOARD_MUTEX
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-    // Step 2: read latest persisted snapshot (None on any failure).
-    let persisted = read_latest_snapshot(bridge);
-
-    // Step 3: merge in-flight on top of persisted. On read failure /
-    // empty store, persist the in-flight board unchanged.
-    let (merged, persisted_active, persisted_backlog) = match persisted {
-        Some(p) => {
-            let pa = p.active.len();
-            let pb = p.backlog.len();
-            (merge_boards(p, board.clone()), pa, pb)
-        }
-        None => (board.clone(), 0, 0),
-    };
-
-    debug!(
-        merge = "goal-board",
-        persisted_active = persisted_active,
-        persisted_backlog = persisted_backlog,
-        in_flight_active = board.active.len(),
-        in_flight_backlog = board.backlog.len(),
-        merged_active = merged.active.len(),
-        merged_backlog = merged.backlog.len(),
-        "save_goal_board: persisting merged snapshot"
-    );
-
-    // Step 4: serialize and store.
-    let snapshot = serde_json::to_string(&merged).map_err(|e| SimardError::InvalidGoalRecord {
-        field: "board".to_string(),
-        reason: format!("failed to serialize goal board: {e}"),
-    })?;
-    bridge.store_fact(
-        "goal-board:snapshot",
-        &snapshot,
-        1.0,
-        &["goal-board".to_string()],
-        "goal-curator",
-    )?;
-    Ok(())
+    save_merged_snapshot(board, &[], bridge, "save_goal_board")
 }
 
 /// Persist `board` with explicit removal of the goal ids in
@@ -486,10 +420,47 @@ pub fn save_goal_board_with_removals(
     force_remove_ids: &[String],
     bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
+    save_merged_snapshot(
+        board,
+        force_remove_ids,
+        bridge,
+        "save_goal_board_with_removals",
+    )
+}
+
+/// Shared read-merge-(filter)-write pipeline for both `save_goal_board`
+/// and `save_goal_board_with_removals`.
+///
+/// Steps (single critical section under [`SAVE_GOAL_BOARD_MUTEX`]):
+///
+/// 1. `cfg(test)` hermetic-state-root guard against `simard_state_root()`,
+///    tagged with `call_site` so a tripped guard names the originating
+///    public function.
+/// 2. Validate in-flight `board` via [`board_integrity_suspect`]. The
+///    persisted snapshot is inductively guard-clean (every prior write
+///    went through this check), so we do not re-guard the merged result —
+///    that would risk rejecting valid persisted goals that an LLM later
+///    contaminated locally on the in-flight side.
+/// 3. Read latest persisted snapshot (`None` on any read failure → treat
+///    as empty-store).
+/// 4. Merge persisted ⊕ in-flight (in-flight wins on collision).
+/// 5. Filter goal ids in `force_remove_ids` from both `active` and
+///    `backlog`. Empty slice is a no-op, making this branch precisely
+///    equivalent to the plain `save_goal_board` pipeline.
+/// 6. Re-apply the [`MAX_ACTIVE_GOALS`] cap as defence in depth (removals
+///    shrink the list, never grow it; this only fires when a caller
+///    hands in a pre-merged board larger than the cap).
+/// 7. Serialize as JSON and `store_fact("goal-board:snapshot", …)`.
+fn save_merged_snapshot(
+    board: &GoalBoard,
+    force_remove_ids: &[String],
+    bridge: &dyn CognitiveMemoryOps,
+    call_site: &'static str,
+) -> SimardResult<()> {
     #[cfg(test)]
     crate::test_support::hermetic_guard::assert_state_root_isolated(
         &simard_state_root(),
-        "save_goal_board_with_removals",
+        call_site,
     );
 
     if let Some(reason) = board_integrity_suspect(board) {
@@ -499,14 +470,25 @@ pub fn save_goal_board_with_removals(
         });
     }
 
+    // Acquire the process-local merge-on-write critical section so two
+    // in-process callers serialize their read-merge-write windows. Without
+    // this, two threads can both read an empty (or stale) snapshot, each
+    // merge it with their own in-flight board, and each store a snapshot
+    // that lacks the other writer's goals — the original #1915 failure.
+    // Mutex poisoning is treated as recoverable: we take the inner guard
+    // and proceed, because a poisoned mutex still serialises us correctly.
     let _critical = SAVE_GOAL_BOARD_MUTEX
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let persisted = read_latest_snapshot(bridge);
-    let mut merged = match persisted {
-        Some(p) => merge_boards(p, board.clone()),
-        None => board.clone(),
+    let (mut merged, persisted_active, persisted_backlog) = match persisted {
+        Some(p) => {
+            let pa = p.active.len();
+            let pb = p.backlog.len();
+            (merge_boards(p, board.clone()), pa, pb)
+        }
+        None => (board.clone(), 0, 0),
     };
 
     if !force_remove_ids.is_empty() {
@@ -515,22 +497,21 @@ pub fn save_goal_board_with_removals(
         merged.backlog.retain(|b| !removals.contains(b.id.as_str()));
     }
 
-    // Re-apply the MAX_ACTIVE_GOALS cap as a defence in depth — removals
-    // shrink, never grow, the active list, but a future caller passing a
-    // pre-merged board larger than the cap should not produce a snapshot
-    // that violates the invariant.
     if merged.active.len() > MAX_ACTIVE_GOALS {
         merged.active.truncate(MAX_ACTIVE_GOALS);
     }
 
     debug!(
         merge = "goal-board",
+        call_site = call_site,
+        persisted_active = persisted_active,
+        persisted_backlog = persisted_backlog,
         in_flight_active = board.active.len(),
         in_flight_backlog = board.backlog.len(),
         force_removed = force_remove_ids.len(),
         merged_active = merged.active.len(),
         merged_backlog = merged.backlog.len(),
-        "save_goal_board_with_removals: persisting filtered snapshot"
+        "persisting merged snapshot"
     );
 
     let snapshot = serde_json::to_string(&merged).map_err(|e| SimardError::InvalidGoalRecord {
