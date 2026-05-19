@@ -4,6 +4,7 @@
 //! delegation (via `BaseTypeSession::run_turn()`), and persistence. The CLI
 //! REPL and dashboard WebSocket are thin adapters around this struct.
 
+pub mod close_guard;
 pub mod command;
 pub mod lightweight;
 pub mod persist;
@@ -17,7 +18,6 @@ mod closing;
 mod messaging;
 
 use std::fmt::Write as _;
-use std::sync::mpsc;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -29,6 +29,7 @@ use crate::cognitive_memory::CognitiveMemoryOps;
 #[allow(unused_imports)]
 use crate::error::SimardResult;
 
+pub use close_guard::{PartialReason, Timeout, with_timeout};
 pub use command::{MeetingCommand, parse_command};
 pub use types::{
     AppliedTemplate, ConversationMessage, HandoffActionItem, MeetingResponse, MeetingSummary,
@@ -40,8 +41,86 @@ pub(super) const MAX_HISTORY: usize = 500;
 /// Number of recent messages included verbatim in the LLM prompt.
 const RECENT_WINDOW: usize = 30;
 
-/// Maximum time to wait for LLM summary generation before falling back.
-const SUMMARY_TIMEOUT: Duration = Duration::from_secs(90);
+/// Default master budget for `MeetingBackend::close()` (issue #1908).
+///
+/// Clamped to `[1, 600]` seconds; overridable via
+/// `SIMARD_MEETING_CLOSE_TIMEOUT_SECS`. See
+/// `docs/reference/meeting-close-lifecycle.md` for the full timing
+/// contract.
+pub(super) const DEFAULT_CLOSE_TIMEOUT_SECS: u64 = 60;
+
+/// Default inner budget for `agent.close()` (issue #1908).
+///
+/// Clamped to `[1, 120]` seconds; overridable via
+/// `SIMARD_MEETING_AGENT_CLOSE_TIMEOUT_SECS`. Used both by the agent
+/// shutdown phase and (as the per-LLM-call cap) by the summary
+/// generator.
+pub(super) const DEFAULT_AGENT_CLOSE_TIMEOUT_SECS: u64 = 15;
+
+/// Env var for the master close budget.
+pub(super) const CLOSE_TIMEOUT_ENV: &str = "SIMARD_MEETING_CLOSE_TIMEOUT_SECS";
+
+/// Env var for the inner agent-close + summarizer budget.
+pub(super) const AGENT_CLOSE_TIMEOUT_ENV: &str = "SIMARD_MEETING_AGENT_CLOSE_TIMEOUT_SECS";
+
+/// Resolve the master close-timeout budget from the env, clamping to
+/// `[1, 600]` and emitting a WARN on malformed values.
+pub(super) fn resolve_close_timeout() -> Duration {
+    resolve_env_duration_secs(CLOSE_TIMEOUT_ENV, DEFAULT_CLOSE_TIMEOUT_SECS, 1, 600)
+}
+
+/// Resolve the inner agent-close budget from the env, clamping to
+/// `[1, 120]` and emitting a WARN on malformed values.
+pub(super) fn resolve_agent_close_timeout() -> Duration {
+    resolve_env_duration_secs(
+        AGENT_CLOSE_TIMEOUT_ENV,
+        DEFAULT_AGENT_CLOSE_TIMEOUT_SECS,
+        1,
+        120,
+    )
+}
+
+fn resolve_env_duration_secs(
+    env_var: &'static str,
+    default_secs: u64,
+    min_secs: u64,
+    max_secs: u64,
+) -> Duration {
+    let raw = match std::env::var(env_var) {
+        Ok(v) => v,
+        Err(_) => return Duration::from_secs(default_secs),
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Duration::from_secs(default_secs);
+    }
+    match trimmed.parse::<u64>() {
+        Ok(v) => {
+            let clamped = v.clamp(min_secs, max_secs);
+            if clamped != v {
+                warn!(
+                    env_var = env_var,
+                    requested = v,
+                    clamped = clamped,
+                    reason = "clamped",
+                    "meeting close timeout out of allowed range; clamped"
+                );
+            }
+            Duration::from_secs(clamped)
+        }
+        Err(e) => {
+            warn!(
+                env_var = env_var,
+                raw = %trimmed,
+                error = %e,
+                default_secs = default_secs,
+                reason = "malformed",
+                "meeting close timeout malformed; using default"
+            );
+            Duration::from_secs(default_secs)
+        }
+    }
+}
 
 /// The unified meeting backend.
 ///
@@ -51,7 +130,11 @@ pub struct MeetingBackend {
     topic: String,
     history: Vec<ConversationMessage>,
     system_prompt: String,
-    agent: Box<dyn BaseTypeSession>,
+    /// `None` when the agent has been moved into a detached close worker
+    /// that exceeded its budget (issue #1908). On a partial close,
+    /// `send_message` and any subsequent `agent.close()` call fall through
+    /// to safe no-ops.
+    agent: Option<Box<dyn BaseTypeSession>>,
     bridge: Option<Box<dyn CognitiveMemoryOps>>,
     started_at: String,
     is_open: bool,
@@ -85,20 +168,25 @@ impl MeetingBackend {
     /// - `system_prompt`: pre-built system prompt (identity + live context).
     pub fn new_session(
         topic: &str,
-        mut agent: Box<dyn BaseTypeSession>,
+        agent: Box<dyn BaseTypeSession>,
         bridge: Option<Box<dyn CognitiveMemoryOps>>,
         system_prompt: String,
     ) -> Self {
         let started_at = Utc::now().to_rfc3339();
-        if let Err(e) = agent.open() {
-            tracing::warn!(%e, "failed to open agent session during meeting creation");
-        }
+        // Backend contract (issue #1905): callers (`open_meeting_agent_session`,
+        // `SessionBuilder::open`) hand the backend an already-opened session.
+        // Re-opening here previously produced a spurious WARN on every meeting
+        // boot ("session is already open"). The backend never re-opens.
+        debug!(
+            backend = ?agent.descriptor().id,
+            "MeetingBackend: caller-opened session adopted (no re-open)"
+        );
         info!(topic, "Meeting session created");
         Self {
             topic: topic.to_string(),
             history: Vec::new(),
             system_prompt,
-            agent,
+            agent: Some(agent),
             bridge,
             started_at,
             is_open: true,
@@ -137,6 +225,25 @@ impl MeetingBackend {
     /// Access the session start time (for export).
     pub fn started_at(&self) -> &str {
         &self.started_at
+    }
+
+    /// Append a synthetic conversation message without invoking the
+    /// agent. Exists so outside-in integration tests can seed history
+    /// before exercising `close()` against blocking-mock sessions
+    /// (issue #1908 regression coverage). Not part of the production
+    /// REPL flow — use `send_message` for that.
+    #[doc(hidden)]
+    pub fn push_test_message(&mut self, role: &str, content: &str) {
+        let role = match role {
+            "operator" | "user" => Role::User,
+            "simard" | "assistant" => Role::Assistant,
+            _ => Role::System,
+        };
+        self.history.push(ConversationMessage {
+            role,
+            content: content.to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+        });
     }
 
     /// Record an explicit theme for this meeting.
@@ -358,11 +465,35 @@ impl MeetingBackend {
         preamble
     }
 
-    /// Ask the LLM for a summary with a timeout to prevent `/close` from hanging.
-    fn generate_summary(&mut self) -> String {
+    /// Ask the LLM for a summary with a hard timeout so `/close` never hangs
+    /// past its budget (issue #1908).
+    ///
+    /// Returns the summary text **and** a flag indicating whether the
+    /// summarizer phase produced a partial-handoff signal. The agent is
+    /// moved into a detached worker thread for the duration of the LLM
+    /// call; on success it is restored to `self.agent` and the caller
+    /// observes no state change. On timeout it stays in the detached
+    /// worker (which continues to drain in the background — see
+    /// `close_guard` module docs for the abandon-not-kill trade-off) and
+    /// `self.agent` is left as `None` so any subsequent `agent.close()`
+    /// call falls through to a no-op rather than touching a poisoned
+    /// session.
+    pub(super) fn generate_summary(&mut self) -> (String, Option<PartialReason>) {
         if self.history.is_empty() {
-            return "Empty meeting — no messages exchanged.".to_string();
+            return ("Empty meeting — no messages exchanged.".to_string(), None);
         }
+
+        let agent = match self.agent.take() {
+            Some(a) => a,
+            None => {
+                warn!(
+                    handoff_partial = true,
+                    reason = PartialReason::SummaryTimeout.as_wire_str(),
+                    "Summary skipped — agent already taken by an earlier phase"
+                );
+                return (self.metadata_summary(), Some(PartialReason::SummaryTimeout));
+            }
+        };
 
         let summary_prompt = format!(
             "Please provide a concise summary of this meeting about \"{}\". \
@@ -378,51 +509,72 @@ impl MeetingBackend {
             prompt_preamble: preamble,
         };
 
+        let summary_budget = resolve_agent_close_timeout();
         info!(
-            timeout_secs = SUMMARY_TIMEOUT.as_secs(),
-            "Starting summary generation"
+            timeout_secs = summary_budget.as_secs(),
+            "meeting.close.phase phase=summary starting"
         );
         let start = std::time::Instant::now();
 
-        // Run the LLM call in a scoped thread with a timeout so /close never hangs.
-        let result = {
-            let (tx, rx) = mpsc::channel();
-            let agent = &mut *self.agent;
-
-            std::thread::scope(|s| {
-                s.spawn(move || {
-                    let r = agent.run_turn(turn_input);
-                    let _ = tx.send(r);
-                });
-                rx.recv_timeout(SUMMARY_TIMEOUT)
-            })
-        };
+        // Move the agent into a detached worker. `with_timeout` uses a
+        // non-scoped `thread::spawn` so the parent returns promptly when
+        // the budget expires (issue #1908 root cause was the old
+        // `thread::scope` which joins at scope end and therefore could
+        // never honour the timeout).
+        let result = with_timeout(summary_budget, move || {
+            let mut agent = agent;
+            let r = agent.run_turn(turn_input);
+            (agent, r)
+        });
 
         match result {
-            Ok(Ok(outcome)) => {
+            Ok((agent, Ok(outcome))) => {
+                self.agent = Some(agent);
+                let elapsed_ms = start.elapsed().as_millis() as u64;
                 info!(
-                    elapsed_ms = start.elapsed().as_millis() as u64,
-                    "Summary generated"
+                    elapsed_ms,
+                    phase = "summary",
+                    outcome = "ok",
+                    "meeting.close.phase done"
                 );
                 let text = extract_response(&outcome);
-                if text.is_empty() {
-                    warn!("LLM returned empty summary — using metadata summary");
-                    self.metadata_summary()
+                if text.trim().is_empty() {
+                    warn!(
+                        handoff_partial = true,
+                        reason = PartialReason::SummaryEmpty.as_wire_str(),
+                        "LLM returned empty summary — using metadata summary"
+                    );
+                    (self.metadata_summary(), Some(PartialReason::SummaryEmpty))
                 } else {
-                    text
+                    (text, None)
                 }
             }
-            Ok(Err(e)) => {
-                warn!(elapsed_ms = start.elapsed().as_millis() as u64, error = %e, "LLM summarization failed");
-                self.metadata_summary()
+            Ok((agent, Err(e))) => {
+                self.agent = Some(agent);
+                let elapsed_ms = start.elapsed().as_millis() as u64;
+                warn!(
+                    elapsed_ms,
+                    error = %e,
+                    handoff_partial = true,
+                    reason = PartialReason::SummaryEmpty.as_wire_str(),
+                    "LLM summarization failed — using metadata summary"
+                );
+                (self.metadata_summary(), Some(PartialReason::SummaryEmpty))
             }
             Err(_) => {
+                let elapsed_ms = start.elapsed().as_millis() as u64;
+                // Agent stays in the detached worker; intentionally leave
+                // `self.agent = None` so closing.rs guards `agent.close()`
+                // with `if let Some(_)` and we never touch a partially
+                // shut-down session.
                 warn!(
-                    timeout_secs = SUMMARY_TIMEOUT.as_secs(),
-                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    timeout_secs = summary_budget.as_secs(),
+                    elapsed_ms,
+                    handoff_partial = true,
+                    reason = PartialReason::SummaryTimeout.as_wire_str(),
                     "Summary generation timed out — saving transcript without LLM summary"
                 );
-                self.metadata_summary()
+                (self.metadata_summary(), Some(PartialReason::SummaryTimeout))
             }
         }
     }

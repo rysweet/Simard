@@ -428,6 +428,42 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                     ))
                 )
                 .ok();
+                // Stable, machine-grep-friendly bundle line for operator
+                // scrollback (see
+                // `docs/reference/meeting-close-lifecycle.md#repl-exit-banner`).
+                writeln!(output, "{}", green(&format!("[meeting] bundle: {dir}"))).ok();
+            }
+            // Operator-facing handoff path line. Stable literal so
+            // operators can `grep '\[meeting\] handoff written:' …`
+            // from terminal scrollback (see
+            // `docs/reference/meeting-close-lifecycle.md#repl-exit-banner`).
+            let handoff_path = crate::meeting_facilitator::default_handoff_dir()
+                .join(crate::meeting_facilitator::MEETING_HANDOFF_FILENAME);
+            writeln!(
+                output,
+                "{}",
+                green(&format!(
+                    "[meeting] handoff written: {}",
+                    handoff_path.display()
+                ))
+            )
+            .ok();
+            // Partial-close banner: only printed when the close
+            // pipeline took a bounded-timeout fast-path (issue #1908).
+            // The literal prefix `[meeting] WARNING: partial close
+            // (reason=<wire>)` is contractual — change only with a
+            // simultaneous update to the howto under
+            // `docs/howto/recover-from-meeting-close-timeout.md`.
+            if let Some(reason) = summary.partial_reason {
+                writeln!(
+                    output,
+                    "{}",
+                    yellow(&format!(
+                        "[meeting] WARNING: partial close (reason={}). Review the bundle before relying on extracted decisions/action items.",
+                        reason.as_wire_str()
+                    ))
+                )
+                .ok();
             }
         }
         Err(e) => {

@@ -94,6 +94,13 @@ pub struct MeetingSummary {
     /// summary so operators (and downstream tools) can find the artifact.
     #[serde(default)]
     pub bundle_dir: Option<String>,
+    /// `Some(reason)` when the close pipeline hit a timeout or a phase
+    /// failure and produced a **partial** handoff (issue #1908). The
+    /// REPL surfaces this in its exit banner, and downstream tooling
+    /// can match on the wire string (see
+    /// [`crate::meeting_backend::PartialReason`]).
+    #[serde(default)]
+    pub partial_reason: Option<crate::meeting_backend::PartialReason>,
 }
 
 /// Current status of a meeting session.
@@ -178,6 +185,7 @@ mod tests {
                 applied_at: "2025-01-01T00:10:00Z".to_string(),
             }],
             bundle_dir: Some("/home/user/.simard/meetings/20250101T000000Z-sprint/".to_string()),
+            partial_reason: None,
         };
         let json = serde_json::to_string(&summary).unwrap();
         let s2: MeetingSummary = serde_json::from_str(&json).unwrap();
@@ -203,6 +211,36 @@ mod tests {
         assert!(s.participants.is_empty());
         assert!(s.applied_templates.is_empty());
         assert!(s.bundle_dir.is_none());
+        assert!(s.partial_reason.is_none());
+    }
+
+    #[test]
+    fn meeting_summary_serde_with_partial_reason() {
+        // partial_reason serializes as snake_case via close_guard::PartialReason
+        let summary = MeetingSummary {
+            topic: "Partial".to_string(),
+            summary_text: "(partial — close timed out at 60s; full summary unavailable)"
+                .to_string(),
+            message_count: 4,
+            duration_secs: 60,
+            transcript_path: None,
+            action_items: vec![],
+            decisions: vec![],
+            markdown_report_path: None,
+            open_questions: vec![],
+            themes: vec![],
+            participants: vec![],
+            applied_templates: vec![],
+            bundle_dir: Some("/tmp/x".to_string()),
+            partial_reason: Some(crate::meeting_backend::PartialReason::SummaryTimeout),
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        assert!(
+            json.contains("\"partial_reason\":\"summary_timeout\""),
+            "json should carry snake_case partial_reason, got {json}"
+        );
+        let s2: MeetingSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(summary, s2);
     }
 
     #[test]

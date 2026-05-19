@@ -51,7 +51,22 @@ impl MeetingBackend {
         );
         let start = std::time::Instant::now();
 
-        let outcome = match self.agent.run_turn(turn_input) {
+        // Agent is normally `Some`; it is only `None` if a previous close
+        // pipeline abandoned it to a detached worker on timeout (issue
+        // #1908). `send_message` must therefore fail loud rather than
+        // silently no-op so the operator notices the meeting is
+        // unusable. The REPL exits on `/close` immediately, so reaching
+        // this branch in practice would mean a buggy caller invoked
+        // `send_message` after a partial close.
+        let agent = self
+            .agent
+            .as_mut()
+            .ok_or_else(|| SimardError::ActionExecutionFailed {
+                action: "send-message".to_string(),
+                reason: "meeting agent is no longer available (close pipeline took it)".to_string(),
+            })?;
+
+        let outcome = match agent.run_turn(turn_input) {
             Ok(o) => {
                 info!(
                     elapsed_ms = start.elapsed().as_millis() as u64,

@@ -1,0 +1,59 @@
+name: meeting-close-bounded-timeout
+app_type: cli
+description: |
+  Validates the bounded meeting close pipeline (issue #1908) plus
+  state-root resolution (issue #1906) and the #1905 spurious-WARN fix.
+
+agents:
+  - name: cargo-test-runner
+    type: cli
+    command: bash
+
+steps:
+  - action: run
+    command: "bash -c 'cargo test --test meeting_close_outside_in close_returns_within_budget_when_agent_blocks 2>&1'"
+    timeout: 180000
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"
+
+  - action: run
+    command: "bash -c 'cargo test --test meeting_close_outside_in happy_path_close_writes_under_state_root 2>&1'"
+    timeout: 180000
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"
+
+  - action: run
+    command: "bash -c 'cargo test --lib meeting_backend::close_guard 2>&1'"
+    timeout: 120000
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"
+
+  - action: run
+    command: "bash -c 'cargo test --lib state_root:: 2>&1'"
+    timeout: 120000
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"
+
+  - action: run
+    command: "bash -c 'cargo test --lib meeting_backend::tests_mod 2>&1'"
+    timeout: 120000
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"
+
+  - action: run
+    command: "bash -c 'cargo test --test meeting_handoff --test meeting_handoff_bundle --test meeting_goals 2>&1'"
+    timeout: 240000
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"

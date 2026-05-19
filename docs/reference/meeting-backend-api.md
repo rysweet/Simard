@@ -20,11 +20,21 @@ related:
 
 ```
 src/meeting_backend/
-├── mod.rs        — MeetingBackend struct and public API
-├── types.rs      — Data types for messages, responses, summaries
-├── command.rs    — MeetingCommand enum and parser
-└── persist.rs    — Transcript and handoff persistence
+├── mod.rs              — MeetingBackend struct and public API
+├── types.rs            — Data types for messages, responses, summaries
+├── command.rs          — MeetingCommand enum and parser
+├── messaging.rs        — send_message implementation
+├── closing.rs          — `close()` pipeline: summary, action items, persistence
+├── close_guard.rs      — `with_timeout()` primitive used by every close phase
+├── config.rs           — Env-var parsing for the close-timeout budgets
+├── partial_reason.rs   — `PartialReason` enum (PascalCase variants, snake_case Display)
+├── sanitize.rs         — 1 MiB UTF-8-safe summary truncation
+└── persist/            — Transcript, handoff, and bundle persistence (atomic writes)
 ```
+
+The four new modules (`closing`, `close_guard`, `config`,
+`partial_reason`) implement the bounded `/close` contract documented
+in [Meeting close lifecycle](./meeting-close-lifecycle.md).
 
 ## Types
 
@@ -62,16 +72,44 @@ Returned by `send_message()`. Contains Simard's response text and the running co
 ```rust
 pub struct MeetingSummary {
     pub topic: String,
-    pub summary: String,
+    pub summary_text: String,
     pub message_count: usize,
-    pub duration: std::time::Duration,
-    pub transcript_path: Option<PathBuf>,
-    pub handoff_written: bool,
-    pub memories_stored: usize,
+    pub duration_secs: u64,
+    pub transcript_path: Option<String>,
+    pub action_items: Vec<HandoffActionItem>,
+    pub decisions: Vec<String>,
+    pub markdown_report_path: Option<String>,
+    pub open_questions: Vec<String>,
+    pub themes: Vec<String>,
+    pub participants: Vec<String>,
+    pub applied_templates: Vec<AppliedTemplate>,
+    pub bundle_dir: Option<String>,
 }
 ```
 
-Returned by `close()`. Contains the session outcome and paths to persisted artifacts.
+Returned by `close()`. `summary_text` carries the LLM-generated
+summary (or the partial-close fallback string — see below).
+`transcript_path` and `bundle_dir` point at the artifacts written
+to disk. Every `Vec<_>` field defaults to empty via `#[serde(default)]`
+so older readers deserialize forward-compatibly.
+
+> **`close()` never returns `Err` on timeout.** Even when the close
+> pipeline exceeds `SIMARD_MEETING_CLOSE_TIMEOUT_SECS` (default 60s)
+> or an inner phase times out, `close()` writes a deserialize-valid
+> handoff to disk and returns `Ok(MeetingSummary { summary_text:
+> "(partial — close timed out at Ns; full summary unavailable)",
+> transcript_path: Some(_), bundle_dir: Some(_), .. })`. The close
+> pipeline also emits a `WARN handoff_partial=true
+> reason=<PartialReason>` event and the REPL prints a `[meeting]
+> WARNING: partial close ...` banner. The full contract — timeout
+> budgets, the `PartialReason` allowlist, the atomic-write
+> guarantee, and the close-pipeline diagram — is documented in
+> [Meeting close lifecycle](./meeting-close-lifecycle.md).
+>
+> Paths embedded in `MeetingSummary` are resolved through the shared
+> [state-root helper](./state-root-resolution.md), so
+> `SIMARD_STATE_ROOT`, `SIMARD_HANDOFF_DIR`, and `SIMARD_MEETINGS_DIR`
+> are all honored.
 
 ### `SessionStatus`
 
@@ -177,25 +215,50 @@ pub fn close(&mut self) -> SimardResult<MeetingSummary>
 
 Ends the meeting, persists all artifacts, and returns a summary.
 
-**Returns:** `SimardResult<MeetingSummary>` with the topic, generated summary, message count, duration, transcript path, and memory storage count.
+**Returns:** `SimardResult<MeetingSummary>` with the topic, generated summary, message count, duration, transcript path, bundle directory, and structured action items / decisions.
 
 **Behavior:**
 
-1. Sends a final LLM call asking Simard to summarize the conversation (the summary prompt is internal and not visible to the operator).
-2. Writes the full transcript to `~/.simard/meetings/{timestamp}_{sanitized_topic}.json` with `0o600` permissions.
-3. Writes a `MeetingHandoff` artifact to `target/meeting_handoffs/meeting_handoff.json` with:
-   - `transcript`: contains the conversation summary
-   - `decisions`: empty vec (decisions are captured in the summary narrative)
-   - `action_items`: empty vec
-   - `open_questions`: empty vec
-   - `processed`: `false`
-4. Stores cognitive memories via the bridge (if available):
-   - 1 episodic memory (the meeting event)
-   - Semantic memories extracted from the summary
-   - Prospective memories for agreed next steps
-5. Marks the session as closed. Further `send_message()` calls return an error.
+1. Wraps the entire pipeline in `close_guard::with_timeout` with the
+   master budget (default 60s, `SIMARD_MEETING_CLOSE_TIMEOUT_SECS`,
+   clamped `[1, 600]`) so the call always returns within the
+   documented ceiling. See [Meeting close lifecycle][close-lifecycle].
+2. Runs each phase (`agent.close()`, `generate_summary()`, structured
+   extraction, persistence, cognitive-memory store) under its own
+   inner `with_timeout`. Phase outcomes (`ok` / `timeout` / `err`)
+   flow into the partial-handoff envelope; the pipeline does **not**
+   short-circuit on a phase failure.
+3. Persists three artifacts under the shared state root via atomic
+   tmp-file + `fsync` + `rename` writes (UTF-8-safe summary
+   truncation at 1 MiB, file mode `0o600`, directory mode `0o700` on
+   unix):
+   - `<state-root>/meetings/<meeting_id>/transcript.json` — full live transcript.
+   - `<state-root>/meetings/<meeting_id>/meeting_handoff.json` — bundle handoff.
+   - `<state-root>/meetings/<meeting_id>/meeting_handoff.md` — markdown report.
+   - `<state-root>/meeting_handoffs/meeting_handoff.json` — flat drop file
+     consumed by the OODA daemon and engineer-loop ingestion.
 
-**Errors:** Persistence failures are logged at `WARN` level but do not prevent the summary from being returned. The method succeeds even if disk writes or bridge calls fail — the summary is always returned to the operator.
+   Paths resolve through the shared [state-root helper][state-root]
+   so `SIMARD_STATE_ROOT`, `SIMARD_HANDOFF_DIR`, and `SIMARD_MEETINGS_DIR`
+   are all honored. `CARGO_MANIFEST_DIR` is **no longer** consulted at
+   runtime.
+4. Stores cognitive memories via the bridge (if available) within the
+   bridge inner budget. Bridge failures / timeouts emit
+   `WARN reason=bridge_timeout` and flow into the partial envelope
+   without blocking the close.
+5. Marks the session as closed. Further `send_message()` calls return
+   an error.
+
+**Errors:** `close()` **never returns `Err` on timeout**. A partial
+close still returns `Ok(MeetingSummary { .. })` with the fallback
+`summary_text` and the on-disk artifact paths populated; the partial
+signal is the `WARN handoff_partial=true reason=<PartialReason>`
+tracing event and the `[meeting] WARNING: partial close (reason=...)`
+REPL banner. `close()` returns `Err` only when called on an
+already-closed session (`ActionExecutionFailed`).
+
+[close-lifecycle]: ./meeting-close-lifecycle.md
+[state-root]: ./state-root-resolution.md
 
 ### `status`
 
@@ -283,7 +346,11 @@ Parses raw user input into a `MeetingCommand` variant.
 
 ### Transcript JSON
 
-Written to `~/.simard/meetings/{timestamp}_{sanitized_topic}.json`:
+Written to `<state-root>/meetings/<meeting_id>/transcript.json` (the
+state root resolves through the shared
+[state-root helper](./state-root-resolution.md), defaulting to
+`~/.simard`). One per-meeting bundle directory contains the
+transcript, the JSON handoff, and the markdown report.
 
 ```json
 {
@@ -320,7 +387,16 @@ Written to `~/.simard/meetings/{timestamp}_{sanitized_topic}.json`:
 
 ### MeetingHandoff JSON
 
-Written to `target/meeting_handoffs/meeting_handoff.json`:
+Written to `<state-root>/meeting_handoffs/meeting_handoff.json` (the
+flat drop directory the OODA daemon and engineer-loop ingest from).
+A copy with the same schema is also written to the per-meeting
+bundle at `<state-root>/meetings/<meeting_id>/meeting_handoff.json`.
+Both paths resolve through the shared
+[state-root helper](./state-root-resolution.md), so
+`SIMARD_HANDOFF_DIR`, `SIMARD_MEETINGS_DIR`, and `SIMARD_STATE_ROOT`
+are all honored. `CARGO_MANIFEST_DIR` is **no longer** consulted at
+runtime — previously `default_handoff_dir()` baked the manifest dir
+into release binaries.
 
 ```json
 {

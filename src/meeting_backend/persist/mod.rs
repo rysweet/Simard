@@ -45,35 +45,34 @@ pub fn sanitize_filename(input: &str) -> String {
 
 /// Directory for meeting transcripts.
 ///
-/// Resolution order (mirrors `goal-curation read` per audit issue #1906 and
-/// `Specs/ProductArchitecture.md` §"Memory Architecture → Session Summary":
-/// handoff records must live under the operator-chosen state-root):
-///   1. `SIMARD_MEETINGS_DIR` — narrow override used by existing tests and
-///      operators who want to redirect only the meeting artifact path
-///      without affecting the cognitive-memory DB root.
-///   2. `SIMARD_STATE_ROOT` — canonical operator-chosen state-root. When set,
-///      meeting transcripts and autosaves land under
-///      `$SIMARD_STATE_ROOT/meetings/`. This matches `memory_ipc::default_state_root()`
-///      / `goal_curation::operations::resolve_state_root` precedent so an
-///      operator who exports `SIMARD_STATE_ROOT=/tmp/foo` gets ALL durable
-///      simard state under `/tmp/foo`, including meeting persistence.
-///   3. `$HOME/.simard/meetings/` — historical default; preserves
-///      backward-compatible layout when neither env var is set.
+/// Precedence ladder (issue #1906):
+/// 1. `SIMARD_MEETINGS_DIR` — narrow override (preserves backward compat
+///    with the legacy env idiom used by `tests_persist_extra`).
+/// 2. `SIMARD_MEETINGS_ROOT` — alias for the narrow override; same
+///    semantics, used by `tests/meeting_handoff_bundle.rs` and any operator
+///    that prefers the `*_ROOT` naming.
+/// 3. `SIMARD_STATE_ROOT/meetings` — broad override resolved through the
+///    shared [`crate::state_root`] helper so a single env var relocates
+///    every Simard subsystem together.
+/// 4. `~/.simard/meetings/` — default.
 ///
-/// Previously this only honored `SIMARD_MEETINGS_DIR`, so operators who set
-/// `SIMARD_STATE_ROOT` (e.g. for hermetic probe runs) silently had their
-/// meeting autosave and transcript files dumped into `~/.simard/meetings/`
-/// regardless. See audit issue #1906 for the full reproduction.
+/// The narrow vars deliberately win over the broad one so a session-scoped
+/// override (e.g. a single test) can still pin a specific directory without
+/// fighting a global `SIMARD_STATE_ROOT` set in the parent shell.
 pub(super) fn meetings_dir() -> PathBuf {
     if let Some(override_path) = std::env::var_os("SIMARD_MEETINGS_DIR") {
-        return PathBuf::from(override_path);
+        let s = override_path.to_string_lossy();
+        if !s.trim().is_empty() {
+            return PathBuf::from(override_path);
+        }
     }
-    if let Some(state_root) = std::env::var_os("SIMARD_STATE_ROOT") {
-        return PathBuf::from(state_root).join("meetings");
+    if let Some(override_path) = std::env::var_os("SIMARD_MEETINGS_ROOT") {
+        let s = override_path.to_string_lossy();
+        if !s.trim().is_empty() {
+            return PathBuf::from(override_path);
+        }
     }
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".simard/meetings")
+    crate::state_root::resolve_subdir("meetings")
 }
 
 /// Write a JSON transcript to `~/.simard/meetings/{timestamp}_{topic}.json`.
