@@ -47,16 +47,31 @@ use std::sync::OnceLock;
 use tempfile::NamedTempFile;
 use tokio::io::AsyncWriteExt as _;
 
+/// Defensive bound on the env value reported to logs. Operator-controlled
+/// input must never inflate log volume or smuggle control characters; see
+/// security review R-IV-2 / S8.
+const ENV_VALUE_LOG_BUDGET: usize = 64;
+
 /// Internal: log a one-time warning when an invalid env override value is
 /// encountered. Subsequent invalid values are silently coerced to the
-/// heuristic fallback.
+/// heuristic fallback. The reported value is truncated to
+/// [`ENV_VALUE_LOG_BUDGET`] bytes and control characters are escaped via
+/// `escape_default` so a malicious env value cannot inject newlines or ANSI
+/// escapes into the log stream.
 fn warn_invalid_env_value_once(value: &str) {
     static WARNED: OnceLock<()> = OnceLock::new();
     if WARNED.set(()).is_ok() {
+        let truncated: String = value.chars().take(ENV_VALUE_LOG_BUDGET).collect();
+        let safe: String = truncated.escape_default().collect();
+        let suffix = if value.len() > truncated.len() {
+            "...(truncated)"
+        } else {
+            ""
+        };
         tracing::warn!(
             target: "amplihack::prompt_delivery",
             env_var = ENV_OVERRIDE,
-            value = value,
+            value = %format_args!("{safe}{suffix}"),
             "invalid AMPLIHACK_PROMPT_DELIVERY value; falling back to auto heuristic. \
              Accepted values: auto, inline|cli|argv|arg, stdin|pipe, tempfile|temp-file|file"
         );
@@ -842,5 +857,17 @@ mod tests {
         assert!(e.source().is_some());
         let e = PromptDeliveryError::NulInInlineMode;
         assert!(e.source().is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Defensive env-value log bound (security review R-IV-2 / S8)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn env_value_log_budget_pinned_at_64_bytes() {
+        // The 64-byte ceiling is a security invariant — bumping it requires
+        // re-reading the threat model in docs/prompt-delivery.md and
+        // session security-review-1897.md.
+        assert_eq!(ENV_VALUE_LOG_BUDGET, 64);
     }
 }
