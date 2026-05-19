@@ -18,8 +18,9 @@ const LOCAL_BASE_TYPE: &str = "local-harness";
 
 // Re-export all public items so `crate::bootstrap::X` still works.
 pub use assembly::{
-    LocalSessionExecution, assemble_local_runtime, assemble_local_runtime_from_handoff,
-    builtin_base_type_registry_for_manifest, latest_local_handoff, run_local_session,
+    KNOWN_BUILTIN_BASE_TYPE_IDS, LocalSessionExecution, assemble_local_runtime,
+    assemble_local_runtime_from_handoff, builtin_base_type_registry_for_manifest,
+    known_builtin_base_type_ids, latest_local_handoff, run_local_session,
 };
 pub use config::BootstrapConfig;
 pub use types::{BootstrapInputs, BootstrapMode, ConfigValue, ConfigValueSource};

@@ -37,6 +37,35 @@ const COPILOT_SDK_BASE_TYPE: &str = "copilot-sdk";
 const CLAUDE_AGENT_SDK_BASE_TYPE: &str = "claude-agent-sdk";
 const MS_AGENT_FRAMEWORK_BASE_TYPE: &str = "ms-agent-framework";
 
+/// Canonical list of built-in base-type identifiers that have an adapter
+/// registered by [`register_builtin_base_type`].
+///
+/// This is the single source of truth for *which identifiers a manifest may
+/// declare* under `supported_base_types` and have actually wired to a real
+/// adapter at runtime. Any identifier outside this list will be silently
+/// skipped by `register_builtin_base_type` and then surface as
+/// [`crate::SimardError::AdapterNotRegistered`] when the runtime tries to
+/// look it up.
+///
+/// Operator-visible help text that advertises a base-type identifier as an
+/// example MUST only use identifiers from this list; the consistency
+/// regression test in `tests/help_base_type_consistency.rs` enforces that
+/// invariant (issue #1907).
+pub const KNOWN_BUILTIN_BASE_TYPE_IDS: &[&str] = &[
+    LOCAL_BASE_TYPE,
+    TERMINAL_SHELL_BASE_TYPE,
+    RUSTY_CLAWD_BASE_TYPE,
+    COPILOT_SDK_BASE_TYPE,
+    CLAUDE_AGENT_SDK_BASE_TYPE,
+    MS_AGENT_FRAMEWORK_BASE_TYPE,
+];
+
+/// Return the canonical list of built-in base-type identifiers. See
+/// [`KNOWN_BUILTIN_BASE_TYPE_IDS`].
+pub fn known_builtin_base_type_ids() -> &'static [&'static str] {
+    KNOWN_BUILTIN_BASE_TYPE_IDS
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalSessionExecution {
     pub outcome: SessionOutcome,

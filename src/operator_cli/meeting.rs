@@ -25,8 +25,8 @@ If no command is given, an interactive REPL is started with a timestamp topic.
 Examples:
   simard meeting --help
   simard meeting repl \"weekly sync\"
-  simard meeting run gpt-5 ring \"design review\"
-  simard meeting read gpt-5 ring
+  simard meeting run local-harness ring \"design review\"
+  simard meeting read local-harness ring
 ";
 
 pub(super) fn dispatch_meeting_command(

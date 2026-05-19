@@ -147,8 +147,9 @@ pub use base_types::{
 };
 pub use bootstrap::{
     BootstrapConfig, BootstrapInputs, BootstrapMode, ConfigValue, ConfigValueSource,
-    LocalSessionExecution, assemble_local_runtime, assemble_local_runtime_from_handoff,
-    bootstrap_entrypoint, builtin_base_type_registry_for_manifest, latest_local_handoff,
+    KNOWN_BUILTIN_BASE_TYPE_IDS, LocalSessionExecution, assemble_local_runtime,
+    assemble_local_runtime_from_handoff, bootstrap_entrypoint,
+    builtin_base_type_registry_for_manifest, known_builtin_base_type_ids, latest_local_handoff,
     run_local_session,
 };
 pub use bridge::{
@@ -262,7 +263,9 @@ pub use ooda_scheduler::{
 pub use test_support::TestAdapter;
 
 pub use metadata::{BackendDescriptor, Freshness, FreshnessState, Provenance};
-pub use operator_cli::{dispatch_operator_cli, operator_cli_help, operator_cli_usage};
+pub use operator_cli::{
+    all_operator_help_texts, dispatch_operator_cli, operator_cli_help, operator_cli_usage,
+};
 pub use operator_commands::{
     dispatch_legacy_gym_cli, dispatch_operator_probe, gym_usage, run_bootstrap_probe,
     run_copilot_submit_probe, run_engineer_loop_probe, run_engineer_read_probe,

@@ -172,6 +172,21 @@ pub fn operator_cli_help() -> &'static str {
     OPERATOR_CLI_HELP
 }
 
+/// Return every user-facing `--help` text block emitted by the operator CLI,
+/// paired with a stable label.
+///
+/// This is consumed by the help/registry consistency regression test in
+/// `tests/help_base_type_consistency.rs` (issue #1907) so that no help block
+/// can silently drift to advertise a base-type identifier that the runtime
+/// registry will reject. When you add a new operator-visible `--help`
+/// constant, add it here too.
+pub fn all_operator_help_texts() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("operator-cli", OPERATOR_CLI_HELP),
+        ("meeting", meeting::MEETING_HELP),
+    ]
+}
+
 fn dispatch_bootstrap_command(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
