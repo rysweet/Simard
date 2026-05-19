@@ -15,12 +15,10 @@
 //!      `BrainJudgmentRecord.parse_failure` field that lands in
 //!      `~/.simard/cycle_reports/cycle_*.json`.
 //!   4. Throttled `gh issue create` at `>= ISSUE_ESCALATION_THRESHOLD`
-//!      consecutive failures per `(phase, goal_id)`.
-//!
-//! The module is **stub-only** in this commit (Step 7 — TDD). The behaviour
-//! is pinned by the failing tests in `src/ooda_loop/tests_parse_failure_1890.rs`
-//! and `src/ooda_brain/parse_failure_tests.rs`. Step 8 will wire the four
-//! channels through the two call sites.
+//!      consecutive failures per `(phase, goal_id)`. Mirrors the
+//!      deterministic-safeguard escalation in
+//!      `src/ooda_actions/advance_goal/spawn.rs` (PR #1711) so reviewers can
+//!      cross-reference the pattern.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -91,7 +89,6 @@ pub struct ParseFailureRecord {
 /// [`reset_consecutive_count`] on the next successful parse for the same key.
 /// Documented cross-restart loss is acceptable — worst case is one extra
 /// `gh issue` per daemon restart loop, which is itself a signal worth investigating.
-#[allow(dead_code)] // Step 8 wires this into the _with_brain call sites.
 fn counters() -> &'static Mutex<HashMap<(BrainPhase, String), u32>> {
     static CTRS: OnceLock<Mutex<HashMap<(BrainPhase, String), u32>>> = OnceLock::new();
     CTRS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -99,7 +96,6 @@ fn counters() -> &'static Mutex<HashMap<(BrainPhase, String), u32>> {
 
 /// Increment the `(phase, goal_id)` counter and return the new value.
 /// `pub(crate)` so the `_with_brain` call sites can call this directly.
-#[allow(dead_code)] // Step 8 wires this into the _with_brain call sites.
 pub(crate) fn bump_consecutive_count(phase: BrainPhase, goal_id: &str) -> u32 {
     let mut guard = counters()
         .lock()
@@ -111,7 +107,6 @@ pub(crate) fn bump_consecutive_count(phase: BrainPhase, goal_id: &str) -> u32 {
 
 /// Reset the `(phase, goal_id)` counter to 0 (called on the next successful
 /// parse for the same key).
-#[allow(dead_code)] // Step 8 wires this into the _with_brain call sites.
 pub(crate) fn reset_consecutive_count(phase: BrainPhase, goal_id: &str) {
     let mut guard = counters()
         .lock()
@@ -151,15 +146,22 @@ pub(crate) fn reset_consecutive_count_for_tests(phase: BrainPhase, goal_id: &str
     reset_consecutive_count(phase, goal_id);
 }
 
-/// Build a [`ParseFailureRecord`] for a brain-invocation failure and fire the
-/// four visibility channels (tracing, metric, return-for-embed, conditional
-/// `gh issue create`).
+/// Build a [`ParseFailureRecord`] for a brain-invocation failure and fire all
+/// four visibility channels:
 ///
-/// STEP 7 STATUS: stub. This implementation only constructs the record and
-/// bumps the counter — it does NOT yet fire tracing, the metric, or `gh`.
-/// The TDD tests assert the wired behaviour; they fail until Step 8 lands
-/// the real implementation.
-#[allow(dead_code)] // Step 8 wires this into the _with_brain call sites.
+///   1. `tracing::error!` with structured fields for `journalctl` / log
+///      aggregators (target `simard::ooda_brain`).
+///   2. `record_metric("brain_parse_failure", 1.0, …)` to
+///      `~/.simard/metrics/metrics.jsonl`. Metric write failures are logged
+///      but never swallow the parse-failure — the caller still gets the record.
+///   3. Returns the [`ParseFailureRecord`] for embedding on the
+///      `BrainJudgmentRecord` that lands in `cycle_*.json`.
+///   4. Conditional `gh issue create` once `consecutive_count` for the
+///      `(phase, goal_id)` reaches [`ISSUE_ESCALATION_THRESHOLD`]. Suppressed
+///      under `#[cfg(test)]` so tests can drive the counter without
+///      spawning real `gh` processes; suppressed in production when
+///      `SIMARD_BRAIN_PARSE_FAILURE_NO_ESCALATE=1` so operators have an
+///      escape hatch during incident response.
 pub(crate) fn record_parse_failure(
     phase: BrainPhase,
     goal_id: &str,
@@ -188,13 +190,171 @@ pub(crate) fn record_parse_failure(
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
 
-    // STEP 8 wires the four channels here. Stub on purpose so TDD tests
-    // can drive the wire-up.
+    // Channel 1: tracing::error! with structured fields. Operators following
+    // `docs/howto/diagnose-decide-orient-parse-failures.md` grep for
+    // `target=simard::ooda_brain` to surface this.
+    tracing::error!(
+        target: "simard::ooda_brain",
+        phase = %record.phase,
+        goal_id = %record.goal_id,
+        error = %record.error_message,
+        raw_response_truncated = %record.raw_response_truncated,
+        prompt_name = %record.prompt_name,
+        prompt_version = %record.prompt_version,
+        consecutive_count = record.consecutive_count,
+        retry_attempted = record.retry_attempted,
+        "brain parse failed — falling back to deterministic floor (issue #1890)",
+    );
+
+    // Channel 2: metrics.jsonl counter with structured context. We don't
+    // hold an `Arc<MetricsWriter>` so call the free function; failures are
+    // best-effort (the parse failure itself is the high-priority signal).
+    let metric_ctx = serde_json::json!({
+        "phase": record.phase,
+        "goal_id": record.goal_id,
+        "consecutive_count": record.consecutive_count,
+        "retry_attempted": record.retry_attempted,
+        "prompt_name": record.prompt_name,
+    })
+    .to_string();
+    if let Err(metric_err) =
+        crate::self_metrics::record_metric("brain_parse_failure", 1.0, &metric_ctx)
+    {
+        tracing::warn!(
+            target: "simard::ooda_brain",
+            error = %metric_err,
+            "record_metric(brain_parse_failure) failed (parse-failure record still emitted)",
+        );
+    }
+
+    // Channel 4: throttled gh-issue escalation at >= threshold.
+    if consecutive_count >= ISSUE_ESCALATION_THRESHOLD {
+        maybe_escalate_to_gh_issue(&record);
+    }
 
     record
 }
 
-#[allow(dead_code)] // Step 8 wires this into the _with_brain call sites.
+/// File a tracking issue when a `(phase, goal_id)` pair has crossed
+/// [`ISSUE_ESCALATION_THRESHOLD`] consecutive parse failures. Mirrors the
+/// `spawn_engineer` deterministic-safeguard pattern from PR #1711.
+///
+/// Suppressed under `#[cfg(test)]` so the TDD suite can drive the counter
+/// to high values without spawning real `gh` subprocesses. Operators can
+/// also disable in production by exporting
+/// `SIMARD_BRAIN_PARSE_FAILURE_NO_ESCALATE=1` (e.g. during incident
+/// response when the issue tracker would be flooded).
+fn maybe_escalate_to_gh_issue(record: &ParseFailureRecord) {
+    if cfg!(test) {
+        return;
+    }
+    if std::env::var("SIMARD_BRAIN_PARSE_FAILURE_NO_ESCALATE").is_ok() {
+        tracing::warn!(
+            target: "simard::ooda_brain",
+            phase = %record.phase,
+            goal_id = %record.goal_id,
+            consecutive_count = record.consecutive_count,
+            "gh-issue escalation suppressed by SIMARD_BRAIN_PARSE_FAILURE_NO_ESCALATE",
+        );
+        return;
+    }
+
+    let title = format!(
+        "OODA {} brain parse-failure on goal '{}' ({} consecutive cycles)",
+        record.phase, record.goal_id, record.consecutive_count
+    );
+    let body = format!(
+        "The OODA `{}` brain has failed to parse a valid judgment for goal `{}` for \
+         {} consecutive cycles.\n\n\
+         **Latest error:**\n```\n{}\n```\n\n\
+         **Raw model response (truncated to {} bytes):**\n```\n{}\n```\n\n\
+         **Prompt asset:** `{}` (version `{}`)\n\
+         **Timestamp:** {}\n\n\
+         Inspect the brain logs (`journalctl -u simard | grep simard::ooda_brain`) and \
+         the prompt asset before reactivating. See \
+         `docs/howto/diagnose-decide-orient-parse-failures.md` for the operator runbook.\n\n\
+         Filed deterministically by `src/ooda_brain/parse_failure.rs` (issue #1890).\n\
+         To suppress further escalations during incident response, export \
+         `SIMARD_BRAIN_PARSE_FAILURE_NO_ESCALATE=1`.",
+        record.phase,
+        record.goal_id,
+        record.consecutive_count,
+        record.error_message,
+        RAW_RESPONSE_TRUNCATE_BYTES,
+        record.raw_response_truncated,
+        record.prompt_name,
+        record.prompt_version,
+        record.timestamp,
+    );
+
+    // Use --body-file with a NamedTempFile so large/escape-laden bodies
+    // can't fail the spawn (same pattern as merge_authority.rs / spawn.rs).
+    let body_file = match tempfile::NamedTempFile::new() {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::error!(
+                target: "simard::ooda_brain",
+                phase = %record.phase,
+                goal_id = %record.goal_id,
+                error = %e,
+                "deterministic safeguard: NamedTempFile for gh issue body FAILED (parse-failure record still emitted)",
+            );
+            return;
+        }
+    };
+    if let Err(e) = std::fs::write(body_file.path(), &body) {
+        tracing::error!(
+            target: "simard::ooda_brain",
+            phase = %record.phase,
+            goal_id = %record.goal_id,
+            error = %e,
+            "deterministic safeguard: writing gh issue body to tempfile FAILED",
+        );
+        return;
+    }
+
+    match std::process::Command::new("gh")
+        .args([
+            "issue",
+            "create",
+            "--repo",
+            ESCALATION_REPO_SLUG,
+            "--title",
+            &title,
+            "--body-file",
+            &body_file.path().to_string_lossy(),
+            "--label",
+            "ooda-brain-parse-failure",
+        ])
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            eprintln!(
+                "[simard] DETERMINISTIC SAFEGUARD: gh issue filed for {} brain parse-failure on goal '{}' ({} consecutive cycles)",
+                record.phase, record.goal_id, record.consecutive_count,
+            );
+        }
+        Ok(out) => {
+            tracing::error!(
+                target: "simard::ooda_brain",
+                phase = %record.phase,
+                goal_id = %record.goal_id,
+                stderr = %String::from_utf8_lossy(&out.stderr),
+                "deterministic safeguard: gh issue create FAILED (parse-failure record still emitted)",
+            );
+        }
+        Err(io_err) => {
+            tracing::error!(
+                target: "simard::ooda_brain",
+                phase = %record.phase,
+                goal_id = %record.goal_id,
+                error = %io_err,
+                "deterministic safeguard: gh process spawn FAILED (parse-failure record still emitted)",
+            );
+        }
+    }
+}
+
 fn phase_to_string(phase: BrainPhase) -> String {
     match phase {
         BrainPhase::Act => "act".to_string(),
@@ -305,7 +465,7 @@ mod tests {
         // characters must not be truncated mid-codepoint (would panic in
         // s.truncate() on bad boundary).
 
-        let multibyte: String = std::iter::repeat('字').take(5000).collect();
+        let multibyte: String = "字".repeat(5000);
         let err = sample_err();
         let rec = record_parse_failure(
             BrainPhase::Decide,

@@ -9,9 +9,10 @@
 //! invoke [`decide_with_brain`] directly.
 
 use crate::error::SimardResult;
+use crate::ooda_brain::parse_failure::{record_parse_failure, reset_consecutive_count};
 use crate::ooda_brain::{
-    BrainJudgmentRecord, DecideContext, DeterministicFallbackDecideBrain, OodaDecideBrain,
-    push_brain_judgment,
+    BrainJudgmentRecord, BrainPhase, DECIDE_PROMPT_NAME, DecideContext,
+    DeterministicFallbackDecideBrain, OodaDecideBrain, push_brain_judgment,
 };
 
 use super::{OodaConfig, PlannedAction, Priority, is_synthetic_id};
@@ -29,7 +30,8 @@ pub fn decide(priorities: &[Priority], config: &OodaConfig) -> SimardResult<Vec<
 /// wire-in) by the daemon when an LLM-backed brain is configured. On any
 /// brain error for an individual priority, falls back to the deterministic
 /// mapping for that priority so a transient adapter failure cannot stall
-/// the cycle.
+/// the cycle — but the failure is recorded LOUDLY (issue #1890) via
+/// `ParseFailureRecord` so the silent-fallback regression cannot recur.
 #[tracing::instrument(skip_all)]
 pub fn decide_with_brain(
     priorities: &[Priority],
@@ -53,26 +55,43 @@ pub fn decide_with_brain(
         };
         let judgment = match brain.judge_decision(&ctx) {
             Ok(j) => {
+                // Healthy parse — reset the (Decide, goal_id) counter so a
+                // recovery cancels any pending gh-issue escalation.
+                reset_consecutive_count(BrainPhase::Decide, &priority.goal_id);
                 push_brain_judgment(BrainJudgmentRecord::from_decide(
                     &priority.goal_id,
                     priority.urgency,
                     &j,
                     false,
-                    crate::ooda_brain::prompt_store::current_version(
-                        crate::ooda_brain::DECIDE_PROMPT_NAME,
-                    ),
+                    crate::ooda_brain::prompt_store::current_version(DECIDE_PROMPT_NAME),
                 ));
                 j
             }
-            Err(_) => {
+            Err(e) => {
+                // Issue #1890: surface the parse failure on all four
+                // visibility channels (tracing, metric, cycle JSON,
+                // throttled gh issue at >= 3 consecutive). Cycle still
+                // continues via the deterministic fallback action so a
+                // transient adapter hiccup cannot stall the loop.
+                let raw_response = extract_raw_response(&e);
+                let pf = record_parse_failure(
+                    BrainPhase::Decide,
+                    &priority.goal_id,
+                    &e,
+                    &raw_response,
+                    DECIDE_PROMPT_NAME,
+                    crate::ooda_brain::prompt_store::current_version(DECIDE_PROMPT_NAME),
+                );
                 let j = fallback.judge_decision(&ctx)?;
-                push_brain_judgment(BrainJudgmentRecord::from_decide(
+                let mut rec = BrainJudgmentRecord::from_decide(
                     &priority.goal_id,
                     priority.urgency,
                     &j,
                     true,
                     String::new(),
-                ));
+                );
+                rec.parse_failure = Some(pf);
+                push_brain_judgment(rec);
                 j
             }
         };
@@ -87,6 +106,31 @@ pub fn decide_with_brain(
         });
     }
     Ok(actions)
+}
+
+/// Recover the raw model response from a brain error message.
+///
+/// Brain parsers embed the model body in the error reason as
+/// `raw_response={:?}` (Debug-format). We extract everything after the
+/// first `raw_response=` marker, then strip the surrounding double-quotes
+/// best-effort. If the marker is absent (non-parse error variants), we
+/// return the full error string so the operator still gets context.
+fn extract_raw_response(err: &crate::error::SimardError) -> String {
+    let msg = err.to_string();
+    if let Some(start) = msg.find("raw_response=") {
+        let tail = &msg[start + "raw_response=".len()..];
+        let tail = tail.trim_start();
+        if let Some(rest) = tail.strip_prefix('"') {
+            // Trim a trailing `")` or `"` (rustyclawd uses `({:?})` shape).
+            let body = rest
+                .strip_suffix("\")")
+                .or_else(|| rest.strip_suffix('"'))
+                .unwrap_or(rest);
+            return body.to_string();
+        }
+        return tail.to_string();
+    }
+    msg
 }
 
 #[cfg(test)]

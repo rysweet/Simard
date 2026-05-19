@@ -4,9 +4,10 @@ use std::collections::{HashMap, HashSet};
 
 use crate::error::SimardResult;
 use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress};
+use crate::ooda_brain::parse_failure::{record_parse_failure, reset_consecutive_count};
 use crate::ooda_brain::{
-    BrainJudgmentRecord, DeterministicFallbackOrientBrain, OodaOrientBrain, OrientContext,
-    push_brain_judgment,
+    BrainJudgmentRecord, BrainPhase, DeterministicFallbackOrientBrain, ORIENT_PROMPT_NAME,
+    OodaOrientBrain, OrientContext, push_brain_judgment,
 };
 
 use super::{Observation, Priority, SyntheticPriorityKind, is_synthetic_id};
@@ -83,9 +84,14 @@ pub fn orient_with_brain(
 
             // Demote chronically failing goals — prompt-driven judgment via
             // the OodaOrientBrain (PR #1469's third-of-three OODA brain).
-            // Per-call fallback to the deterministic floor on any brain
-            // error or invalid judgment so the cycle never stalls and the
-            // brain can never escalate a failing goal above its base.
+            //
+            // Issue #1890: the previous `_ => (compute, true)` arm collapsed
+            // both LLM `Err(_)` and `Ok(j) if validate.is_err()` into the
+            // same silent deterministic-floor record. The Err case must
+            // now fire all four parse-failure visibility channels; the
+            // validate-failure case (semantic-judgment-out-of-bounds) is
+            // out of #1890 scope and keeps the legacy silent fallback —
+            // tracked separately so this PR stays focused.
             if let Some(&count) = failure_counts.get(&g.id)
                 && count > 0
             {
@@ -95,11 +101,42 @@ pub fn orient_with_brain(
                     base_reason: reason.clone(),
                     failure_count: count,
                 };
-                let (judgment, fallback_used) = match brain.judge_orientation(&ctx) {
-                    Ok(j) if j.validate(ctx.base_urgency).is_ok() => (j, false),
-                    _ => (DeterministicFallbackOrientBrain::compute(&ctx), true),
+                let (judgment, fallback_used, parse_failure) = match brain.judge_orientation(&ctx) {
+                    Ok(j) if j.validate(ctx.base_urgency).is_ok() => {
+                        // Healthy parse — reset the (Orient, goal_id)
+                        // counter so a recovery cancels any pending
+                        // gh-issue escalation.
+                        reset_consecutive_count(BrainPhase::Orient, &g.id);
+                        (j, false, None)
+                    }
+                    Ok(_) => {
+                        // Brain produced JSON that parsed but failed
+                        // semantic validation (e.g. adjusted_urgency
+                        // out of range). Out of #1890 scope: keep the
+                        // legacy silent deterministic fallback.
+                        (DeterministicFallbackOrientBrain::compute(&ctx), true, None)
+                    }
+                    Err(e) => {
+                        // Issue #1890: parse failure — fire all four
+                        // visibility channels and embed the record
+                        // on the BrainJudgmentRecord.
+                        let raw_response = extract_raw_response(&e);
+                        let pf = record_parse_failure(
+                            BrainPhase::Orient,
+                            &g.id,
+                            &e,
+                            &raw_response,
+                            ORIENT_PROMPT_NAME,
+                            crate::ooda_brain::prompt_store::current_version(ORIENT_PROMPT_NAME),
+                        );
+                        (
+                            DeterministicFallbackOrientBrain::compute(&ctx),
+                            true,
+                            Some(pf),
+                        )
+                    }
                 };
-                push_brain_judgment(BrainJudgmentRecord::from_orient(
+                let mut rec = BrainJudgmentRecord::from_orient(
                     &g.id,
                     ctx.base_urgency,
                     count,
@@ -108,11 +145,11 @@ pub fn orient_with_brain(
                     if fallback_used {
                         String::new()
                     } else {
-                        crate::ooda_brain::prompt_store::current_version(
-                            crate::ooda_brain::ORIENT_PROMPT_NAME,
-                        )
+                        crate::ooda_brain::prompt_store::current_version(ORIENT_PROMPT_NAME)
                     },
-                ));
+                );
+                rec.parse_failure = parse_failure;
+                push_brain_judgment(rec);
                 reason = format!("{reason}; {}", judgment.rationale);
                 urgency = judgment.adjusted_urgency;
             }
@@ -206,6 +243,35 @@ pub(crate) fn filter_hallucinated_priorities(
             false
         }
     });
+}
+
+/// Recover the raw model response from a brain error message.
+///
+/// Brain parsers embed the model body in the error reason as
+/// `raw_response={:?}` (Debug-format). We extract everything after the
+/// first `raw_response=` marker, then strip the surrounding double-quotes
+/// best-effort. If the marker is absent (non-parse error variants), we
+/// return the full error string so the operator still gets context.
+///
+/// Kept local to `orient.rs` (vs. promoted to a shared helper) because the
+/// only other caller — `decide.rs::extract_raw_response` — is a one-line
+/// twin that the linter would force into an over-abstraction if we tried
+/// to share it. If a third caller appears, refactor then.
+fn extract_raw_response(err: &crate::error::SimardError) -> String {
+    let msg = err.to_string();
+    if let Some(start) = msg.find("raw_response=") {
+        let tail = &msg[start + "raw_response=".len()..];
+        let tail = tail.trim_start();
+        if let Some(rest) = tail.strip_prefix('"') {
+            let body = rest
+                .strip_suffix("\")")
+                .or_else(|| rest.strip_suffix('"'))
+                .unwrap_or(rest);
+            return body.to_string();
+        }
+        return tail.to_string();
+    }
+    msg
 }
 
 #[cfg(test)]
