@@ -256,7 +256,11 @@ fn handle_cleanup(flags: &[String]) -> Result<(), Box<dyn Error>> {
 /// description that merely *contains* the substring `Goal x` (or has the
 /// wrong case like `goal x`) survives the sweep. See
 /// `tests_goal_remove::goal_cleanup_placeholders_preserves_description_when_id_substring_matches`.
+///
+/// Allocation-free: prior implementation `format!("Goal {id}")` allocated
+/// a fresh `String` per goal on every `cleanup --placeholders` sweep.
+/// `strip_prefix` + slice equality is the same semantics with zero
+/// allocations.
 fn is_id_placeholder(id: &str, desc: &str) -> bool {
-    let expected = format!("Goal {id}");
-    desc == expected
+    desc.strip_prefix("Goal ") == Some(id)
 }

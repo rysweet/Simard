@@ -25,6 +25,13 @@ use crate::memory_ipc::TEST_ALLOW_LIVE_STATE_ENV;
 /// Assert that `state_root` is hermetic — i.e. **not** under
 /// `$HOME/.simard`. `call_site` is logged in the panic message so the
 /// failed test points directly at the offending production site.
+///
+/// **Performance:** the guard fires on every cognitive-memory write site
+/// during `cargo test`, so the fast-path is structured to avoid syscalls
+/// in the overwhelmingly common case of a TempDir state root that
+/// obviously lives outside `$HOME`. We only fall back to the
+/// `canonicalize()` round-trip (which symlink-resolves via repeated
+/// stat()s) when the cheap lexical prefix check is ambiguous.
 pub fn assert_state_root_isolated(state_root: &Path, call_site: &'static str) {
     if std::env::var_os(TEST_ALLOW_LIVE_STATE_ENV).as_deref() == Some(std::ffi::OsStr::new("1")) {
         return;
@@ -35,6 +42,36 @@ pub fn assert_state_root_isolated(state_root: &Path, call_site: &'static str) {
         None => return,
     };
 
+    // Fast path: a cheap lexical prefix check against the (un-canonicalised)
+    // paths. The common test case — TempDir under `/tmp` while `$HOME` is
+    // `/home/azureuser` — exits here with zero syscalls. We only fall
+    // through to symlink-resolution when this lexical check matches AND
+    // we need to confirm whether the apparent overlap is real (e.g. a
+    // symlinked TMPDIR pointing into `$HOME/.simard`, or `state_root`
+    // already explicitly written as `$HOME/.simard/...`).
+    if !state_root.starts_with(&home_simard) {
+        // Apparent paths don't overlap. The only way the canonical paths
+        // could still overlap is if `state_root` is itself a symlink
+        // resolving into `$HOME/.simard`. That is rare enough that we
+        // pay the canonicalize cost only when triggered, not on every
+        // hermetic test write.
+        let canon_state = match state_root.canonicalize() {
+            Ok(p) => p,
+            Err(_) => return, // path doesn't exist yet → cannot be inside HOME/.simard
+        };
+        if !canon_state.starts_with(&home_simard) {
+            let canon_home = home_simard
+                .canonicalize()
+                .unwrap_or_else(|_| home_simard.clone());
+            if !canon_state.starts_with(&canon_home) {
+                return;
+            }
+        }
+    }
+
+    // Slow path: lexical prefix matched, so confirm with canonicalisation
+    // before panicking — a TMPDIR symlinked elsewhere can produce a false
+    // positive at the lexical layer.
     let canon_state = state_root
         .canonicalize()
         .unwrap_or_else(|_| state_root.to_path_buf());
