@@ -222,16 +222,18 @@ gets the same guarantee:
 
 The three resolver entrypoints downstream are:
 
-- `state_root::resolved_meeting_read_state_root(explicit, base, topology) -> Result<PathBuf, SimardError>`
-- `state_root::resolved_improvement_curation_read_state_root(explicit, base, topology) -> Result<PathBuf, SimardError>`
-- `state_root::resolved_review_read_state_root(explicit, base, topology) -> Result<PathBuf, SimardError>`
+- `state_root::resolved_meeting_read_state_root(explicit, base) -> Result<PathBuf, SimardError>`
+- `state_root::resolved_improvement_curation_read_state_root(explicit, base) -> Result<PathBuf, SimardError>`
+- `state_root::resolved_review_read_state_root(explicit, base) -> Result<PathBuf, SimardError>`
 
 Each forwards `(explicit, "<subcommand>", base)` to the shared guard and
 then runs the post-guard validators (`validate_meeting_read_state_root`,
 `validate_improvement_curation_read_state_root`) where applicable. The
-`base` and `topology` arguments are accepted so each helper can build
-fully-qualified diagnostics if a post-guard validator fails on the
-caller-supplied path.
+`base` argument is preserved so each helper can build fully-qualified
+diagnostics if a post-guard validator fails on the caller-supplied path.
+Topology is not consumed: explicit-only inputs never need to synthesize
+a probe-relative default path, so the resolvers do not need to know
+which runtime topology the read targets.
 
 ## Test coverage
 

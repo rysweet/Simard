@@ -172,7 +172,6 @@ pub(crate) fn resolved_review_read_state_root(
 pub(crate) fn resolved_improvement_curation_read_state_root(
     explicit: Option<PathBuf>,
     base_type: &str,
-    _topology: &str,
 ) -> crate::SimardResult<PathBuf> {
     let state_root =
         require_explicit_state_root_for_read(explicit, "improvement-curation", base_type)?;
@@ -213,7 +212,6 @@ pub(crate) fn resolved_terminal_read_state_root(
 pub(crate) fn resolved_meeting_read_state_root(
     explicit: Option<PathBuf>,
     base_type: &str,
-    _topology: &str,
 ) -> crate::SimardResult<PathBuf> {
     let state_root = require_explicit_state_root_for_read(explicit, "meeting", base_type)?;
     validate_meeting_read_state_root(&state_root)?;

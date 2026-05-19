@@ -7,9 +7,16 @@ __pycache__/
 logs/
 .amplihack/
 worktrees/
+worktrees
 node_modules/
 test-results/
 gym-wave*-tmp/
+
 # Rust coverage artifacts (llvm-cov / cargo-llvm-cov)
+# Emitted into CWD when tests run without `LLVM_PROFILE_FILE` redirection.
 *.profraw
 *.profdata
+
+# Per-process engineer claim files written by the multi-worktree orchestrator;
+# never useful in version control.
+.simard-engineer-claim
