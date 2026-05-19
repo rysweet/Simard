@@ -88,18 +88,16 @@ pub fn simard_state_root() -> std::path::PathBuf {
 /// Returns `Some(reason)` if the board contains obviously corrupt or
 /// placeholder goals that should not be accepted as valid loaded state.
 ///
-/// Heuristics:
-/// - Goal id shorter than 5 chars (catches `g1`, `g12`, `g123`, `g1234`)
-/// - Description matches the placeholder pattern `^goal [a-z0-9]{1,4}$` (case-insensitive)
+/// The signature that actually correlates with fixture-leakage from
+/// `tests_goal.rs` (issues #1923 / #1925) is the placeholder description
+/// pattern `^goal [a-z0-9]{1,4}$` — `Goal alpha`, `Goal g1`, etc. The
+/// previously-shipped "id shorter than 5 chars" heuristic was both too
+/// permissive (real leaked fixtures used 5+ char ids like `alpha`,
+/// `stuck-a`) and too aggressive (legitimate short operator-chosen ids
+/// like `beta` tripped it). Description-based detection is retained as
+/// the single source of truth.
 pub fn board_integrity_suspect(board: &GoalBoard) -> Option<String> {
     for goal in &board.active {
-        if goal.id.len() < 5 {
-            return Some(format!(
-                "goal '{}' has suspiciously short id (len {})",
-                goal.id,
-                goal.id.len()
-            ));
-        }
         if is_placeholder_description(&goal.description) {
             return Some(format!(
                 "goal '{}' has placeholder description '{}'",
@@ -385,6 +383,12 @@ pub(super) fn merge_boards(persisted: GoalBoard, in_flight: GoalBoard) -> GoalBo
 /// resolve field-level last-writer-wins. Callers needing strict
 /// serializability must route through the daemon IPC socket.
 pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> SimardResult<()> {
+    #[cfg(test)]
+    crate::test_support::hermetic_guard::assert_state_root_isolated(
+        &simard_state_root(),
+        "save_goal_board",
+    );
+
     // Step 1: guard the in-flight board. Persisted snapshot is inductively
     // guard-clean (every prior write went through this same check), so the
     // merged board does not need re-guarding — re-guarding would risk
@@ -448,7 +452,8 @@ pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> Si
     Ok(())
 }
 
-/// Stub for the explicit-removal sibling of [`save_goal_board`].
+/// Persist `board` with explicit removal of the goal ids in
+/// `force_remove_ids`.
 ///
 /// See `docs/reference/goal-board-api.md#save_goal_board_with_removals`
 /// for the full contract. Introduced for issues
@@ -458,21 +463,88 @@ pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> Si
 /// defeated by the merge-on-write resurrection failure mode that PR #1926
 /// hit.
 ///
-/// # TDD stub
+/// # Pipeline
 ///
-/// Body is `unimplemented!` in the TDD step; replaced with the real
-/// pipeline (integrity-guard → read → merge → filter by `force_remove_ids`
-/// → truncate → `store_fact`) in the implementation step.
+/// 1. Test-only hermetic-state-root guard.
+/// 2. Validate in-flight `board` via [`board_integrity_suspect`].
+/// 3. Acquire [`SAVE_GOAL_BOARD_MUTEX`] so the read-merge-filter-write
+///    window is serialized with [`save_goal_board`].
+/// 4. Read the persisted snapshot.
+/// 5. Merge persisted ⊕ in-flight (in-flight wins on collision).
+/// 6. Filter goals (active + backlog) whose id is in `force_remove_ids`.
+/// 7. Truncate `active` to [`MAX_ACTIVE_GOALS`] using the same
+///    deterministic order [`merge_boards`] guarantees.
+/// 8. `store_fact("goal-board:snapshot", merged_json, …)`.
+///
+/// # Idempotency
+///
+/// - Empty `force_remove_ids` → exactly equivalent to `save_goal_board`.
+/// - Unknown ids → silent no-ops (no error).
+/// - Duplicate ids in the slice → one removal each (de-duplicated).
 pub fn save_goal_board_with_removals(
-    _board: &GoalBoard,
-    _force_remove_ids: &[String],
-    _bridge: &dyn CognitiveMemoryOps,
+    board: &GoalBoard,
+    force_remove_ids: &[String],
+    bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
-    unimplemented!(
-        "save_goal_board_with_removals is the #1923/#1925 implementation \
-         surface — stubbed for the TDD step; see \
-         docs/reference/goal-board-api.md#save_goal_board_with_removals"
-    )
+    #[cfg(test)]
+    crate::test_support::hermetic_guard::assert_state_root_isolated(
+        &simard_state_root(),
+        "save_goal_board_with_removals",
+    );
+
+    if let Some(reason) = board_integrity_suspect(board) {
+        return Err(SimardError::InvalidGoalRecord {
+            field: "board".to_string(),
+            reason: format!("refusing to persist suspect board: {reason}"),
+        });
+    }
+
+    let _critical = SAVE_GOAL_BOARD_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let persisted = read_latest_snapshot(bridge);
+    let mut merged = match persisted {
+        Some(p) => merge_boards(p, board.clone()),
+        None => board.clone(),
+    };
+
+    if !force_remove_ids.is_empty() {
+        let removals: BTreeSet<&str> = force_remove_ids.iter().map(String::as_str).collect();
+        merged.active.retain(|g| !removals.contains(g.id.as_str()));
+        merged.backlog.retain(|b| !removals.contains(b.id.as_str()));
+    }
+
+    // Re-apply the MAX_ACTIVE_GOALS cap as a defence in depth — removals
+    // shrink, never grow, the active list, but a future caller passing a
+    // pre-merged board larger than the cap should not produce a snapshot
+    // that violates the invariant.
+    if merged.active.len() > MAX_ACTIVE_GOALS {
+        merged.active.truncate(MAX_ACTIVE_GOALS);
+    }
+
+    debug!(
+        merge = "goal-board",
+        in_flight_active = board.active.len(),
+        in_flight_backlog = board.backlog.len(),
+        force_removed = force_remove_ids.len(),
+        merged_active = merged.active.len(),
+        merged_backlog = merged.backlog.len(),
+        "save_goal_board_with_removals: persisting filtered snapshot"
+    );
+
+    let snapshot = serde_json::to_string(&merged).map_err(|e| SimardError::InvalidGoalRecord {
+        field: "board".to_string(),
+        reason: format!("failed to serialize goal board: {e}"),
+    })?;
+    bridge.store_fact(
+        "goal-board:snapshot",
+        &snapshot,
+        1.0,
+        &["goal-board".to_string()],
+        "goal-curator",
+    )?;
+    Ok(())
 }
 
 /// Persist the board state and record an episode for recall.

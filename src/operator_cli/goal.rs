@@ -1,6 +1,10 @@
 //! `simard goal` operator subcommands: `list`, `unblock <id>`,
-//! `unblock-all`. Operator escape hatch for the issue-#1911 OODA goal
-//! lockout (and a general-purpose board-inspection tool).
+//! `unblock-all`, `remove <id>…`, `cleanup --placeholders`. Operator
+//! escape hatch for the issue-#1911 OODA goal lockout (and a
+//! general-purpose board-inspection tool) plus the
+//! [#1923](https://github.com/rysweet/Simard/issues/1923) /
+//! [#1925](https://github.com/rysweet/Simard/issues/1925) fixture-leak
+//! cleanup tooling.
 //!
 //! Subcommand semantics (asymmetric by design — see spec A4):
 //!   - `goal list`         — print active + backlog snapshot to stdout.
@@ -11,6 +15,12 @@
 //!     safeguard marker (`is_brain_failure_marker`). Operator-set,
 //!     scope-blocked, dependency-blocked, and subordinate-blocked
 //!     goals are untouched.
+//!   - `goal remove <id>…` — variadic, idempotent. Persists via
+//!     `save_goal_board_with_removals` so the PR #1926 merge-on-write
+//!     resurrection failure mode is defeated.
+//!   - `goal cleanup --placeholders` — defence-in-depth sweep that
+//!     removes every active or backlog goal whose description is exactly
+//!     `Goal <id>` (the placeholder pattern emitted by test fixtures).
 //!
 //! Persistence is cognitive memory via `launch_writer_bridge` against
 //! `simard_state_root()` (honours `SIMARD_STATE_ROOT`). Audit traces are
@@ -19,7 +29,10 @@
 
 use std::error::Error;
 
-use crate::goal_curation::{GoalProgress, load_goal_board, save_goal_board, simard_state_root};
+use crate::goal_curation::{
+    GoalProgress, load_goal_board, save_goal_board, save_goal_board_with_removals,
+    simard_state_root,
+};
 use crate::memory_ipc::launch_writer_bridge;
 use crate::ooda_actions::advance_goal::spawn::is_brain_failure_marker;
 
@@ -46,6 +59,14 @@ pub(super) fn dispatch_goal_command(
             reject_extra_args(args)?;
             handle_unblock_all()
         }
+        "remove" => {
+            let ids: Vec<String> = args.collect();
+            handle_remove(&ids)
+        }
+        "cleanup" => {
+            let flags: Vec<String> = args.collect();
+            handle_cleanup(&flags)
+        }
         other => Err(format!("unsupported command 'goal {other}'").into()),
     }
 }
@@ -69,6 +90,21 @@ fn save_board(board: &crate::goal_curation::GoalBoard) -> Result<(), Box<dyn Err
         .map_err(|e| format!("failed to open cognitive memory writer bridge: {e}"))?;
     save_goal_board(board, bridge.ops())
         .map_err(|e| format!("failed to persist goal board: {e}"))?;
+    Ok(())
+}
+
+/// Persist the in-flight `board` with explicit removal of `ids`. Used by
+/// `goal remove` and `goal cleanup --placeholders` so both routes share
+/// the post-merge filter that defeats PR #1926's resurrection failure.
+fn save_board_with_removals(
+    board: &crate::goal_curation::GoalBoard,
+    ids: &[String],
+) -> Result<(), Box<dyn Error>> {
+    let state_root = simard_state_root();
+    let bridge = launch_writer_bridge(&state_root)
+        .map_err(|e| format!("failed to open cognitive memory writer bridge: {e}"))?;
+    save_goal_board_with_removals(board, ids, bridge.ops())
+        .map_err(|e| format!("failed to persist goal board with removals: {e}"))?;
     Ok(())
 }
 
@@ -144,4 +180,83 @@ fn handle_unblock_all() -> Result<(), Box<dyn Error>> {
         eprintln!("[simard] goal unblock-all: '{id}' restored to NotStarted");
     }
     Ok(())
+}
+
+/// `simard goal remove <id>…` — variadic, idempotent. Routes through
+/// `save_goal_board_with_removals` so the post-merge filter defeats the
+/// PR #1926 resurrection failure mode.
+fn handle_remove(ids: &[String]) -> Result<(), Box<dyn Error>> {
+    if ids.is_empty() {
+        return Err("usage: simard goal remove <id> [<id>...]; at least one id is required".into());
+    }
+    let board = load_board()?;
+    save_board_with_removals(&board, ids)?;
+    eprintln!(
+        "[simard] goal remove: requested removal of {} id(s): {}",
+        ids.len(),
+        ids.join(", "),
+    );
+    Ok(())
+}
+
+/// `simard goal cleanup --placeholders` — sweeps every active / backlog
+/// goal whose description is exactly `"Goal <id>"` (the strict
+/// placeholder pattern emitted by `tests_goal.rs::active_goal`). Other
+/// criteria flags can be added later; the parser rejects any unknown
+/// flag and requires at least one explicit criteria flag.
+fn handle_cleanup(flags: &[String]) -> Result<(), Box<dyn Error>> {
+    let mut placeholders = false;
+    for flag in flags {
+        match flag.as_str() {
+            "--placeholders" => placeholders = true,
+            other => {
+                return Err(format!(
+                    "unsupported flag '{other}' for 'goal cleanup'; valid flags: --placeholders"
+                )
+                .into());
+            }
+        }
+    }
+    if !placeholders {
+        return Err(
+            "usage: simard goal cleanup --placeholders; at least one criteria flag is required"
+                .into(),
+        );
+    }
+
+    let board = load_board()?;
+    let mut removals: Vec<String> = Vec::new();
+    for g in &board.active {
+        if is_id_placeholder(&g.id, &g.description) {
+            removals.push(g.id.clone());
+        }
+    }
+    for b in &board.backlog {
+        if is_id_placeholder(&b.id, &b.description) && !removals.contains(&b.id) {
+            removals.push(b.id.clone());
+        }
+    }
+
+    if removals.is_empty() {
+        eprintln!("[simard] goal cleanup --placeholders: no placeholder goals found; no-op");
+        return Ok(());
+    }
+
+    save_board_with_removals(&board, &removals)?;
+    eprintln!(
+        "[simard] goal cleanup --placeholders: removed {} placeholder goal(s): {}",
+        removals.len(),
+        removals.join(", "),
+    );
+    Ok(())
+}
+
+/// Strict per-id placeholder predicate: returns `true` iff `desc` is
+/// exactly `"Goal <id>"`. Anchored on both ends so a production
+/// description that merely *contains* the substring `Goal x` (or has the
+/// wrong case like `goal x`) survives the sweep. See
+/// `tests_goal_remove::goal_cleanup_placeholders_preserves_description_when_id_substring_matches`.
+fn is_id_placeholder(id: &str, desc: &str) -> bool {
+    let expected = format!("Goal {id}");
+    desc == expected
 }

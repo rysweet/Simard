@@ -72,19 +72,16 @@ pub fn default_socket_path() -> PathBuf {
 /// `docs/reference/cognitive-memory-bridge-helpers.md` for the bridge-
 /// helper integration.
 ///
-/// # TDD stub
-///
-/// This function is the #1923/#1925 implementation surface. The body is
-/// `unimplemented!` in the TDD step and is replaced with the real
-/// resolution ladder in the implementation step. Production call sites
-/// must not invoke it until the body lands; tests invoke it through
-/// [`HermeticState`](crate::test_support::HermeticState), whose
-/// stub similarly defers until the implementation step.
-pub fn socket_path_for(_state_root: &Path) -> PathBuf {
-    unimplemented!(
-        "socket_path_for is the #1923/#1925 implementation surface — \
-         stubbed for the TDD step; see docs/testing/hermetic-tests.md"
-    )
+/// Implementation: env-var override (when non-empty) → `state_root.join("memory.sock")`.
+pub fn socket_path_for(state_root: &Path) -> PathBuf {
+    if let Some(raw) = std::env::var_os(MEMORY_SOCKET_ENV) {
+        let s = raw.to_string_lossy();
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    state_root.join("memory.sock")
 }
 
 /// Environment variable that overrides the IPC socket path independent of

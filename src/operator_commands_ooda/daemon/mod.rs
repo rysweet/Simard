@@ -89,8 +89,13 @@ pub fn run_ooda_daemon(
     memory_ipc::register_in_process_writer(state_root.clone(), Arc::clone(&shared_mem));
 
     // Spawn the memory IPC server so meetings and other clients can share
-    // this live DB handle without their own locks conflicting.
-    let socket_path = memory_ipc::default_socket_path();
+    // this live DB handle without their own locks conflicting. The socket
+    // lives next to the DB it fronts (`socket_path_for(state_root)`), so
+    // a TempDir-rooted client can never accidentally connect to this
+    // daemon (closes
+    // [#1923](https://github.com/rysweet/Simard/issues/1923) /
+    // [#1925](https://github.com/rysweet/Simard/issues/1925)).
+    let socket_path = memory_ipc::socket_path_for(&state_root);
     let _memory_ipc_server = match memory_ipc::spawn_server(socket_path.clone(), shared_mem.clone())
     {
         Ok(h) => {

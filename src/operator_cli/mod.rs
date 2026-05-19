@@ -51,6 +51,16 @@ Product modes:
                              deterministic brain-failure safeguard
                              marker; operator-, scope-, dependency-, and
                              subordinate-blocked goals are untouched
+  goal remove <id>...      — drop one or more goal ids from the active
+                             + backlog board. Variadic, idempotent
+                             (unknown ids = no-op). Defeats the PR #1926
+                             merge-on-write resurrection failure mode
+                             (issues #1923 / #1925).
+  goal cleanup --placeholders
+                          — sweep every goal whose description is
+                            exactly 'Goal <id>' (the test-fixture
+                            placeholder pattern). Defence-in-depth
+                            cleanup for issues #1923 / #1925.
   goal-curation run <base-type> <topology> <objective> [state-root]
   goal-curation read <base-type> <topology> [state-root]
                          — read goals from $SIMARD_STATE_ROOT (or

@@ -136,7 +136,10 @@ fn writer_bridge_is_compatible_with_save_and_load_goal_board() {
     // The whole point of these helpers is to let dashboard / meeting /
     // engineer call sites flow through `save_goal_board(&board, writer.ops())`
     // and `load_goal_board(reader.ops())` without any ceremony.
-    let root = fresh_state_root("writer-goal-board");
+    // HermeticState pins SIMARD_STATE_ROOT to a TempDir so the
+    // #[cfg(test)] hermetic guard in save_goal_board does not trip.
+    let hermetic = crate::test_support::HermeticState::new();
+    let root = hermetic.state_root().to_path_buf();
     let writer = launch_writer_bridge(&root).expect("writer bridge");
 
     let mut board = GoalBoard::new();
@@ -162,7 +165,10 @@ fn writer_bridge_is_compatible_with_save_and_load_goal_board() {
 fn writer_bridge_does_not_create_legacy_goal_records_json_on_save() {
     // Acceptance criterion #6: every save must flow through cognitive memory.
     // No writer call site is allowed to create the legacy JSON file.
-    let root = fresh_state_root("writer-no-disk-file");
+    // HermeticState pins SIMARD_STATE_ROOT to a TempDir so the
+    // #[cfg(test)] hermetic guard in save_goal_board does not trip.
+    let hermetic = crate::test_support::HermeticState::new();
+    let root = hermetic.state_root().to_path_buf();
     let writer = launch_writer_bridge(&root).expect("writer bridge");
 
     let mut board = GoalBoard::new();
