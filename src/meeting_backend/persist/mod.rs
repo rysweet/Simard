@@ -43,15 +43,33 @@ pub fn sanitize_filename(input: &str) -> String {
     }
 }
 
-/// Directory for meeting transcripts: `$SIMARD_MEETINGS_DIR` if set, else
-/// `~/.simard/meetings/`.
+/// Directory for meeting transcripts.
 ///
-/// The env var override mirrors the `SIMARD_HANDOFF_DIR` idiom in
-/// [`meeting_facilitator::default_handoff_dir`] so tests (and operators) can
-/// redirect meeting artifacts to a tempdir without touching `$HOME`.
+/// Resolution order (mirrors `goal-curation read` per audit issue #1906 and
+/// `Specs/ProductArchitecture.md` §"Memory Architecture → Session Summary":
+/// handoff records must live under the operator-chosen state-root):
+///   1. `SIMARD_MEETINGS_DIR` — narrow override used by existing tests and
+///      operators who want to redirect only the meeting artifact path
+///      without affecting the cognitive-memory DB root.
+///   2. `SIMARD_STATE_ROOT` — canonical operator-chosen state-root. When set,
+///      meeting transcripts and autosaves land under
+///      `$SIMARD_STATE_ROOT/meetings/`. This matches `memory_ipc::default_state_root()`
+///      / `goal_curation::operations::resolve_state_root` precedent so an
+///      operator who exports `SIMARD_STATE_ROOT=/tmp/foo` gets ALL durable
+///      simard state under `/tmp/foo`, including meeting persistence.
+///   3. `$HOME/.simard/meetings/` — historical default; preserves
+///      backward-compatible layout when neither env var is set.
+///
+/// Previously this only honored `SIMARD_MEETINGS_DIR`, so operators who set
+/// `SIMARD_STATE_ROOT` (e.g. for hermetic probe runs) silently had their
+/// meeting autosave and transcript files dumped into `~/.simard/meetings/`
+/// regardless. See audit issue #1906 for the full reproduction.
 pub(super) fn meetings_dir() -> PathBuf {
     if let Some(override_path) = std::env::var_os("SIMARD_MEETINGS_DIR") {
         return PathBuf::from(override_path);
+    }
+    if let Some(state_root) = std::env::var_os("SIMARD_STATE_ROOT") {
+        return PathBuf::from(state_root).join("meetings");
     }
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))

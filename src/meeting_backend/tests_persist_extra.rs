@@ -573,3 +573,124 @@ fn json_handoff_action_item_none_fields_serialize_as_explicit_null() {
         serde_json::Value::String("Triage backlog".to_string())
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// #1906: meeting REPL must honor SIMARD_STATE_ROOT
+//
+// `meetings_dir()` is the resolver used by `write_transcript` and
+// `write_auto_save`. The audit (issue #1906) found that operators who set
+// SIMARD_STATE_ROOT saw their autosaves silently written to
+// `~/.simard/meetings/_autosave_<topic>.json` regardless. The resolver now
+// mirrors `goal-curation read`:
+//   1. SIMARD_MEETINGS_DIR (narrow override; wins)
+//   2. SIMARD_STATE_ROOT    -> $SIMARD_STATE_ROOT/meetings
+//   3. $HOME/.simard/meetings (default)
+// ────────────────────────────────────────────────────────────────────────────
+
+/// End-to-end: with only SIMARD_STATE_ROOT set, `write_auto_save` must
+/// land the autosave file under `$SIMARD_STATE_ROOT/meetings/` and must
+/// NOT touch `$HOME/.simard/meetings/`. This is the outside-in assertion
+/// the #1906 audit reproduction specifies.
+#[test]
+#[serial]
+fn write_auto_save_lands_under_simard_state_root() {
+    use std::path::PathBuf;
+
+    // Belt-and-braces: clear both narrow overrides before setting STATE_ROOT.
+    // SAFETY: serialized via `#[serial]` (default lock group) across this
+    // test binary; matches the existing tests in this file that mutate
+    // SIMARD_MEETINGS_DIR.
+    unsafe {
+        std::env::remove_var("SIMARD_MEETINGS_DIR");
+        std::env::remove_var("SIMARD_STATE_ROOT");
+    }
+
+    let state_root = tempfile::tempdir().expect("create state-root tempdir");
+    unsafe {
+        std::env::set_var("SIMARD_STATE_ROOT", state_root.path().as_os_str());
+    }
+
+    let transcript = MeetingTranscript {
+        topic: "audit_state_root_probe".to_string(),
+        started_at: "2026-05-19T00:00:00Z".to_string(),
+        closed_at: String::new(),
+        duration_secs: 0,
+        summary: "[in-progress — meeting still open]".to_string(),
+        messages: vec![
+            make_msg(Role::User, "hello"),
+            make_msg(Role::User, "/close"),
+        ],
+    };
+
+    let written = write_auto_save(&transcript).expect("autosave should succeed");
+
+    let expected_parent = state_root.path().join("meetings");
+    assert_eq!(
+        written.parent(),
+        Some(expected_parent.as_path()),
+        "autosave parent must be $SIMARD_STATE_ROOT/meetings (got {})",
+        written.display(),
+    );
+    assert_eq!(
+        written.file_name().and_then(|s| s.to_str()),
+        Some("_autosave_audit_state_root_probe.json"),
+        "autosave filename contract preserved (got {})",
+        written.display(),
+    );
+    assert!(written.is_file(), "autosave file must exist on disk");
+
+    // Critical #1906 assertion (on the returned write path, not on stale disk
+    // state): the resolver must route writes to $SIMARD_STATE_ROOT/meetings,
+    // not silently fall through to $HOME/.simard/meetings. Developer machines
+    // already have stale artifacts under $HOME/.simard/meetings/ from prior
+    // operator probes (which is exactly how #1906 was discovered), so we can
+    // only test fix-correctness via the returned path.
+    let home_meetings =
+        PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".simard/meetings");
+    assert!(
+        !written.starts_with(&home_meetings),
+        "audit #1906: write_auto_save must NOT write under $HOME/.simard/meetings \
+         when SIMARD_STATE_ROOT is set. Got: {}",
+        written.display(),
+    );
+
+    unsafe {
+        std::env::remove_var("SIMARD_STATE_ROOT");
+    }
+}
+
+/// SIMARD_MEETINGS_DIR is the narrow override and must win over
+/// SIMARD_STATE_ROOT when both are set. Preserves the existing operator/test
+/// contract that lets callers redirect only the meeting artifact dir.
+#[test]
+#[serial]
+fn meetings_dir_narrow_override_wins_over_state_root() {
+    let narrow = tempfile::tempdir().expect("narrow tempdir");
+    let state = tempfile::tempdir().expect("state tempdir");
+    unsafe {
+        std::env::set_var("SIMARD_MEETINGS_DIR", narrow.path().as_os_str());
+        std::env::set_var("SIMARD_STATE_ROOT", state.path().as_os_str());
+    }
+
+    let transcript = MeetingTranscript {
+        topic: "narrow_wins".to_string(),
+        started_at: "2026-05-19T00:00:00Z".to_string(),
+        closed_at: String::new(),
+        duration_secs: 0,
+        summary: String::new(),
+        messages: vec![make_msg(Role::User, "hi")],
+    };
+
+    let written = write_auto_save(&transcript).expect("autosave should succeed");
+
+    assert_eq!(
+        written.parent(),
+        Some(narrow.path()),
+        "SIMARD_MEETINGS_DIR must win over SIMARD_STATE_ROOT (preserves narrow-override contract)"
+    );
+
+    unsafe {
+        std::env::remove_var("SIMARD_MEETINGS_DIR");
+        std::env::remove_var("SIMARD_STATE_ROOT");
+    }
+}
