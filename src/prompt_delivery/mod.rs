@@ -38,9 +38,84 @@
 //! * [`ENV_OVERRIDE`] — `"AMPLIHACK_PROMPT_DELIVERY"`.
 
 use std::fmt;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command};
 use std::str::FromStr;
+use std::sync::OnceLock;
+
+use tempfile::NamedTempFile;
+use tokio::io::AsyncWriteExt as _;
+
+/// Internal: log a one-time warning when an invalid env override value is
+/// encountered. Subsequent invalid values are silently coerced to the
+/// heuristic fallback.
+fn warn_invalid_env_value_once(value: &str) {
+    static WARNED: OnceLock<()> = OnceLock::new();
+    if WARNED.set(()).is_ok() {
+        tracing::warn!(
+            target: "amplihack::prompt_delivery",
+            env_var = ENV_OVERRIDE,
+            value = value,
+            "invalid AMPLIHACK_PROMPT_DELIVERY value; falling back to auto heuristic. \
+             Accepted values: auto, inline|cli|argv|arg, stdin|pipe, tempfile|temp-file|file"
+        );
+    }
+}
+
+/// Internal helper: convert prompt bytes into an `&OsStr` for argv use.
+/// Unix-only because Rust's `OsStr::from_bytes` is gated to Unix; the
+/// integration tests are likewise `#[cfg(unix)]`.
+#[cfg(unix)]
+fn prompt_as_osstr(prompt: &[u8]) -> &std::ffi::OsStr {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::OsStr::from_bytes(prompt)
+}
+
+#[cfg(not(unix))]
+fn prompt_as_osstr(prompt: &[u8]) -> std::ffi::OsString {
+    // On non-Unix targets fall back to UTF-8 (best-effort). amplihack
+    // primarily runs on Unix; Inline mode on Windows assumes valid UTF-8.
+    std::ffi::OsString::from(String::from_utf8_lossy(prompt).into_owned())
+}
+
+/// Internal helper: scan an iterator of OS-strings for an exact `--`
+/// terminator. Used to avoid duplicating a caller-supplied flag terminator.
+fn args_contain_flag_terminator<'a, I>(args: I) -> bool
+where
+    I: IntoIterator<Item = &'a std::ffi::OsStr>,
+{
+    args.into_iter().any(|a| a == "--")
+}
+
+/// Internal: write a `0o600` permissions bit on a freshly-created
+/// `NamedTempFile`. No-op on non-Unix.
+#[cfg(unix)]
+fn set_owner_only_permissions(file: &NamedTempFile) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let perms = std::fs::Permissions::from_mode(0o600);
+    std::fs::set_permissions(file.path(), perms)
+}
+
+#[cfg(not(unix))]
+fn set_owner_only_permissions(_file: &NamedTempFile) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Internal: create + populate + lock-down a postmortem temp file holding
+/// `prompt`. Wraps the three failure modes in distinct error variants so
+/// operators can diagnose temp-file vs. write vs. permission failures.
+fn build_postmortem_tempfile(prompt: &[u8]) -> Result<NamedTempFile, PromptDeliveryError> {
+    let mut file = tempfile::Builder::new()
+        .prefix("amplihack-prompt-")
+        .suffix(".txt")
+        .tempfile()
+        .map_err(PromptDeliveryError::TempFile)?;
+    file.write_all(prompt).map_err(PromptDeliveryError::Write)?;
+    file.flush().map_err(PromptDeliveryError::Write)?;
+    set_owner_only_permissions(&file).map_err(PromptDeliveryError::Permissions)?;
+    Ok(file)
+}
 
 // ---------------------------------------------------------------------------
 // Constants (test-asserted)
@@ -160,8 +235,19 @@ impl std::error::Error for ParsePromptDeliveryError {}
 impl FromStr for PromptDelivery {
     type Err = ParsePromptDeliveryError;
 
-    fn from_str(_s: &str) -> Result<Self, Self::Err> {
-        unimplemented!("PromptDelivery::from_str stub — see docs/prompt-delivery.md")
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return Err(ParsePromptDeliveryError(trimmed.to_string()));
+        }
+        let folded = trimmed.to_ascii_lowercase();
+        match folded.as_str() {
+            "auto" => Ok(PromptDelivery::Auto),
+            "inline" | "cli" | "argv" | "arg" => Ok(PromptDelivery::Inline),
+            "stdin" | "pipe" => Ok(PromptDelivery::Stdin),
+            "tempfile" | "temp-file" | "temp_file" | "file" => Ok(PromptDelivery::TempFile),
+            _ => Err(ParsePromptDeliveryError(trimmed.to_string())),
+        }
     }
 }
 
@@ -184,10 +270,58 @@ impl FromStr for PromptDelivery {
 /// 6. `len < STDIN_PREFERRED_MAX_BYTES` → `Stdin`.
 /// 7. Otherwise → `TempFile`.
 pub fn select_mode(
-    _prompt: &[u8],
-    _caller: PromptDelivery,
+    prompt: &[u8],
+    caller: PromptDelivery,
 ) -> Result<PromptDelivery, PromptDeliveryError> {
-    unimplemented!("select_mode stub — see docs/prompt-delivery.md")
+    // Step 1 — hard cap fires before any override is considered.
+    if prompt.len() > HARD_CAP_BYTES {
+        return Err(PromptDeliveryError::TooLarge(prompt.len()));
+    }
+
+    // Step 2 — caller-supplied non-Auto mode wins.
+    match caller {
+        PromptDelivery::Inline => {
+            if prompt.contains(&0u8) {
+                return Err(PromptDeliveryError::NulInInlineMode);
+            }
+            return Ok(PromptDelivery::Inline);
+        }
+        PromptDelivery::Stdin => return Ok(PromptDelivery::Stdin),
+        PromptDelivery::TempFile => return Ok(PromptDelivery::TempFile),
+        PromptDelivery::Auto => {}
+    }
+
+    // Step 3 — env override (only consulted for Auto).
+    if let Ok(raw) = std::env::var(ENV_OVERRIDE) {
+        match PromptDelivery::from_str(&raw) {
+            Ok(PromptDelivery::Auto) => {
+                // explicit "auto" → fall through to heuristic
+            }
+            Ok(PromptDelivery::Inline) => {
+                if prompt.contains(&0u8) {
+                    return Err(PromptDeliveryError::NulInInlineMode);
+                }
+                return Ok(PromptDelivery::Inline);
+            }
+            Ok(mode @ (PromptDelivery::Stdin | PromptDelivery::TempFile)) => return Ok(mode),
+            Err(_) => warn_invalid_env_value_once(&raw),
+        }
+    }
+
+    // Step 4 — NUL fork (Auto only): silently route to stdin.
+    if prompt.contains(&0u8) {
+        return Ok(PromptDelivery::Stdin);
+    }
+
+    // Steps 5–7 — size-based heuristic. Boundaries are exclusive upper
+    // bounds so the threshold values themselves promote to the next mode.
+    if prompt.len() < INLINE_MAX_BYTES {
+        Ok(PromptDelivery::Inline)
+    } else if prompt.len() < STDIN_PREFERRED_MAX_BYTES {
+        Ok(PromptDelivery::Stdin)
+    } else {
+        Ok(PromptDelivery::TempFile)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -199,34 +333,55 @@ pub fn select_mode(
 /// child process or the temp file may be unlinked prematurely.
 #[must_use = "AppliedPromptStd must outlive the child process or the temp file may unlink prematurely"]
 pub struct AppliedPromptStd {
-    // Private fields will be filled in by the implementation commit.
-    _private: (),
+    mode: PromptDelivery,
+    /// Owned prompt bytes for stdin delivery. `None` for `Inline` (the bytes
+    /// already live in argv) or after the buffer has been consumed by
+    /// `feed`.
+    prompt: Option<Vec<u8>>,
+    /// Postmortem temp file. `Some` for `TempFile` mode (until consumed by
+    /// `retain_temp_file`). Drop unlinks the file on disk.
+    temp_file: Option<NamedTempFile>,
 }
 
 impl AppliedPromptStd {
     /// The mode actually selected (after size cap + caller / env override).
     pub fn mode(&self) -> PromptDelivery {
-        unimplemented!("AppliedPromptStd::mode stub")
+        self.mode
     }
 
     /// Path to the temp file, if mode == `TempFile`. `None` otherwise.
     pub fn temp_path(&self) -> Option<&Path> {
-        unimplemented!("AppliedPromptStd::temp_path stub")
+        self.temp_file.as_ref().map(|f| f.path())
     }
 
     /// Write the owned prompt buffer to the child's stdin and consume the
     /// guard. No-op for `Inline` mode (returns `Ok(())`). Closes stdin on
     /// completion so the child reads EOF.
-    pub fn feed(self, _stdin: Option<ChildStdin>) -> std::io::Result<()> {
-        unimplemented!("AppliedPromptStd::feed stub")
+    pub fn feed(mut self, stdin: Option<ChildStdin>) -> std::io::Result<()> {
+        let bytes = match self.prompt.take() {
+            Some(b) => b,
+            // Inline mode (no buffer captured) → nothing to write.
+            None => return Ok(()),
+        };
+        let mut sink = stdin.ok_or_else(|| {
+            std::io::Error::other(
+                "AppliedPromptStd::feed requires the child's stdin pipe \
+                 (set Command::stdin(Stdio::piped()) before spawning)",
+            )
+        })?;
+        sink.write_all(&bytes)?;
+        sink.flush()?;
+        // Dropping `sink` closes the pipe so the child reads EOF.
+        drop(sink);
+        Ok(())
     }
 
     /// Detach the temp file from RAII cleanup. Returns the retained path so
-    /// the caller can attach it to a bug report. **Caller must
-    /// `std::fs::remove_file` the path once the postmortem capture is
-    /// finished** — opt-in retention disables Drop unlink.
-    pub fn retain_temp_file(self) -> Option<PathBuf> {
-        unimplemented!("AppliedPromptStd::retain_temp_file stub")
+    /// the caller can attach it to a bug report.
+    pub fn retain_temp_file(mut self) -> Option<PathBuf> {
+        let file = self.temp_file.take()?;
+        // `keep()` disables the auto-unlink Drop and returns the path.
+        file.keep().ok().map(|(_file, path)| path)
     }
 }
 
@@ -237,24 +392,41 @@ impl AppliedPromptStd {
 /// Async sibling of [`AppliedPromptStd`].
 #[must_use = "AppliedPromptTokio must outlive the child process or the temp file may unlink prematurely"]
 pub struct AppliedPromptTokio {
-    _private: (),
+    mode: PromptDelivery,
+    prompt: Option<Vec<u8>>,
+    temp_file: Option<NamedTempFile>,
 }
 
 impl AppliedPromptTokio {
     pub fn mode(&self) -> PromptDelivery {
-        unimplemented!("AppliedPromptTokio::mode stub")
+        self.mode
     }
 
     pub fn temp_path(&self) -> Option<&Path> {
-        unimplemented!("AppliedPromptTokio::temp_path stub")
+        self.temp_file.as_ref().map(|f| f.path())
     }
 
-    pub async fn feed(self, _stdin: Option<tokio::process::ChildStdin>) -> std::io::Result<()> {
-        unimplemented!("AppliedPromptTokio::feed stub")
+    pub async fn feed(mut self, stdin: Option<tokio::process::ChildStdin>) -> std::io::Result<()> {
+        let bytes = match self.prompt.take() {
+            Some(b) => b,
+            None => return Ok(()),
+        };
+        let mut sink = stdin.ok_or_else(|| {
+            std::io::Error::other(
+                "AppliedPromptTokio::feed requires the child's stdin pipe \
+                 (set Command::stdin(Stdio::piped()) before spawning)",
+            )
+        })?;
+        sink.write_all(&bytes).await?;
+        sink.flush().await?;
+        sink.shutdown().await?;
+        drop(sink);
+        Ok(())
     }
 
-    pub fn retain_temp_file(self) -> Option<PathBuf> {
-        unimplemented!("AppliedPromptTokio::retain_temp_file stub")
+    pub fn retain_temp_file(mut self) -> Option<PathBuf> {
+        let file = self.temp_file.take()?;
+        file.keep().ok().map(|(_file, path)| path)
     }
 }
 
@@ -271,20 +443,103 @@ impl AppliedPromptTokio {
 ///   the prompt bytes for postmortem inspection; bytes also written to stdin
 ///   by `feed`.
 pub fn apply_std(
-    _cmd: &mut Command,
-    _prompt: &[u8],
-    _mode: PromptDelivery,
+    cmd: &mut Command,
+    prompt: &[u8],
+    mode: PromptDelivery,
 ) -> Result<AppliedPromptStd, PromptDeliveryError> {
-    unimplemented!("apply_std stub — see docs/prompt-delivery.md")
+    let resolved = select_mode(prompt, mode)?;
+    match resolved {
+        PromptDelivery::Inline => {
+            // Inject `--` flag terminator (unless caller already supplied one)
+            // and append the prompt as the final positional argument.
+            if !args_contain_flag_terminator(cmd.get_args()) {
+                cmd.arg("--");
+            }
+            #[cfg(unix)]
+            {
+                cmd.arg(prompt_as_osstr(prompt));
+            }
+            #[cfg(not(unix))]
+            {
+                cmd.arg(prompt_as_osstr(prompt));
+            }
+            Ok(AppliedPromptStd {
+                mode: PromptDelivery::Inline,
+                prompt: None,
+                temp_file: None,
+            })
+        }
+        PromptDelivery::Stdin => {
+            cmd.stdin(std::process::Stdio::piped());
+            Ok(AppliedPromptStd {
+                mode: PromptDelivery::Stdin,
+                prompt: Some(prompt.to_vec()),
+                temp_file: None,
+            })
+        }
+        PromptDelivery::TempFile => {
+            let file = build_postmortem_tempfile(prompt)?;
+            cmd.stdin(std::process::Stdio::piped());
+            Ok(AppliedPromptStd {
+                mode: PromptDelivery::TempFile,
+                prompt: Some(prompt.to_vec()),
+                temp_file: Some(file),
+            })
+        }
+        // `Auto` is fully resolved by `select_mode`; this branch is
+        // unreachable but keeps the match exhaustive against the
+        // `non_exhaustive` enum.
+        PromptDelivery::Auto => unreachable!("select_mode never returns Auto"),
+    }
 }
 
 /// Async sibling of [`apply_std`].
 pub async fn apply_tokio(
-    _cmd: &mut tokio::process::Command,
-    _prompt: &[u8],
-    _mode: PromptDelivery,
+    cmd: &mut tokio::process::Command,
+    prompt: &[u8],
+    mode: PromptDelivery,
 ) -> Result<AppliedPromptTokio, PromptDeliveryError> {
-    unimplemented!("apply_tokio stub — see docs/prompt-delivery.md")
+    let resolved = select_mode(prompt, mode)?;
+    match resolved {
+        PromptDelivery::Inline => {
+            // Note: tokio::process::Command does not expose `get_args()`, so
+            // we always inject `--` here. Callers wanting to skip the
+            // injection should pass a non-Inline mode or strip the
+            // duplicate `--` themselves.
+            cmd.arg("--");
+            #[cfg(unix)]
+            {
+                cmd.arg(prompt_as_osstr(prompt));
+            }
+            #[cfg(not(unix))]
+            {
+                cmd.arg(prompt_as_osstr(prompt));
+            }
+            Ok(AppliedPromptTokio {
+                mode: PromptDelivery::Inline,
+                prompt: None,
+                temp_file: None,
+            })
+        }
+        PromptDelivery::Stdin => {
+            cmd.stdin(std::process::Stdio::piped());
+            Ok(AppliedPromptTokio {
+                mode: PromptDelivery::Stdin,
+                prompt: Some(prompt.to_vec()),
+                temp_file: None,
+            })
+        }
+        PromptDelivery::TempFile => {
+            let file = build_postmortem_tempfile(prompt)?;
+            cmd.stdin(std::process::Stdio::piped());
+            Ok(AppliedPromptTokio {
+                mode: PromptDelivery::TempFile,
+                prompt: Some(prompt.to_vec()),
+                temp_file: Some(file),
+            })
+        }
+        PromptDelivery::Auto => unreachable!("select_mode never returns Auto"),
+    }
 }
 
 // ===========================================================================
