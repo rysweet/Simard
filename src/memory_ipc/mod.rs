@@ -22,6 +22,8 @@ use std::sync::Arc;
 #[cfg(test)]
 mod tests_bridge_isolation;
 #[cfg(test)]
+mod tests_default_state_root_1967;
+#[cfg(test)]
 mod tests_launcher;
 #[cfg(test)]
 mod tests_socket_path;
@@ -104,19 +106,22 @@ pub const TEST_ALLOW_LIVE_STATE_ENV: &str = "SIMARD_TEST_ALLOW_LIVE_STATE";
 /// Default state-root directory used by daemon, meeting, and any other client
 /// that needs to know where the on-disk cognitive-memory DB lives.
 ///
-/// Resolution order:
-///   1. `SIMARD_STATE_ROOT` environment variable (explicit override)
-///   2. `$HOME/.simard/state`
+/// Delegates to [`crate::state_root::simard_state_root`] — the single
+/// canonical resolver shared by the daemon, `simard goal` CLI, and every
+/// other state-root-aware caller. Resolution order is the one documented
+/// on that function:
 ///
-/// Both the OODA daemon and the meeting REPL must agree on this path,
-/// otherwise the meeting's direct-open fallback targets a different DB
-/// than the one the daemon owns.
+///   1. `SIMARD_STATE_ROOT` environment variable (explicit override)
+///   2. `$HOME/.simard`
+///
+/// **Issue #1967 regression pin:** earlier versions of this function
+/// appended a `state` subdirectory (`$HOME/.simard/state`), which caused
+/// the meeting REPL to talk to a *different* LadybugDB than the daemon,
+/// making it impossible to discuss the real goal board in a meeting.
+/// Do not reintroduce a subdirectory join here without updating the
+/// daemon resolver in lockstep.
 pub fn default_state_root() -> PathBuf {
-    if let Ok(v) = std::env::var("SIMARD_STATE_ROOT") {
-        return PathBuf::from(v);
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
-    PathBuf::from(home).join(".simard").join("state")
+    crate::state_root::simard_state_root()
 }
 
 /// Request types mirroring [`CognitiveMemoryOps`] methods.

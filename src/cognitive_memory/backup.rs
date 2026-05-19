@@ -315,6 +315,27 @@ impl NativeCognitiveMemory {
         match first {
             Ok(Ok(db)) => return Ok(db),
             Ok(Err(e)) => {
+                // Issue #1967: lock contention is NOT corruption. If a peer
+                // process (typically `simard-ooda`) holds the LadybugDB lock,
+                // LadybugDB surfaces "Could not set lock on file" — historic
+                // behavior treated this as corruption, renamed the file to
+                // `cognitive_memory.corrupt-<ts>`, and restored from backup,
+                // silently rolling state back hours. Detect that signature
+                // here and return a clear lock-contention error without
+                // touching the on-disk DB.
+                if Self::is_lock_contention_error(&e) {
+                    return Err(SimardError::RuntimeInitFailed {
+                        component: "cognitive-memory".into(),
+                        reason: format!(
+                            "LadybugDB at {} is locked by another process \
+                             (typically the simard-ooda daemon). The meeting / \
+                             goal CLI must share the daemon's writer bridge \
+                             instead of opening the DB directly. Underlying \
+                             error: {e}",
+                            db_path.display()
+                        ),
+                    });
+                }
                 eprintln!("[simard] LadybugDB opened but failed health check: {e}");
             }
             Err(panic_info) => {
@@ -390,6 +411,29 @@ impl NativeCognitiveMemory {
         }
         Self::preemptive_wal_cleanup(db_path);
         try_open(db_path)
+    }
+
+    /// Returns true when the open-error signature matches LadybugDB
+    /// reporting that another process already holds the file lock.
+    ///
+    /// Issue #1967: the meeting REPL — and any other client that opens the
+    /// DB directly while the daemon is running — receives this error from
+    /// LadybugDB. Historically, the recovery ladder above treated *every*
+    /// open failure as corruption, renamed the on-disk file to
+    /// `cognitive_memory.corrupt-<ts>`, and silently restored from a stale
+    /// backup. Detecting the lock signature here lets callers fail fast
+    /// with a clear error and leaves the DB untouched.
+    ///
+    /// Detection is string-based on the `Display` of the inner LadybugDB
+    /// error because the upstream library does not yet expose a typed
+    /// `Locked` variant. The matched substrings come from
+    /// LadybugDB's own error messages and are stable across versions
+    /// observed in production.
+    pub(super) fn is_lock_contention_error(err: &SimardError) -> bool {
+        let msg = err.to_string();
+        msg.contains("Could not set lock on file")
+            || msg.contains("Could not set lock")
+            || msg.contains("Resource temporarily unavailable")
     }
 
     /// Create a verified backup of the DB file. Returns the backup path on
