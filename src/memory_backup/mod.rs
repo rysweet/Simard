@@ -98,7 +98,10 @@ fn sha256_hex(data: &[&[u8]]) -> String {
 fn write_json<T: Serialize>(path: &Path, value: &T) -> SimardResult<Vec<u8>> {
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|e| store_error("serialize", path, e.to_string()))?;
-    fs::write(path, &bytes).map_err(|e| store_error("write", path, e.to_string()))?;
+    // Route through the durable persistence pipeline (temp + fsync + rename +
+    // parent fsync). The checksum below is computed over `bytes`, which is the
+    // exact payload written to disk, so verification stays bit-exact.
+    crate::persistence::persist_bytes("memory-backup", path, &bytes)?;
     Ok(bytes)
 }
 

@@ -123,12 +123,12 @@ pub fn export_memory_snapshot(
                 reason: e.to_string(),
             }
         })?;
-        std::fs::write(path, json).map_err(|e| SimardError::PersistentStoreIo {
-            store: "memory-snapshot".to_string(),
-            action: "write".to_string(),
-            path: path.to_path_buf(),
-            reason: e.to_string(),
-        })?;
+        // Route through the durable persistence pipeline so session-boundary
+        // snapshots in ~/.simard/snapshots/ are crash-safe (temp + fsync +
+        // rename + parent fsync). Previous behaviour used bare fs::write,
+        // which left a window where a power loss could resurrect the
+        // pre-rename inode on ext4/xfs (issue #1918).
+        crate::persistence::persist_bytes("memory-snapshot", path, json.as_bytes())?;
     }
 
     Ok(snapshot)

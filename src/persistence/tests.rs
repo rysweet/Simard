@@ -1,4 +1,4 @@
-use super::{TempFileGuard, persist_json};
+use super::{TempFileGuard, persist_bytes, persist_json};
 use std::fs;
 use std::io::Write;
 #[cfg(unix)]
@@ -287,4 +287,134 @@ fn temp_file_guard_new_creates_file() {
         "temp file should exist after guard creation"
     );
     // guard dropped here, temp cleaned up
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Crash-durability tests (#1918)
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Persisting into a freshly-created deep nested directory exercises the new
+/// parent-directory fsync path on every component up to the leaf. If
+/// `fsync_parent_dir` returned an error for any reason (bad fd, EBADF, ENOTDIR)
+/// this test would fail; today it must succeed end-to-end.
+#[test]
+fn persist_json_durable_under_freshly_created_nested_parent() {
+    let temp_dir = TestDir::new("simard-persist-fsync-nested");
+    let path = temp_dir
+        .path()
+        .join("level-a")
+        .join("level-b")
+        .join("durable.json");
+    persist_json("memory", &path, &vec!["alpha", "beta"]).expect("durable persist");
+    assert!(
+        path.is_file(),
+        "destination should exist after durable persist"
+    );
+    let loaded: Vec<String> =
+        super::load_json_or_default("memory", &path).expect("load nested persist");
+    assert_eq!(loaded, vec!["alpha".to_string(), "beta".to_string()]);
+}
+
+/// Simulate a crash mid-write: write an "old" payload through the durable
+/// pipeline, then create a `TempFileGuard` for the same destination, write
+/// "new" bytes into the temp file, but drop the guard WITHOUT calling
+/// `persist()`. The destination must still hold the old payload, and the
+/// temp file must be cleaned up so a recovering process never sees a torn
+/// or partial state.
+#[test]
+fn dropping_temp_file_guard_preserves_prior_destination() {
+    let temp_dir = TestDir::new("simard-persist-crash-mid-write");
+    let store_path = temp_dir.path().join("ledger.json");
+
+    persist_json("memory", &store_path, &"old-payload").expect("baseline persist of old payload");
+
+    let temp_path = {
+        let mut guard = TempFileGuard::new("memory", &store_path).expect("open temp guard");
+        guard
+            .file_mut()
+            .expect("temp file open")
+            .write_all(br#""new-payload-that-never-commits""#)
+            .expect("write partial new payload");
+        let temp_path = guard.path().to_path_buf();
+        assert!(temp_path.is_file(), "temp file present before crash");
+        temp_path
+        // guard dropped here without `.persist()` — simulates a crash between
+        // open() and the rename(). The destination MUST still hold the old
+        // payload; the loader MUST NEVER observe a torn or empty state.
+    };
+
+    assert!(
+        !temp_path.exists(),
+        "uncommitted temp file should be removed on drop"
+    );
+    let loaded: String =
+        super::load_json_or_default("memory", &store_path).expect("load after simulated crash");
+    assert_eq!(
+        loaded, "old-payload",
+        "destination must still hold the pre-rename payload after a simulated crash"
+    );
+}
+
+/// Drive `persist_json` in a tight overwrite loop and assert the loader can
+/// always decode a complete value at the destination — never an empty file,
+/// never a half-written one. This is the "loader never observes a torn
+/// state" property from the issue acceptance criteria, exercised on the
+/// real persistence pipeline.
+#[test]
+fn persist_json_overwrite_never_observes_torn_state() {
+    let temp_dir = TestDir::new("simard-persist-torn");
+    let path = temp_dir.path().join("counter.json");
+    persist_json("memory", &path, &0u64).expect("baseline write");
+    for value in 1u64..=64 {
+        persist_json("memory", &path, &value).expect("overwrite must succeed");
+        let observed: u64 = super::load_json_or_default("memory", &path)
+            .expect("loader must always observe a fully-formed value");
+        assert!(
+            observed <= value,
+            "loader saw a value from the future ({observed} > {value}); pipeline is not atomic"
+        );
+    }
+}
+
+/// `persist_bytes` is the byte-oriented entry point used by callers that
+/// produce their own serialized form (pretty JSON, fixed-format envelopes).
+/// Verify it goes through the same durable pipeline as `persist_json` and
+/// publishes bit-exact payloads.
+#[test]
+fn persist_bytes_writes_bit_exact_payload_atomically() {
+    let temp_dir = TestDir::new("simard-persist-bytes");
+    let path = temp_dir.path().join("blob.bin");
+    let payload: &[u8] = b"\x00\x01\x02hello\xff\xfe";
+    persist_bytes("test", &path, payload).expect("persist_bytes must succeed");
+    let read_back = fs::read(&path).expect("read bit-exact payload");
+    assert_eq!(
+        read_back, payload,
+        "persist_bytes must publish the exact byte sequence given"
+    );
+}
+
+/// Whenever `persist_bytes` overwrites an existing file, the post-call
+/// state must be exclusively the new payload. No leftover temp file may
+/// remain, and no concurrent reader could observe a mix.
+#[test]
+fn persist_bytes_overwrites_existing_atomically() {
+    let temp_dir = TestDir::new("simard-persist-bytes-overwrite");
+    let path = temp_dir.path().join("blob.bin");
+    persist_bytes("test", &path, b"old-bytes").expect("baseline");
+    persist_bytes("test", &path, b"new-bytes-longer-than-old").expect("overwrite");
+    let read_back = fs::read(&path).expect("read overwritten payload");
+    assert_eq!(read_back, b"new-bytes-longer-than-old");
+    let stray: Vec<_> = fs::read_dir(temp_dir.path())
+        .expect("read parent dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name();
+            let s = name.to_string_lossy();
+            s.starts_with('.') && s.contains(".tmp.")
+        })
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "no temp file may remain after a successful persist_bytes; found {stray:?}"
+    );
 }

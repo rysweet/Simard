@@ -59,7 +59,12 @@ impl TempFileGuard {
             reason: error.to_string(),
         })?;
         self.keep = true;
-        set_owner_only_permissions(store, destination)
+        set_owner_only_permissions(store, destination)?;
+        // POSIX does not guarantee a successful rename is crash-durable unless
+        // the parent directory is itself fsync'd. Without this, a power loss
+        // between rename() and the next directory-touching fsync can resurrect
+        // the pre-rename inode or lose the entry entirely on ext4/xfs.
+        fsync_parent_dir(store, destination)
     }
 }
 
@@ -99,6 +104,21 @@ pub fn persist_json<T>(store: &str, path: &Path, value: &T) -> SimardResult<()>
 where
     T: Serialize,
 {
+    let payload = serde_json::to_vec(value).map_err(|error| SimardError::PersistentStoreIo {
+        store: store.to_string(),
+        action: "serialize".to_string(),
+        path: path.to_path_buf(),
+        reason: error.to_string(),
+    })?;
+    persist_bytes(store, path, &payload)
+}
+
+/// Persist `payload` to `path` durably, using the same temp+fsync+rename+
+/// parent-fsync pipeline as [`persist_json`]. Intended for callers that
+/// produce their own serialized bytes (for example, pretty-printed JSON,
+/// fixed-format records, or pre-checksummed envelopes) and still need
+/// crash-durable atomic replacement.
+pub fn persist_bytes(store: &str, path: &Path, payload: &[u8]) -> SimardResult<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| SimardError::PersistentStoreIo {
             store: store.to_string(),
@@ -108,16 +128,10 @@ where
         })?;
     }
 
-    let payload = serde_json::to_vec(value).map_err(|error| SimardError::PersistentStoreIo {
-        store: store.to_string(),
-        action: "serialize".to_string(),
-        path: path.to_path_buf(),
-        reason: error.to_string(),
-    })?;
     let mut temp_file = TempFileGuard::new(store, path)?;
     temp_file
         .file_mut()?
-        .write_all(&payload)
+        .write_all(payload)
         .map_err(|error| SimardError::PersistentStoreIo {
             store: store.to_string(),
             action: "write-temp".to_string(),
@@ -134,6 +148,45 @@ where
             reason: error.to_string(),
         })?;
     temp_file.persist(store, path)
+}
+
+/// Open the parent of `path` and call `sync_all` so the directory entry
+/// produced by a preceding `rename` becomes crash-durable on POSIX
+/// filesystems (ext4, xfs, btrfs, apfs). On Windows the rename produced by
+/// `MoveFileEx` is already metadata-durable, so this is a no-op.
+#[cfg(unix)]
+fn fsync_parent_dir(store: &str, path: &Path) -> SimardResult<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    // An empty parent (relative path with no directory component) means the
+    // current working directory — open `.` rather than passing an empty path
+    // to the OS.
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    let dir = File::open(parent).map_err(|error| SimardError::PersistentStoreIo {
+        store: store.to_string(),
+        action: "open-parent-dir".to_string(),
+        path: parent.to_path_buf(),
+        reason: error.to_string(),
+    })?;
+    dir.sync_all()
+        .map_err(|error| SimardError::PersistentStoreIo {
+            store: store.to_string(),
+            action: "sync-parent-dir".to_string(),
+            path: parent.to_path_buf(),
+            reason: error.to_string(),
+        })
+}
+
+#[cfg(not(unix))]
+fn fsync_parent_dir(_store: &str, _path: &Path) -> SimardResult<()> {
+    // Windows: `MoveFileEx` already publishes the rename as a metadata-durable
+    // operation through the NTFS log. There is no documented file-descriptor
+    // analogue to fsync(directory_fd), so we treat parent fsync as a no-op
+    // on this platform.
+    Ok(())
 }
 
 fn create_temp_file(store: &str, path: &Path) -> SimardResult<(PathBuf, File)> {
