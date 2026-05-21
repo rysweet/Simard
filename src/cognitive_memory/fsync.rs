@@ -34,10 +34,18 @@ use crate::error::{SimardError, SimardResult};
 /// failure to open the path for fsync is a different operational
 /// signal than a failure of the fsync syscall itself.
 ///
-/// `reason_context` is woven into the error `reason` string when
-/// non-empty (use `""` when no per-call context applies). Typical
-/// usage: `"op=store_fact"` from the per-write barrier, so a fsync
-/// failure can be attributed back to the mutating op that triggered it.
+/// `op_context` carries the calling mutating op name (e.g.
+/// `Some("store_fact")` from the per-write barrier) so a fsync failure
+/// can be attributed back to the op that triggered it. Pass `None`
+/// when no per-call context applies (backup path).
+///
+/// **Hot-path note:** the formatting of `op_context` into the error
+/// `reason` happens **only inside `io_err`**, which is invoked solely
+/// on the IO failure path. The success path — taken on every successful
+/// write via [`super::NativeCognitiveMemory::post_write_barrier`] — does
+/// zero string allocation. Previous versions accepted a pre-formatted
+/// `&str` which forced a `format!("op={op}")` allocation per write
+/// even when no error occurred.
 ///
 /// Works for both regular files and directories — `File::open` on a
 /// directory is the canonical Unix way to obtain a fd suitable for
@@ -46,22 +54,22 @@ pub(super) fn open_and_fsync(
     path: &Path,
     open_action: &str,
     sync_action: &str,
-    reason_context: &str,
+    op_context: Option<&str>,
 ) -> SimardResult<()> {
     let f = std::fs::OpenOptions::new()
         .read(true)
         .open(path)
-        .map_err(|e| io_err(open_action, path, reason_context, e))?;
+        .map_err(|e| io_err(open_action, path, op_context, e))?;
     f.sync_all()
-        .map_err(|e| io_err(sync_action, path, reason_context, e))?;
+        .map_err(|e| io_err(sync_action, path, op_context, e))?;
     Ok(())
 }
 
-fn io_err(action: &str, path: &Path, ctx: &str, e: std::io::Error) -> SimardError {
-    let reason = if ctx.is_empty() {
-        e.to_string()
-    } else {
-        format!("{ctx}: {e}")
+#[cold]
+fn io_err(action: &str, path: &Path, op_context: Option<&str>, e: std::io::Error) -> SimardError {
+    let reason = match op_context {
+        Some(op) => format!("op={op}: {e}"),
+        None => e.to_string(),
     };
     SimardError::PersistentStoreIo {
         store: "cognitive-memory".into(),

@@ -33,7 +33,17 @@ fn sha256_file(path: &Path) -> std::io::Result<String> {
         hasher.update(&buf[..n]);
     }
     let digest = hasher.finalize();
-    Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
+    // SHA-256 is exactly 32 bytes → 64 hex chars. Pre-allocate once and
+    // write each byte in place; the previous `map(format!).collect()`
+    // pattern produced 32 transient `String`s plus the final collected
+    // buffer (33 allocations) for a payload whose total length is known
+    // at compile time.
+    use std::fmt::Write as _;
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        write!(hex, "{b:02x}").expect("writing to String cannot fail");
+    }
+    Ok(hex)
 }
 
 /// Atomically copy `src` to `dst`: write to `<dst>.tmp`, fsync the bytes
@@ -69,7 +79,7 @@ fn atomic_copy_with_fsync(src: &Path, dst: &Path) -> SimardResult<()> {
     // could return Ok with un-fsynced bytes if the kernel surfaced EIO,
     // which is the exact failure mode the per-write barrier exists to
     // prevent.
-    fsync::open_and_fsync(&tmp, "backup-open-tmp-for-fsync", "backup-fsync-tmp", "")?;
+    fsync::open_and_fsync(&tmp, "backup-open-tmp-for-fsync", "backup-fsync-tmp", None)?;
 
     std::fs::rename(&tmp, dst).map_err(|e| SimardError::PersistentStoreIo {
         store: "cognitive-memory".into(),
@@ -87,7 +97,7 @@ fn atomic_copy_with_fsync(src: &Path, dst: &Path) -> SimardResult<()> {
             parent,
             "backup-open-parent-for-fsync",
             "backup-fsync-parent-dir",
-            "",
+            None,
         )?;
     }
 
@@ -175,14 +185,14 @@ impl NativeCognitiveMemory {
             db_path,
             "recovery-replay-fsync-open",
             "recovery-replay-fsync",
-            "",
+            None,
         )?;
         if let Some(parent) = db_path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fsync::open_and_fsync(
                 parent,
                 "recovery-replay-fsync-parent-open",
                 "recovery-replay-fsync-parent",
-                "",
+                None,
             )?;
         }
         Ok(())
