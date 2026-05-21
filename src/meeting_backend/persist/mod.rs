@@ -401,7 +401,10 @@ pub use markdown::{write_handoff_markdown_report, write_markdown_export};
 mod cognitive;
 mod extract;
 mod json_sibling;
+mod memory_records;
 mod templates;
+
+pub use memory_records::{MEMORY_RECORDS_FILENAME, write_meeting_memory_records};
 
 pub use cognitive::{store_cognitive_memory, store_enriched_cognitive_memory};
 // re-exported for cfg(test) consumers in meeting_backend/tests_persist.rs (false-positive of clippy unused_imports on lib pass — see #1405)
