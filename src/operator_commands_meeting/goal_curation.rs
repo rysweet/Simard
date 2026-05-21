@@ -228,6 +228,7 @@ mod tests {
                 assigned_to: None,
                 current_activity: None,
                 wip_refs: vec![],
+                last_progress_update_at: None,
             });
         }
         board

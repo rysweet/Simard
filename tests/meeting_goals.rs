@@ -49,6 +49,7 @@ fn sample_active(id: &str, priority: u32) -> ActiveGoal {
         assigned_to: None,
         current_activity: None,
         wip_refs: Vec::new(),
+        last_progress_update_at: None,
     }
 }
 
@@ -309,6 +310,7 @@ fn meeting_decisions_feed_goal_board() {
                 assigned_to: None,
                 current_activity: None,
                 wip_refs: Vec::new(),
+                last_progress_update_at: None,
             },
         )
         .unwrap();

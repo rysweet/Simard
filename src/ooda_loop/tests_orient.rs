@@ -31,6 +31,7 @@ fn orient_blocked_goals_have_highest_urgency() {
             assigned_to: None,
             current_activity: None,
             wip_refs: vec![],
+            last_progress_update_at: None,
         },
         ActiveGoal {
             id: "not-started".to_string(),
@@ -40,6 +41,7 @@ fn orient_blocked_goals_have_highest_urgency() {
             assigned_to: None,
             current_activity: None,
             wip_refs: vec![],
+            last_progress_update_at: None,
         },
     ];
     let board = make_board_with_goals(goals);
@@ -59,6 +61,7 @@ fn orient_completed_goals_have_zero_urgency() {
         assigned_to: None,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     }];
     let board = make_board_with_goals(goals);
     let obs = make_observation(EnvironmentSnapshot::default());
@@ -80,6 +83,7 @@ fn orient_not_started_higher_urgency_than_in_progress() {
             assigned_to: None,
             current_activity: None,
             wip_refs: vec![],
+            last_progress_update_at: None,
         },
         ActiveGoal {
             id: "wip".to_string(),
@@ -89,6 +93,7 @@ fn orient_not_started_higher_urgency_than_in_progress() {
             assigned_to: None,
             current_activity: None,
             wip_refs: vec![],
+            last_progress_update_at: None,
         },
     ];
     let board = make_board_with_goals(goals);
@@ -110,6 +115,7 @@ fn orient_in_progress_urgency_decreases_with_percent() {
             assigned_to: None,
             current_activity: None,
             wip_refs: vec![],
+            last_progress_update_at: None,
         },
         ActiveGoal {
             id: "late".to_string(),
@@ -119,6 +125,7 @@ fn orient_in_progress_urgency_decreases_with_percent() {
             assigned_to: None,
             current_activity: None,
             wip_refs: vec![],
+            last_progress_update_at: None,
         },
     ];
     let board = make_board_with_goals(goals);
@@ -139,6 +146,7 @@ fn orient_boosts_urgency_when_goal_mentioned_in_issues() {
         assigned_to: None,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     }];
     let board = make_board_with_goals(goals.clone());
     let env_with_issue = EnvironmentSnapshot {
@@ -174,6 +182,7 @@ fn orient_boosts_in_progress_when_dirty_tree() {
         assigned_to: None,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     }];
     let board = make_board_with_goals(goals);
     let env_dirty = EnvironmentSnapshot {
@@ -208,6 +217,7 @@ fn orient_adds_memory_consolidation_when_episodic_exceeds_100() {
         assigned_to: None,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     }];
     let board = make_board_with_goals(goals);
     let obs = Observation {

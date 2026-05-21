@@ -106,6 +106,7 @@ fn sample_board() -> GoalBoard {
             assigned_to: None,
             current_activity: None,
             wip_refs: vec![],
+            last_progress_update_at: None,
         },
     )
     .unwrap();

@@ -9,8 +9,16 @@
 //!   apply any `PROGRESS: NN` marker to the goal board.
 //!
 //! Both branches honour an optional `PROGRESS: NN` marker.
+//!
+//! All progress-mutation paths route through
+//! [`crate::goal_curation::update_goal_progress_with_evidence`] so a
+//! `PROGRESS: NN` line that asks for an *increase* is rejected unless
+//! verifiable git evidence (commit or PR) backs it (issue #1967).
 
-use crate::goal_curation::{GoalBoard, GoalProgress, update_goal_progress};
+use chrono::Utc;
+
+use crate::goal_curation::progress_evidence::EvidenceDecision;
+use crate::goal_curation::{GoalBoard, GoalProgress, update_goal_progress_with_evidence};
 use crate::ooda_loop::{ActionOutcome, OodaState, PlannedAction};
 
 use super::super::make_outcome;
@@ -26,6 +34,8 @@ use super::{
 /// callers / tests) directly. The function never spawns a subprocess.
 pub(crate) fn assess_only_outcome(
     action: &PlannedAction,
+    memory: &dyn crate::cognitive_memory::CognitiveMemoryOps,
+    checker: &dyn crate::goal_curation::progress_evidence::ProgressEvidenceChecker,
     board: &mut GoalBoard,
     goal_id: &str,
     reason: &str,
@@ -54,8 +64,15 @@ pub(crate) fn assess_only_outcome(
         }
     };
 
-    match update_goal_progress(board, goal_id, new_progress) {
-        Ok(()) => {
+    match update_goal_progress_with_evidence(
+        board,
+        goal_id,
+        new_progress,
+        checker,
+        memory,
+        Utc::now(),
+    ) {
+        Ok(EvidenceDecision::Accept { .. }) => {
             eprintln!(
                 "[simard] OODA goal-action no-action for '{}': {} (progress={}%)",
                 goal_id, reason_short, pct,
@@ -63,6 +80,17 @@ pub(crate) fn assess_only_outcome(
             let detail = format!(
                 "no-action: {} (progress={}%, goal '{}')",
                 reason_short, pct, goal_id,
+            );
+            make_outcome(action, true, detail)
+        }
+        Ok(EvidenceDecision::Reject { reason: rej }) => {
+            eprintln!(
+                "[simard] OODA goal-action no-action REJECTED progress for '{}': {} (proposed={}%, reason={})",
+                goal_id, reason_short, pct, rej,
+            );
+            let detail = format!(
+                "no-action: progress claim rejected (no git evidence): {rej} (goal '{}', proposed={}%)",
+                goal_id, pct,
             );
             make_outcome(action, true, detail)
         }
@@ -87,6 +115,8 @@ pub(crate) fn assess_only_outcome(
 /// engineer's reported outcome — never by auto-incrementing.
 pub(crate) fn advance_goal_with_session(
     action: &PlannedAction,
+    memory: &dyn crate::cognitive_memory::CognitiveMemoryOps,
+    checker: &dyn crate::goal_curation::progress_evidence::ProgressEvidenceChecker,
     session: &mut dyn crate::base_types::BaseTypeSession,
     state: &mut OodaState,
     goal: &crate::goal_curation::ActiveGoal,
@@ -209,6 +239,8 @@ pub(crate) fn advance_goal_with_session(
                 GoalAction::NoAction { ref reason } => {
                     let outcome = assess_only_outcome(
                         action,
+                        memory,
+                        checker,
                         &mut state.active_goals,
                         &goal.id,
                         reason,
@@ -229,6 +261,13 @@ pub(crate) fn advance_goal_with_session(
                     // Apply the optional progress marker BEFORE spawning,
                     // so even if the engineer subprocess crashes the
                     // orchestrator's progress assessment is recorded.
+                    //
+                    // Routed through `update_goal_progress_with_evidence`
+                    // (issue #1967): a pre-spawn bump that has no
+                    // commits/PRs yet will be Rejected and the prior
+                    // percent will be kept — by the time the engineer
+                    // actually produces a commit, the next cycle will
+                    // accept the same claim.
                     if let Some(pct) = progress_pct {
                         let new_progress = if pct >= 100 {
                             GoalProgress::Completed
@@ -239,13 +278,27 @@ pub(crate) fn advance_goal_with_session(
                                 percent: pct as u32,
                             }
                         };
-                        if let Err(e) =
-                            update_goal_progress(&mut state.active_goals, &goal.id, new_progress)
-                        {
-                            eprintln!(
-                                "[simard] OODA goal-action progress update FAILED for '{}': {} (progress={}%)",
-                                goal.id, e, pct,
-                            );
+                        match update_goal_progress_with_evidence(
+                            &mut state.active_goals,
+                            &goal.id,
+                            new_progress,
+                            checker,
+                            memory,
+                            Utc::now(),
+                        ) {
+                            Ok(EvidenceDecision::Accept { .. }) => {}
+                            Ok(EvidenceDecision::Reject { reason: rej }) => {
+                                eprintln!(
+                                    "[simard] OODA goal-action pre-spawn progress REJECTED for '{}': {} (proposed={}%)",
+                                    goal.id, rej, pct,
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[simard] OODA goal-action progress update FAILED for '{}': {} (progress={}%)",
+                                    goal.id, e, pct,
+                                );
+                            }
                         }
                     }
 

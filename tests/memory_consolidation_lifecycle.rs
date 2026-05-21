@@ -173,6 +173,10 @@ fn ooda_cycle_runs_with_consolidation_wired_in() {
         brain: std::sync::Arc::new(simard::ooda_brain::DeterministicFallbackBrain),
         decide_brain: None,
         orient_brain: None,
+        repo_root: std::path::PathBuf::from("."),
+        progress_evidence: std::sync::Arc::new(
+            simard::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
+        ),
     };
 
     let mut board = GoalBoard::new();
@@ -184,6 +188,7 @@ fn ooda_cycle_runs_with_consolidation_wired_in() {
         assigned_to: None,
         current_activity: None,
         wip_refs: Vec::new(),
+        last_progress_update_at: None,
     });
 
     let mut state = OodaState::new(board);
@@ -318,6 +323,10 @@ fn multiple_ooda_cycles_accumulate_consolidation() {
         brain: std::sync::Arc::new(simard::ooda_brain::DeterministicFallbackBrain),
         decide_brain: None,
         orient_brain: None,
+        repo_root: std::path::PathBuf::from("."),
+        progress_evidence: std::sync::Arc::new(
+            simard::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
+        ),
     };
 
     let mut board = GoalBoard::new();
@@ -329,6 +338,7 @@ fn multiple_ooda_cycles_accumulate_consolidation() {
         assigned_to: None,
         current_activity: None,
         wip_refs: Vec::new(),
+        last_progress_update_at: None,
     });
 
     let mut state = OodaState::new(board);

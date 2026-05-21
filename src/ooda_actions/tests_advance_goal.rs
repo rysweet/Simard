@@ -376,7 +376,11 @@ fn validate_subordinate_completion_with_artifacts_succeeds() {
         goal_id: Some("g1".into()),
         description: "advance".into(),
     };
-    let outcome = validate_subordinate_completion(&action, &mut state, "g1", "sub-ok", &progress);
+    let mem_box = mock_memory();
+    let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
+    let outcome = validate_subordinate_completion(
+        &action, &checker, &*mem_box, &mut state, "g1", "sub-ok", &progress,
+    );
     assert!(
         outcome.success,
         "should succeed with artifacts: {}",
@@ -407,8 +411,17 @@ fn validate_subordinate_completion_without_artifacts_fails() {
         goal_id: Some("g1".into()),
         description: "advance".into(),
     };
-    let outcome =
-        validate_subordinate_completion(&action, &mut state, "g1", "sub-empty", &progress);
+    let mem_box = mock_memory();
+    let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
+    let outcome = validate_subordinate_completion(
+        &action,
+        &checker,
+        &*mem_box,
+        &mut state,
+        "g1",
+        "sub-empty",
+        &progress,
+    );
     assert!(
         !outcome.success,
         "should fail when no artifacts: {}",

@@ -74,6 +74,7 @@ fn make_goal(id: &str, status: GoalProgress) -> ActiveGoal {
         assigned_to: None,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     }
 }
 

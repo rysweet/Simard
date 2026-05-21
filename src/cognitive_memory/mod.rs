@@ -92,6 +92,27 @@ pub trait CognitiveMemoryOps: Send + Sync {
 
     fn get_statistics(&self) -> SimardResult<CognitiveStatistics>;
 
+    /// Search recent episodes by content prefix.
+    ///
+    /// Returns `(content, recorded_at)` pairs for episodes whose
+    /// `content` starts with `prefix`, ordered most-recent first, capped
+    /// at `limit`. Used by the progress-evidence gate
+    /// (`update_goal_progress_with_evidence`) to source the `since`
+    /// timestamp for goals that have no
+    /// `ActiveGoal.last_progress_update_at` field set yet (legacy
+    /// on-disk boards from before #1967).
+    ///
+    /// Default impl returns `Ok(vec![])` — backends without temporal
+    /// metadata simply force callers into the next fallback step (the
+    /// daemon's process-start timestamp), which is safe.
+    fn search_episodes_starting_with(
+        &self,
+        _prefix: &str,
+        _limit: u32,
+    ) -> SimardResult<Vec<(String, chrono::DateTime<chrono::Utc>)>> {
+        Ok(vec![])
+    }
+
     /// Reports whether this backend was opened in read-only mode.
     ///
     /// Defaulted to `false` because the overwhelming majority of

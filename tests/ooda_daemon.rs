@@ -95,6 +95,10 @@ fn test_bridges() -> OodaBridges {
         brain: std::sync::Arc::new(simard::ooda_brain::DeterministicFallbackBrain),
         decide_brain: None,
         orient_brain: None,
+        repo_root: std::path::PathBuf::from("."),
+        progress_evidence: std::sync::Arc::new(
+            simard::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
+        ),
     }
 }
 
@@ -110,6 +114,7 @@ fn board_with_active_goals() -> GoalBoard {
             assigned_to: None,
             current_activity: None,
             wip_refs: Vec::new(),
+            last_progress_update_at: None,
         },
     )
     .unwrap();
@@ -123,6 +128,7 @@ fn board_with_active_goals() -> GoalBoard {
             assigned_to: None,
             current_activity: None,
             wip_refs: Vec::new(),
+            last_progress_update_at: None,
         },
     )
     .unwrap();
@@ -361,6 +367,7 @@ fn goal_objective_contains_goal_id_and_description() {
         assigned_to: None,
         current_activity: None,
         wip_refs: Vec::new(),
+        last_progress_update_at: None,
     };
 
     // This is the format the daemon should use when constructing objectives

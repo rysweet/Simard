@@ -151,6 +151,7 @@ fn writer_bridge_is_compatible_with_save_and_load_goal_board() {
         assigned_to: None,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     });
 
     save_goal_board(&board, writer.ops()).expect("save_goal_board via WriterBridge must succeed");
@@ -180,6 +181,7 @@ fn writer_bridge_does_not_create_legacy_goal_records_json_on_save() {
         assigned_to: None,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     });
     save_goal_board(&board, writer.ops()).expect("save_goal_board");
 

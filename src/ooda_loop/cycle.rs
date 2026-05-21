@@ -587,6 +587,7 @@ mod tests_sweep {
             assigned_to: session.map(str::to_string),
             current_activity: None,
             wip_refs: vec![],
+            last_progress_update_at: None,
         }
     }
 
@@ -721,6 +722,7 @@ mod tests_board_integrity {
             assigned_to: None,
             current_activity: None,
             wip_refs: vec![],
+            last_progress_update_at: None,
         }
     }
 

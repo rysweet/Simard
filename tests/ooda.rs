@@ -80,6 +80,10 @@ fn test_bridges() -> OodaBridges {
         brain: std::sync::Arc::new(simard::ooda_brain::DeterministicFallbackBrain),
         decide_brain: None,
         orient_brain: None,
+        repo_root: std::path::PathBuf::from("."),
+        progress_evidence: std::sync::Arc::new(
+            simard::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
+        ),
     }
 }
 
@@ -92,6 +96,7 @@ fn sample_goal(id: &str, priority: u32, progress: GoalProgress) -> ActiveGoal {
         assigned_to: None,
         current_activity: None,
         wip_refs: Vec::new(),
+        last_progress_update_at: None,
     }
 }
 
@@ -244,6 +249,10 @@ fn feral_gym_bridge_down() {
         brain: std::sync::Arc::new(simard::ooda_brain::DeterministicFallbackBrain),
         decide_brain: None,
         orient_brain: None,
+        repo_root: std::path::PathBuf::from("."),
+        progress_evidence: std::sync::Arc::new(
+            simard::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
+        ),
     };
     let mut state = OodaState::new(board_with_goals());
     let report = run_ooda_cycle(&mut state, &mut bridges, &OodaConfig::default()).unwrap();

@@ -54,6 +54,7 @@ fn active_goal(id: &str, priority: u32) -> ActiveGoal {
         assigned_to: None,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     }
 }
 

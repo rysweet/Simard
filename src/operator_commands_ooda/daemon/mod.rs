@@ -194,6 +194,38 @@ pub fn run_ooda_daemon(
         );
     }
 
+    // Wire the progress-evidence checker (issue #1967). Honors
+    // `SIMARD_PROGRESS_EVIDENCE=off` as a kill switch (see
+    // docs/operations/progress-evidence-kill-switch.md).
+    let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let kill_switch = std::env::var("SIMARD_PROGRESS_EVIDENCE")
+        .ok()
+        .map(|v| v.eq_ignore_ascii_case("off"))
+        .unwrap_or(false);
+    let progress_evidence: std::sync::Arc<
+        dyn crate::goal_curation::progress_evidence::ProgressEvidenceChecker,
+    > = if kill_switch {
+        daemon_log(
+            &state_root,
+            "[simard] progress-evidence: DISABLED (NoopProgressEvidenceChecker -- SIMARD_PROGRESS_EVIDENCE=off)",
+        );
+        std::sync::Arc::new(crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker)
+    } else {
+        daemon_log(
+            &state_root,
+            &format!(
+                "[simard] progress-evidence: enabled (DefaultProgressEvidenceChecker, repo_root={}, remote=rysweet/Simard)",
+                repo_root.display()
+            ),
+        );
+        std::sync::Arc::new(
+            crate::goal_curation::progress_evidence::DefaultProgressEvidenceChecker::new(
+                repo_root.clone(),
+                "rysweet/Simard",
+            ),
+        )
+    };
+
     let mut bridges = OodaBridges {
         memory,
         knowledge,
@@ -202,6 +234,8 @@ pub fn run_ooda_daemon(
         brain,
         decide_brain,
         orient_brain,
+        repo_root,
+        progress_evidence,
     };
 
     let board = load_goal_board(&*bridges.memory).unwrap_or_default();

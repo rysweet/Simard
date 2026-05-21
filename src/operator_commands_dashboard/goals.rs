@@ -108,6 +108,7 @@ pub(crate) async fn seed_goals() -> Json<Value> {
         assigned_to: Some("simard".to_string()),
         current_activity: Some(format!("Goal seeded via dashboard at {now}")),
         wip_refs: vec![],
+        last_progress_update_at: None,
     });
     board.active.push(ActiveGoal {
         id: "knowledge-growth".to_string(),
@@ -119,6 +120,7 @@ pub(crate) async fn seed_goals() -> Json<Value> {
         assigned_to: Some("simard".to_string()),
         current_activity: Some(format!("Goal seeded via dashboard at {now}")),
         wip_refs: vec![],
+        last_progress_update_at: None,
     });
     board.active.push(ActiveGoal {
         id: "operational-health".to_string(),
@@ -128,6 +130,7 @@ pub(crate) async fn seed_goals() -> Json<Value> {
         assigned_to: Some("simard".to_string()),
         current_activity: Some(format!("Goal seeded via dashboard at {now}")),
         wip_refs: vec![],
+        last_progress_update_at: None,
     });
     board.backlog.push(BacklogItem {
         id: "distributed-sync".to_string(),
@@ -190,6 +193,7 @@ pub(crate) async fn add_goal(Json(body): Json<Value>) -> Json<Value> {
             assigned_to: None,
             current_activity: None,
             wip_refs: vec![],
+            last_progress_update_at: None,
         });
     }
 
@@ -289,6 +293,7 @@ pub(crate) async fn promote_backlog_item(Path(id): Path<String>) -> Json<Value> 
         assigned_to: None,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     });
 
     match dashboard_save_goal_board(&state_root, &board) {
