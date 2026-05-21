@@ -108,9 +108,82 @@ pub(crate) const PART_05: &str = r#"      try {
       ws.onclose = () => { setAgentLogStatus('detached', '#8b949e'); if(agentLogWS === ws) agentLogWS = null; };
     }
 
+    /* --- Merge Readiness (#1880) --- */
+    async function fetchMergeReadiness(){
+      const el=document.getElementById('merge-readiness-panel');
+      if(!el) return;
+      try {
+        const d = await apiFetch('/api/merge-readiness');
+        const judgeConfigured = !!d.judge_configured;
+        const judgeKind = String(d.judge_kind || 'unknown');
+        const badgeColor = judgeConfigured ? '#3fb950' : '#f85149';
+        const badgeText = judgeConfigured
+          ? 'Judge: configured ('+judgeKind.toUpperCase()+')'
+          : 'Judge: unconfigured — RefusingMergeJudge fallback';
+        const judgeTooltip = judgeConfigured
+          ? 'Agentic merge-readiness judge is wired to an LLM provider.'
+          : 'No LLM provider is configured; every merge will be refused. See prompt_assets/simard/merge_readiness_judge.md.';
+        const summary = d.summary || {};
+        const ghError = d.gh_error ? '<div class="err" style="margin-top:.4rem;font-size:.85rem">gh error: '+esc(d.gh_error)+'</div>' : '';
+        const persistenceStub = (d.verdict_persistence && d.verdict_persistence.available === false)
+          ? '<div style="color:#8b949e;font-size:.75rem;margin-top:.3rem">Per-PR judge verdicts are not yet persisted; see follow-up issue.</div>'
+          : '';
+        const prs = Array.isArray(d.open_prs) ? d.open_prs : [];
+        let rows;
+        if(prs.length === 0){
+          rows = '<div style="color:#8b949e;font-size:.85rem;margin-top:.5rem">No open PRs.</div>';
+        } else {
+          rows = '<table class="proc-table" data-testid="merge-readiness-table" style="margin-top:.5rem">'
+               + '<thead><tr>'
+               +   '<th>#</th><th>Title</th><th>Base</th><th>Objective</th><th>Blocker</th><th>Judge Verdict</th><th></th>'
+               + '</tr></thead><tbody>'
+               + prs.map(pr => {
+                   const state = String(pr.readiness_state || 'unknown');
+                   let badge;
+                   if(state === 'ready')        badge = '<span class="ok">✓ ready</span>';
+                   else if(state === 'pending') badge = '<span class="warn">⏳ pending</span>';
+                   else                         badge = '<span class="err">✗ '+esc(state)+'</span>';
+                   const blocker = pr.objective_blocker
+                     ? '<span style="color:#8b949e;font-size:.8rem">'+esc(String(pr.objective_blocker).split('\n')[0])+'</span>'
+                     : '<span style="color:#8b949e">—</span>';
+                   const verdict = (pr.last_judge_verdict == null)
+                     ? '<span style="color:#8b949e" title="Merge-judge verdicts are not yet persisted (follow-up issue).">verdict unavailable</span>'
+                     : esc(String(pr.last_judge_verdict.verdict || ''));
+                   const titleEsc = esc(String(pr.title || '').slice(0, 60));
+                   return '<tr>'
+                        + '<td><a href="'+esc(pr.url||'')+'" target="_blank" style="color:var(--accent)">#'+esc(String(pr.number))+'</a></td>'
+                        + '<td>'+titleEsc+'</td>'
+                        + '<td><code>'+esc(String(pr.base_ref_name||''))+'</code></td>'
+                        + '<td>'+badge+'</td>'
+                        + '<td>'+blocker+'</td>'
+                        + '<td>'+verdict+'</td>'
+                        + '<td><a href="'+esc(pr.url||'')+'" target="_blank" title="Open on GitHub">↗</a></td>'
+                        + '</tr>';
+                 }).join('')
+               + '</tbody></table>';
+        }
+        el.innerHTML =
+            '<div data-testid="merge-readiness-judge-pill" style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap">'
+          +   '<span class="badge" style="background:'+badgeColor+'22;color:'+badgeColor+'" title="'+esc(judgeTooltip)+'">'+esc(badgeText)+'</span>'
+          +   '<span style="color:#8b949e;font-size:.85rem">'
+          +     esc(String(summary.objective_ready||0))+' ready · '
+          +     esc(String(summary.objective_pending||0))+' pending · '
+          +     esc(String(summary.objective_blocked||0))+' blocked · '
+          +     esc(String(summary.total_open||0))+' open'
+          +   '</span>'
+          + '</div>'
+          + ghError
+          + rows
+          + persistenceStub;
+      } catch(e) {
+        el.innerHTML = '<span class="err">Failed to load merge readiness: '+esc(e.message||e)+'</span>';
+      }
+    }
+
     /* --- Init --- */
-    fetchStatus(); fetchIssues(); fetchDistributed(); fetchAgentOverview();
+    fetchStatus(); fetchIssues(); fetchDistributed(); fetchAgentOverview(); fetchMergeReadiness();
     setInterval(fetchAgentOverview,30000);
+    setInterval(fetchMergeReadiness,30000);
     setInterval(fetchStatus,30000);
     setInterval(fetchIssues,120000);
   </script>
