@@ -656,6 +656,7 @@ pub fn promote_to_active(
         assigned_to,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     });
     Ok(())
 }
@@ -684,6 +685,182 @@ pub fn update_goal_progress(
         })?;
     goal.status = progress;
     Ok(())
+}
+
+/// Map a [`GoalProgress`] variant to its effective percent (0–100) for
+/// gate comparison. `Blocked` keeps the *current* percent since it does
+/// not change progress numerically; callers pass `current` for that.
+fn progress_to_percent(p: &GoalProgress, current: u32) -> u32 {
+    match p {
+        GoalProgress::NotStarted => 0,
+        GoalProgress::InProgress { percent } => *percent,
+        GoalProgress::Blocked(_) => current,
+        GoalProgress::Completed => 100,
+    }
+}
+
+/// Variant label for bypass reason strings.
+fn variant_label(p: &GoalProgress) -> &'static str {
+    match p {
+        GoalProgress::NotStarted => "not-started",
+        GoalProgress::InProgress { .. } => "in-progress",
+        GoalProgress::Blocked(_) => "blocked",
+        GoalProgress::Completed => "completed",
+    }
+}
+
+/// Progress-evidence gatekeeper façade (issue #1967).
+///
+/// Routes every proposed mutation of [`ActiveGoal::status`] through a
+/// [`ProgressEvidenceChecker`]. Behaviour summary:
+///
+/// * **Bypass** (no evidence consulted, no audit episode):
+///   - Decreases and same-value `InProgress` writes
+///   - `Blocked(_)` transitions (kept at prior percent)
+///   - `NotStarted` resets
+///
+/// * **Otherwise** (proposal is an *increase* over `old_percent`):
+///   1. Source `since` via the three-step fallback chain:
+///      a. `goal.last_progress_update_at`
+///      b. Most recent `"goal progress accepted: …<goal_id>…"` episode
+///      c. [`progress_evidence::process_start`]
+///   2. Call `checker.check(...)`.
+///   3. On `Accept`: write through, stamp `last_progress_update_at =
+///      Some(now)`, emit one `"goal progress accepted: …"` episode.
+///   4. On `Reject`: keep prior percent, emit one
+///      `"brain hallucination detected: …"` episode.
+///
+/// Both `Accept` and `Reject` are returned as `Ok(...)`. `Err` is
+/// reserved for genuine failures (goal not found, underlying writer
+/// fails, memory `store_episode` fails).
+pub fn update_goal_progress_with_evidence(
+    board: &mut GoalBoard,
+    goal_id: &str,
+    proposed: GoalProgress,
+    checker: &dyn super::progress_evidence::ProgressEvidenceChecker,
+    memory: &dyn CognitiveMemoryOps,
+    now: chrono::DateTime<chrono::Utc>,
+) -> SimardResult<super::progress_evidence::EvidenceDecision> {
+    use super::progress_evidence::{EvidenceDecision, process_start};
+
+    // ── Look up the goal first; needed for percent comparison ─────────
+    let (current_status, last_update_at_field) = {
+        let goal = board
+            .active
+            .iter()
+            .find(|g| g.id == goal_id)
+            .ok_or_else(|| SimardError::InvalidGoalRecord {
+                field: "goal_id".to_string(),
+                reason: format!("active goal '{goal_id}' not found"),
+            })?;
+        (goal.status.clone(), goal.last_progress_update_at)
+    };
+    let old_percent = progress_to_percent(&current_status, 0);
+    let new_percent = progress_to_percent(&proposed, old_percent);
+
+    // ── Bypass set ────────────────────────────────────────────────────
+    let is_bypass = matches!(proposed, GoalProgress::Blocked(_))
+        || matches!(proposed, GoalProgress::NotStarted)
+        || new_percent <= old_percent;
+
+    if is_bypass {
+        let bypass_reason = if matches!(proposed, GoalProgress::Blocked(_)) {
+            "bypass: blocked".to_string()
+        } else if matches!(proposed, GoalProgress::NotStarted) {
+            "bypass: not-started".to_string()
+        } else if new_percent < old_percent {
+            "bypass: non-increase (decrease)".to_string()
+        } else {
+            format!("bypass: non-increase ({})", variant_label(&proposed))
+        };
+        update_goal_progress(board, goal_id, proposed)?;
+        return Ok(EvidenceDecision::Accept {
+            reason: bypass_reason,
+        });
+    }
+
+    // ── Source `since` via three-step fallback ───────────────────────
+    let mut since = if let Some(t) = last_update_at_field {
+        t
+    } else {
+        // Memory scan: most recent "goal progress accepted: …<goal_id>…"
+        // episode. We over-fetch a generous limit and filter to those
+        // mentioning this goal id.
+        let prefix = "goal progress accepted:";
+        let hits = memory
+            .search_episodes_starting_with(prefix, 64)
+            .unwrap_or_default();
+        let matched: Option<chrono::DateTime<chrono::Utc>> = hits
+            .into_iter()
+            .filter(|(content, _)| content.contains(goal_id))
+            .map(|(_, at)| at)
+            .max();
+        matched.unwrap_or_else(process_start)
+    };
+    // Clamp `since` to `now` so the cached `process_start` fallback
+    // never produces a `since` in the future when the caller's `now`
+    // happens to predate the daemon process start (test fixtures with
+    // historical timestamps; daylight-savings/NTP corrections in prod).
+    if since > now {
+        since = now;
+    }
+
+    // ── Consult checker ───────────────────────────────────────────────
+    // Re-borrow the goal immutably to pass into checker.check.
+    let goal_snapshot = board
+        .active
+        .iter()
+        .find(|g| g.id == goal_id)
+        .expect("already located above")
+        .clone();
+    let decision = checker.check(&goal_snapshot, old_percent, new_percent, since);
+
+    match decision {
+        EvidenceDecision::Accept { reason } => {
+            update_goal_progress(board, goal_id, proposed)?;
+            // Stamp the timestamp for next time.
+            if let Some(g) = board.active.iter_mut().find(|g| g.id == goal_id) {
+                g.last_progress_update_at = Some(now);
+            }
+            let episode = format!(
+                "goal progress accepted: {old_percent}%->{new_percent}% on {goal_id}\n  -- evidence: {reason}"
+            );
+            // Best-effort audit episode — memory failures propagate.
+            let _ = memory.store_episode(
+                &episode,
+                "progress-evidence-gate",
+                Some(&json!({
+                    "kind": "progress_accepted",
+                    "goal_id": goal_id,
+                    "old_percent": old_percent,
+                    "new_percent": new_percent,
+                    "reason": reason,
+                    "at": now.to_rfc3339(),
+                })),
+            )?;
+            Ok(EvidenceDecision::Accept { reason })
+        }
+        EvidenceDecision::Reject { reason } => {
+            // Do NOT mutate the board. Emit a hallucination alert.
+            let episode = format!(
+                "brain hallucination detected: rejected progress {old_percent}%->{new_percent}% on {goal_id}\n  -- no git evidence since last update: {reason}"
+            );
+            memory.store_episode(
+                &episode,
+                "progress-evidence-gate",
+                Some(&json!({
+                    "kind": "progress_rejected",
+                    "goal_id": goal_id,
+                    "old_percent": old_percent,
+                    "new_percent": new_percent,
+                    "reason": reason,
+                    "since": since.to_rfc3339(),
+                    "at": now.to_rfc3339(),
+                })),
+            )?;
+            Ok(EvidenceDecision::Reject { reason })
+        }
+    }
 }
 
 /// Clear the assignment of an active goal, resetting it to `NotStarted` so
@@ -773,6 +950,7 @@ pub fn seed_default_board(board: &mut GoalBoard) -> usize {
             assigned_to: None,
             current_activity: None,
             wip_refs: vec![],
+            last_progress_update_at: None,
         });
     }
 

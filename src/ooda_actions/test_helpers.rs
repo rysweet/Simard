@@ -142,6 +142,10 @@ pub(crate) fn test_bridges() -> OodaBridges {
         brain: std::sync::Arc::new(crate::ooda_brain::DeterministicFallbackBrain),
         decide_brain: None,
         orient_brain: None,
+        repo_root: std::path::PathBuf::from("."),
+        progress_evidence: std::sync::Arc::new(
+            crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
+        ),
     }
 }
 
@@ -161,6 +165,7 @@ pub(crate) fn board_with_goal(
             assigned_to: assigned.map(String::from),
             current_activity: None,
             wip_refs: vec![],
+            last_progress_update_at: None,
         },
     )
     .unwrap();
@@ -177,5 +182,9 @@ pub(crate) fn bridges_with_session(session: MockSession) -> OodaBridges {
         brain: std::sync::Arc::new(crate::ooda_brain::DeterministicFallbackBrain),
         decide_brain: None,
         orient_brain: None,
+        repo_root: std::path::PathBuf::from("."),
+        progress_evidence: std::sync::Arc::new(
+            crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
+        ),
     }
 }

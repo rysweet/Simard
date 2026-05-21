@@ -10,6 +10,7 @@ fn make_goal(id: &str, priority: u32) -> ActiveGoal {
         assigned_to: None,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     }
 }
 
@@ -347,6 +348,7 @@ fn load_goal_board_reads_from_cognitive_memory() {
         assigned_to: None,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     });
     let snapshot_json = serde_json::to_string(&mem_board).unwrap();
     let recording = BridgeRecording::shared();
@@ -398,6 +400,7 @@ fn load_goal_board_migrates_legacy_disk_file_into_memory_then_deletes_it() {
         assigned_to: None,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     });
     let path = root.join("goal_records.json");
     std::fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
@@ -469,6 +472,7 @@ fn load_goal_board_runs_migration_only_once_in_practice() {
         assigned_to: None,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     });
     let path = root.join("goal_records.json");
     std::fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
@@ -500,6 +504,7 @@ fn save_goal_board_persists_only_to_memory_and_writes_no_disk_file() {
         assigned_to: None,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     });
 
     let recording = BridgeRecording::shared();
@@ -531,6 +536,7 @@ fn save_goal_board_rejects_suspect_board_without_persisting() {
         assigned_to: None,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     });
 
     let recording = BridgeRecording::shared();
@@ -565,6 +571,7 @@ fn save_goal_board_accepts_a_well_formed_board() {
         assigned_to: None,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     });
     let recording = BridgeRecording::shared();
     let bridge = recording_bridge_empty(recording.clone());
@@ -602,6 +609,7 @@ fn board_integrity_suspect_flags_short_ids_and_placeholder_descriptions() {
         assigned_to: None,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     });
     assert!(board_integrity_suspect(&board).is_some());
 }
@@ -617,6 +625,7 @@ fn board_integrity_suspect_passes_well_formed_board() {
         assigned_to: None,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     });
     assert!(board_integrity_suspect(&board).is_none());
 }
@@ -634,6 +643,7 @@ fn clear_goal_assignment_resets_status_and_clears_assigned_to() {
         assigned_to: Some("engineer-session-abc".to_string()),
         current_activity: Some("Doing work".to_string()),
         wip_refs: vec![],
+        last_progress_update_at: None,
     });
 
     super::clear_goal_assignment(&mut board, "assigned-goal").unwrap();
@@ -689,6 +699,7 @@ fn goal_with(id: &str, priority: u32, status: GoalProgress, desc: &str) -> Activ
         assigned_to: None,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     }
 }
 

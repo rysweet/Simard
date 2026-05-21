@@ -36,6 +36,7 @@ fn seeded_board() -> GoalBoard {
             assigned_to: Some("simard".to_string()),
             current_activity: None,
             wip_refs: vec![],
+            last_progress_update_at: None,
         });
     }
     board
@@ -99,6 +100,7 @@ fn writer_persists_through_cognitive_memory_without_legacy_file() {
         assigned_to: Some("simard".to_string()),
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     });
 
     dashboard_save_goal_board(&root, &board).expect("dashboard writer must succeed");

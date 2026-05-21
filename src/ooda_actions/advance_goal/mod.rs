@@ -125,10 +125,30 @@ pub(super) fn dispatch_advance_goal(
     // when we mutably borrow `bridges.session` below (issue #1266).
     let brain = std::sync::Arc::clone(&bridges.brain);
 
+    // Same pattern for the progress-evidence checker (issue #1967): clone
+    // the Arc up-front so it lives across the inner mutable session
+    // borrow without colliding with the bridges field-borrow check.
+    let checker = std::sync::Arc::clone(&bridges.progress_evidence);
+
+    // Split-borrow disjoint fields of `bridges` so we can hold `&mut
+    // session` and `&dyn memory` simultaneously. `&mut *bridges` flattens
+    // the deref so Rust tracks the per-field borrows.
+    let OodaBridges {
+        ref mut session,
+        ref memory,
+        ..
+    } = *bridges;
+
     // If a base-type session is available, use run_turn for real agent work.
-    if let Some(ref mut session) = bridges.session {
-        let result =
-            super::goal_session::advance_goal_with_session(action, session.as_mut(), state, &goal);
+    if let Some(sess) = session {
+        let result = super::goal_session::advance_goal_with_session(
+            action,
+            memory.as_ref(),
+            checker.as_ref(),
+            sess.as_mut(),
+            state,
+            &goal,
+        );
 
         // For spawn_engineer the dispatcher must perform the actual fork
         // (it owns the state mutation needed to set goal.assigned_to).

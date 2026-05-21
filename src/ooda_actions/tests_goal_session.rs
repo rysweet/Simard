@@ -42,7 +42,16 @@ fn no_action_response_records_no_action_outcome_without_spawning() {
         vec![],
     );
 
-    let result = advance_goal_with_session(&action, &mut session, &mut state, &goal);
+    let mem_box = mock_memory();
+    let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
+    let result = advance_goal_with_session(
+        &action,
+        &*mem_box,
+        &checker,
+        &mut session,
+        &mut state,
+        &goal,
+    );
 
     assert!(
         result.outcome.success,
@@ -67,7 +76,16 @@ fn prose_response_routes_to_spawn_engineer() {
     let task_text = "Run cargo test --lib goal_session and report failing tests.";
     let (mut session, _captured) = MockSession::new_ok(task_text, vec![]);
 
-    let result = advance_goal_with_session(&action, &mut session, &mut state, &goal);
+    let mem_box = mock_memory();
+    let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
+    let result = advance_goal_with_session(
+        &action,
+        &*mem_box,
+        &checker,
+        &mut session,
+        &mut state,
+        &goal,
+    );
 
     assert!(result.outcome.success);
     assert!(result.outcome.detail.contains("spawn_engineer"));
@@ -91,7 +109,16 @@ fn progress_marker_in_prose_updates_goal_progress_before_spawn() {
         vec![],
     );
 
-    let _ = advance_goal_with_session(&action, &mut session, &mut state, &goal);
+    let mem_box = mock_memory();
+    let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
+    let _ = advance_goal_with_session(
+        &action,
+        &*mem_box,
+        &checker,
+        &mut session,
+        &mut state,
+        &goal,
+    );
 
     let updated = live_goal(&state, goal_id);
     match updated.status {
@@ -110,7 +137,16 @@ fn progress_marker_in_no_action_updates_goal_progress() {
     let (mut session, _captured) =
         MockSession::new_ok("NO ACTION\nWaiting on PR review. PROGRESS: 95", vec![]);
 
-    let _ = advance_goal_with_session(&action, &mut session, &mut state, &goal);
+    let mem_box = mock_memory();
+    let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
+    let _ = advance_goal_with_session(
+        &action,
+        &*mem_box,
+        &checker,
+        &mut session,
+        &mut state,
+        &goal,
+    );
 
     let updated = live_goal(&state, goal_id);
     match updated.status {
@@ -128,7 +164,16 @@ fn empty_response_is_a_visible_failure() {
 
     let (mut session, _captured) = MockSession::new_ok("   \n\t  ", vec![]);
 
-    let result = advance_goal_with_session(&action, &mut session, &mut state, &goal);
+    let mem_box = mock_memory();
+    let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
+    let result = advance_goal_with_session(
+        &action,
+        &*mem_box,
+        &checker,
+        &mut session,
+        &mut state,
+        &goal,
+    );
 
     assert!(!result.outcome.success);
     assert!(result.outcome.detail.contains("empty response"));
@@ -144,7 +189,16 @@ fn session_run_turn_error_is_a_visible_failure() {
 
     let mut session = MockSession::new_err("LLM provider unavailable");
 
-    let result = advance_goal_with_session(&action, &mut session, &mut state, &goal);
+    let mem_box = mock_memory();
+    let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
+    let result = advance_goal_with_session(
+        &action,
+        &*mem_box,
+        &checker,
+        &mut session,
+        &mut state,
+        &goal,
+    );
 
     assert!(!result.outcome.success);
     assert!(result.outcome.detail.contains("session run_turn failed"));
@@ -162,7 +216,16 @@ fn objective_includes_goal_metadata_and_environment() {
 
     let (mut session, captured) = MockSession::new_ok("NO ACTION\n", vec![]);
 
-    let _ = advance_goal_with_session(&action, &mut session, &mut state, &goal);
+    let mem_box = mock_memory();
+    let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
+    let _ = advance_goal_with_session(
+        &action,
+        &*mem_box,
+        &checker,
+        &mut session,
+        &mut state,
+        &goal,
+    );
 
     let captured = captured.borrow();
     let input = captured.as_ref().expect("session must be invoked once");

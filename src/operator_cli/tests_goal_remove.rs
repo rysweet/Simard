@@ -66,6 +66,7 @@ fn active_goal_with_desc(id: &str, description: &str) -> ActiveGoal {
         assigned_to: None,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     }
 }
 

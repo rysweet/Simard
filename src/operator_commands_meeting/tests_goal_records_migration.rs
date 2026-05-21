@@ -31,6 +31,7 @@ fn seed_active_only(state_root: &std::path::Path, n: usize) -> GoalBoard {
             assigned_to: Some("simard".to_string()),
             current_activity: None,
             wip_refs: vec![],
+            last_progress_update_at: None,
         });
     }
     save_goal_board(&board, &mem).expect("seed active goals");

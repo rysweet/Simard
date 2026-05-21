@@ -153,6 +153,7 @@ fn orient_priorities_sorted_by_urgency_descending() {
             assigned_to: None,
             current_activity: None,
             wip_refs: vec![],
+            last_progress_update_at: None,
         },
         ActiveGoal {
             id: "high".to_string(),
@@ -162,6 +163,7 @@ fn orient_priorities_sorted_by_urgency_descending() {
             assigned_to: None,
             current_activity: None,
             wip_refs: vec![],
+            last_progress_update_at: None,
         },
         ActiveGoal {
             id: "mid".to_string(),
@@ -171,6 +173,7 @@ fn orient_priorities_sorted_by_urgency_descending() {
             assigned_to: None,
             current_activity: None,
             wip_refs: vec![],
+            last_progress_update_at: None,
         },
     ];
     let board = make_board_with_goals(goals);
@@ -191,6 +194,7 @@ fn orient_failure_cooldown_demotes_urgency() {
         assigned_to: None,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     }];
     let board = make_board_with_goals(goals);
     let obs = make_observation(EnvironmentSnapshot::default());
@@ -219,6 +223,7 @@ fn orient_failure_cooldown_clamps_to_zero() {
         assigned_to: None,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     }];
     let board = make_board_with_goals(goals);
     let obs = make_observation(EnvironmentSnapshot::default());
@@ -240,6 +245,7 @@ fn orient_no_demotion_when_failure_count_zero() {
         assigned_to: None,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     }];
     let board = make_board_with_goals(goals);
     let obs = make_observation(EnvironmentSnapshot::default());

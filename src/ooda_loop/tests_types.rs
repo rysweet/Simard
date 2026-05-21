@@ -52,6 +52,7 @@ fn ooda_state_new_with_goals() {
         assigned_to: None,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     });
     let state = OodaState::new(board);
     assert_eq!(state.active_goals.active.len(), 1);
@@ -69,6 +70,7 @@ fn populated_state() -> OodaState {
         assigned_to: Some("engineer-7".to_string()),
         current_activity: Some("doing things".to_string()),
         wip_refs: vec![],
+        last_progress_update_at: None,
     });
     let mut state = OodaState::new(board);
     state.current_phase = OodaPhase::Decide;
@@ -165,6 +167,7 @@ fn goal_snapshot_from_active_goal() {
         assigned_to: Some("engineer".to_string()),
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     };
     let snapshot = GoalSnapshot::from(&goal);
     assert_eq!(snapshot.id, "g-1");
@@ -185,6 +188,7 @@ fn goal_snapshot_from_blocked_goal() {
         assigned_to: None,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     };
     let snapshot = GoalSnapshot::from(&goal);
     assert!(matches!(snapshot.progress, GoalProgress::Blocked(_)));

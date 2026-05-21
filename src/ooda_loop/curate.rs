@@ -103,6 +103,7 @@ pub fn check_meeting_handoffs(
                 assigned_to: None,
                 current_activity: None,
                 wip_refs: vec![],
+                last_progress_update_at: None,
             });
         } else {
             // Board full — route to backlog with score based on position.
@@ -412,6 +413,7 @@ mod tests {
                 assigned_to: None,
                 current_activity: None,
                 wip_refs: vec![],
+                last_progress_update_at: None,
             });
         }
         board.backlog.push(BacklogItem {

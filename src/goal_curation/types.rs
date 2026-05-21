@@ -2,6 +2,7 @@
 
 use std::fmt::{self, Display, Formatter};
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Maximum number of concurrently active goals.
@@ -55,6 +56,14 @@ pub struct ActiveGoal {
     /// References to work-in-progress: PRs, issues, branches, sessions.
     #[serde(default)]
     pub wip_refs: Vec<WipRef>,
+    /// Wall-clock timestamp of the last accepted progress update.
+    ///
+    /// `None` for goals created before issue #1967; the progress-evidence
+    /// gate (see `progress_evidence` module) falls back to a memory scan,
+    /// then to the daemon's process-start timestamp. Set automatically by
+    /// `update_goal_progress_with_evidence` on every accepted update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_progress_update_at: Option<DateTime<Utc>>,
 }
 
 impl ActiveGoal {
@@ -185,6 +194,7 @@ mod tests {
             assigned_to: Some("team-a".to_string()),
             current_activity: None,
             wip_refs: vec![],
+            last_progress_update_at: None,
         }
     }
 
@@ -215,6 +225,7 @@ mod tests {
             assigned_to: None,
             current_activity: None,
             wip_refs: vec![],
+            last_progress_update_at: None,
         };
         let json = serde_json::to_string(&g).unwrap();
         let g2: ActiveGoal = serde_json::from_str(&json).unwrap();
@@ -287,6 +298,7 @@ mod tests {
                 assigned_to: None,
                 current_activity: None,
                 wip_refs: vec![],
+                last_progress_update_at: None,
             })
             .collect();
         let board = GoalBoard {
@@ -307,6 +319,7 @@ mod tests {
                 assigned_to: None,
                 current_activity: None,
                 wip_refs: vec![],
+                last_progress_update_at: None,
             })
             .collect();
         let board = GoalBoard {

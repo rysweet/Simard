@@ -33,6 +33,7 @@ fn active(id: &str, description: &str, priority: u32) -> ActiveGoal {
         assigned_to: None,
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     }
 }
 
@@ -97,6 +98,7 @@ fn current_activity_is_used_as_rationale_when_present() {
         assigned_to: None,
         current_activity: Some("writing tests for active_goals_as_records".to_string()),
         wip_refs: vec![],
+        last_progress_update_at: None,
     });
 
     let records = active_goals_as_records(&board);
@@ -128,6 +130,7 @@ fn assigned_to_some_becomes_owner_identity() {
         assigned_to: Some("simard-engineer".to_string()),
         current_activity: None,
         wip_refs: vec![],
+        last_progress_update_at: None,
     });
 
     let records = active_goals_as_records(&board);

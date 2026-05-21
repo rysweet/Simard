@@ -72,6 +72,10 @@ pub fn bridges_from_state_root(state_root: &Path) -> SimardResult<OodaBridges> {
         brain: std::sync::Arc::new(crate::ooda_brain::DeterministicFallbackBrain),
         decide_brain: None,
         orient_brain: None,
+        repo_root: std::path::PathBuf::from("."),
+        progress_evidence: std::sync::Arc::new(
+            crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
+        ),
     })
 }
 

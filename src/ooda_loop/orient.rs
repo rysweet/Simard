@@ -310,6 +310,7 @@ mod wire_in_tests {
             assigned_to: None,
             current_activity: None,
             wip_refs: vec![],
+            last_progress_update_at: None,
         });
         let obs = Observation {
             goal_statuses: Vec::new(),
@@ -353,6 +354,7 @@ mod hallucination_filter_tests {
             assigned_to: None,
             current_activity: None,
             wip_refs: vec![],
+            last_progress_update_at: None,
         }
     }
 

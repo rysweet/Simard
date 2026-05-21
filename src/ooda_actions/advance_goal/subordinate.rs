@@ -1,8 +1,12 @@
 //! AdvanceGoal dispatch — routing, subordinate heartbeat, and session-based advancement.
 
+use chrono::Utc;
+
 use crate::agent_supervisor::{HeartbeatStatus, check_heartbeat};
+use crate::goal_curation::progress_evidence::EvidenceDecision;
 use crate::goal_curation::{
     GoalProgress, clear_goal_assignment, save_goal_board, update_goal_progress,
+    update_goal_progress_with_evidence,
 };
 use crate::ooda_loop::{ActionOutcome, OodaBridges, OodaState, PlannedAction};
 
@@ -47,25 +51,54 @@ pub fn advance_goal_with_subordinate(
             {
                 // Subordinate claims completion — validate artifacts.
                 return validate_subordinate_completion(
-                    action, state, goal_id, sub_name, &progress,
+                    action,
+                    &*bridges.progress_evidence,
+                    &*bridges.memory,
+                    state,
+                    goal_id,
+                    sub_name,
+                    &progress,
                 );
             }
 
             // Subordinate is alive and still working.
+            //
+            // Route the 50% heartbeat bump through
+            // `update_goal_progress_with_evidence` (issue #1967): an
+            // alive engineer is NOT evidence of progress. If no commits
+            // or PRs exist since the last update, the gate Rejects and
+            // the prior percent is preserved.
             let new_progress = GoalProgress::InProgress { percent: 50 };
-            if let Err(e) = update_goal_progress(&mut state.active_goals, goal_id, new_progress) {
-                eprintln!(
-                    "[simard] OODA advance_goal FAILED to persist InProgress for \
-                     goal '{goal_id}': {e}"
-                );
-                return make_outcome(
-                    action,
-                    false,
-                    format!(
-                        "subordinate '{sub_name}' alive (phase={phase}) but \
-                         persisting InProgress for goal '{goal_id}' failed: {e}"
-                    ),
-                );
+            match update_goal_progress_with_evidence(
+                &mut state.active_goals,
+                goal_id,
+                new_progress,
+                &*bridges.progress_evidence,
+                &*bridges.memory,
+                Utc::now(),
+            ) {
+                Ok(EvidenceDecision::Accept { .. }) => {}
+                Ok(EvidenceDecision::Reject { reason: rej }) => {
+                    eprintln!(
+                        "[simard] OODA subordinate heartbeat REJECTED 50% bump for \
+                         goal '{goal_id}' (subordinate '{sub_name}' alive, no \
+                         commits/PRs yet): {rej}"
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[simard] OODA advance_goal FAILED to persist InProgress for \
+                         goal '{goal_id}': {e}"
+                    );
+                    return make_outcome(
+                        action,
+                        false,
+                        format!(
+                            "subordinate '{sub_name}' alive (phase={phase}) but \
+                             persisting InProgress for goal '{goal_id}' failed: {e}"
+                        ),
+                    );
+                }
             }
             make_outcome(
                 action,
@@ -83,7 +116,13 @@ pub fn advance_goal_with_subordinate(
                 && progress.outcome.is_some()
             {
                 return validate_subordinate_completion(
-                    action, state, goal_id, sub_name, &progress,
+                    action,
+                    &*bridges.progress_evidence,
+                    &*bridges.memory,
+                    state,
+                    goal_id,
+                    sub_name,
+                    &progress,
                 );
             }
 
@@ -122,7 +161,13 @@ pub fn advance_goal_with_subordinate(
             {
                 if progress.outcome.is_some() {
                     return validate_subordinate_completion(
-                        action, state, goal_id, sub_name, &progress,
+                        action,
+                        &*bridges.progress_evidence,
+                        &*bridges.memory,
+                        state,
+                        goal_id,
+                        sub_name,
+                        &progress,
                     );
                 }
                 // Subordinate reported progress but no outcome — silent exit.
@@ -210,6 +255,8 @@ fn cleanup_engineer_worktree_for_goal(state: &mut OodaState, goal_id: &str) {
 /// different approach.
 pub fn validate_subordinate_completion(
     action: &PlannedAction,
+    checker: &dyn crate::goal_curation::progress_evidence::ProgressEvidenceChecker,
+    memory: &dyn crate::cognitive_memory::CognitiveMemoryOps,
     state: &mut OodaState,
     goal_id: &str,
     sub_name: &str,
@@ -219,21 +266,46 @@ pub fn validate_subordinate_completion(
     let outcome_text = progress.outcome.as_deref().unwrap_or("unknown");
 
     if has_artifacts {
+        // Route the Completed write through the progress-evidence gate
+        // (issue #1967) for audit-trail consistency. Rule 1 (commit on
+        // engineer branch) is satisfied by definition here because the
+        // subordinate produced commits; the gate Accepts and stamps
+        // `last_progress_update_at`.
         let new_progress = GoalProgress::Completed;
-        if let Err(e) = update_goal_progress(&mut state.active_goals, goal_id, new_progress) {
-            eprintln!(
-                "[simard] OODA advance_goal FAILED to persist Completed for \
-                 goal '{goal_id}': {e}"
-            );
-            return make_outcome(
-                action,
-                false,
-                format!(
-                    "subordinate '{sub_name}' produced {} commit(s) and {} PR(s) for \
-                     goal '{goal_id}' but persisting Completed failed: {e}",
-                    progress.commits_produced, progress.prs_produced,
-                ),
-            );
+        match update_goal_progress_with_evidence(
+            &mut state.active_goals,
+            goal_id,
+            new_progress,
+            checker,
+            memory,
+            Utc::now(),
+        ) {
+            Ok(EvidenceDecision::Accept { .. }) => {}
+            Ok(EvidenceDecision::Reject { reason: rej }) => {
+                // Unexpected — subordinate produced artifacts so rule 1
+                // should match. Log and fall through; the percent stays
+                // where it was, but we still treat the action as
+                // successful since the engineer did produce output.
+                eprintln!(
+                    "[simard] OODA validate_subordinate_completion: gate REJECTED \
+                     Completed for goal '{goal_id}' despite artifacts: {rej}"
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "[simard] OODA advance_goal FAILED to persist Completed for \
+                     goal '{goal_id}': {e}"
+                );
+                return make_outcome(
+                    action,
+                    false,
+                    format!(
+                        "subordinate '{sub_name}' produced {} commit(s) and {} PR(s) for \
+                         goal '{goal_id}' but persisting Completed failed: {e}",
+                        progress.commits_produced, progress.prs_produced,
+                    ),
+                );
+            }
         }
         eprintln!(
             "[simard] subordinate '{sub_name}' completed goal '{goal_id}' — \
@@ -254,6 +326,10 @@ pub fn validate_subordinate_completion(
     } else {
         // Subordinate claims success but produced nothing — this is the
         // silent exit bug (issue #905). Mark as failed for retry.
+        //
+        // `Blocked(reason)` is in the bypass set for the progress-evidence
+        // gate (it does not increase the percent) so we keep the direct
+        // `update_goal_progress` call here.
         eprintln!(
             "[simard] WARNING: subordinate '{sub_name}' reported outcome \
              '{outcome_text}' for goal '{goal_id}' but produced 0 commits \

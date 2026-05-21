@@ -174,9 +174,10 @@ pub use evidence::{
     EvidenceRecord, EvidenceSource, EvidenceStore, FileBackedEvidenceStore, InMemoryEvidenceStore,
 };
 pub use goal_curation::{
-    ActiveGoal, BacklogItem, DEFAULT_SEED_GOALS, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS,
+    ActiveGoal, BacklogItem, DEFAULT_SEED_GOALS, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS, WipRef,
     add_active_goal, add_backlog_item, archive_completed, load_goal_board, persist_board,
     promote_to_active, seed_default_board, update_goal_progress,
+    update_goal_progress_with_evidence,
 };
 pub use goals::{
     FileBackedGoalStore, GoalRecord, GoalStatus, GoalStore, GoalUpdate, InMemoryGoalStore,
