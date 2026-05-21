@@ -22,6 +22,7 @@ fn make_session(
         participants: participants.into_iter().map(String::from).collect(),
         explicit_questions: Vec::new(),
         themes: Vec::new(),
+        next_owner: None,
     }
 }
 

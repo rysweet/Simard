@@ -157,6 +157,30 @@ pub fn write_auto_save(transcript: &MeetingTranscript) -> SimardResult<PathBuf> 
     Ok(path)
 }
 
+/// Optional enrichment fields carried into the persisted handoff.
+///
+/// Issue #1954 added `next_owner` and `artifacts` to `MeetingHandoff`.
+/// Producer paths in `closing.rs` populate this struct so the persist
+/// helpers don't grow yet another tuple of positional parameters.
+#[derive(Clone, Debug, Default)]
+pub struct HandoffEnrichment<'a> {
+    /// Named owner expected to action this handoff next (e.g.
+    /// `"engineer"`, `"ooda-curate"`, a GitHub handle). Set by the
+    /// `/owner` slash command at the REPL or dashboard.
+    pub next_owner: Option<&'a str>,
+    /// Linked artifact pointers (transcript, bundle, markdown report,
+    /// template agendas). Producers compute these before writing so
+    /// downstream consumers can link without re-deriving paths.
+    pub artifacts: Vec<crate::meeting_facilitator::HandoffArtifact>,
+    /// Pre-built structured decisions (rationale + participants already
+    /// extracted). When `Some`, replaces the string-list `decisions` argument
+    /// of the writer — used by the closing path to thread non-placeholder
+    /// rationale/participants through the partial-close fast-path. When
+    /// `None`, decisions are reconstructed from `&[String]` via the
+    /// existing extract helpers (legacy behaviour).
+    pub structured_decisions: Option<Vec<crate::meeting_facilitator::MeetingDecision>>,
+}
+
 /// Write a `MeetingHandoff` artifact for OODA integration.
 ///
 /// Serializes the full structured data extracted from the meeting session —
@@ -169,14 +193,23 @@ pub fn write_handoff(
     action_items: &[HandoffActionItem],
     decisions: &[String],
 ) -> SimardResult<()> {
-    write_handoff_with_explicit(topic, summary, messages, action_items, decisions, &[])
+    write_handoff_with_explicit(
+        topic,
+        summary,
+        messages,
+        action_items,
+        decisions,
+        &[],
+        HandoffEnrichment::default(),
+    )
 }
 
 /// Variant of [`write_handoff`] that accepts a list of operator-supplied
 /// explicit open questions (recorded inline via `/question`). Explicit
 /// questions are prepended to the inferred ones with `explicit=true`, and
 /// inferred questions whose text duplicates an explicit one are dropped.
-/// Issue #1730 seam (b).
+/// Issue #1730 seam (b). Extended in issue #1954 with `HandoffEnrichment`
+/// carrying `next_owner`, `artifacts`, and pre-built structured decisions.
 pub fn write_handoff_with_explicit(
     topic: &str,
     summary: &str,
@@ -184,6 +217,7 @@ pub fn write_handoff_with_explicit(
     action_items: &[HandoffActionItem],
     decisions: &[String],
     explicit_questions: &[String],
+    enrichment: HandoffEnrichment<'_>,
 ) -> SimardResult<()> {
     let started_at = messages
         .first()
@@ -216,18 +250,26 @@ pub fn write_handoff_with_explicit(
         .collect();
 
     // Convert decision strings to MeetingDecision structs, extracting
-    // rationale context from surrounding messages when available.
-    let facilitator_decisions: Vec<MeetingDecision> = decisions
-        .iter()
-        .map(|d| {
-            let rationale = extract::extract_decision_rationale_pub(d, messages);
-            MeetingDecision {
-                description: d.clone(),
-                rationale,
-                participants: extract::extract_decision_participants_pub(d, messages),
-            }
-        })
-        .collect();
+    // rationale context from surrounding messages when available — unless
+    // the producer already supplied pre-built structured decisions (issue
+    // #1954, which uses this to thread non-placeholder rationale through
+    // the partial-close fast-path).
+    let facilitator_decisions: Vec<MeetingDecision> =
+        if let Some(prebuilt) = enrichment.structured_decisions.clone() {
+            prebuilt
+        } else {
+            decisions
+                .iter()
+                .map(|d| {
+                    let rationale = extract::extract_decision_rationale_pub(d, messages);
+                    MeetingDecision {
+                        description: d.clone(),
+                        rationale,
+                        participants: extract::extract_decision_participants_pub(d, messages),
+                    }
+                })
+                .collect()
+        };
 
     // Extract open questions from message content; prepend explicit ones.
     let inferred_questions = extract_open_questions(messages);
@@ -287,6 +329,8 @@ pub fn write_handoff_with_explicit(
         participants,
         themes,
         transcript_path: None,
+        next_owner: enrichment.next_owner.map(|s| s.to_string()),
+        artifacts: enrichment.artifacts.clone(),
     };
 
     let dir = default_handoff_dir();
@@ -315,6 +359,7 @@ pub fn write_handoff_bundle(
     open_questions: Vec<crate::meeting_facilitator::OpenQuestion>,
     themes: Vec<String>,
     participants: Vec<String>,
+    enrichment: HandoffEnrichment<'_>,
 ) -> SimardResult<std::path::PathBuf> {
     use crate::meeting_facilitator::{
         ActionItem as FacilitatorActionItem, MeetingDecision as FacilitatorDecision,
@@ -349,14 +394,22 @@ pub fn write_handoff_bundle(
         })
         .collect();
 
-    let facilitator_decisions: Vec<FacilitatorDecision> = decisions
-        .iter()
-        .map(|d| FacilitatorDecision {
-            description: d.clone(),
-            rationale: extract::extract_decision_rationale_pub(d, messages),
-            participants: extract::extract_decision_participants_pub(d, messages),
-        })
-        .collect();
+    // Honour pre-built structured decisions when the producer supplied
+    // them (issue #1954) — otherwise rebuild from the string list using
+    // the heuristic extractors.
+    let facilitator_decisions: Vec<FacilitatorDecision> =
+        if let Some(prebuilt) = enrichment.structured_decisions.clone() {
+            prebuilt
+        } else {
+            decisions
+                .iter()
+                .map(|d| FacilitatorDecision {
+                    description: d.clone(),
+                    rationale: extract::extract_decision_rationale_pub(d, messages),
+                    participants: extract::extract_decision_participants_pub(d, messages),
+                })
+                .collect()
+        };
 
     let meeting_id = derive_meeting_id(&started_at, topic);
     let mut handoff = MeetingHandoff {
@@ -373,6 +426,8 @@ pub fn write_handoff_bundle(
         participants,
         themes,
         transcript_path: None,
+        next_owner: enrichment.next_owner.map(|s| s.to_string()),
+        artifacts: enrichment.artifacts.clone(),
     };
 
     let lines: Vec<crate::meeting_facilitator::BundleTranscriptLine> = messages

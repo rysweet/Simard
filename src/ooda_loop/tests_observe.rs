@@ -173,6 +173,8 @@ fn scan_unprocessed_handoffs_returns_true_for_unprocessed() {
         themes: Vec::new(),
         meeting_id: String::new(),
         transcript_path: None,
+        next_owner: None,
+        artifacts: Vec::new(),
     };
     write_meeting_handoff(dir.path(), &handoff).unwrap();
 
@@ -202,6 +204,8 @@ fn scan_unprocessed_handoffs_returns_false_when_processed() {
         themes: Vec::new(),
         meeting_id: String::new(),
         transcript_path: None,
+        next_owner: None,
+        artifacts: Vec::new(),
     };
     write_meeting_handoff(dir.path(), &handoff).unwrap();
 

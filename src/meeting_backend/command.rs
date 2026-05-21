@@ -32,6 +32,11 @@ pub enum MeetingCommand {
     /// Operator marks an open question deterministically (e.g.
     /// `/question What is our SLO target?`).
     Question(String),
+    /// Operator names the agent / persona / human expected to action this
+    /// handoff (e.g. `/owner engineer`, `/owner ooda-curate`, `/owner alice`).
+    /// Empty payload (a bare `/owner`) falls through to conversation so
+    /// the operator's intent isn't silently coerced. Added in issue #1954.
+    Owner(String),
     /// Natural language — forwarded to the LLM.
     Conversation(String),
 }
@@ -90,6 +95,14 @@ pub fn parse_command(input: &str) -> MeetingCommand {
                 MeetingCommand::Conversation(trimmed.to_string())
             } else {
                 MeetingCommand::Question(arg)
+            }
+        }
+        _ if lower.starts_with("/owner ") => {
+            let arg = trimmed["/owner ".len()..].trim().to_string();
+            if arg.is_empty() {
+                MeetingCommand::Conversation(trimmed.to_string())
+            } else {
+                MeetingCommand::Owner(arg)
             }
         }
         _ => MeetingCommand::Conversation(trimmed.to_string()),
@@ -317,6 +330,42 @@ mod tests {
         assert_eq!(
             parse_command("/question  "),
             MeetingCommand::Conversation("/question".to_string()),
+        );
+    }
+
+    // ── Inline /owner (issue #1954) ──────────────────────────────────
+
+    #[test]
+    fn parse_owner_with_arg() {
+        assert_eq!(
+            parse_command("/owner engineer"),
+            MeetingCommand::Owner("engineer".to_string()),
+        );
+        assert_eq!(
+            parse_command("  /Owner  alice  "),
+            MeetingCommand::Owner("alice".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_owner_preserves_case() {
+        // GitHub handles are case-sensitive; the parser must preserve
+        // operator-typed case rather than lowercasing.
+        assert_eq!(
+            parse_command("/owner RyanSweet"),
+            MeetingCommand::Owner("RyanSweet".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_owner_empty_arg_is_conversation() {
+        assert_eq!(
+            parse_command("/owner"),
+            MeetingCommand::Conversation("/owner".to_string()),
+        );
+        assert_eq!(
+            parse_command("/owner    "),
+            MeetingCommand::Conversation("/owner".to_string()),
         );
     }
 }

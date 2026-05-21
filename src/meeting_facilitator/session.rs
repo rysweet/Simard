@@ -60,6 +60,7 @@ pub fn start_meeting(topic: &str, bridge: &dyn CognitiveMemoryOps) -> SimardResu
         participants: Vec::new(),
         explicit_questions: Vec::new(),
         themes: Vec::new(),
+        next_owner: None,
     })
 }
 

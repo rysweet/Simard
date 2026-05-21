@@ -68,6 +68,7 @@ fn sample_handoff() -> MeetingHandoff {
         participants: Vec::new(),
         explicit_questions: Vec::new(),
         themes: Vec::new(),
+        next_owner: None,
     };
     MeetingHandoff::from_session(&session)
 }
@@ -265,6 +266,7 @@ fn act_on_decisions_with_empty_handoff_creates_no_issues() {
         participants: Vec::new(),
         explicit_questions: Vec::new(),
         themes: Vec::new(),
+        next_owner: None,
     };
     let handoff = MeetingHandoff::from_session(&session);
     write_meeting_handoff(&dir, &handoff).unwrap();

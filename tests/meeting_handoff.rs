@@ -71,6 +71,7 @@ fn sample_session_with_questions() -> MeetingSession {
         participants: Vec::new(),
         explicit_questions: Vec::new(),
         themes: Vec::new(),
+        next_owner: None,
     }
 }
 
@@ -85,6 +86,7 @@ fn sample_empty_session() -> MeetingSession {
         participants: Vec::new(),
         explicit_questions: Vec::new(),
         themes: Vec::new(),
+        next_owner: None,
     }
 }
 
@@ -456,6 +458,7 @@ fn handoff_with_only_action_items_no_decisions() {
         participants: Vec::new(),
         explicit_questions: Vec::new(),
         themes: Vec::new(),
+        next_owner: None,
     };
     let handoff = MeetingHandoff::from_session(&session);
     assert!(handoff.decisions.is_empty());
@@ -483,6 +486,7 @@ fn handoff_with_only_decisions_no_actions() {
         participants: Vec::new(),
         explicit_questions: Vec::new(),
         themes: Vec::new(),
+        next_owner: None,
     };
     let handoff = MeetingHandoff::from_session(&session);
     assert_eq!(handoff.decisions.len(), 1);

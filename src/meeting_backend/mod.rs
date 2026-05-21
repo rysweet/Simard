@@ -157,6 +157,11 @@ pub struct MeetingBackend {
     /// distinguish operator-supplied items from inferred ones. Issue #1730
     /// seam (b).
     explicit_questions: Vec<String>,
+    /// Owner set inline by the operator via `/owner <name>`. Names the next
+    /// agent/persona/human expected to action the handoff (e.g. `engineer`,
+    /// `ooda-curate`, `act-on-decisions`, a GitHub handle). Surfaced on the
+    /// `MeetingHandoff` via the new `next_owner` field. Added in #1954.
+    explicit_next_owner: Option<String>,
 }
 
 impl MeetingBackend {
@@ -195,6 +200,7 @@ impl MeetingBackend {
             explicit_decisions: Vec::new(),
             explicit_action_items: Vec::new(),
             explicit_questions: Vec::new(),
+            explicit_next_owner: None,
         }
     }
 
@@ -371,6 +377,25 @@ impl MeetingBackend {
     /// Read the open questions the operator recorded inline so far.
     pub fn explicit_questions(&self) -> &[String] {
         &self.explicit_questions
+    }
+
+    /// Record the next responsible owner the operator named with
+    /// `/owner <name>`. Trimmed; empty values clear the value. Stored
+    /// verbatim so case is preserved for GitHub handles and persona names.
+    /// Surfaced into the `next_owner` field of the resulting
+    /// `MeetingHandoff`. Added in issue #1954.
+    pub fn push_next_owner(&mut self, text: &str) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            self.explicit_next_owner = None;
+        } else {
+            self.explicit_next_owner = Some(trimmed.to_string());
+        }
+    }
+
+    /// Read the next-owner value the operator set inline (if any).
+    pub fn explicit_next_owner(&self) -> Option<&str> {
+        self.explicit_next_owner.as_deref()
     }
 
     // --- Private helpers ---

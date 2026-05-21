@@ -61,19 +61,44 @@ pub(super) fn dispatch_act_on_decisions() -> Result<(), Box<dyn std::error::Erro
         handoff.topic, handoff.closed_at
     );
 
+    // Issue #1954: build a shared "linked artifacts" markdown block
+    // appended to every issue body so reviewers can jump straight from
+    // the issue to the transcript / bundle / report.
+    let artifacts_md = if handoff.artifacts.is_empty() {
+        String::new()
+    } else {
+        let mut s = String::from("\n\n**Linked artifacts:**\n");
+        for art in &handoff.artifacts {
+            let desc = art
+                .description
+                .as_deref()
+                .map(|d| format!(" — {d}"))
+                .unwrap_or_default();
+            s.push_str(&format!("- `{}`: {}{}\n", art.kind, art.uri_or_path, desc));
+        }
+        s
+    };
+    let owner_hint_md = handoff
+        .next_owner
+        .as_deref()
+        .map(|o| format!("\n**Assignee hint (meeting):** {o}\n"))
+        .unwrap_or_default();
+
     let mut created = 0u32;
 
     for decision in &handoff.decisions {
         let title = format!("Decision: {}", decision.description);
         let body = format!(
-            "**Rationale:** {}\n**Participants:** {}\n\n_From meeting: {}_",
+            "**Rationale:** {}\n**Participants:** {}{}\n\n_From meeting: {}_{}",
             decision.rationale,
             if decision.participants.is_empty() {
                 "(none)".to_string()
             } else {
                 decision.participants.join(", ")
             },
+            owner_hint_md,
             handoff.topic,
+            artifacts_md,
         );
         if gh_create_issue(&title, &body, &decision.description) {
             created += 1;
@@ -84,8 +109,8 @@ pub(super) fn dispatch_act_on_decisions() -> Result<(), Box<dyn std::error::Erro
         let title = format!("Action: {}", item.description);
         let due = item.due_description.as_deref().unwrap_or("(unspecified)");
         let body = format!(
-            "**Owner:** {}\n**Priority:** {}\n**Due:** {}\n\n_From meeting: {}_",
-            item.owner, item.priority, due, handoff.topic,
+            "**Owner:** {}\n**Priority:** {}\n**Due:** {}{}\n\n_From meeting: {}_{}",
+            item.owner, item.priority, due, owner_hint_md, handoff.topic, artifacts_md,
         );
         if gh_create_issue(&title, &body, &item.description) {
             created += 1;
@@ -97,6 +122,21 @@ pub(super) fn dispatch_act_on_decisions() -> Result<(), Box<dyn std::error::Erro
         for q in &handoff.open_questions {
             let tag = if q.explicit { "explicit" } else { "inferred" };
             println!("  - [{tag}] {}", q.text);
+        }
+    }
+
+    if let Some(ref owner) = handoff.next_owner {
+        println!("\nNext owner: {owner}");
+    }
+    if !handoff.artifacts.is_empty() {
+        println!("\nLinked artifacts:");
+        for art in &handoff.artifacts {
+            let desc = art
+                .description
+                .as_deref()
+                .map(|d| format!(" — {d}"))
+                .unwrap_or_default();
+            println!("  - [{}] {}{}", art.kind, art.uri_or_path, desc);
         }
     }
 
@@ -142,6 +182,8 @@ mod tests {
             themes: Vec::new(),
             meeting_id: String::new(),
             transcript_path: None,
+            next_owner: None,
+            artifacts: Vec::new(),
         }
     }
 
@@ -216,6 +258,8 @@ mod tests {
             themes: Vec::new(),
             meeting_id: String::new(),
             transcript_path: None,
+            next_owner: None,
+            artifacts: Vec::new(),
         };
         let json = serde_json::to_string(&h).unwrap();
         let h2: MeetingHandoff = serde_json::from_str(&json).unwrap();
