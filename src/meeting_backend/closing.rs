@@ -240,28 +240,8 @@ impl MeetingBackend {
             .map(|q| q.to_lowercase())
             .collect();
 
-        // Write MeetingHandoff artifact for OODA integration.
-        if let Err(e) = persist::write_handoff_with_explicit(
-            &self.topic,
-            &summary_text,
-            &self.history,
-            &action_items,
-            &decisions,
-            &self.explicit_questions,
-        ) {
-            warn!(
-                target: "simard::meeting_backend::closing",
-                phase = "persist_handoff",
-                outcome = "error",
-                error = %e,
-                handoff_partial = true,
-                reason = PartialReason::PersistenceError.as_wire_str(),
-                "Failed to write meeting handoff"
-            );
-            partial_reason.get_or_insert(PartialReason::PersistenceError);
-        }
-
-        // Explicit /theme entries come first; inferred themes fill in the rest.
+        // ── Themes + participants (computed before persist so the
+        // enrichment payload can use them) ──
         let inferred_themes = persist::extract_themes(&self.history);
         let mut themes: Vec<String> = self.themes.clone();
         for t in inferred_themes {
@@ -271,7 +251,6 @@ impl MeetingBackend {
             }
         }
 
-        // Collect unique participants from messages and action item assignees.
         let mut participants: Vec<String> = Vec::new();
         for msg in &self.history {
             let role_name = match msg.role {
@@ -292,8 +271,10 @@ impl MeetingBackend {
             }
         }
 
-        // ── Auto-export markdown report on /end ──
-        // Convert extracted decision strings to MeetingDecision structs (with rationale).
+        // ── Build structured decisions once (issue #1954) ──
+        // Threaded through both the legacy handoff and the bundle so
+        // rationale/participants extracted from the live conversation
+        // aren't reduced to `String::new()` placeholders downstream.
         let structured_decisions: Vec<crate::meeting_facilitator::MeetingDecision> = decisions
             .iter()
             .map(|d| {
@@ -306,6 +287,9 @@ impl MeetingBackend {
                 }
             })
             .collect();
+
+        // ── Write the markdown report first so its path can be carried
+        // into the handoff's artifacts list (issue #1954). ──
         let markdown_report_path = match persist::write_handoff_markdown_report(
             &self.topic,
             &self.started_at,
@@ -330,6 +314,57 @@ impl MeetingBackend {
                 None
             }
         };
+
+        // ── Derive next_owner (issue #1954) ──
+        // Precedence: explicit `/owner <name>` > most-frequent
+        // `action_items[].assignee` (when non-empty) > `None`.
+        let next_owner_owned = self
+            .explicit_next_owner
+            .clone()
+            .or_else(|| most_frequent_action_owner(&action_items));
+
+        // ── Pre-compute the per-meeting bundle directory (deterministic
+        // from `meeting_id`) so the artifacts list can name it before the
+        // bundle writer actually runs (issue #1954). ──
+        let meeting_id =
+            crate::meeting_facilitator::derive_meeting_id(&self.started_at, &self.topic);
+        let bundle_dir_expected = crate::meeting_facilitator::meeting_bundle_dir(&meeting_id);
+
+        // ── Build the artifacts list (issue #1954) ──
+        let artifacts = build_handoff_artifacts(
+            transcript_path.as_deref(),
+            Some(&bundle_dir_expected.to_string_lossy()),
+            markdown_report_path.as_deref(),
+            &self.applied_templates,
+        );
+
+        let enrichment = persist::HandoffEnrichment {
+            next_owner: next_owner_owned.as_deref(),
+            artifacts: artifacts.clone(),
+            structured_decisions: Some(structured_decisions.clone()),
+        };
+
+        // Write MeetingHandoff artifact for OODA integration.
+        if let Err(e) = persist::write_handoff_with_explicit(
+            &self.topic,
+            &summary_text,
+            &self.history,
+            &action_items,
+            &decisions,
+            &self.explicit_questions,
+            enrichment.clone(),
+        ) {
+            warn!(
+                target: "simard::meeting_backend::closing",
+                phase = "persist_handoff",
+                outcome = "error",
+                error = %e,
+                handoff_partial = true,
+                reason = PartialReason::PersistenceError.as_wire_str(),
+                "Failed to write meeting handoff"
+            );
+            partial_reason.get_or_insert(PartialReason::PersistenceError);
+        }
 
         // ── Per-meeting structured handoff bundle ──
         // Writes ~/.simard/meetings/<meeting_id>/{meeting_handoff.json,
@@ -357,6 +392,7 @@ impl MeetingBackend {
             bundle_open_questions,
             themes.clone(),
             participants.clone(),
+            enrichment,
         ) {
             Ok(p) => Some(p.to_string_lossy().to_string()),
             Err(e) => {
@@ -498,26 +534,6 @@ impl MeetingBackend {
             }
         };
 
-        if let Err(e) = persist::write_handoff_with_explicit(
-            &self.topic,
-            &summary_text,
-            &self.history,
-            &action_items,
-            &decisions,
-            &self.explicit_questions,
-        ) {
-            warn!(
-                target: "simard::meeting_backend::closing",
-                phase = "persist_handoff",
-                outcome = "error",
-                error = %e,
-                handoff_partial = true,
-                reason = PartialReason::PersistenceError.as_wire_str(),
-                "Failed to write partial meeting handoff"
-            );
-            partial_reason.get_or_insert(PartialReason::PersistenceError);
-        }
-
         let explicit_question_set: std::collections::HashSet<String> = self
             .explicit_questions
             .iter()
@@ -534,14 +550,26 @@ impl MeetingBackend {
                 }
             })
             .collect();
+
+        // Issue #1954: extract rationale/participants from the live
+        // history rather than emitting placeholder `String::new()`
+        // values. Same heuristics as the happy-path `close()` flow so
+        // partial closes stay informative.
         let structured_decisions: Vec<crate::meeting_facilitator::MeetingDecision> = decisions
             .iter()
-            .map(|d| crate::meeting_facilitator::MeetingDecision {
-                description: d.clone(),
-                rationale: String::new(),
-                participants: Vec::new(),
+            .map(|d| {
+                let rationale = persist::extract_decision_rationale_pub(d, &self.history);
+                let participants = persist::extract_decision_participants_pub(d, &self.history);
+                crate::meeting_facilitator::MeetingDecision {
+                    description: d.clone(),
+                    rationale,
+                    participants,
+                }
             })
             .collect();
+
+        // Write the markdown report first so its path can flow into
+        // the artifacts list of the handoff JSON (issue #1954).
         let markdown_report_path = persist::write_handoff_markdown_report(
             &self.topic,
             &self.started_at,
@@ -554,6 +582,51 @@ impl MeetingBackend {
         .ok()
         .map(|p| p.to_string_lossy().to_string());
 
+        // Derive `next_owner` (issue #1954): explicit `/owner` value first,
+        // then most-frequent action assignee, otherwise None.
+        let next_owner_owned = self
+            .explicit_next_owner
+            .clone()
+            .or_else(|| most_frequent_action_owner(&action_items));
+
+        let meeting_id =
+            crate::meeting_facilitator::derive_meeting_id(&self.started_at, &self.topic);
+        let bundle_dir_expected = crate::meeting_facilitator::meeting_bundle_dir(&meeting_id);
+
+        let artifacts = build_handoff_artifacts(
+            transcript_path.as_deref(),
+            Some(&bundle_dir_expected.to_string_lossy()),
+            markdown_report_path.as_deref(),
+            &self.applied_templates,
+        );
+
+        let enrichment = persist::HandoffEnrichment {
+            next_owner: next_owner_owned.as_deref(),
+            artifacts: artifacts.clone(),
+            structured_decisions: Some(structured_decisions.clone()),
+        };
+
+        if let Err(e) = persist::write_handoff_with_explicit(
+            &self.topic,
+            &summary_text,
+            &self.history,
+            &action_items,
+            &decisions,
+            &self.explicit_questions,
+            enrichment.clone(),
+        ) {
+            warn!(
+                target: "simard::meeting_backend::closing",
+                phase = "persist_handoff",
+                outcome = "error",
+                error = %e,
+                handoff_partial = true,
+                reason = PartialReason::PersistenceError.as_wire_str(),
+                "Failed to write partial meeting handoff"
+            );
+            partial_reason.get_or_insert(PartialReason::PersistenceError);
+        }
+
         let bundle_dir = match persist::write_handoff_bundle(
             &self.topic,
             &summary_text,
@@ -564,6 +637,7 @@ impl MeetingBackend {
             bundle_open_questions,
             themes.clone(),
             participants.clone(),
+            enrichment,
         ) {
             Ok(p) => Some(p.to_string_lossy().to_string()),
             Err(e) => {
@@ -619,4 +693,89 @@ impl MeetingBackend {
             partial_reason,
         })
     }
+}
+
+/// Pick the most-frequent assignee across action items, breaking ties by
+/// first-appearance order. Returns `None` when no action item has an
+/// `assignee`.
+///
+/// Used as the fallback for `MeetingHandoff.next_owner` when the operator
+/// did not record an explicit `/owner` (issue #1954).
+fn most_frequent_action_owner(action_items: &[super::types::HandoffActionItem]) -> Option<String> {
+    use std::collections::HashMap;
+
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut first_seen: Vec<String> = Vec::new();
+    for a in action_items {
+        if let Some(ref owner) = a.assignee {
+            let trimmed = owner.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let key = trimmed.to_string();
+            if !counts.contains_key(&key) {
+                first_seen.push(key.clone());
+            }
+            *counts.entry(key).or_insert(0) += 1;
+        }
+    }
+    let mut best: Option<&String> = None;
+    let mut best_count: usize = 0;
+    for owner in &first_seen {
+        let c = counts.get(owner).copied().unwrap_or(0);
+        if c > best_count {
+            best_count = c;
+            best = Some(owner);
+        }
+    }
+    best.cloned()
+}
+
+/// Build the `artifacts[]` payload for a [`MeetingHandoff`] (issue #1954).
+///
+/// Emits one entry per known artifact source: transcript JSON, per-meeting
+/// bundle directory, ad-hoc markdown report, and one entry per applied
+/// meeting template (pointing at the bundle so consumers can read the
+/// inlined agenda).
+fn build_handoff_artifacts(
+    transcript_path: Option<&str>,
+    bundle_dir: Option<&str>,
+    markdown_report_path: Option<&str>,
+    applied_templates: &[crate::meeting_backend::types::AppliedTemplate],
+) -> Vec<crate::meeting_facilitator::HandoffArtifact> {
+    use crate::meeting_facilitator::{
+        ARTIFACT_KIND_BUNDLE, ARTIFACT_KIND_MARKDOWN_REPORT, ARTIFACT_KIND_TEMPLATE_AGENDA,
+        ARTIFACT_KIND_TRANSCRIPT, HandoffArtifact,
+    };
+
+    let mut out: Vec<HandoffArtifact> = Vec::new();
+    if let Some(p) = transcript_path {
+        out.push(HandoffArtifact {
+            kind: ARTIFACT_KIND_TRANSCRIPT.to_string(),
+            uri_or_path: p.to_string(),
+            description: Some("Meeting transcript JSON".to_string()),
+        });
+    }
+    if let Some(p) = bundle_dir {
+        out.push(HandoffArtifact {
+            kind: ARTIFACT_KIND_BUNDLE.to_string(),
+            uri_or_path: p.to_string(),
+            description: Some("Per-meeting handoff bundle directory".to_string()),
+        });
+    }
+    if let Some(p) = markdown_report_path {
+        out.push(HandoffArtifact {
+            kind: ARTIFACT_KIND_MARKDOWN_REPORT.to_string(),
+            uri_or_path: p.to_string(),
+            description: Some("Auto-exported meeting report (markdown)".to_string()),
+        });
+    }
+    for tpl in applied_templates {
+        out.push(HandoffArtifact {
+            kind: ARTIFACT_KIND_TEMPLATE_AGENDA.to_string(),
+            uri_or_path: bundle_dir.unwrap_or("").to_string(),
+            description: Some(format!("Applied meeting template: {}", tpl.name)),
+        });
+    }
+    out
 }

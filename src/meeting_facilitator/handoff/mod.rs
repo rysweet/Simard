@@ -36,8 +36,56 @@ pub fn default_handoff_dir() -> PathBuf {
     crate::state_root::resolve_subdir("meeting_handoffs")
 }
 
+/// Well-known artifact-kind tag for a meeting transcript file.
+pub const ARTIFACT_KIND_TRANSCRIPT: &str = "transcript";
+/// Well-known artifact-kind tag for a per-meeting bundle directory.
+pub const ARTIFACT_KIND_BUNDLE: &str = "bundle";
+/// Well-known artifact-kind tag for the human-readable markdown report.
+pub const ARTIFACT_KIND_MARKDOWN_REPORT: &str = "markdown_report";
+/// Well-known artifact-kind tag for an applied template-agenda file.
+pub const ARTIFACT_KIND_TEMPLATE_AGENDA: &str = "template_agenda";
+/// Catch-all artifact-kind tag for anything not covered by the well-known set.
+pub const ARTIFACT_KIND_OTHER: &str = "other";
+
+/// A single artifact pointer carried in the meeting handoff payload.
+///
+/// Lets downstream consumers (engineer loop, dashboard chat, `act-on-decisions`)
+/// link directly to artifacts produced by the close pipeline (transcript,
+/// bundle directory, markdown report, applied template agendas) instead of
+/// re-deriving paths from `meeting_id`, `topic`, and `started_at`.
+///
+/// `kind` is one of the well-known [`ARTIFACT_KIND_TRANSCRIPT`],
+/// [`ARTIFACT_KIND_BUNDLE`], [`ARTIFACT_KIND_MARKDOWN_REPORT`],
+/// [`ARTIFACT_KIND_TEMPLATE_AGENDA`], or [`ARTIFACT_KIND_OTHER`]. Custom
+/// kinds are permitted but consumers may only render the well-known ones
+/// specially; unknown kinds fall through to a generic listing.
+///
+/// `path` is the URI-or-path field named in issue #1954. It is a string
+/// so artifacts can refer to absolute filesystem paths, bundle-relative
+/// paths, or remote URIs (e.g. `https://…/meeting_handoff.md`) without
+/// inventing a separate enum.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HandoffArtifact {
+    /// Well-known kind tag — see the `ARTIFACT_KIND_*` constants.
+    pub kind: String,
+    /// Filesystem path or remote URI pointing at the artifact.
+    ///
+    /// Field name matches the schema in issue #1954. The `path` alias is
+    /// accepted on deserialize for tooling that wrote the prior shape.
+    #[serde(alias = "path")]
+    pub uri_or_path: String,
+    /// Optional human-readable description of what the artifact contains.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
 /// A handoff artifact produced when a meeting closes. Contains decisions,
-/// action items, and open questions extracted from the meeting session.
+/// action items, open questions, the next responsible owner, and a list
+/// of linked artifacts.
+///
+/// All fields added after the initial schema use `#[serde(default)]` so
+/// legacy handoffs (written before the field existed) deserialize cleanly
+/// with empty defaults. No on-disk migration step is required.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MeetingHandoff {
     /// Stable, sortable identifier for this meeting. Derived from
@@ -71,6 +119,21 @@ pub struct MeetingHandoff {
     /// High-level themes or recurring topics identified during the meeting.
     #[serde(default)]
     pub themes: Vec<String>,
+    /// Names the agent, persona, or human expected to action this handoff
+    /// (e.g. `"engineer"`, `"ooda-curate"`, `"act-on-decisions"`, or a
+    /// GitHub handle). Producer derives from the explicit `/owner <name>`
+    /// slash command and otherwise falls back to the most-frequent
+    /// `action_items[].owner`. Added in issue #1954; legacy handoffs
+    /// deserialize as `None`.
+    #[serde(default)]
+    pub next_owner: Option<String>,
+    /// Direct pointers to the artifacts produced by the close pipeline
+    /// (transcript file, bundle directory, markdown report, applied
+    /// template agendas, …). Lets consumers link without re-deriving
+    /// paths from `meeting_id`. Added in issue #1954; legacy handoffs
+    /// deserialize as `[]`.
+    #[serde(default)]
+    pub artifacts: Vec<HandoffArtifact>,
 }
 
 /// Build a stable, sortable meeting id from a started-at timestamp and a
@@ -261,6 +324,8 @@ impl MeetingHandoff {
             participants: all_participants,
             themes,
             transcript_path: None,
+            next_owner: session.next_owner.clone(),
+            artifacts: Vec::new(),
         }
     }
 

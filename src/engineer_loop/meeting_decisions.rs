@@ -37,6 +37,28 @@ pub(crate) fn load_carried_meeting_decisions(state_root: &Path) -> SimardResult<
                     handoff.topic, a.description, a.owner, a.priority,
                 ));
             }
+            // Issue #1954: surface `next_owner` and `artifacts[]` so the
+            // engineer loop's next inspect step can see who the meeting
+            // expected to pick up the work and which files to read. The
+            // canonical CarriedMeetingContext promotion is deferred to
+            // issue #6 of epic #1951.
+            if let Some(ref owner) = handoff.next_owner {
+                carried.push(format!(
+                    "meeting handoff — {} next_owner: {}",
+                    handoff.topic, owner,
+                ));
+            }
+            for art in &handoff.artifacts {
+                let desc = art
+                    .description
+                    .as_deref()
+                    .map(|s| format!(" ({s})"))
+                    .unwrap_or_default();
+                carried.push(format!(
+                    "meeting handoff — {} artifact [{}]: {}{}",
+                    handoff.topic, art.kind, art.uri_or_path, desc,
+                ));
+            }
         }
         Ok(_) => {}
         Err(e) => {

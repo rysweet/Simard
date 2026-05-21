@@ -20,6 +20,7 @@ fn make_session(
         participants: participants.into_iter().map(String::from).collect(),
         explicit_questions: Vec::new(),
         themes: Vec::new(),
+        next_owner: None,
     }
 }
 
@@ -351,4 +352,155 @@ fn mark_processed_in_place_persists() {
 
     let loaded = load_meeting_handoff(dir.path()).unwrap().unwrap();
     assert!(loaded.processed);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #1954 — handoff enrichment (next_owner + artifacts) acceptance tests
+// ---------------------------------------------------------------------------
+
+use super::handoff::{
+    ARTIFACT_KIND_BUNDLE, ARTIFACT_KIND_MARKDOWN_REPORT, ARTIFACT_KIND_TRANSCRIPT, HandoffArtifact,
+};
+
+fn sample_artifacts() -> Vec<HandoffArtifact> {
+    vec![
+        HandoffArtifact {
+            kind: ARTIFACT_KIND_TRANSCRIPT.to_string(),
+            uri_or_path: "/tmp/meetings/transcript-2026-05-01.json".to_string(),
+            description: Some("Meeting transcript JSON".to_string()),
+        },
+        HandoffArtifact {
+            kind: ARTIFACT_KIND_BUNDLE.to_string(),
+            uri_or_path: "/tmp/meetings/2026-05-01-sprint-planning/".to_string(),
+            description: Some("Per-meeting handoff bundle directory".to_string()),
+        },
+        HandoffArtifact {
+            kind: ARTIFACT_KIND_MARKDOWN_REPORT.to_string(),
+            uri_or_path: "/tmp/meetings/20260501_sprint-planning.md".to_string(),
+            description: None,
+        },
+    ]
+}
+
+#[test]
+fn round_trip_handoff_with_next_owner_and_artifacts() {
+    // Construct a fully-populated handoff and assert byte-stable round-trip
+    // (serialize → deserialize → re-serialize → byte equality), which is
+    // the acceptance bar from issue #1954.
+    let handoff = MeetingHandoff {
+        meeting_id: "20260501T070000Z-sprint-planning".to_string(),
+        topic: "Sprint planning".to_string(),
+        started_at: "2026-05-01T07:00:00Z".to_string(),
+        closed_at: "2026-05-01T07:30:00Z".to_string(),
+        decisions: vec![sample_decision()],
+        action_items: vec![sample_action()],
+        open_questions: vec![OpenQuestion {
+            text: "Should we increase the iteration budget?".to_string(),
+            explicit: true,
+        }],
+        processed: false,
+        duration_secs: Some(1800),
+        transcript: vec!["operator: hi".to_string()],
+        participants: vec!["alice".to_string()],
+        themes: vec!["handoff".to_string()],
+        transcript_path: Some("/tmp/meetings/transcript-2026-05-01.json".to_string()),
+        next_owner: Some("engineer".to_string()),
+        artifacts: sample_artifacts(),
+    };
+
+    let json = serde_json::to_string_pretty(&handoff).expect("serialize ok");
+    let parsed: MeetingHandoff = serde_json::from_str(&json).expect("deserialize ok");
+    assert_eq!(parsed.next_owner.as_deref(), Some("engineer"));
+    assert_eq!(parsed.artifacts.len(), 3);
+    assert_eq!(parsed.artifacts[0].kind, ARTIFACT_KIND_TRANSCRIPT);
+    assert_eq!(
+        parsed.artifacts[0].uri_or_path,
+        "/tmp/meetings/transcript-2026-05-01.json"
+    );
+    assert_eq!(parsed.artifacts[2].description, None);
+
+    // Byte-stable round-trip — guards against accidental field reorders
+    // or default-skipping changes that could break downstream tooling.
+    let reserialized = serde_json::to_string_pretty(&parsed).expect("re-serialize ok");
+    assert_eq!(json, reserialized);
+}
+
+#[test]
+fn legacy_handoff_without_next_owner_or_artifacts_deserializes() {
+    // Issue #1954: artifacts written before the schema landed must still
+    // deserialize cleanly with `next_owner = None` and `artifacts = []`.
+    // No on-disk migration step is required.
+    let legacy_json = r#"{
+        "meeting_id": "20260101T000000Z-legacy",
+        "topic": "Legacy meeting",
+        "started_at": "2026-01-01T00:00:00Z",
+        "closed_at": "2026-01-01T00:30:00Z",
+        "decisions": [],
+        "action_items": [],
+        "open_questions": [],
+        "processed": false,
+        "duration_secs": 1800,
+        "transcript": [],
+        "participants": [],
+        "themes": [],
+        "transcript_path": null
+    }"#;
+
+    let parsed: MeetingHandoff = serde_json::from_str(legacy_json).expect("legacy deserialize ok");
+    assert_eq!(parsed.next_owner, None);
+    assert!(parsed.artifacts.is_empty());
+    assert_eq!(parsed.topic, "Legacy meeting");
+}
+
+#[test]
+fn handoff_artifact_accepts_path_alias_on_deserialize() {
+    // The `path` field name was used during early development; the
+    // canonical name is `uri_or_path` (per issue #1954 spec). The serde
+    // alias keeps existing tooling working.
+    let json = r#"{
+        "kind": "transcript",
+        "path": "/tmp/foo.json"
+    }"#;
+    let parsed: HandoffArtifact = serde_json::from_str(json).expect("alias deserialize ok");
+    assert_eq!(parsed.uri_or_path, "/tmp/foo.json");
+    assert_eq!(parsed.kind, "transcript");
+    assert_eq!(parsed.description, None);
+}
+
+#[test]
+fn from_session_threads_next_owner() {
+    // Issue #1954: `MeetingHandoff::from_session` carries `next_owner`
+    // through from `MeetingSession.next_owner`. Producers set the field
+    // via the `/owner` slash command (issue spec) and the closing path
+    // uses it as the explicit override over the action-owner fallback.
+    let mut session = make_session("Planning", vec![], vec![], vec![], vec![]);
+    session.next_owner = Some("engineer".to_string());
+
+    let handoff = MeetingHandoff::from_session(&session);
+    assert_eq!(handoff.next_owner.as_deref(), Some("engineer"));
+}
+
+#[test]
+fn empty_meeting_handoff_has_empty_enrichment() {
+    // The "empty meeting baseline" acceptance test from issue #1954: a
+    // handoff with no enrichment fields populated must still produce
+    // empty (not absent or null) collections for `artifacts` and a None
+    // for `next_owner`. Guards against accidentally making the fields
+    // mandatory in the wire format.
+    let session = make_session("Quick sync", vec![], vec![], vec![], vec![]);
+    let handoff = MeetingHandoff::from_session(&session);
+
+    assert!(handoff.decisions.is_empty());
+    assert!(handoff.action_items.is_empty());
+    assert!(handoff.open_questions.is_empty());
+    assert!(handoff.artifacts.is_empty());
+    assert_eq!(handoff.next_owner, None);
+
+    let json = serde_json::to_value(&handoff).unwrap();
+    assert!(json["artifacts"].is_array(), "artifacts must be an array");
+    assert_eq!(json["artifacts"].as_array().unwrap().len(), 0);
+    assert!(
+        json["next_owner"].is_null(),
+        "next_owner must serialize as null when empty"
+    );
 }

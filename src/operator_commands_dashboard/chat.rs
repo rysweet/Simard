@@ -151,10 +151,23 @@ pub(crate) async fn handle_ws_chat(mut socket: WebSocket) {
                         })
                         .await;
                         let recap = match summary {
-                            Ok(Ok(Ok(s))) => format!(
-                                "Meeting closed. {} messages. Summary: {}",
-                                s.message_count, s.summary_text
-                            ),
+                            Ok(Ok(Ok(s))) => {
+                                // Issue #1954: include `next_owner` and a
+                                // compact artifact list in the recap so
+                                // dashboard operators can navigate straight
+                                // to the bundle / transcript / report.
+                                let mut body = format!(
+                                    "Meeting closed. {} messages. Summary: {}",
+                                    s.message_count, s.summary_text
+                                );
+                                if let Some(ref dir) = s.bundle_dir {
+                                    body.push_str(&format!("\nBundle: {dir}"));
+                                }
+                                if let Some(ref md) = s.markdown_report_path {
+                                    body.push_str(&format!("\nReport: {md}"));
+                                }
+                                body
+                            }
                             Ok(Ok(Err(e))) => format!("Meeting closed with error: {e}"),
                             Ok(Err(_panic)) => {
                                 eprintln!("[simard][PANIC] ws_chat close panicked");
@@ -170,7 +183,7 @@ pub(crate) async fn handle_ws_chat(mut socket: WebSocket) {
                         break;
                     }
                     MeetingCommand::Help => {
-                        let help = "Commands: /status, /template [name], /export, /theme <text>, /decision <text>, /action <text>, /question <text>, /recap, /preview, /state, /close, /help. Everything else is natural conversation with Simard.";
+                        let help = "Commands: /status, /template [name], /export, /theme <text>, /decision <text>, /action <text>, /question <text>, /owner <name>, /recap, /preview, /state, /close, /help. Everything else is natural conversation with Simard.";
                         let _ = socket
                             .send(Message::Text(
                                 json!({"role":"system","content": help}).to_string().into(),
@@ -267,6 +280,17 @@ pub(crate) async fn handle_ws_chat(mut socket: WebSocket) {
                     MeetingCommand::Question(text) => {
                         backend.push_explicit_question(&text);
                         let content = format!("Question recorded: {text}");
+                        let _ = socket
+                            .send(Message::Text(
+                                json!({"role":"system","content": content})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await;
+                    }
+                    MeetingCommand::Owner(text) => {
+                        backend.push_next_owner(&text);
+                        let content = format!("Next owner recorded: {text}");
                         let _ = socket
                             .send(Message::Text(
                                 json!({"role":"system","content": content})

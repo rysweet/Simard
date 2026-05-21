@@ -68,6 +68,13 @@ pub struct MeetingSession {
     /// Themes explicitly recorded via `/theme`.
     #[serde(default)]
     pub themes: Vec<String>,
+    /// Names the next agent / persona / human expected to action this
+    /// session's handoff (e.g. `"engineer"`, `"ooda-curate"`, a GitHub
+    /// handle). Set by the `/owner <name>` slash command; persisted into
+    /// the WIP snapshot so a crash before `/close` retains the value.
+    /// Added in issue #1954.
+    #[serde(default)]
+    pub next_owner: Option<String>,
 }
 
 impl MeetingSession {
@@ -253,6 +260,7 @@ mod tests {
             participants: vec!["alice".to_string(), "bob".to_string()],
             explicit_questions: vec!["What about testing?".to_string()],
             themes: vec!["performance".to_string()],
+            next_owner: None,
         }
     }
 
@@ -323,6 +331,7 @@ mod tests {
             participants: vec![],
             explicit_questions: vec![],
             themes: vec![],
+            next_owner: None,
         };
         let summary = s.durable_summary();
         assert!(summary.contains("decisions=[none]"));
@@ -343,6 +352,7 @@ mod tests {
             participants: vec![],
             explicit_questions: vec![],
             themes: vec![],
+            next_owner: None,
         };
         let summary = s.durable_summary();
         assert!(summary.contains("duration=unknown"));

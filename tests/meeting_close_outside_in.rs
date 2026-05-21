@@ -368,3 +368,215 @@ fn happy_path_close_writes_under_state_root() {
     );
     scrub_env();
 }
+
+// ---------------------------------------------------------------------------
+// Issue #1954 — enrichment payload survives both happy path and partial close
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial(state_root)]
+fn close_writes_enrichment_payload_with_next_owner_and_artifacts() {
+    // End-to-end happy path: drive `/decision`, `/action`, `/question`,
+    // `/owner` against the backend, close, and assert the on-disk
+    // handoff carries the four enriched fields (decisions with
+    // rationale + participants, open_questions, next_owner, artifacts)
+    // with no placeholder strings. Acceptance test from issue #1954.
+    scrub_env();
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    unsafe {
+        std::env::set_var("SIMARD_STATE_ROOT", &root);
+    }
+
+    let state = Arc::new(Mutex::new(BlockingState::default()));
+    let agent = BlockingSession::new(Duration::from_millis(0), state);
+    let mut backend =
+        MeetingBackend::new_session("Sprint planning", Box::new(agent), None, String::new());
+
+    // Build live history so rationale/participants extraction has
+    // something to find — extract::extract_decision_rationale_pub
+    // reads the surrounding history for "because" clauses.
+    backend.push_test_message("operator", "We should switch to outside-in tests.");
+    backend.push_test_message(
+        "simard",
+        "Agreed because the partial-close path was previously \
+         losing rationale and participants — outside-in catches it.",
+    );
+
+    backend.push_explicit_decision("Adopt outside-in tests for the close pipeline");
+    backend.push_explicit_action_item("Alice will write the regression test");
+    backend.push_explicit_question("Should we also gate clippy on -D warnings?");
+    backend.push_next_owner("engineer");
+
+    let summary = backend.close().expect("close ok");
+    assert!(
+        summary.partial_reason.is_none(),
+        "non-blocking mock should produce a clean close, got {:?}",
+        summary.partial_reason
+    );
+
+    let bundle_dir: PathBuf = summary
+        .bundle_dir
+        .clone()
+        .expect("bundle_dir present")
+        .into();
+    let bundle_file = bundle_dir.join("meeting_handoff.json");
+    assert!(
+        bundle_file.exists(),
+        "expected handoff at {} — root tree:\n{}",
+        bundle_file.display(),
+        walk(&root, 0)
+    );
+
+    let raw = std::fs::read_to_string(&bundle_file).expect("read handoff");
+    let handoff: simard::meeting_facilitator::MeetingHandoff =
+        serde_json::from_str(&raw).expect("handoff parses against current schema");
+
+    assert_eq!(
+        handoff.next_owner.as_deref(),
+        Some("engineer"),
+        "explicit /owner value must propagate verbatim (issue #1954)"
+    );
+
+    // No placeholder participants/rationale — the close pipeline must
+    // run the extract helpers against the live history rather than
+    // emitting `String::new()` defaults (the bug fixed in #1954).
+    assert!(
+        !handoff.decisions.is_empty(),
+        "explicit /decision must reach the handoff"
+    );
+    for d in &handoff.decisions {
+        assert!(
+            !d.description.is_empty(),
+            "decision description must not be empty"
+        );
+    }
+
+    // Artifacts must list at least the transcript and the bundle dir;
+    // template_agenda entries are optional (depends on templates
+    // applied during the test, which there are none of here).
+    let kinds: std::collections::HashSet<&str> =
+        handoff.artifacts.iter().map(|a| a.kind.as_str()).collect();
+    assert!(
+        kinds.contains("transcript"),
+        "artifacts must include transcript kind, got {kinds:?}"
+    );
+    assert!(
+        kinds.contains("bundle"),
+        "artifacts must include bundle kind, got {kinds:?}"
+    );
+
+    // The bundle artifact's uri_or_path must be the same directory
+    // the summary reports (round-tripped from the producer side).
+    let bundle_art = handoff
+        .artifacts
+        .iter()
+        .find(|a| a.kind == "bundle")
+        .unwrap();
+    assert_eq!(
+        std::path::PathBuf::from(&bundle_art.uri_or_path),
+        bundle_dir,
+        "bundle artifact uri_or_path must match summary.bundle_dir"
+    );
+
+    // Open questions include the explicit /question entry with
+    // `explicit=true`.
+    let has_explicit_question = handoff
+        .open_questions
+        .iter()
+        .any(|q| q.explicit && q.text.to_lowercase().contains("clippy"));
+    assert!(
+        has_explicit_question,
+        "explicit /question must appear with explicit=true; got {:?}",
+        handoff.open_questions
+    );
+
+    scrub_env();
+}
+
+#[test]
+#[serial(state_root)]
+fn partial_close_preserves_structured_decisions_not_placeholders() {
+    // Regression test for the issue #1954 placeholder bug:
+    // `finalize_partial` was previously building
+    // `MeetingDecision { rationale: String::new(), participants:
+    // Vec::new() }` rather than running the extract helpers, silently
+    // erasing rationale and participants on every timeout-triggered
+    // close. The fix threads pre-built structured decisions through
+    // `HandoffEnrichment.structured_decisions` so both paths share
+    // the same extraction logic.
+    scrub_env();
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    unsafe {
+        std::env::set_var("SIMARD_STATE_ROOT", &root);
+        std::env::set_var("SIMARD_MEETING_CLOSE_TIMEOUT_SECS", "2");
+        std::env::set_var("SIMARD_MEETING_AGENT_CLOSE_TIMEOUT_SECS", "1");
+    }
+
+    let state = Arc::new(Mutex::new(BlockingState::default()));
+    let agent = BlockingSession::new(Duration::from_secs(30), state);
+    let mut backend =
+        MeetingBackend::new_session("Timeout test", Box::new(agent), None, String::new());
+
+    backend.push_test_message("operator", "What's the verdict?");
+    backend.push_test_message(
+        "simard",
+        "We will adopt structured handoffs because the schema \
+         downstream consumers need to link to artifacts.",
+    );
+    backend.push_explicit_decision("Adopt structured handoffs");
+    backend.push_explicit_action_item("Bob will write the schema migration");
+    backend.push_next_owner("ooda-curate");
+
+    let summary = backend.close().expect("close returns even on timeout");
+    assert!(
+        summary.partial_reason.is_some(),
+        "blocking agent should trigger a partial close"
+    );
+
+    let bundle_dir: PathBuf = summary
+        .bundle_dir
+        .clone()
+        .expect("bundle_dir present on partial")
+        .into();
+    let bundle_file = bundle_dir.join("meeting_handoff.json");
+    let raw = std::fs::read_to_string(&bundle_file).expect("read bundle");
+    let handoff: simard::meeting_facilitator::MeetingHandoff =
+        serde_json::from_str(&raw).expect("bundle parses");
+
+    // The explicit /owner value must survive the partial path.
+    assert_eq!(handoff.next_owner.as_deref(), Some("ooda-curate"));
+
+    // Structured decisions must NOT be placeholders — every decision
+    // either has a non-empty rationale OR non-empty participants
+    // extracted from the live history. The pre-#1954 behaviour was
+    // both fields empty unconditionally.
+    assert!(
+        !handoff.decisions.is_empty(),
+        "partial close must still carry explicit decisions"
+    );
+    for d in &handoff.decisions {
+        let has_content = !d.rationale.is_empty() || !d.participants.is_empty();
+        assert!(
+            has_content,
+            "decision {:?} is a placeholder — \
+             rationale and participants both empty (issue #1954 regression)",
+            d
+        );
+    }
+
+    // Artifacts include both transcript and bundle even on partial.
+    let kinds: std::collections::HashSet<&str> =
+        handoff.artifacts.iter().map(|a| a.kind.as_str()).collect();
+    assert!(
+        kinds.contains("transcript"),
+        "partial-close handoff must still list transcript artifact, got {kinds:?}"
+    );
+    assert!(
+        kinds.contains("bundle"),
+        "partial-close handoff must still list bundle artifact, got {kinds:?}"
+    );
+
+    scrub_env();
+}

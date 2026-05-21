@@ -519,6 +519,28 @@ fn render_bundle_markdown(
         let _ = writeln!(md);
     }
 
+    // Issue #1954 — `next_owner` and `artifacts[]` sections.
+    if let Some(ref owner) = handoff.next_owner {
+        let _ = writeln!(md, "## Next owner");
+        let _ = writeln!(md);
+        let _ = writeln!(md, "- {owner}");
+        let _ = writeln!(md);
+    }
+
+    if !handoff.artifacts.is_empty() {
+        let _ = writeln!(md, "## Artifacts");
+        let _ = writeln!(md);
+        for art in &handoff.artifacts {
+            let desc = art
+                .description
+                .as_deref()
+                .map(|d| format!(" — {d}"))
+                .unwrap_or_default();
+            let _ = writeln!(md, "- **{}** — `{}`{}", art.kind, art.uri_or_path, desc);
+        }
+        let _ = writeln!(md);
+    }
+
     if !transcript_lines.is_empty() {
         let _ = writeln!(md, "## Transcript");
         let _ = writeln!(md);
@@ -580,6 +602,8 @@ mod bundle_tests {
             participants: vec!["alice".to_string(), "bob".to_string()],
             themes: vec!["handoff".to_string()],
             transcript_path: None,
+            next_owner: None,
+            artifacts: Vec::new(),
         }
     }
 

@@ -80,6 +80,24 @@ pub fn check_meeting_handoffs(
 
     let mut created = 0u32;
 
+    // Issue #1954: surface the meeting's `next_owner` and `artifacts[]`
+    // through the curated goals/backlog so downstream consumers (engineer
+    // loop, dashboard) can see who the meeting expected to action this
+    // and which files to read. `assigned_to` carries the owner verbatim
+    // so the engineer-loop selection logic can prefer goals it owns; the
+    // backlog `source` string carries an artifact-pointer suffix.
+    let owner_hint = handoff.next_owner.as_deref();
+    let artifact_suffix: String = if handoff.artifacts.is_empty() {
+        String::new()
+    } else {
+        let names: Vec<String> = handoff
+            .artifacts
+            .iter()
+            .map(|a| format!("{}={}", a.kind, a.uri_or_path))
+            .collect();
+        format!(" artifacts=[{}]", names.join("; "))
+    };
+
     // Convert decisions to active goals; overflow goes to backlog.
     for (i, decision) in handoff.decisions.iter().enumerate() {
         let goal_id = crate::goals::goal_slug(&decision.description);
@@ -100,7 +118,7 @@ pub fn check_meeting_handoffs(
                 description,
                 priority,
                 status: GoalProgress::NotStarted,
-                assigned_to: None,
+                assigned_to: owner_hint.map(String::from),
                 current_activity: None,
                 wip_refs: vec![],
                 last_progress_update_at: None,
@@ -111,7 +129,14 @@ pub fn check_meeting_handoffs(
             board.backlog.push(BacklogItem {
                 id: goal_id,
                 description,
-                source: format!("meeting:{}", handoff.topic),
+                source: format!(
+                    "meeting:{}{}{}",
+                    handoff.topic,
+                    owner_hint
+                        .map(|o| format!(" owner={o}"))
+                        .unwrap_or_default(),
+                    artifact_suffix,
+                ),
                 score,
             });
         }
@@ -134,7 +159,14 @@ pub fn check_meeting_handoffs(
         board.backlog.push(BacklogItem {
             id: item_id,
             description: format!("[action] {} (owner: {})", item.description, item.owner),
-            source: format!("meeting:{}", handoff.topic),
+            source: format!(
+                "meeting:{}{}{}",
+                handoff.topic,
+                owner_hint
+                    .map(|o| format!(" owner={o}"))
+                    .unwrap_or_default(),
+                artifact_suffix,
+            ),
             score,
         });
         created += 1;
@@ -183,6 +215,8 @@ mod tests {
             themes: Vec::new(),
             meeting_id: String::new(),
             transcript_path: None,
+            next_owner: None,
+            artifacts: Vec::new(),
         }
     }
 
@@ -204,6 +238,8 @@ mod tests {
             themes: Vec::new(),
             meeting_id: String::new(),
             transcript_path: None,
+            next_owner: None,
+            artifacts: Vec::new(),
         }
     }
 
@@ -471,6 +507,8 @@ mod tests {
             themes: Vec::new(),
             meeting_id: String::new(),
             transcript_path: None,
+            next_owner: None,
+            artifacts: Vec::new(),
         };
         let path_b = dir.path().join("handoff-2026-04-03T00-05-01_00-00.json");
         fs::write(&path_b, serde_json::to_string_pretty(&handoff_b).unwrap()).unwrap();

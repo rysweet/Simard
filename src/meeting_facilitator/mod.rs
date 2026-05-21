@@ -16,12 +16,14 @@ mod types;
 
 // Re-export all public items so `crate::meeting_facilitator::X` still works.
 pub use handoff::{
-    BundleTranscriptLine, MEETING_HANDOFF_FILENAME, MEETING_SESSION_WIP_FILENAME, MeetingHandoff,
-    bundle_handoff_path, bundle_markdown_path, bundle_transcript_path, default_bundle_root,
-    default_handoff_dir, derive_meeting_id, find_newest_handoff, find_oldest_unprocessed_handoff,
-    load_meeting_handoff, load_session_wip, mark_handoff_processed_in_place,
-    mark_meeting_handoff_processed, meeting_bundle_dir, remove_session_wip, save_session_wip,
-    write_meeting_bundle, write_meeting_handoff,
+    ARTIFACT_KIND_BUNDLE, ARTIFACT_KIND_MARKDOWN_REPORT, ARTIFACT_KIND_OTHER,
+    ARTIFACT_KIND_TEMPLATE_AGENDA, ARTIFACT_KIND_TRANSCRIPT, BundleTranscriptLine, HandoffArtifact,
+    MEETING_HANDOFF_FILENAME, MEETING_SESSION_WIP_FILENAME, MeetingHandoff, bundle_handoff_path,
+    bundle_markdown_path, bundle_transcript_path, default_bundle_root, default_handoff_dir,
+    derive_meeting_id, find_newest_handoff, find_oldest_unprocessed_handoff, load_meeting_handoff,
+    load_session_wip, mark_handoff_processed_in_place, mark_meeting_handoff_processed,
+    meeting_bundle_dir, remove_session_wip, save_session_wip, write_meeting_bundle,
+    write_meeting_handoff,
 };
 pub use session::{
     add_note, add_question, close_meeting, edit_item, record_action_item, record_decision,
@@ -141,6 +143,7 @@ mod tests {
             participants: vec!["alice".to_string()],
             explicit_questions: vec![],
             themes: vec![],
+            next_owner: None,
         };
         let summary = session.durable_summary();
         assert!(summary.contains("Planning"));

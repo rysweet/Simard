@@ -228,7 +228,9 @@ pub use meeting_backend::{
     SessionStatus,
 };
 pub use meeting_facilitator::{
-    ActionItem, MEETING_HANDOFF_FILENAME, MeetingDecision, MeetingHandoff, MeetingSession,
+    ARTIFACT_KIND_BUNDLE, ARTIFACT_KIND_MARKDOWN_REPORT, ARTIFACT_KIND_OTHER,
+    ARTIFACT_KIND_TEMPLATE_AGENDA, ARTIFACT_KIND_TRANSCRIPT, ActionItem, HandoffArtifact,
+    MEETING_HANDOFF_FILENAME, MeetingDecision, MeetingHandoff, MeetingSession,
     MeetingSessionStatus, add_note, close_meeting, default_handoff_dir, load_meeting_handoff,
     mark_handoff_processed_in_place, mark_meeting_handoff_processed, record_action_item,
     record_decision, start_meeting, write_meeting_handoff,
