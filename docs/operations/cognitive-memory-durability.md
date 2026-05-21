@@ -72,7 +72,7 @@ recovery point for catastrophic corruption.
 |  +---------------------+  |
 |                           |
 |  +---------------------+  |   #1973: every mutating op calls
-|  | post_write_barrier  |  |     checkpoint → fsync(data) →
+|  | post_write_barrier  |  |     fsync(data file) →
 |  | (per-write fsync)   |  |     fsync(parent dir) before return
 |  +---------------------+  |
 +---------------------------+
@@ -121,33 +121,46 @@ The barrier does **not** apply to the in-memory backend (see
 ### Mechanism
 
 After a mutating Cypher write succeeds, the store calls a private
-method `post_write_barrier(op: &'static str)` which performs three
+method `post_write_barrier(op: &'static str)` which performs two
 steps in this exact order:
 
-1. **Checkpoint** — `CognitiveMemoryOps::checkpoint()` collapses the
-   WAL into the main data file. Post-checkpoint, any WAL sibling
-   (`cognitive_memory.ladybug.wal` and/or `cognitive_memory.wal`) is
-   either truncated to zero length or removed by lbug itself.
-2. **`fsync(data file)`** — `File::open(&self.path)?.sync_all()` forces
+1. **`fsync(data file)`** — `File::open(&self.path)?.sync_all()` forces
    the kernel to flush the file's data and metadata to the underlying
-   block device.
-3. **`fsync(parent dir)`** — `File::open(&self.parent_dir)?.sync_all()`
+   block device. lbug's internal WAL is co-resident in this same data
+   file, so a single fsync of the file durably captures both committed
+   pages and any uncheckpointed WAL frames; on reopen lbug replays
+   those frames automatically.
+2. **`fsync(parent dir)`** — `File::open(&self.parent_dir)?.sync_all()`
    forces the directory-entry update so the data file's new size /
    timestamp survive a crash on filesystems that journal metadata
-   separately (notably ext4). The same parent-dir fsync also
-   durably records any WAL truncation / removal performed in step 1,
-   so the barrier does **not** need to fsync the WAL siblings
-   individually.
+   separately (notably ext4).
+
+> **Why no `CHECKPOINT;`?** An earlier draft of this barrier issued
+> `CognitiveMemoryOps::checkpoint()` as a first step. That was removed
+> after CI exposed a lbug bug: issuing `CHECKPOINT;` between writes
+> inside a multi-statement op (notably `consolidate_episodes`) caused
+> subsequent reads of `e.content` on previously-written `Episode`
+> rows to return raw page bytes instead of the stored string literal,
+> breaking `bootstrap`, `goal_stewardship`, and `improvement_curation`
+> integration tests. The crash-recovery integration tests
+> (`tests/cognitive_memory_crash_durability.rs` and
+> `tests/daemon_sigterm_durability.rs`) empirically confirm that the
+> fsync pair above — **without** CHECKPOINT — preserves every
+> acknowledged write across `SIGKILL`/restart cycles.
+>
+> `CHECKPOINT;` remains in use at backup time (see
+> `NativeCognitiveMemory::backup`), which is the only context where
+> the WAL must be folded into the data file before the file is copied.
 
 The order is **non-negotiable** and called out by a `// SAFETY:`
-comment in `post_write_barrier`. Reordering steps 2 and 3 — or
+comment in `post_write_barrier`. Reordering steps 1 and 2 — or
 omitting either — re-introduces the lost-write window that motivated
 issue #1973.
 
-All three steps propagate failures as typed `SimardError` variants
+Both steps propagate failures as typed `SimardError` variants
 (see [Error Mapping](#error-mapping) below); the barrier never
-swallows an fsync result. A failure at any step short-circuits the
-remaining steps and returns `Err(...)` to the caller, surfacing the
+swallows an fsync result. A failure at either step short-circuits the
+remaining step and returns `Err(...)` to the caller, surfacing the
 durability failure rather than masking it.
 
 ### Methods that invoke the barrier
@@ -229,8 +242,9 @@ the convention already established by `NativeCognitiveMemory::open`
 
 | Step | Failure variant | `action` label |
 |---|---|---|
-| Checkpoint | `BridgeCallFailed { bridge: "cognitive-memory", method: "post-write-checkpoint", reason }` | n/a (bridge variant) |
+| `fsync(data file)` open | `PersistentStoreIo { store: "cognitive-memory", action, path, reason }` | `fsync-data-file-open` |
 | `fsync(data file)` | `PersistentStoreIo { store: "cognitive-memory", action, path, reason }` | `fsync-data-file` |
+| `fsync(parent dir)` open | `PersistentStoreIo { store: "cognitive-memory", action, path, reason }` | `fsync-parent-dir-open` |
 | `fsync(parent dir)` | `PersistentStoreIo { store: "cognitive-memory", action, path, reason }` | `fsync-parent-dir` |
 | Recovery-replay copy | `PersistentStoreIo { store: "cognitive-memory", action, path, reason }` (remapped by `try_restore_from_backup`) | `recovery-replay-fsync` |
 | Readback hash mismatch | `PersistentStoreIo { store: "cognitive-memory", action, path, reason }` | `verify-readback` |

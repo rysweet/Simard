@@ -634,9 +634,11 @@ fn in_memory_writes_succeed_without_barrier() {
 
 /// Open-and-write path on a real on-disk DB must succeed end-to-end with
 /// the barrier engaged. This is the positive-control for the barrier
-/// pipeline (`checkpoint → fsync data → fsync parent dir`) running on
-/// every write — if any step regressed to a hard error on a healthy DB,
-/// this test catches it before the SIGKILL integration test runs.
+/// pipeline (`fsync data → fsync parent dir`) running on every write —
+/// if either step regressed to a hard error on a healthy DB, this test
+/// catches it before the SIGKILL integration test runs. (The pipeline
+/// deliberately omits `CHECKPOINT;` — see the `// No CHECKPOINT here`
+/// note on `NativeCognitiveMemory::post_write_barrier`.)
 #[test]
 #[serial_test::serial(cognitive_memory)]
 fn on_disk_writes_succeed_with_barrier_engaged() {

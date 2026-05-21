@@ -402,18 +402,34 @@ impl NativeCognitiveMemory {
     /// and the directory entry for the data file is durable.
     ///
     /// Pipeline (Unix; the only platform supported for on-disk writers):
-    /// 1. Flush the lbug WAL into the main DB file via `checkpoint()`.
-    /// 2. `sync_all()` the data file so kernel page cache is flushed.
-    /// 3. `sync_all()` the parent directory so the dirent itself is
+    /// 1. `sync_all()` the data file so kernel page cache is flushed.
+    ///    lbug's internal WAL is co-resident in this same file, so a
+    ///    single fsync of the file durably captures both committed pages
+    ///    and any uncheckpointed WAL frames. Reopen replays the WAL.
+    /// 2. `sync_all()` the parent directory so the dirent itself is
     ///    durable on ext4/xfs/btrfs/apfs after any preceding rename.
+    ///
+    /// **No CHECKPOINT here.** lbug's `CHECKPOINT;` Cypher statement,
+    /// when invoked between writes inside a multi-statement op
+    /// (notably `consolidate_episodes`), has been observed to corrupt
+    /// subsequent reads of `e.content` on previously-written `Episode`
+    /// rows in the same connection — raw page bytes are returned
+    /// instead of the stored string literal. The crash-recovery
+    /// integration tests in `tests/cognitive_memory_crash_durability.rs`
+    /// and `tests/daemon_sigterm_durability.rs` empirically confirm
+    /// that the fsync pair above (without CHECKPOINT) preserves every
+    /// acknowledged write across `SIGKILL`/restart cycles.
+    ///
+    /// CHECKPOINT is still invoked at backup time
+    /// (see `NativeCognitiveMemory::backup`), which is the only context
+    /// where the WAL must be folded into the data file before the file
+    /// is copied.
     ///
     /// No-op when `durable_writes` is `false` (in-memory backend used by
     /// the unit-test suite; read-only handles).
     ///
     /// Errors map to existing typed variants — no new error variants
     /// were introduced for this feature:
-    /// - `checkpoint()` failure → `SimardError::BridgeCallFailed` with
-    ///   `method = "post-write-checkpoint"`.
     /// - data-file fsync failure → `SimardError::PersistentStoreIo` with
     ///   `action = "fsync-data-file"`.
     /// - parent-dir fsync failure → `SimardError::PersistentStoreIo` with
@@ -427,17 +443,14 @@ impl NativeCognitiveMemory {
             return Ok(());
         }
 
-        // Step 1: flush WAL into main DB file.
-        self.checkpoint()
-            .map_err(|e| SimardError::BridgeCallFailed {
-                bridge: "cognitive-memory-native".into(),
-                method: "post-write-checkpoint".into(),
-                reason: format!("op={op}: {e}"),
-            })?;
+        // Per-write barrier — no CHECKPOINT (see method doc). Just
+        // fsync the data file + parent directory.
 
-        // Step 2: fsync the data file. Open read-only — lbug owns the
+        // Step 1: fsync the data file. Open read-only — lbug owns the
         // exclusive writer fd; we only need a separate fd to issue
-        // sync_all(2) on the underlying inode.
+        // sync_all(2) on the underlying inode. lbug's internal WAL is
+        // co-resident in this same file, so a single sync_all() captures
+        // both committed pages and uncheckpointed WAL frames.
         let data_file = std::fs::OpenOptions::new()
             .read(true)
             .open(&self.path)
@@ -456,9 +469,9 @@ impl NativeCognitiveMemory {
                 reason: format!("op={op}: {e}"),
             })?;
 
-        // Step 3: fsync the parent directory so the dirent for `self.path`
-        // (and any rename'd .wal sibling that lbug published during the
-        // checkpoint) is itself crash-durable.
+        // Step 2: fsync the parent directory so the dirent for
+        // `self.path` is itself crash-durable on filesystems that
+        // journal metadata separately (notably ext4).
         let parent = self
             .path
             .parent()

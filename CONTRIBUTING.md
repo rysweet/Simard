@@ -206,16 +206,18 @@ lbug file is created in its place — the legacy data is preserved but
 **not** automatically imported (the formats are incompatible). lbug
 only flushes its WAL inside `Database::drop`, which does **not** run
 automatically on signal-induced process exit, and even acknowledged
-in-process writes are not on stable storage until a checkpoint plus
-`fsync(2)` complete.
+in-process writes are not on stable storage until the writer
+`fsync(2)`s the data file.
 
 Three layers together provide durability:
 
 1. **Per-write fsync barrier** (issue #1973) — every mutating op on
-   `NativeCognitiveMemory` is followed by `checkpoint() →
-   fsync(data file) → fsync(parent dir)` before returning to the
-   caller. Survives `SIGKILL`, OOM, and power loss for any write
-   whose mutating call returned `Ok(())`.
+   `NativeCognitiveMemory` is followed by `fsync(data file) →
+   fsync(parent dir)` before returning to the caller. Survives
+   `SIGKILL`, OOM, and power loss for any write whose mutating call
+   returned `Ok(())`. lbug's internal WAL is co-resident in the data
+   file; a single `fsync(2)` on the data file captures both committed
+   pages and uncheckpointed WAL frames, which lbug replays on reopen.
 2. **Graceful shutdown handler** — drains the WAL on
    `SIGTERM`/`SIGINT`/`SIGHUP` so `systemctl restart` is lossless
    even for in-flight writes.
@@ -237,9 +239,15 @@ The barrier:
   keeping in-memory unit tests fast. (Note: the in-memory backend
   still uses a tempdir-backed lbug DB under the hood; only the
   fsync — not the lbug write itself — is skipped.)
-- Otherwise performs `checkpoint() → fsync(self.path) →
-  fsync(self.parent_dir)` in that exact order. The order is
-  non-negotiable and annotated with a `// SAFETY:` comment.
+- Otherwise performs `fsync(self.path) → fsync(self.parent_dir)` in
+  that exact order. The order is non-negotiable and annotated with a
+  `// SAFETY:` comment.
+- Does **not** issue a `CHECKPOINT;` Cypher statement (an earlier
+  draft did; it was removed after CI showed lbug returns raw page
+  bytes for `e.content` on subsequent reads when CHECKPOINT is
+  interleaved with writes inside `consolidate_episodes`). The
+  crash-recovery integration tests confirm the fsync pair above is
+  sufficient without CHECKPOINT.
 - Propagates all failures as typed `SimardError` variants with
   `store: "cognitive-memory"` and distinct `action` labels
   (`fsync-data-file`, `fsync-parent-dir`, `verify-readback`,
