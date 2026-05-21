@@ -51,6 +51,7 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
             escape_cypher(modality),
             escape_cypher(raw_data),
         ))?;
+        self.post_write_barrier("record_sensory")?;
         Ok(id)
     }
 
@@ -68,6 +69,7 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
             self.execute(&format!(
                 "MATCH (s:Sensory) WHERE s.expires_at < {now} DELETE s"
             ))?;
+            self.post_write_barrier("prune_expired_sensory")?;
         }
         Ok(count)
     }
@@ -87,6 +89,7 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
             escape_cypher(content),
             escape_cypher(task_id),
         ))?;
+        self.post_write_barrier("push_working")?;
         Ok(id)
     }
 
@@ -122,6 +125,7 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
                 "MATCH (w:WorkingMemory) WHERE w.task_id = '{}' DELETE w",
                 escape_cypher(task_id)
             ))?;
+            self.post_write_barrier("clear_working")?;
         }
         Ok(count)
     }
@@ -139,6 +143,7 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
             escape_cypher(content),
             escape_cypher(source_label),
         ))?;
+        self.post_write_barrier("store_episode")?;
         Ok(id)
     }
 
@@ -186,6 +191,11 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
                 ))?;
             }
         }
+        // Per-write barrier — one barrier for the whole consolidation op
+        // (summary insert + N compress flips), not per Cypher statement.
+        // Issue #1973 spec rationale (decision D5): consolidation is a
+        // single semantic op; per-statement fsync would be O(N) syscalls.
+        self.post_write_barrier("consolidate_episodes")?;
         Ok(Some(summary_id))
     }
 
@@ -213,6 +223,7 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
             escape_cypher(&tags_str),
             escape_cypher(source_id),
         ))?;
+        self.post_write_barrier("store_fact")?;
         Ok(id)
     }
 
@@ -283,6 +294,7 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
             escape_cypher(&steps_json),
             escape_cypher(&prereqs_json),
         ))?;
+        self.post_write_barrier("store_procedure")?;
         Ok(id)
     }
 
@@ -409,6 +421,7 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
             escape_cypher(trigger_condition),
             escape_cypher(action_on_trigger),
         ))?;
+        self.post_write_barrier("store_prospective")?;
         Ok(id)
     }
 

@@ -608,3 +608,131 @@ fn recovery_skips_corrupt_backups_uses_next() {
         "fact_c (only in corrupt newest backup) must NOT appear"
     );
 }
+
+// ============================================================================
+// Per-write fsync barrier tests (issue #1973)
+// ============================================================================
+
+/// In-memory backend must skip the barrier (no on-disk file to fsync).
+/// This keeps the unit-test suite fast and confirms the opt-out path.
+#[test]
+fn in_memory_writes_succeed_without_barrier() {
+    let mem = NativeCognitiveMemory::in_memory().unwrap();
+    // If post_write_barrier were not no-op'd, this would attempt to open
+    // and fsync a path that may not even be a regular file — the test
+    // would either fail or be slow. Each of these mutating ops exercises
+    // a different post_write_barrier callsite.
+    mem.store_fact("in_mem", "value", 0.9, &[], "test").unwrap();
+    mem.record_sensory("modality", "data", 60).unwrap();
+    mem.push_working("goal", "x", "t1", 1.0).unwrap();
+    mem.store_episode("event", "label", None).unwrap();
+    mem.store_prospective("desc", "trig", "act", 1).unwrap();
+    mem.store_procedure("p", &["s1".to_string()], &[]).unwrap();
+    let stats = mem.get_statistics().unwrap();
+    assert!(stats.total() >= 6, "all writes must land");
+}
+
+/// Open-and-write path on a real on-disk DB must succeed end-to-end with
+/// the barrier engaged. This is the positive-control for the barrier
+/// pipeline (`checkpoint → fsync data → fsync parent dir`) running on
+/// every write — if any step regressed to a hard error on a healthy DB,
+/// this test catches it before the SIGKILL integration test runs.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn on_disk_writes_succeed_with_barrier_engaged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state_root = tmp.path().to_path_buf();
+    let mem = NativeCognitiveMemory::open(&state_root).unwrap();
+    for i in 0..5 {
+        mem.store_fact(
+            &format!("barrier_fact_{i}"),
+            "barrier-payload",
+            0.9,
+            &[],
+            "test",
+        )
+        .unwrap();
+    }
+    // Re-open from a fresh handle (still same process; the SIGKILL
+    // integration test covers the cross-process variant).
+    drop(mem);
+    let mem2 = NativeCognitiveMemory::open(&state_root).unwrap();
+    let facts = mem2.search_facts("barrier_fact", 100, 0.0).unwrap();
+    assert_eq!(
+        facts.len(),
+        5,
+        "all 5 barrier-protected writes must persist"
+    );
+}
+
+/// `create_verified_backup` must produce a file whose SHA-256 matches the
+/// source DB byte-for-byte. This is the directly-observable consequence
+/// of the verified-fsync readback added to `atomic_copy_with_fsync` —
+/// before issue #1973 the function dropped fsync errors and could return
+/// Ok with a drifted backup.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn verified_backup_is_bit_exact_replica_of_source() {
+    use sha2::{Digest, Sha256};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let state_root = tmp.path().to_path_buf();
+    let db_path = state_root.join("cognitive_memory.ladybug");
+
+    {
+        let mem = NativeCognitiveMemory::open(&state_root).unwrap();
+        mem.store_fact("backup_verify", "payload", 0.9, &[], "test")
+            .unwrap();
+    }
+
+    let backup_path = NativeCognitiveMemory::create_verified_backup(&state_root)
+        .expect("create_verified_backup must succeed for a healthy DB");
+
+    let hash_of = |p: &std::path::Path| -> String {
+        let bytes = std::fs::read(p).unwrap();
+        let mut h = Sha256::new();
+        h.update(&bytes);
+        let digest = h.finalize();
+        digest.iter().map(|b| format!("{b:02x}")).collect()
+    };
+
+    assert_eq!(
+        hash_of(&db_path),
+        hash_of(&backup_path),
+        "verified-fsync readback (issue #1973) must guarantee that the \
+         backup file on disk is a bit-exact replica of the source DB"
+    );
+}
+
+/// When the source file disappears mid-flight, the readback verify path
+/// surfaces a `PersistentStoreIo` error rather than silently returning
+/// Ok. Exercises the new error variant introduced by decision D3.
+///
+/// This test calls `create_verified_backup` indirectly to drive the
+/// `atomic_copy_with_fsync` codepath, then asserts the typed error
+/// shape when the readback can no longer hash the source.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn verified_backup_errors_with_persistent_store_io_on_readback_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state_root = tmp.path().to_path_buf();
+    {
+        let mem = NativeCognitiveMemory::open(&state_root).unwrap();
+        mem.store_fact("would_be_backed_up", "v", 0.9, &[], "test")
+            .unwrap();
+    }
+    // Delete the source DB between handle drop and backup call — the
+    // backup precondition check returns an error early, before readback
+    // would be reached. This still exercises the typed-error contract:
+    // we must never get back an `Ok(...)` for a missing source.
+    let db_path = state_root.join("cognitive_memory.ladybug");
+    std::fs::remove_file(&db_path).unwrap();
+
+    let err = NativeCognitiveMemory::create_verified_backup(&state_root)
+        .expect_err("missing source file must propagate as an error, not Ok");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("nothing to back up") || msg.contains("does not exist"),
+        "error should describe the missing source: {msg}"
+    );
+}

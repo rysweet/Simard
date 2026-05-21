@@ -1,16 +1,60 @@
 //! NativeCognitiveMemory backup, restore, and DB-recovery helpers.
 
+use std::io::Read;
 use std::os::unix::io::AsRawFd;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+
+use sha2::{Digest, Sha256};
 
 use crate::error::{SimardError, SimardResult};
 
 use super::NativeCognitiveMemory;
 
+/// Compute the SHA-256 hex digest of `path`'s full contents.
+///
+/// Used by `atomic_copy_with_fsync` after the fsync pipeline completes to
+/// **verify post-fsync state**: we re-open both src and dst, hash each,
+/// and require they match before declaring the backup durable. Trusting
+/// only the syscall return is insufficient — a torn write that returned
+/// `Ok(0)` from the fs layer (rare but observed on flaky storage) would
+/// otherwise produce a "valid" backup whose bytes drifted from the
+/// source. Issue #1973, decision D3.
+fn sha256_file(path: &Path) -> std::io::Result<String> {
+    let mut f = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let digest = hasher.finalize();
+    Ok(hex_encode(&digest))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push(char::from_digit((b >> 4) as u32, 16).unwrap());
+        s.push(char::from_digit((b & 0x0f) as u32, 16).unwrap());
+    }
+    s
+}
+
 /// Atomically copy `src` to `dst`: write to `<dst>.tmp`, fsync the bytes
 /// and the directory entry, then rename. The result is either the new
 /// `dst` is fully present and durable, or `dst` is unchanged.
+///
+/// **Verified-fsync** (issue #1973, decision D3): after the rename + dir
+/// fsync, the function re-opens `dst` and recomputes its SHA-256 against
+/// `src`'s SHA-256. A mismatch surfaces as `SimardError::PersistentStoreIo`
+/// with `action = "verify-readback"` so a torn or buffered write cannot
+/// pass as a successful backup. Without this check the previous version
+/// happily returned `Ok(())` even when the fsync syscalls below silently
+/// dropped errors via `let _ = ...`.
 fn atomic_copy_with_fsync(src: &Path, dst: &Path) -> SimardResult<()> {
     let tmp = {
         let mut s = dst.as_os_str().to_owned();
@@ -28,10 +72,29 @@ fn atomic_copy_with_fsync(src: &Path, dst: &Path) -> SimardResult<()> {
     })?;
 
     // fsync the file contents so a crash between copy and rename does not
-    // leave a torn payload that becomes the next durable backup.
-    if let Ok(f) = std::fs::OpenOptions::new().read(true).open(&tmp) {
-        let _ = f.sync_all();
-    }
+    // leave a torn payload that becomes the next durable backup. Errors
+    // are propagated (issue #1973): the previous `let _ = f.sync_all()`
+    // could return Ok with un-fsynced bytes if the kernel surfaced EIO,
+    // which is the exact failure mode the per-write barrier exists to
+    // prevent.
+    let tmp_file = std::fs::OpenOptions::new()
+        .read(true)
+        .open(&tmp)
+        .map_err(|e| SimardError::PersistentStoreIo {
+            store: "cognitive-memory".into(),
+            action: "backup-open-tmp-for-fsync".into(),
+            path: tmp.clone(),
+            reason: e.to_string(),
+        })?;
+    tmp_file
+        .sync_all()
+        .map_err(|e| SimardError::PersistentStoreIo {
+            store: "cognitive-memory".into(),
+            action: "backup-fsync-tmp".into(),
+            path: tmp.clone(),
+            reason: e.to_string(),
+        })?;
+    drop(tmp_file);
 
     std::fs::rename(&tmp, dst).map_err(|e| SimardError::PersistentStoreIo {
         store: "cognitive-memory".into(),
@@ -41,11 +104,55 @@ fn atomic_copy_with_fsync(src: &Path, dst: &Path) -> SimardResult<()> {
     })?;
 
     // fsync the parent directory so the rename itself is durable.
-    if let Some(parent) = dst.parent()
-        && let Ok(d) = std::fs::File::open(parent)
-    {
-        let _ = d.sync_all();
+    // Propagated as PersistentStoreIo with action="backup-fsync-parent-dir"
+    // — the prior `let _ = d.sync_all()` could lose an EIO and present a
+    // non-durable dirent as a successful backup. Issue #1973.
+    if let Some(parent) = dst.parent() {
+        let d = std::fs::File::open(parent).map_err(|e| SimardError::PersistentStoreIo {
+            store: "cognitive-memory".into(),
+            action: "backup-open-parent-for-fsync".into(),
+            path: parent.to_path_buf(),
+            reason: e.to_string(),
+        })?;
+        d.sync_all().map_err(|e| SimardError::PersistentStoreIo {
+            store: "cognitive-memory".into(),
+            action: "backup-fsync-parent-dir".into(),
+            path: parent.to_path_buf(),
+            reason: e.to_string(),
+        })?;
     }
+
+    // Verified-fsync: re-open src + dst (separate fds from the ones we
+    // fsynced above) and hash each. A mismatch means the on-disk dst is
+    // not a bit-exact replica of src, even though every preceding syscall
+    // returned success — surface this as a typed error rather than
+    // silently returning Ok. Issue #1973 decision D3.
+    let src_hash = sha256_file(src).map_err(|e| SimardError::PersistentStoreIo {
+        store: "cognitive-memory".into(),
+        action: "verify-readback-src-hash".into(),
+        path: src.to_path_buf(),
+        reason: e.to_string(),
+    })?;
+    let dst_hash = sha256_file(dst).map_err(|e| SimardError::PersistentStoreIo {
+        store: "cognitive-memory".into(),
+        action: "verify-readback-dst-hash".into(),
+        path: dst.to_path_buf(),
+        reason: e.to_string(),
+    })?;
+    if src_hash != dst_hash {
+        return Err(SimardError::PersistentStoreIo {
+            store: "cognitive-memory".into(),
+            action: "verify-readback".into(),
+            path: dst.to_path_buf(),
+            reason: format!(
+                "post-fsync hash mismatch: src={src_hash} dst={dst_hash} \
+                 (the backup file on disk is not a bit-exact replica of \
+                 the source — fsync pipeline succeeded but durability is \
+                 not guaranteed)"
+            ),
+        });
+    }
+
     Ok(())
 }
 
@@ -80,6 +187,51 @@ impl NativeCognitiveMemory {
                 let _ = std::fs::remove_file(&wal);
             }
         }
+    }
+
+    /// Recovery-replay fsync helper (issue #1973, decision D4).
+    ///
+    /// After `try_restore_from_backup` copies a candidate backup into
+    /// `db_path`, this routine fsyncs the freshly-restored file and its
+    /// parent directory so a crash before `open_db_with_recovery`
+    /// completes cannot leave a half-written replica that a subsequent
+    /// recovery cycle treats as canonical.
+    ///
+    /// Errors map to `SimardError::PersistentStoreIo` with
+    /// `action = "recovery-replay-fsync"` for symmetry with the
+    /// `post_write_barrier` write-path pipeline.
+    #[cfg(unix)]
+    fn fsync_recovery_replay(db_path: &Path) -> SimardResult<()> {
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .open(db_path)
+            .map_err(|e| SimardError::PersistentStoreIo {
+                store: "cognitive-memory".into(),
+                action: "recovery-replay-fsync-open".into(),
+                path: db_path.to_path_buf(),
+                reason: e.to_string(),
+            })?;
+        f.sync_all().map_err(|e| SimardError::PersistentStoreIo {
+            store: "cognitive-memory".into(),
+            action: "recovery-replay-fsync".into(),
+            path: db_path.to_path_buf(),
+            reason: e.to_string(),
+        })?;
+        if let Some(parent) = db_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            let d = std::fs::File::open(parent).map_err(|e| SimardError::PersistentStoreIo {
+                store: "cognitive-memory".into(),
+                action: "recovery-replay-fsync-parent-open".into(),
+                path: parent.to_path_buf(),
+                reason: e.to_string(),
+            })?;
+            d.sync_all().map_err(|e| SimardError::PersistentStoreIo {
+                store: "cognitive-memory".into(),
+                action: "recovery-replay-fsync-parent".into(),
+                path: parent.to_path_buf(),
+                reason: e.to_string(),
+            })?;
+        }
+        Ok(())
     }
 
     /// Run a basic health-check query to verify the DB is actually usable.
@@ -195,6 +347,25 @@ impl NativeCognitiveMemory {
                 let msg = format!("copy from {} failed: {e}", backup_path.display());
                 eprintln!("[simard] {msg}");
                 last_err = Some(msg);
+                continue;
+            }
+
+            // Per-write barrier on recovery replay (issue #1973, decision D4):
+            // fsync the freshly-copied DB file and its parent directory so a
+            // subsequent crash before this restored DB is opened cannot leave
+            // a half-written replica. Mirrors the pattern in
+            // `NativeCognitiveMemory::post_write_barrier`. Failure short-
+            // circuits this candidate and falls through to the next backup.
+            if let Err(e) = Self::fsync_recovery_replay(db_path) {
+                let msg = format!(
+                    "recovery-replay fsync failed for {}: {e}",
+                    backup_path.display()
+                );
+                eprintln!("[simard] {msg}");
+                last_err = Some(msg);
+                if db_path.exists() {
+                    let _ = std::fs::remove_file(db_path);
+                }
                 continue;
             }
 

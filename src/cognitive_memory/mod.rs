@@ -161,6 +161,16 @@ pub struct NativeCognitiveMemory {
     /// handle (issue #1590 follow-up — closes the dashboard hollow-
     /// success failure mode).
     read_only: bool,
+    /// Whether mutating ops must call [`Self::post_write_barrier`] after
+    /// every successful Cypher write. `true` for [`Self::open`] (on-disk
+    /// writer), `false` for [`Self::in_memory`] (no on-disk file to fsync)
+    /// and for [`Self::open_read_only`] (writes aren't possible).
+    ///
+    /// Per-write fsync barrier: issue #1973, goals G1 + G2 of epic
+    /// #1972 (improve-cognitive-memory-persistence). Without the barrier,
+    /// SIGKILL between two writes loses acknowledged data because lbug
+    /// only flushes its WAL on `Database::drop`.
+    durable_writes: bool,
 }
 
 // SAFETY: lbug::Database is thread-safe by design (internal locking).
@@ -204,6 +214,7 @@ impl NativeCognitiveMemory {
             path: db_path,
             _temp_dir: None,
             read_only: false,
+            durable_writes: true,
         };
         mem.ensure_schema()?;
         eprintln!(
@@ -236,6 +247,11 @@ impl NativeCognitiveMemory {
             path: db_path,
             _temp_dir: Some(Arc::new(tmp)),
             read_only: false,
+            // In-memory handles back a temp file whose lifetime is tied to
+            // the process — there is no recovery scenario where fsyncing it
+            // would help, and unit tests rely on the latency profile of an
+            // un-fsynced backend. Issue #1973 opt-out.
+            durable_writes: false,
         };
         mem.ensure_schema()?;
         Ok(mem)
@@ -274,6 +290,10 @@ impl NativeCognitiveMemory {
             path: db_path,
             _temp_dir: None,
             read_only: true,
+            // Read-only handles cannot mutate, so the barrier is a no-op
+            // and we save the cost of even checking the flag inside hot
+            // read paths that happen to call into shared code.
+            durable_writes: false,
         };
         eprintln!(
             "[simard] cognitive memory opened read-only — LadybugDB at {}",
@@ -372,6 +392,92 @@ impl NativeCognitiveMemory {
                 }),
             },
         }
+    }
+
+    /// Per-write fsync barrier (issue #1973, goals G1 + G2 of epic #1972).
+    ///
+    /// Runs after every successful Cypher mutation on an on-disk
+    /// `NativeCognitiveMemory` so that, by the time the calling `Ok(())`
+    /// returns to the caller, the written bytes are on stable storage
+    /// and the directory entry for the data file is durable.
+    ///
+    /// Pipeline (Unix; the only platform supported for on-disk writers):
+    /// 1. Flush the lbug WAL into the main DB file via `checkpoint()`.
+    /// 2. `sync_all()` the data file so kernel page cache is flushed.
+    /// 3. `sync_all()` the parent directory so the dirent itself is
+    ///    durable on ext4/xfs/btrfs/apfs after any preceding rename.
+    ///
+    /// No-op when `durable_writes` is `false` (in-memory backend used by
+    /// the unit-test suite; read-only handles).
+    ///
+    /// Errors map to existing typed variants — no new error variants
+    /// were introduced for this feature:
+    /// - `checkpoint()` failure → `SimardError::BridgeCallFailed` with
+    ///   `method = "post-write-checkpoint"`.
+    /// - data-file fsync failure → `SimardError::PersistentStoreIo` with
+    ///   `action = "fsync-data-file"`.
+    /// - parent-dir fsync failure → `SimardError::PersistentStoreIo` with
+    ///   `action = "fsync-parent-dir"`.
+    ///
+    /// The `op` argument is a static string identifying the calling
+    /// mutating op (e.g. `"store_fact"`) and is woven into error
+    /// `reason` strings so a fsync failure can be attributed in logs.
+    pub(crate) fn post_write_barrier(&self, op: &'static str) -> SimardResult<()> {
+        if !self.durable_writes {
+            return Ok(());
+        }
+
+        // Step 1: flush WAL into main DB file.
+        self.checkpoint()
+            .map_err(|e| SimardError::BridgeCallFailed {
+                bridge: "cognitive-memory-native".into(),
+                method: "post-write-checkpoint".into(),
+                reason: format!("op={op}: {e}"),
+            })?;
+
+        // Step 2: fsync the data file. Open read-only — lbug owns the
+        // exclusive writer fd; we only need a separate fd to issue
+        // sync_all(2) on the underlying inode.
+        let data_file = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&self.path)
+            .map_err(|e| SimardError::PersistentStoreIo {
+                store: "cognitive-memory".into(),
+                action: "fsync-data-file-open".into(),
+                path: self.path.clone(),
+                reason: format!("op={op}: {e}"),
+            })?;
+        data_file
+            .sync_all()
+            .map_err(|e| SimardError::PersistentStoreIo {
+                store: "cognitive-memory".into(),
+                action: "fsync-data-file".into(),
+                path: self.path.clone(),
+                reason: format!("op={op}: {e}"),
+            })?;
+
+        // Step 3: fsync the parent directory so the dirent for `self.path`
+        // (and any rename'd .wal sibling that lbug published during the
+        // checkpoint) is itself crash-durable.
+        let parent = self
+            .path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let dir = std::fs::File::open(parent).map_err(|e| SimardError::PersistentStoreIo {
+            store: "cognitive-memory".into(),
+            action: "fsync-parent-dir-open".into(),
+            path: parent.to_path_buf(),
+            reason: format!("op={op}: {e}"),
+        })?;
+        dir.sync_all().map_err(|e| SimardError::PersistentStoreIo {
+            store: "cognitive-memory".into(),
+            action: "fsync-parent-dir".into(),
+            path: parent.to_path_buf(),
+            reason: format!("op={op}: {e}"),
+        })?;
+
+        Ok(())
     }
 }
 
