@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use crate::error::{SimardError, SimardResult};
 
 use super::NativeCognitiveMemory;
+use super::fsync;
 
 /// Compute the SHA-256 hex digest of `path`'s full contents.
 ///
@@ -32,16 +33,7 @@ fn sha256_file(path: &Path) -> std::io::Result<String> {
         hasher.update(&buf[..n]);
     }
     let digest = hasher.finalize();
-    Ok(hex_encode(&digest))
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push(char::from_digit((b >> 4) as u32, 16).unwrap());
-        s.push(char::from_digit((b & 0x0f) as u32, 16).unwrap());
-    }
-    s
+    Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// Atomically copy `src` to `dst`: write to `<dst>.tmp`, fsync the bytes
@@ -77,24 +69,7 @@ fn atomic_copy_with_fsync(src: &Path, dst: &Path) -> SimardResult<()> {
     // could return Ok with un-fsynced bytes if the kernel surfaced EIO,
     // which is the exact failure mode the per-write barrier exists to
     // prevent.
-    let tmp_file = std::fs::OpenOptions::new()
-        .read(true)
-        .open(&tmp)
-        .map_err(|e| SimardError::PersistentStoreIo {
-            store: "cognitive-memory".into(),
-            action: "backup-open-tmp-for-fsync".into(),
-            path: tmp.clone(),
-            reason: e.to_string(),
-        })?;
-    tmp_file
-        .sync_all()
-        .map_err(|e| SimardError::PersistentStoreIo {
-            store: "cognitive-memory".into(),
-            action: "backup-fsync-tmp".into(),
-            path: tmp.clone(),
-            reason: e.to_string(),
-        })?;
-    drop(tmp_file);
+    fsync::open_and_fsync(&tmp, "backup-open-tmp-for-fsync", "backup-fsync-tmp", "")?;
 
     std::fs::rename(&tmp, dst).map_err(|e| SimardError::PersistentStoreIo {
         store: "cognitive-memory".into(),
@@ -108,18 +83,12 @@ fn atomic_copy_with_fsync(src: &Path, dst: &Path) -> SimardResult<()> {
     // — the prior `let _ = d.sync_all()` could lose an EIO and present a
     // non-durable dirent as a successful backup. Issue #1973.
     if let Some(parent) = dst.parent() {
-        let d = std::fs::File::open(parent).map_err(|e| SimardError::PersistentStoreIo {
-            store: "cognitive-memory".into(),
-            action: "backup-open-parent-for-fsync".into(),
-            path: parent.to_path_buf(),
-            reason: e.to_string(),
-        })?;
-        d.sync_all().map_err(|e| SimardError::PersistentStoreIo {
-            store: "cognitive-memory".into(),
-            action: "backup-fsync-parent-dir".into(),
-            path: parent.to_path_buf(),
-            reason: e.to_string(),
-        })?;
+        fsync::open_and_fsync(
+            parent,
+            "backup-open-parent-for-fsync",
+            "backup-fsync-parent-dir",
+            "",
+        )?;
     }
 
     // Verified-fsync: re-open src + dst (separate fds from the ones we
@@ -202,34 +171,19 @@ impl NativeCognitiveMemory {
     /// `post_write_barrier` write-path pipeline.
     #[cfg(unix)]
     fn fsync_recovery_replay(db_path: &Path) -> SimardResult<()> {
-        let f = std::fs::OpenOptions::new()
-            .read(true)
-            .open(db_path)
-            .map_err(|e| SimardError::PersistentStoreIo {
-                store: "cognitive-memory".into(),
-                action: "recovery-replay-fsync-open".into(),
-                path: db_path.to_path_buf(),
-                reason: e.to_string(),
-            })?;
-        f.sync_all().map_err(|e| SimardError::PersistentStoreIo {
-            store: "cognitive-memory".into(),
-            action: "recovery-replay-fsync".into(),
-            path: db_path.to_path_buf(),
-            reason: e.to_string(),
-        })?;
+        fsync::open_and_fsync(
+            db_path,
+            "recovery-replay-fsync-open",
+            "recovery-replay-fsync",
+            "",
+        )?;
         if let Some(parent) = db_path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            let d = std::fs::File::open(parent).map_err(|e| SimardError::PersistentStoreIo {
-                store: "cognitive-memory".into(),
-                action: "recovery-replay-fsync-parent-open".into(),
-                path: parent.to_path_buf(),
-                reason: e.to_string(),
-            })?;
-            d.sync_all().map_err(|e| SimardError::PersistentStoreIo {
-                store: "cognitive-memory".into(),
-                action: "recovery-replay-fsync-parent".into(),
-                path: parent.to_path_buf(),
-                reason: e.to_string(),
-            })?;
+            fsync::open_and_fsync(
+                parent,
+                "recovery-replay-fsync-parent-open",
+                "recovery-replay-fsync-parent",
+                "",
+            )?;
         }
         Ok(())
     }

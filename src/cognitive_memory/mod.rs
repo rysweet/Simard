@@ -305,6 +305,7 @@ impl NativeCognitiveMemory {
 }
 
 mod backup;
+mod fsync;
 mod ops;
 
 impl NativeCognitiveMemory {
@@ -444,30 +445,17 @@ impl NativeCognitiveMemory {
         }
 
         // Per-write barrier — no CHECKPOINT (see method doc). Just
-        // fsync the data file + parent directory.
+        // fsync the data file + parent directory via the shared
+        // `fsync::open_and_fsync` helper, which preserves the
+        // site-distinct action labels operator logs grep on.
+        let ctx = format!("op={op}");
 
-        // Step 1: fsync the data file. Open read-only — lbug owns the
-        // exclusive writer fd; we only need a separate fd to issue
-        // sync_all(2) on the underlying inode. lbug's internal WAL is
-        // co-resident in this same file, so a single sync_all() captures
-        // both committed pages and uncheckpointed WAL frames.
-        let data_file = std::fs::OpenOptions::new()
-            .read(true)
-            .open(&self.path)
-            .map_err(|e| SimardError::PersistentStoreIo {
-                store: "cognitive-memory".into(),
-                action: "fsync-data-file-open".into(),
-                path: self.path.clone(),
-                reason: format!("op={op}: {e}"),
-            })?;
-        data_file
-            .sync_all()
-            .map_err(|e| SimardError::PersistentStoreIo {
-                store: "cognitive-memory".into(),
-                action: "fsync-data-file".into(),
-                path: self.path.clone(),
-                reason: format!("op={op}: {e}"),
-            })?;
+        // Step 1: fsync the data file. lbug owns the exclusive writer
+        // fd; the helper opens a separate read-only fd just long
+        // enough to issue sync_all(2). The data file is co-resident
+        // with lbug's WAL, so a single sync_all() captures both
+        // committed pages and any uncheckpointed WAL frames.
+        fsync::open_and_fsync(&self.path, "fsync-data-file-open", "fsync-data-file", &ctx)?;
 
         // Step 2: fsync the parent directory so the dirent for
         // `self.path` is itself crash-durable on filesystems that
@@ -477,18 +465,7 @@ impl NativeCognitiveMemory {
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| std::path::Path::new("."));
-        let dir = std::fs::File::open(parent).map_err(|e| SimardError::PersistentStoreIo {
-            store: "cognitive-memory".into(),
-            action: "fsync-parent-dir-open".into(),
-            path: parent.to_path_buf(),
-            reason: format!("op={op}: {e}"),
-        })?;
-        dir.sync_all().map_err(|e| SimardError::PersistentStoreIo {
-            store: "cognitive-memory".into(),
-            action: "fsync-parent-dir".into(),
-            path: parent.to_path_buf(),
-            reason: format!("op={op}: {e}"),
-        })?;
+        fsync::open_and_fsync(parent, "fsync-parent-dir-open", "fsync-parent-dir", &ctx)?;
 
         Ok(())
     }
