@@ -1,6 +1,6 @@
 //! CognitiveMemoryOps trait impl for NativeCognitiveMemory + Cypher escaping.
 
-use crate::error::SimardResult;
+use crate::error::{SimardError, SimardResult};
 use crate::memory_cognitive::{
     CognitiveFact, CognitiveProcedure, CognitiveProspective, CognitiveStatistics,
     CognitiveWorkingSlot,
@@ -253,8 +253,29 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
         prerequisites: &[String],
     ) -> SimardResult<String> {
         let id = Self::new_id("proc");
-        let steps_json = serde_json::to_string(steps).unwrap_or_default();
-        let prereqs_json = serde_json::to_string(prerequisites).unwrap_or_default();
+        // Errors propagated (no silent `unwrap_or_default()`) so a
+        // serialize failure cannot land a row whose `steps` column is the
+        // empty string — that would round-trip as `[]` and look like a
+        // legitimate zero-step procedure on recall.  See issue #1604 gap
+        // G17 / the #1711/#1748/#1754 "no silent fallback" pattern.
+        let steps_json =
+            serde_json::to_string(steps).map_err(|e| SimardError::BridgeCallFailed {
+                bridge: "cognitive-memory-native".into(),
+                method: "store_procedure".into(),
+                reason: format!(
+                    "failed to serialize {} step(s) for procedure '{name}': {e}",
+                    steps.len()
+                ),
+            })?;
+        let prereqs_json =
+            serde_json::to_string(prerequisites).map_err(|e| SimardError::BridgeCallFailed {
+                bridge: "cognitive-memory-native".into(),
+                method: "store_procedure".into(),
+                reason: format!(
+                    "failed to serialize {} prerequisite(s) for procedure '{name}': {e}",
+                    prerequisites.len()
+                ),
+            })?;
         self.execute(&format!(
             "CREATE (p:Procedure {{id: '{}', name: '{}', steps: '{}', prerequisites: '{}', usage_count: 0}})",
             escape_cypher(&id),
@@ -270,20 +291,107 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
         let rows = self.query(&format!(
             "MATCH (p:Procedure) WHERE p.name CONTAINS '{q}' OR p.steps CONTAINS '{q}' RETURN p.id, p.name, p.steps, p.prerequisites, p.usage_count LIMIT {limit}"
         ))?;
-        Ok(rows
-            .iter()
-            .map(|row| {
-                let steps_str = as_str(&row[2]).unwrap_or("[]");
-                let prereqs_str = as_str(&row[3]).unwrap_or("[]");
-                CognitiveProcedure {
-                    node_id: as_str(&row[0]).unwrap_or("").to_string(),
-                    name: as_str(&row[1]).unwrap_or("").to_string(),
-                    steps: serde_json::from_str(steps_str).unwrap_or_default(),
-                    prerequisites: serde_json::from_str(prereqs_str).unwrap_or_default(),
-                    usage_count: as_i64(&row[4]).unwrap_or(0),
+        // Each row is decoded with **loud** failure on schema drift or
+        // corrupt JSON in `steps` / `prerequisites`.  The previous
+        // implementation called `unwrap_or_default()` on the JSON parse
+        // and `unwrap_or("")` on every column, which turned a corrupt
+        // procedure into a "valid procedure with zero steps" — the exact
+        // silent-empty-recall failure mode called out in issue #1604
+        // (gap G17) and the recent #1711/#1748/#1754 work to remove
+        // silent fallbacks from the cognitive substrate.
+        rows.into_iter()
+            .map(|row| -> SimardResult<CognitiveProcedure> {
+                if row.len() < 5 {
+                    return Err(SimardError::BridgeCallFailed {
+                        bridge: "cognitive-memory-native".into(),
+                        method: "recall_procedure".into(),
+                        reason: format!(
+                            "expected 5 columns from MATCH (p:Procedure), got {}",
+                            row.len()
+                        ),
+                    });
                 }
+                let node_id = as_str(&row[0])
+                    .ok_or_else(|| SimardError::BridgeCallFailed {
+                        bridge: "cognitive-memory-native".into(),
+                        method: "recall_procedure".into(),
+                        reason: format!(
+                            "procedure row column 0 (id) was not a string: {:?}",
+                            row[0]
+                        ),
+                    })?
+                    .to_string();
+                let name = as_str(&row[1])
+                    .ok_or_else(|| SimardError::BridgeCallFailed {
+                        bridge: "cognitive-memory-native".into(),
+                        method: "recall_procedure".into(),
+                        reason: format!(
+                            "procedure '{node_id}' column 1 (name) was not a string: {:?}",
+                            row[1]
+                        ),
+                    })?
+                    .to_string();
+                let steps_str =
+                    as_str(&row[2]).ok_or_else(|| SimardError::BridgeCallFailed {
+                        bridge: "cognitive-memory-native".into(),
+                        method: "recall_procedure".into(),
+                        reason: format!(
+                            "procedure '{node_id}' column 2 (steps) was not a string: {:?}",
+                            row[2]
+                        ),
+                    })?;
+                let prereqs_str =
+                    as_str(&row[3]).ok_or_else(|| SimardError::BridgeCallFailed {
+                        bridge: "cognitive-memory-native".into(),
+                        method: "recall_procedure".into(),
+                        reason: format!(
+                            "procedure '{node_id}' column 3 (prerequisites) was not a string: {:?}",
+                            row[3]
+                        ),
+                    })?;
+                let steps: Vec<String> = serde_json::from_str(steps_str).map_err(|e| {
+                    tracing::warn!(
+                        node_id = %node_id,
+                        column = "steps",
+                        payload = %steps_str,
+                        error = %e,
+                        "cognitive_memory::recall_procedure: corrupt steps JSON",
+                    );
+                    SimardError::BridgeCallFailed {
+                        bridge: "cognitive-memory-native".into(),
+                        method: "recall_procedure".into(),
+                        reason: format!(
+                            "procedure '{node_id}' has corrupt steps JSON ({e}); payload={steps_str:?}"
+                        ),
+                    }
+                })?;
+                let prerequisites: Vec<String> =
+                    serde_json::from_str(prereqs_str).map_err(|e| {
+                        tracing::warn!(
+                            node_id = %node_id,
+                            column = "prerequisites",
+                            payload = %prereqs_str,
+                            error = %e,
+                            "cognitive_memory::recall_procedure: corrupt prerequisites JSON",
+                        );
+                        SimardError::BridgeCallFailed {
+                            bridge: "cognitive-memory-native".into(),
+                            method: "recall_procedure".into(),
+                            reason: format!(
+                                "procedure '{node_id}' has corrupt prerequisites JSON ({e}); payload={prereqs_str:?}"
+                            ),
+                        }
+                    })?;
+                let usage_count = as_i64(&row[4]).unwrap_or(0);
+                Ok(CognitiveProcedure {
+                    node_id,
+                    name,
+                    steps,
+                    prerequisites,
+                    usage_count,
+                })
             })
-            .collect())
+            .collect()
     }
 
     fn store_prospective(
