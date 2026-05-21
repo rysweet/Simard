@@ -3,10 +3,18 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
           document.getElementById('goals-active').innerHTML=`<table class="proc-table">
             <tr><th>Priority</th><th>ID</th><th>Description</th><th>Status</th><th>Current Activity</th><th>Actions</th></tr>
             ${d.active.map(g=>{
+              const chipColors={'Working':'#2ea043','Skipped':'#8b949e','Failed':'#f85149','Spawned engineer':'#a371f7','Waiting':'#6e7681'};
+              const chip=g.status_chip||'Waiting';
+              const chipColor=chipColors[chip]||'#6e7681';
+              const chipHtml='<span style="display:inline-block;padding:1px 8px;border-radius:10px;background:'+chipColor+';color:#fff;font-size:.7rem;font-weight:600;white-space:nowrap">'+esc(chip)+'</span>';
+              const detailText=g.detail||'';
+              const detailHtml=detailText?'<span style="font-size:.8rem;margin-left:6px">'+esc(detailText)+'</span>':'';
+              const full=g.detail_full||'';
+              const expandHtml=(full&&full!==detailText)?'<details style="display:inline;margin-left:6px"><summary style="display:inline;cursor:pointer;color:#8b949e;font-size:.7rem">[raw]</summary><pre style="margin:.3rem 0 0;white-space:pre-wrap;font-size:.75rem;color:#8b949e">'+esc(full)+'</pre></details>':'';
               let wipHtml='—';
-              if(g.current_activity||g.wip_refs?.length){
+              if(chip!=='Waiting'||detailText||g.wip_refs?.length){
                 let parts=[];
-                if(g.current_activity) parts.push('<div style="font-size:.8rem">'+esc(g.current_activity)+'</div>');
+                parts.push('<div style="font-size:.8rem;line-height:1.4">'+chipHtml+detailHtml+expandHtml+'</div>');
                 if(g.wip_refs?.length) parts.push(g.wip_refs.map(r=>{
                   const icon=r.kind==='pr'?'🔀':r.kind==='issue'?'🐛':r.kind==='branch'?'🌿':r.kind==='session'?'💻':'📌';
                   return r.url?'<a href="'+esc(r.url)+'" target="_blank" style="color:var(--accent);text-decoration:none;font-size:.8rem">'+icon+' '+esc(r.label)+'</a>':'<span style="font-size:.8rem">'+icon+' '+esc(r.label)+'</span>';

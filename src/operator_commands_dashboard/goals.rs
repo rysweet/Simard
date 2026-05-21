@@ -2,6 +2,7 @@ use axum::Json;
 use axum::extract::Path;
 use serde_json::{Value, json};
 
+use super::goals_status::render_status_and_detail;
 use super::routes::resolve_state_root;
 use super::{dashboard_goal_board_snapshot, dashboard_save_goal_board};
 use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
@@ -24,6 +25,12 @@ pub(crate) async fn goals() -> Json<Value> {
         .active
         .into_iter()
         .map(|g| {
+            // Issue #1684: render the raw brain-log `current_activity` string
+            // into a plain-English `status_chip` + `detail` pair, plus the
+            // unredacted `detail_full` for click-to-expand. `current_activity`
+            // is kept as-is (alias) so existing consumers do not break.
+            let (chip, detail, detail_full) =
+                render_status_and_detail(g.current_activity.as_deref());
             json!({
                 "id": g.id,
                 "description": g.description,
@@ -31,6 +38,9 @@ pub(crate) async fn goals() -> Json<Value> {
                 "status": g.status.to_string(),
                 "assigned_to": g.assigned_to,
                 "current_activity": g.current_activity,
+                "status_chip": chip.as_str(),
+                "detail": detail,
+                "detail_full": detail_full,
                 "wip_refs": g.wip_refs,
             })
         })

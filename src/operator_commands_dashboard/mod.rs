@@ -5,6 +5,7 @@ mod chat;
 mod current_work;
 mod distributed;
 mod goals;
+mod goals_status;
 mod hosts;
 mod index_html;
 mod logs;
