@@ -33,8 +33,8 @@ use simard::base_types::{
 };
 use simard::error::SimardResult;
 use simard::meeting_backend::{MeetingBackend, PartialReason};
-use simard::memory::{FileBackedMemoryStore, MemoryScope, MemoryStore};
 use simard::meetings::{PersistedMeetingRecord, looks_like_persisted_meeting_record};
+use simard::memory::{FileBackedMemoryStore, MemoryScope, MemoryStore};
 use simard::metadata::{BackendDescriptor, Freshness};
 use simard::run_meeting_read_probe;
 use simard::runtime::RuntimeTopology;
@@ -237,12 +237,8 @@ fn empty_repl_close_emits_empty_but_valid_memory_records() {
     // No conversation messages, no explicit /decision or /action.
     let state = Arc::new(Mutex::new(AgentState::default()));
     let agent = ScriptedAgent::new(Duration::from_millis(0), "(no content)", state);
-    let mut backend = MeetingBackend::new_session(
-        "Empty meeting",
-        Box::new(agent),
-        None,
-        String::new(),
-    );
+    let mut backend =
+        MeetingBackend::new_session("Empty meeting", Box::new(agent), None, String::new());
 
     let summary = backend.close().expect("close ok");
     let bundle_dir = std::path::PathBuf::from(
@@ -297,8 +293,12 @@ fn partial_repl_close_still_writes_memory_records_json() {
     let state = Arc::new(Mutex::new(AgentState::default()));
     // 30s block on every agent call → forces the timeout fast-path.
     let agent = ScriptedAgent::new(Duration::from_secs(30), "blocked", state);
-    let mut backend =
-        MeetingBackend::new_session("Partial close regression", Box::new(agent), None, String::new());
+    let mut backend = MeetingBackend::new_session(
+        "Partial close regression",
+        Box::new(agent),
+        None,
+        String::new(),
+    );
     backend.push_test_message("operator", "Ship the fix?");
     backend.push_test_message("simard", "Acknowledged.");
 
@@ -357,8 +357,12 @@ fn meeting_read_probe_exits_ok_after_repl_close() {
 
     let state = Arc::new(Mutex::new(AgentState::default()));
     let agent = ScriptedAgent::new(Duration::from_millis(0), "ok", state);
-    let mut backend =
-        MeetingBackend::new_session("End-to-end read probe", Box::new(agent), None, String::new());
+    let mut backend = MeetingBackend::new_session(
+        "End-to-end read probe",
+        Box::new(agent),
+        None,
+        String::new(),
+    );
     backend.push_test_message("operator", "Did we decide to fix #2000?");
     backend.push_test_message("simard", "Yes, we shipped the fix.");
     let _summary = backend.close().expect("close ok");

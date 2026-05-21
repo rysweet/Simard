@@ -55,10 +55,7 @@ pub(crate) fn build_meeting_record_value(
 ) -> String {
     let agenda = topic.trim();
     let agenda = if agenda.is_empty() { "meeting" } else { agenda };
-    let next_steps: Vec<String> = action_items
-        .iter()
-        .map(|a| a.description.clone())
-        .collect();
+    let next_steps: Vec<String> = action_items.iter().map(|a| a.description.clone()).collect();
     format!(
         "agenda={}; updates={}; decisions={}; risks={}; next_steps={}; open_questions={}; goals={}",
         agenda,
@@ -179,13 +176,15 @@ pub fn write_meeting_memory_records(
     if written.is_empty() {
         // Surface the most recent error so the caller can mark the close
         // partial.
-        return Err(last_err.unwrap_or_else(|| SimardError::ActionExecutionFailed {
-            action: "write-meeting-memory-records".to_string(),
-            reason: format!(
-                "no destination resolved for memory_records.json (bundle_dir={})",
-                bundle_dir.display()
-            ),
-        }));
+        return Err(
+            last_err.unwrap_or_else(|| SimardError::ActionExecutionFailed {
+                action: "write-meeting-memory-records".to_string(),
+                reason: format!(
+                    "no destination resolved for memory_records.json (bundle_dir={})",
+                    bundle_dir.display()
+                ),
+            }),
+        );
     }
 
     info!(
@@ -306,7 +305,10 @@ mod tests {
         let parsed = crate::meetings::PersistedMeetingRecord::parse(&value)
             .expect("populated record parses");
         assert_eq!(parsed.decisions, decisions);
-        assert_eq!(parsed.next_steps, vec!["Write the regression test", "Run cargo clippy"]);
+        assert_eq!(
+            parsed.next_steps,
+            vec!["Write the regression test", "Run cargo clippy"]
+        );
         assert_eq!(parsed.open_questions, questions);
     }
 
