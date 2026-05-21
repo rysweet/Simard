@@ -10,3 +10,6 @@ worktrees/
 node_modules/
 test-results/
 gym-wave*-tmp/
+# Rust coverage artifacts (llvm-cov / cargo-llvm-cov)
+*.profraw
+*.profdata

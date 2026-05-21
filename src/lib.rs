@@ -77,6 +77,7 @@ mod operator_commands_review;
 mod operator_commands_terminal;
 mod persistence;
 pub mod prompt_assets;
+pub mod prompt_delivery;
 pub mod reflection;
 pub mod remote_azlin;
 pub mod remote_session;
