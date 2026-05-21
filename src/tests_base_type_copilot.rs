@@ -88,11 +88,20 @@ fn build_copilot_objective_includes_command_and_exit() {
         command: "my-copilot run".to_string(),
         working_directory: Some("/tmp/work".to_string()),
     };
-    let prompt = "Do the thing.";
-    let objective = build_copilot_terminal_objective(&config, prompt);
+    let prompt_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(prompt_file.path(), "Do the thing.").unwrap();
+    let objective = build_copilot_terminal_objective(&config, prompt_file.path());
     assert!(objective.contains("my-copilot run"));
     assert!(objective.contains("working-directory: /tmp/work"));
-    assert!(objective.contains("Do the thing."));
+    // Issue #1871: the prompt body is now read from the temp file, not inlined.
+    assert!(
+        objective.contains(prompt_file.path().to_str().unwrap()),
+        "objective should reference the prompt file path"
+    );
+    assert!(
+        !objective.contains("Do the thing."),
+        "prompt body must NOT be inlined into the shell command (issue #1871)"
+    );
     assert!(
         objective.contains("; exit"),
         "objective must chain exit to end the shell naturally"
@@ -118,19 +127,121 @@ fn build_copilot_objective_includes_command_and_exit() {
 #[test]
 fn build_copilot_objective_without_working_directory() {
     let config = CopilotAdapterConfig::default();
-    let prompt = "Hello world";
-    let objective = build_copilot_terminal_objective(&config, prompt);
+    let prompt_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(prompt_file.path(), "Hello world").unwrap();
+    let objective = build_copilot_terminal_objective(&config, prompt_file.path());
     assert!(!objective.contains("working-directory:"));
     assert!(objective.contains("; exit"));
     assert!(objective.contains("amplihack copilot"));
 }
 
+/// Regression for issue #1871: prompts containing both single and double
+/// quotes (plus a large body) must round-trip through the adapter without
+/// any shell-escaping ambiguity. With the new file-based approach, the
+/// objective shell command is short and does not embed the prompt body at
+/// all — the prompt is delivered to the copilot subprocess via
+/// `cat 'PATH'` reading a file written out-of-band from Rust.
 #[test]
-fn build_copilot_objective_escapes_single_quotes() {
+fn build_copilot_objective_handles_apostrophes_and_double_quotes() {
     let config = CopilotAdapterConfig::default();
-    let prompt = "it's a test with 'quotes'";
-    let objective = build_copilot_terminal_objective(&config, prompt);
-    assert!(!objective.contains("it's"), "single quotes must be escaped");
+    // Prompt with the classic failure patterns: apostrophes ("author's",
+    // "Simard's"), backslashes, double quotes, and a $-prefixed token that
+    // would have undergone shell expansion if inlined.
+    let prompt = "author's Simard's judge's response: she said \"hello $USER\" and \\escaped\\";
+    let temp_file = write_prompt_to_tempfile(prompt).expect("write tempfile");
+    let objective = build_copilot_terminal_objective(&config, temp_file.path());
+
+    // The prompt body must NEVER appear in the shell command line — that
+    // was the root cause of #1871.
+    for needle in [
+        "author's",
+        "Simard's",
+        "judge's",
+        "hello $USER",
+        "\\escaped\\",
+    ] {
+        assert!(
+            !objective.contains(needle),
+            "prompt fragment {needle:?} leaked into shell command: {objective:?}"
+        );
+    }
+
+    // The file on disk must contain the prompt verbatim.
+    let written = std::fs::read_to_string(temp_file.path()).expect("read prompt file");
+    assert_eq!(
+        written, prompt,
+        "tempfile contents must be byte-for-byte identical to the input prompt"
+    );
+
+    // The objective must reference the temp file path.
+    assert!(
+        objective.contains(temp_file.path().to_str().unwrap()),
+        "objective must reference the temp file path"
+    );
+}
+
+/// Regression for issue #1871 (PTY line-buffer overflow): a 128 KB+ prompt
+/// containing apostrophes must produce a short shell command line and a
+/// faithful on-disk prompt file. The reporter observed the failure with a
+/// ~12 KB prompt; we lock the larger 128 KB threshold to leave headroom.
+#[test]
+fn build_copilot_objective_handles_prompts_over_128kb() {
+    let config = CopilotAdapterConfig::default();
+
+    // Build a > 128 KB prompt mixing apostrophes, double quotes, backslashes,
+    // and shell metacharacters. The repeated unit is 64 bytes so 3000 reps
+    // ≈ 187 KB — well over the threshold.
+    let unit = "author's judge's \"merge\" `pwned` ${injected} \\nope\\ end-of-line\n";
+    assert_eq!(unit.len(), 64);
+    let prompt: String = unit.repeat(3000);
+    assert!(prompt.len() > 128 * 1024, "prompt should exceed 128 KB");
+
+    let temp_file = write_prompt_to_tempfile(&prompt).expect("write tempfile");
+    let objective = build_copilot_terminal_objective(&config, temp_file.path());
+
+    // The objective shell-command must stay small — comfortably under the
+    // canonical PTY line buffer (~4 KB on Linux). A few hundred bytes is
+    // typical: command + path + flags.
+    assert!(
+        objective.len() < 1024,
+        "objective length {} exceeded 1 KB; large prompt may have leaked into command line",
+        objective.len()
+    );
+
+    // The on-disk file must contain the prompt byte-for-byte.
+    let written = std::fs::read_to_string(temp_file.path()).expect("read prompt file");
+    assert_eq!(written.len(), prompt.len(), "tempfile size mismatch");
+    assert_eq!(written, prompt, "tempfile content mismatch");
+
+    // The command must reference the file via `cat 'PATH'`, not inline it.
+    assert!(
+        objective.contains("$(cat '"),
+        "objective must read prompt via $(cat 'PATH'): {objective:?}"
+    );
+
+    // Sanity: no fragment of the inlined prompt body leaked through.
+    assert!(
+        !objective.contains("author's"),
+        "prompt body must not appear in shell command"
+    );
+}
+
+/// `write_prompt_to_tempfile` returns a `NamedTempFile` whose path is safe
+/// to single-quote in shell. The `NamedTempFile` API guarantees ASCII
+/// alphanumerics, `/`, `.`, `_`, and `-`; this test pins that contract so
+/// any future change that broke it would surface here, not as a production
+/// shell-injection bug.
+#[test]
+fn write_prompt_tempfile_path_is_shell_safe() {
+    let file = write_prompt_to_tempfile("ok").expect("write tempfile");
+    let path = file.path().to_string_lossy();
+    for ch in path.chars() {
+        assert!(
+            ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-'),
+            "tempfile path {path:?} contains unexpected character {ch:?}; \
+             single-quoting in build_copilot_terminal_objective would no longer be safe"
+        );
+    }
 }
 
 #[test]
