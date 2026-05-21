@@ -15,7 +15,9 @@ related:
 
 # How to inspect meeting records
 
-This guide shows how to use `simard meeting read <base-type> <topology> [state-root]` as the read-only audit companion to `meeting run`.
+This guide shows how to use `simard meeting read <base-type> <topology> <state-root>` as the read-only audit companion to `meeting run`.
+
+The positional `<state-root>` is **required**: `meeting read` does not synthesize a default path and does not honor `SIMARD_STATE_ROOT`. See [Operator read-subcommand state-root contract](../reference/operator-read-state-root-contract.md) for the full contract.
 
 ## Prerequisites
 
@@ -95,16 +97,16 @@ Latest meeting record: agenda=align the next Simard workstream; ...
 The important contract is structural:
 
 - the command is read-only
-- it reads the latest persisted meeting decision record from the selected validated `state-root`
+- it reads the latest persisted meeting decision record from the explicit validated `<state-root>`
 - sections always appear in this order: agenda, updates, decisions, risks, next steps, open questions, goal updates, latest raw meeting record
 - empty sections render explicit `0` and `<none>` lines instead of disappearing
 - persisted meeting text is sanitized before printing so stored terminal control sequences are not replayed
-- when `[state-root]` is omitted, the command reuses the same canonical durable root that `meeting run` writes for the validated runtime pairing
+- the `<state-root>` positional is required; omitting it (or relying on `SIMARD_STATE_ROOT`) hard-fails with a stable, actionable error at state-root resolution time, before any storage I/O for the durable record
 
 ## 4. Configuration rules that matter
 
-- pass the exact same explicit `state-root` you used for `meeting run` when you want to inspect that stored planning record later
-- if you omit `[state-root]`, keep the same shipped `base-type` and `topology` pairing you used for `meeting run` so Simard resolves the same canonical durable root
+- always pass the exact same explicit `<state-root>` you used for `meeting run`; the positional is required and omitting it hard-fails
+- `SIMARD_STATE_ROOT` is intentionally not honored for `meeting read` — set the path on the command line instead
 - use `meeting run` when you want to capture new durable planning state
 - use `meeting read` when you want to inspect the latest durable meeting state without mutating it
 - expect invalid `state-root` values, missing memory state, and malformed persisted meeting records to fail explicitly rather than silently rendering a synthetic summary
@@ -120,6 +122,22 @@ That usually means one of these is true:
 - you expected Simard to synthesize meeting state from current goals alone
 
 Run `meeting run` first against the same root, then use `meeting read`.
+
+### The command fails because `<state-root>` was omitted
+
+`meeting read` requires the positional `<state-root>` and will exit non-zero. The error has the template form:
+
+```text
+error: missing required config 'state-root': state-root is required for `simard meeting read <base-type>`: pass the positional <state-root> argument explicitly. The SIMARD_STATE_ROOT environment variable is not honored for this command.
+```
+
+`<base-type>` is the literal value the runtime substitutes from the operator-supplied argument. For example, calling `simard meeting read local-harness single-process` (with no `<state-root>`) prints:
+
+```text
+error: missing required config 'state-root': state-root is required for `simard meeting read local-harness`: pass the positional <state-root> argument explicitly. The SIMARD_STATE_ROOT environment variable is not honored for this command.
+```
+
+Re-run with the same explicit `STATE_ROOT` you used for `meeting run`. Setting `SIMARD_STATE_ROOT` will not help — the variable is intentionally ignored for this command. See [Operator read-subcommand state-root contract](../reference/operator-read-state-root-contract.md).
 
 ### The command fails before any record is printed
 

@@ -58,6 +58,7 @@ nav:
   - Concepts:
     - Truthful Runtime Metadata: concepts/truthful-runtime-metadata.md
     - Prompt-driven Brain Iteration: concepts/prompt-driven-brain-iteration.md
+    - Improvement context — denser execution evidence: concepts/improvement-context-execution-evidence-gap.md
   - Tutorials:
     - First Local Session: tutorials/run-your-first-local-session.md
     - First Benchmark Suite: tutorials/run-your-first-benchmark-gym.md
@@ -73,6 +74,7 @@ nav:
   - Reference:
     - CLI Reference: reference/simard-cli.md
     - Runtime Contracts: reference/runtime-contracts.md
+    - Operator Read State-Root Contract: reference/operator-read-state-root-contract.md
     - Bridge Wire Protocol: reference/bridge-wire-protocol.md
     - Dashboard E2E Tests: reference/dashboard-e2e-tests.md
     # Hidden from nav until issue #1590 implementation lands:

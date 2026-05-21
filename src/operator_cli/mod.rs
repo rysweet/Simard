@@ -41,7 +41,7 @@ Product modes:
   engineer terminal-read <topology> [state-root]
   engineer read <topology> [state-root]
   meeting run <base-type> <topology> <objective> [state-root]
-  meeting read <base-type> <topology> [state-root]
+  meeting read <base-type> <topology> <state-root>
   meeting repl [topic]
   goal list                — print active + backlog snapshot to stdout
   goal unblock <goal-id>   — operator escape hatch: clear any Blocked
@@ -68,7 +68,7 @@ Product modes:
                            meeting greeting banner; pass [state-root] to
                            inspect a probe-isolated sandbox instead
   improvement-curation run <base-type> <topology> <objective> [state-root]
-  improvement-curation read <base-type> <topology> [state-root]
+  improvement-curation read <base-type> <topology> <state-root>
   gym list
   gym run <scenario-id>
   gym compare <scenario-id>
@@ -95,7 +95,7 @@ Product modes:
 
 Operator utilities:
   review run <base-type> <topology> <objective> [state-root]
-  review read <base-type> <topology> [state-root]
+  review read <base-type> <topology> <state-root>
   bootstrap run <identity> <base-type> <topology> <objective> [state-root]
 
 Compatibility binaries remain available: simard_operator_probe, simard-gym

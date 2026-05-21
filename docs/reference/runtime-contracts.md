@@ -65,17 +65,17 @@ The shipped operator-facing command tree is:
 - `simard engineer copilot-submit <topology> [state-root] [--json]`
 - `simard engineer terminal-read <topology> [state-root]`
 - `simard meeting run <base-type> <topology> <structured-objective> [state-root]`
-- `simard meeting read <base-type> <topology> [state-root]`
+- `simard meeting read <base-type> <topology> <state-root>`
 - `simard goal-curation run <base-type> <topology> <structured-objective> [state-root]`
 - `simard goal-curation read <base-type> <topology> [state-root]`
 - `simard improvement-curation run <base-type> <topology> <structured-objective> [state-root]`
-- `simard improvement-curation read <base-type> <topology> [state-root]`
+- `simard improvement-curation read <base-type> <topology> <state-root>`
 - `simard gym list`
 - `simard gym run <scenario-id>`
 - `simard gym compare <scenario-id>`
 - `simard gym run-suite <suite-id>`
 - `simard review run <base-type> <topology> <objective> [state-root]`
-- `simard review read <base-type> <topology> [state-root]`
+- `simard review read <base-type> <topology> <state-root>`
 - `simard bootstrap run <identity> <base-type> <topology> <objective> [state-root]`
 
 Shipped terminal contract: `simard engineer copilot-submit <topology> [state-root] [--json]`. It is documented below as the bounded one-shot local Copilot submission surface.
@@ -93,6 +93,24 @@ Rejected inputs include:
 - a symlink root
 
 Safe roots are canonicalized once and then reused throughout the command.
+
+### Required state-root on operator-probe read subcommands
+
+The three operator-probe read subcommands publish the positional argument
+as `<state-root>` (required) rather than `[state-root]` (optional):
+
+- `simard meeting read <base-type> <topology> <state-root>`
+- `simard improvement-curation read <base-type> <topology> <state-root>`
+- `simard review read <base-type> <topology> <state-root>`
+
+When `<state-root>` is omitted these commands hard-fail with the
+`SimardError::MissingRequiredConfig` variant and a stable, actionable
+error that names the missing argument, the subcommand, and the base-type.
+`SIMARD_STATE_ROOT` is intentionally **not** consulted for these three
+reads. `simard goal-curation read` and every `... run` path keep the
+existing optional positional and env-fallback behavior. See
+[Operator read-subcommand state-root contract](./operator-read-state-root-contract.md)
+for the complete contract.
 
 ## Mode-scoped handoff artifacts
 
@@ -295,7 +313,7 @@ This command ships as the next bounded local Copilot slice after `copilot-prompt
 Canonical entrypoints:
 
 - `simard meeting run <base-type> <topology> <structured-objective> [state-root]`
-- `simard meeting read <base-type> <topology> [state-root]`
+- `simard meeting read <base-type> <topology> <state-root>`
 
 Compatibility surface: `simard_operator_probe meeting-run ...` and `simard_operator_probe meeting-read ...`
 
@@ -313,7 +331,8 @@ The shipped contract is intentionally explicit:
 
 - `meeting run` remains the only mutation path for agenda, update, decision, risk, next-step, open-question, and goal-update capture
 - `meeting read` is the read-only audit surface for the latest persisted meeting decision state
-- both commands reuse the same validated state root, and both default to the same canonical durable root for `simard-meeting`
+- `meeting run` accepts an optional `[state-root]` positional and falls back to its canonical durable root when omitted
+- `meeting read` requires an explicit `<state-root>` positional; `SIMARD_STATE_ROOT` is not honored. See [Operator read-subcommand state-root contract](./operator-read-state-root-contract.md)
 - `meeting read` loads the latest persisted meeting decision record, where "latest" means the last decision memory record whose value matches the shipped meeting record shape
 - `meeting read` renders agenda, updates, decisions, risks, next steps, open questions, goal updates, and the latest raw meeting record in a stable operator-visible order
 - operator-visible strings are sanitized before printing so persisted terminal control sequences are not replayed
@@ -335,7 +354,7 @@ Goal-curation mode maintains durable backlog records and the active top five goa
 Canonical entrypoints:
 
 - `simard improvement-curation run <base-type> <topology> <structured-objective> [state-root]`
-- `simard improvement-curation read <base-type> <topology> [state-root]`
+- `simard improvement-curation read <base-type> <topology> <state-root>`
 
 Compatibility surface: `simard_operator_probe improvement-curation-run ...` and `simard_operator_probe improvement-curation-read ...`
 
@@ -345,7 +364,8 @@ The shipped contract is intentionally explicit:
 
 - `improvement-curation run` remains the only mutation path for approving or deferring proposals
 - `improvement-curation read` is the read-only audit surface for the latest review-to-priority promotion state
-- both commands reuse the same validated state root, and both default to the same canonical durable root as `review run`
+- `improvement-curation run` accepts an optional `[state-root]` positional and falls back to the same canonical durable root as `review run` when omitted
+- `improvement-curation read` requires an explicit `<state-root>` positional; `SIMARD_STATE_ROOT` is not honored. See [Operator read-subcommand state-root contract](./operator-read-state-root-contract.md)
 - `improvement-curation read` loads the latest persisted review artifact, where "latest" means the artifact with the highest `reviewed_at_unix_ms`
 - `improvement-curation read` loads the latest persisted improvement decision record, where "latest" means the last decision memory record whose key ends with `improvement-curation-record`
 - `improvement-curation read` renders approved proposals, deferred proposals, active goals, proposed goals, and the latest improvement decision record in a stable operator-visible order
@@ -361,11 +381,17 @@ target/operator-probe-state/review-run/simard-engineer/<base-type>/<topology>
 Canonical entrypoints:
 
 - `simard review run <base-type> <topology> <objective> [state-root]`
-- `simard review read <base-type> <topology> [state-root]`
+- `simard review read <base-type> <topology> <state-root>`
 
 Compatibility surface: `simard_operator_probe review-run ...` and `simard_operator_probe review-read ...`
 
 Review mode persists a structured review artifact and makes the latest artifact readable from the same durable state root.
+
+- `review run` keeps the optional `[state-root]` positional and the
+  `SIMARD_STATE_ROOT` env fallback used by the canonical run helper.
+- `review read` requires the positional `<state-root>` and intentionally
+  does not honor `SIMARD_STATE_ROOT`. Hard-fail wording matches the
+  [operator-read contract](./operator-read-state-root-contract.md).
 
 ### Benchmark gym
 

@@ -41,13 +41,13 @@ simard
 |  `- terminal-read <topology> [state-root]
 |- meeting
 |  |- run <base-type> <topology> <structured-objective> [state-root]
-|  `- read <base-type> <topology> [state-root]
+|  `- read <base-type> <topology> <state-root>
 |- goal-curation
 |  |- run <base-type> <topology> <structured-objective> [state-root]
 |  `- read <base-type> <topology> [state-root]
 |- improvement-curation
 |  |- run <base-type> <topology> <structured-objective> [state-root]
-|  `- read <base-type> <topology> [state-root]
+|  `- read <base-type> <topology> <state-root>
 |- gym
 |  |- list
 |  |- run <scenario-id>
@@ -55,7 +55,7 @@ simard
 |  `- run-suite <suite-id>
 |- review
 |  |- run <base-type> <topology> <objective> [state-root]
-|  `- read <base-type> <topology> [state-root]
+|  `- read <base-type> <topology> <state-root>
 `- bootstrap
 |  `- run <identity> <base-type> <topology> <objective> [state-root]
 |- ooda
@@ -247,6 +247,45 @@ Rejected inputs include:
 - a symlink root
 
 Safe state roots are canonicalized once and then reused for the rest of the command.
+
+### Required state-root on operator-probe read subcommands
+
+Three operator-probe read subcommands publish the positional argument as
+`<state-root>` (required) rather than `[state-root]` (optional):
+
+- `simard meeting read <base-type> <topology> <state-root>`
+- `simard improvement-curation read <base-type> <topology> <state-root>`
+- `simard review read <base-type> <topology> <state-root>`
+
+When `<state-root>` is omitted, these three commands hard-fail with the
+`SimardError::MissingRequiredConfig` variant and a stable error message of
+the form:
+
+```text
+error: missing required config 'state-root': state-root is required for `simard <subcommand> read <base-type>`: pass the positional <state-root> argument explicitly. The SIMARD_STATE_ROOT environment variable is not honored for this command.
+```
+
+`<subcommand>` is one of `meeting`, `improvement-curation`, `review`.
+`<base-type>` is the literal value the runtime substitutes from the
+operator-supplied argument. For example, calling `simard meeting read
+local-harness single-process` (with no `<state-root>`) prints:
+
+```text
+error: missing required config 'state-root': state-root is required for `simard meeting read local-harness`: pass the positional <state-root> argument explicitly. The SIMARD_STATE_ROOT environment variable is not honored for this command.
+```
+
+The `SIMARD_STATE_ROOT` environment variable is intentionally **not honored**
+for these three reads — setting it does not change behavior, and the
+operator still gets the error above. This audit-focused contract is tracked
+under issue [#1909](https://github.com/rysweet/Simard/issues/1909) /
+audit [#1910](https://github.com/rysweet/Simard/issues/1910) and is
+documented end-to-end in
+[Operator read-subcommand state-root contract](./operator-read-state-root-contract.md).
+
+The `simard goal-curation read` command keeps the optional `[state-root]`
+positional and still honors `SIMARD_STATE_ROOT` for operator parity with
+its run counterpart. All `... run` paths likewise keep the optional
+positional and the env fallback.
 
 ## Shared socket-path contract
 
@@ -633,15 +672,15 @@ EOF2
 simard meeting run local-harness single-process "$MEETING_OBJECTIVE" "$STATE_ROOT"
 ```
 
-### `simard meeting read <base-type> <topology> [state-root]`
+### `simard meeting read <base-type> <topology> <state-root>`
 
 Reads the latest durable meeting record without mutating it.
 
 Key behavior:
 
 - loads the latest persisted meeting decision record from the validated `state-root`
-- reuses the same canonical default durable root as `meeting run` when `[state-root]` is omitted
-- validates `base-type` and `topology` before deriving that default root
+- requires the positional `<state-root>` and hard-fails if it is omitted; `SIMARD_STATE_ROOT` is not honored. See [Operator read-subcommand state-root contract](./operator-read-state-root-contract.md)
+- validates `base-type` and `topology` before further work
 - requires explicit read-layout inputs before probing: the state root itself must already exist as a directory and `memory_records.json` must already be present
 - prints sections in this fixed order: latest agenda, updates, decisions, risks, next steps, open questions, goal updates, latest meeting record
 - includes explicit zero-state lines for empty update, decision, risk, next-step, open-question, and goal-update sections
@@ -760,7 +799,7 @@ When `[state-root]` is omitted, `improvement-curation run` reuses the same canon
 target/operator-probe-state/review-run/simard-engineer/<base-type>/<topology>
 ```
 
-### `simard improvement-curation read <base-type> <topology> [state-root]`
+### `simard improvement-curation read <base-type> <topology> <state-root>`
 
 Reads the latest durable improvement-curation state without mutating it.
 
@@ -768,8 +807,8 @@ Key behavior:
 
 - loads the latest persisted review artifact from the validated `state-root`, where "latest" means the review artifact with the highest `reviewed_at_unix_ms`
 - loads the latest persisted improvement-curation decision record from the same root, where "latest" means the last decision memory record whose key ends with `improvement-curation-record`
-- reuses the same canonical default durable root as `review run` and `improvement-curation run` when `[state-root]` is omitted
-- validates `base-type` and `topology` before deriving that default root
+- requires the positional `<state-root>` and hard-fails if it is omitted; `SIMARD_STATE_ROOT` is not honored. See [Operator read-subcommand state-root contract](./operator-read-state-root-contract.md)
+- validates `base-type` and `topology` before further work
 - requires explicit read-layout inputs before probing: the state root itself must already exist as a directory, `review-artifacts/` must exist, and both `memory_records.json` and `goal_records.json` must already be present
 - prints sections in this fixed order: latest review metadata, approved proposals, deferred proposals, active goals, proposed goals, latest improvement record
 - includes explicit zero-state lines for empty approved, deferred, active-goal, and proposed-goal sections
@@ -936,9 +975,11 @@ The public operator contract is:
 
 Builds and persists the latest review artifact tied to the selected durable state.
 
-### `simard review read <base-type> <topology> [state-root]`
+### `simard review read <base-type> <topology> <state-root>`
 
 Reads back the latest persisted review artifact from the selected durable state.
+
+Requires the positional `<state-root>` and hard-fails if it is omitted; `SIMARD_STATE_ROOT` is not honored. See [Operator read-subcommand state-root contract](./operator-read-state-root-contract.md).
 
 Example:
 

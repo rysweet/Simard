@@ -46,6 +46,7 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [Cognitive-memory goal store adapter](./reference/cognitive-memory-goal-store.md) - Design for the planned `GoalStore` implementation that will back `RuntimePorts.goal_store` with cognitive memory (issue #1590 follow-up).
 - [String truncation helpers](./reference/string-truncation-helpers.md) - Design for the planned `truncate_to_char_boundary` UTF-8-safe byte-budget helper (issue #1590 follow-up).
 - [Concept: truthful runtime metadata](./concepts/truthful-runtime-metadata.md) - Read the design rationale behind the stricter runtime contract.
+- [Concept: improvement context — denser execution evidence for the engineer loop](./concepts/improvement-context-execution-evidence-gap.md) - Captured improvement-curation context preserving the active "Capture denser execution evidence" goal and the observation that the legacy `simard_operator_probe` surface does not yet expose a terminal engineer-loop probe.
 
 ## Canonical executable surface
 

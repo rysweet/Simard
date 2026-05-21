@@ -76,7 +76,7 @@ pub fn run_meeting_read_probe(
     topology: &str,
     state_root_override: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let state_root = resolved_meeting_read_state_root(state_root_override, base_type, topology)?;
+    let state_root = resolved_meeting_read_state_root(state_root_override, base_type)?;
     let memory_store = FileBackedMemoryStore::try_new(state_root.join("memory_records.json"))?;
     let meeting_records = memory_store
         .list(MemoryScope::Decision)?

@@ -105,11 +105,10 @@ pub fn run_improvement_curation_probe(
 
 pub fn run_improvement_curation_read_probe(
     base_type: &str,
-    topology: &str,
+    _topology: &str,
     state_root_override: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let state_root =
-        resolved_improvement_curation_read_state_root(state_root_override, base_type, topology)?;
+    let state_root = resolved_improvement_curation_read_state_root(state_root_override, base_type)?;
     let (review_artifact_path, review) =
         latest_review_artifact(&state_root)?.ok_or("expected persisted review artifact")?;
     let memory_store = FileBackedMemoryStore::try_new(state_root.join("memory_records.json"))?;

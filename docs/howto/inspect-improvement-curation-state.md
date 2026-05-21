@@ -15,7 +15,9 @@ related:
 
 # How to inspect improvement-curation state
 
-This guide shows how to use `simard improvement-curation read <base-type> <topology> [state-root]` as the read-only audit companion to `improvement-curation run`.
+This guide shows how to use `simard improvement-curation read <base-type> <topology> <state-root>` as the read-only audit companion to `improvement-curation run`.
+
+The positional `<state-root>` is **required**: `improvement-curation read` does not synthesize a default path and does not honor `SIMARD_STATE_ROOT`. The same explicit-or-fail contract also applies to `review read`; see [Operator read-subcommand state-root contract](../reference/operator-read-state-root-contract.md).
 
 ## Prerequisites
 
@@ -110,20 +112,20 @@ Latest improvement record: review=review-... target=operator-review approvals=[p
 The important contract is structural:
 
 - the command is read-only
-- it reads the latest persisted review artifact from the same validated `state-root`, where "latest" means the artifact with the highest `reviewed_at_unix_ms`
+- it reads the latest persisted review artifact from the explicit validated `<state-root>`, where "latest" means the artifact with the highest `reviewed_at_unix_ms`
 - it reads the latest persisted improvement decision record from that same root, where "latest" means the last decision memory record whose key ends with `improvement-curation-record`
 - sections always appear in this order: latest review metadata, approved proposals, deferred proposals, active goals, proposed goals, latest improvement record
 - empty approved, deferred, active-goal, or proposed-goal sections render explicit `0` and `<none>` lines instead of disappearing
 - persisted proposal titles, rationales, goal text, and decision records are sanitized before printing so stored terminal control sequences are not replayed
-- when `[state-root]` is omitted, the command reuses the same canonical durable root that `review run` and `improvement-curation run` use for the validated runtime pairing
+- the `<state-root>` positional is required; omitting it (or relying on `SIMARD_STATE_ROOT`) hard-fails with a stable, actionable error at state-root resolution time, before any storage I/O for the durable record
 
 ## 5. Configuration rules that matter
 
 For predictable future improvement-state inspection, keep these rules in mind:
 
-- pass the exact same explicit `state-root` you used for earlier `review run` and `improvement-curation run` activity when you want to inspect that stored decision state
-- if you omit `[state-root]`, keep the same shipped `base-type` and `topology` pairing you used for `review run` or `improvement-curation run` so Simard resolves the same canonical durable root
-- the canonical default root for the shared review/improvement state is `target/operator-probe-state/review-run/simard-engineer/<base-type>/<topology>`
+- always pass the exact same explicit `<state-root>` you used for earlier `review run` and `improvement-curation run` activity; the positional is required for `improvement-curation read` and `review read`, and omitting it hard-fails
+- `SIMARD_STATE_ROOT` is intentionally not honored for `improvement-curation read` or `review read` — set the path on the command line instead
+- the canonical default root used by `review run` and `improvement-curation run` is still `target/operator-probe-state/review-run/simard-engineer/<base-type>/<topology>`; pass that path verbatim to the read commands if you relied on it before
 - use `improvement-curation run` when you want to approve or defer proposals
 - use `improvement-curation read` when you want a read-only operator summary of the latest decisions and promoted goals
 - expect invalid `state-root` values, missing review artifacts, missing improvement records, unreadable storage, and malformed decision data to fail explicitly rather than silently rendering a partial report
@@ -146,6 +148,22 @@ That means no improvement-curation decision has been written under the selected 
 
 Run `improvement-curation run` first, then use the read command against the same root.
 
+### The command fails because `<state-root>` was omitted
+
+`improvement-curation read` (and `review read`) require the positional `<state-root>` and will exit non-zero. The error has the template form:
+
+```text
+error: missing required config 'state-root': state-root is required for `simard improvement-curation read <base-type>`: pass the positional <state-root> argument explicitly. The SIMARD_STATE_ROOT environment variable is not honored for this command.
+```
+
+`<base-type>` is the literal value the runtime substitutes from the operator-supplied argument. For example, calling `simard improvement-curation read local-harness single-process` (with no `<state-root>`) prints:
+
+```text
+error: missing required config 'state-root': state-root is required for `simard improvement-curation read local-harness`: pass the positional <state-root> argument explicitly. The SIMARD_STATE_ROOT environment variable is not honored for this command.
+```
+
+Re-run with the same explicit `STATE_ROOT` you used for `review run` and `improvement-curation run`. Setting `SIMARD_STATE_ROOT` will not help — the variable is intentionally ignored for these commands. See [Operator read-subcommand state-root contract](../reference/operator-read-state-root-contract.md).
+
 ### The command prints no proposed goals
 
 That is fine when the approved proposals were promoted as `active` priorities instead of `proposed` priorities. `improvement-curation read` should still print:
@@ -162,3 +180,4 @@ That is the intended contract for invalid or unreadable operator state. Fix the 
 - For the exact command tree and example syntax, see [Simard CLI reference](../reference/simard-cli.md).
 - For the executable contract behind the read and run paths, see [Runtime contracts reference](../reference/runtime-contracts.md).
 - For the wider tutorial flow that also exercises engineer, meeting, goal-curation, and bootstrap modes, see [Tutorial: Run your first local session](../tutorials/run-your-first-local-session.md).
+- For the durable captured-context entry behind the "Capture denser execution evidence" example goal used in step 3, see [Improvement context: denser execution evidence for the engineer loop](../concepts/improvement-context-execution-evidence-gap.md).
