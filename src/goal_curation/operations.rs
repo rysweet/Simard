@@ -113,13 +113,12 @@ pub fn board_integrity_suspect(board: &GoalBoard) -> Option<String> {
 ///
 /// Matches strings like `Goal g1`, `goal g1`, `GOAL abc`.
 pub fn is_placeholder_description(desc: &str) -> bool {
-    let s = desc.trim().to_lowercase();
-    if let Some(rest) = s.strip_prefix("goal") {
-        let rest = rest.trim();
-        !rest.is_empty() && rest.len() <= 4 && rest.chars().all(|c| c.is_ascii_alphanumeric())
-    } else {
-        false
+    let s = desc.trim();
+    if !s.get(..4).is_some_and(|p| p.eq_ignore_ascii_case("goal")) {
+        return false;
     }
+    let rest = s[4..].trim();
+    !rest.is_empty() && rest.len() <= 4 && rest.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 /// One-time migration: if a legacy `goal_records.json` exists on disk, read
@@ -743,20 +742,20 @@ pub fn update_goal_progress_with_evidence(
 ) -> SimardResult<super::progress_evidence::EvidenceDecision> {
     use super::progress_evidence::{EvidenceDecision, process_start};
 
-    // ── Look up the goal first; needed for percent comparison ─────────
-    let (current_status, last_update_at_field) = {
-        let goal = board
-            .active
-            .iter()
-            .find(|g| g.id == goal_id)
-            .ok_or_else(|| SimardError::InvalidGoalRecord {
-                field: "goal_id".to_string(),
-                reason: format!("active goal '{goal_id}' not found"),
-            })?;
-        (goal.status.clone(), goal.last_progress_update_at)
-    };
-    let old_percent = progress_to_percent(&current_status, 0);
+    // ── Look up and snapshot the goal; reused for percent comparison and
+    //    checker.check() below, avoiding a second linear scan. ─────────
+    let goal_snapshot = board
+        .active
+        .iter()
+        .find(|g| g.id == goal_id)
+        .ok_or_else(|| SimardError::InvalidGoalRecord {
+            field: "goal_id".to_string(),
+            reason: format!("active goal '{goal_id}' not found"),
+        })?
+        .clone();
+    let old_percent = progress_to_percent(&goal_snapshot.status, 0);
     let new_percent = progress_to_percent(&proposed, old_percent);
+    let last_update_at_field = goal_snapshot.last_progress_update_at;
 
     // ── Bypass set ────────────────────────────────────────────────────
     let is_bypass = matches!(proposed, GoalProgress::Blocked(_))
@@ -806,13 +805,6 @@ pub fn update_goal_progress_with_evidence(
     }
 
     // ── Consult checker ───────────────────────────────────────────────
-    // Re-borrow the goal immutably to pass into checker.check.
-    let goal_snapshot = board
-        .active
-        .iter()
-        .find(|g| g.id == goal_id)
-        .expect("already located above")
-        .clone();
     let decision = checker.check(&goal_snapshot, old_percent, new_percent, since);
 
     match decision {
@@ -966,10 +958,12 @@ pub fn seed_default_board(board: &mut GoalBoard) -> usize {
 /// The board has no per-goal session provenance, so we mark these records
 /// as originating from the "all-zeros" session so callers can distinguish
 /// them from session-sourced goals.
-fn sentinel_source_session_id() -> crate::session::SessionId {
+///
+/// Cached via `LazyLock` to avoid re-parsing the UUID string on every call.
+static SENTINEL_SESSION_ID: LazyLock<crate::session::SessionId> = LazyLock::new(|| {
     crate::session::SessionId::parse("00000000-0000-0000-0000-000000000000")
         .expect("sentinel uuid must parse")
-}
+});
 
 /// Adapt the cognitive-memory `GoalBoard` into the flat
 /// `Vec<crate::goals::GoalRecord>` shape that the engineer loop and meeting
@@ -990,7 +984,6 @@ fn sentinel_source_session_id() -> crate::session::SessionId {
 /// Backlog items are not emitted — only the active goals surface here, which
 /// matches the legacy `FileBackedGoalStore::active_top_goals(...)` contract.
 pub fn active_goals_as_records(board: &GoalBoard) -> Vec<crate::goals::GoalRecord> {
-    let sentinel = sentinel_source_session_id();
     board
         .active
         .iter()
@@ -1017,7 +1010,7 @@ pub fn active_goals_as_records(board: &GoalBoard) -> Vec<crate::goals::GoalRecor
                 status,
                 priority,
                 owner_identity,
-                source_session_id: sentinel.clone(),
+                source_session_id: SENTINEL_SESSION_ID.clone(),
                 updated_in: crate::session::SessionPhase::Persistence,
             }
         })

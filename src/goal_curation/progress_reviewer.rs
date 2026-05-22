@@ -120,22 +120,28 @@ fn render_wip_summary(goal: &ActiveGoal) -> String {
     if goal.wip_refs.is_empty() {
         return String::new();
     }
-    goal.wip_refs
-        .iter()
-        .map(|w| format!("{:?}", w))
-        .collect::<Vec<_>>()
-        .join(", ")
+    use std::fmt::Write;
+    let mut s = String::new();
+    for (i, w) in goal.wip_refs.iter().enumerate() {
+        if i > 0 {
+            s.push_str(", ");
+        }
+        let _ = write!(s, "{:?}", w);
+    }
+    s
 }
 
 fn decision_from_response(r: ReviewerResponse) -> EvidenceDecision {
-    let mut rationale = r.rationale.trim().to_string();
-    if rationale.chars().count() > RATIONALE_MAX_CHARS {
-        rationale = rationale
-            .chars()
-            .take(RATIONALE_MAX_CHARS)
-            .collect::<String>()
-            + "…";
-    }
+    let trimmed = r.rationale.trim();
+    let rationale = {
+        let mut chars = trimmed.chars();
+        let prefix: String = chars.by_ref().take(RATIONALE_MAX_CHARS).collect();
+        if chars.next().is_some() {
+            prefix + "…"
+        } else {
+            prefix
+        }
+    };
     let verdict_lc = r.verdict.trim().to_ascii_lowercase();
     if verdict_lc == "accept" {
         EvidenceDecision::Accept {
@@ -263,10 +269,12 @@ fn extract_balanced_objects(s: &str) -> Vec<&str> {
 
 fn truncate_for_err(s: &str) -> String {
     const MAX: usize = 400;
-    if s.chars().count() <= MAX {
-        s.to_string()
+    let mut chars = s.chars();
+    let prefix: String = chars.by_ref().take(MAX).collect();
+    if chars.next().is_some() {
+        prefix + "…"
     } else {
-        s.chars().take(MAX).collect::<String>() + "…"
+        prefix
     }
 }
 
