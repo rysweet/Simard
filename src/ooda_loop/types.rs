@@ -325,7 +325,7 @@ pub struct OodaBridges {
     /// `std::env::current_dir()` at daemon boot.
     pub repo_root: std::path::PathBuf,
     /// Gatekeeper for goal-progress increases (issue #1967). Production
-    /// boot wires [`crate::goal_curation::progress_evidence::DefaultProgressEvidenceChecker`];
+    /// boot wires [`crate::goal_curation::progress_reviewer::LlmReviewerProgressChecker`];
     /// tests and `SIMARD_PROGRESS_EVIDENCE=off` wire
     /// [`crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker`].
     pub progress_evidence:
