@@ -25,9 +25,8 @@ attempted percent transition, the cutoff timestamp, and the checker's
 reason string. Example:
 
 ```
-brain hallucination detected: rejected progress 35%→75% on enhance-simard-meeting-experience
-  — no git evidence since last update: no commits on engineer/enhance-simard-meeting-experience-*,
-    no PRs referencing goal, no merged PRs closing #1951 since 2026-05-19T23:06:48Z
+brain hallucination detected: rejected progress 35%->75% on enhance-simard-meeting-experience
+  -- reviewer rationale: progress-assessment-reviewer: reject — 75% claim with no plan and no WIP; likely hallucinated
 ```
 
 ### From the command line
@@ -71,8 +70,8 @@ The reason string follows a fixed template. The LLM reviewer returns a
 short rationale explaining why the progress claim was rejected:
 
 ```
-brain hallucination detected: rejected progress 35%→75% on enhance-simard-meeting-experience
-  — no git evidence since last update: progress-assessment-reviewer: reject — 75% claim with no plan and no WIP; likely hallucinated
+brain hallucination detected: rejected progress 35%->75% on enhance-simard-meeting-experience
+  -- reviewer rationale: progress-assessment-reviewer: reject — 75% claim with no plan and no WIP; likely hallucinated
 ```
 
 The `progress-assessment-reviewer:` prefix identifies that the rejection
@@ -199,9 +198,9 @@ the kill switch on in production — see
 ## 5. After the underlying issue is fixed
 
 The gate is stateless across daemon runs (modulo the `OnceLock`
-process-start fallback). Once the missing branch, PR, or `gh` auth is
-in place, the next OODA cycle that proposes the same increase will go
-through the checker fresh. On `Accept`:
+process-start fallback). Once the underlying plan or WIP is updated to
+reflect actual work, the next OODA cycle that proposes the same increase
+will go through the checker fresh. On `Accept`:
 
 - The goal's `last_progress_update_at` is set to the cycle wall-clock.
 - A `"goal progress accepted:"` episode is written to memory.

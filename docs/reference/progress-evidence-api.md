@@ -202,8 +202,8 @@ pub fn update_goal_progress_with_evidence(
       - Set `goal.last_progress_update_at = Some(now)`.
       - Emit one episode:
         ```
-        goal progress accepted: <old>%→<new>% on <goal-id>
-          — evidence: <checker reason>
+        goal progress accepted: <old>%-><new>% on <goal-id>
+          -- evidence: <checker reason>
         ```
         importance `0.4`.
       - Return `Ok(Accept { reason })`.
@@ -211,8 +211,8 @@ pub fn update_goal_progress_with_evidence(
       - Do **not** mutate the board.
       - Emit one episode:
         ```
-        brain hallucination detected: rejected progress <old>%→<new>% on <goal-id>
-          — no git evidence since last update: <checker reason>
+        brain hallucination detected: rejected progress <old>%-><new>% on <goal-id>
+          -- reviewer rationale: <checker reason>
         ```
         importance `0.7`.
       - Return `Ok(Reject { reason })`. **This is not an error.** The

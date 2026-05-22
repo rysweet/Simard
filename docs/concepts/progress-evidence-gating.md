@@ -177,16 +177,16 @@ The gate emits one cognitive-memory episode per non-bypass decision.
 **On `Accept`** (low importance, 0.4):
 
 ```
-goal progress accepted: 64%→72% on improve-simard-dashboard
-  — evidence: progress-assessment-reviewer: accept — PR #1998 in flight, 8pt delta matches plan
+goal progress accepted: 64%->72% on improve-simard-dashboard
+  -- evidence: progress-assessment-reviewer: accept — PR #1998 in flight, 8pt delta matches plan
 ```
 
 **On `Reject`** (higher importance, 0.7) — the prefix is exact and stable
 so dashboards and consolidation jobs can match it:
 
 ```
-brain hallucination detected: rejected progress 35%→75% on enhance-simard-meeting-experience
-  — no git evidence since last update: progress-assessment-reviewer: reject — 75% claim with no plan and no WIP; likely hallucinated
+brain hallucination detected: rejected progress 35%->75% on enhance-simard-meeting-experience
+  -- reviewer rationale: progress-assessment-reviewer: reject — 75% claim with no plan and no WIP; likely hallucinated
 ```
 
 These episodes flow through the existing cognitive-memory pipeline:
