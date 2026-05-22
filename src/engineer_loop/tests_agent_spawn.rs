@@ -4,7 +4,10 @@
 //! architecture. They cover:
 //!   1. `build_agent_prompt` content requirements
 //!   2. `AgentSession` variant serialisation (must be snake_case JSON key)
-//!   3. `AGENT_SESSION_TIMEOUT_SECS` constant value
+//!   3. (removed) Agent-session timeout — engineer subprocesses now run unbounded
+//!      so the prior `AGENT_SESSION_TIMEOUT_SECS = 3600` constant is gone.
+//!      See issue #1989 for rationale (wall-clock SIGKILL silently drops
+//!      uncommitted engineer work, e.g. PR #1988 salvage).
 //!   4. `AgentSession` is treated as a mutating action by `run_optional_review`
 //!   5. `compute_diff_for_review` for `AgentSession` uses `git diff` (not HEAD~1)
 //!   6. `run_local_engineer_loop` emits all three agent-* phase traces
@@ -13,9 +16,7 @@ use std::path::PathBuf;
 
 use serial_test::serial;
 
-use super::agent_spawn::{
-    AGENT_SESSION_TIMEOUT_SECS, DEFAULT_MAX_TURNS, build_agent_prompt, rustyclawd_argv,
-};
+use super::agent_spawn::{DEFAULT_MAX_TURNS, build_agent_prompt, rustyclawd_argv};
 use super::review_persist::compute_diff_for_review;
 use super::types::{
     EngineerActionKind, ExecutedEngineerAction, RepoInspection, SelectedEngineerAction,
@@ -160,17 +161,11 @@ fn engineer_action_kind_agent_session_round_trips() {
     assert_eq!(kind, back);
 }
 
-// ─── 3. Timeout constant ─────────────────────────────────────────────────────
-
-/// Agent session timeout must be exactly 3600 seconds (consistent with
-/// CARGO_COMMAND_TIMEOUT_SECS ordering and the architecture spec).
-#[test]
-fn agent_session_timeout_is_3600_seconds() {
-    assert_eq!(
-        AGENT_SESSION_TIMEOUT_SECS, 3600,
-        "AGENT_SESSION_TIMEOUT_SECS must be 3600"
-    );
-}
+// ─── 3. (removed) Timeout constant ───────────────────────────────────────────
+// `AGENT_SESSION_TIMEOUT_SECS` was deleted as part of removing the engineer
+// subprocess wall-clock timeout (issue #1989, PR #1988 salvage). Long-running
+// agentic processes must not be SIGKILL'd on a clock. Liveness, if ever
+// reintroduced, must be progress-signal-based, not deadline-based.
 
 // ─── 4. AgentSession is mutating ─────────────────────────────────────────────
 
@@ -361,9 +356,7 @@ fn rustyclawd_argv_matches_amplihack_auto_contract() {
     );
 }
 
-/// The agent session timeout must remain at 3600s — it bounds how long
-/// Simard will wait for the RustyClawd subprocess before SIGKILL'ing it.
-#[test]
-fn agent_session_timeout_bounded_for_subprocess_wait() {
-    assert_eq!(AGENT_SESSION_TIMEOUT_SECS, 3600);
-}
+// (removed) Agent-session subprocess wait used to be bounded by
+// `AGENT_SESSION_TIMEOUT_SECS = 3600`. Removed because wall-clock SIGKILL on
+// agentic processes silently drops uncommitted work (issue #1989, PR #1988
+// salvage). Engineer subprocesses now run unbounded.
