@@ -3,7 +3,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Overview · Simard</title>
+  <title>{{DEFAULT_TITLE}}</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
   <style>
@@ -96,19 +96,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
       <span id="clock" style="color:#8b949e;font-size:.85rem"></span>
     </div>
   </header>
-  <div class="tabs">
-    <div class="tab active" data-tab="overview" title="System health and what the agent is doing right now">Overview</div>
-    <div class="tab" data-tab="goals" title="Active goals and progress toward each one">Goals</div>
-    <div class="tab" data-tab="traces" title="Step-by-step OpenTelemetry traces of agent decisions">Traces</div>
-    <div class="tab" data-tab="logs" title="Raw daemon logs and recent OODA cycle reports for debugging">Logs</div>
-    <div class="tab" data-tab="processes" title="Background processes and tmux sessions running on this host">Processes</div>
-    <div class="tab" data-tab="memory" title="What the agent has learned and remembered (working, semantic, episodic memory)">Memory</div>
-    <div class="tab" data-tab="costs" title="Token and dollar usage by model, plus your daily and weekly budget">Costs</div>
-    <div class="tab" data-tab="chat" title="Talk to the running agent (uses the meeting protocol)">Chat</div>
-    <div class="tab" data-tab="workboard" title="Tasks the agent is working on, like a kanban board">Workboard</div>
-    <div class="tab" data-tab="thinking" title="Live stream of the agent's reasoning between actions">🧠 Thinking</div>
-    <div class="tab" data-tab="terminal" title="Attach to the agent's tmux terminal session and watch live stdout">Terminal</div>
-  </div>
+  {{TAB_NAV}}
 
   <div class="tab-content active" id="tab-overview">
     <h1 class="page-h1">Overview</h1>

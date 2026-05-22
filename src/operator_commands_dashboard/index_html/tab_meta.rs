@@ -15,10 +15,10 @@
 //!
 //! See `docs/dashboard.md#tab-identity-contract` for the full design.
 //!
-//! Several fields below are only consumed from `#[cfg(test)]` code or from
-//! the JSON payload built by [`tab_meta_js`]; the `#[allow(dead_code)]`
-//! attributes silence Rust's "field never used" analysis without weakening
-//! the contract.
+//! The `lede` field is consumed by `#[cfg(test)]` cross-check code that
+//! confirms every lede appears in the rendered HTML; `#![allow(dead_code)]`
+//! silences Rust's "field never used" analysis without weakening the
+//! contract.
 #![allow(dead_code)]
 
 use std::fmt::Write as _;
@@ -161,18 +161,36 @@ pub const TAB_METADATA: &[TabMeta] = &[
 ];
 
 /// Browser title shown on first page load. The client-side tab handler
-/// updates this when a different tab is activated.
+/// updates this when a different tab is activated. Uses `TAB_METADATA[0]`
+/// directly because [`tab_meta_slugs_unique`] asserts the table has
+/// exactly 11 entries — an empty table would already fail other tests.
 pub fn default_title() -> &'static str {
-    TAB_METADATA
-        .first()
-        .map(|t| t.title)
-        .unwrap_or("Simard Dashboard")
+    TAB_METADATA[0].title
 }
 
-/// Look up a tab by slug. Returns `None` for unknown slugs.
-#[allow(dead_code)]
-pub fn get(slug: &str) -> Option<&'static TabMeta> {
-    TAB_METADATA.iter().find(|t| t.slug == slug)
+/// Render the `{{TAB_NAV}}` block: the full `<div class="tabs">…</div>`
+/// nav bar with one `<div class="tab">` per [`TAB_METADATA`] entry.
+/// The first entry receives `class="tab active"` so the initial render
+/// highlights the default-active tab without any client-side bootstrap.
+///
+/// This is the **only** place tab labels, tooltips and slugs flow into
+/// the rendered HTML, so a future edit to a tooltip is a one-line change
+/// in [`TAB_METADATA`] rather than two-places-to-keep-in-sync.
+pub fn tab_nav_html() -> String {
+    let mut out = String::with_capacity(1024);
+    out.push_str(r#"<div class="tabs">"#);
+    for (i, t) in TAB_METADATA.iter().enumerate() {
+        let class = if i == 0 { "tab active" } else { "tab" };
+        let _ = write!(
+            out,
+            r#"<div class="{class}" data-tab="{slug}" title="{tooltip}">{label}</div>"#,
+            slug = t.slug,
+            tooltip = t.tooltip,
+            label = t.label,
+        );
+    }
+    out.push_str("</div>");
+    out
 }
 
 /// Render the `{{TAB_META_JS}}` block: an inline `<script>` that exports
@@ -202,17 +220,4 @@ pub fn tab_meta_js() -> String {
     out.push_str(&payload);
     out.push_str(";</script>");
     out
-}
-
-/// Render a small markdown-ish dump of `slug | title | h1 | lede` for
-/// debugging and PR evidence. Not part of the live page.
-#[allow(dead_code)]
-pub fn debug_dump() -> String {
-    let mut s = String::new();
-    let _ = writeln!(s, "| slug | title | h1 | lede |");
-    let _ = writeln!(s, "|------|-------|----|------|");
-    for t in TAB_METADATA {
-        let _ = writeln!(s, "| {} | {} | {} | {} |", t.slug, t.title, t.h1, t.lede);
-    }
-    s
 }

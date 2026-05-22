@@ -89,26 +89,27 @@ pub struct TabMeta {
 pub const TAB_METADATA: &[TabMeta] = &[ /* one entry per tab, in nav order */ ];
 ```
 
-The HTML template is rendered by substituting markers from `TAB_METADATA`:
+The HTML template is rendered by substituting markers from `TAB_METADATA` in `index_html_string()`:
 
-| Marker            | Resolves to                                                                 |
-|-------------------|-----------------------------------------------------------------------------|
-| `{{TITLE}}`       | Initial `<title>` of the page (matches the default-active tab).             |
-| `{{NAV}}`         | Full `<nav>` list of buttons, one per tab (label + tooltip + `data-tab`).   |
-| `{{HEADER:slug}}` | `<h1 class="page-h1">…</h1><p class="page-lede">…</p>` block for that tab.  |
-| `{{TAB_META_JS}}` | `<script>window.__TAB_META = { … };</script>` map of `slug → {title, h1}`.  |
+| Marker              | Resolves to                                                                 |
+|---------------------|-----------------------------------------------------------------------------|
+| `{{DEFAULT_TITLE}}` | Initial `<title>` of the page (matches the default-active tab).             |
+| `{{TAB_NAV}}`       | Full `<div class="tabs">…</div>` nav, one button per tab (label + tooltip + `data-tab`). |
+| `{{TAB_META_JS}}`   | `<script>window.__TAB_META = { … };</script>` map of `slug → {title, h1, label}`. |
 
-All fields are passed through a uniform `html_escape()` before insertion, and the `__TAB_META` JS object is serialized with `serde_json::to_string` so that `</script>`, `U+2028`, and `U+2029` are safe inside an inline `<script>` tag. A `debug_assert!` at the end of `index_html_string()` rejects any unresolved `{{MARKER}}` left in the rendered output. A companion unit test (`tab_meta_every_slug_has_header_marker`) iterates `TAB_METADATA` and asserts that the raw template contains `{{HEADER:slug}}` for every slug, so a new entry that forgets its panel header is caught at build time rather than rendering as a tab with no heading.
+The per-tab `<h1 class="page-h1">` and `<p class="page-lede">` blocks are inlined directly in each `<div class="tab-content">` in `part_00.rs` / `part_01.rs` rather than via a marker — so an editor can `grep` for a heading and find it in the markup. The cross-check tests in `tests_tab_meta.rs` (`rendered_html_contains_every_h1`, `rendered_html_contains_every_lede`, `rendered_html_contains_every_tooltip_from_sot`) enforce that every value in `TAB_METADATA` appears verbatim in the rendered HTML, so a typo or a forgotten panel header fails CI rather than shipping a tab with the wrong text.
 
-On the client, the existing tab-click handler in `part_01.rs` sets `document.title = window.__TAB_META[slug].title` when a tab is activated. The H1 and lede do not need to be re-injected at click time — every panel is pre-rendered with its own header block, and the handler toggles visibility so that exactly one `.tab-panel` is on-screen at any moment. The smoke test relies on Playwright's `to_be_visible()` rather than a specific CSS class, so the panel-visibility mechanism (class toggle vs. inline `style.display` vs. `hidden` attribute) is an implementation detail the contract does not pin.
+The `__TAB_META` JS object is serialized with `serde_json::to_string` and then `<` is replaced with `\u003c` so that a future lede or title containing `</script>` cannot terminate the inline `<script>` tag. A `debug_assert!` at the end of `index_html_string()` rejects any unresolved `{{MARKER}}` left in the rendered output.
+
+On the client, the existing tab-click handler in `part_01.rs` sets `document.title = window.__TAB_META[slug].title` when a tab is activated. The H1 and lede do not need to be re-injected at click time — every panel is pre-rendered with its own header block, and the handler toggles `class="active"` on `.tab-content` so that exactly one panel is on-screen at any moment.
 
 ### Adding a new tab
 
 Adding a tab is a single-file edit followed by writing the panel content:
 
-1. Append a new `TabMeta { … }` entry to `TAB_METADATA` in `tab_meta.rs`. Pick a `slug` matching `^[a-z][a-z0-9_]*$`, a one-word `label`, a `title` of the form `"{Label} · Simard"`, an `h1` (usually equal to `label`), a `lede` that passes the jargon blocklist, and a `tooltip`.
-2. Add the panel `<div class="tab-panel" data-tab="{slug}">{{HEADER:slug}} … </div>` to the appropriate `part_NN.rs` (the existing markup uses `<div class="tab-panel">`; preserve that element to match the current CSS and tab handler).
-3. Run `cargo test` — the unit tests in `tests_tab_meta.rs` will verify uniqueness of `slug`, `label`, `title`, `h1`, non-emptiness of `lede`, absence of banned jargon, and that the template contains a `{{HEADER:slug}}` marker for the new slug. The smoke test will pick the new tab up automatically (it discovers tabs from the rendered DOM, not from a hardcoded list).
+1. Append a new `TabMeta { … }` entry to `TAB_METADATA` in `tab_meta.rs`. Pick a `slug` matching `^[a-z][a-z0-9_]*$`, a one-word `label`, a `title` of the form `"{H1} · Simard"`, an `h1` (usually equal to `label`), a `lede` that passes the jargon blocklist, and a `tooltip`.
+2. Add the panel to the appropriate `part_NN.rs`: a `<div class="tab-content" id="tab-{slug}">` whose first two children are `<h1 class="page-h1">{h1}</h1>` and `<p class="page-lede">{lede}</p>` with text matching the SoT entry exactly.
+3. Run `cargo test` — the unit tests in `tests_tab_meta.rs` verify uniqueness of `slug`, `label`, `title`, `h1`, non-emptiness of `lede`, absence of banned jargon, and that the rendered HTML contains every label / H1 / lede / tooltip from the SoT. The smoke test will pick the new tab up automatically (it discovers tabs from the rendered DOM, not from a hardcoded list).
 
 No other file needs to change. There is no second place to update a string.
 

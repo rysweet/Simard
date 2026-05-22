@@ -6,7 +6,7 @@
 #![cfg(test)]
 
 use super::INDEX_HTML;
-use super::tab_meta::{BANNED_JARGON, TAB_METADATA, default_title, get, tab_meta_js};
+use super::tab_meta::{BANNED_JARGON, TAB_METADATA, default_title, tab_meta_js, tab_nav_html};
 use std::collections::HashSet;
 
 #[test]
@@ -168,12 +168,6 @@ fn default_title_is_first_tab_title() {
     assert_eq!(default_title(), TAB_METADATA[0].title);
 }
 
-#[test]
-fn get_returns_tab_by_slug() {
-    assert_eq!(get("workboard").map(|t| t.label), Some("Workboard"));
-    assert!(get("does-not-exist").is_none());
-}
-
 // ----- Cross-check: SoT ↔ rendered INDEX_HTML -----
 
 #[test]
@@ -214,6 +208,67 @@ fn rendered_html_contains_every_lede() {
             t.slug
         );
     }
+}
+
+#[test]
+fn rendered_html_contains_every_tooltip_from_sot() {
+    // The nav is rendered from TAB_METADATA via tab_nav_html(), so every
+    // tooltip in the SoT must appear verbatim in the rendered nav as
+    // `data-tab="{slug}" title="{tooltip}"`. This is the test that
+    // would have caught the historical drift where the visible logs
+    // tooltip said "OODA cycle reports" while the SoT said "cycle reports".
+    for t in TAB_METADATA {
+        let needle = format!(r#"data-tab="{}" title="{}""#, t.slug, t.tooltip);
+        assert!(
+            INDEX_HTML.contains(&needle),
+            "rendered INDEX_HTML missing nav tooltip for slug {:?}; \
+             expected to find: {needle}",
+            t.slug
+        );
+    }
+}
+
+#[test]
+fn tab_nav_html_marks_first_tab_active_and_rest_inactive() {
+    let nav = tab_nav_html();
+    // The first tab carries `class="tab active"` so the initial render
+    // highlights it without any client-side bootstrap.
+    let first = TAB_METADATA[0];
+    let active_needle = format!(r#"<div class="tab active" data-tab="{}""#, first.slug);
+    assert!(
+        nav.contains(&active_needle),
+        "first tab {:?} should be rendered with class=\"tab active\"; nav: {nav}",
+        first.slug
+    );
+    // No other tab may carry `tab active`.
+    let active_count = nav.matches(r#"class="tab active""#).count();
+    assert_eq!(
+        active_count, 1,
+        "exactly one tab should be rendered as active, found {active_count}; nav: {nav}"
+    );
+    // Every non-first tab is plain `class="tab"`.
+    for t in &TAB_METADATA[1..] {
+        let needle = format!(r#"<div class="tab" data-tab="{}""#, t.slug);
+        assert!(
+            nav.contains(&needle),
+            "non-first tab {:?} should render with class=\"tab\" (no active); nav: {nav}",
+            t.slug
+        );
+    }
+}
+
+#[test]
+fn rendered_html_default_title_matches_sot() {
+    // The hardcoded `<title>` in part_00.rs is gone; the initial title
+    // comes from default_title() via the {{DEFAULT_TITLE}} marker.
+    let needle = format!("<title>{}</title>", default_title());
+    assert!(
+        INDEX_HTML.contains(&needle),
+        "rendered INDEX_HTML should contain <title>{}</title> for the \
+         default-active tab; this is substituted from default_title() at \
+         render time",
+        default_title()
+    );
 }
 
 #[test]
