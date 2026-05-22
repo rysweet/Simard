@@ -1,9 +1,9 @@
-pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
+pub(crate) const PART_00: &str = r##"<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Simard Dashboard v2</title>
+  <title>Overview · Simard Dashboard</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
   <style>
@@ -11,7 +11,9 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
     *{margin:0;padding:0;box-sizing:border-box}
     body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--fg)}
     header{display:flex;align-items:center;justify-content:space-between;padding:1rem 2rem;border-bottom:1px solid var(--border)}
-    header h1{color:var(--accent);font-size:1.3rem}
+    header .brand{color:var(--accent);font-size:1.3rem;font-weight:700;text-decoration:none}
+    header .brand:hover{filter:brightness(1.1)}
+    .page-title{color:var(--accent);font-size:1.5rem;font-weight:700;margin:0 0 .35rem;line-height:1.2}
     .tabs{display:flex;gap:0;border-bottom:1px solid var(--border);padding:0 2rem}
     .tab{padding:.6rem 1.2rem;cursor:pointer;color:#8b949e;border-bottom:2px solid transparent;font-size:.9rem}
     .tab:hover{color:var(--fg)} .tab.active{color:var(--accent);border-bottom-color:var(--accent)}
@@ -87,7 +89,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
 </head>
 <body>
   <header>
-    <h1>🌲 Simard Dashboard</h1>
+    <a class="brand" href="#/overview" title="Simard Dashboard home">🌲 Simard Dashboard</a>
     <div style="display:flex;align-items:center;gap:1rem">
       <span id="header-version" style="font-size:.75rem;color:#8b949e"></span>
       <a href="https://github.com/rysweet/Simard" target="_blank" style="color:#8b949e;text-decoration:none;font-size:.85rem;padding:.2rem .4rem" title="Source on GitHub">⟨/⟩ Source</a>
@@ -110,6 +112,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
   </div>
 
   <div class="tab-content active" id="tab-overview">
+    <h1 class="page-title" data-page-title="overview">Overview</h1>
     <div class="page-intro">A live view of what the agent is doing right now: recent actions, open work items, system health, and any other Simard hosts in your cluster.</div>
     <div class="card" style="margin-bottom:1rem;border:1px solid #238636;background:linear-gradient(135deg,#0d1117,#0f1a12)">
       <h2 style="color:#3fb950;margin-bottom:.75rem">🤖 Simard — Autonomous Agent</h2>
@@ -152,6 +155,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
   </div>
 
   <div class="tab-content" id="tab-goals">
+    <h1 class="page-title" data-page-title="goals">Goals</h1>
     <div class="page-intro">Goals are the durable things you want the agent to accomplish. Active goals are being worked on now; backlog goals are queued for later.</div>
     <div class="card" style="margin-bottom:1rem">
       <h2>Active Goals
@@ -182,7 +186,8 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
   </div>
 
   <div class="tab-content" id="tab-traces">
-    <div class="page-intro">OpenTelemetry traces show the step-by-step path of agent decisions across processes — useful for debugging slow or surprising behaviour. Set <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> to enable.</div>
+    <h1 class="page-title" data-page-title="traces">Activity traces</h1>
+    <div class="page-intro">Step-by-step trace of what each agent did, with timestamps — useful for debugging slow or surprising behaviour. Set <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> to enable full OpenTelemetry collection.</div>
     <div class="card" style="margin-bottom:1rem">
       <h2>OTEL Traces <button class="btn" onclick="fetchTraces()">Refresh</button></h2>
       <div id="otel-status" style="margin-bottom:.75rem"><span class="loading">Loading…</span></div>
@@ -196,7 +201,8 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
   </div>
 
   <div class="tab-content" id="tab-logs">
-    <div class="page-intro">Raw daemon logs, cost ledger, and recent OODA cycle reports — the lowest-level view for debugging. Cycle reports summarise each Observe-Orient-Decide-Act loop the daemon ran.</div>
+    <h1 class="page-title" data-page-title="logs">Logs and cycle reports</h1>
+    <div class="page-intro">Raw daemon logs, cost ledger, and recent decision-cycle reports — the lowest-level view for debugging. Each cycle report summarises one Observe → Orient → Decide → Act (OODA) loop the daemon ran.</div>
     <div class="card" style="margin-bottom:1rem">
       <h2>Daemon Log <button class="btn" onclick="fetchLogs()">Refresh</button> <button class="btn" onclick="copyLogContent('daemon-log')" style="margin-left:.3rem">📋 Copy</button></h2>
       <div style="margin-bottom:.5rem;display:flex;gap:.5rem;align-items:center">
@@ -226,7 +232,8 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
   </div>
 
   <div class="tab-content" id="tab-processes">
-    <div class="page-intro">Background OS processes and tmux sessions Simard has running on this host. Useful for spotting stuck or zombie agents.</div>
+    <h1 class="page-title" data-page-title="processes">Running processes</h1>
+    <div class="page-intro">OS processes Simard has spawned and their CPU / memory use, plus the tmux sessions it owns on this host. Useful for spotting stuck or zombie agents.</div>
     <div class="card">
       <h2>Active Simard Processes <button class="btn" onclick="fetchProcesses()">Refresh</button> <span id="proc-auto-refresh" style="font-size:.75rem;color:#8b949e;font-weight:normal;margin-left:.5rem">⟳ auto-refreshing</span></h2>
       <div id="proc-count" style="margin-bottom:.5rem;color:#8b949e;font-size:.85rem"></div>
@@ -240,7 +247,8 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
   </div>
 
   <div class="tab-content" id="tab-memory">
-    <div class="page-intro">What the agent has learned and remembered, organised by memory type: <em>Working</em> (current task), <em>Semantic</em> (facts), <em>Episodic</em> (past events), <em>Procedural</em> (how-to), <em>Prospective</em> (planned), and <em>Sensory</em> (raw input).</div>
+    <h1 class="page-title" data-page-title="memory">Recent memory</h1>
+    <div class="page-intro">What the agent remembered recently, grouped by memory type: <em>Working</em> (current task), <em>Semantic</em> (facts it knows), <em>Episodic</em> (past events it experienced), <em>Procedural</em> (how-to skills), <em>Prospective</em> (planned actions), and <em>Sensory</em> (raw input it just observed).</div>
     <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem">
       <h2 style="margin:0">Memory</h2>
       <span id="mem-graph-stats" style="color:#8b949e;font-size:.8rem;margin-left:auto"></span>
@@ -285,6 +293,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
   </div>
 
   <div class="tab-content" id="tab-costs">
+    <h1 class="page-title" data-page-title="costs">Costs and budget</h1>
     <div class="page-intro">Token and dollar usage by model, plus your daily and weekly budget caps. Costs are computed from real provider invoices, not estimates.</div>
     <div class="grid">
       <div class="card"><h2>Daily Costs <button class="btn" onclick="fetchCosts()">Refresh</button></h2><div id="costs-daily"><span class="loading">Loading…</span></div></div>
@@ -301,7 +310,8 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
   </div>
 
   <div class="tab-content" id="tab-thinking">
-    <div class="page-intro">Live stream of the agent's internal reasoning between actions — the “Orient” and “Decide” phases of each OODA cycle (Observe → Orient → Decide → Act).</div>
+    <h1 class="page-title" data-page-title="thinking">Live thinking</h1>
+    <div class="page-intro">Live transcript of the agent's current reasoning — the “Orient” and “Decide” phases of each Observe → Orient → Decide → Act (OODA) cycle, streamed as it happens.</div>
     <div class="card">
       <h2>OODA Internal Reasoning <button class="btn" onclick="fetchThinking()">Refresh</button></h2>
       <div id="thinking-timeline"><span class="loading">Loading…</span></div>
@@ -309,6 +319,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
   </div>
 
   <div class="tab-content" id="tab-chat">
+    <h1 class="page-title" data-page-title="chat">Chat with the agent</h1>
     <div class="page-intro">Talk to the running agent in real time. Anything you say here can become a new goal. Type <code>/close</code> to end the session, <code>/goals</code> to review goals, <code>/status</code> for system status.</div>
     <div class="card" style="max-width:720px">
       <h2>Meeting Chat</h2>
@@ -328,7 +339,8 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
   </div>
 
   <div class="tab-content" id="tab-workboard">
-    <div class="page-intro">A kanban-style view of the agent's current work: queued / in-progress / blocked / done goals, plus the agent's working memory and recent actions. The OODA cycle indicator at the top shows where the daemon is in its current Observe → Orient → Decide → Act loop.</div>
+    <h1 class="page-title" data-page-title="workboard">Whiteboard</h1>
+    <div class="page-intro">A kanban-style view of the agent's current work: queued / in-progress / blocked / done goals, plus the agent's working memory and recent actions. The cycle indicator at the top shows where the daemon is in its current Observe → Orient → Decide → Act loop.</div>
     <div id="wb-header" style="display:flex;align-items:center;gap:1.5rem;margin-bottom:1rem;flex-wrap:wrap">
       <div id="wb-cycle-indicator" style="display:flex;align-items:center;gap:.5rem">
         <span id="wb-phase-dot" style="width:12px;height:12px;border-radius:50%;display:inline-block;background:#8b949e"></span>
@@ -362,4 +374,4 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
     <div class="card" style="margin-bottom:1.25rem">
       <h2 style="cursor:pointer" onclick="document.getElementById('wb-wm-body').style.display=document.getElementById('wb-wm-body').style.display==='none'?'block':'none'">Working Memory <span style="font-weight:normal;color:#8b949e;font-size:.8rem" id="wb-wm-count">0 slots</span> <span style="font-size:.75rem;color:#8b949e">▾</span></h2>
       <div id="wb-wm-body">
-        <div id="wb-wm-list" style="font-size:.85rem;color:#8b949e">No active working memory</div>"#;
+        <div id="wb-wm-list" style="font-size:.85rem;color:#8b949e">No active working memory</div>"##;

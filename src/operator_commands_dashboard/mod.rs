@@ -27,6 +27,8 @@ mod tests_goal_records_migration;
 mod tests_routes_a;
 #[cfg(test)]
 mod tests_routes_b;
+#[cfg(test)]
+mod tests_titles_and_ledes;
 
 use std::net::SocketAddr;
 use std::path::Path;

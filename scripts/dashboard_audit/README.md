@@ -53,6 +53,24 @@ Run a pass:
 
 Typical wall time is ~50-60s. Output goes to `scripts/dashboard_audit/out/`.
 
+## Regression check: per-route titles + ledes (issues #1993, #1994)
+
+A small companion script asserts that every dashboard route exposes a
+unique, plain-English `<title>` and `<h1>` plus a non-empty `.page-intro`
+lede — the contract introduced by issues #1993 and #1994. Run it the same
+way as the audit pass:
+
+```bash
+DASHBOARD_URL=http://localhost:8080 \
+  .venv-audit/bin/python scripts/dashboard_audit/test_titles_and_ledes.py
+```
+
+The script logs in with `~/.simard/.dashkey`, visits every
+`/#/<slug>` route, and prints a JSON summary. It exits non-zero if any
+route is missing a title/H1/lede, has a duplicate, or is still showing
+the legacy "Simard Dashboard v2" generic `<title>`. Use this as a smoke
+test before shipping any change to the dashboard chrome.
+
 ## How to file findings
 
 After the pass completes, read the `.txt` dumps (they are far easier to grep

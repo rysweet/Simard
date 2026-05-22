@@ -15,6 +15,7 @@ pub(crate) const PART_01: &str = r#"      </div>
   </div>
 
   <div class="tab-content" id="tab-terminal">
+    <h1 class="page-title" data-page-title="terminal">Terminal viewer</h1>
     <div class="page-intro">Attach to the live tmux terminal session of a running subordinate agent and watch its stdout/stderr stream.</div>
     <div class="card" style="max-width:980px">
       <h2>Agent Terminal</h2>
@@ -182,28 +183,67 @@ pub(crate) const PART_01: &str = r#"      </div>
 
     function clearTabTimers(){Object.values(tabRefreshTimers).forEach(clearInterval);tabRefreshTimers={};}
 
-    /* --- Tabs --- */
+    /* --- Tabs & per-route H1 / <title> / hash routing (issues #1993, #1994) --- */
+    /* Whitelist of valid tab slugs so a malformed hash can't navigate to a
+       phantom tab. Aliases (e.g. 'whiteboard' -> 'workboard') let us preserve
+       the user-facing route name while keeping the internal id stable. */
+    const TAB_ALIASES={'whiteboard':'workboard'};
+    function knownTab(slug){
+      if(!slug) return false;
+      const target=TAB_ALIASES[slug]||slug;
+      return !!document.getElementById('tab-'+target);
+    }
+    function resolveTab(slug){return TAB_ALIASES[slug]||slug;}
+    function pageTitleFor(slug){
+      const el=document.querySelector('#tab-'+slug+' [data-page-title]');
+      const name=el?(el.textContent||'').trim():slug;
+      return name?(name+' · Simard Dashboard'):'Simard Dashboard';
+    }
+    function activateTab(slug,pushHash){
+      const target=resolveTab(slug);
+      if(!document.getElementById('tab-'+target)){return false;}
+      document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
+      const tabBtn=document.querySelector('.tab[data-tab="'+target+'"]');
+      if(tabBtn) tabBtn.classList.add('active');
+      document.getElementById('tab-'+target).classList.add('active');
+      activeTab=target;
+      document.title=pageTitleFor(target);
+      if(pushHash){
+        const desired='#/'+slug;
+        if(window.location.hash!==desired){
+          try{history.replaceState(null,'',desired);}catch(_){window.location.hash=desired;}
+        }
+      }
+      clearTabTimers();
+      if(target==='logs') {fetchLogs();tabRefreshTimers.logs=setInterval(fetchLogs,15000);}
+      if(target==='processes') {fetchProcessTree();tabRefreshTimers.proc=setInterval(fetchProcessTree,15000);}
+      if(target==='memory') {fetchMemoryGraph();fetchMemory();}
+      if(target==='goals') fetchGoals();
+      if(target==='costs') fetchCosts();
+      if(target==='traces') fetchTraces();
+      if(target==='chat') initChat();
+      if(target==='workboard') {fetchWorkboard();tabRefreshTimers.wb=setInterval(fetchWorkboard,30000);}
+      if(target==='thinking') {fetchThinking();tabRefreshTimers.thinking=setInterval(fetchThinking,30000);}
+      if(target==='terminal') {initAgentLogTerminal();fetchSubagentSessions();tabRefreshTimers.subagent=setInterval(fetchSubagentSessions,5000);fetchTmuxSessions();tabRefreshTimers.tmux=setInterval(fetchTmuxSessions,10000);}
+      return true;
+    }
+    function slugFromHash(){
+      const h=(window.location.hash||'').replace(/^#\/?/, '').split('/')[0].trim();
+      return h||'';
+    }
+    function syncFromHash(){
+      const slug=slugFromHash();
+      if(slug && knownTab(slug)){activateTab(slug,false);}
+      else {activateTab('overview',false);}
+    }
     document.querySelectorAll('.tab').forEach(tab=>{
-      tab.addEventListener('click',()=>{
-        document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-        document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
-        tab.classList.add('active');
-        document.getElementById('tab-'+tab.dataset.tab).classList.add('active');
-        activeTab=tab.dataset.tab;
-        clearTabTimers();
-        if(tab.dataset.tab==='logs') {fetchLogs();tabRefreshTimers.logs=setInterval(fetchLogs,15000);}
-        if(tab.dataset.tab==='processes') {fetchProcessTree();tabRefreshTimers.proc=setInterval(fetchProcessTree,15000);}
-        if(tab.dataset.tab==='memory') {fetchMemoryGraph();fetchMemory();}
-
-        if(tab.dataset.tab==='goals') fetchGoals();
-        if(tab.dataset.tab==='costs') fetchCosts();
-        if(tab.dataset.tab==='traces') fetchTraces();
-        if(tab.dataset.tab==='chat') initChat();
-        if(tab.dataset.tab==='workboard') {fetchWorkboard();tabRefreshTimers.wb=setInterval(fetchWorkboard,30000);}
-        if(tab.dataset.tab==='thinking') {fetchThinking();tabRefreshTimers.thinking=setInterval(fetchThinking,30000);}
-        if(tab.dataset.tab==='terminal') {initAgentLogTerminal();fetchSubagentSessions();tabRefreshTimers.subagent=setInterval(fetchSubagentSessions,5000);fetchTmuxSessions();tabRefreshTimers.tmux=setInterval(fetchTmuxSessions,10000);}
-      });
+      tab.addEventListener('click',()=>{activateTab(tab.dataset.tab,true);});
     });
+    window.addEventListener('hashchange',syncFromHash);
+    /* Run once on load so a deep-link to e.g. /#/memory activates the right
+       tab and sets <title> before the user sees the page. */
+    syncFromHash();
     setInterval(()=>{document.getElementById('clock').textContent=formatTime(Date.now())},1000);
 
     /* --- Status --- */
