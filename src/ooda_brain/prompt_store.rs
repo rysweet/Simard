@@ -63,6 +63,8 @@ const EMBEDDED_DECIDE: &str = include_str!("../../prompt_assets/simard/ooda_deci
 const EMBEDDED_ORIENT: &str = include_str!("../../prompt_assets/simard/ooda_orient.md");
 const EMBEDDED_MERGE_JUDGE: &str =
     include_str!("../../prompt_assets/simard/merge_readiness_judge.md");
+const EMBEDDED_PROGRESS_REVIEWER: &str =
+    include_str!("../../prompt_assets/simard/progress_assessment_reviewer.md");
 
 /// Look up the embedded fallback for a known prompt name. Returns `None` for
 /// unknown names so callers can surface a configuration error rather than
@@ -73,6 +75,7 @@ pub fn embedded_fallback(name: &str) -> Option<&'static str> {
         "ooda_decide.md" => Some(EMBEDDED_DECIDE),
         "ooda_orient.md" => Some(EMBEDDED_ORIENT),
         "merge_readiness_judge.md" => Some(EMBEDDED_MERGE_JUDGE),
+        "progress_assessment_reviewer.md" => Some(EMBEDDED_PROGRESS_REVIEWER),
         _ => None,
     }
 }
