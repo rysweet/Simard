@@ -843,7 +843,7 @@ pub fn update_goal_progress_with_evidence(
         EvidenceDecision::Reject { reason } => {
             // Do NOT mutate the board. Emit a hallucination alert.
             let episode = format!(
-                "brain hallucination detected: rejected progress {old_percent}%->{new_percent}% on {goal_id}\n  -- no git evidence since last update: {reason}"
+                "brain hallucination detected: rejected progress {old_percent}%->{new_percent}% on {goal_id}\n  -- reviewer rationale: {reason}"
             );
             memory.store_episode(
                 &episode,
