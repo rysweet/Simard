@@ -194,9 +194,13 @@ pub fn run_ooda_daemon(
         );
     }
 
-    // Wire the progress-evidence checker (issue #1967). Honors
-    // `SIMARD_PROGRESS_EVIDENCE=off` as a kill switch (see
-    // docs/operations/progress-evidence-kill-switch.md).
+    // Wire the progress-evidence checker (issue #1967; replaced 2026-05-22
+    // per user direction to use an LLM reviewer instead of the original
+    // git-shelling state-machine gate). Honors `SIMARD_PROGRESS_EVIDENCE=off`
+    // as a kill switch (see docs/operations/progress-evidence-kill-switch.md).
+    //
+    // The reviewer takes {problem, plan, prior_pct, claimed_pct, wip} and
+    // returns {verdict, rationale}. No git/gh shellouts.
     let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let kill_switch = std::env::var("SIMARD_PROGRESS_EVIDENCE")
         .ok()
@@ -211,19 +215,32 @@ pub fn run_ooda_daemon(
         );
         std::sync::Arc::new(crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker)
     } else {
-        daemon_log(
-            &state_root,
-            &format!(
-                "[simard] progress-evidence: enabled (DefaultProgressEvidenceChecker, repo_root={}, remote=rysweet/Simard)",
-                repo_root.display()
-            ),
-        );
-        std::sync::Arc::new(
-            crate::goal_curation::progress_evidence::DefaultProgressEvidenceChecker::new(
-                repo_root.clone(),
-                "rysweet/Simard",
-            ),
-        )
+        match LlmProvider::resolve() {
+            Ok(reviewer_provider) => {
+                daemon_log(
+                    &state_root,
+                    "[simard] progress-evidence: enabled (LlmReviewerProgressChecker -- problem+plan+progress LLM reviewer)",
+                );
+                let reviewer_submitter =
+                    crate::ooda_brain::SessionLlmSubmitter::new(reviewer_provider);
+                std::sync::Arc::new(
+                    crate::goal_curation::progress_reviewer::LlmReviewerProgressChecker::new(
+                        reviewer_submitter,
+                    ),
+                )
+            }
+            Err(e) => {
+                daemon_log(
+                    &state_root,
+                    &format!(
+                        "[simard] progress-evidence: NO LLM PROVIDER ({e}); falling back to NoopProgressEvidenceChecker (no gating)"
+                    ),
+                );
+                std::sync::Arc::new(
+                    crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
+                )
+            }
+        }
     };
 
     let mut bridges = OodaBridges {
