@@ -181,6 +181,24 @@ pub(crate) const PART_05: &str = r#"      try {
     }
 
     /* --- Init --- */
+    /* Page-header initial sync + hash deep-link (issues #1993, #1994). */
+    {
+      const initial=(typeof slugFromHash==='function' && slugFromHash())||'overview';
+      if(initial!=='overview'){
+        const t=document.querySelector(`.tab[data-tab="${initial}"]`);
+        if(t) t.click(); else if(typeof applyPageHeader==='function') applyPageHeader('overview');
+      } else if(typeof applyPageHeader==='function'){
+        applyPageHeader('overview');
+      }
+    }
+    window.addEventListener('hashchange',()=>{
+      if(typeof slugFromHash!=='function') return;
+      const s=slugFromHash();
+      if(s && s!==activeTab){
+        const t=document.querySelector(`.tab[data-tab="${s}"]`);
+        if(t) t.click();
+      }
+    });
     fetchStatus(); fetchIssues(); fetchDistributed(); fetchAgentOverview(); fetchMergeReadiness();
     setInterval(fetchAgentOverview,30000);
     setInterval(fetchMergeReadiness,30000);

@@ -215,25 +215,69 @@ mod tests {
     }
 
     #[test]
-    fn index_html_has_per_tab_intros_and_tooltips() {
-        // Issue #1662 pass-1: every tab gets a hover-tooltip and a one-sentence intro
-        // so first-time readers can orient without clicking through to documentation.
-        assert!(
-            INDEX_HTML.contains(r#"class="page-intro""#),
-            "page-intro CSS class should be used at least once"
-        );
-        // .page-intro CSS rule is registered (style block).
+    fn index_html_has_per_route_page_header_and_intros() {
+        // Issues #1993, #1994: every route gets a unique <title>, a top-level
+        // <h1>, and a one-sentence plain-English lede. The dashboard is an SPA,
+        // so the H1, title, and lede live in a SINGLE dynamic page-header block
+        // updated by JS via a PAGE_INFO lookup table — there must be exactly
+        // ONE visible H1 in the DOM at a time and the title must change per tab.
+
+        // The CSS rule for .page-intro must still exist (visual contract).
         assert!(INDEX_HTML.contains(".page-intro{"));
-        // Spot-check a few tab tooltips so future refactors keep them in sync.
+        // The dynamic page-header block must exist (issue #1993).
+        assert!(
+            INDEX_HTML.contains(r#"id="page-h1""#),
+            "expected a single <h1 id=\"page-h1\"> in the dynamic page header"
+        );
+        assert!(
+            INDEX_HTML.contains(r#"id="page-lede""#),
+            "expected a single <p id=\"page-lede\"> lede under the H1 (issue #1994)"
+        );
+        // The lede element must carry the page-intro class so the existing
+        // CSS rule still applies.
+        assert!(
+            INDEX_HTML.contains(r#"class="page-intro" id="page-lede""#)
+                || INDEX_HTML.contains(r#"class="page-intro""#)
+                    && INDEX_HTML.contains(r#"id="page-lede""#),
+            "lede element must carry class=\"page-intro\""
+        );
+        // The PAGE_INFO data table must include every known route, each with
+        // an h1 / title / lede field (issues #1993, #1994).
+        let tabs = [
+            "overview",
+            "goals",
+            "traces",
+            "logs",
+            "processes",
+            "memory",
+            "costs",
+            "chat",
+            "workboard",
+            "thinking",
+            "terminal",
+        ];
+        for tab in &tabs {
+            let needle = format!("{tab}:");
+            assert!(
+                INDEX_HTML.contains(&needle) && INDEX_HTML.contains("PAGE_INFO"),
+                "PAGE_INFO table must include an entry for `{tab}` so its h1/title/lede are set"
+            );
+        }
+        // The global brand header must no longer be an <h1> — that was the
+        // bug #1993 named (every page showed the same H1).
+        assert!(
+            !INDEX_HTML.contains("<h1>🌲 Simard Dashboard</h1>"),
+            "the global brand text must not be an <h1>; each route owns its own H1 (issue #1993)"
+        );
+        assert!(
+            INDEX_HTML.contains(r#"class="brand""#),
+            "the global brand should be a non-heading element (e.g. div.brand)"
+        );
+        // Spot-check a few tab tooltips so future refactors keep them in sync
+        // with the routes (regression on issue #1662 pass-1 ).
         assert!(INDEX_HTML.contains(r#"data-tab="overview" title="System health"#));
         assert!(INDEX_HTML.contains(r#"data-tab="goals" title="Active goals"#));
         assert!(INDEX_HTML.contains(r#"data-tab="terminal" title="Attach to the agent"#));
-        // All 11 tab-content containers should now precede a page-intro div.
-        let intro_count = INDEX_HTML.matches(r#"class="page-intro""#).count();
-        assert!(
-            intro_count >= 11,
-            "expected at least 11 .page-intro divs (one per tab), found {intro_count}"
-        );
     }
 
     #[test]
@@ -340,14 +384,12 @@ mod tests {
         }
     }
 
-    /// Each of the eleven `tab-content` containers (`id="tab-<name>"`)
-    /// must contain at least one `<div class="page-intro">…</div>` inside
-    /// its body — i.e. between the opening `id="tab-<name>"` and the next
-    /// `id="tab-` of any kind (the next sibling tab-content). Guarantees
-    /// the intro banner is scoped to each page rather than leaking from a
-    /// neighbour.
+    /// Each known SPA route must have a PAGE_INFO entry in the dynamic
+    /// page-header JS lookup so the H1, document.title, and lede update
+    /// when the tab is activated (issues #1993, #1994). This replaces the
+    /// older per-tab `<div class="page-intro">` placement check.
     #[test]
-    fn index_html_each_tab_content_has_intro_inside_it() {
+    fn index_html_each_route_has_page_info_entry() {
         let tabs = [
             "overview",
             "goals",
@@ -361,21 +403,42 @@ mod tests {
             "thinking",
             "terminal",
         ];
+        // The PAGE_INFO table must be present.
+        let pi_start = INDEX_HTML
+            .find("const PAGE_INFO=")
+            .or_else(|| INDEX_HTML.find("const PAGE_INFO ="))
+            .expect("PAGE_INFO lookup table must be defined in the dashboard JS");
+        // Bound the search to the table body — the closing `};` of the
+        // const declaration. This keeps the check tight and avoids
+        // false positives elsewhere in the JS.
+        let pi_end_rel = INDEX_HTML[pi_start..]
+            .find("};")
+            .expect("PAGE_INFO declaration must be closed by `};`");
+        let pi_body = &INDEX_HTML[pi_start..pi_start + pi_end_rel];
         for tab in &tabs {
-            let open = format!(r#"id="tab-{tab}""#);
-            let start = INDEX_HTML
-                .find(&open)
-                .unwrap_or_else(|| panic!("`{open}` container not found"));
-            // Find the next tab-content opening (any tab); use end-of-doc
-            // as the boundary for the final tab.
-            let after = &INDEX_HTML[start + open.len()..];
-            let end_rel = after.find(r#"id="tab-"#).unwrap_or(after.len());
-            let body = &after[..end_rel];
+            let key = format!("{tab}:");
             assert!(
-                body.contains(r#"class="page-intro""#),
-                "tab `{tab}` (id=tab-{tab}) is missing its `<div class=\"page-intro\">` intro \
-                 banner inside the tab-content body — first-time readers won't get the \
-                 'What is this page?' orientation sentence."
+                pi_body.contains(&key) || pi_body.contains(&format!("{tab} :")),
+                "PAGE_INFO is missing an entry for `{tab}` — its H1, title, and \
+                 lede will not update when the tab is opened (issues #1993, #1994)"
+            );
+            // Each entry must declare h1, title, and lede fields.
+            // Look for the entry's body up to the next `},` (or end of table).
+            let entry_start = pi_body
+                .find(&format!("{tab}:"))
+                .or_else(|| pi_body.find(&format!("{tab} :")))
+                .unwrap();
+            let entry_rest = &pi_body[entry_start..];
+            let entry_end = entry_rest.find("},").unwrap_or(entry_rest.len());
+            let entry = &entry_rest[..entry_end];
+            assert!(entry.contains("h1:"), "PAGE_INFO[{tab}] missing h1: field");
+            assert!(
+                entry.contains("title:"),
+                "PAGE_INFO[{tab}] missing title: field"
+            );
+            assert!(
+                entry.contains("lede:"),
+                "PAGE_INFO[{tab}] missing lede: field (issue #1994)"
             );
         }
     }
@@ -620,17 +683,29 @@ mod tests {
         );
     }
 
-    /// Sanity-check on the page-intro count: there must be exactly 11
-    /// (one per tab) — a stricter bound than the existing `>= 11`
-    /// assertion. If a refactor accidentally adds a 12th, we want to
-    /// know immediately so we can decide whether the new container is
-    /// actually a new tab or a misuse of the class.
+    /// Sanity-check on the dynamic page header: there must be exactly ONE
+    /// `class="page-intro"` element in the rendered DOM (the dynamic lede)
+    /// and the per-route metadata lives in the PAGE_INFO JS table.
+    /// Issues #1993, #1994 — previously this was an 11-count assertion when
+    /// the lede was duplicated inside each tab-content.
     #[test]
-    fn index_html_has_exactly_eleven_page_intros() {
+    fn index_html_has_exactly_one_dynamic_page_intro() {
         let count = INDEX_HTML.matches(r#"class="page-intro""#).count();
         assert_eq!(
-            count, 11,
-            "expected exactly 11 page-intro divs (one per top-level tab), got {count}"
+            count, 1,
+            "expected exactly 1 page-intro element (the dynamic lede under #page-h1), got {count}"
+        );
+        // And there must be exactly one element with id="page-lede".
+        let lede_id_count = INDEX_HTML.matches(r#"id="page-lede""#).count();
+        assert_eq!(
+            lede_id_count, 1,
+            "expected exactly one element with id=\"page-lede\", got {lede_id_count}"
+        );
+        // And exactly one element with id="page-h1".
+        let h1_id_count = INDEX_HTML.matches(r#"id="page-h1""#).count();
+        assert_eq!(
+            h1_id_count, 1,
+            "expected exactly one element with id=\"page-h1\", got {h1_id_count}"
         );
     }
 

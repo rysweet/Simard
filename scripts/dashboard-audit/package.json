@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "audit": "node audit.mjs",
+    "regression:h1-title-lede": "node regression-h1-title-lede.mjs",
     "install-chromium": "npx playwright install chromium"
   },
   "dependencies": {

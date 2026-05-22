@@ -15,7 +15,6 @@ pub(crate) const PART_01: &str = r#"      </div>
   </div>
 
   <div class="tab-content" id="tab-terminal">
-    <div class="page-intro">Attach to the live tmux terminal session of a running subordinate agent and watch its stdout/stderr stream.</div>
     <div class="card" style="max-width:980px">
       <h2>Agent Terminal</h2>
       <div style="background:#1a1a2e;border:1px solid #333;border-radius:6px;padding:.6rem;margin-bottom:.75rem;font-size:.8rem;color:#8b949e">
@@ -182,26 +181,59 @@ pub(crate) const PART_01: &str = r#"      </div>
 
     function clearTabTimers(){Object.values(tabRefreshTimers).forEach(clearInterval);tabRefreshTimers={};}
 
+    /* --- Per-route page metadata (issues #1993, #1994): unique title; non-empty h1; non-empty lede ≤140 chars. */
+    const PAGE_INFO={
+      overview:  {h1:'Overview',   title:'Overview · Simard Dashboard',   lede:'A live snapshot of what the agent is doing right now: recent actions, open work, and system health.'},
+      goals:     {h1:'Goals',      title:'Goals · Simard Dashboard',      lede:"The durable outcomes you want the agent to deliver — active goals are in flight; backlog is queued for later."},
+      traces:    {h1:'Traces',     title:'Traces · Simard Dashboard',     lede:'Step-by-step record of what each agent did and when, sourced from OpenTelemetry — useful for debugging.'},
+      logs:      {h1:'Logs',       title:'Logs · Simard Dashboard',       lede:'Raw daemon logs, cost ledger, and recent cycle summaries — the lowest-level view for debugging.'},
+      processes: {h1:'Processes',  title:'Processes · Simard Dashboard',  lede:'OS processes Simard has spawned with CPU and memory use — useful for spotting stuck or zombie agents.'},
+      memory:    {h1:'Memory',     title:'Memory · Simard Dashboard',     lede:'What the agent has learned and remembered, grouped by memory type (working, semantic, episodic, etc.).'},
+      costs:     {h1:'Costs',      title:'Costs · Simard Dashboard',      lede:'Token and dollar usage by model, plus your daily and weekly budget caps, from real provider invoices.'},
+      chat:      {h1:'Chat',       title:'Chat · Simard Dashboard',       lede:'Talk to the running agent in real time — anything you say here can become a new goal.'},
+      workboard: {h1:'Whiteboard', title:'Whiteboard · Simard Dashboard', lede:"Kanban view of the agent's current work: queued, in-progress, blocked, and done goals."},
+      thinking:  {h1:'Thinking',   title:'Thinking · Simard Dashboard',   lede:"Live transcript of the agent's reasoning between actions — the Orient and Decide steps of each cycle."},
+      terminal:  {h1:'Terminal',   title:'Terminal · Simard Dashboard',   lede:"Attach to a running subordinate agent's tmux session and watch its stdout and stderr stream live."}
+    };
+    function applyPageHeader(slug){
+      const info=PAGE_INFO[slug]||PAGE_INFO.overview;
+      const h1=document.getElementById('page-h1'); if(h1) h1.textContent=info.h1;
+      const lede=document.getElementById('page-lede'); if(lede) lede.textContent=info.lede;
+      try{document.title=info.title;}catch(_){}
+    }
+    function slugFromHash(){
+      const m=(location.hash||'').replace(/^#/,'').match(/^(?:tab=|\/)?([a-z0-9_-]+)$/i);
+      return (m && PAGE_INFO[m[1]]) ? m[1] : null;
+    }
+    function activateTab(slug,{updateHash=true}={}){
+      const tab=document.querySelector(`.tab[data-tab="${slug}"]`);
+      const content=document.getElementById('tab-'+slug);
+      if(!tab||!content) return false;
+      document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
+      tab.classList.add('active'); content.classList.add('active');
+      activeTab=slug; applyPageHeader(slug);
+      if(updateHash){try{history.replaceState(null,'','#/'+slug);}catch(_){location.hash='#/'+slug;}}
+      return true;
+    }
+
     /* --- Tabs --- */
     document.querySelectorAll('.tab').forEach(tab=>{
       tab.addEventListener('click',()=>{
-        document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-        document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
-        tab.classList.add('active');
-        document.getElementById('tab-'+tab.dataset.tab).classList.add('active');
-        activeTab=tab.dataset.tab;
+        const slug=tab.dataset.tab;
+        activateTab(slug);
         clearTabTimers();
-        if(tab.dataset.tab==='logs') {fetchLogs();tabRefreshTimers.logs=setInterval(fetchLogs,15000);}
-        if(tab.dataset.tab==='processes') {fetchProcessTree();tabRefreshTimers.proc=setInterval(fetchProcessTree,15000);}
-        if(tab.dataset.tab==='memory') {fetchMemoryGraph();fetchMemory();}
+        if(slug==='logs') {fetchLogs();tabRefreshTimers.logs=setInterval(fetchLogs,15000);}
+        if(slug==='processes') {fetchProcessTree();tabRefreshTimers.proc=setInterval(fetchProcessTree,15000);}
+        if(slug==='memory') {fetchMemoryGraph();fetchMemory();}
 
-        if(tab.dataset.tab==='goals') fetchGoals();
-        if(tab.dataset.tab==='costs') fetchCosts();
-        if(tab.dataset.tab==='traces') fetchTraces();
-        if(tab.dataset.tab==='chat') initChat();
-        if(tab.dataset.tab==='workboard') {fetchWorkboard();tabRefreshTimers.wb=setInterval(fetchWorkboard,30000);}
-        if(tab.dataset.tab==='thinking') {fetchThinking();tabRefreshTimers.thinking=setInterval(fetchThinking,30000);}
-        if(tab.dataset.tab==='terminal') {initAgentLogTerminal();fetchSubagentSessions();tabRefreshTimers.subagent=setInterval(fetchSubagentSessions,5000);fetchTmuxSessions();tabRefreshTimers.tmux=setInterval(fetchTmuxSessions,10000);}
+        if(slug==='goals') fetchGoals();
+        if(slug==='costs') fetchCosts();
+        if(slug==='traces') fetchTraces();
+        if(slug==='chat') initChat();
+        if(slug==='workboard') {fetchWorkboard();tabRefreshTimers.wb=setInterval(fetchWorkboard,30000);}
+        if(slug==='thinking') {fetchThinking();tabRefreshTimers.thinking=setInterval(fetchThinking,30000);}
+        if(slug==='terminal') {initAgentLogTerminal();fetchSubagentSessions();tabRefreshTimers.subagent=setInterval(fetchSubagentSessions,5000);fetchTmuxSessions();tabRefreshTimers.tmux=setInterval(fetchTmuxSessions,10000);}
       });
     });
     setInterval(()=>{document.getElementById('clock').textContent=formatTime(Date.now())},1000);
