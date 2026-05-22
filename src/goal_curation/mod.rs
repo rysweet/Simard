@@ -25,6 +25,4 @@ mod tests_adapter;
 #[cfg(test)]
 mod tests_operations;
 #[cfg(test)]
-mod tests_progress_evidence;
-#[cfg(test)]
 mod tests_save_with_removals;

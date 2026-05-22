@@ -1,5 +1,5 @@
-//! LLM-backed [`ProgressEvidenceChecker`] — replaces the git-shelling
-//! [`super::progress_evidence::DefaultProgressEvidenceChecker`] (PR #1970).
+//! LLM-backed [`ProgressEvidenceChecker`] — production implementation
+//! (replaced the former `DefaultProgressEvidenceChecker` in PR #2007).
 //!
 //! Per user direction (post-PR #1970 review): "the progress assessment
 //! should be an llm reviewing the problem, the plan, and the progress
