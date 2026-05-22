@@ -188,12 +188,11 @@ fn parse_reviewer_response(raw: &str) -> Result<ReviewerResponse, String> {
         }
     }
     // 4. outermost braces fallback
-    if let (Some(first), Some(last)) = (stripped.find('{'), stripped.rfind('}')) {
-        if first < last {
-            if let Ok(parsed) = serde_json::from_str::<ReviewerResponse>(&stripped[first..=last]) {
-                return Ok(parsed);
-            }
-        }
+    if let (Some(first), Some(last)) = (stripped.find('{'), stripped.rfind('}'))
+        && first < last
+        && let Ok(parsed) = serde_json::from_str::<ReviewerResponse>(&stripped[first..=last])
+    {
+        return Ok(parsed);
     }
     Err(format!(
         "{ADAPTER_TAG} response had no parseable JSON object; raw={:?}",
