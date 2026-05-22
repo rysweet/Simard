@@ -21,13 +21,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant};
 
 use crate::error::{SimardError, SimardResult};
 
 use super::types::RepoInspection;
 
-pub(crate) const AGENT_SESSION_TIMEOUT_SECS: u64 = 3600;
+// NOTE: There is intentionally no wall-clock timeout on the engineer
+// subprocess. Long-running agentic work (e.g. `amplihack copilot`) must run
+// to natural completion; a SIGKILL deadline silently drops uncommitted work
+// (see PR #1988 salvage and issue #1989). Liveness, if needed, must come from
+// agent-emitted progress signals, not from Simard wall-clock SIGKILL.
 
 /// Default upper bound on RustyClawd autonomous turns. Aligns with the
 /// `amplihack RustyClawd --auto --max-turns` complex-task guidance.
@@ -288,37 +291,15 @@ pub fn run_engineer_subprocess(
         cmd.env("COPILOT_ALLOW_ALL", "1");
     }
 
-    let mut child = cmd
+    let child = cmd
         .spawn()
         .map_err(|e| SimardError::ActionExecutionFailed {
             action: action_label.clone(),
             reason: format!("failed to spawn `{bin}`: {e}"),
         })?;
 
-    let deadline = Instant::now() + Duration::from_secs(AGENT_SESSION_TIMEOUT_SECS);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_status)) => break,
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(SimardError::CommandTimeout {
-                        action: action_label,
-                        timeout_secs: AGENT_SESSION_TIMEOUT_SECS,
-                    });
-                }
-                thread::sleep(Duration::from_millis(250));
-            }
-            Err(e) => {
-                return Err(SimardError::ActionExecutionFailed {
-                    action: action_label,
-                    reason: format!("failed to poll child process: {e}"),
-                });
-            }
-        }
-    }
-
+    // Wait unbounded. Engineer subprocesses are agentic and must run to
+    // natural completion or natural failure; do NOT SIGKILL on a wall clock.
     let output = child
         .wait_with_output()
         .map_err(|e| SimardError::ActionExecutionFailed {
@@ -380,10 +361,14 @@ pub(crate) fn start_agent_session(
 pub(crate) fn await_agent_session(
     rx: mpsc::Receiver<SimardResult<String>>,
 ) -> SimardResult<String> {
-    rx.recv_timeout(Duration::from_secs(AGENT_SESSION_TIMEOUT_SECS + 30))
-        .map_err(|_| SimardError::ActionExecutionFailed {
+    // Unbounded recv: the engineer subprocess has no wall-clock timeout, so
+    // the channel must not impose one either. The only failure modes are:
+    // (a) the worker thread panics (sender dropped → RecvError), or
+    // (b) the subprocess returns an error which we propagate verbatim.
+    rx.recv()
+        .map_err(|e| SimardError::ActionExecutionFailed {
             action: "agent-spawn".to_string(),
-            reason: format!("agent session channel timed out after {AGENT_SESSION_TIMEOUT_SECS}s"),
+            reason: format!("agent session channel closed unexpectedly: {e}"),
         })?
         .map_err(|e| SimardError::ActionExecutionFailed {
             action: "agent-spawn".to_string(),
