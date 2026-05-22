@@ -35,7 +35,7 @@ pub enum EvidenceDecision {
 }
 
 /// Gate trait — decides whether a proposed progress increase is backed
-/// by verifiable git artifacts.
+/// by sufficient evidence (LLM-reviewed or heuristic).
 ///
 /// `Send + Sync` so a single `Arc<dyn ProgressEvidenceChecker>` can be
 /// installed on `OodaBridges` and shared across OODA actions.
@@ -57,7 +57,7 @@ pub trait ProgressEvidenceChecker: Send + Sync {
 ///
 /// Used:
 /// 1. By tests' default bridges constructors so existing tests don't
-///    need to mock `git`/`gh`.
+///    need to provide an `LlmSubmitter` implementation.
 /// 2. As the operator escape hatch via `SIMARD_PROGRESS_EVIDENCE=off` at
 ///    daemon boot.
 pub struct NoopProgressEvidenceChecker;

@@ -1,7 +1,7 @@
 ---
 title: Progress-evidence gating
-description: How Simard refuses to bump a goal's completion percentage unless a verifiable git artifact backs the claim.
-last_updated: 2026-05-21
+description: How Simard refuses to bump a goal's completion percentage unless an LLM reviewer confirms the claim is coherent with the plan.
+last_updated: 2026-05-22
 owner: simard
 doc_type: concept
 related:
@@ -44,35 +44,50 @@ The single guiding principle of the fix is:
 > **No progress increase without a verifiable git artifact since the last
 > update.**
 
-## The three accepted forms of evidence
+## How evidence is evaluated
 
 A proposed increase from `old_percent` to `new_percent` for goal `G` is
-accepted if **any one** of the following is true since `G`'s last accepted
-update (`G.last_progress_update_at`):
+submitted to an **LLM reviewer** (`LlmReviewerProgressChecker` in
+`src/goal_curation/progress_reviewer.rs`). The reviewer reads five inputs —
+the goal's **problem** description, **plan** (current activity), **prior
+percent**, **claimed percent**, and **WIP summary** — and returns
+`{verdict: "accept"|"reject", rationale: "..."}`.
 
-1. **Local commit on an engineer branch.** At least one commit exists on a
-   branch matching `engineer/{slug(G.id)}-*` with author-date `>= since`.
-2. **PR referencing the goal.** At least one PR (any state) on
-   `rysweet/Simard` whose title or body contains either the goal slug or any
-   `ref_id` listed in `G.wip_refs`, created at or after `since`.
-3. **Merged PR closing a wip-ref issue.** At least one PR with
-   `state="MERGED"` and `mergedAt >= since` whose body matches a
-   `Closes/Fixes/Resolves #NNNN` clause where `NNNN` is an issue in
-   `G.wip_refs`.
+The reviewer **accepts** when the claimed percent is coherent with the plan:
 
-If none match, the gate rejects the update, the prior percent is kept, and
-the rejection is recorded as a cognitive-memory episode (see
-[Audit trail](#audit-trail)).
+- The plan describes work in flight, and the delta is small and proportional.
+- The plan describes plausibly complete work, and the claimed percent matches.
+- The plan is empty but WIP references list concrete artifacts and the delta
+  is modest.
 
-### Why "any-of" rather than "all-of"
+The reviewer **rejects** when the claimed percent looks hallucinated:
 
-Real progress takes many shapes. A long-running spike may produce commits on
-a personal branch before a PR exists. A documentation-only fix may land as a
-PR with no engineer branch. A bug closed by an external contributor may merge
-without ever touching an engineer branch. Requiring all three signals
-simultaneously would block legitimate work; requiring any one of them blocks
-only the failure mode we observed — brain output with **zero** corresponding
-artifacts.
+- A large delta with no matching plan or WIP.
+- A 100% claim with no shipped artifact in the plan or WIP.
+- A claim that contradicts the plan (e.g. "blocked on review" but claims 90%).
+
+On **LLM infrastructure failure** (transport error, parse error, empty
+response), the reviewer **accepts** with a diagnostic rationale. The gate's
+purpose is to catch hallucinated jumps, not to block goals on LLM
+availability.
+
+> **History:** Prior to PR #2007/#2011, evidence was gathered via `git log`
+> and `gh pr list` shellouts (the `DefaultProgressEvidenceChecker`). Per user
+> direction: "the progress assessment should be an LLM reviewing the problem,
+> the plan, and the progress against the plan, that's all." The git/gh
+> shellout code was removed entirely in PR #2011.
+
+### Why LLM review rather than git-artifact matching
+
+The original three-rule git/gh matcher was brittle in practice. Real progress
+takes many shapes that do not always produce engineer branches or PRs by the
+time the brain makes a progress claim. An LLM reviewer can assess whether a
+claimed delta is *proportional to the described plan* — a judgment call that
+a fixed-rule state machine cannot make.
+
+The trade-off is that the reviewer depends on LLM availability. The fail-open
+design means an LLM outage degrades to pre-#1967 behavior (all claims
+accepted) rather than blocking all goals.
 
 ### What does *not* count as evidence
 
@@ -162,16 +177,16 @@ The gate emits one cognitive-memory episode per non-bypass decision.
 **On `Accept`** (low importance, 0.4):
 
 ```
-goal progress accepted: 64%→72% on improve-simard-dashboard
-  — evidence: commit a1b2c3d on engineer/improve-simard-dashboard-2026-05-21 at 2026-05-21T02:14:08Z
+goal progress accepted: 64%->72% on improve-simard-dashboard
+  -- evidence: progress-assessment-reviewer: accept — PR #1998 in flight, 8pt delta matches plan
 ```
 
 **On `Reject`** (higher importance, 0.7) — the prefix is exact and stable
 so dashboards and consolidation jobs can match it:
 
 ```
-brain hallucination detected: rejected progress 35%→75% on enhance-simard-meeting-experience
-  — no git evidence since last update: no commits on engineer/enhance-simard-meeting-experience-*, no PRs referencing goal, no merged PRs closing #1951 since 2026-05-19T23:06:48Z
+brain hallucination detected: rejected progress 35%->75% on enhance-simard-meeting-experience
+  -- reviewer rationale: progress-assessment-reviewer: reject — 75% claim with no plan and no WIP; likely hallucinated
 ```
 
 These episodes flow through the existing cognitive-memory pipeline:
@@ -201,16 +216,15 @@ events, not silent suppressions.
 | `NotStarted` resets | No (bypass) | Decrease; cannot inflate dashboard. |
 | Decreases & equal-value writes | No (bypass) | Same. |
 | Dashboard `PUT /api/goals/<id>/progress` | **No** | Intentional operator override; documented as such. |
-| `gh` / `git` not available on daemon host | Gate Rejects | Treat tooling absence as "no evidence". See [kill switch](../operations/progress-evidence-kill-switch.md). |
+| `gh` / `git` not available on daemon host | N/A | The LLM reviewer does not shell out to `gh` or `git`. |
 
 ## Performance
 
 The gate fires only on progress-**increase** attempts — typically a handful
 per OODA cycle, not per cycle wall-clock. Each fire executes at most one
-`git for-each-ref` + one `git log` + one `gh pr list`. On a quiet repo the
-combined wall-time is well under the existing OODA cycle budget. A
-per-cycle in-memory cache for `gh pr list` results is reserved for v2 if
-profiling identifies it as hot.
+LLM call (the `LlmReviewerProgressChecker` submits a single prompt).
+Downward/no-change moves are auto-accepted without an LLM call. The
+prompt template is kept short to minimize latency.
 
 ## Related work
 

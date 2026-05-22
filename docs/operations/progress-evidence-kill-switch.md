@@ -17,7 +17,7 @@ the API is documented in
 
 | Value | Behavior |
 |---|---|
-| Unset, or any value other than `off` (case-insensitive) | `OodaBridges.progress_evidence` is wired to `DefaultProgressEvidenceChecker` against the daemon's `repo_root` and `rysweet/Simard`. Progress increases require git evidence. |
+| Unset, or any value other than `off` (case-insensitive) | `OodaBridges.progress_evidence` is wired to `LlmReviewerProgressChecker`, which delegates to an LLM to verify that proposed progress claims are coherent with the goal's plan and WIP artifacts. |
 | `off` (case-insensitive) | `OodaBridges.progress_evidence` is wired to `NoopProgressEvidenceChecker`. Every progress claim is accepted. **No `"goal progress accepted:"` or `"brain hallucination detected:"` audit episodes are emitted.** |
 
 The variable is read once, at daemon startup, in the bridge-construction
@@ -31,13 +31,14 @@ to pick up a new value.
 There are exactly three legitimate uses. If you find yourself reaching for
 the kill switch outside of these, file a bug instead.
 
-1. **`gh` outage or auth failure on the daemon host.** When
-   `gh pr list` fails for an extended period, every increase attempt that
-   would have matched rule (2) or (3) will be rejected. Setting `off`
-   restores pre-#1967 behavior while you re-auth `gh` or wait for the
-   outage to clear.
+1. **LLM outage or model-provider failure on the daemon host.** When
+   the LLM endpoint is unavailable for an extended period, the reviewer
+   will fail open (accept with a diagnostic rationale), so the kill switch
+   is less urgent than it was with the old `gh`-based checker. However,
+   if you want to eliminate the LLM calls entirely during an outage to
+   reduce noise in audit logs, set `off`.
 2. **Investigating a regression in the gate itself.** If you suspect the
-   checker is rejecting a legitimate claim and you need a quick
+   reviewer is rejecting a legitimate claim and you need a quick
    side-by-side comparison of the daemon's behavior with and without the
    gate, toggle the variable on a non-production daemon and re-run the
    cycle.
@@ -118,7 +119,7 @@ The daemon logs the active checker at boot. The format is pinned by
 are stable; the parenthetical detail may evolve.
 
 ```
-[simard] progress-evidence: enabled (DefaultProgressEvidenceChecker, repo_root=/home/azureuser/src/Simard, remote=rysweet/Simard)
+[simard] progress-evidence: enabled (LlmReviewerProgressChecker)
 ```
 
 Or:
@@ -153,18 +154,20 @@ curl -s -X POST http://localhost:8080/api/memory/search \
 
 ## Failure modes the kill switch addresses
 
-Reject reason-string substrings are pinned by the runner error contract
-documented in design §2.7. Triage by `grep`'ing the
-`"brain hallucination detected:"` episode body for the substring in the
-left column:
+The LLM reviewer fails open by design — LLM transport errors, JSON parse
+errors, and empty responses all result in `Accept` with a diagnostic
+rationale (see [Progress-evidence API](../reference/progress-evidence-api.md)).
+This means the kill switch is **less critical** for infrastructure failures
+than it was with the old `DefaultProgressEvidenceChecker` (which rejected
+on `gh`/`git` errors).
 
-| Substring in `reason` | Likely cause | Remedy |
-|---|---|---|
-| `gh: command not found` | `gh` is not installed or not on the daemon's `PATH`. | Install `gh`; remove the kill switch. |
-| `gh: authentication required` | The daemon's `gh` token expired or was revoked. | `gh auth login` as the daemon user; remove the kill switch. |
-| `git: not a git repository` | `repo_root` resolves to a non-repo path (e.g. daemon launched from `/`). | Launch the daemon from the repo root, or override via the daemon-boot wiring. |
-| `git: io error` / `gh: io error` | Catch-all process-spawn failure (broken pipe, ENOSPC, etc.). | Inspect the trailing `<detail>` portion of the reason string. |
-| Genuine engineer commits exist but the gate still rejects | Branch name does not match `engineer/<slug>-*` pattern. | File a bug. Do not paper over with the kill switch. |
+The kill switch is still useful for:
+
+| Scenario | When to use kill switch |
+|---|---|
+| LLM reviewer producing excessive false rejections | Disable while debugging the prompt; restore when fixed. |
+| Investigating daemon behavior unrelated to progress | Remove one variable from the investigation. |
+| Daemon deployed without LLM access (e.g. air-gapped test) | The reviewer already fails open, but `off` avoids LLM call attempts entirely. |
 
 ---
 
@@ -172,7 +175,7 @@ left column:
 
 When the underlying issue is resolved, remove the environment variable
 and restart the daemon. Confirm via the boot log line above that
-`DefaultProgressEvidenceChecker` is active. The next cycle that involves
+`LlmReviewerProgressChecker` is active. The next cycle that involves
 a progress claim should produce either an `Accept` or a `Reject` audit
 episode in cognitive memory.
 

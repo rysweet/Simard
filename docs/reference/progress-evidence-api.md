@@ -4,11 +4,17 @@ Crate: `simard` · Module: `simard::goal_curation::progress_evidence`
 
 This module implements the gatekeeper described in
 [Progress-evidence gating](../concepts/progress-evidence-gating.md). It
-exposes one trait (`ProgressEvidenceChecker`), two production helper traits
-for shell-out seams (`GitRunner`, `GhRunner`), two concrete implementations
-(`DefaultProgressEvidenceChecker`, `NoopProgressEvidenceChecker`), and a
-single façade function (`update_goal_progress_with_evidence`) in the
+exposes one trait (`ProgressEvidenceChecker`), two concrete implementations
+(`LlmReviewerProgressChecker` in
+`simard::goal_curation::progress_reviewer`, `NoopProgressEvidenceChecker`),
+and a single façade function (`update_goal_progress_with_evidence`) in the
 sibling `simard::goal_curation::operations` module.
+
+> **History:** Prior to PR #2007, the production implementation was
+> `DefaultProgressEvidenceChecker`, which shelled out to `git log` and
+> `gh pr list`. That struct and its helper traits (`GitRunner`, `GhRunner`)
+> were removed in PR #2011. The gate now delegates to an LLM reviewer —
+> no subprocess calls, no local tooling requirements.
 
 All public symbols below are re-exported from `simard::goal_curation`.
 
@@ -52,17 +58,18 @@ can be installed on `OodaBridges` and shared across all OODA actions.
 ### Contract
 
 - `check` MUST NOT mutate the goal board, cognitive memory, or any other
-  daemon state. It is a read-only function over the local repo and remote
-  GitHub.
-- `check` MAY perform blocking I/O (git/gh shellouts). It is called at most
+  daemon state. It is a read-only decision function.
+- `check` MAY perform blocking I/O (LLM calls). It is called at most
   a few times per OODA cycle, only on progress-increase attempts.
-- `check` MUST return `Accept` when evidence is found and `Reject`
-  otherwise. It MUST NOT return `Accept` on shellout failure — tooling
-  absence is treated as "no evidence" (see
+- `check` MUST return `Accept` when evidence supports the claim and
+  `Reject` otherwise. The production `LlmReviewerProgressChecker`
+  accepts on LLM infrastructure failure (transport error, parse error,
+  empty response) — the gate's purpose is to catch hallucinated jumps,
+  not to block goals on LLM availability. See
   [`SIMARD_PROGRESS_EVIDENCE`](../operations/progress-evidence-kill-switch.md)
-  for the operator escape hatch).
+  for the operator escape hatch.
 - The `since` argument is provided by the caller; the trait does not
-  source it.
+  source it (the LLM reviewer ignores it — decisions are prompt-based).
 
 ### Parameters
 
@@ -73,118 +80,57 @@ can be installed on `OodaBridges` and shared across all OODA actions.
 | `new_percent` | `u32` | The proposed new percent (0–100). Only called when `new_percent > old_percent`. |
 | `since` | `DateTime<Utc>` | The cutoff timestamp; only artifacts at or after this instant count as evidence. |
 
-### Decision rules (DefaultProgressEvidenceChecker)
+### Decision rules (LlmReviewerProgressChecker)
 
-The production implementation accepts on any of:
+The production implementation (`src/goal_curation/progress_reviewer.rs`)
+sends goal context to an LLM and parses a `{verdict, rationale}` JSON
+response. No git introspection, no `gh` shellouts — the LLM reads the
+problem, plan, and progress against the plan to determine whether the
+claimed percent is honest.
 
-| # | Source | Match | `reason` template |
-|---|---|---|---|
-| 1 | `git log` on `engineer/{slug(goal.id)}-*` | ≥1 commit with author-date `>= since` | `"commit <sha7> on <branch> at <iso8601>"` |
-| 2 | `gh pr list` on `remote_slug` | ≥1 PR (any state) with title or body containing the goal slug **or** any `wip_refs[].ref_id` of kind `issue` or `pr` | `"PR #<n> references goal"` |
-| 3 | `gh pr list` on `remote_slug` | ≥1 PR with `state == "MERGED"`, `mergedAt >= since`, body matching `(?i)\b(close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+#(\d+)\b` where `\2` is in `wip_refs` issues | `"PR #<n> closed #<issue> at <iso8601>"` |
-| 4 | — | none of the above | `Reject` with concatenated `"no commits on engineer/<slug>-*, no PRs referencing goal, no merged PRs closing #<issue-list> since <iso8601>"` |
+| Condition | Result | `reason` template |
+|---|---|---|
+| `new_percent <= old_percent` | `Accept` (auto, no LLM call) | `"progress-assessment-reviewer: downward / no-change (<old> -> <new>) auto-accepted"` |
+| LLM returns `{"verdict":"accept","rationale":"..."}` | `Accept` | `"progress-assessment-reviewer: accept — <rationale>"` |
+| LLM returns `{"verdict":"reject","rationale":"..."}` | `Reject` | `"progress-assessment-reviewer: reject — <rationale>"` |
+| LLM transport/parse error or empty response | `Accept` (fail-open) | `"progress-assessment-reviewer: LLM submit failed (<error>); accepting to avoid blocking goal"` |
+| Unknown verdict string | `Accept` (fail-open) | `"progress-assessment-reviewer: unknown verdict \"<v>\"; accepting to avoid blocking goal"` |
 
-Rules are evaluated top-to-bottom; the first match short-circuits and
-returns `Accept`.
-
----
-
-## `GitRunner`
-
-```rust
-pub trait GitRunner: Send + Sync {
-    fn list_branches(
-        &self,
-        repo_root: &Path,
-        pattern: &str,
-    ) -> io::Result<Vec<String>>;
-
-    fn commits_since(
-        &self,
-        repo_root: &Path,
-        branch: &str,
-        since: DateTime<Utc>,
-    ) -> io::Result<Vec<String>>;
-}
-```
-
-Test seam for the local-git half of `DefaultProgressEvidenceChecker`. The
-production impl (`SystemGitRunner`) wraps:
-
-- `git -C <repo_root> for-each-ref --format=%(refname:short) refs/heads/<pattern>`
-- `git -C <repo_root> log --since <iso8601> --pretty=%H <branch>`
-
-`io::Error` from either call is propagated as a `Reject` from `check`.
+The prompt template lives at
+`prompt_assets/simard/progress_assessment_reviewer.md`. It substitutes
+`{goal_id}`, `{problem}`, `{plan}`, `{prior_pct}`, `{claimed_pct}`, and
+`{wip_summary}` before submission.
 
 ---
 
-## `GhRunner`
+## `LlmReviewerProgressChecker`
 
 ```rust
-pub trait GhRunner: Send + Sync {
-    fn search_prs(
-        &self,
-        repo_slug: &str,
-        query: &str,
-    ) -> io::Result<Vec<GhPr>>;
+// In src/goal_curation/progress_reviewer.rs
+
+pub struct LlmReviewerProgressChecker<S: LlmSubmitter> {
+    submitter: S,
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
-pub struct GhPr {
-    pub number: u64,
-    pub title: String,
-    pub body: Option<String>,
-    pub state: String,
-    #[serde(rename = "createdAt")]
-    pub created_at: DateTime<Utc>,
-    #[serde(rename = "mergedAt")]
-    pub merged_at: Option<DateTime<Utc>>,
+impl<S: LlmSubmitter> LlmReviewerProgressChecker<S> {
+    pub fn new(submitter: S) -> Self;
 }
 ```
 
-Test seam for the GitHub half of `DefaultProgressEvidenceChecker`. The
-production impl (`SystemGhRunner`) shells out to:
+The production checker. Generic over `LlmSubmitter` so tests can swap in a
+canned-response stub without global state. Constructed at daemon startup
+with the daemon's active `LlmSubmitter` implementation.
 
-```
-gh pr list --repo <repo_slug> --search <query> --state all \
-   --json number,title,body,state,createdAt,mergedAt
-```
+The checker:
 
-Authentication is the daemon process's existing `gh` token (same
-credentials used by other Simard subsystems that read GitHub).
-
----
-
-## `DefaultProgressEvidenceChecker`
-
-```rust
-pub struct DefaultProgressEvidenceChecker {
-    pub repo_root: PathBuf,
-    pub remote_slug: String,
-    pub git: Arc<dyn GitRunner>,
-    pub gh:  Arc<dyn GhRunner>,
-}
-```
-
-The production checker. Constructed at daemon startup with:
-
-| Field | Production value |
-|---|---|
-| `repo_root` | `std::env::current_dir()` at boot |
-| `remote_slug` | `"rysweet/Simard"` |
-| `git` | `Arc::new(SystemGitRunner)` |
-| `gh` | `Arc::new(SystemGhRunner)` |
-
-### Custom constructor for non-default deployments
-
-```rust
-impl DefaultProgressEvidenceChecker {
-    pub fn new(repo_root: PathBuf, remote_slug: impl Into<String>) -> Self;
-}
-```
-
-Use this when the daemon runs from a directory other than the repo root or
-when targeting a fork.
+1. Auto-accepts downward/no-change moves without an LLM call.
+2. Renders the prompt template with goal context.
+3. Submits to the LLM via `submitter.submit(...)`.
+4. Parses the response JSON (tries: raw, fenced code blocks, brace-balanced
+   spans, outermost-brace fallback — same strategy as `merge_judge`).
+5. Maps `"accept"` / `"reject"` verdicts to `EvidenceDecision`.
+6. Fails open on any infrastructure error (LLM down, parse failure, unknown
+   verdict).
 
 ---
 
@@ -204,7 +150,7 @@ Always returns `Accept { reason: "noop checker (no evidence enforced)" }`.
 Used in two places:
 
 1. **Tests.** Default test-helper `OodaBridges::for_tests()` installs this
-   so existing tests do not need to mock `git`/`gh`.
+   so existing tests do not need to provide an `LlmSubmitter` implementation.
 2. **Operator escape hatch.** Selected at daemon boot when
    `SIMARD_PROGRESS_EVIDENCE=off`. See
    [the kill-switch operations doc](../operations/progress-evidence-kill-switch.md).
@@ -256,8 +202,8 @@ pub fn update_goal_progress_with_evidence(
       - Set `goal.last_progress_update_at = Some(now)`.
       - Emit one episode:
         ```
-        goal progress accepted: <old>%→<new>% on <goal-id>
-          — evidence: <checker reason>
+        goal progress accepted: <old>%-><new>% on <goal-id>
+          -- evidence: <checker reason>
         ```
         importance `0.4`.
       - Return `Ok(Accept { reason })`.
@@ -265,8 +211,8 @@ pub fn update_goal_progress_with_evidence(
       - Do **not** mutate the board.
       - Emit one episode:
         ```
-        brain hallucination detected: rejected progress <old>%→<new>% on <goal-id>
-          — no git evidence since last update: <checker reason>
+        brain hallucination detected: rejected progress <old>%-><new>% on <goal-id>
+          -- reviewer rationale: <checker reason>
         ```
         importance `0.7`.
       - Return `Ok(Reject { reason })`. **This is not an error.** The
@@ -334,8 +280,7 @@ pub struct OodaBridges {
 
 | Field | Default at daemon boot | Default in tests |
 |---|---|---|
-| `repo_root` | `std::env::current_dir().unwrap_or_else(\|_\| PathBuf::from("."))` | `PathBuf::from(".")` |
-| `progress_evidence` | `Arc::new(DefaultProgressEvidenceChecker::new(repo_root.clone(), "rysweet/Simard"))`, or `Arc::new(NoopProgressEvidenceChecker)` when `SIMARD_PROGRESS_EVIDENCE=off` | `Arc::new(NoopProgressEvidenceChecker)` |
+| `progress_evidence` | `Arc::new(LlmReviewerProgressChecker::new(submitter))`, or `Arc::new(NoopProgressEvidenceChecker)` when `SIMARD_PROGRESS_EVIDENCE=off` | `Arc::new(NoopProgressEvidenceChecker)` |
 
 A new `OodaBridges::for_tests()` constructor wires the test defaults so
 that existing OODA-loop tests need only a single-line change to adopt the
@@ -375,11 +320,11 @@ No data migration is required.
 | Item | Stability |
 |---|---|
 | `EvidenceDecision`, `ProgressEvidenceChecker` | Public stable — semver-tracked. |
-| `GitRunner`, `GhRunner`, `GhPr` | Public stable — needed for test seams in external crates. |
 | `update_goal_progress_with_evidence` | Public stable. |
-| `DefaultProgressEvidenceChecker` internals (private helpers) | Implementation detail; may change. |
+| `LlmReviewerProgressChecker` | Public stable — generic over `LlmSubmitter`. |
 | `NoopProgressEvidenceChecker` | Public stable; safe to use in any test. |
 | Episode prefix strings (`"goal progress accepted:"`, `"brain hallucination detected:"`) | **Behaviorally stable.** The dashboard and consolidation jobs match these prefixes verbatim; changing them is a breaking change. |
+| Prompt template (`progress_assessment_reviewer.md`) | Implementation detail; may evolve. |
 
 ---
 

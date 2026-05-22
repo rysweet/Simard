@@ -65,9 +65,9 @@ pub fn advance_goal_with_subordinate(
             //
             // Route the 50% heartbeat bump through
             // `update_goal_progress_with_evidence` (issue #1967): an
-            // alive engineer is NOT evidence of progress. If no commits
-            // or PRs exist since the last update, the gate Rejects and
-            // the prior percent is preserved.
+            // alive engineer is NOT evidence of progress. If the reviewer
+            // cannot confirm meaningful progress since the last update,
+            // the gate Rejects and the prior percent is preserved.
             let new_progress = GoalProgress::InProgress { percent: 50 };
             match update_goal_progress_with_evidence(
                 &mut state.active_goals,

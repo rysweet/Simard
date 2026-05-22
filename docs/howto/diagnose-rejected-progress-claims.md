@@ -25,9 +25,8 @@ attempted percent transition, the cutoff timestamp, and the checker's
 reason string. Example:
 
 ```
-brain hallucination detected: rejected progress 35%→75% on enhance-simard-meeting-experience
-  — no git evidence since last update: no commits on engineer/enhance-simard-meeting-experience-*,
-    no PRs referencing goal, no merged PRs closing #1951 since 2026-05-19T23:06:48Z
+brain hallucination detected: rejected progress 35%->75% on enhance-simard-meeting-experience
+  -- reviewer rationale: progress-assessment-reviewer: reject — 75% claim with no plan and no WIP; likely hallucinated
 ```
 
 ### From the command line
@@ -67,19 +66,26 @@ journalctl --user -u simard-ooda -n 5000 | grep 'brain hallucination detected'
 
 ## 2. Read the rejection reason
 
-The reason string follows a fixed template. Each comma-separated clause
-corresponds to one of the three evidence rules:
+The reason string follows a fixed template. The LLM reviewer returns a
+short rationale explaining why the progress claim was rejected:
 
-| Clause | Means | Rule |
-|---|---|---|
-| `no commits on engineer/<slug>-*` | No local branch matching the engineer pattern has a commit at or after `since`. | (1) Local commit |
-| `no PRs referencing goal` | No PR on `rysweet/Simard` (any state, any age within the search window) mentions the goal slug or any `wip_refs` id. | (2) PR cross-reference |
-| `no merged PRs closing #<issue-list>` | No PR was merged at or after `since` whose body contains `Closes/Fixes/Resolves #N` for any `N` in the goal's `wip_refs`. | (3) Merged-PR closer |
-| `since <iso8601>` | The cutoff used. Anything older than this is ignored. | — |
+```
+brain hallucination detected: rejected progress 35%->75% on enhance-simard-meeting-experience
+  -- reviewer rationale: progress-assessment-reviewer: reject — 75% claim with no plan and no WIP; likely hallucinated
+```
 
-If only **one** of the three clauses appears, the others were
-short-circuited by a different match. If all three appear, every rule
-failed.
+The `progress-assessment-reviewer:` prefix identifies that the rejection
+came from the LLM reviewer. The rationale after the dash is the reviewer's
+one-sentence explanation.
+
+Common rejection patterns:
+
+| Rationale pattern | Means |
+|---|---|
+| Large delta with no plan/WIP | The brain claimed a big jump but the goal has no current activity or WIP references. |
+| 100% claim with no shipped artifact | The brain marked the goal complete but the plan doesn't mention a shipped PR or merged change. |
+| Claim contradicts plan | The plan says "blocked" or "investigating" but the brain claimed high progress. |
+| No plan, big jump | The goal has no `current_activity` set and the percent jumped significantly. |
 
 ---
 
@@ -87,9 +93,8 @@ failed.
 
 ### Case A: The brain hallucinated, the gate worked correctly
 
-- The engineer subprocess produced no branches.
-- No PR exists for the goal.
-- No merged PR closes a `wip_refs` issue.
+- The goal has no current plan or WIP references.
+- The brain claimed a large delta despite no described work.
 - The dashboard percent stayed at its prior value.
 
 **Action:** None on the gate. This is the intended behavior. If you want
@@ -98,37 +103,37 @@ REPL to set a concrete next step — see
 [Start a meeting](start-a-meeting.md) and
 [Carry meeting decisions into engineer sessions](carry-meeting-decisions-into-engineer-sessions.md).
 
-### Case B: Real work happened but on the wrong branch
+### Case B: The plan is set but the reviewer misjudged
 
-`git branch --list 'engineer/*'` shows no branch for the goal, but you
-know an engineer made commits on a differently-named branch.
+The goal has a meaningful `current_activity` and/or WIP references, but
+the reviewer still rejected the claim. This could mean:
 
-**Action:** This is an engineer-spawn bug, not a gate bug. The engineer
-should be writing to `engineer/<goal-slug>-<timestamp>` (see
-[Spawn engineers from OODA daemon](spawn-engineers-from-ooda-daemon.md)).
-File an issue against the spawn path and reference the rejection
-episode.
+- The plan text is too vague for the reviewer to correlate with the
+  claimed delta (e.g. "working on stuff" → 80%).
+- The WIP references are stale or don't match what the brain described.
 
-### Case C: A PR exists but the gate did not find it
+**Action:** Update the goal's `current_activity` to accurately describe
+the work being done. The reviewer compares the claimed delta against the
+plan — a clearer plan leads to better accept/reject decisions. If the
+reviewer is consistently wrong despite good plans, file a bug against the
+prompt template at `prompt_assets/simard/progress_assessment_reviewer.md`.
+
+### Case C: The reviewer accepted on infrastructure failure
+
+The LLM reviewer fails open — if the LLM endpoint is down or returns
+unparseable output, the gate accepts with a diagnostic rationale containing
+`"LLM submit failed"` or `"parse error"`. This is by design (the gate
+should not block goals on LLM availability), but if it happens frequently:
 
 ```bash
-gh pr list --repo rysweet/Simard --search '<goal-slug or issue#>' --state all \
-  --json number,title,body,state,createdAt,mergedAt | jq .
+curl -s -X POST http://localhost:8080/api/memory/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"LLM submit failed"}' \
+  | jq -r '.results[].data'
 ```
 
-If the PR exists but `gh pr list` returns nothing, one of:
-
-- `gh` is unauthenticated on the daemon host (`gh auth status`).
-- The PR's title and body do **not** mention the goal slug or any
-  `wip_refs` id. The gate cannot find what is not referenced.
-- The PR's `createdAt` is before `since`. This is intended — once a
-  goal's last-update timestamp moves forward, older PRs no longer count
-  as fresh evidence. Either the goal needs a new PR or its
-  `last_progress_update_at` was reset spuriously.
-
-**Action:** If `gh` is broken, fix it and the next cycle will Accept. If
-the PR is unreferenced, edit its body to mention the goal id or relevant
-issue number — this is also good practice for human reviewers.
+**Action:** Investigate the LLM endpoint availability. Frequent fail-open
+accepts mean the gate is effectively disabled.
 
 ### Case D: The `since` timestamp looks wrong
 
@@ -193,9 +198,9 @@ the kill switch on in production — see
 ## 5. After the underlying issue is fixed
 
 The gate is stateless across daemon runs (modulo the `OnceLock`
-process-start fallback). Once the missing branch, PR, or `gh` auth is
-in place, the next OODA cycle that proposes the same increase will go
-through the checker fresh. On `Accept`:
+process-start fallback). Once the underlying plan or WIP is updated to
+reflect actual work, the next OODA cycle that proposes the same increase
+will go through the checker fresh. On `Accept`:
 
 - The goal's `last_progress_update_at` is set to the cycle wall-clock.
 - A `"goal progress accepted:"` episode is written to memory.
@@ -221,18 +226,17 @@ curl -s -X POST http://localhost:8080/api/memory/search \
   -d '{"query":"goal progress accepted"}' \
   | jq -r '.results[] | "\(.source)\t\(.data | tostring | .[0:200])"'
 
+# Find LLM infrastructure failures (fail-open accepts)
+curl -s -X POST http://localhost:8080/api/memory/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"LLM submit failed"}' \
+  | jq -r '.results[] | "\(.source)\t\(.data | tostring | .[0:200])"'
+
 # Confirm the gate is on (drop --user for system-level installs)
 journalctl --user -u simard-ooda -n 500 | grep 'progress-evidence:'
 
-# Confirm gh works for the daemon user
-gh auth status
-gh pr list --repo rysweet/Simard --limit 3
-
-# List engineer branches the gate would scan for goal G
-GOAL=enhance-simard-meeting-experience
-git -C ~/src/Simard for-each-ref --format='%(refname:short)' "refs/heads/engineer/${GOAL}-*"
-
 # Inspect the last_progress_update_at field directly
+GOAL=enhance-simard-meeting-experience
 simard goal show --id "$GOAL" --json | jq .last_progress_update_at
 ```
 

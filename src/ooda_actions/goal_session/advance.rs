@@ -13,7 +13,7 @@
 //! All progress-mutation paths route through
 //! [`crate::goal_curation::update_goal_progress_with_evidence`] so a
 //! `PROGRESS: NN` line that asks for an *increase* is rejected unless
-//! verifiable git evidence (commit or PR) backs it (issue #1967).
+//! the LLM-backed reviewer confirms it (issue #1967, #2007).
 
 use chrono::Utc;
 
@@ -89,7 +89,7 @@ pub(crate) fn assess_only_outcome(
                 goal_id, reason_short, pct, rej,
             );
             let detail = format!(
-                "no-action: progress claim rejected (no git evidence): {rej} (goal '{}', proposed={}%)",
+                "no-action: progress claim rejected (reviewer): {rej} (goal '{}', proposed={}%)",
                 goal_id, pct,
             );
             make_outcome(action, true, detail)
