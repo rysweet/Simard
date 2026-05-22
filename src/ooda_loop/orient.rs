@@ -337,6 +337,97 @@ mod wire_in_tests {
         assert_eq!(records[0].rationale, "llm-orient-brain: light demotion");
         assert!(!records[0].fallback);
     }
+
+    // -----------------------------------------------------------------------
+    // Issue #1979 / #1933 anti-regression: when the LLM-backed orient brain
+    // returns Err for a goal, orient_with_brain must
+    //   (1) record the parse failure in parse_failure::counters(),
+    //   (2) embed a ParseFailureRecord on the per-cycle BrainJudgmentRecord
+    //       with fallback=true, and
+    //   (3) still emit a Priority (deterministic floor fired — transient
+    //       adapter failure must not invert priorities).
+    // -----------------------------------------------------------------------
+    #[test]
+    fn orient_with_brain_records_parse_failure_and_falls_back_on_brain_error() {
+        use crate::error::SimardError;
+        use crate::ooda_brain::parse_failure::{
+            peek_consecutive_count, reset_consecutive_count_for_tests, test_serial_guard,
+        };
+
+        struct AlwaysErrOrientBrain;
+        impl OodaOrientBrain for AlwaysErrOrientBrain {
+            fn judge_orientation(&self, _ctx: &OrientContext) -> SimardResult<OrientJudgment> {
+                Err(SimardError::AdapterInvocationFailed {
+                    base_type: "ooda-orient-brain".into(),
+                    reason: "orient-brain-parse-error: stub; payload={}; raw_response=\"junk\""
+                        .into(),
+                })
+            }
+        }
+
+        let _g = test_serial_guard();
+        let goal_id = "orient-parse-fail-1979";
+        reset_consecutive_count_for_tests(BrainPhase::Orient, goal_id);
+
+        let mut board = GoalBoard::default();
+        board.active.push(ActiveGoal {
+            id: goal_id.to_string(),
+            description: "test".to_string(),
+            priority: 1,
+            status: GoalProgress::NotStarted,
+            assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
+            last_progress_update_at: None,
+        });
+        let obs = Observation {
+            goal_statuses: Vec::new(),
+            gym_health: None,
+            memory_stats: CognitiveStatistics::default(),
+            pending_improvements: Vec::new(),
+            environment: EnvironmentSnapshot::default(),
+            eval_watchdog: None,
+        };
+        let mut failures = HashMap::new();
+        failures.insert(goal_id.to_string(), 1);
+
+        let (priorities, records) = crate::ooda_brain::with_brain_judgment_scope(|| {
+            crate::ooda_brain::clear_brain_judgments();
+            let prios = orient_with_brain(&obs, &board, &failures, &AlwaysErrOrientBrain).unwrap();
+            (prios, crate::ooda_brain::take_brain_judgments())
+        });
+
+        // (3) Deterministic floor still emits the priority — never stall.
+        assert!(
+            priorities.iter().any(|p| p.goal_id == goal_id),
+            "deterministic floor must still emit priority for the failed goal"
+        );
+
+        // (1) counters() observed the (Orient, goal_id) bump.
+        let count = peek_consecutive_count(BrainPhase::Orient, goal_id);
+        assert_eq!(count, 1, "expected consecutive_count == 1, got {count}");
+
+        // (2) BrainJudgmentRecord embeds ParseFailureRecord with fallback=true.
+        let rec = records
+            .iter()
+            .find(|r| r.phase == BrainPhase::Orient)
+            .expect("orient record must be present");
+        assert!(rec.fallback, "record must be flagged as fallback");
+        let pf = rec
+            .parse_failure
+            .as_ref()
+            .expect("ParseFailureRecord must be embedded on the judgment record");
+        assert_eq!(pf.phase, "orient");
+        assert_eq!(pf.goal_id, goal_id);
+        assert_eq!(pf.consecutive_count, 1);
+        assert!(
+            pf.raw_response_truncated.contains("junk"),
+            "raw_response must be salvaged from the brain error (issue #1711 contract): {:?}",
+            pf.raw_response_truncated,
+        );
+
+        reset_consecutive_count_for_tests(BrainPhase::Orient, goal_id);
+    }
 }
 
 #[cfg(test)]
