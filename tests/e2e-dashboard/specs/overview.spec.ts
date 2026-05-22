@@ -93,7 +93,7 @@ test.describe('Dashboard Overview @structural', () => {
       'Memory',
       'Costs',
       'Chat',
-      'Whiteboard',
+      'Workboard',
       '🧠 Thinking',
     ]) {
       expect(names).toContain(required);

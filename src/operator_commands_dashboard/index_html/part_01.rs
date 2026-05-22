@@ -15,7 +15,8 @@ pub(crate) const PART_01: &str = r#"      </div>
   </div>
 
   <div class="tab-content" id="tab-terminal">
-    <div class="page-intro">Attach to the live tmux terminal session of a running subordinate agent and watch its stdout/stderr stream.</div>
+    <h1 class="page-h1">Terminal</h1>
+    <p class="page-lede">Attach to the live terminal of a running Simard sub-agent and watch its standard output and standard error stream in real time.</p>
     <div class="card" style="max-width:980px">
       <h2>Agent Terminal</h2>
       <div style="background:#1a1a2e;border:1px solid #333;border-radius:6px;padding:.6rem;margin-bottom:.75rem;font-size:.8rem;color:#8b949e">
@@ -66,6 +67,7 @@ pub(crate) const PART_01: &str = r#"      </div>
     </section>
   </div>
 
+  {{TAB_META_JS}}
   <script>
     /* --- Helpers --- */
     function fmtB(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';return(b/1048576).toFixed(1)+' MB';}
@@ -183,6 +185,10 @@ pub(crate) const PART_01: &str = r#"      </div>
     function clearTabTimers(){Object.values(tabRefreshTimers).forEach(clearInterval);tabRefreshTimers={};}
 
     /* --- Tabs --- */
+    function updateDocumentTitleForTab(slug){
+      var meta=(window.__TAB_META||{})[slug];
+      if(meta && meta.title) document.title=meta.title;
+    }
     document.querySelectorAll('.tab').forEach(tab=>{
       tab.addEventListener('click',()=>{
         document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
@@ -190,6 +196,7 @@ pub(crate) const PART_01: &str = r#"      </div>
         tab.classList.add('active');
         document.getElementById('tab-'+tab.dataset.tab).classList.add('active');
         activeTab=tab.dataset.tab;
+        updateDocumentTitleForTab(activeTab);
         clearTabTimers();
         if(tab.dataset.tab==='logs') {fetchLogs();tabRefreshTimers.logs=setInterval(fetchLogs,15000);}
         if(tab.dataset.tab==='processes') {fetchProcessTree();tabRefreshTimers.proc=setInterval(fetchProcessTree,15000);}
