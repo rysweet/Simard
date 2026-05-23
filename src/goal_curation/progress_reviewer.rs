@@ -36,12 +36,12 @@ const ADAPTER_TAG: &str = "progress-assessment-reviewer";
 /// The prompt asks for one short sentence; this is a safety net.
 const RATIONALE_MAX_CHARS: usize = 240;
 
-/// JSON contract from the prompt template. Kept private — callers only
-/// see the `EvidenceDecision` returned by [`ProgressEvidenceChecker::check`].
+/// JSON contract from the prompt template. Public so that the recipe-based
+/// checker in [`super::recipe_progress_checker`] can reuse the same struct.
 #[derive(Debug, Deserialize)]
-struct ReviewerResponse {
-    verdict: String,
-    rationale: String,
+pub struct ReviewerResponse {
+    pub verdict: String,
+    pub rationale: String,
 }
 
 /// LLM-backed checker. Generic over `LlmSubmitter` so tests can swap in a
@@ -169,7 +169,10 @@ fn decision_from_response(r: ReviewerResponse) -> EvidenceDecision {
 ///   2. Look inside fenced code blocks.
 ///   3. Scan for the first brace-balanced `{...}` that parses cleanly.
 ///   4. Fall back to outermost-brace strategy.
-fn parse_reviewer_response(raw: &str) -> Result<ReviewerResponse, String> {
+///
+/// Public so that [`super::recipe_progress_checker`] can reuse the same
+/// parsing logic on recipe-runner stdout.
+pub fn parse_reviewer_response(raw: &str) -> Result<ReviewerResponse, String> {
     let stripped = raw.trim();
     if stripped.is_empty() {
         return Err(format!(

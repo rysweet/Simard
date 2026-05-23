@@ -17,6 +17,7 @@ pub mod dedup;
 pub mod gh_client;
 pub mod merge_authority;
 pub mod merge_judge;
+pub mod recipe_merge_judge;
 pub mod routing;
 pub mod types;
 
@@ -37,6 +38,7 @@ pub use merge_judge::{
     Blocker, JudgeOutcome, LlmMergeJudge, MergeJudge, MergeJudgeKind, RefusingMergeJudge, Verdict,
     build_merge_judge,
 };
+pub use recipe_merge_judge::RecipeMergeJudge;
 pub use routing::route_failure;
 pub use types::{OrchestratorRunSummary, StewardshipOutcome, TargetRepo};
 

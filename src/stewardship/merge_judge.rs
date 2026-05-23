@@ -130,6 +130,9 @@ impl JudgeOutcome {
 pub enum MergeJudgeKind {
     /// [`LlmMergeJudge`] — production impl backed by an LLM provider.
     Llm,
+    /// [`super::recipe_merge_judge::RecipeMergeJudge`] — production impl
+    /// backed by recipe-runner-rs subprocess.
+    Recipe,
     /// [`RefusingMergeJudge`] — fallback when no LLM provider is configured.
     /// When this is the active variant, every merge will be refused; the
     /// dashboard surfaces this in red so the operator notices.
@@ -140,7 +143,7 @@ impl MergeJudgeKind {
     /// Whether the judge can issue a non-refusal verdict. Mirrors the
     /// `judge_configured` field in the dashboard JSON contract.
     pub fn is_configured(self) -> bool {
-        matches!(self, MergeJudgeKind::Llm)
+        matches!(self, MergeJudgeKind::Llm | MergeJudgeKind::Recipe)
     }
 }
 
@@ -367,10 +370,16 @@ fn extract_balanced_objects(s: &str) -> Vec<&str> {
 
 // ─────────────────────────── Production constructor ─────────────────────────
 
-/// Build the production merge judge. Resolves an LLM provider via the same
-/// `LlmProvider::resolve` path the OODA brains use. Falls back to
-/// [`RefusingMergeJudge`] when no provider is configured.
+/// Build the production merge judge. Resolution order:
+///   1. Recipe-runner-rs (if binary and recipe YAML are both available)
+///   2. Direct LLM (if an LLM provider is configured)
+///   3. [`RefusingMergeJudge`] (fallback)
 pub fn build_merge_judge() -> Box<dyn MergeJudge> {
+    let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    if let Some(recipe_judge) = super::recipe_merge_judge::RecipeMergeJudge::new(&repo_root) {
+        eprintln!("[simard] merge-judge: using recipe-runner-rs backed judge");
+        return Box::new(recipe_judge);
+    }
     match LlmProvider::resolve() {
         Ok(provider) => {
             let submitter = SessionLlmSubmitter::new(provider);

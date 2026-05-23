@@ -6,6 +6,7 @@
 mod operations;
 pub mod progress_evidence;
 pub mod progress_reviewer;
+pub mod recipe_progress_checker;
 mod types;
 
 // Re-export all public items so `crate::goal_curation::X` still works.
