@@ -69,3 +69,40 @@ _Tip: Timebox estimation discussions — if it takes >2 min, take it offline._",
 pub fn find_template(name: &str) -> Option<&'static MeetingTemplate> {
     TEMPLATES.iter().find(|t| t.name.eq_ignore_ascii_case(name))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_template_known_name() {
+        let t = find_template("standup");
+        assert!(t.is_some());
+        assert_eq!(t.unwrap().name, "standup");
+    }
+
+    #[test]
+    fn find_template_case_insensitive() {
+        assert!(find_template("STANDUP").is_some());
+        assert!(find_template("Retro").is_some());
+    }
+
+    #[test]
+    fn find_template_unknown_returns_none() {
+        assert!(find_template("nonexistent").is_none());
+    }
+
+    #[test]
+    fn find_template_empty_returns_none() {
+        assert!(find_template("").is_none());
+    }
+
+    #[test]
+    fn templates_all_have_non_empty_fields() {
+        for t in TEMPLATES {
+            assert!(!t.name.is_empty());
+            assert!(!t.description.is_empty());
+            assert!(!t.agenda.is_empty());
+        }
+    }
+}

@@ -503,3 +503,311 @@ pub fn extract_deadline_pub(lower_sentence: &str) -> Option<String> {
 pub fn clean_action_description_pub(sentence: &str) -> String {
     extract::clean_action_description(sentence)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::meeting_backend::types::{ConversationMessage, HandoffActionItem, Role};
+    use serial_test::serial;
+
+    fn temp_meetings_dir(label: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("persist-mod-{label}-{unique}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn sample_messages() -> Vec<ConversationMessage> {
+        vec![
+            ConversationMessage {
+                role: Role::User,
+                content: "Let's discuss testing.".to_string(),
+                timestamp: "2026-01-15T10:00:00Z".to_string(),
+            },
+            ConversationMessage {
+                role: Role::Assistant,
+                content: "We decided to adopt TDD.".to_string(),
+                timestamp: "2026-01-15T10:01:00Z".to_string(),
+            },
+        ]
+    }
+
+    // ── sanitize_filename ───────────────────────────────────────────
+
+    #[test]
+    fn sanitize_strips_path_separators() {
+        assert_eq!(sanitize_filename("a/b\\c"), "a_b_c");
+    }
+
+    #[test]
+    fn sanitize_strips_null_bytes_and_control_chars() {
+        assert_eq!(sanitize_filename("ab\0cd\x01ef"), "abcdef");
+    }
+
+    #[test]
+    fn sanitize_removes_dot_dot_sequences() {
+        assert_eq!(sanitize_filename("../etc/passwd"), "etc_passwd");
+    }
+
+    #[test]
+    fn sanitize_replaces_special_chars() {
+        assert_eq!(sanitize_filename("a:b*c?d"), "a_b_c_d");
+    }
+
+    #[test]
+    fn sanitize_trims_leading_trailing_underscores_dots() {
+        assert_eq!(sanitize_filename("___hello___"), "hello");
+        assert_eq!(sanitize_filename("...hello..."), "hello");
+    }
+
+    #[test]
+    fn sanitize_empty_input_returns_meeting() {
+        assert_eq!(sanitize_filename(""), "meeting");
+        assert_eq!(sanitize_filename("///"), "meeting");
+    }
+
+    #[test]
+    fn sanitize_caps_length() {
+        let long = "a".repeat(200);
+        let result = sanitize_filename(&long);
+        assert!(result.len() <= MAX_FILENAME_LEN);
+    }
+
+    #[test]
+    fn sanitize_spaces_become_underscores() {
+        assert_eq!(sanitize_filename("sprint planning"), "sprint_planning");
+    }
+
+    // ── write_transcript ────────────────────────────────────────────
+
+    #[test]
+    #[serial(simard_meetings_dir_env)]
+    fn write_transcript_creates_json_file() {
+        let dir = temp_meetings_dir("transcript");
+        unsafe { std::env::set_var("SIMARD_MEETINGS_DIR", &dir) };
+
+        let transcript = crate::meeting_backend::types::MeetingTranscript {
+            topic: "Sprint retro".to_string(),
+            started_at: "2026-01-15T10:00:00Z".to_string(),
+            closed_at: "2026-01-15T11:00:00Z".to_string(),
+            duration_secs: 3600,
+            summary: "Went well.".to_string(),
+            messages: sample_messages(),
+        };
+        let path = write_transcript(&transcript).unwrap();
+        assert!(path.exists());
+        assert!(path.extension().is_some_and(|e| e == "json"));
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let rt: crate::meeting_backend::types::MeetingTranscript =
+            serde_json::from_str(&contents).unwrap();
+        assert_eq!(rt.topic, "Sprint retro");
+
+        unsafe { std::env::remove_var("SIMARD_MEETINGS_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[serial(simard_meetings_dir_env)]
+    fn write_transcript_error_on_unwritable_dir() {
+        unsafe { std::env::set_var("SIMARD_MEETINGS_DIR", "/proc/1/nonexistent") };
+        let transcript = crate::meeting_backend::types::MeetingTranscript {
+            topic: "fail".to_string(),
+            started_at: String::new(),
+            closed_at: String::new(),
+            duration_secs: 0,
+            summary: String::new(),
+            messages: vec![],
+        };
+        assert!(write_transcript(&transcript).is_err());
+        unsafe { std::env::remove_var("SIMARD_MEETINGS_DIR") };
+    }
+
+    // ── write_auto_save ─────────────────────────────────────────────
+
+    #[test]
+    #[serial(simard_meetings_dir_env)]
+    fn write_auto_save_overwrites_same_file() {
+        let dir = temp_meetings_dir("autosave");
+        unsafe { std::env::set_var("SIMARD_MEETINGS_DIR", &dir) };
+
+        let mut transcript = crate::meeting_backend::types::MeetingTranscript {
+            topic: "auto-topic".to_string(),
+            started_at: "2026-01-15T10:00:00Z".to_string(),
+            closed_at: "2026-01-15T11:00:00Z".to_string(),
+            duration_secs: 60,
+            summary: "first".to_string(),
+            messages: vec![],
+        };
+        let path1 = write_auto_save(&transcript).unwrap();
+        transcript.summary = "second".to_string();
+        let path2 = write_auto_save(&transcript).unwrap();
+        assert_eq!(path1, path2, "auto-save should overwrite same file");
+
+        let contents = std::fs::read_to_string(&path2).unwrap();
+        assert!(contents.contains("second"));
+
+        unsafe { std::env::remove_var("SIMARD_MEETINGS_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── write_handoff ───────────────────────────────────────────────
+
+    #[test]
+    #[serial(simard_meetings_dir_env)]
+    fn write_handoff_success_writes_artifact() {
+        let dir = temp_meetings_dir("handoff");
+        unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", &dir) };
+
+        let msgs = sample_messages();
+        let items = vec![HandoffActionItem {
+            description: "Write tests".to_string(),
+            assignee: Some("Alice".to_string()),
+            deadline: Some("by friday".to_string()),
+            linked_goal: None,
+            priority: None,
+        }];
+        let result = write_handoff("Sprint", "Summary", &msgs, &items, &["Use TDD".to_string()]);
+        assert!(result.is_ok(), "write_handoff should succeed: {result:?}");
+
+        let files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("handoff-"))
+            .collect();
+        assert!(!files.is_empty(), "handoff file should exist");
+
+        unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[serial(simard_meetings_dir_env)]
+    fn write_handoff_error_on_read_only_dir() {
+        unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", "/proc/1/no_such_dir") };
+        let result = write_handoff("topic", "summary", &[], &[], &[]);
+        assert!(
+            result.is_err(),
+            "write_handoff should surface error, not silently drop"
+        );
+        unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR") };
+    }
+
+    #[test]
+    #[serial(simard_meetings_dir_env)]
+    fn write_handoff_empty_messages() {
+        let dir = temp_meetings_dir("handoff-empty");
+        unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", &dir) };
+
+        let result = write_handoff("empty", "No messages", &[], &[], &[]);
+        assert!(result.is_ok(), "empty-message handoff should succeed");
+
+        unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── write_handoff_bundle ────────────────────────────────────────
+
+    #[test]
+    #[serial(simard_meetings_dir_env)]
+    fn write_handoff_bundle_creates_sibling_files() {
+        let dir = temp_meetings_dir("bundle");
+        unsafe { std::env::set_var("SIMARD_MEETINGS_ROOT", &dir) };
+
+        let msgs = sample_messages();
+        let items = vec![HandoffActionItem {
+            description: "Deploy".to_string(),
+            assignee: Some("Bob".to_string()),
+            deadline: None,
+            linked_goal: None,
+            priority: Some(1),
+        }];
+        let decisions = vec!["Adopt TDD".to_string()];
+        let oq = vec![crate::meeting_facilitator::OpenQuestion {
+            text: "What about coverage?".to_string(),
+            explicit: true,
+        }];
+        let themes = vec!["testing".to_string()];
+        let participants = vec!["operator".to_string(), "simard".to_string()];
+
+        let bundle_dir = write_handoff_bundle(
+            "Sprint",
+            "Summary",
+            Some("2026-01-15T10:00:00Z"),
+            &msgs,
+            &items,
+            &decisions,
+            oq,
+            themes,
+            participants,
+            HandoffEnrichment::default(),
+        )
+        .unwrap();
+
+        assert!(
+            bundle_dir.join("meeting_handoff.json").is_file(),
+            "bundle must contain meeting_handoff.json"
+        );
+        assert!(
+            bundle_dir.join("transcript.json").is_file(),
+            "bundle must contain transcript.json"
+        );
+
+        unsafe { std::env::remove_var("SIMARD_MEETINGS_ROOT") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[serial(simard_meetings_dir_env)]
+    fn write_handoff_bundle_error_on_unwritable() {
+        unsafe { std::env::set_var("SIMARD_MEETINGS_ROOT", "/proc/1/nowrite") };
+
+        let result = write_handoff_bundle(
+            "topic",
+            "summary",
+            None,
+            &[],
+            &[],
+            &[],
+            vec![],
+            vec![],
+            vec![],
+            HandoffEnrichment::default(),
+        );
+        assert!(
+            result.is_err(),
+            "bundle write to unwritable dir should error, not silently drop"
+        );
+
+        unsafe { std::env::remove_var("SIMARD_MEETINGS_ROOT") };
+    }
+
+    // ── extract_assignee_pub / extract_deadline_pub ─────────────────
+
+    #[test]
+    fn extract_assignee_pub_detects_name() {
+        let result = extract_assignee_pub("Alice will write the tests");
+        assert_eq!(result, Some("Alice".to_string()));
+    }
+
+    #[test]
+    fn extract_assignee_pub_none_without_name() {
+        let result = extract_assignee_pub("we should do this");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn extract_deadline_pub_detects_by_friday() {
+        let result = extract_deadline_pub("finish by friday please");
+        assert_eq!(result, Some("by friday".to_string()));
+    }
+
+    #[test]
+    fn extract_deadline_pub_none_when_absent() {
+        let result = extract_deadline_pub("no deadline here");
+        assert_eq!(result, None);
+    }
+}
