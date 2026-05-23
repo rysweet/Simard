@@ -186,6 +186,11 @@ pub(crate) const PART_05: &str = r#"      try {
     setInterval(fetchMergeReadiness,30000);
     setInterval(fetchStatus,30000);
     setInterval(fetchIssues,120000);
+    /* Hash-based tab activation (supports /glossary → /#glossary deep link) */
+    (function(){
+      const hash=window.location.hash.replace('#','');
+      if(hash){const tab=document.querySelector('.tab[data-tab="'+hash+'"]');if(tab)tab.click();}
+    })();
   </script>
 </body>
 </html>

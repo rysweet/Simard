@@ -232,16 +232,16 @@ mod tests {
         assert!(INDEX_HTML.contains(r#"data-tab="overview" title="System health"#));
         assert!(INDEX_HTML.contains(r#"data-tab="goals" title="Active goals"#));
         assert!(INDEX_HTML.contains(r#"data-tab="terminal" title="Attach to the agent"#));
-        // All 11 tab-content containers should now carry a page-lede paragraph.
+        // All 12 tab-content containers should now carry a page-lede paragraph.
         let lede_count = INDEX_HTML.matches(r#"class="page-lede""#).count();
         assert!(
-            lede_count >= 11,
-            "expected at least 11 .page-lede paragraphs (one per tab), found {lede_count}"
+            lede_count >= 12,
+            "expected at least 12 .page-lede paragraphs (one per tab), found {lede_count}"
         );
         let h1_count = INDEX_HTML.matches(r#"class="page-h1""#).count();
         assert!(
-            h1_count >= 11,
-            "expected at least 11 .page-h1 headings (one per tab), found {h1_count}"
+            h1_count >= 12,
+            "expected at least 12 .page-h1 headings (one per tab), found {h1_count}"
         );
     }
 
@@ -349,7 +349,7 @@ mod tests {
         }
     }
 
-    /// Each of the eleven `tab-content` containers (`id="tab-<name>"`)
+    /// Each of the twelve `tab-content` containers (`id="tab-<name>"`)
     /// must contain at least one `<p class="page-lede">…</p>` inside
     /// its body — i.e. between the opening `id="tab-<name>"` and the next
     /// `id="tab-` of any kind (the next sibling tab-content). Guarantees
@@ -369,6 +369,7 @@ mod tests {
             "workboard",
             "thinking",
             "terminal",
+            "glossary",
         ];
         for tab in &tabs {
             let open = format!(r#"id="tab-{tab}""#);
@@ -548,9 +549,10 @@ mod tests {
     #[test]
     fn index_html_last_consolidation_uses_format_time() {
         // The stat appears as a single template-literal line; locate by label.
+        // The label now wraps "Consolidation" in an <abbr> tag (#1996).
         let pos = INDEX_HTML
-            .find("Last Consolidation")
-            .expect("'Last Consolidation' stat must exist on the Memory tab");
+            .find("Consolidation</abbr>")
+            .expect("'Consolidation' stat (with <abbr> tag) must exist on the Memory tab");
         let window_end = (pos + 600).min(INDEX_HTML.len());
         let window = &INDEX_HTML[pos..window_end];
         assert!(
@@ -634,22 +636,22 @@ mod tests {
         );
     }
 
-    /// Sanity-check on the page-lede count: there must be exactly 11
-    /// (one per tab) — a stricter bound than the existing `>= 11`
+    /// Sanity-check on the page-lede count: there must be exactly 12
+    /// (one per tab) — a stricter bound than the existing `>= 12`
     /// assertion. If a refactor accidentally adds a 12th, we want to
     /// know immediately so we can decide whether the new container is
     /// actually a new tab or a misuse of the class.
     #[test]
-    fn index_html_has_exactly_eleven_page_intros() {
+    fn index_html_has_exactly_twelve_page_intros() {
         let count = INDEX_HTML.matches(r#"class="page-lede""#).count();
         assert_eq!(
             count, 11,
-            "expected exactly 11 page-lede paragraphs (one per top-level tab), got {count}"
+            "expected exactly 12 page-lede paragraphs (one per top-level tab), got {count}"
         );
         let h1_count = INDEX_HTML.matches(r#"class="page-h1""#).count();
         assert_eq!(
             h1_count, 11,
-            "expected exactly 11 page-h1 headings (one per top-level tab), got {h1_count}"
+            "expected exactly 12 page-h1 headings (one per top-level tab), got {h1_count}"
         );
     }
 

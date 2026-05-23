@@ -67,6 +67,33 @@ pub(crate) const PART_01: &str = r#"      </div>
     </section>
   </div>
 
+  <div class="tab-content" id="tab-glossary">
+    <h1 class="page-h1">Glossary</h1>
+    <p class="page-lede">Plain-English explanations of the technical terms used throughout this dashboard — hover over dotted-underlined terms on other tabs for a quick definition.</p>
+    <div class="card" style="max-width:720px">
+      <h2>Jargon Glossary</h2>
+      <dl class="glossary-dl">
+        <dt id="gl-ooda">OODA</dt>
+        <dd>A repeating loop where Simard <strong>observes</strong> what changed, <strong>orients</strong> (analyses context), <strong>decides</strong> what to do, and <strong>acts</strong>. The dashboard surfaces each phase so you can see exactly where the agent is in its cycle. Stands for <em>Observe → Orient → Decide → Act</em>.</dd>
+
+        <dt id="gl-consolidation">Consolidation</dt>
+        <dd>The process of saving short-term notes into long-term memory. After each OODA cycle, the agent consolidates what it learned so that important facts survive beyond the current session.</dd>
+
+        <dt id="gl-facilitator">Facilitator</dt>
+        <dd>The module that runs a meeting conversation. When you use the <strong>Chat</strong> tab (or run <code>simard meeting</code>), the facilitator manages the dialogue and turns your requests into actionable goals.</dd>
+
+        <dt id="gl-recipe-runner">Recipe Runner</dt>
+        <dd>The system that executes multi-step workflows. A "recipe" is a predefined sequence of agent actions; the recipe runner ensures each step runs in order and handles retries on failure.</dd>
+
+        <dt id="gl-spawn-engineer">spawn_engineer</dt>
+        <dd>Launching a coding agent to do implementation work. When the OODA loop decides a goal needs code changes, it uses <code>spawn_engineer</code> to start a subordinate agent in its own tmux session.</dd>
+
+        <dt id="gl-whiteboard">Whiteboard</dt>
+        <dd>A shared scratchpad where Simard tracks goals and tasks. The <strong>Whiteboard</strong> tab shows the kanban-style board of queued, in-progress, blocked, and done items that the agent is working on.</dd>
+      </dl>
+    </div>
+  </div>
+
   {{TAB_META_JS}}
   <script>
     /* --- Helpers --- */
@@ -230,7 +257,7 @@ pub(crate) const PART_01: &str = r#"      </div>
         }
         document.getElementById('status').innerHTML=`
           <div class="stat"><span class="label">Version</span><span class="value">${versionLink}</span></div>
-          <div class="stat"><span class="label">OODA Daemon</span><span class="value ${oc}">${esc(d.ooda_daemon)}${healthDetail}</span></div>
+          <div class="stat"><span class="label"><abbr title="A repeating loop: Observe → Orient → Decide → Act">OODA</abbr> Daemon</span><span class="value ${oc}">${esc(d.ooda_daemon)}${healthDetail}</span></div>
           <div class="stat"><span class="label">Active Processes</span><span class="value">${d.active_processes??0}</span></div>
           <div class="stat"><span class="label">Disk Usage</span><span class="value ${dc}">${d.disk_usage_pct??'?'}%</span></div>
           <div class="stat"><span class="label">Updated</span><span class="value">${timeAgo(d.timestamp)}</span></div>`;
@@ -278,7 +305,7 @@ pub(crate) const PART_01: &str = r#"      </div>
 
         el.innerHTML=`
           <div style="display:flex;gap:2rem;flex-wrap:wrap;align-items:center;margin-bottom:.75rem">
-            <div><span style="font-size:1.5rem;${isRunning&&!isStale?'':'filter:grayscale(1)'}">${isRunning?(isStale?'🟡':'🟢'):'🔴'}</span> <strong style="font-size:1.1rem">${isRunning?(isStale?'Agent Stale':'OODA Loop Active'):'Agent Stopped'}</strong></div>
+            <div><span style="font-size:1.5rem;${isRunning&&!isStale?'':'filter:grayscale(1)'}">${isRunning?(isStale?'🟡':'🟢'):'🔴'}</span> <strong style="font-size:1.1rem">${isRunning?(isStale?'Agent Stale':'<abbr title="Observe → Orient → Decide → Act">OODA</abbr> Loop Active'):'Agent Stopped'}</strong></div>
             <div style="color:#8b949e">Cycle <strong style="color:var(--fg)">#${cycle}</strong> · Last heartbeat <strong style="color:var(--fg)">${heartbeat}</strong>${isStale?' <span style="color:var(--yellow)">(>10 min ago)</span>':''}</div>
           </div>
           ${currentFocus?`<div style="margin-bottom:.75rem"><span style="color:#8b949e">🎯 Top Priority:</span> ${currentFocus}</div>`:''}

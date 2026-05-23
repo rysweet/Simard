@@ -77,6 +77,7 @@ pub fn build_router() -> Router {
         )
         .route("/api/login", post(login))
         .route("/login", get(login_page))
+        .route("/glossary", get(glossary_redirect))
         .route("/", get(index))
         .layer(middleware::from_fn(require_auth))
 }
@@ -213,6 +214,10 @@ pub(crate) fn truncate_with_ellipsis(s: &str, max: usize) -> String {
 
 async fn index() -> axum::response::Html<String> {
     axum::response::Html(super::index_html::index_html_string())
+}
+
+async fn glossary_redirect() -> axum::response::Redirect {
+    axum::response::Redirect::to("/#glossary")
 }
 
 pub(crate) fn resolve_state_root() -> std::path::PathBuf {

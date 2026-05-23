@@ -158,12 +158,20 @@ pub const TAB_METADATA: &[TabMeta] = &[
         lede: "Attach to the live terminal of a running Simard sub-agent and watch its standard output and standard error stream in real time.",
         tooltip: "Attach to the agent's tmux terminal session and watch live stdout",
     },
+    TabMeta {
+        slug: "glossary",
+        label: "📖 Glossary",
+        title: "Glossary · Simard",
+        h1: "Glossary",
+        lede: "Plain-English explanations of the technical terms used throughout this dashboard — hover over dotted-underlined terms on other tabs for a quick definition.",
+        tooltip: "Plain-English explanations of technical terms used in this dashboard",
+    },
 ];
 
 /// Browser title shown on first page load. The client-side tab handler
 /// updates this when a different tab is activated. Uses `TAB_METADATA[0]`
 /// directly because [`tab_meta_slugs_unique`] asserts the table has
-/// exactly 11 entries — an empty table would already fail other tests.
+/// exactly 12 entries — an empty table would already fail other tests.
 pub fn default_title() -> &'static str {
     TAB_METADATA[0].title
 }

@@ -84,6 +84,9 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
     .outcome.success{background:rgba(63,185,80,0.1)}
     .outcome.failure{background:rgba(248,81,73,0.1)}
     .outcome-detail{font-size:.8rem;color:#8b949e;margin-top:.2rem;padding-left:1rem;font-family:monospace;white-space:pre-wrap;max-height:100px;overflow-y:auto}
+    abbr[title]{text-decoration:underline dotted #58a6ff;text-underline-offset:2px;cursor:help}
+    .glossary-dl dt{color:var(--accent);font-weight:700;margin-top:1rem;font-size:.95rem}
+    .glossary-dl dd{color:#c9d1d9;margin:.25rem 0 .75rem .75rem;line-height:1.5}
   </style>
 </head>
 <body>
@@ -212,7 +215,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
       <h2>Cycle Reports</h2>
       <div id="cycle-reports"><span class="loading">Loading…</span></div>
     </div>
-    <h2 style="color:var(--accent);font-size:1rem;margin-bottom:.5rem">OODA Transcripts</h2>
+    <h2 style="color:var(--accent);font-size:1rem;margin-bottom:.5rem"><abbr title="A repeating loop: Observe → Orient → Decide → Act">OODA</abbr> Transcripts</h2>
     <div id="ooda-transcripts"><span class="loading">Loading…</span></div>
     <h2 style="color:var(--accent);font-size:1rem;margin:.75rem 0 .5rem">Terminal Session Transcripts</h2>
     <div id="terminal-transcripts"><span class="loading">Loading…</span></div>
@@ -300,7 +303,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
     <h1 class="page-h1">Thinking</h1>
     <p class="page-lede">A live stream of the daemon's internal reasoning between actions, showing what it considered before deciding what to do next.</p>
     <div class="card">
-      <h2>OODA Internal Reasoning <button class="btn" onclick="fetchThinking()">Refresh</button></h2>
+      <h2><abbr title="A repeating loop: Observe → Orient → Decide → Act">OODA</abbr> Internal Reasoning <button class="btn" onclick="fetchThinking()">Refresh</button></h2>
       <div id="thinking-timeline"><span class="loading">Loading…</span></div>
     </div>
   </div>
@@ -314,7 +317,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
         <strong style="color:var(--accent)">💡 Meeting Help:</strong>
         Use this chat or run <code>simard meeting &lt;topic&gt;</code> from the terminal.
         Commands: <code>/close</code> end session, <code>/goals</code> review goals, <code>/status</code> system status.
-        Meetings generate handoff documents that the OODA daemon ingests as new goals.
+        Meetings generate handoff documents that the <abbr title="A repeating loop: Observe → Orient → Decide → Act">OODA</abbr> daemon ingests as new goals.
       </div>
       <div class="ws-status disconnected" id="ws-status">● Disconnected <button class="btn" onclick="initChat()" style="font-size:.75rem;padding:.1rem .4rem;margin-left:.5rem">Reconnect</button></div>
       <div id="chat-messages"></div>

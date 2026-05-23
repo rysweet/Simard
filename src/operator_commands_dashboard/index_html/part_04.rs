@@ -243,7 +243,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
                     const agent=se.subordinate_agent;
                     const agentLink=agent?`<a href='javascript:void(0)' onclick="openAgentLog('${esc(agent)}');return false;"><code>${esc(agent)}</code></a>`:'<em>(no agent)</em>';
                     seBlock=`<div class="spawn-engineer-block" style="margin-top:.35rem;padding:.4rem .55rem;border-left:3px solid ${statusColor};background:rgba(255,255,255,0.03);border-radius:4px">
-                      <div><span style="color:${statusColor}">●</span> <strong>spawn_engineer</strong> · ${esc(se.last_action||'')} · <span style="color:${statusColor}">${esc(se.status||'')}</span></div>
+                      <div><span style="color:${statusColor}">●</span> <strong><abbr title="Launching a coding agent to do implementation work">spawn_engineer</abbr></strong> · ${esc(se.last_action||'')} · <span style="color:${statusColor}">${esc(se.status||'')}</span></div>
                       <div>subordinate: ${agentLink}${se.goal_id?` · goal <code>${esc(se.goal_id)}</code>`:''}</div>
                       ${se.task_summary?`<div>task: ${esc(se.task_summary)}</div>`:''}
                     </div>`;
