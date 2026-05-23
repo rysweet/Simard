@@ -8,6 +8,21 @@ use crate::memory_cognitive::{
 
 use super::{CognitiveMemoryOps, NativeCognitiveMemory, as_f64, as_i64, as_str};
 
+#[cfg(test)]
+impl NativeCognitiveMemory {
+    /// `cfg(test)`-only guard that panics when `self.path` is under
+    /// `$HOME/.simard` — i.e. when a test is about to mutate the
+    /// operator's live cognitive memory. Every mutating
+    /// `CognitiveMemoryOps` method calls this at its entry point.
+    ///
+    /// New mutating methods on this impl **must** call
+    /// `self.assert_hermetic_for("<method>")` as their first statement.
+    /// See `docs/testing/hermetic-tests.md` for the full contract.
+    fn assert_hermetic_for(&self, site: &'static str) {
+        crate::test_support::hermetic_guard::assert_state_root_isolated(&self.path, site);
+    }
+}
+
 /// null bytes — the full set of characters that can break or inject into
 /// Cypher string literals.
 pub(crate) fn escape_cypher(s: &str) -> String {
@@ -43,6 +58,9 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
         raw_data: &str,
         ttl_seconds: u64,
     ) -> SimardResult<String> {
+        #[cfg(test)]
+        self.assert_hermetic_for("NativeCognitiveMemory::record_sensory");
+
         let id = Self::new_id("sen");
         let expires_at = Self::now_secs()? + ttl_seconds as f64;
         self.execute(&format!(
@@ -55,6 +73,9 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
     }
 
     fn prune_expired_sensory(&self) -> SimardResult<usize> {
+        #[cfg(test)]
+        self.assert_hermetic_for("NativeCognitiveMemory::prune_expired_sensory");
+
         let now = Self::now_secs()?;
         let rows = self.query(&format!(
             "MATCH (s:Sensory) WHERE s.expires_at < {now} RETURN count(s)"
@@ -79,6 +100,9 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
         task_id: &str,
         relevance: f64,
     ) -> SimardResult<String> {
+        #[cfg(test)]
+        self.assert_hermetic_for("NativeCognitiveMemory::push_working");
+
         let id = Self::new_id("wrk");
         self.execute(&format!(
             "CREATE (w:WorkingMemory {{id: '{}', slot_type: '{}', content: '{}', task_id: '{}', relevance: {relevance}}})",
@@ -108,6 +132,9 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
     }
 
     fn clear_working(&self, task_id: &str) -> SimardResult<usize> {
+        #[cfg(test)]
+        self.assert_hermetic_for("NativeCognitiveMemory::clear_working");
+
         let rows = self.query(&format!(
             "MATCH (w:WorkingMemory) WHERE w.task_id = '{}' RETURN count(w)",
             escape_cypher(task_id)
@@ -132,6 +159,9 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
         source_label: &str,
         _metadata: Option<&serde_json::Value>,
     ) -> SimardResult<String> {
+        #[cfg(test)]
+        self.assert_hermetic_for("NativeCognitiveMemory::store_episode");
+
         let id = Self::new_id("epi");
         self.execute(&format!(
             "CREATE (e:Episode {{id: '{}', content: '{}', source_label: '{}', temporal_index: 0, compressed: 0}})",
@@ -143,6 +173,9 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
     }
 
     fn consolidate_episodes(&self, batch_size: u32) -> SimardResult<Option<String>> {
+        #[cfg(test)]
+        self.assert_hermetic_for("NativeCognitiveMemory::consolidate_episodes");
+
         let rows = self.query(&format!(
             "MATCH (e:Episode) WHERE e.compressed = 0 RETURN e.id, e.content ORDER BY e.temporal_index LIMIT {batch_size}"
         ))?;
@@ -198,10 +231,7 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
         source_id: &str,
     ) -> SimardResult<String> {
         #[cfg(test)]
-        crate::test_support::hermetic_guard::assert_state_root_isolated(
-            &self.path,
-            "NativeCognitiveMemory::store_fact",
-        );
+        self.assert_hermetic_for("NativeCognitiveMemory::store_fact");
 
         let id = Self::new_id("sem");
         let tags_str = tags.join(",");
@@ -252,6 +282,9 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
         steps: &[String],
         prerequisites: &[String],
     ) -> SimardResult<String> {
+        #[cfg(test)]
+        self.assert_hermetic_for("NativeCognitiveMemory::store_procedure");
+
         let id = Self::new_id("proc");
         // Errors propagated (no silent `unwrap_or_default()`) so a
         // serialize failure cannot land a row whose `steps` column is the
@@ -401,6 +434,9 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
         action_on_trigger: &str,
         priority: i64,
     ) -> SimardResult<String> {
+        #[cfg(test)]
+        self.assert_hermetic_for("NativeCognitiveMemory::store_prospective");
+
         let id = Self::new_id("pro");
         self.execute(&format!(
             "CREATE (p:Prospective {{id: '{}', description: '{}', trigger_condition: '{}', action_on_trigger: '{}', status: 'pending', priority: {priority}}})",
