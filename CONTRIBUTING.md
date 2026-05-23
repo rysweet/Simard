@@ -11,7 +11,7 @@ they are the same gates CI enforces.
 
 1. [Local Pre-Commit Workflow](#local-pre-commit-workflow)
 2. [Merge Policy: No `--admin` Merges](#merge-policy-no---admin-merges)
-3. [Cognitive Memory Durability (SIGTERM + Periodic Backups)](#cognitive-memory-durability-sigterm--periodic-backups)
+3. [Cognitive Memory Durability (Per-Write Barrier + SIGTERM + Periodic Backups)](#cognitive-memory-durability-per-write-barrier--sigterm--periodic-backups)
 4. [Local Data Retention Disclosure](#local-data-retention-disclosure)
 5. [Pre-Existing Test Failure Disposition](#pre-existing-test-failure-disposition)
 6. [Real-Meeting & Dashboard E2E Verification](#real-meeting--dashboard-e2e-verification)
@@ -194,16 +194,86 @@ Before requesting merge:
 
 ---
 
-## Cognitive Memory Durability (SIGTERM + Periodic Backups)
+## Cognitive Memory Durability (Per-Write Barrier + SIGTERM + Periodic Backups)
 
 Simard's cognitive memory is backed by [`lbug`](https://docs.rs/lbug)
-(`0.15.x`, see [`Cargo.toml`](Cargo.toml) for the active minor). lbug
-opens its database as a directory at
-`~/.simard/cognitive_memory.ladybug/` and only flushes its WAL inside
-`Database::drop`, which does **not** run automatically on signal-induced
-process exit. To prevent data loss on `systemctl restart simard-ooda`
-(and similar SIGTERM-issuing scenarios), the daemon installs a graceful
-shutdown handler and runs a periodic backup loop.
+(`0.15.x`, see [`Cargo.toml`](Cargo.toml) for the active minor). The
+on-disk path is `~/.simard/cognitive_memory.ladybug` (a single file as
+of issue #1973). A legacy KuzuDB **directory** at this path from
+prototype builds is renamed aside to
+`cognitive_memory.ladybug.kuzu-backup` on first open and a fresh empty
+lbug file is created in its place — the legacy data is preserved but
+**not** automatically imported (the formats are incompatible). lbug
+only flushes its WAL inside `Database::drop`, which does **not** run
+automatically on signal-induced process exit, and even acknowledged
+in-process writes are not on stable storage until the writer
+`fsync(2)`s the data file.
+
+Three layers together provide durability:
+
+1. **Per-write fsync barrier** (issue #1973) — every mutating op on
+   `NativeCognitiveMemory` is followed by `fsync(data file) →
+   fsync(parent dir)` before returning to the caller. Survives
+   `SIGKILL`, OOM, and power loss for any write whose mutating call
+   returned `Ok(())`. lbug's internal WAL is co-resident in the data
+   file; a single `fsync(2)` on the data file captures both committed
+   pages and uncheckpointed WAL frames, which lbug replays on reopen.
+2. **Graceful shutdown handler** — drains the WAL on
+   `SIGTERM`/`SIGINT`/`SIGHUP` so `systemctl restart` is lossless
+   even for in-flight writes.
+3. **Periodic verified backups** — secondary recovery point used
+   only if the main data file becomes unreadable.
+
+### Per-Write fsync Barrier (issue #1973)
+
+Implemented as a private `NativeCognitiveMemory::post_write_barrier(
+op: &'static str)` and called by every mutating method in
+`CognitiveMemoryOps` (`store_fact`, `store_episode`,
+`update_episode_status`, `link_episodes`, `delete_fact`, `tag_fact`,
+`record_observation`, `record_goal_event`, `consolidate_episodes`).
+
+The barrier:
+
+- Returns `Ok(())` immediately if the store is in-memory
+  (`durable_writes == false`), skipping the fsync round-trip and
+  keeping in-memory unit tests fast. (Note: the in-memory backend
+  still uses a tempdir-backed lbug DB under the hood; only the
+  fsync — not the lbug write itself — is skipped.)
+- Otherwise performs `fsync(self.path) → fsync(self.parent_dir)` in
+  that exact order. The order is non-negotiable and annotated with a
+  `// SAFETY:` comment.
+- Does **not** issue a `CHECKPOINT;` Cypher statement (an earlier
+  draft did; it was removed after CI showed lbug returns raw page
+  bytes for `e.content` on subsequent reads when CHECKPOINT is
+  interleaved with writes inside `consolidate_episodes`). The
+  crash-recovery integration tests confirm the fsync pair above is
+  sufficient without CHECKPOINT.
+- Propagates all failures as typed `SimardError` variants with
+  `store: "cognitive-memory"` and distinct `action` labels
+  (`fsync-data-file`, `fsync-parent-dir`, `verify-readback`,
+  `recovery-replay-fsync`) — **never** swallows an fsync result.
+  The mutating op name is included in `reason` as
+  `format!("op={op}: {io_err}")`.
+
+`consolidate_episodes` fires the barrier **once after the loop
+completes**, not per-iteration, to bound write amplification.
+
+The backup/recovery helper `atomic_copy_with_fsync` was hardened in
+the same PR to (a) propagate previously-swallowed fsync errors and
+(b) re-read the destination and compare a SHA-256 digest against the
+source, returning `PersistentStoreIo { action: "verify-readback", .. }`
+on mismatch.
+
+Direct proof: `tests/cognitive_memory_crash_durability.rs::
+sigkill_preserves_last_write` spawns the helper binary
+`examples/cognitive_memory_crash_helper.rs`, waits for `WROTE`,
+SIGKILLs it, reopens the store from a fresh process, and asserts the
+marker fact is present.
+
+> Full reference: [`docs/operations/cognitive-memory-durability.md`](docs/operations/cognitive-memory-durability.md)
+> — section "Per-Write fsync Barrier (issue #1973)" documents
+> mechanism, error mapping, latency tradeoff, in-memory backend
+> opt-out, and operational runbook entries.
 
 ### Graceful Shutdown Sequence
 
@@ -216,11 +286,14 @@ following steps **in order**:
 
 1. **Persist the goal board** via `persist_board(&state.active_goals,
    &*bridges.memory)`. The write goes through the live cognitive-memory
-   writer so the subsequent checkpoint flushes it.
+   writer; the per-write barrier (#1973) makes it durable before the
+   call returns.
 2. **Pre-exit checkpoint** via `shared_mem.checkpoint()`
    (`CognitiveMemoryOps::checkpoint`, which delegates to
-   `NativeCognitiveMemory::checkpoint`). Collapses the WAL into the
-   main DB directory.
+   `NativeCognitiveMemory::checkpoint`). Collapses any WAL residue
+   into the main DB file (the per-write barrier already checkpointed
+   each individual write, but this catches anything written through
+   a path that bypasses `CognitiveMemoryOps`).
 3. **Close the LLM session** if one is bound (`bridges.session.close()`).
 4. **Clear the in-process writer** via
    `memory_ipc::clear_in_process_writer()`. This drops the global
@@ -249,9 +322,10 @@ last backup. If so:
    `NativeCognitiveMemory::create_verified_backup(&state_root)`, which:
    - copies `~/.simard/cognitive_memory.ladybug` to
      `~/.simard/backups/cognitive_memory.ladybug.<unix_ts>` using a
-     `copy → fsync(file) → rename → fsync(parent dir)` atomic-write
-     pattern (`atomic_copy_with_fsync` in
-     `src/cognitive_memory/backup.rs`);
+     `copy → fsync(file) → rename → fsync(parent dir) → readback-verify`
+     atomic-write pattern (`atomic_copy_with_fsync` in
+     `src/cognitive_memory/backup.rs`; fsync errors propagate and
+     a SHA-256 readback verifies the destination, both as of #1973);
    - copies any extant WAL siblings (lbug 0.15 may use either
      `cognitive_memory.ladybug.wal` or `cognitive_memory.wal`) to
      `<wal_name>.<unix_ts>` with the **same** timestamp so the pair is
@@ -271,21 +345,27 @@ On daemon startup, the routine attempts to copy the existing main DB to
 a verified backup before opening it for writes. If the open fails
 because the on-disk DB is corrupt, the recovery path falls back to the
 most recent verified backup (see `try_recover` in
-`src/cognitive_memory/backup.rs`).
+`src/cognitive_memory/backup.rs`). The recovery-replay copy uses
+`atomic_copy_with_fsync` and therefore inherits the same fsync +
+readback verification, surfaced with `action="recovery-replay-fsync"`
+on failure.
 
 ### File and Directory Layout
 
 | Path | Purpose | Notes |
 |---|---|---|
-| `~/.simard/cognitive_memory.ladybug/` | lbug DB directory | Created by `lbug::Database::new` on first use |
+| `~/.simard/cognitive_memory.ladybug` | lbug DB file | Single file as of #1973. A legacy KuzuDB directory at this path is renamed aside to `cognitive_memory.ladybug.kuzu-backup` by `NativeCognitiveMemory::open` on first run; the legacy contents are preserved but **not** auto-imported. |
 | `~/.simard/cognitive_memory.ladybug.wal` *or* `~/.simard/cognitive_memory.wal` | WAL sibling(s) | Either or both may exist depending on lbug minor |
+| `~/.simard/cognitive_memory.ladybug.kuzu-backup` | Legacy KuzuDB dir, if migrated | Preserved on disk for manual inspection; safe to `rm -rf` once the new lbug DB is confirmed as source of truth |
 | `~/.simard/backups/` | Backup root | Created by `create_dir_all` on first backup |
-| `~/.simard/backups/cognitive_memory.ladybug.<ts>` | Backup of the DB directory at unix-second `<ts>` | Restore = copy back |
+| `~/.simard/backups/cognitive_memory.ladybug.<ts>` | Backup of the DB file at unix-second `<ts>` | Always a file (legacy KuzuDB directories are renamed aside *before* any backup is taken); restore = `cp` |
 | `~/.simard/backups/cognitive_memory.ladybug.wal.<ts>` | WAL sibling for the same `<ts>` | Same timestamp pairs the two |
 
-> **Note**: `cognitive_memory.ladybug` is an **lbug database directory**,
-> not a single file. Restoration uses `cp -r` (not `cp`); see
-> [Restoring from Backup](#restoring-from-backup) and
+> **Note**: `cognitive_memory.ladybug` is a **single file** as of
+> issue #1973, and every backup created by `create_verified_backup`
+> is therefore also a single file. Restoration uses plain `cp`; see
+> [Restoring from Backup](docs/operations/cognitive-memory-durability.md#restoring-from-backup)
+> and
 > [`docs/operations/cognitive-memory-durability.md`](docs/operations/cognitive-memory-durability.md).
 
 ### Configuration
@@ -309,11 +389,11 @@ sudo systemctl stop simard-ooda
 # 2. Identify the most recent paired backup
 ls -lt ~/.simard/backups/cognitive_memory.ladybug.* | head
 
-# 3. Copy both the DB directory AND the WAL sibling(s) back into ~/.simard/
+# 3. Copy the DB file AND any WAL sibling(s) back into ~/.simard/
 TS=1762800000   # the timestamp suffix from above
-rm -rf ~/.simard/cognitive_memory.ladybug
-cp -r ~/.simard/backups/cognitive_memory.ladybug.${TS} \
-      ~/.simard/cognitive_memory.ladybug
+rm -f ~/.simard/cognitive_memory.ladybug
+cp ~/.simard/backups/cognitive_memory.ladybug.${TS} \
+   ~/.simard/cognitive_memory.ladybug
 # WAL siblings (either or both may exist for this timestamp; copy what's there)
 for w in cognitive_memory.ladybug.wal cognitive_memory.wal; do
   src=~/.simard/backups/${w}.${TS}

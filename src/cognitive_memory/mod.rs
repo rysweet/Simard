@@ -161,6 +161,16 @@ pub struct NativeCognitiveMemory {
     /// handle (issue #1590 follow-up — closes the dashboard hollow-
     /// success failure mode).
     read_only: bool,
+    /// Whether mutating ops must call [`Self::post_write_barrier`] after
+    /// every successful Cypher write. `true` for [`Self::open`] (on-disk
+    /// writer), `false` for [`Self::in_memory`] (no on-disk file to fsync)
+    /// and for [`Self::open_read_only`] (writes aren't possible).
+    ///
+    /// Per-write fsync barrier: issue #1973, goals G1 + G2 of epic
+    /// #1972 (improve-cognitive-memory-persistence). Without the barrier,
+    /// SIGKILL between two writes loses acknowledged data because lbug
+    /// only flushes its WAL on `Database::drop`.
+    durable_writes: bool,
 }
 
 // SAFETY: lbug::Database is thread-safe by design (internal locking).
@@ -204,6 +214,7 @@ impl NativeCognitiveMemory {
             path: db_path,
             _temp_dir: None,
             read_only: false,
+            durable_writes: true,
         };
         mem.ensure_schema()?;
         eprintln!(
@@ -236,6 +247,11 @@ impl NativeCognitiveMemory {
             path: db_path,
             _temp_dir: Some(Arc::new(tmp)),
             read_only: false,
+            // In-memory handles back a temp file whose lifetime is tied to
+            // the process — there is no recovery scenario where fsyncing it
+            // would help, and unit tests rely on the latency profile of an
+            // un-fsynced backend. Issue #1973 opt-out.
+            durable_writes: false,
         };
         mem.ensure_schema()?;
         Ok(mem)
@@ -274,6 +290,10 @@ impl NativeCognitiveMemory {
             path: db_path,
             _temp_dir: None,
             read_only: true,
+            // Read-only handles cannot mutate, so the barrier is a no-op
+            // and we save the cost of even checking the flag inside hot
+            // read paths that happen to call into shared code.
+            durable_writes: false,
         };
         eprintln!(
             "[simard] cognitive memory opened read-only — LadybugDB at {}",
@@ -285,6 +305,7 @@ impl NativeCognitiveMemory {
 }
 
 mod backup;
+mod fsync;
 mod ops;
 
 impl NativeCognitiveMemory {
@@ -372,6 +393,92 @@ impl NativeCognitiveMemory {
                 }),
             },
         }
+    }
+
+    /// Per-write fsync barrier (issue #1973, goals G1 + G2 of epic #1972).
+    ///
+    /// Runs after every successful Cypher mutation on an on-disk
+    /// `NativeCognitiveMemory` so that, by the time the calling `Ok(())`
+    /// returns to the caller, the written bytes are on stable storage
+    /// and the directory entry for the data file is durable.
+    ///
+    /// Pipeline (Unix; the only platform supported for on-disk writers):
+    /// 1. `sync_all()` the data file so kernel page cache is flushed.
+    ///    lbug's internal WAL is co-resident in this same file, so a
+    ///    single fsync of the file durably captures both committed pages
+    ///    and any uncheckpointed WAL frames. Reopen replays the WAL.
+    /// 2. `sync_all()` the parent directory so the dirent itself is
+    ///    durable on ext4/xfs/btrfs/apfs after any preceding rename.
+    ///
+    /// **No CHECKPOINT here.** lbug's `CHECKPOINT;` Cypher statement,
+    /// when invoked between writes inside a multi-statement op
+    /// (notably `consolidate_episodes`), has been observed to corrupt
+    /// subsequent reads of `e.content` on previously-written `Episode`
+    /// rows in the same connection — raw page bytes are returned
+    /// instead of the stored string literal. The crash-recovery
+    /// integration tests in `tests/cognitive_memory_crash_durability.rs`
+    /// and `tests/daemon_sigterm_durability.rs` empirically confirm
+    /// that the fsync pair above (without CHECKPOINT) preserves every
+    /// acknowledged write across `SIGKILL`/restart cycles.
+    ///
+    /// CHECKPOINT is still invoked at backup time
+    /// (see `NativeCognitiveMemory::backup`), which is the only context
+    /// where the WAL must be folded into the data file before the file
+    /// is copied.
+    ///
+    /// No-op when `durable_writes` is `false` (in-memory backend used by
+    /// the unit-test suite; read-only handles).
+    ///
+    /// Errors map to existing typed variants — no new error variants
+    /// were introduced for this feature:
+    /// - data-file fsync failure → `SimardError::PersistentStoreIo` with
+    ///   `action = "fsync-data-file"`.
+    /// - parent-dir fsync failure → `SimardError::PersistentStoreIo` with
+    ///   `action = "fsync-parent-dir"`.
+    ///
+    /// The `op` argument is a static string identifying the calling
+    /// mutating op (e.g. `"store_fact"`) and is woven into error
+    /// `reason` strings so a fsync failure can be attributed in logs.
+    pub(crate) fn post_write_barrier(&self, op: &'static str) -> SimardResult<()> {
+        if !self.durable_writes {
+            return Ok(());
+        }
+
+        // Per-write barrier — no CHECKPOINT (see method doc). Just
+        // fsync the data file + parent directory via the shared
+        // `fsync::open_and_fsync` helper, which preserves the
+        // site-distinct action labels operator logs grep on.
+        //
+        // `op` is forwarded as `Some(&str)` rather than a pre-formatted
+        // `format!("op={op}")` string so the success path — taken on
+        // every successful write — does **zero string allocation**.
+        // The "op=…" prefix is composed inside `fsync::io_err` only
+        // when an IO syscall actually fails.
+        let op_ctx = Some(op);
+
+        // Step 1: fsync the data file. lbug owns the exclusive writer
+        // fd; the helper opens a separate read-only fd just long
+        // enough to issue sync_all(2). The data file is co-resident
+        // with lbug's WAL, so a single sync_all() captures both
+        // committed pages and any uncheckpointed WAL frames.
+        fsync::open_and_fsync(
+            &self.path,
+            "fsync-data-file-open",
+            "fsync-data-file",
+            op_ctx,
+        )?;
+
+        // Step 2: fsync the parent directory so the dirent for
+        // `self.path` is itself crash-durable on filesystems that
+        // journal metadata separately (notably ext4).
+        let parent = self
+            .path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        fsync::open_and_fsync(parent, "fsync-parent-dir-open", "fsync-parent-dir", op_ctx)?;
+
+        Ok(())
     }
 }
 
