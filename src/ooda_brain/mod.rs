@@ -240,3 +240,231 @@ pub fn apply_decision_to_state(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Inline tests (issue #1979 — per-source-file coverage of the public surface
+// declared here. The sibling `tests.rs` file covers brain dispatch end-to-end;
+// these inline tests pin the contracts declared in *this* file so coverage
+// tools see #[test]s alongside the public surface, including the
+// `BrainPhase` serde round-trip that the `parse_failure::counters()` map
+// uses as a HashMap key.)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod inline_tests_1979 {
+    use super::*;
+    use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress};
+    use crate::ooda_brain::BrainPhase;
+    use crate::ooda_loop::OodaState;
+
+    fn state_with_active_goal(id: &str) -> OodaState {
+        let mut board = GoalBoard::default();
+        board.active.push(ActiveGoal {
+            id: id.to_string(),
+            description: "test".to_string(),
+            priority: 1,
+            status: GoalProgress::NotStarted,
+            assigned_to: Some("engineer-a".to_string()),
+            current_activity: None,
+            wip_refs: vec![],
+            last_progress_update_at: None,
+        });
+        OodaState::new(board)
+    }
+
+    // ----- BrainPhase serde round-trip -----------------------------------
+    // The map `parse_failure::counters(): (BrainPhase, goal_id) -> u32` keys
+    // on `BrainPhase`. An incorrect Hash/Eq/serde impl silently re-buckets
+    // failures across phases — these tests pin the round-trip so an
+    // accidental rename or representation change is caught early.
+
+    #[test]
+    fn brain_phase_serializes_as_lowercase() {
+        assert_eq!(serde_json::to_string(&BrainPhase::Act).unwrap(), "\"act\"");
+        assert_eq!(
+            serde_json::to_string(&BrainPhase::Decide).unwrap(),
+            "\"decide\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BrainPhase::Orient).unwrap(),
+            "\"orient\""
+        );
+    }
+
+    #[test]
+    fn brain_phase_round_trips_through_json() {
+        for &phase in &[BrainPhase::Act, BrainPhase::Decide, BrainPhase::Orient] {
+            let s = serde_json::to_string(&phase).unwrap();
+            let back: BrainPhase = serde_json::from_str(&s).unwrap();
+            assert_eq!(phase, back);
+        }
+    }
+
+    #[test]
+    fn brain_phase_distinct_variants_are_not_equal() {
+        // Guard against a future refactor that accidentally collapses
+        // variants — counters() would re-bucket all phases together.
+        assert_ne!(BrainPhase::Act, BrainPhase::Decide);
+        assert_ne!(BrainPhase::Decide, BrainPhase::Orient);
+        assert_ne!(BrainPhase::Act, BrainPhase::Orient);
+    }
+
+    // ----- apply_decision_to_state — branches sibling tests do not pin --
+
+    #[test]
+    fn apply_decision_continue_skipping_does_not_mutate_state() {
+        let mut state = state_with_active_goal("g1");
+        let before_assigned = state.active_goals.active[0].assigned_to.clone();
+        let detail = apply_decision_to_state(
+            &EngineerLifecycleDecision::ContinueSkipping {
+                rationale: "hb ok".into(),
+            },
+            &mut state,
+            "g1",
+        );
+        assert!(detail.contains("continue_skipping"));
+        assert!(detail.contains("hb ok"));
+        assert_eq!(state.active_goals.active[0].assigned_to, before_assigned);
+    }
+
+    #[test]
+    fn apply_decision_reclaim_clears_assignment_and_worktree() {
+        let mut state = state_with_active_goal("g1");
+        let detail = apply_decision_to_state(
+            &EngineerLifecycleDecision::ReclaimAndRedispatch {
+                rationale: "wedged 7h".into(),
+                redispatch_context: "retry with extra ctx".into(),
+            },
+            &mut state,
+            "g1",
+        );
+        assert!(detail.contains("reclaim_and_redispatch"));
+        assert!(detail.contains("retry with extra ctx"));
+        assert!(state.active_goals.active[0].assigned_to.is_none());
+        // worktree map remove is best-effort even when entry is absent.
+        assert!(!state.engineer_worktrees.contains_key("g1"));
+    }
+
+    #[test]
+    fn apply_decision_reclaim_omits_context_marker_when_empty() {
+        let mut state = state_with_active_goal("g1");
+        let detail = apply_decision_to_state(
+            &EngineerLifecycleDecision::ReclaimAndRedispatch {
+                rationale: "wedged".into(),
+                redispatch_context: String::new(),
+            },
+            &mut state,
+            "g1",
+        );
+        assert!(detail.contains("reclaim_and_redispatch"));
+        assert!(
+            !detail.contains("redispatch_context="),
+            "empty redispatch_context must NOT be appended; got: {detail}"
+        );
+    }
+
+    #[test]
+    fn apply_decision_deprioritize_bumps_failure_counter() {
+        let mut state = state_with_active_goal("g1");
+        let before = state.goal_failure_counts.get("g1").copied().unwrap_or(0);
+        let detail = apply_decision_to_state(
+            &EngineerLifecycleDecision::Deprioritize {
+                rationale: "chronic".into(),
+            },
+            &mut state,
+            "g1",
+        );
+        let after = state.goal_failure_counts.get("g1").copied().unwrap_or(0);
+        assert_eq!(after, before + 1, "deprioritize must bump failure counter");
+        assert!(detail.contains("deprioritized"));
+    }
+
+    #[test]
+    fn apply_decision_mark_blocked_sets_goal_status() {
+        let mut state = state_with_active_goal("g1");
+        let detail = apply_decision_to_state(
+            &EngineerLifecycleDecision::MarkGoalBlocked {
+                rationale: "human input".into(),
+                reason: "needs API key".into(),
+            },
+            &mut state,
+            "g1",
+        );
+        match &state.active_goals.active[0].status {
+            GoalProgress::Blocked(r) => assert_eq!(r, "needs API key"),
+            other => panic!("expected Blocked, got {other:?}"),
+        }
+        assert!(detail.contains("mark_goal_blocked"));
+        assert!(detail.contains("needs API key"));
+    }
+
+    #[test]
+    fn apply_decision_open_tracking_issue_returns_descriptive_detail() {
+        let mut state = state_with_active_goal("g1");
+        let detail = apply_decision_to_state(
+            &EngineerLifecycleDecision::OpenTrackingIssue {
+                rationale: "panic seen".into(),
+                title: "engineer panicked".into(),
+                body: "see logs".into(),
+            },
+            &mut state,
+            "g1",
+        );
+        assert!(detail.contains("open_tracking_issue"));
+        assert!(detail.contains("engineer panicked"));
+        // No state mutation — the actual `gh issue create` lives elsewhere.
+        assert!(state.active_goals.active[0].assigned_to.is_some());
+    }
+
+    // ----- EngineerLifecycleCtx default minutes_since_last_update --------
+    #[test]
+    fn lifecycle_ctx_serde_default_minutes_since_last_update_is_max() {
+        // When the field is absent from incoming JSON (e.g. older cycle
+        // reports), the serde default must be u64::MAX so safe-update's
+        // min-gap predicate does not immediately permit an update.
+        let json = r#"{
+            "goal_id":"g","goal_description":"","cycle_number":0,
+            "consecutive_skip_count":0,"failure_count":0,
+            "worktree_path":"/tmp","worktree_mtime_secs_ago":0,
+            "sentinel_pid":null,"last_engineer_log_tail":""
+        }"#;
+        let ctx: EngineerLifecycleCtx = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            ctx.minutes_since_last_update_attempt,
+            u64::MAX,
+            "missing field must default to 'never attempted' (u64::MAX), not 0"
+        );
+        // commits_behind / in_flight_engineer_count use plain #[serde(default)]
+        // (the type's Default → 0). Pinning so a future serde rename catches.
+        assert_eq!(ctx.commits_behind, 0);
+        assert_eq!(ctx.in_flight_engineer_count, 0);
+    }
+
+    #[test]
+    fn lifecycle_ctx_serde_round_trip_preserves_all_fields() {
+        let ctx = EngineerLifecycleCtx {
+            goal_id: "g1".into(),
+            goal_description: "ship".into(),
+            cycle_number: 12,
+            consecutive_skip_count: 3,
+            failure_count: 1,
+            worktree_path: PathBuf::from("/tmp/wt"),
+            worktree_mtime_secs_ago: 100,
+            sentinel_pid: Some(42),
+            last_engineer_log_tail: "ok".into(),
+            commits_behind: 4,
+            in_flight_engineer_count: 2,
+            minutes_since_last_update_attempt: 30,
+        };
+        let json = serde_json::to_string(&ctx).unwrap();
+        let back: EngineerLifecycleCtx = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.goal_id, ctx.goal_id);
+        assert_eq!(back.cycle_number, ctx.cycle_number);
+        assert_eq!(back.sentinel_pid, ctx.sentinel_pid);
+        assert_eq!(back.commits_behind, ctx.commits_behind);
+        assert_eq!(
+            back.minutes_since_last_update_attempt,
+            ctx.minutes_since_last_update_attempt
+        );
+    }
+}

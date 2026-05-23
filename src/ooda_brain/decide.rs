@@ -232,3 +232,102 @@ pub fn build_rustyclawd_decide_brain() -> SimardResult<Box<dyn OodaDecideBrain>>
     let submitter = super::rustyclawd::SessionLlmSubmitter::new(provider);
     Ok(Box::new(RustyClawdDecideBrain::new(submitter)))
 }
+
+// ---------------------------------------------------------------------------
+// Inline tests (issue #1979 — per-source-file coverage of the JSON-parse
+// fallback parser the RustyClawd Decide bridge depends on. Sibling
+// `decide_tests.rs` covers the end-to-end public API; these inline tests
+// pin the private `parse_judgment_from_response` for the four shapes
+// `parse_failure::record_parse_failure` was added to surface in #1933.)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ooda_loop::ActionKind;
+
+    // ----- (a) well-formed JSON pass-through -----------------------------
+    #[test]
+    fn parse_well_formed_json_returns_judgment() {
+        let raw = r#"{"choice":"advance_goal","rationale":"go"}"#;
+        let j = parse_judgment_from_response(raw).expect("must parse");
+        assert_eq!(j.action_kind(), ActionKind::AdvanceGoal);
+        assert_eq!(j.rationale(), "go");
+    }
+
+    // ----- (b) JSON with surrounding prose — fallback parser must salvage -
+    #[test]
+    fn parse_salvages_json_wrapped_in_prose() {
+        // Both leading and trailing prose around the object. The
+        // `find('{') .. rfind('}')` salvage must extract the JSON body.
+        let raw = "Here's my answer:\n```json\n{\"choice\":\"run_gym_eval\",\"rationale\":\"low score\"}\n```\nThanks!";
+        let j = parse_judgment_from_response(raw).expect("must salvage JSON in prose");
+        assert_eq!(j.action_kind(), ActionKind::RunGymEval);
+    }
+
+    #[test]
+    fn parse_salvages_json_with_trailing_prose_only() {
+        // The parser slices from the first `{` to the last `}`, so trailing
+        // commentary after the closing brace must not break the salvage.
+        let raw = r#"{"choice":"consolidate_memory","rationale":"compaction"}  -- thanks"#;
+        let j = parse_judgment_from_response(raw).expect("must parse");
+        assert_eq!(j.action_kind(), ActionKind::ConsolidateMemory);
+    }
+
+    // ----- (c) completely unparseable returns Err, never panics ----------
+    #[test]
+    fn parse_unparseable_returns_structured_error_with_raw_body() {
+        let raw = "totally not json at all";
+        let err = parse_judgment_from_response(raw).expect_err("must Err");
+        // Anti-regression for #1711: the error must embed the raw response
+        // so operators can diagnose. (`raw` has no `{` so it hits the
+        // "no JSON object" branch, not the serde-error branch.)
+        assert!(
+            err.contains(raw),
+            "error must embed raw response (issue #1711), got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_empty_response_returns_empty_error() {
+        let err = parse_judgment_from_response("").expect_err("must Err");
+        assert!(
+            err.to_lowercase().contains("empty"),
+            "empty-response error must mention emptiness, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_whitespace_only_response_treated_as_empty() {
+        let err = parse_judgment_from_response("   \n\t  ").expect_err("must Err");
+        assert!(
+            err.to_lowercase().contains("empty"),
+            "whitespace-only must be treated as empty, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_malformed_json_with_braces_returns_parse_error() {
+        // Hits the serde-error branch (has `{` and `}` but invalid JSON).
+        let raw = r#"{"choice":"advance_goal","rationale":}"#;
+        let err = parse_judgment_from_response(raw).expect_err("must Err");
+        assert!(
+            err.contains("decide-brain-parse-error"),
+            "malformed JSON must surface a structured serde error tag, got: {err}"
+        );
+        // #1711: full raw must be embedded.
+        assert!(err.contains(raw), "raw_response must be embedded: {err}");
+    }
+
+    #[test]
+    fn parse_unknown_choice_tag_returns_error() {
+        // Schema guard: unrecognised `choice` tags must fail to parse so the
+        // consumer falls back to the deterministic mapping.
+        let raw = r#"{"choice":"do_a_barrel_roll","rationale":"why not"}"#;
+        let err = parse_judgment_from_response(raw).expect_err("must Err");
+        assert!(
+            err.contains("decide-brain-parse-error"),
+            "unknown variant must surface serde-tagged error: {err}"
+        );
+    }
+}

@@ -331,4 +331,140 @@ mod tests {
         assert_eq!(records[0].rationale, "llm-brain: high-leverage progress");
         assert!(!records[0].fallback);
     }
+
+    // -----------------------------------------------------------------------
+    // Issue #1979 / #1933 anti-regression: when the LLM-backed brain returns
+    // Err for a priority, decide_with_brain must
+    //   (1) record the parse failure in parse_failure::counters(),
+    //   (2) embed a ParseFailureRecord on the per-cycle BrainJudgmentRecord
+    //       with fallback=true, and
+    //   (3) still emit a PlannedAction (deterministic fallback fired —
+    //       transient adapter failure must not stall the loop).
+    // -----------------------------------------------------------------------
+    #[test]
+    fn decide_with_brain_records_parse_failure_and_falls_back_on_brain_error() {
+        use crate::error::SimardError;
+        use crate::ooda_brain::BrainPhase;
+        use crate::ooda_brain::parse_failure::{
+            peek_consecutive_count, reset_consecutive_count_for_tests, test_serial_guard,
+        };
+
+        struct AlwaysErrBrain;
+        impl OodaDecideBrain for AlwaysErrBrain {
+            fn judge_decision(
+                &self,
+                _ctx: &DecideContext,
+            ) -> crate::error::SimardResult<DecideJudgment> {
+                Err(SimardError::AdapterInvocationFailed {
+                    base_type: "ooda-decide-brain".into(),
+                    reason: "decide-brain-parse-error: stub; payload={}; raw_response=\"junk\""
+                        .into(),
+                })
+            }
+        }
+
+        // Serialise on the global counters guard; the map is process-wide.
+        let _g = test_serial_guard();
+        let goal_id = "decide-parse-fail-1979";
+        reset_consecutive_count_for_tests(BrainPhase::Decide, goal_id);
+
+        let priorities = vec![Priority {
+            goal_id: goal_id.to_string(),
+            urgency: 0.9,
+            reason: "test".to_string(),
+        }];
+        let config = OodaConfig::default();
+
+        let (actions, records) = crate::ooda_brain::with_brain_judgment_scope(|| {
+            crate::ooda_brain::clear_brain_judgments();
+            let acts = decide_with_brain(&priorities, &config, &AlwaysErrBrain).unwrap();
+            (acts, crate::ooda_brain::take_brain_judgments())
+        });
+
+        // (3) Deterministic fallback still emits a PlannedAction so the
+        //     OODA loop never stalls on transient brain failures.
+        assert_eq!(actions.len(), 1, "fallback action must still be emitted");
+        assert_eq!(
+            actions[0].goal_id.as_deref(),
+            Some(goal_id),
+            "fallback must preserve goal_id"
+        );
+
+        // (1) parse_failure::counters() observed the (Decide, goal_id) bump.
+        let count = peek_consecutive_count(BrainPhase::Decide, goal_id);
+        assert_eq!(count, 1, "expected consecutive_count == 1, got {count}");
+
+        // (2) The per-cycle BrainJudgmentRecord embeds the ParseFailureRecord
+        //     and is flagged as a fallback.
+        assert_eq!(records.len(), 1);
+        let rec = &records[0];
+        assert!(rec.fallback, "record must be flagged as fallback");
+        let pf = rec
+            .parse_failure
+            .as_ref()
+            .expect("ParseFailureRecord must be embedded on the judgment record");
+        assert_eq!(pf.phase, "decide");
+        assert_eq!(pf.goal_id, goal_id);
+        assert_eq!(pf.consecutive_count, 1);
+        assert!(
+            pf.raw_response_truncated.contains("junk"),
+            "raw_response must be salvaged from the brain error (issue #1711 contract): {:?}",
+            pf.raw_response_truncated,
+        );
+
+        reset_consecutive_count_for_tests(BrainPhase::Decide, goal_id);
+    }
+
+    #[test]
+    fn decide_with_brain_successful_parse_resets_consecutive_counter() {
+        use crate::ooda_brain::BrainPhase;
+        use crate::ooda_brain::parse_failure::{
+            peek_consecutive_count, reset_consecutive_count_for_tests, test_serial_guard,
+        };
+
+        struct AlwaysOkBrain;
+        impl OodaDecideBrain for AlwaysOkBrain {
+            fn judge_decision(
+                &self,
+                _ctx: &DecideContext,
+            ) -> crate::error::SimardResult<DecideJudgment> {
+                Ok(DecideJudgment::AdvanceGoal {
+                    rationale: "ok".into(),
+                })
+            }
+        }
+
+        let _g = test_serial_guard();
+        let goal_id = "decide-reset-1979";
+        reset_consecutive_count_for_tests(BrainPhase::Decide, goal_id);
+        // Seed a non-zero counter to prove the reset-on-success path fires.
+        crate::ooda_brain::parse_failure::record_parse_failure(
+            BrainPhase::Decide,
+            goal_id,
+            &crate::error::SimardError::AdapterInvocationFailed {
+                base_type: "decide".into(),
+                reason: "seed".into(),
+            },
+            "raw",
+            crate::ooda_brain::DECIDE_PROMPT_NAME,
+            String::new(),
+        );
+        assert_eq!(peek_consecutive_count(BrainPhase::Decide, goal_id), 1);
+
+        let priorities = vec![Priority {
+            goal_id: goal_id.to_string(),
+            urgency: 0.9,
+            reason: "t".to_string(),
+        }];
+        let config = OodaConfig::default();
+        let _ = decide_with_brain(&priorities, &config, &AlwaysOkBrain).unwrap();
+
+        assert_eq!(
+            peek_consecutive_count(BrainPhase::Decide, goal_id),
+            0,
+            "successful parse must reset (Decide, goal_id) counter"
+        );
+
+        reset_consecutive_count_for_tests(BrainPhase::Decide, goal_id);
+    }
 }
