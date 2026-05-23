@@ -382,11 +382,12 @@ pub(super) fn merge_boards(persisted: GoalBoard, in_flight: GoalBoard) -> GoalBo
 /// resolve field-level last-writer-wins. Callers needing strict
 /// serializability must route through the daemon IPC socket.
 pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> SimardResult<()> {
-    #[cfg(test)]
-    crate::test_support::hermetic_guard::assert_state_root_isolated(
-        &simard_state_root(),
-        "save_goal_board",
-    );
+    // NOTE: hermetic guard removed from this call-site. The env-var-based
+    // `simard_state_root()` check raced with parallel tests that unset
+    // SIMARD_STATE_ROOT (see CI failure on PR #2017). Per-method guards
+    // on NativeCognitiveMemory::assert_hermetic_for (issue #1976) and the
+    // launch_writer_bridge guard now cover this path without env-var
+    // dependency.
 
     // Step 1: guard the in-flight board. Persisted snapshot is inductively
     // guard-clean (every prior write went through this same check), so the
@@ -485,11 +486,9 @@ pub fn save_goal_board_with_removals(
     force_remove_ids: &[String],
     bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
-    #[cfg(test)]
-    crate::test_support::hermetic_guard::assert_state_root_isolated(
-        &simard_state_root(),
-        "save_goal_board_with_removals",
-    );
+    // NOTE: hermetic guard removed — same reasoning as save_goal_board.
+    // Per-method NativeCognitiveMemory guards + launch_writer_bridge guard
+    // cover the hermetic property without the racy simard_state_root() call.
 
     if let Some(reason) = board_integrity_suspect(board) {
         return Err(SimardError::InvalidGoalRecord {
