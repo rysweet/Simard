@@ -381,3 +381,258 @@ pub use persistence::{
     mark_meeting_handoff_processed, meeting_bundle_dir, remove_session_wip, save_session_wip,
     write_meeting_bundle, write_meeting_handoff,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::meeting_facilitator::types::{
+        ActionItem, MeetingDecision, MeetingSession, MeetingSessionStatus,
+    };
+
+    fn empty_session() -> MeetingSession {
+        MeetingSession {
+            topic: String::new(),
+            decisions: vec![],
+            action_items: vec![],
+            notes: vec![],
+            status: MeetingSessionStatus::Open,
+            started_at: String::new(),
+            participants: vec![],
+            explicit_questions: vec![],
+            themes: vec![],
+            next_owner: None,
+        }
+    }
+
+    fn populated_session() -> MeetingSession {
+        MeetingSession {
+            topic: "Sprint planning".to_string(),
+            decisions: vec![MeetingDecision {
+                description: "Adopt TDD".to_string(),
+                rationale: "Better quality".to_string(),
+                participants: vec!["alice".to_string()],
+            }],
+            action_items: vec![ActionItem {
+                description: "Set up CI".to_string(),
+                owner: "bob".to_string(),
+                priority: 1,
+                due_description: Some("Friday".to_string()),
+                linked_issue: None,
+            }],
+            notes: vec![
+                "Good discussion about testing".to_string(),
+                "OPEN: what about the timeline?".to_string(),
+                "We need more testing coverage".to_string(),
+                "testing should be a priority".to_string(),
+            ],
+            status: MeetingSessionStatus::Open,
+            started_at: "2026-01-15T10:00:00Z".to_string(),
+            participants: vec!["alice".to_string(), "bob".to_string()],
+            explicit_questions: vec!["What about testing?".to_string()],
+            themes: vec!["performance".to_string()],
+            next_owner: Some("engineer".to_string()),
+        }
+    }
+
+    // ── default_handoff_dir ─────────────────────────────────────────
+
+    #[test]
+    fn default_handoff_dir_returns_path() {
+        let dir = default_handoff_dir();
+        let dir_str = dir.to_string_lossy();
+        // May resolve via SIMARD_STATE_ROOT or SIMARD_HANDOFF_DIR env override.
+        assert!(
+            dir_str.contains("meeting_handoffs") || dir_str.contains("simard"),
+            "default dir should be under simard state: {dir_str}"
+        );
+    }
+
+    // ── derive_meeting_id ───────────────────────────────────────────
+
+    #[test]
+    fn derive_meeting_id_valid_timestamp() {
+        let id = derive_meeting_id("2026-01-15T10:00:00Z", "Sprint Planning");
+        assert!(id.starts_with("20260115T100000Z-"));
+        assert!(id.contains("sprint"));
+    }
+
+    #[test]
+    fn derive_meeting_id_idempotent() {
+        let a = derive_meeting_id("2026-01-15T10:00:00Z", "topic");
+        let b = derive_meeting_id("2026-01-15T10:00:00Z", "topic");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn derive_meeting_id_invalid_timestamp_does_not_panic() {
+        let id = derive_meeting_id("not-a-date", "topic");
+        assert!(id.contains("topic"));
+    }
+
+    #[test]
+    fn derive_meeting_id_empty_topic() {
+        let id = derive_meeting_id("2026-01-15T10:00:00Z", "");
+        assert!(id.starts_with("20260115T100000Z"));
+        assert!(
+            !id.contains('-'),
+            "empty topic should produce no slug suffix"
+        );
+    }
+
+    #[test]
+    fn derive_meeting_id_topic_punctuation_stable() {
+        let a = derive_meeting_id("2026-01-15T10:00:00Z", "Sprint Planning!");
+        let b = derive_meeting_id("2026-01-15T10:00:00Z", "Sprint Planning!");
+        assert_eq!(a, b, "punctuation handling should be deterministic");
+    }
+
+    // ── is_open_question ────────────────────────────────────────────
+
+    #[test]
+    fn is_open_question_explicit_prefix() {
+        assert!(is_open_question("OPEN: who will lead?"));
+        assert!(is_open_question("question: what about coverage?"));
+        assert!(is_open_question("TBD: deployment strategy"));
+    }
+
+    #[test]
+    fn is_open_question_genuine_question() {
+        assert!(is_open_question(
+            "What about the deployment strategy going forward?"
+        ));
+    }
+
+    #[test]
+    fn is_open_question_rhetorical_rejected() {
+        assert!(!is_open_question("Right?"));
+        assert!(!is_open_question("Why not?"));
+    }
+
+    #[test]
+    fn is_open_question_no_question_no_prefix() {
+        assert!(!is_open_question("This is a statement about testing"));
+    }
+
+    // ── MeetingHandoff::from_session ────────────────────────────────
+
+    #[test]
+    fn from_session_empty_no_panic() {
+        let session = empty_session();
+        let handoff = MeetingHandoff::from_session(&session);
+        assert!(handoff.decisions.is_empty());
+        assert!(handoff.action_items.is_empty());
+        assert!(handoff.open_questions.is_empty());
+        assert!(handoff.themes.is_empty());
+        assert!(handoff.next_owner.is_none());
+        assert!(!handoff.processed);
+    }
+
+    #[test]
+    fn from_session_populated_carries_decisions() {
+        let handoff = MeetingHandoff::from_session(&populated_session());
+        assert_eq!(handoff.decisions.len(), 1);
+        assert_eq!(handoff.decisions[0].description, "Adopt TDD");
+    }
+
+    #[test]
+    fn from_session_populated_carries_action_items() {
+        let handoff = MeetingHandoff::from_session(&populated_session());
+        assert_eq!(handoff.action_items.len(), 1);
+        assert_eq!(handoff.action_items[0].owner, "bob");
+    }
+
+    #[test]
+    fn from_session_explicit_questions_marked_explicit() {
+        let handoff = MeetingHandoff::from_session(&populated_session());
+        let explicit: Vec<_> = handoff
+            .open_questions
+            .iter()
+            .filter(|q| q.explicit)
+            .collect();
+        assert!(!explicit.is_empty(), "explicit questions should be flagged");
+        assert!(explicit.iter().any(|q| q.text.contains("testing")));
+    }
+
+    #[test]
+    fn from_session_inferred_questions_from_notes() {
+        let handoff = MeetingHandoff::from_session(&populated_session());
+        let inferred: Vec<_> = handoff
+            .open_questions
+            .iter()
+            .filter(|q| !q.explicit)
+            .collect();
+        // "OPEN: what about the timeline?" should be inferred from notes.
+        assert!(
+            !inferred.is_empty() || handoff.open_questions.len() >= 2,
+            "should have inferred questions from notes"
+        );
+    }
+
+    #[test]
+    fn from_session_collects_all_participants() {
+        let handoff = MeetingHandoff::from_session(&populated_session());
+        assert!(handoff.participants.contains(&"alice".to_string()));
+        assert!(handoff.participants.contains(&"bob".to_string()));
+    }
+
+    #[test]
+    fn from_session_preserves_next_owner() {
+        let handoff = MeetingHandoff::from_session(&populated_session());
+        assert_eq!(handoff.next_owner.as_deref(), Some("engineer"));
+    }
+
+    #[test]
+    fn from_session_topic_and_meeting_id() {
+        let handoff = MeetingHandoff::from_session(&populated_session());
+        assert_eq!(handoff.topic, "Sprint planning");
+        assert!(!handoff.meeting_id.is_empty());
+        assert!(handoff.meeting_id.contains("sprint"));
+    }
+
+    #[test]
+    fn from_session_themes_include_explicit_and_inferred() {
+        let handoff = MeetingHandoff::from_session(&populated_session());
+        assert!(
+            handoff.themes.contains(&"performance".to_string()),
+            "explicit themes should be preserved"
+        );
+        // "testing" appears in 3+ notes → should be inferred as theme.
+        assert!(
+            handoff.themes.contains(&"testing".to_string()),
+            "inferred theme 'testing' should appear: {:?}",
+            handoff.themes
+        );
+    }
+
+    // ── extract_themes_from_notes ───────────────────────────────────
+
+    #[test]
+    fn extract_themes_from_notes_empty() {
+        let themes = MeetingHandoff::extract_themes_from_notes(&[]);
+        assert!(themes.is_empty());
+    }
+
+    #[test]
+    fn extract_themes_from_notes_dedup() {
+        let notes = vec![
+            "testing testing testing".to_string(),
+            "testing is key to quality".to_string(),
+        ];
+        let themes = MeetingHandoff::extract_themes_from_notes(&notes);
+        assert!(themes.contains(&"testing".to_string()));
+        // No duplicates — the word appears once in the result.
+        assert_eq!(themes.iter().filter(|t| t.as_str() == "testing").count(), 1);
+    }
+
+    #[test]
+    fn extract_themes_from_notes_ordering_stable() {
+        let notes = vec![
+            "alpha bravo charlie delta".to_string(),
+            "alpha bravo charlie delta".to_string(),
+            "alpha bravo echo foxtrot".to_string(),
+        ];
+        let a = MeetingHandoff::extract_themes_from_notes(&notes);
+        let b = MeetingHandoff::extract_themes_from_notes(&notes);
+        assert_eq!(a, b, "theme extraction should be deterministic");
+    }
+}

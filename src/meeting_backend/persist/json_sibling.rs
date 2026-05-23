@@ -190,3 +190,148 @@ pub(super) fn write_json_sibling_for_markdown(
 
     Ok(json_path)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::meeting_backend::types::{ConversationMessage, HandoffActionItem, Role};
+    use crate::meeting_facilitator::MeetingDecision;
+
+    fn msg(role: Role, content: &str) -> ConversationMessage {
+        ConversationMessage {
+            role,
+            content: content.to_string(),
+            timestamp: "2026-01-15T10:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn json_action_item_from_handoff_preserves_fields() {
+        let src = HandoffActionItem {
+            description: "Deploy to staging".to_string(),
+            assignee: Some("Alice".to_string()),
+            deadline: Some("friday".to_string()),
+            linked_goal: Some("deploy-goal".to_string()),
+            priority: Some(1),
+        };
+        let json_item = JsonHandoffActionItem::from(&src);
+        assert_eq!(json_item.title, "Deploy to staging");
+        assert_eq!(json_item.owner, Some("Alice".to_string()));
+        assert_eq!(json_item.acceptance_criteria, None);
+    }
+
+    #[test]
+    fn json_action_item_from_no_assignee() {
+        let src = HandoffActionItem {
+            description: "Unassigned task".to_string(),
+            assignee: None,
+            deadline: None,
+            linked_goal: None,
+            priority: None,
+        };
+        let json_item = JsonHandoffActionItem::from(&src);
+        assert_eq!(json_item.owner, None);
+    }
+
+    #[test]
+    fn json_action_item_round_trip_serde() {
+        let item = JsonHandoffActionItem {
+            title: "Test".to_string(),
+            owner: Some("Bob".to_string()),
+            acceptance_criteria: None,
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        let r: JsonHandoffActionItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(item, r);
+    }
+
+    #[test]
+    fn build_sibling_populates_all_fields() {
+        let messages = vec![
+            msg(Role::User, "Let's discuss the plan."),
+            msg(
+                Role::Assistant,
+                "OPEN: what about the timeline going forward?",
+            ),
+        ];
+        let items = vec![HandoffActionItem {
+            description: "Write docs".to_string(),
+            assignee: Some("Charlie".to_string()),
+            deadline: None,
+            linked_goal: None,
+            priority: None,
+        }];
+        let decisions = vec![MeetingDecision {
+            description: "Use Rust".to_string(),
+            rationale: "Memory safety".to_string(),
+            participants: vec!["operator".to_string()],
+        }];
+        let md_path = std::path::Path::new("/tmp/test_report.md");
+        let sibling = build_sibling(md_path, &messages, &items, &decisions);
+
+        assert_eq!(sibling.schema_version, "v1");
+        assert!(sibling.participants.contains(&"operator".to_string()));
+        assert!(sibling.participants.contains(&"simard".to_string()));
+        assert!(sibling.participants.contains(&"Charlie".to_string()));
+        assert_eq!(sibling.decisions, vec!["Use Rust".to_string()]);
+        assert_eq!(sibling.action_items.len(), 1);
+        assert_eq!(sibling.action_items[0].title, "Write docs");
+        assert_eq!(sibling.transcript_ref, "test_report.md");
+        assert!(!sibling.open_questions.is_empty());
+    }
+
+    #[test]
+    fn build_sibling_empty_inputs() {
+        let sibling = build_sibling(std::path::Path::new("/tmp/empty.md"), &[], &[], &[]);
+        assert_eq!(sibling.schema_version, "v1");
+        assert!(sibling.participants.is_empty());
+        assert!(sibling.decisions.is_empty());
+        assert!(sibling.action_items.is_empty());
+        assert!(sibling.open_questions.is_empty());
+    }
+
+    #[test]
+    fn sibling_serde_round_trip() {
+        let sibling = JsonHandoffSibling {
+            schema_version: "v1".to_string(),
+            participants: vec!["operator".to_string()],
+            decisions: vec!["Use TDD".to_string()],
+            action_items: vec![JsonHandoffActionItem {
+                title: "Deploy".to_string(),
+                owner: Some("Dev".to_string()),
+                acceptance_criteria: None,
+            }],
+            open_questions: vec!["When?".to_string()],
+            transcript_ref: "report.md".to_string(),
+        };
+        let json = serde_json::to_string_pretty(&sibling).unwrap();
+        let rt: JsonHandoffSibling = serde_json::from_str(&json).unwrap();
+        assert_eq!(sibling, rt);
+    }
+
+    #[test]
+    fn write_json_sibling_creates_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "json-sibling-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let md_path = dir.join("report.md");
+        std::fs::write(&md_path, "# Report").unwrap();
+
+        let result = write_json_sibling_for_markdown(&md_path, &[], &[], &[]);
+        assert!(result.is_ok());
+        let json_path = result.unwrap();
+        assert!(json_path.exists());
+        assert_eq!(json_path.extension().unwrap(), "json");
+
+        let content = std::fs::read_to_string(&json_path).unwrap();
+        let parsed: JsonHandoffSibling = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed.schema_version, "v1");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

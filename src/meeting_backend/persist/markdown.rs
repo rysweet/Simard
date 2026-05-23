@@ -282,3 +282,174 @@ pub fn write_handoff_markdown_report(
 
     Ok(path)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::meeting_backend::types::{ConversationMessage, HandoffActionItem, Role};
+    use crate::meeting_facilitator::MeetingDecision;
+    use serial_test::serial;
+
+    fn temp_dir(label: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("md-{label}-{unique}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn msg(role: Role, content: &str) -> ConversationMessage {
+        ConversationMessage {
+            role,
+            content: content.to_string(),
+            timestamp: "2026-01-15T10:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    #[serial(simard_meetings_dir_env)]
+    fn write_markdown_export_creates_md_file() {
+        let dir = temp_dir("export");
+        unsafe { std::env::set_var("SIMARD_MEETINGS_DIR", &dir) };
+
+        let msgs = vec![msg(Role::User, "Hello"), msg(Role::Assistant, "Hi there")];
+        let path = write_markdown_export("Sprint", "2026-01-15T10:00:00Z", &msgs).unwrap();
+        assert!(path.exists());
+        assert_eq!(path.extension().unwrap(), "md");
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("topic: \"Sprint\""));
+        assert!(content.contains("**Operator**"));
+        assert!(content.contains("**Simard**"));
+
+        unsafe { std::env::remove_var("SIMARD_MEETINGS_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[serial(simard_meetings_dir_env)]
+    fn write_markdown_export_empty_messages() {
+        let dir = temp_dir("export-empty");
+        unsafe { std::env::set_var("SIMARD_MEETINGS_DIR", &dir) };
+
+        let path = write_markdown_export("Empty", "2026-01-15T10:00:00Z", &[]).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("No messages recorded"));
+
+        unsafe { std::env::remove_var("SIMARD_MEETINGS_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[serial(simard_meetings_dir_env)]
+    fn write_handoff_markdown_report_creates_report() {
+        let dir = temp_dir("report");
+        unsafe { std::env::set_var("SIMARD_MEETINGS_DIR", &dir) };
+
+        let msgs = vec![
+            msg(Role::User, "Let's plan the sprint."),
+            msg(
+                Role::Assistant,
+                "Decision: adopt structured handoff bundles.",
+            ),
+        ];
+        let items = vec![HandoffActionItem {
+            description: "Write integration tests".to_string(),
+            assignee: Some("Alice".to_string()),
+            deadline: Some("by friday".to_string()),
+            linked_goal: None,
+            priority: Some(1),
+        }];
+        let decisions = vec![MeetingDecision {
+            description: "Adopt TDD".to_string(),
+            rationale: "Better quality".to_string(),
+            participants: vec!["operator".to_string()],
+        }];
+
+        let path = write_handoff_markdown_report(
+            "Sprint Planning",
+            "2026-01-15T10:00:00Z",
+            "Good meeting.",
+            &msgs,
+            &items,
+            &decisions,
+            &[],
+        )
+        .unwrap();
+
+        assert!(path.exists());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("## Summary"));
+        assert!(content.contains("## Decisions"));
+        assert!(content.contains("Adopt TDD"));
+        assert!(content.contains("## Action Items"));
+        assert!(content.contains("Write integration tests"));
+        assert!(content.contains("Alice"));
+        assert!(content.contains("## Open Questions"));
+        assert!(content.contains("## Themes"));
+
+        let json_path = path.with_extension("json");
+        assert!(json_path.exists(), "JSON sibling should exist");
+
+        unsafe { std::env::remove_var("SIMARD_MEETINGS_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[serial(simard_meetings_dir_env)]
+    fn write_handoff_markdown_report_empty_sections() {
+        let dir = temp_dir("report-empty");
+        unsafe { std::env::set_var("SIMARD_MEETINGS_DIR", &dir) };
+
+        let path = write_handoff_markdown_report(
+            "Empty",
+            "2026-01-15T10:00:00Z",
+            "Nothing.",
+            &[],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("No explicit decisions recorded"));
+        assert!(content.contains("No action items extracted"));
+
+        unsafe { std::env::remove_var("SIMARD_MEETINGS_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[serial(simard_meetings_dir_env)]
+    fn write_handoff_markdown_report_includes_templates() {
+        let dir = temp_dir("report-tmpl");
+        unsafe { std::env::set_var("SIMARD_MEETINGS_DIR", &dir) };
+
+        let templates = vec![AppliedTemplate {
+            name: "retro".to_string(),
+            agenda: "## Retrospective\n1. What went well?".to_string(),
+            applied_at: "2026-01-15T10:05:00Z".to_string(),
+        }];
+
+        let path = write_handoff_markdown_report(
+            "Retro",
+            "2026-01-15T10:00:00Z",
+            "Good retro.",
+            &[msg(Role::User, "went well")],
+            &[],
+            &[],
+            &templates,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("## Agenda"));
+        assert!(content.contains("Template: `retro`"));
+
+        unsafe { std::env::remove_var("SIMARD_MEETINGS_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
