@@ -493,3 +493,395 @@ pub fn extract_deadline_pub(lower_sentence: &str) -> Option<String> {
 pub fn clean_action_description_pub(sentence: &str) -> String {
     extract::clean_action_description(sentence)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::meeting_backend::types::{ConversationMessage, HandoffActionItem, Role};
+    use serial_test::serial;
+
+    fn msg(role: Role, content: &str, ts: &str) -> ConversationMessage {
+        ConversationMessage {
+            role,
+            content: content.to_string(),
+            timestamp: ts.to_string(),
+        }
+    }
+
+    #[test]
+    fn sanitize_filename_strips_path_separators() {
+        assert_eq!(sanitize_filename("foo/bar\\baz"), "foo_bar_baz");
+    }
+
+    #[test]
+    fn sanitize_filename_strips_dots_and_control() {
+        assert_eq!(sanitize_filename("..dangerous..name.."), "dangerousname");
+    }
+
+    #[test]
+    fn sanitize_filename_replaces_special_chars() {
+        assert_eq!(sanitize_filename("a:b*c?d<e>f|g"), "a_b_c_d_e_f_g");
+    }
+
+    #[test]
+    fn sanitize_filename_replaces_spaces() {
+        assert_eq!(sanitize_filename("hello world"), "hello_world");
+    }
+
+    #[test]
+    fn sanitize_filename_empty_returns_meeting() {
+        assert_eq!(sanitize_filename(""), "meeting");
+    }
+
+    #[test]
+    fn sanitize_filename_only_dots_returns_meeting() {
+        assert_eq!(sanitize_filename("...."), "meeting");
+    }
+
+    #[test]
+    fn sanitize_filename_caps_length() {
+        let long = "a".repeat(200);
+        let result = sanitize_filename(&long);
+        assert!(result.len() <= MAX_FILENAME_LEN);
+    }
+
+    #[test]
+    fn sanitize_filename_strips_null_bytes() {
+        assert_eq!(sanitize_filename("foo\0bar"), "foobar");
+    }
+
+    #[test]
+    #[serial(simard_env)]
+    fn write_transcript_creates_json_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("SIMARD_MEETINGS_DIR", tmp.path());
+        }
+        let transcript = MeetingTranscript {
+            topic: "test-topic".to_string(),
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            closed_at: "2026-01-01T01:00:00Z".to_string(),
+            duration_secs: 3600,
+            summary: "A test summary".to_string(),
+            messages: vec![msg(Role::User, "Hello", "2026-01-01T00:00:00Z")],
+        };
+
+        let path = write_transcript(&transcript).unwrap();
+        assert!(path.exists());
+        assert!(path.extension().unwrap() == "json");
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let loaded: MeetingTranscript = serde_json::from_str(&raw).unwrap();
+        assert_eq!(loaded.topic, "test-topic");
+        assert_eq!(loaded.messages.len(), 1);
+
+        unsafe {
+            std::env::remove_var("SIMARD_MEETINGS_DIR");
+        }
+    }
+
+    #[test]
+    #[serial(simard_env)]
+    fn write_auto_save_creates_autosave_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("SIMARD_MEETINGS_DIR", tmp.path());
+        }
+        let transcript = MeetingTranscript {
+            topic: "autosave-topic".to_string(),
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            closed_at: "2026-01-01T00:30:00Z".to_string(),
+            duration_secs: 1800,
+            summary: "Partial".to_string(),
+            messages: vec![],
+        };
+
+        let path = write_auto_save(&transcript).unwrap();
+        assert!(path.exists());
+        let filename = path.file_name().unwrap().to_string_lossy();
+        assert!(filename.starts_with("_autosave_"));
+
+        unsafe {
+            std::env::remove_var("SIMARD_MEETINGS_DIR");
+        }
+    }
+
+    #[test]
+    fn handoff_enrichment_default_is_empty() {
+        let e = HandoffEnrichment::default();
+        assert!(e.next_owner.is_none());
+        assert!(e.artifacts.is_empty());
+        assert!(e.structured_decisions.is_none());
+    }
+
+    #[test]
+    #[serial(simard_env)]
+    fn write_handoff_creates_artifact() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("SIMARD_HANDOFF_DIR", tmp.path());
+        }
+
+        let messages = vec![
+            msg(
+                Role::User,
+                "Alice will deploy the service by friday.",
+                "2026-01-01T00:00:00Z",
+            ),
+            msg(
+                Role::Assistant,
+                "Decision: we use microservices.",
+                "2026-01-01T00:01:00Z",
+            ),
+        ];
+        let action_items = vec![HandoffActionItem {
+            description: "Deploy service".to_string(),
+            assignee: Some("Alice".to_string()),
+            deadline: Some("by friday".to_string()),
+            linked_goal: None,
+            priority: None,
+        }];
+        let decisions = vec!["Use microservices".to_string()];
+
+        write_handoff(
+            "integration-test",
+            "Meeting summary",
+            &messages,
+            &action_items,
+            &decisions,
+        )
+        .unwrap();
+
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                name.starts_with("handoff-") && name.ends_with(".json")
+            })
+            .collect();
+        assert!(
+            !entries.is_empty(),
+            "handoff file should be written in {}",
+            tmp.path().display()
+        );
+
+        let raw = std::fs::read_to_string(entries[0].path()).unwrap();
+        let handoff: crate::meeting_facilitator::MeetingHandoff =
+            serde_json::from_str(&raw).unwrap();
+        assert_eq!(handoff.topic, "integration-test");
+        assert!(!handoff.participants.is_empty());
+        assert!(!handoff.action_items.is_empty());
+        assert_eq!(handoff.action_items[0].owner, "Alice");
+
+        unsafe {
+            std::env::remove_var("SIMARD_HANDOFF_DIR");
+        }
+    }
+
+    #[test]
+    #[serial(simard_env)]
+    fn write_handoff_with_explicit_deduplicates_questions() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("SIMARD_HANDOFF_DIR", tmp.path());
+        }
+
+        let messages = vec![msg(
+            Role::User,
+            "Should we migrate to the new framework entirely?",
+            "2026-01-01T00:00:00Z",
+        )];
+        let explicit_questions =
+            vec!["Should we migrate to the new framework entirely?".to_string()];
+
+        write_handoff_with_explicit(
+            "dedup-test",
+            "summary",
+            &messages,
+            &[],
+            &[],
+            &explicit_questions,
+            HandoffEnrichment::default(),
+        )
+        .unwrap();
+
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
+            .collect();
+        let raw = std::fs::read_to_string(entries[0].path()).unwrap();
+        let handoff: crate::meeting_facilitator::MeetingHandoff =
+            serde_json::from_str(&raw).unwrap();
+
+        let matching: Vec<_> = handoff
+            .open_questions
+            .iter()
+            .filter(|q| q.text.contains("migrate"))
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "should deduplicate explicit vs inferred: {matching:?}"
+        );
+        assert!(matching[0].explicit);
+
+        unsafe {
+            std::env::remove_var("SIMARD_HANDOFF_DIR");
+        }
+    }
+
+    #[test]
+    #[serial(simard_env)]
+    fn write_handoff_uses_structured_decisions_when_provided() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("SIMARD_HANDOFF_DIR", tmp.path());
+        }
+
+        let messages = vec![msg(Role::User, "Hello", "2026-01-01T00:00:00Z")];
+        let prebuilt = vec![crate::meeting_facilitator::MeetingDecision {
+            description: "Prebuilt decision".to_string(),
+            rationale: "Prebuilt rationale".to_string(),
+            participants: vec!["alice".to_string()],
+        }];
+
+        write_handoff_with_explicit(
+            "prebuilt-test",
+            "summary",
+            &messages,
+            &[],
+            &["ignored string".to_string()],
+            &[],
+            HandoffEnrichment {
+                structured_decisions: Some(prebuilt),
+                ..HandoffEnrichment::default()
+            },
+        )
+        .unwrap();
+
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
+            .collect();
+        let raw = std::fs::read_to_string(entries[0].path()).unwrap();
+        let handoff: crate::meeting_facilitator::MeetingHandoff =
+            serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(handoff.decisions.len(), 1);
+        assert_eq!(handoff.decisions[0].description, "Prebuilt decision");
+        assert_eq!(handoff.decisions[0].rationale, "Prebuilt rationale");
+
+        unsafe {
+            std::env::remove_var("SIMARD_HANDOFF_DIR");
+        }
+    }
+
+    #[test]
+    #[serial(simard_env)]
+    fn write_handoff_bundle_creates_three_artifacts() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("SIMARD_MEETINGS_ROOT", tmp.path());
+        }
+
+        let messages = vec![
+            msg(Role::User, "Hi", "2026-05-01T10:00:00Z"),
+            msg(Role::Assistant, "Hello", "2026-05-01T10:00:05Z"),
+        ];
+
+        let result = write_handoff_bundle(
+            "bundle-test",
+            "summary",
+            Some("2026-05-01T10:00:00Z"),
+            &messages,
+            &[],
+            &[],
+            vec![],
+            vec![],
+            vec!["operator".to_string()],
+            HandoffEnrichment::default(),
+        );
+        assert!(result.is_ok());
+
+        let dir = result.unwrap();
+        assert!(dir.join("meeting_handoff.json").is_file());
+        assert!(dir.join("meeting_handoff.md").is_file());
+        assert!(dir.join("transcript.json").is_file());
+
+        let raw = std::fs::read_to_string(dir.join("meeting_handoff.json")).unwrap();
+        let handoff: crate::meeting_facilitator::MeetingHandoff =
+            serde_json::from_str(&raw).unwrap();
+        assert_eq!(handoff.topic, "bundle-test");
+        assert!(handoff.transcript_path.is_some());
+
+        unsafe {
+            std::env::remove_var("SIMARD_MEETINGS_ROOT");
+        }
+    }
+
+    #[test]
+    #[serial(simard_env)]
+    fn write_handoff_includes_assignee_in_participants() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("SIMARD_HANDOFF_DIR", tmp.path());
+        }
+
+        let messages = vec![msg(Role::User, "Hello", "2026-01-01T00:00:00Z")];
+        let action_items = vec![HandoffActionItem {
+            description: "A task".to_string(),
+            assignee: Some("ExternalPerson".to_string()),
+            deadline: None,
+            linked_goal: None,
+            priority: None,
+        }];
+
+        write_handoff("test", "summary", &messages, &action_items, &[]).unwrap();
+
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
+            .collect();
+        let raw = std::fs::read_to_string(entries[0].path()).unwrap();
+        let handoff: crate::meeting_facilitator::MeetingHandoff =
+            serde_json::from_str(&raw).unwrap();
+
+        assert!(
+            handoff.participants.contains(&"ExternalPerson".to_string()),
+            "assignee should appear in participants: {:?}",
+            handoff.participants
+        );
+
+        unsafe {
+            std::env::remove_var("SIMARD_HANDOFF_DIR");
+        }
+    }
+
+    #[test]
+    fn extract_assignee_pub_delegates_correctly() {
+        assert_eq!(
+            extract_assignee_pub("Alice will fix it"),
+            Some("Alice".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_deadline_pub_delegates_correctly() {
+        assert_eq!(
+            extract_deadline_pub("by friday please"),
+            Some("by friday".to_string())
+        );
+    }
+
+    #[test]
+    fn clean_action_description_pub_delegates_correctly() {
+        assert_eq!(
+            clean_action_description_pub("TODO: write tests"),
+            "write tests"
+        );
+    }
+}

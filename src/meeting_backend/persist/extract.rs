@@ -392,3 +392,468 @@ pub fn extract_decision_participants_pub(
 ) -> Vec<String> {
     extract_decision_participants(decision, messages)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::meeting_backend::types::{ConversationMessage, HandoffActionItem, Role};
+
+    fn msg(role: Role, content: &str) -> ConversationMessage {
+        ConversationMessage {
+            role,
+            content: content.to_string(),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn split_sentences_basic() {
+        let result = split_sentences("Hello world. Goodbye world!");
+        assert_eq!(result, vec!["Hello world.", "Goodbye world!"]);
+    }
+
+    #[test]
+    fn split_sentences_newline_delimiter() {
+        let result = split_sentences("Line one\nLine two");
+        assert_eq!(result, vec!["Line one", "Line two"]);
+    }
+
+    #[test]
+    fn split_sentences_question_mark() {
+        let result = split_sentences("Is this a test? Yes it is.");
+        assert_eq!(result, vec!["Is this a test?", "Yes it is."]);
+    }
+
+    #[test]
+    fn split_sentences_empty() {
+        assert!(split_sentences("").is_empty());
+    }
+
+    #[test]
+    fn split_sentences_no_terminator() {
+        let result = split_sentences("No terminator here");
+        assert_eq!(result, vec!["No terminator here"]);
+    }
+
+    #[test]
+    fn split_sentences_trailing_whitespace() {
+        let result = split_sentences("  Hello.   ");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], "Hello.");
+    }
+
+    #[test]
+    fn clean_strips_action_item_prefix() {
+        assert_eq!(
+            clean_action_description("action item: fix the bug"),
+            "fix the bug"
+        );
+    }
+
+    #[test]
+    fn clean_strips_todo_prefix() {
+        assert_eq!(clean_action_description("TODO: write tests"), "write tests");
+    }
+
+    #[test]
+    fn clean_strips_task_prefix() {
+        assert_eq!(
+            clean_action_description("Task: deploy the service"),
+            "deploy the service"
+        );
+    }
+
+    #[test]
+    fn clean_preserves_normal_text() {
+        assert_eq!(
+            clean_action_description("Alice will fix it"),
+            "Alice will fix it"
+        );
+    }
+
+    #[test]
+    fn clean_strips_ai_prefix() {
+        assert_eq!(clean_action_description("AI: review PR"), "review PR");
+    }
+
+    #[test]
+    fn assignee_from_will_verb() {
+        assert_eq!(
+            extract_assignee("Alice will fix the tests"),
+            Some("Alice".to_string())
+        );
+    }
+
+    #[test]
+    fn assignee_from_should_verb() {
+        assert_eq!(
+            extract_assignee("Bob should review the PR"),
+            Some("Bob".to_string())
+        );
+    }
+
+    #[test]
+    fn assignee_from_needs_to_verb() {
+        assert_eq!(
+            extract_assignee("Charlie needs to update docs"),
+            Some("Charlie".to_string())
+        );
+    }
+
+    #[test]
+    fn assignee_from_assigned_to() {
+        assert_eq!(
+            extract_assignee("This is assigned to Dave immediately"),
+            Some("Dave".to_string())
+        );
+    }
+
+    #[test]
+    fn assignee_none_when_lowercase_prefix() {
+        assert_eq!(extract_assignee("we will do it"), None);
+    }
+
+    #[test]
+    fn assignee_none_for_short_name() {
+        assert_eq!(extract_assignee("I will do it"), None);
+    }
+
+    #[test]
+    fn deadline_by_friday() {
+        assert_eq!(
+            extract_deadline("finish this by friday"),
+            Some("by friday".to_string())
+        );
+    }
+
+    #[test]
+    fn deadline_asap() {
+        assert_eq!(
+            extract_deadline("we need this asap"),
+            Some("asap".to_string())
+        );
+    }
+
+    #[test]
+    fn deadline_none_when_absent() {
+        assert_eq!(extract_deadline("no deadline mentioned"), None);
+    }
+
+    #[test]
+    fn deadline_by_eod() {
+        assert_eq!(
+            extract_deadline("please complete by eod"),
+            Some("by eod".to_string())
+        );
+    }
+
+    #[test]
+    fn deadline_next_sprint() {
+        assert_eq!(
+            extract_deadline("ship it next sprint"),
+            Some("next sprint".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_action_items_basic() {
+        let messages = vec![msg(Role::User, "Alice will fix the login bug by friday.")];
+        let items = extract_action_items(&messages);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].assignee, Some("Alice".to_string()));
+        assert_eq!(items[0].deadline, Some("by friday".to_string()));
+        assert!(
+            items[0]
+                .description
+                .contains("Alice will fix the login bug")
+        );
+    }
+
+    #[test]
+    fn extract_action_items_todo_prefix() {
+        let messages = vec![msg(Role::Assistant, "TODO: Write unit tests for persist.")];
+        let items = extract_action_items(&messages);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].description, "Write unit tests for persist.");
+    }
+
+    #[test]
+    fn extract_action_items_skips_short_desc() {
+        let messages = vec![msg(Role::User, "todo: ok")];
+        let items = extract_action_items(&messages);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn extract_action_items_empty_messages() {
+        let items = extract_action_items(&[]);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn extract_action_items_no_signals() {
+        let messages = vec![msg(Role::User, "The weather is nice today.")];
+        let items = extract_action_items(&messages);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn extract_action_items_multiple_sentences() {
+        let messages = vec![msg(
+            Role::User,
+            "Alice will fix the bug. Bob should review the PR.",
+        )];
+        let items = extract_action_items(&messages);
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn extract_action_items_follow_up_signal() {
+        let messages = vec![msg(Role::User, "We need a follow-up meeting by tomorrow.")];
+        let items = extract_action_items(&messages);
+        assert!(!items.is_empty(), "follow-up should trigger action signal");
+        assert_eq!(items[0].deadline, Some("by tomorrow".to_string()));
+    }
+
+    #[test]
+    fn link_action_items_matches_goal() {
+        let mut items = vec![HandoffActionItem {
+            description: "Improve the search performance significantly".to_string(),
+            assignee: None,
+            deadline: None,
+            linked_goal: None,
+            priority: None,
+        }];
+        let goals = vec![(
+            "perf-sprint".to_string(),
+            "Improve search performance".to_string(),
+        )];
+        link_action_items_to_goals(&mut items, &goals);
+        assert_eq!(items[0].linked_goal, Some("perf-sprint".to_string()));
+    }
+
+    #[test]
+    fn link_action_items_no_match() {
+        let mut items = vec![HandoffActionItem {
+            description: "Fix login page".to_string(),
+            assignee: None,
+            deadline: None,
+            linked_goal: None,
+            priority: None,
+        }];
+        let goals = vec![("perf".to_string(), "Improve search performance".to_string())];
+        link_action_items_to_goals(&mut items, &goals);
+        assert_eq!(items[0].linked_goal, None);
+    }
+
+    #[test]
+    fn link_action_items_picks_best_match() {
+        let mut items = vec![HandoffActionItem {
+            description: "Improve the search performance and indexing".to_string(),
+            assignee: None,
+            deadline: None,
+            linked_goal: None,
+            priority: None,
+        }];
+        let goals = vec![
+            ("auth".to_string(), "Authentication overhaul".to_string()),
+            (
+                "perf".to_string(),
+                "Improve search performance indexing".to_string(),
+            ),
+        ];
+        link_action_items_to_goals(&mut items, &goals);
+        assert_eq!(items[0].linked_goal, Some("perf".to_string()));
+    }
+
+    #[test]
+    fn extract_decisions_basic() {
+        let messages = vec![msg(
+            Role::User,
+            "Decision: We will use Rust for the rewrite.",
+        )];
+        let decisions = extract_decisions(&messages);
+        assert_eq!(decisions.len(), 1);
+        assert!(decisions[0].contains("We will use Rust"));
+    }
+
+    #[test]
+    fn extract_decisions_agreed_to() {
+        let messages = vec![msg(Role::Assistant, "We agreed to ship on Monday.")];
+        let decisions = extract_decisions(&messages);
+        assert_eq!(decisions.len(), 1);
+    }
+
+    #[test]
+    fn extract_decisions_deduplicates() {
+        let messages = vec![
+            msg(Role::User, "Decision: Use Rust."),
+            msg(Role::Assistant, "Decision: Use Rust."),
+        ];
+        let decisions = extract_decisions(&messages);
+        assert_eq!(decisions.len(), 1);
+    }
+
+    #[test]
+    fn extract_decisions_empty() {
+        let decisions = extract_decisions(&[]);
+        assert!(decisions.is_empty());
+    }
+
+    #[test]
+    fn extract_decisions_no_signals() {
+        let messages = vec![msg(Role::User, "The weather is fine.")];
+        let decisions = extract_decisions(&messages);
+        assert!(decisions.is_empty());
+    }
+
+    #[test]
+    fn extract_open_questions_explicit_prefix() {
+        let messages = vec![msg(Role::User, "OPEN: Who will lead the migration?")];
+        let questions = extract_open_questions(&messages);
+        assert_eq!(questions.len(), 1);
+        assert!(questions[0].explicit);
+    }
+
+    #[test]
+    fn extract_open_questions_question_mark() {
+        let messages = vec![msg(
+            Role::User,
+            "Should we migrate to the new framework entirely?",
+        )];
+        let questions = extract_open_questions(&messages);
+        assert_eq!(questions.len(), 1);
+        assert!(!questions[0].explicit);
+    }
+
+    #[test]
+    fn extract_open_questions_short_question_skipped() {
+        let messages = vec![msg(Role::User, "Right?")];
+        let questions = extract_open_questions(&messages);
+        assert!(questions.is_empty());
+    }
+
+    #[test]
+    fn extract_open_questions_deduplicates() {
+        let messages = vec![
+            msg(Role::User, "Should we deploy this to production now?"),
+            msg(Role::Assistant, "Should we deploy this to production now?"),
+        ];
+        let questions = extract_open_questions(&messages);
+        assert_eq!(questions.len(), 1);
+    }
+
+    #[test]
+    fn extract_open_questions_tbd_prefix() {
+        let messages = vec![msg(Role::User, "TBD: resource allocation for Q3")];
+        let questions = extract_open_questions(&messages);
+        assert_eq!(questions.len(), 1);
+        assert!(questions[0].explicit);
+    }
+
+    #[test]
+    fn extract_themes_recurring_words() {
+        let messages = vec![
+            msg(Role::User, "We need better performance for search."),
+            msg(
+                Role::Assistant,
+                "Performance improvements will help search speed.",
+            ),
+        ];
+        let themes = extract_themes(&messages);
+        assert!(
+            themes.contains(&"performance".to_string()) || themes.contains(&"search".to_string()),
+            "Expected recurring words in themes: {themes:?}"
+        );
+    }
+
+    #[test]
+    fn extract_themes_skips_system_messages() {
+        let messages = vec![
+            msg(Role::System, "performance performance performance"),
+            msg(Role::User, "Hello, let's begin."),
+        ];
+        let themes = extract_themes(&messages);
+        assert!(
+            !themes.contains(&"performance".to_string()),
+            "System messages should be skipped"
+        );
+    }
+
+    #[test]
+    fn extract_themes_empty_messages() {
+        let themes = extract_themes(&[]);
+        assert!(themes.is_empty());
+    }
+
+    #[test]
+    fn extract_themes_single_message_no_themes() {
+        let messages = vec![msg(Role::User, "Unique words in a single message only.")];
+        let themes = extract_themes(&messages);
+        assert!(themes.is_empty());
+    }
+
+    #[test]
+    fn extract_themes_caps_at_ten() {
+        let many_words: Vec<String> = (0..20).map(|i| format!("keyword{i}")).collect();
+        let content = many_words.join(" ");
+        let messages = vec![msg(Role::User, &content), msg(Role::Assistant, &content)];
+        let themes = extract_themes(&messages);
+        assert!(themes.len() <= 10);
+    }
+
+    #[test]
+    fn rationale_from_preceding_message() {
+        let messages = vec![
+            msg(Role::User, "Rust gives us memory safety."),
+            msg(Role::Assistant, "We decided to adopt Rust for the rewrite."),
+        ];
+        let rationale =
+            extract_decision_rationale_pub("We decided to adopt Rust for the rewrite.", &messages);
+        assert!(rationale.contains("memory safety"));
+    }
+
+    #[test]
+    fn rationale_empty_when_no_preceding() {
+        let messages = vec![msg(Role::User, "We decided to use Rust.")];
+        let rationale = extract_decision_rationale_pub("We decided to use Rust.", &messages);
+        assert!(rationale.is_empty());
+    }
+
+    #[test]
+    fn rationale_truncates_long_preceding() {
+        let long_msg = "x".repeat(400);
+        let messages = vec![
+            msg(Role::User, &long_msg),
+            msg(Role::Assistant, "We decided to proceed."),
+        ];
+        let rationale = extract_decision_rationale_pub("We decided to proceed.", &messages);
+        assert!(rationale.len() <= 300, "rationale should be truncated");
+        assert!(rationale.ends_with('…'));
+    }
+
+    #[test]
+    fn participants_from_decision_message() {
+        let messages = vec![
+            msg(Role::User, "We should adopt this."),
+            msg(Role::Assistant, "We decided to use Rust."),
+        ];
+        let parts = extract_decision_participants_pub("We decided to use Rust.", &messages);
+        assert!(parts.contains(&"simard".to_string()));
+        assert!(parts.contains(&"operator".to_string()));
+    }
+
+    #[test]
+    fn participants_empty_when_decision_not_found() {
+        let messages = vec![msg(Role::User, "Nothing relevant.")];
+        let parts = extract_decision_participants_pub("Nonexistent decision", &messages);
+        assert!(parts.is_empty());
+    }
+
+    #[test]
+    fn participants_single_message_no_predecessor() {
+        let messages = vec![msg(Role::User, "We decided to ship it.")];
+        let parts = extract_decision_participants_pub("We decided to ship it.", &messages);
+        assert_eq!(parts, vec!["operator".to_string()]);
+    }
+}

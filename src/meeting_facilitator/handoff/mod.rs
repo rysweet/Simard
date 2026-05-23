@@ -381,3 +381,297 @@ pub use persistence::{
     mark_meeting_handoff_processed, meeting_bundle_dir, remove_session_wip, save_session_wip,
     write_meeting_bundle, write_meeting_handoff,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::super::types::{
+        ActionItem, MeetingDecision, MeetingSession, MeetingSessionStatus, OpenQuestion,
+    };
+    use super::*;
+
+    fn make_session(topic: &str) -> MeetingSession {
+        MeetingSession {
+            topic: topic.to_string(),
+            decisions: vec![],
+            action_items: vec![],
+            notes: vec![],
+            status: MeetingSessionStatus::Closed,
+            started_at: "2026-05-01T10:00:00Z".to_string(),
+            participants: vec!["alice".to_string()],
+            explicit_questions: vec![],
+            themes: vec![],
+            next_owner: None,
+        }
+    }
+
+    #[test]
+    fn derive_meeting_id_format() {
+        let id = derive_meeting_id("2026-05-01T10:00:00Z", "Sprint Planning");
+        assert!(id.starts_with("20260501T100000Z-"));
+        assert!(id.contains("sprint"));
+    }
+
+    #[test]
+    fn derive_meeting_id_empty_topic() {
+        let id = derive_meeting_id("2026-05-01T10:00:00Z", "");
+        assert_eq!(id, "20260501T100000Z");
+    }
+
+    #[test]
+    fn derive_meeting_id_invalid_timestamp_still_works() {
+        let id = derive_meeting_id("not-a-date", "test");
+        assert!(id.contains("test"));
+    }
+
+    #[test]
+    fn derive_meeting_id_long_topic_capped() {
+        let long_topic = "a".repeat(200);
+        let id = derive_meeting_id("2026-05-01T10:00:00Z", &long_topic);
+        let slug_part = id.split('-').skip(1).collect::<Vec<_>>().join("-");
+        assert!(slug_part.len() <= 64);
+    }
+
+    #[test]
+    fn is_open_question_explicit_prefix() {
+        assert!(is_open_question("OPEN: what about X?"));
+        assert!(is_open_question("todo: figure this out"));
+        assert!(is_open_question("TBD: timeline"));
+        assert!(is_open_question("question: how?"));
+        assert!(is_open_question("unresolved: ownership"));
+    }
+
+    #[test]
+    fn is_open_question_genuine_question() {
+        assert!(is_open_question("Should we migrate the entire codebase?"));
+    }
+
+    #[test]
+    fn is_open_question_rhetorical_rejected() {
+        assert!(!is_open_question("Right?"));
+        assert!(!is_open_question("Why not?"));
+        assert!(!is_open_question("Who cares?"));
+    }
+
+    #[test]
+    fn is_open_question_no_marker_no_question_mark() {
+        assert!(!is_open_question("This is a plain statement"));
+    }
+
+    #[test]
+    fn from_session_basic() {
+        let mut s = make_session("test");
+        s.decisions.push(MeetingDecision {
+            description: "Use Rust".to_string(),
+            rationale: "Safety".to_string(),
+            participants: vec!["alice".to_string()],
+        });
+        s.action_items.push(ActionItem {
+            description: "Write tests".to_string(),
+            owner: "bob".to_string(),
+            priority: 1,
+            due_description: Some("next sprint".to_string()),
+            linked_issue: None,
+        });
+
+        let handoff = MeetingHandoff::from_session(&s);
+        assert_eq!(handoff.topic, "test");
+        assert!(!handoff.meeting_id.is_empty());
+        assert_eq!(handoff.decisions.len(), 1);
+        assert_eq!(handoff.action_items.len(), 1);
+        assert!(!handoff.processed);
+    }
+
+    #[test]
+    fn from_session_merges_explicit_and_inferred_questions() {
+        let mut s = make_session("questions-test");
+        s.explicit_questions = vec!["How do we deploy?".to_string()];
+        s.notes = vec![
+            "OPEN: What about testing?".to_string(),
+            "Just a regular note".to_string(),
+        ];
+
+        let handoff = MeetingHandoff::from_session(&s);
+        assert!(handoff.open_questions.len() >= 2);
+        assert!(
+            handoff
+                .open_questions
+                .iter()
+                .any(|q| q.explicit && q.text.contains("deploy"))
+        );
+        assert!(
+            handoff
+                .open_questions
+                .iter()
+                .any(|q| !q.explicit && q.text.contains("testing"))
+        );
+    }
+
+    #[test]
+    fn from_session_collects_participants_from_decisions_and_actions() {
+        let mut s = make_session("participants");
+        s.decisions.push(MeetingDecision {
+            description: "d".to_string(),
+            rationale: "r".to_string(),
+            participants: vec!["carol".to_string()],
+        });
+        s.action_items.push(ActionItem {
+            description: "a".to_string(),
+            owner: "dave".to_string(),
+            priority: 0,
+            due_description: None,
+            linked_issue: None,
+        });
+
+        let handoff = MeetingHandoff::from_session(&s);
+        assert!(handoff.participants.contains(&"alice".to_string()));
+        assert!(handoff.participants.contains(&"carol".to_string()));
+        assert!(handoff.participants.contains(&"dave".to_string()));
+    }
+
+    #[test]
+    fn from_session_extracts_themes() {
+        let mut s = make_session("themes");
+        s.notes = vec![
+            "We need better performance for search queries".to_string(),
+            "Performance of the search system is critical".to_string(),
+        ];
+
+        let handoff = MeetingHandoff::from_session(&s);
+        assert!(
+            !handoff.themes.is_empty(),
+            "should extract themes from notes: {:?}",
+            handoff.themes
+        );
+    }
+
+    #[test]
+    fn from_session_explicit_themes_take_priority() {
+        let mut s = make_session("explicit-themes");
+        s.themes = vec!["architecture".to_string()];
+        s.notes = vec![
+            "architecture discussion was productive".to_string(),
+            "more architecture work needed".to_string(),
+        ];
+
+        let handoff = MeetingHandoff::from_session(&s);
+        let arch_count = handoff
+            .themes
+            .iter()
+            .filter(|t| t.to_lowercase() == "architecture")
+            .count();
+        assert_eq!(arch_count, 1, "explicit theme should not be duplicated");
+    }
+
+    #[test]
+    fn from_session_empty_notes_uses_decision_action_fallback() {
+        let mut s = make_session("fallback-themes");
+        s.decisions = vec![
+            MeetingDecision {
+                description: "Improve deployment pipeline efficiency".to_string(),
+                rationale: "r".to_string(),
+                participants: vec![],
+            },
+            MeetingDecision {
+                description: "Pipeline needs deployment automation".to_string(),
+                rationale: "r".to_string(),
+                participants: vec![],
+            },
+        ];
+
+        let handoff = MeetingHandoff::from_session(&s);
+        let _ = handoff.themes;
+    }
+
+    #[test]
+    fn from_session_preserves_next_owner() {
+        let mut s = make_session("owner-test");
+        s.next_owner = Some("engineer".to_string());
+
+        let handoff = MeetingHandoff::from_session(&s);
+        assert_eq!(handoff.next_owner, Some("engineer".to_string()));
+    }
+
+    #[test]
+    fn from_session_duration_computed() {
+        let s = make_session("duration");
+        let handoff = MeetingHandoff::from_session(&s);
+        assert!(handoff.duration_secs.is_some());
+    }
+
+    #[test]
+    fn handoff_artifact_serde_roundtrip() {
+        let art = HandoffArtifact {
+            kind: ARTIFACT_KIND_TRANSCRIPT.to_string(),
+            uri_or_path: "/tmp/transcript.json".to_string(),
+            description: Some("Full transcript".to_string()),
+        };
+        let json = serde_json::to_string(&art).unwrap();
+        let art2: HandoffArtifact = serde_json::from_str(&json).unwrap();
+        assert_eq!(art, art2);
+    }
+
+    #[test]
+    fn handoff_artifact_path_alias() {
+        let json = r#"{"kind":"transcript","path":"/tmp/t.json"}"#;
+        let art: HandoffArtifact = serde_json::from_str(json).unwrap();
+        assert_eq!(art.uri_or_path, "/tmp/t.json");
+    }
+
+    #[test]
+    fn meeting_handoff_legacy_closed_at_alias() {
+        let json = r#"{
+            "topic": "test",
+            "started_at": "2026-01-01T00:00:00Z",
+            "closed_at": "2026-01-01T01:00:00Z",
+            "decisions": [],
+            "action_items": [],
+            "open_questions": []
+        }"#;
+        let h: MeetingHandoff = serde_json::from_str(json).unwrap();
+        assert_eq!(h.closed_at, "2026-01-01T01:00:00Z");
+        assert!(h.meeting_id.is_empty());
+        assert!(!h.processed);
+        assert!(h.artifacts.is_empty());
+    }
+
+    #[test]
+    fn meeting_handoff_roundtrip_full() {
+        let h = MeetingHandoff {
+            meeting_id: "20260501T100000Z-test".to_string(),
+            topic: "test".to_string(),
+            started_at: "2026-05-01T10:00:00Z".to_string(),
+            closed_at: "2026-05-01T11:00:00Z".to_string(),
+            decisions: vec![MeetingDecision {
+                description: "d".to_string(),
+                rationale: "r".to_string(),
+                participants: vec!["a".to_string()],
+            }],
+            action_items: vec![ActionItem {
+                description: "a".to_string(),
+                owner: "o".to_string(),
+                priority: 0,
+                due_description: None,
+                linked_issue: None,
+            }],
+            open_questions: vec![OpenQuestion {
+                text: "q".to_string(),
+                explicit: true,
+            }],
+            processed: false,
+            duration_secs: Some(3600),
+            transcript: vec!["line1".to_string()],
+            participants: vec!["alice".to_string()],
+            themes: vec!["perf".to_string()],
+            transcript_path: Some("/tmp/t.json".to_string()),
+            next_owner: Some("eng".to_string()),
+            artifacts: vec![HandoffArtifact {
+                kind: ARTIFACT_KIND_BUNDLE.to_string(),
+                uri_or_path: "/tmp/bundle".to_string(),
+                description: None,
+            }],
+        };
+        let json = serde_json::to_string_pretty(&h).unwrap();
+        let h2: MeetingHandoff = serde_json::from_str(&json).unwrap();
+        assert_eq!(h, h2);
+    }
+}
