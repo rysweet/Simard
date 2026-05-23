@@ -1,0 +1,75 @@
+# progress-assessment.yaml — Recipe-runner recipe for the progress-evidence gate.
+#
+# Replaces the direct LLM call in LlmReviewerProgressChecker. The prompt
+# content is adapted from prompt_assets/simard/progress_assessment_reviewer.md
+# (single-brace {var} → double-brace {{var}} for recipe-runner substitution).
+#
+# Context vars (passed via -c):
+#   goal_id, problem, plan, prior_pct, claimed_pct, wip_summary
+#
+# Output: agent stdout — raw text containing a JSON object:
+#   {"verdict": "accept"|"reject", "rationale": "..."}
+
+name: "progress-assessment"
+description: "LLM-backed progress-evidence gate for Simard goal board updates"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "progress", "assessment"]
+
+context: {}
+
+steps:
+  - id: "assess-progress"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      You are an LLM reviewer judging whether a proposed progress update on a Simard
+      goal is honest. You read three things — the **problem**, the **plan**, and the
+      **progress against the plan** — and return a single JSON verdict.
+
+      No git introspection. No PR-list scraping. No tool calls. You just read the
+      text below and decide whether the proposed new percent is a reasonable reflection
+      of the work done so far.
+
+      ## Input
+
+      - **goal_id**: {{goal_id}}
+      - **problem**: {{problem}}
+      - **plan**: {{plan}}
+      - **prior_pct**: {{prior_pct}}
+      - **claimed_pct**: {{claimed_pct}}
+      - **wip_summary**: {{wip_summary}}
+
+      ## How to judge
+
+      Accept when the claimed percent is coherent with the plan:
+      - The plan describes work in flight, and the claimed delta is small and
+        proportional to that work.
+      - The plan describes work that is plausibly complete, and the claimed
+        percent matches.
+      - The plan field is empty but the WIP summary lists concrete artifacts
+        and the delta is modest.
+
+      Reject when the claimed percent looks hallucinated:
+      - A large delta with no matching plan or WIP.
+      - A 100% claim with no shipped artifact in the plan or WIP.
+      - A claim that contradicts the plan.
+
+      A decrease in percent (claimed < prior) is always acceptable — the brain is
+      correcting a prior overestimate.
+
+      When in genuine doubt, prefer accept with a cautionary rationale.
+
+      ## Output
+
+      Return a single JSON object, no prose, no markdown fences:
+
+      {"verdict": "accept", "rationale": "<one short sentence>"}
+
+      or
+
+      {"verdict": "reject", "rationale": "<one short sentence>"}
+
+      verdict MUST be exactly "accept" or "reject". rationale MUST be a single
+      short sentence (max 240 chars).
+    output: "assessment_result"

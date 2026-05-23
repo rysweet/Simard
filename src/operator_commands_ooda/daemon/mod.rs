@@ -196,11 +196,15 @@ pub fn run_ooda_daemon(
 
     // Wire the progress-evidence checker (issue #1967; replaced 2026-05-22
     // per user direction to use an LLM reviewer instead of the original
-    // git-shelling state-machine gate). Honors `SIMARD_PROGRESS_EVIDENCE=off`
-    // as a kill switch (see docs/operations/progress-evidence-kill-switch.md).
+    // git-shelling state-machine gate). Updated for issue #1971 to prefer
+    // recipe-runner-rs backed checker when available.
     //
-    // The reviewer takes {problem, plan, prior_pct, claimed_pct, wip} and
-    // returns {verdict, rationale}. No git/gh shellouts.
+    // Resolution order:
+    //   1. Recipe-runner-rs (if binary + recipe YAML available)
+    //   2. Direct LLM (LlmReviewerProgressChecker)
+    //   3. NoopProgressEvidenceChecker (fallback)
+    //
+    // Honors `SIMARD_PROGRESS_EVIDENCE=off` as a kill switch.
     let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let kill_switch = std::env::var("SIMARD_PROGRESS_EVIDENCE")
         .ok()
@@ -214,12 +218,20 @@ pub fn run_ooda_daemon(
             "[simard] progress-evidence: DISABLED (NoopProgressEvidenceChecker -- SIMARD_PROGRESS_EVIDENCE=off)",
         );
         std::sync::Arc::new(crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker)
+    } else if let Some(recipe_checker) =
+        crate::goal_curation::recipe_progress_checker::RecipeProgressChecker::new(&repo_root)
+    {
+        daemon_log(
+            &state_root,
+            "[simard] progress-evidence: enabled (RecipeProgressChecker -- recipe-runner-rs backed)",
+        );
+        std::sync::Arc::new(recipe_checker)
     } else {
         match LlmProvider::resolve() {
             Ok(reviewer_provider) => {
                 daemon_log(
                     &state_root,
-                    "[simard] progress-evidence: enabled (LlmReviewerProgressChecker -- problem+plan+progress LLM reviewer)",
+                    "[simard] progress-evidence: enabled (LlmReviewerProgressChecker -- direct LLM fallback)",
                 );
                 let reviewer_submitter =
                     crate::ooda_brain::SessionLlmSubmitter::new(reviewer_provider);

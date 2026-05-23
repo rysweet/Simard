@@ -36,12 +36,12 @@ const ADAPTER_TAG: &str = "progress-assessment-reviewer";
 /// The prompt asks for one short sentence; this is a safety net.
 const RATIONALE_MAX_CHARS: usize = 240;
 
-/// JSON contract from the prompt template. Kept private — callers only
-/// see the `EvidenceDecision` returned by [`ProgressEvidenceChecker::check`].
+/// JSON contract from the prompt template. Public so that the recipe-based
+/// checker in [`super::recipe_progress_checker`] can reuse the same struct.
 #[derive(Debug, Deserialize)]
-struct ReviewerResponse {
-    verdict: String,
-    rationale: String,
+pub struct ReviewerResponse {
+    pub verdict: String,
+    pub rationale: String,
 }
 
 /// LLM-backed checker. Generic over `LlmSubmitter` so tests can swap in a
@@ -120,22 +120,28 @@ fn render_wip_summary(goal: &ActiveGoal) -> String {
     if goal.wip_refs.is_empty() {
         return String::new();
     }
-    goal.wip_refs
-        .iter()
-        .map(|w| format!("{:?}", w))
-        .collect::<Vec<_>>()
-        .join(", ")
+    use std::fmt::Write;
+    let mut s = String::new();
+    for (i, w) in goal.wip_refs.iter().enumerate() {
+        if i > 0 {
+            s.push_str(", ");
+        }
+        let _ = write!(s, "{:?}", w);
+    }
+    s
 }
 
 fn decision_from_response(r: ReviewerResponse) -> EvidenceDecision {
-    let mut rationale = r.rationale.trim().to_string();
-    if rationale.chars().count() > RATIONALE_MAX_CHARS {
-        rationale = rationale
-            .chars()
-            .take(RATIONALE_MAX_CHARS)
-            .collect::<String>()
-            + "…";
-    }
+    let trimmed = r.rationale.trim();
+    let rationale = {
+        let mut chars = trimmed.chars();
+        let prefix: String = chars.by_ref().take(RATIONALE_MAX_CHARS).collect();
+        if chars.next().is_some() {
+            prefix + "…"
+        } else {
+            prefix
+        }
+    };
     let verdict_lc = r.verdict.trim().to_ascii_lowercase();
     if verdict_lc == "accept" {
         EvidenceDecision::Accept {
@@ -163,7 +169,10 @@ fn decision_from_response(r: ReviewerResponse) -> EvidenceDecision {
 ///   2. Look inside fenced code blocks.
 ///   3. Scan for the first brace-balanced `{...}` that parses cleanly.
 ///   4. Fall back to outermost-brace strategy.
-fn parse_reviewer_response(raw: &str) -> Result<ReviewerResponse, String> {
+///
+/// Public so that [`super::recipe_progress_checker`] can reuse the same
+/// parsing logic on recipe-runner stdout.
+pub fn parse_reviewer_response(raw: &str) -> Result<ReviewerResponse, String> {
     let stripped = raw.trim();
     if stripped.is_empty() {
         return Err(format!(
@@ -263,10 +272,12 @@ fn extract_balanced_objects(s: &str) -> Vec<&str> {
 
 fn truncate_for_err(s: &str) -> String {
     const MAX: usize = 400;
-    if s.chars().count() <= MAX {
-        s.to_string()
+    let mut chars = s.chars();
+    let prefix: String = chars.by_ref().take(MAX).collect();
+    if chars.next().is_some() {
+        prefix + "…"
     } else {
-        s.chars().take(MAX).collect::<String>() + "…"
+        prefix
     }
 }
 

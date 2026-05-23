@@ -150,6 +150,7 @@ pub fn build_merge_readiness_response(
         "judge_configured": judge_kind.is_configured(),
         "judge_kind": match judge_kind {
             MergeJudgeKind::Llm => "llm",
+            MergeJudgeKind::Recipe => "recipe",
             MergeJudgeKind::Refusing => "refusing",
         },
         "base_allowlist": base_allowlist,

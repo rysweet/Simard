@@ -1,0 +1,94 @@
+# merge-readiness-judge.yaml — Recipe-runner recipe for the merge-readiness judge.
+#
+# Replaces the direct LLM call in LlmMergeJudge. The prompt content is
+# adapted from prompt_assets/simard/merge_readiness_judge.md (single-brace
+# {var} → double-brace {{var}} for recipe-runner substitution).
+#
+# Context vars (passed via -c):
+#   pr_number, repo, pr_body
+#
+# Output: agent stdout — raw text containing a JSON object:
+#   {"verdict": "ready"|"not_ready"|"unclear", "rationale": "...", "blockers": [...]}
+
+name: "merge-readiness-judge"
+description: "LLM-backed merge-readiness judge for Simard PR evaluation"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "merge", "judge"]
+
+context: {}
+
+steps:
+  - id: "judge-merge-readiness"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      You are the merge-readiness judge for the Simard repository. Your single job is
+      to read a pull request body and the surrounding context, then return a structured
+      JSON verdict on whether the PR satisfies the merge-ready skill.
+
+      The skill defines six evidence sections that must be present in a merge-ready PR body:
+
+      1. **QA-team evidence** — scenarios + validate + run results
+      2. **Documentation** — surfaces touched + doc updates (or internal-only justification)
+      3. **Quality-audit** — at least three SEEK → VALIDATE → FIX cycles ending clean
+      4. **CI** — link to the green run for every required check
+      5. **Scope** — diff summary with confirmation of no unrelated edits
+      6. **Verdict** — explicit "ready to merge" / "draft" / "blocked" call with rationale
+
+      What matters is whether the substance is present, not whether a particular literal
+      heading string appears.
+
+      For each criterion, decide:
+      - **Present and substantive** — concrete artifacts (file paths, command output, commit SHAs)
+      - **Present but thin** — heading is there but content is placeholder or one-liner
+      - **Missing** — the criterion is not addressed
+
+      You do NOT need to verify CI status, mergeability, or base branch — the deterministic
+      gate has already done that. You are judging evidence quality only.
+
+      ## Inputs
+
+      PR_NUMBER: {{pr_number}}
+      REPO: {{repo}}
+      PR_BODY:
+      {{pr_body}}
+
+      ## Output
+
+      Return exactly one JSON object, nothing else. No markdown fences, no prose around it.
+
+      Schema (verdict is one of ready, not_ready, unclear):
+
+      {
+        "verdict": "ready",
+        "rationale": "All six skill criteria present and substantive."
+      }
+
+      or
+
+      {
+        "verdict": "not_ready",
+        "rationale": "Quality-audit section is one sentence with no cycles.",
+        "blockers": [
+          {
+            "section": "Quality-audit",
+            "severity": "high",
+            "observation": "No SEEK/VALIDATE/FIX cycle counts.",
+            "fix": "Run at least three cycles per the skill."
+          }
+        ]
+      }
+
+      or
+
+      {
+        "verdict": "unclear",
+        "rationale": "PR body appears truncated."
+      }
+
+      Severity scale: high (missing/absent), medium (missing artifact), low (could be stronger).
+
+      Do not output anything other than the JSON object. If input is malformed, return
+      verdict "unclear" with a rationale. Do not refuse to render a verdict.
+    output: "judge_result"
