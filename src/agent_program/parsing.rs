@@ -70,31 +70,12 @@ pub(crate) fn parse_goal_status(value: &str) -> SimardResult<GoalStatus> {
     }
 }
 
-pub(crate) fn format_items(items: &[String]) -> String {
-    if items.is_empty() {
-        "[]".to_string()
-    } else {
-        format!("[{}]", items.join(" | "))
-    }
-}
-
-pub(crate) fn format_goal_items(items: &[GoalUpdate]) -> String {
-    if items.is_empty() {
-        "[]".to_string()
-    } else {
-        format!(
-            "[{}]",
-            items
-                .iter()
-                .map(|goal| format!(
-                    "p{}:{}:{}:{}",
-                    goal.priority, goal.status, goal.title, goal.rationale
-                ))
-                .collect::<Vec<_>>()
-                .join(" | ")
-        )
-    }
-}
+// `format_items` and `format_goal_items` previously lived here as helpers
+// for `StructuredMeetingNotes::concise_record`. They were exact duplicates
+// of the persisted-meeting-record rendering logic in `src/meetings/mod.rs`
+// and are now obsoleted by `PersistedMeetingRecord::render` (issue #2003).
+// If a future writer needs the same bracketed-list semantics it should call
+// `PersistedMeetingRecord::render` rather than reintroduce a parallel helper.
 
 #[cfg(test)]
 mod tests {
@@ -194,35 +175,9 @@ mod tests {
         assert!(msg.contains("unsupported goal status"));
     }
 
-    // --- format_items / format_goal_items ---
-
-    #[test]
-    fn format_items_empty() {
-        assert_eq!(format_items(&[]), "[]");
-    }
-
-    #[test]
-    fn format_items_single() {
-        assert_eq!(format_items(&["hello".to_string()]), "[hello]");
-    }
-
-    #[test]
-    fn format_items_multiple() {
-        let result = format_items(&["a".to_string(), "b".to_string()]);
-        assert_eq!(result, "[a | b]");
-    }
-
-    #[test]
-    fn format_goal_items_empty() {
-        assert_eq!(format_goal_items(&[]), "[]");
-    }
-
-    #[test]
-    fn format_goal_items_single() {
-        let goal = GoalUpdate::new("Ship v1", "roadmap", GoalStatus::Active, 1).unwrap();
-        let result = format_goal_items(&[goal]);
-        assert!(result.contains("p1"));
-        assert!(result.contains("Ship v1"));
-        assert!(result.contains("roadmap"));
-    }
+    // --- (format_items / format_goal_items tests removed alongside the
+    //     helpers they covered — see the comment above the removed helpers
+    //     in this file for rationale. The wire-format invariants those tests
+    //     guarded are now covered by `PersistedMeetingRecord::render`
+    //     round-trip tests in `src/meetings/tests.rs`.)
 }

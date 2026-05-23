@@ -42,46 +42,21 @@ pub const MEMORY_RECORDS_FILENAME: &str = "memory_records.json";
 /// Build a `PersistedMeetingRecord`-shaped value string from a closed
 /// meeting.
 ///
-/// The format is the same one
-/// [`crate::agent_program::meeting_facilitator::MeetingFacilitatorProgram`]
-/// produces for the non-REPL probe path, so the read companion's
-/// `looks_like_persisted_meeting_record` filter and `PersistedMeetingRecord::parse`
-/// both succeed.
+/// Delegates to the shared [`crate::build_persisted_meeting_record_value`]
+/// renderer so the REPL close path and the non-REPL
+/// `MeetingFacilitatorProgram` path emit byte-identical wire format for
+/// equivalent inputs (issue #2003 — eliminates silent-drift risk between
+/// the two persistence paths). The read companion's
+/// `looks_like_persisted_meeting_record` filter and
+/// `PersistedMeetingRecord::parse` both succeed on whatever this returns.
 pub(crate) fn build_meeting_record_value(
     topic: &str,
     decisions: &[String],
     action_items: &[HandoffActionItem],
     open_questions: &[String],
 ) -> String {
-    let agenda = topic.trim();
-    let agenda = if agenda.is_empty() { "meeting" } else { agenda };
     let next_steps: Vec<String> = action_items.iter().map(|a| a.description.clone()).collect();
-    format!(
-        "agenda={}; updates={}; decisions={}; risks={}; next_steps={}; open_questions={}; goals={}",
-        agenda,
-        format_list(&[]),
-        format_list(decisions),
-        format_list(&[]),
-        format_list(&next_steps),
-        format_list(open_questions),
-        // `parse_goal_update_list` accepts `[]`; we don't synthesize goal
-        // updates from a REPL close because the REPL has no goal-update
-        // surface.
-        "[]",
-    )
-}
-
-fn format_list(items: &[String]) -> String {
-    let cleaned: Vec<String> = items
-        .iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    if cleaned.is_empty() {
-        "[]".to_string()
-    } else {
-        format!("[{}]", cleaned.join(" | "))
-    }
+    crate::build_persisted_meeting_record_value(topic, decisions, &next_steps, open_questions)
 }
 
 /// Write `memory_records.json` for the closing REPL meeting.

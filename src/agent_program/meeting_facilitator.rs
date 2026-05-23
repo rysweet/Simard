@@ -1,11 +1,12 @@
 use crate::base_types::{BaseTypeOutcome, BaseTypeTurnInput};
 use crate::error::SimardResult;
 use crate::goals::GoalUpdate;
+use crate::meetings::{PersistedMeetingGoalUpdate, PersistedMeetingRecord};
 use crate::memory::MemoryScope;
 use crate::metadata::{BackendDescriptor, Freshness};
 use crate::sanitization::objective_metadata;
 
-use super::parsing::{format_goal_items, format_items, parse_goal_directive};
+use super::parsing::parse_goal_directive;
 use super::types::{AgentProgram, AgentProgramContext, AgentProgramMemoryRecord};
 
 #[derive(Debug)]
@@ -188,16 +189,24 @@ impl StructuredMeetingNotes {
     }
 
     fn concise_record(&self) -> String {
-        format!(
-            "agenda={}; updates={}; decisions={}; risks={}; next_steps={}; open_questions={}; goals={}",
-            self.agenda,
-            format_items(&self.updates),
-            format_items(&self.decisions),
-            format_items(&self.risks),
-            format_items(&self.next_steps),
-            format_items(&self.open_questions),
-            format_goal_items(&self.goals),
-        )
+        // Route through the shared `PersistedMeetingRecord::render` so the
+        // non-REPL `MeetingFacilitatorProgram` path and the REPL
+        // `meeting_backend::persist::memory_records` path cannot drift
+        // (issue #2003).
+        let record = PersistedMeetingRecord {
+            agenda: self.agenda.clone(),
+            updates: self.updates.clone(),
+            decisions: self.decisions.clone(),
+            risks: self.risks.clone(),
+            next_steps: self.next_steps.clone(),
+            open_questions: self.open_questions.clone(),
+            goals: self
+                .goals
+                .iter()
+                .map(PersistedMeetingGoalUpdate::from)
+                .collect(),
+        };
+        record.render()
     }
 }
 
@@ -286,6 +295,78 @@ mod tests {
             .additional_memory_records(&context, &test_outcome())
             .expect("additional_memory_records should succeed");
         assert!(records.is_empty());
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Cross-path wire-format drift-prevention test for issue #2003.
+    //
+    // The non-REPL `MeetingFacilitatorProgram::additional_memory_records`
+    // path (this file) and the REPL
+    // `meeting_backend::persist::memory_records::build_meeting_record_value`
+    // path used to maintain TWO independent renderings of the same
+    // `agenda=...; updates=...; ...` wire format. After the #2003
+    // consolidation both route through `PersistedMeetingRecord::render`.
+    // This test pins the invariant by driving the actual production path
+    // on each side and asserting byte-identical output for equivalent
+    // inputs.
+    #[test]
+    fn meeting_facilitator_and_repl_emit_identical_wire_format_for_equivalent_inputs() {
+        // Drive the non-REPL agent-program path through its real entry
+        // point. We only populate decisions / next_steps / open_questions
+        // so the REPL side (which has no surface for updates / risks /
+        // goals) can match exactly.
+        let program = MeetingFacilitatorProgram::try_default().expect("create test program");
+        let context = test_context(
+            "agenda: Close issue #2000\n\
+             decision: consolidate persistence\n\
+             next-step: land PR\n\
+             next-step: update tests\n\
+             open-question: unify bundle dir next?",
+        );
+        let agent_records = program
+            .additional_memory_records(&context, &test_outcome())
+            .expect("agent path should produce a memory record");
+        assert_eq!(agent_records.len(), 1, "expected one decision-record");
+        let agent_value = &agent_records[0].value;
+
+        // Drive the REPL path through its real entry point with the same
+        // semantic inputs.
+        let repl_value = crate::meeting_backend::persist::build_meeting_record_value_for_test(
+            "Close issue #2000",
+            &["consolidate persistence".to_string()],
+            &[
+                crate::meeting_backend::HandoffActionItem {
+                    description: "land PR".to_string(),
+                    assignee: None,
+                    deadline: None,
+                    priority: None,
+                    linked_goal: None,
+                },
+                crate::meeting_backend::HandoffActionItem {
+                    description: "update tests".to_string(),
+                    assignee: None,
+                    deadline: None,
+                    priority: None,
+                    linked_goal: None,
+                },
+            ],
+            &["unify bundle dir next?".to_string()],
+        );
+
+        assert_eq!(
+            agent_value, &repl_value,
+            "agent-program and REPL persistence paths must emit byte-identical wire format \
+             for equivalent inputs (issue #2003 drift-prevention).\n\
+             agent={agent_value}\nrepl ={repl_value}"
+        );
+
+        // And the unified output must still satisfy the read companion.
+        assert!(
+            crate::looks_like_persisted_meeting_record(agent_value),
+            "unified output must satisfy looks_like_persisted_meeting_record: {agent_value}"
+        );
+        crate::PersistedMeetingRecord::parse(agent_value)
+            .expect("unified output must parse via PersistedMeetingRecord::parse");
     }
 
     #[test]

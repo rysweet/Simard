@@ -238,7 +238,8 @@ pub use meeting_facilitator::{
 };
 pub use meeting_repl::{MeetingCommand, parse_meeting_command, run_meeting_repl};
 pub use meetings::{
-    PersistedMeetingGoalUpdate, PersistedMeetingRecord, looks_like_persisted_meeting_record,
+    PersistedMeetingGoalUpdate, PersistedMeetingRecord, build_persisted_meeting_record_value,
+    looks_like_persisted_meeting_record,
 };
 pub use memory::{
     FileBackedMemoryStore, InMemoryMemoryStore, MemoryRecord, MemoryScope, MemoryStore,

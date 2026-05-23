@@ -461,6 +461,13 @@ mod templates;
 
 pub use memory_records::{MEMORY_RECORDS_FILENAME, write_meeting_memory_records};
 
+/// Test-only re-export of the REPL-path wire-format builder so cross-module
+/// drift-prevention tests in other modules (notably
+/// `agent_program::meeting_facilitator`) can drive the actual production
+/// renderer without a parallel implementation. Issue #2003.
+#[cfg(test)]
+pub(crate) use memory_records::build_meeting_record_value as build_meeting_record_value_for_test;
+
 pub use cognitive::{store_cognitive_memory, store_enriched_cognitive_memory};
 // re-exported for cfg(test) consumers in meeting_backend/tests_persist.rs (false-positive of clippy unused_imports on lib pass — see #1405)
 #[allow(unused_imports)]

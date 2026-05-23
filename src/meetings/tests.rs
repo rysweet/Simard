@@ -316,3 +316,191 @@ fn parse_record_with_whitespace_around_values() {
     assert_eq!(record.agenda, "spaced agenda");
     assert_eq!(record.updates, vec!["item with spaces"]);
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// Wire-format round-trip and drift-prevention coverage for issue #2003.
+//
+// Before the unification, `StructuredMeetingNotes::concise_record` (the
+// non-REPL `MeetingFacilitatorProgram` path) and `build_meeting_record_value`
+// (the REPL `meeting_backend::persist::memory_records` path) duplicated the
+// `agenda=...; updates=...; ...` rendering logic. Any change to one had to
+// be hand-mirrored to the other or `simard meeting read` would silently
+// reject one side's output. These tests pin both invariants on the single
+// `PersistedMeetingRecord::render` writer they now both delegate to.
+
+#[test]
+fn render_round_trips_through_parse_for_full_record() {
+    let original = PersistedMeetingRecord {
+        agenda: "Sprint review".to_string(),
+        updates: vec!["shipped #2000 fix".to_string(), "ran cargo fmt".to_string()],
+        decisions: vec!["ship the consolidation".to_string()],
+        risks: vec!["non-REPL bundle dir still pending".to_string()],
+        next_steps: vec!["open the PR".to_string()],
+        open_questions: vec!["do we close #2003 here?".to_string()],
+        goals: vec![PersistedMeetingGoalUpdate {
+            priority: 1,
+            status: GoalStatus::Active,
+            title: "Unify persistence".to_string(),
+            rationale: "two writers must not drift".to_string(),
+        }],
+    };
+    let rendered = original.render();
+    let reparsed =
+        PersistedMeetingRecord::parse(&rendered).expect("rendered record must parse back");
+    assert_eq!(
+        reparsed, original,
+        "render/parse must round-trip exactly: {rendered}"
+    );
+}
+
+#[test]
+fn render_round_trips_through_parse_for_empty_record() {
+    let original = PersistedMeetingRecord {
+        agenda: "minimal".to_string(),
+        updates: Vec::new(),
+        decisions: Vec::new(),
+        risks: Vec::new(),
+        next_steps: Vec::new(),
+        open_questions: Vec::new(),
+        goals: Vec::new(),
+    };
+    let rendered = original.render();
+    assert!(
+        crate::meetings::looks_like_persisted_meeting_record(&rendered),
+        "empty render must still look like a persisted meeting record: {rendered}"
+    );
+    let reparsed =
+        PersistedMeetingRecord::parse(&rendered).expect("empty rendered record must parse back");
+    assert_eq!(reparsed, original);
+}
+
+#[test]
+fn render_falls_back_to_meeting_when_agenda_blank() {
+    let record = PersistedMeetingRecord {
+        agenda: "   ".to_string(),
+        updates: Vec::new(),
+        decisions: Vec::new(),
+        risks: Vec::new(),
+        next_steps: Vec::new(),
+        open_questions: Vec::new(),
+        goals: Vec::new(),
+    };
+    let rendered = record.render();
+    let reparsed = PersistedMeetingRecord::parse(&rendered).expect("fallback record must parse");
+    assert_eq!(reparsed.agenda, "meeting");
+}
+
+#[test]
+fn render_filters_blank_and_whitespace_only_items() {
+    let record = PersistedMeetingRecord {
+        agenda: "filter test".to_string(),
+        updates: vec!["".to_string(), "   ".to_string(), "real update".to_string()],
+        decisions: vec!["  trimmed decision  ".to_string()],
+        risks: Vec::new(),
+        next_steps: Vec::new(),
+        open_questions: Vec::new(),
+        goals: Vec::new(),
+    };
+    let rendered = record.render();
+    assert!(rendered.contains("updates=[real update]"), "{rendered}");
+    assert!(
+        rendered.contains("decisions=[trimmed decision]"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn build_persisted_meeting_record_value_matches_struct_render() {
+    // Drift-prevention: the convenience builder used by the REPL close
+    // path must produce byte-identical output to constructing a
+    // PersistedMeetingRecord and calling render() with the same inputs.
+    let topic = "Close issue #2000";
+    let decisions = vec!["consolidate persistence".to_string()];
+    let action_items = vec!["land PR".to_string(), "update tests".to_string()];
+    let open_questions = vec!["unify bundle dir next?".to_string()];
+
+    let via_helper = crate::meetings::build_persisted_meeting_record_value(
+        topic,
+        &decisions,
+        &action_items,
+        &open_questions,
+    );
+    let via_struct = PersistedMeetingRecord {
+        agenda: topic.to_string(),
+        updates: Vec::new(),
+        decisions: decisions.clone(),
+        risks: Vec::new(),
+        next_steps: action_items.clone(),
+        open_questions: open_questions.clone(),
+        goals: Vec::new(),
+    }
+    .render();
+    assert_eq!(via_helper, via_struct);
+}
+
+#[test]
+fn build_persisted_meeting_record_value_parses_back_for_repl_close_path() {
+    // The REPL close path constructs records with empty updates / risks /
+    // goals (it has no surface for those today). The read companion must
+    // still parse the result without error.
+    let value = crate::meetings::build_persisted_meeting_record_value(
+        "Sprint review",
+        &["Ship the fix".to_string()],
+        &["Write the regression test".to_string()],
+        &["What about #2003?".to_string()],
+    );
+    assert!(
+        crate::meetings::looks_like_persisted_meeting_record(&value),
+        "REPL-close output must satisfy the looks_like filter: {value}"
+    );
+    let parsed = PersistedMeetingRecord::parse(&value).expect("REPL-close output must parse");
+    assert_eq!(parsed.agenda, "Sprint review");
+    assert_eq!(parsed.decisions, vec!["Ship the fix"]);
+    assert_eq!(parsed.next_steps, vec!["Write the regression test"]);
+    assert_eq!(parsed.open_questions, vec!["What about #2003?"]);
+    assert!(parsed.updates.is_empty());
+    assert!(parsed.risks.is_empty());
+    assert!(parsed.goals.is_empty());
+}
+
+#[test]
+fn goal_update_render_round_trips_inside_record() {
+    // The shared `PersistedMeetingGoalUpdate::render` must produce a string
+    // that the goals list parser accepts. This pins the format used by
+    // both the REPL and non-REPL paths to a single writer.
+    let goal = PersistedMeetingGoalUpdate {
+        priority: 2,
+        status: GoalStatus::Completed,
+        title: "Ship issue #1985".to_string(),
+        rationale: "engineer mode consumes bundle".to_string(),
+    };
+    let record = PersistedMeetingRecord {
+        agenda: "test".to_string(),
+        updates: Vec::new(),
+        decisions: Vec::new(),
+        risks: Vec::new(),
+        next_steps: Vec::new(),
+        open_questions: Vec::new(),
+        goals: vec![goal.clone()],
+    };
+    let rendered = record.render();
+    let reparsed = PersistedMeetingRecord::parse(&rendered).expect("goal record must parse");
+    assert_eq!(reparsed.goals, vec![goal]);
+}
+
+#[test]
+fn persisted_meeting_goal_update_from_goal_update_preserves_fields() {
+    use crate::goals::GoalUpdate;
+    let original = GoalUpdate::new(
+        "Unify persistence paths",
+        "two writers cannot drift",
+        GoalStatus::Active,
+        3,
+    )
+    .expect("valid goal update");
+    let persisted = PersistedMeetingGoalUpdate::from(&original);
+    assert_eq!(persisted.priority, 3);
+    assert_eq!(persisted.status, GoalStatus::Active);
+    assert_eq!(persisted.title, "Unify persistence paths");
+    assert_eq!(persisted.rationale, "two writers cannot drift");
+}
