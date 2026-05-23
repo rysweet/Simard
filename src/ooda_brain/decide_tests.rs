@@ -68,6 +68,14 @@ fn judgment_extra_fields_are_ignored() {
     assert_eq!(parsed.action_kind(), ActionKind::RunImprovement);
 }
 
+#[test]
+fn judgment_safe_update_roundtrips() {
+    let raw = r#"{"choice":"safe_update","rationale":"divergence >= 3, conditions met"}"#;
+    let parsed: DecideJudgment = serde_json::from_str(raw).expect("parse");
+    assert_eq!(parsed.action_kind(), ActionKind::SafeUpdate);
+    assert_eq!(parsed.rationale(), "divergence >= 3, conditions met");
+}
+
 // ---------------------------------------------------------------------------
 // DeterministicFallbackDecideBrain — preserves pre-#1458 mapping
 // ---------------------------------------------------------------------------
@@ -98,6 +106,13 @@ fn fallback_routes_extract_ideas_synthetic_to_extract_ideas() {
     let brain = DeterministicFallbackDecideBrain;
     let j = brain.judge_decision(&ctx("__extract_ideas__")).unwrap();
     assert_eq!(j.action_kind(), ActionKind::ExtractIdeas);
+}
+
+#[test]
+fn fallback_routes_safe_update_synthetic_to_safe_update() {
+    let brain = DeterministicFallbackDecideBrain;
+    let j = brain.judge_decision(&ctx("__safe_update__")).unwrap();
+    assert_eq!(j.action_kind(), ActionKind::SafeUpdate);
 }
 
 #[test]

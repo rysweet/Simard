@@ -153,6 +153,7 @@ pub enum ActionKind {
     LaunchSession,
     PollDeveloperActivity,
     ExtractIdeas,
+    SafeUpdate,
 }
 
 impl Display for ActionKind {
@@ -167,6 +168,7 @@ impl Display for ActionKind {
             Self::LaunchSession => f.write_str("launch-session"),
             Self::PollDeveloperActivity => f.write_str("poll-developer-activity"),
             Self::ExtractIdeas => f.write_str("extract-ideas"),
+            Self::SafeUpdate => f.write_str("safe-update"),
         }
     }
 }

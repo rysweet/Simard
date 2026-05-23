@@ -65,6 +65,7 @@ pub enum DecideJudgment {
     LaunchSession { rationale: String },
     PollDeveloperActivity { rationale: String },
     ExtractIdeas { rationale: String },
+    SafeUpdate { rationale: String },
 }
 
 impl DecideJudgment {
@@ -82,6 +83,7 @@ impl DecideJudgment {
             Self::LaunchSession { .. } => ActionKind::LaunchSession,
             Self::PollDeveloperActivity { .. } => ActionKind::PollDeveloperActivity,
             Self::ExtractIdeas { .. } => ActionKind::ExtractIdeas,
+            Self::SafeUpdate { .. } => ActionKind::SafeUpdate,
         }
     }
 
@@ -95,7 +97,8 @@ impl DecideJudgment {
             | Self::BuildSkill { rationale }
             | Self::LaunchSession { rationale }
             | Self::PollDeveloperActivity { rationale }
-            | Self::ExtractIdeas { rationale } => rationale,
+            | Self::ExtractIdeas { rationale }
+            | Self::SafeUpdate { rationale } => rationale,
         }
     }
 }
@@ -139,6 +142,7 @@ impl OodaDecideBrain for DeterministicFallbackDecideBrain {
                 DecideJudgment::PollDeveloperActivity { rationale }
             }
             Some(SyntheticPriorityKind::ExtractIdeas) => DecideJudgment::ExtractIdeas { rationale },
+            Some(SyntheticPriorityKind::SafeUpdate) => DecideJudgment::SafeUpdate { rationale },
             Some(SyntheticPriorityKind::EvalWatchdog) | None => {
                 DecideJudgment::AdvanceGoal { rationale }
             }

@@ -264,6 +264,20 @@ mod tests {
         assert!(actions[0].goal_id.is_none());
     }
 
+    #[test]
+    fn decide_maps_safe_update_priority() {
+        let priorities = vec![Priority {
+            goal_id: "__safe_update__".to_string(),
+            urgency: 0.8,
+            reason: "binary 5 commits behind, conditions met".to_string(),
+        }];
+        let config = OodaConfig::default();
+        let actions = decide(&priorities, &config).unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, ActionKind::SafeUpdate);
+        assert!(actions[0].goal_id.is_none());
+    }
+
     // -----------------------------------------------------------------------
     // Brain wire-in tests: prove the brain's choice flows through and that
     // a brain error transparently falls back to the deterministic mapping.

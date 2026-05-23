@@ -139,6 +139,7 @@ impl BrainJudgmentRecord {
             DecideJudgment::LaunchSession { .. } => "launch_session",
             DecideJudgment::PollDeveloperActivity { .. } => "poll_developer_activity",
             DecideJudgment::ExtractIdeas { .. } => "extract_ideas",
+            DecideJudgment::SafeUpdate { .. } => "safe_update",
         };
         Self {
             phase: BrainPhase::Decide,
