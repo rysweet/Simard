@@ -49,13 +49,18 @@ const RECENT_WINDOW: usize = 30;
 /// contract.
 pub(super) const DEFAULT_CLOSE_TIMEOUT_SECS: u64 = 60;
 
-/// Default inner budget for `agent.close()` (issue #1908).
+/// Default inner budget for `agent.close()` (issue #1908, #1999).
 ///
 /// Clamped to `[1, 120]` seconds; overridable via
 /// `SIMARD_MEETING_AGENT_CLOSE_TIMEOUT_SECS`. Used both by the agent
 /// shutdown phase and (as the per-LLM-call cap) by the summary
 /// generator.
-pub(super) const DEFAULT_AGENT_CLOSE_TIMEOUT_SECS: u64 = 15;
+///
+/// Raised from 15 → 45 in #1999: the previous 15s default was shorter
+/// than a single lightweight-chat LLM turn at p95, causing every
+/// real-world `/close` to race the summarizer and produce a partial
+/// handoff with no summary.
+pub(super) const DEFAULT_AGENT_CLOSE_TIMEOUT_SECS: u64 = 45;
 
 /// Env var for the master close budget.
 pub(super) const CLOSE_TIMEOUT_ENV: &str = "SIMARD_MEETING_CLOSE_TIMEOUT_SECS";

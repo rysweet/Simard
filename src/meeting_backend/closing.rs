@@ -30,7 +30,7 @@ impl MeetingBackend {
     ///
     /// Bounded by `SIMARD_MEETING_CLOSE_TIMEOUT_SECS` (default 60s,
     /// clamped to `[1, 600]`) plus an inner `agent.close()` budget of
-    /// `SIMARD_MEETING_AGENT_CLOSE_TIMEOUT_SECS` (default 15s, clamped to
+    /// `SIMARD_MEETING_AGENT_CLOSE_TIMEOUT_SECS` (default 45s, clamped to
     /// `[1, 120]`). On a timeout the close still returns
     /// `Ok(MeetingSummary)` with `partial_reason = Some(_)` and a
     /// deserialize-valid handoff bundle written to disk (issue #1908).

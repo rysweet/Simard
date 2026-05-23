@@ -370,6 +370,124 @@ fn happy_path_close_writes_under_state_root() {
 }
 
 // ---------------------------------------------------------------------------
+// Issue #1999 — slow-but-successful LLM close still produces complete handoff
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial(state_root)]
+fn slow_but_successful_llm_close_produces_complete_handoff() {
+    // Regression test for #1999: when the LLM summary turn completes
+    // within budget (but takes longer than the old 15s default), the
+    // close must produce a *complete* handoff — not a partial one.
+    //
+    // With the old 15s default, a realistic LLM turn taking ~3s on the
+    // mock (representing p50–p75 real-world latency) would still succeed.
+    // The real problem was p95 turns (20–40s) that exceeded 15s. This
+    // test uses a 3s mock with a 10s budget to verify the general
+    // contract: any LLM response that finishes within the configured
+    // budget produces a complete handoff with no partial_reason.
+    scrub_env();
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    unsafe {
+        std::env::set_var("SIMARD_STATE_ROOT", &root);
+        // 30s master budget and 10s agent-close budget — the mock takes
+        // 3s per call, well within both budgets.
+        std::env::set_var("SIMARD_MEETING_CLOSE_TIMEOUT_SECS", "30");
+        std::env::set_var("SIMARD_MEETING_AGENT_CLOSE_TIMEOUT_SECS", "10");
+    }
+
+    let state = Arc::new(Mutex::new(BlockingState::default()));
+    // 3s per call simulates a realistic LLM response time.
+    let agent = BlockingSession::new(Duration::from_secs(3), state.clone());
+
+    let mut backend = MeetingBackend::new_session(
+        "Slow-but-successful close (issue #1999)",
+        Box::new(agent),
+        None,
+        String::new(),
+    );
+
+    backend.push_test_message("operator", "Let's wrap up. What did we decide?");
+    backend.push_test_message(
+        "simard",
+        "We decided to raise the agent close timeout to 45 seconds \
+         because the previous 15-second default was shorter than a \
+         single LLM turn at p95.",
+    );
+    backend.push_explicit_decision("Raise agent close timeout to 45s");
+    backend.push_explicit_action_item("Engineer will update the default and docs");
+
+    let started = Instant::now();
+    let summary = backend.close().expect("close must succeed");
+    let elapsed = started.elapsed();
+
+    // The close must complete — the 3s mock is well within the 10s budget.
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "close took {elapsed:?}; exceeded sanity ceiling"
+    );
+
+    // The critical assertion: no partial_reason. Before #1999 this would
+    // have been `Some(SummaryTimeout)` or `Some(AgentCloseTimeout)` when
+    // the default was 15s and real-world LLM turns routinely exceeded it.
+    assert!(
+        summary.partial_reason.is_none(),
+        "a slow-but-successful LLM close must NOT be partial; got {:?} \
+         (issue #1999 regression)",
+        summary.partial_reason
+    );
+
+    // Verify the summary text is the real LLM output, not the fallback.
+    assert!(
+        !summary.summary_text.contains("partial"),
+        "summary text should be the real LLM output, not the partial fallback; \
+         got: {:?}",
+        summary.summary_text
+    );
+
+    // The handoff bundle must exist and parse cleanly.
+    let bundle_dir: PathBuf = summary
+        .bundle_dir
+        .clone()
+        .expect("bundle_dir present")
+        .into();
+    let handoff_path = bundle_dir.join("meeting_handoff.json");
+    assert!(
+        handoff_path.exists(),
+        "handoff bundle missing at {} — root tree:\n{}",
+        handoff_path.display(),
+        walk(&root, 0)
+    );
+
+    let raw = std::fs::read_to_string(&handoff_path).expect("read handoff");
+    let handoff: simard::meeting_facilitator::MeetingHandoff =
+        serde_json::from_str(&raw).expect("handoff parses against current schema");
+
+    // Explicit decisions must survive the close pipeline end-to-end.
+    assert!(
+        !handoff.decisions.is_empty(),
+        "explicit decisions must reach the handoff (issue #1999)"
+    );
+    assert!(
+        !handoff.action_items.is_empty(),
+        "explicit action items must reach the handoff (issue #1999)"
+    );
+    assert!(!handoff.processed, "fresh handoff must be unprocessed");
+
+    // The agent.close() should have been called and returned successfully
+    // within the 10s budget (the mock takes 3s).
+    let st = state.lock().unwrap();
+    assert!(st.close_called, "agent.close() must have been invoked");
+    assert!(
+        st.close_returned,
+        "agent.close() must have returned within budget (issue #1999)"
+    );
+
+    scrub_env();
+}
+
+// ---------------------------------------------------------------------------
 // Issue #1954 — enrichment payload survives both happy path and partial close
 // ---------------------------------------------------------------------------
 
