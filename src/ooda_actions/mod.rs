@@ -66,8 +66,9 @@ pub fn dispatch_actions(
             .iter()
             .map(|action| {
                 s.spawn(|| match action.kind {
-                    // LaunchSession is fully independent — no shared state.
+                    // LaunchSession and SafeUpdate are fully independent — no shared state.
                     ActionKind::LaunchSession => session::dispatch_launch_session(action),
+                    ActionKind::SafeUpdate => simple_actions::dispatch_safe_update(action),
                     // All other actions need bridges and/or state.
                     _ => {
                         let mut bg = bridges.lock().expect("bridges lock poisoned");
@@ -107,5 +108,6 @@ fn dispatch_one(
             simple_actions::dispatch_poll_developer_activity(action, bridges)
         }
         ActionKind::ExtractIdeas => simple_actions::dispatch_extract_ideas(action, bridges),
+        ActionKind::SafeUpdate => simple_actions::dispatch_safe_update(action),
     }
 }

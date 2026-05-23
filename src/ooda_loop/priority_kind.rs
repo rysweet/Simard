@@ -56,6 +56,10 @@ pub enum SyntheticPriorityKind {
     /// The eval watchdog tripped in the Observe phase. Highest-urgency
     /// synthetic — preempts ordinary work until an operator investigates.
     EvalWatchdog,
+    /// Brain-orchestrated safe self-update. Synthesized when the running
+    /// binary is behind `origin/main` by at least `min_commits_since_build`
+    /// commits and the four-part triggering doctrine is satisfied.
+    SafeUpdate,
 }
 
 impl SyntheticPriorityKind {
@@ -70,6 +74,7 @@ impl SyntheticPriorityKind {
             Self::PollDeveloperActivity => "__poll_activity__",
             Self::ExtractIdeas => "__extract_ideas__",
             Self::EvalWatchdog => "__eval_watchdog__",
+            Self::SafeUpdate => "__safe_update__",
         }
     }
 
@@ -84,6 +89,7 @@ impl SyntheticPriorityKind {
             "__poll_activity__" => Self::PollDeveloperActivity,
             "__extract_ideas__" => Self::ExtractIdeas,
             "__eval_watchdog__" => Self::EvalWatchdog,
+            "__safe_update__" => Self::SafeUpdate,
             _ => return None,
         })
     }
@@ -98,6 +104,7 @@ impl SyntheticPriorityKind {
             Self::PollDeveloperActivity,
             Self::ExtractIdeas,
             Self::EvalWatchdog,
+            Self::SafeUpdate,
         ]
     }
 }
@@ -208,6 +215,10 @@ mod tests {
         assert_eq!(
             SyntheticPriorityKind::EvalWatchdog.synthetic_id(),
             "__eval_watchdog__"
+        );
+        assert_eq!(
+            SyntheticPriorityKind::SafeUpdate.synthetic_id(),
+            "__safe_update__"
         );
     }
 }

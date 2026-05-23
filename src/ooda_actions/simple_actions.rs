@@ -142,6 +142,45 @@ pub(super) fn dispatch_extract_ideas(
     }
 }
 
+/// SafeUpdate: initiate the brain-orchestrated safe self-update sequence.
+///
+/// Spawns `simard safe-update` as a detached child process so the daemon
+/// can finish the current OODA cycle cleanly. The orchestrator's swap phase
+/// exec()s into the new binary, so calling it inline would replace the
+/// still-running daemon mid-cycle. The detached subprocess drives
+/// drain → snapshot → pre-test → swap independently.
+pub(super) fn dispatch_safe_update(action: &PlannedAction) -> ActionOutcome {
+    let bin = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("simard"));
+    let result = std::process::Command::new(&bin)
+        .arg("safe-update")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .stdin(std::process::Stdio::null())
+        .spawn();
+    match result {
+        Ok(child) => {
+            tracing::info!(
+                target: "simard::ooda_actions",
+                pid = child.id(),
+                "safe_update: spawned `simard safe-update` (detached)",
+            );
+            make_outcome(
+                action,
+                true,
+                format!("spawned `simard safe-update` as pid {}", child.id()),
+            )
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "simard::ooda_actions",
+                error = %e,
+                "safe_update: failed to spawn `simard safe-update`",
+            );
+            make_outcome(action, false, format!("failed to spawn safe-update: {e}"))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::goal_curation::GoalBoard;
