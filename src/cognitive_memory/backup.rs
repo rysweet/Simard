@@ -149,7 +149,10 @@ impl NativeCognitiveMemory {
 
     /// Remove WAL files that are empty or unreadable — these cause LadybugDB
     /// to hit an UNREACHABLE_CODE assertion on open.
-    fn preemptive_wal_cleanup(db_path: &Path) {
+    ///
+    /// Returns `Err` if a WAL that *should* be removed cannot be deleted
+    /// (issue #1975: previously swallowed via `let _ =`).
+    pub fn preemptive_wal_cleanup(db_path: &Path) -> SimardResult<()> {
         for wal in Self::wal_paths(db_path) {
             if !wal.exists() {
                 continue;
@@ -163,9 +166,18 @@ impl NativeCognitiveMemory {
                     "[simard] removing corrupt/empty WAL file: {}",
                     wal.display()
                 );
-                let _ = std::fs::remove_file(&wal);
+                std::fs::remove_file(&wal).map_err(|e| {
+                    super::metrics::increment("wal_cleanup_failed", "preemptive_wal_cleanup");
+                    SimardError::PersistentStoreIo {
+                        store: "cognitive-memory".into(),
+                        action: "preemptive_wal_cleanup".into(),
+                        path: wal.clone(),
+                        reason: e.to_string(),
+                    }
+                })?;
             }
         }
+        Ok(())
     }
 
     /// Recovery-replay fsync helper (issue #1973, decision D4).
@@ -304,7 +316,18 @@ impl NativeCognitiveMemory {
             // sequence already preserved the original under a `.corrupt-*`
             // suffix before reaching this code.
             if db_path.exists() {
-                let _ = std::fs::remove_file(db_path);
+                std::fs::remove_file(db_path).map_err(|e| {
+                    super::metrics::increment(
+                        "restore_cleanup_failed",
+                        "try_restore_from_backup:pre",
+                    );
+                    SimardError::PersistentStoreIo {
+                        store: "cognitive-memory".into(),
+                        action: "restore-cleanup-pre".into(),
+                        path: db_path.to_path_buf(),
+                        reason: e.to_string(),
+                    }
+                })?;
             }
 
             if let Err(e) = std::fs::copy(&backup_path, db_path) {
@@ -334,7 +357,8 @@ impl NativeCognitiveMemory {
             }
 
             // Clean WAL files before opening the restored copy.
-            Self::preemptive_wal_cleanup(db_path);
+            // Best-effort in restore loop — don't abort the fallback sequence.
+            let _ = Self::preemptive_wal_cleanup(db_path);
 
             // Open with catch_unwind because a corrupt backup can panic
             // inside lbug just like a corrupt main DB does — without this
@@ -387,10 +411,19 @@ impl NativeCognitiveMemory {
             // This candidate failed; clear the partial copy + WAL before
             // trying the next one so we never present a half-restored DB
             // as "successfully recovered".
-            if db_path.exists() {
-                let _ = std::fs::remove_file(db_path);
+            if db_path.exists()
+                && let Err(e) = std::fs::remove_file(db_path)
+            {
+                super::metrics::increment("restore_cleanup_failed", "try_restore_from_backup:post");
+                eprintln!(
+                    "[simard] failed to remove partial restore at {}: {e}",
+                    db_path.display()
+                );
             }
-            Self::preemptive_wal_cleanup(db_path);
+            // WAL cleanup is best-effort here: we're in a fallback loop
+            // and failing to remove a WAL sibling shouldn't block trying
+            // the next candidate.
+            let _ = Self::preemptive_wal_cleanup(db_path);
         }
 
         Err(SimardError::RuntimeInitFailed {
@@ -425,7 +458,7 @@ impl NativeCognitiveMemory {
     #[cfg(unix)]
     pub(super) fn open_db_with_recovery(db_path: &Path) -> SimardResult<lbug::Database> {
         // Step 1: preemptive WAL cleanup.
-        Self::preemptive_wal_cleanup(db_path);
+        Self::preemptive_wal_cleanup(db_path)?;
 
         let try_open = |p: &Path| -> SimardResult<lbug::Database> {
             Self::with_open_lock(p, || {
@@ -502,8 +535,14 @@ impl NativeCognitiveMemory {
         }
 
         for wal in Self::wal_paths(db_path) {
-            if wal.exists() {
-                let _ = std::fs::remove_file(&wal);
+            if wal.exists()
+                && let Err(e) = std::fs::remove_file(&wal)
+            {
+                super::metrics::increment("wal_cleanup_failed", "open_db_with_recovery:step3");
+                eprintln!(
+                    "[simard] failed to remove WAL sibling {}: {e}",
+                    wal.display()
+                );
             }
         }
 
@@ -542,9 +581,22 @@ impl NativeCognitiveMemory {
         // truly cannot recover anything; the data-loss log line above is
         // unconditional so a crash here will always leave a paper trail.
         if db_path.exists() {
-            let _ = std::fs::remove_file(db_path);
+            std::fs::remove_file(db_path).map_err(|e| {
+                super::metrics::increment(
+                    "restore_cleanup_failed",
+                    "open_db_with_recovery:last_resort",
+                );
+                SimardError::PersistentStoreIo {
+                    store: "cognitive-memory".into(),
+                    action: "recovery-last-resort-cleanup".into(),
+                    path: db_path.to_path_buf(),
+                    reason: e.to_string(),
+                }
+            })?;
         }
-        Self::preemptive_wal_cleanup(db_path);
+        // Best-effort WAL cleanup before fresh create — don't abort
+        // the last-resort path if this fails.
+        let _ = Self::preemptive_wal_cleanup(db_path);
         try_open(db_path)
     }
 
@@ -650,10 +702,18 @@ impl NativeCognitiveMemory {
 
     /// Remove old backups, keeping only the `keep` most recent ones. Removes
     /// any paired `.wal` backup files that share the same timestamp suffix.
-    pub fn prune_old_backups(state_root: &Path, keep: usize) {
+    ///
+    /// Returns a [`PruneOutcome`](super::metrics::PruneOutcome) so the caller
+    /// can observe per-file failures without aborting the whole prune
+    /// (issue #1975).
+    pub fn prune_old_backups(state_root: &Path, keep: usize) -> super::metrics::PruneOutcome {
+        let mut outcome = super::metrics::PruneOutcome {
+            removed: 0,
+            failed: Vec::new(),
+        };
         let backup_dir = state_root.join("backups");
         if !backup_dir.is_dir() {
-            return;
+            return outcome;
         }
         let prefix = "cognitive_memory.ladybug.";
         let mut backups: Vec<(u64, PathBuf)> = Vec::new();
@@ -672,21 +732,41 @@ impl NativeCognitiveMemory {
         }
         backups.sort_by_key(|x| std::cmp::Reverse(x.0));
         for (epoch, path) in backups.into_iter().skip(keep) {
-            if let Err(e) = std::fs::remove_file(&path) {
-                eprintln!(
-                    "[simard] failed to remove old backup {}: {e}",
-                    path.display()
-                );
+            match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    outcome.removed += 1;
+                }
+                Err(e) => {
+                    super::metrics::increment("prune_remove_failed", "prune_old_backups:main");
+                    eprintln!(
+                        "[simard] failed to remove old backup {}: {e}",
+                        path.display()
+                    );
+                    outcome.failed.push((path, e));
+                }
             }
             // Remove paired .wal files with the same epoch (any of the two
             // wal_name variants lbug may use).
             for wal_name in ["cognitive_memory.ladybug.wal", "cognitive_memory.wal"] {
                 let paired = backup_dir.join(format!("{wal_name}.{epoch}"));
                 if paired.exists() {
-                    let _ = std::fs::remove_file(&paired);
+                    if let Err(e) = std::fs::remove_file(&paired) {
+                        super::metrics::increment(
+                            "prune_wal_remove_failed",
+                            "prune_old_backups:wal",
+                        );
+                        eprintln!(
+                            "[simard] failed to remove paired WAL backup {}: {e}",
+                            paired.display()
+                        );
+                        outcome.failed.push((paired, e));
+                    } else {
+                        outcome.removed += 1;
+                    }
                 }
             }
         }
+        outcome
     }
 
     #[cfg(unix)]

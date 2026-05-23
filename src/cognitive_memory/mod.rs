@@ -306,6 +306,7 @@ impl NativeCognitiveMemory {
 
 mod backup;
 mod fsync;
+pub mod metrics;
 mod ops;
 
 impl NativeCognitiveMemory {
