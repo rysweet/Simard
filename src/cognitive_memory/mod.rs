@@ -513,3 +513,6 @@ mod tests_mod;
 
 #[cfg(test)]
 mod tests_lock_vs_corruption_1967;
+
+#[cfg(test)]
+mod tests_hermetic_parity;

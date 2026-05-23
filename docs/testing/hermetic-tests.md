@@ -111,18 +111,34 @@ intentionally verbose because a tripped guard always indicates the test
 needs a code change — there is no scenario in which retrying or
 ignoring it is correct.
 
-The guard runs at three sites, chosen to cover every path that can
-mutate persisted state:
+The guard runs via a `cfg(test)`-only helper
+`NativeCognitiveMemory::assert_hermetic_for(site)` at the top of every
+mutating `CognitiveMemoryOps` method. Any new mutating method **must**
+call `self.assert_hermetic_for("NativeCognitiveMemory::<method>")` as
+its acceptance criteria. The nine guarded cognitive-memory entry points
+are:
 
-- `cognitive_memory::native::NativeCognitiveMemory::store_fact` (and its
-  `store_episode` / `store_procedure` siblings).
+| # | Method                | Guard site string |
+|---|----------------------|-------------------|
+| 1 | `record_sensory`     | `NativeCognitiveMemory::record_sensory` |
+| 2 | `prune_expired_sensory` | `NativeCognitiveMemory::prune_expired_sensory` |
+| 3 | `push_working`       | `NativeCognitiveMemory::push_working` |
+| 4 | `clear_working`      | `NativeCognitiveMemory::clear_working` |
+| 5 | `store_episode`      | `NativeCognitiveMemory::store_episode` |
+| 6 | `consolidate_episodes` | `NativeCognitiveMemory::consolidate_episodes` |
+| 7 | `store_fact`         | `NativeCognitiveMemory::store_fact` |
+| 8 | `store_procedure`    | `NativeCognitiveMemory::store_procedure` |
+| 9 | `store_prospective`  | `NativeCognitiveMemory::store_prospective` |
+
+Additional enforcement points outside cognitive memory:
+
 - `goals::persistence::save_goal_board` and
   `goals::persistence::save_goal_board_with_removals` (immediately
   before the first `store_fact` call).
 - `memory_ipc::launcher::launch_writer_bridge` (immediately before
   returning a writer bridge, regardless of which tier was selected).
 
-Three independent enforcement points means deleting one of them does
+Multiple independent enforcement points means deleting one of them does
 not silently disable the guard — at least one will still fire.
 
 ## Helpers that satisfy the contract
