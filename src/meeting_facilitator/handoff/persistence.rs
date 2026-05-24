@@ -604,6 +604,12 @@ mod bundle_tests {
             transcript_path: None,
             next_owner: None,
             artifacts: Vec::new(),
+            schema_version: 2,
+            goal: None,
+            next_actor: None,
+            applied_templates: Vec::new(),
+            history_truncated_count: 0,
+            partial_reason: None,
         }
     }
 

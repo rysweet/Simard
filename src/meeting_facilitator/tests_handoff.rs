@@ -21,6 +21,7 @@ fn make_session(
         explicit_questions: Vec::new(),
         themes: Vec::new(),
         next_owner: None,
+        goal: None,
     }
 }
 
@@ -406,6 +407,12 @@ fn round_trip_handoff_with_next_owner_and_artifacts() {
         transcript_path: Some("/tmp/meetings/transcript-2026-05-01.json".to_string()),
         next_owner: Some("engineer".to_string()),
         artifacts: sample_artifacts(),
+        schema_version: 2,
+        goal: None,
+        next_actor: None,
+        applied_templates: Vec::new(),
+        history_truncated_count: 0,
+        partial_reason: None,
     };
 
     let json = serde_json::to_string_pretty(&handoff).expect("serialize ok");

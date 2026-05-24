@@ -81,6 +81,7 @@ fn scripted_meeting_emits_structured_handoff_bundle() {
         explicit_questions: Vec::new(),
         themes: Vec::new(),
         next_owner: None,
+        goal: None,
     };
 
     let mut handoff = MeetingHandoff::from_session(&session);
@@ -217,6 +218,12 @@ fn empty_transcript_still_produces_well_formed_bundle() {
         transcript_path: None,
         next_owner: None,
         artifacts: Vec::new(),
+        schema_version: 2,
+        goal: None,
+        next_actor: None,
+        applied_templates: Vec::new(),
+        history_truncated_count: 0,
+        partial_reason: None,
     };
 
     let dir = write_meeting_bundle(&mut handoff, &[]).expect("write_meeting_bundle");

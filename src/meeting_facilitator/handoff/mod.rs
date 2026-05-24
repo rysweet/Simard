@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use super::types::{ActionItem, MeetingDecision, MeetingSession, OpenQuestion};
+use super::types::{ActionItem, MeetingDecision, MeetingSession, NextActor, OpenQuestion};
 
 /// Well-known filename for meeting handoff artifacts.
 pub const MEETING_HANDOFF_FILENAME: &str = "meeting_handoff.json";
@@ -79,6 +79,12 @@ pub struct HandoffArtifact {
     pub description: Option<String>,
 }
 
+/// Default value for `MeetingHandoff::schema_version` when deserializing
+/// legacy (v1) JSON that lacks the field.
+fn default_schema_version() -> u32 {
+    1
+}
+
 /// A handoff artifact produced when a meeting closes. Contains decisions,
 /// action items, open questions, the next responsible owner, and a list
 /// of linked artifacts.
@@ -134,6 +140,38 @@ pub struct MeetingHandoff {
     /// deserialize as `[]`.
     #[serde(default)]
     pub artifacts: Vec<HandoffArtifact>,
+
+    // ── Handoff schema v2 fields (issue #1987) ─────────────────────
+    /// Schema version tag. `2` for the enriched schema introduced in
+    /// issue #1987; absent (defaults to `1`) in legacy handoffs.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    /// The overarching objective the meeting set out to achieve, recorded
+    /// by the `/goal` REPL command. Absent when the operator did not set
+    /// one.
+    #[serde(default)]
+    pub goal: Option<String>,
+    /// Typed next-actor routing tag. Supersedes the free-form
+    /// `next_owner` string with a discriminated enum so downstream
+    /// consumers can route deterministically. Both fields are emitted;
+    /// `next_owner` is kept for backward compat.
+    #[serde(default)]
+    pub next_actor: Option<NextActor>,
+    /// Templates applied during the meeting (name + agenda text).
+    /// Lets downstream consumers reconstruct the agenda without
+    /// re-reading the template catalogue.
+    #[serde(default)]
+    pub applied_templates: Vec<crate::meeting_backend::AppliedTemplate>,
+    /// Number of conversation turns that were truncated from `transcript`
+    /// due to the `MAX_HISTORY` cap. Zero when the full history fits.
+    #[serde(default)]
+    pub history_truncated_count: usize,
+    /// When the close pipeline produced a partial handoff (timeout,
+    /// persistence error, …), this field carries the machine-readable
+    /// reason string (e.g. `"close_timeout"`, `"summary_timeout"`).
+    /// `None` on a clean close.
+    #[serde(default)]
+    pub partial_reason: Option<String>,
 }
 
 /// Build a stable, sortable meeting id from a started-at timestamp and a
@@ -326,6 +364,15 @@ impl MeetingHandoff {
             transcript_path: None,
             next_owner: session.next_owner.clone(),
             artifacts: Vec::new(),
+            // v2 fields default to safe values in the facilitator path;
+            // the backend closing path overwrites them via direct struct
+            // construction.
+            schema_version: 2,
+            goal: session.goal.clone(),
+            next_actor: None,
+            applied_templates: Vec::new(),
+            history_truncated_count: 0,
+            partial_reason: None,
         }
     }
 
@@ -401,6 +448,7 @@ mod tests {
             explicit_questions: vec![],
             themes: vec![],
             next_owner: None,
+            goal: None,
         }
     }
 
@@ -431,6 +479,7 @@ mod tests {
             explicit_questions: vec!["What about testing?".to_string()],
             themes: vec!["performance".to_string()],
             next_owner: Some("engineer".to_string()),
+            goal: None,
         }
     }
 

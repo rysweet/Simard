@@ -167,6 +167,9 @@ pub struct MeetingBackend {
     /// `ooda-curate`, `act-on-decisions`, a GitHub handle). Surfaced on the
     /// `MeetingHandoff` via the new `next_owner` field. Added in #1954.
     explicit_next_owner: Option<String>,
+    /// Overarching objective of this meeting, set via `/goal <text>`.
+    /// Flows into the handoff schema v2 `goal` field. Added in #1987.
+    explicit_goal: Option<String>,
     /// Count of user messages whose `send_message` returned `Err` after the
     /// user message was already pushed to history. These are "orphan" turns
     /// with no assistant reply. Surfaced on `MeetingSummary` (issue #1983).
@@ -210,6 +213,7 @@ impl MeetingBackend {
             explicit_action_items: Vec::new(),
             explicit_questions: Vec::new(),
             explicit_next_owner: None,
+            explicit_goal: None,
             orphan_turn_count: 0,
         }
     }
@@ -419,6 +423,23 @@ impl MeetingBackend {
     /// Read the next-owner value the operator set inline (if any).
     pub fn explicit_next_owner(&self) -> Option<&str> {
         self.explicit_next_owner.as_deref()
+    }
+
+    /// Record the meeting's overarching objective via `/goal <text>`.
+    /// Trimmed; empty values clear the value. Surfaced into the `goal`
+    /// field of the resulting `MeetingHandoff`. Added in issue #1987.
+    pub fn push_goal(&mut self, text: &str) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            self.explicit_goal = None;
+        } else {
+            self.explicit_goal = Some(trimmed.to_string());
+        }
+    }
+
+    /// Read the goal the operator set inline (if any).
+    pub fn explicit_goal(&self) -> Option<&str> {
+        self.explicit_goal.as_deref()
     }
 
     // --- Private helpers ---

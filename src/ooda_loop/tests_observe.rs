@@ -175,6 +175,12 @@ fn scan_unprocessed_handoffs_returns_true_for_unprocessed() {
         transcript_path: None,
         next_owner: None,
         artifacts: Vec::new(),
+        schema_version: 2,
+        goal: None,
+        next_actor: None,
+        applied_templates: Vec::new(),
+        history_truncated_count: 0,
+        partial_reason: None,
     };
     write_meeting_handoff(dir.path(), &handoff).unwrap();
 
@@ -206,6 +212,12 @@ fn scan_unprocessed_handoffs_returns_false_when_processed() {
         transcript_path: None,
         next_owner: None,
         artifacts: Vec::new(),
+        schema_version: 2,
+        goal: None,
+        next_actor: None,
+        applied_templates: Vec::new(),
+        history_truncated_count: 0,
+        partial_reason: None,
     };
     write_meeting_handoff(dir.path(), &handoff).unwrap();
 

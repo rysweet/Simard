@@ -261,6 +261,10 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                 backend.push_next_owner(&text);
                 writeln!(output, "{}", cyan(&format!("Next owner recorded: {text}"))).ok();
             }
+            MeetingCommand::Goal(text) => {
+                backend.push_goal(&text);
+                writeln!(output, "{}", cyan(&format!("Goal recorded: {text}"))).ok();
+            }
             MeetingCommand::Recap => {
                 let status = backend.status();
                 writeln!(output, "\n── Meeting Recap ──").ok();
@@ -562,5 +566,6 @@ fn empty_closed_session(topic: &str) -> MeetingSession {
         explicit_questions: Vec::new(),
         themes: Vec::new(),
         next_owner: None,
+        goal: None,
     }
 }

@@ -4,6 +4,29 @@ use std::fmt::{self, Display, Formatter};
 
 use serde::{Deserialize, Serialize};
 
+/// Identifies the next actor expected to consume a meeting handoff.
+///
+/// Supersedes the free-form `next_owner: Option<String>` field with a
+/// typed enum so downstream consumers can route deterministically.
+/// Custom values are captured via the `Other(String)` variant, preserving
+/// backward compatibility with arbitrary strings.
+///
+/// Added in handoff schema v2 (issue #1987).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NextActor {
+    /// The Simard engineer loop.
+    Engineer,
+    /// The OODA curation pipeline.
+    OodaCurate,
+    /// The `act-on-decisions` CLI subcommand.
+    ActOnDecisions,
+    /// A specific human (GitHub handle or display name).
+    Human(String),
+    /// An arbitrary persona / agent name not covered by the well-known set.
+    Other(String),
+}
+
 /// A single decision recorded during a meeting.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MeetingDecision {
@@ -75,6 +98,12 @@ pub struct MeetingSession {
     /// Added in issue #1954.
     #[serde(default)]
     pub next_owner: Option<String>,
+    /// The overarching objective of this meeting, set via `/goal <text>`.
+    /// Flows into the handoff schema v2 `goal` field so downstream
+    /// consumers know what the meeting was trying to achieve. Added in
+    /// issue #1987.
+    #[serde(default)]
+    pub goal: Option<String>,
 }
 
 impl MeetingSession {
@@ -261,6 +290,7 @@ mod tests {
             explicit_questions: vec!["What about testing?".to_string()],
             themes: vec!["performance".to_string()],
             next_owner: None,
+            goal: None,
         }
     }
 
@@ -332,6 +362,7 @@ mod tests {
             explicit_questions: vec![],
             themes: vec![],
             next_owner: None,
+            goal: None,
         };
         let summary = s.durable_summary();
         assert!(summary.contains("decisions=[none]"));
@@ -353,6 +384,7 @@ mod tests {
             explicit_questions: vec![],
             themes: vec![],
             next_owner: None,
+            goal: None,
         };
         let summary = s.durable_summary();
         assert!(summary.contains("duration=unknown"));

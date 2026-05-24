@@ -184,6 +184,12 @@ mod tests {
             transcript_path: None,
             next_owner: None,
             artifacts: Vec::new(),
+            schema_version: 2,
+            goal: None,
+            next_actor: None,
+            applied_templates: Vec::new(),
+            history_truncated_count: 0,
+            partial_reason: None,
         }
     }
 
@@ -260,6 +266,12 @@ mod tests {
             transcript_path: None,
             next_owner: None,
             artifacts: Vec::new(),
+            schema_version: 2,
+            goal: None,
+            next_actor: None,
+            applied_templates: Vec::new(),
+            history_truncated_count: 0,
+            partial_reason: None,
         };
         let json = serde_json::to_string(&h).unwrap();
         let h2: MeetingHandoff = serde_json::from_str(&json).unwrap();

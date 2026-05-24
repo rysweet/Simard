@@ -23,6 +23,7 @@ fn make_session(
         explicit_questions: Vec::new(),
         themes: Vec::new(),
         next_owner: None,
+        goal: None,
     }
 }
 
@@ -258,4 +259,119 @@ fn save_wip_overwrites_previous() {
     let loaded = load_session_wip(dir.path()).unwrap().unwrap();
     assert_eq!(loaded.topic, "Second");
     assert_eq!(loaded.notes, vec!["updated"]);
+}
+
+// -----------------------------------------------------------------------
+// Handoff schema v2 serde round-trip tests (issue #1987)
+// -----------------------------------------------------------------------
+
+#[test]
+fn v2_round_trip_serde() {
+    use crate::meeting_facilitator::types::NextActor;
+
+    let session = make_session(
+        "v2 test",
+        vec!["TBD: what next?"],
+        vec![sample_decision()],
+        vec![sample_action()],
+        vec!["alice"],
+    );
+    let mut handoff = MeetingHandoff::from_session(&session);
+    handoff.schema_version = 2;
+    handoff.goal = Some("Ship handoff schema v2".to_string());
+    handoff.next_actor = Some(NextActor::Engineer);
+    handoff.history_truncated_count = 42;
+    handoff.partial_reason = Some("close_timeout".to_string());
+
+    let json = serde_json::to_string_pretty(&handoff).unwrap();
+    let deser: MeetingHandoff = serde_json::from_str(&json).unwrap();
+    assert_eq!(handoff, deser);
+    assert_eq!(deser.schema_version, 2);
+    assert_eq!(deser.goal.as_deref(), Some("Ship handoff schema v2"));
+    assert_eq!(deser.next_actor, Some(NextActor::Engineer));
+    assert_eq!(deser.history_truncated_count, 42);
+    assert_eq!(deser.partial_reason.as_deref(), Some("close_timeout"));
+}
+
+#[test]
+fn v1_json_missing_v2_fields_defaults_cleanly() {
+    // Simulates deserializing a legacy v1 handoff that has none of the v2 fields.
+    let v1_json = r#"{
+        "meeting_id": "20260101T000000Z-legacy",
+        "topic": "Legacy meeting",
+        "started_at": "2026-01-01T00:00:00Z",
+        "closed_at": "2026-01-01T01:00:00Z",
+        "decisions": [],
+        "action_items": [],
+        "open_questions": [],
+        "processed": false,
+        "transcript": ["summary text"],
+        "participants": ["alice"],
+        "themes": ["testing"]
+    }"#;
+    let handoff: MeetingHandoff = serde_json::from_str(v1_json).unwrap();
+    assert_eq!(
+        handoff.schema_version, 1,
+        "missing schema_version should default to 1"
+    );
+    assert_eq!(handoff.goal, None);
+    assert_eq!(handoff.next_actor, None);
+    assert!(handoff.applied_templates.is_empty());
+    assert_eq!(handoff.history_truncated_count, 0);
+    assert_eq!(handoff.partial_reason, None);
+    assert!(handoff.artifacts.is_empty());
+    assert_eq!(handoff.next_owner, None);
+}
+
+#[test]
+fn v2_strip_to_v1_compat() {
+    use crate::meeting_facilitator::types::NextActor;
+
+    // Build a v2 handoff, serialize it, strip the v2-only fields,
+    // and verify the remainder still deserializes as a valid MeetingHandoff
+    // (all v2 fields fall back to defaults).
+    let session = make_session(
+        "v2 compat",
+        vec![],
+        vec![sample_decision()],
+        vec![],
+        vec!["bob"],
+    );
+    let mut handoff = MeetingHandoff::from_session(&session);
+    handoff.goal = Some("Test compat".to_string());
+    handoff.next_actor = Some(NextActor::Human("alice".to_string()));
+    handoff.history_truncated_count = 10;
+    handoff.partial_reason = Some("summary_timeout".to_string());
+
+    let mut val: serde_json::Value = serde_json::to_value(&handoff).unwrap();
+    let obj = val.as_object_mut().unwrap();
+    obj.remove("schema_version");
+    obj.remove("goal");
+    obj.remove("next_actor");
+    obj.remove("applied_templates");
+    obj.remove("history_truncated_count");
+    obj.remove("partial_reason");
+
+    let stripped_json = serde_json::to_string_pretty(&val).unwrap();
+    let deser: MeetingHandoff = serde_json::from_str(&stripped_json).unwrap();
+    // V2 fields should all revert to defaults.
+    assert_eq!(deser.schema_version, 1);
+    assert_eq!(deser.goal, None);
+    assert_eq!(deser.next_actor, None);
+    assert!(deser.applied_templates.is_empty());
+    assert_eq!(deser.history_truncated_count, 0);
+    assert_eq!(deser.partial_reason, None);
+    // V1 fields should survive.
+    assert_eq!(deser.topic, "v2 compat");
+    assert_eq!(deser.decisions.len(), 1);
+}
+
+#[test]
+fn from_session_populates_goal() {
+    let mut session = make_session("Goal test", vec![], vec![], vec![], vec![]);
+    session.goal = Some("Resolve blocking issues".to_string());
+
+    let handoff = MeetingHandoff::from_session(&session);
+    assert_eq!(handoff.goal.as_deref(), Some("Resolve blocking issues"));
+    assert_eq!(handoff.schema_version, 2);
 }

@@ -342,6 +342,11 @@ impl MeetingBackend {
             next_owner: next_owner_owned.as_deref(),
             artifacts: artifacts.clone(),
             structured_decisions: Some(structured_decisions.clone()),
+            applied_templates: self.applied_templates.clone(),
+            history_truncated_count: self.history.len().saturating_sub(super::MAX_HISTORY),
+            partial_reason: partial_reason.as_ref().map(|r| r.as_wire_str()),
+            goal: self.explicit_goal.as_deref(),
+            next_actor: next_owner_owned.as_deref().map(next_actor_from_owner_str),
         };
 
         // Write MeetingHandoff artifact for OODA integration.
@@ -635,6 +640,11 @@ impl MeetingBackend {
             next_owner: next_owner_owned.as_deref(),
             artifacts: artifacts.clone(),
             structured_decisions: Some(structured_decisions.clone()),
+            applied_templates: self.applied_templates.clone(),
+            history_truncated_count: self.history.len().saturating_sub(super::MAX_HISTORY),
+            partial_reason: partial_reason.as_ref().map(|r| r.as_wire_str()),
+            goal: self.explicit_goal.as_deref(),
+            next_actor: next_owner_owned.as_deref().map(next_actor_from_owner_str),
         };
 
         if let Err(e) = persist::write_handoff_with_explicit(
@@ -835,4 +845,32 @@ fn build_handoff_artifacts(
         });
     }
     out
+}
+
+/// Map a free-form `next_owner` string to a typed [`NextActor`] enum variant.
+///
+/// Well-known persona names (`"engineer"`, `"ooda-curate"`,
+/// `"act-on-decisions"`) are recognized case-insensitively and mapped to
+/// the corresponding discriminated variant. Strings that look like a
+/// GitHub `@handle` (single token, alphanumeric + hyphens) are mapped to
+/// `Human`. Everything else falls into `Other`.
+fn next_actor_from_owner_str(owner: &str) -> crate::meeting_facilitator::NextActor {
+    use crate::meeting_facilitator::NextActor;
+    match owner.trim().to_ascii_lowercase().as_str() {
+        "engineer" => NextActor::Engineer,
+        "ooda-curate" | "ooda_curate" => NextActor::OodaCurate,
+        "act-on-decisions" | "act_on_decisions" => NextActor::ActOnDecisions,
+        other => {
+            // Single-token handles that look human-ish → Human variant.
+            if !other.contains(' ')
+                && other
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            {
+                NextActor::Human(owner.trim().to_string())
+            } else {
+                NextActor::Other(owner.trim().to_string())
+            }
+        }
+    }
 }

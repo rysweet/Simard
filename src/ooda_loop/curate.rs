@@ -217,6 +217,12 @@ mod tests {
             transcript_path: None,
             next_owner: None,
             artifacts: Vec::new(),
+            schema_version: 2,
+            goal: None,
+            next_actor: None,
+            applied_templates: Vec::new(),
+            history_truncated_count: 0,
+            partial_reason: None,
         }
     }
 
@@ -240,6 +246,12 @@ mod tests {
             transcript_path: None,
             next_owner: None,
             artifacts: Vec::new(),
+            schema_version: 2,
+            goal: None,
+            next_actor: None,
+            applied_templates: Vec::new(),
+            history_truncated_count: 0,
+            partial_reason: None,
         }
     }
 
@@ -509,6 +521,12 @@ mod tests {
             transcript_path: None,
             next_owner: None,
             artifacts: Vec::new(),
+            schema_version: 2,
+            goal: None,
+            next_actor: None,
+            applied_templates: Vec::new(),
+            history_truncated_count: 0,
+            partial_reason: None,
         };
         let path_b = dir.path().join("handoff-2026-04-03T00-05-01_00-00.json");
         fs::write(&path_b, serde_json::to_string_pretty(&handoff_b).unwrap()).unwrap();

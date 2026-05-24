@@ -179,6 +179,17 @@ pub struct HandoffEnrichment<'a> {
     /// `None`, decisions are reconstructed from `&[String]` via the
     /// existing extract helpers (legacy behaviour).
     pub structured_decisions: Option<Vec<crate::meeting_facilitator::MeetingDecision>>,
+    /// Templates applied during the meeting (`/template` command).
+    /// Carried into the handoff v2 `applied_templates` field.
+    pub applied_templates: Vec<crate::meeting_backend::AppliedTemplate>,
+    /// Number of history turns that were truncated by the MAX_HISTORY cap.
+    pub history_truncated_count: usize,
+    /// Wire-format string of the partial-close reason, if any.
+    pub partial_reason: Option<&'a str>,
+    /// The meeting's overarching objective set via `/goal`.
+    pub goal: Option<&'a str>,
+    /// Typed next-actor tag (v2). Supersedes `next_owner` for routing.
+    pub next_actor: Option<crate::meeting_facilitator::NextActor>,
 }
 
 /// Write a `MeetingHandoff` artifact for OODA integration.
@@ -331,6 +342,12 @@ pub fn write_handoff_with_explicit(
         transcript_path: None,
         next_owner: enrichment.next_owner.map(|s| s.to_string()),
         artifacts: enrichment.artifacts.clone(),
+        schema_version: 2,
+        goal: enrichment.goal.map(|s| s.to_string()),
+        next_actor: enrichment.next_actor.clone(),
+        applied_templates: enrichment.applied_templates.clone(),
+        history_truncated_count: enrichment.history_truncated_count,
+        partial_reason: enrichment.partial_reason.map(|s| s.to_string()),
     };
 
     let dir = default_handoff_dir();
@@ -428,6 +445,12 @@ pub fn write_handoff_bundle(
         transcript_path: None,
         next_owner: enrichment.next_owner.map(|s| s.to_string()),
         artifacts: enrichment.artifacts.clone(),
+        schema_version: 2,
+        goal: enrichment.goal.map(|s| s.to_string()),
+        next_actor: enrichment.next_actor.clone(),
+        applied_templates: enrichment.applied_templates.clone(),
+        history_truncated_count: enrichment.history_truncated_count,
+        partial_reason: enrichment.partial_reason.map(|s| s.to_string()),
     };
 
     let lines: Vec<crate::meeting_facilitator::BundleTranscriptLine> = messages
