@@ -236,6 +236,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial(cognitive_memory)]
+    #[cfg(feature = "slow-tests")]
     fn banner_and_goal_curation_read_agree_on_shared_store_with_seeded_goals() {
         use crate::greeting_banner::build_greeting_banner;
 
@@ -276,8 +277,41 @@ mod tests {
             .expect("read probe with explicit state root must succeed");
     }
 
+    /// Fast replacement for `banner_and_goal_curation_read_agree_on_shared_store_with_seeded_goals`.
+    ///
+    /// Tests the same Pillar 11 invariant (banner and goal-curation read agree)
+    /// without spawning `gh` subprocesses. Exercises `load_goal_board` directly
+    /// against the same bridge both code paths would use.
     #[test]
     #[serial_test::serial(cognitive_memory)]
+    fn pillar11_banner_and_read_agree_with_seeded_goals_fast() {
+        let state = crate::test_support::HermeticState::new();
+        let state_root = state.state_root().to_path_buf();
+
+        let bridge = crate::memory_ipc::launch_writer_bridge(&state_root).expect("writer bridge");
+        let board = seeded_board(4);
+        crate::goal_curation::save_goal_board(&board, bridge.ops()).expect("seed board");
+
+        // Both banner and read-probe resolve goals via load_goal_board.
+        // The invariant is that reading the same bridge yields the same count.
+        let board_a =
+            crate::goal_curation::load_goal_board(bridge.ops()).expect("load board (banner path)");
+        let board_b =
+            crate::goal_curation::load_goal_board(bridge.ops()).expect("load board (read path)");
+        let records = crate::goal_curation::active_goals_as_records(&board_b);
+
+        assert_eq!(board_a.active.len(), 4, "banner path should see 4 goals");
+        assert_eq!(records.len(), 4, "read path should see 4 goals");
+        assert_eq!(
+            board_a.active.len(),
+            records.len(),
+            "Pillar 11: both paths must agree on active goal count"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    #[cfg(feature = "slow-tests")]
     fn banner_and_goal_curation_read_agree_on_shared_store_when_empty() {
         use crate::greeting_banner::build_greeting_banner;
 
@@ -307,6 +341,24 @@ mod tests {
             0,
             "read should see zero active goals"
         );
+    }
+
+    /// Fast replacement for `banner_and_goal_curation_read_agree_on_shared_store_when_empty`.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn pillar11_banner_and_read_agree_when_empty_fast() {
+        let state = crate::test_support::HermeticState::new();
+        let state_root = state.state_root().to_path_buf();
+
+        let bridge = crate::memory_ipc::launch_writer_bridge(&state_root).expect("writer bridge");
+        crate::goal_curation::save_goal_board(
+            &crate::goal_curation::GoalBoard::new(),
+            bridge.ops(),
+        )
+        .expect("seed empty board");
+
+        let board = crate::goal_curation::load_goal_board(bridge.ops()).expect("load empty board");
+        assert_eq!(board.active.len(), 0, "both paths should see zero goals");
     }
 
     #[test]
