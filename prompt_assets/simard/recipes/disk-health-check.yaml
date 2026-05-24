@@ -29,33 +29,39 @@ steps:
 
       STATE_ROOT="${state_root:-$HOME/.simard}"
       THRESHOLD=80
+      # Emergency mode: keep fewer backups than normal (SIMARD_DB_BACKUP_KEEP
+      # defaults to 24) to reclaim space aggressively under disk pressure.
       BACKUP_KEEP=5
 
-      freed_bytes=0
       actions=()
 
-      # ── Helper: add to freed_bytes and actions ──────────────────────────
-      record_freed() {
-        local bytes="$1" msg="$2"
-        freed_bytes=$((freed_bytes + bytes))
-        actions+=("$msg")
+      # ── Helper: record a cleanup action ─────────────────────────────────
+      record_action() {
+        actions+=("$1")
       }
 
-      # ── Helper: size of a path in bytes (0 if missing) ─────────────────
-      path_bytes() {
-        if [ -e "$1" ]; then
-          du -sb "$1" 2>/dev/null | awk '{print $1}'
-        else
-          echo 0
+      # ── Helper: current disk usage percentage ──────────────────────────
+      get_disk_pct() {
+        local pct
+        pct=$(df --output=pcent "$HOME" 2>/dev/null | tail -1 | tr -d ' %')
+        if [ -z "$pct" ]; then
+          pct=$(df "$HOME" | tail -1 | awk '{gsub(/%/,""); print $5}')
         fi
+        echo "$pct"
+      }
+
+      # ── Helper: available disk space in 1K blocks ──────────────────────
+      get_avail_kb() {
+        local kb
+        kb=$(df --output=avail "$HOME" 2>/dev/null | tail -1 | tr -d ' ')
+        if [ -z "$kb" ]; then
+          kb=$(df "$HOME" | tail -1 | awk '{print $4}')
+        fi
+        echo "$kb"
       }
 
       # ── 1. Measure current disk usage ──────────────────────────────────
-      disk_pct=$(df --output=pcent "$HOME" 2>/dev/null | tail -1 | tr -d ' %')
-      if [ -z "$disk_pct" ]; then
-        # Fallback for non-GNU df
-        disk_pct=$(df "$HOME" | tail -1 | awk '{gsub(/%/,""); print $5}')
-      fi
+      disk_pct=$(get_disk_pct)
 
       # ── 2. If below threshold, report and exit ─────────────────────────
       if [ "$disk_pct" -lt "$THRESHOLD" ]; then
@@ -64,6 +70,7 @@ steps:
       fi
 
       # ── 3. Clean stale engineer worktrees (>24h, no active process) ────
+      avail_before=$(get_avail_kb)
       WORKTREE_DIR="$STATE_ROOT/engineer-worktrees"
       if [ -d "$WORKTREE_DIR" ]; then
         while IFS= read -r -d '' wt; do
@@ -79,9 +86,8 @@ steps:
             fi
           fi
 
-          sz=$(path_bytes "$wt")
           rm -rf "$wt"
-          record_freed "$sz" "removed stale worktree: $(basename "$wt")"
+          record_action "removed stale worktree: $(basename "$wt")"
         done < <(find "$WORKTREE_DIR" -mindepth 1 -maxdepth 1 -type d -not -type l -mmin +1440 -print0 2>/dev/null)
       fi
 
@@ -89,9 +95,8 @@ steps:
       if [ -d "$WORKTREE_DIR" ]; then
         while IFS= read -r -d '' tgt; do
           [ -L "$tgt" ] && continue
-          sz=$(path_bytes "$tgt")
           rm -rf "$tgt"
-          record_freed "$sz" "removed worktree target: $(basename "$(dirname "$tgt")")/target"
+          record_action "removed worktree target: $(basename "$(dirname "$tgt")")/target"
         done < <(find "$WORKTREE_DIR" -mindepth 2 -maxdepth 2 -type d -name target -print0 2>/dev/null)
       fi
 
@@ -103,9 +108,8 @@ steps:
           # Sort by mtime, delete oldest beyond BACKUP_KEEP
           while IFS= read -r -d '' old; do
             [ -L "$old" ] && continue
-            sz=$(path_bytes "$old")
             rm -f "$old"
-            record_freed "$sz" "pruned backup: $(basename "$old")"
+            record_action "pruned backup: $(basename "$old")"
           done < <(find "$BACKUP_DIR" -maxdepth 1 -type f -not -type l -printf '%T@\t%p\0' \
                    | sort -z -t$'\t' -k1,1n \
                    | head -z -n -"$BACKUP_KEEP" \
@@ -116,23 +120,18 @@ steps:
       # ── 6. Clean cargo-target and shared-target caches ─────────────────
       for cache_dir in "$STATE_ROOT/cargo-target" "$STATE_ROOT/shared-target"; do
         if [ -d "$cache_dir" ]; then
-          sz=$(path_bytes "$cache_dir")
-          # Remove incremental and debug artifacts (largest consumers)
           find "$cache_dir" -type d -name incremental -exec rm -rf {} + 2>/dev/null || true
           find "$cache_dir" -type d -name debug -exec rm -rf {} + 2>/dev/null || true
-          sz_after=$(path_bytes "$cache_dir")
-          delta=$((sz - sz_after))
-          if [ "$delta" -gt 0 ]; then
-            record_freed "$delta" "cleaned cache: $(basename "$cache_dir") (incremental+debug)"
-          fi
+          record_action "cleaned cache: $(basename "$cache_dir") (incremental+debug)"
         fi
       done
 
-      # ── 7. Re-measure disk and emit report ─────────────────────────────
-      disk_pct_after=$(df --output=pcent "$HOME" 2>/dev/null | tail -1 | tr -d ' %')
-      if [ -z "$disk_pct_after" ]; then
-        disk_pct_after=$(df "$HOME" | tail -1 | awk '{gsub(/%/,""); print $5}')
-      fi
+      # ── 7. Re-measure disk and compute freed bytes from df delta ───────
+      disk_pct_after=$(get_disk_pct)
+      avail_after=$(get_avail_kb)
+      freed_kb=$((avail_after - avail_before))
+      if [ "$freed_kb" -lt 0 ]; then freed_kb=0; fi
+      freed_bytes=$((freed_kb * 1024))
 
       # Build JSON array of actions
       json_actions="["

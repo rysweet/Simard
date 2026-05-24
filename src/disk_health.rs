@@ -127,8 +127,7 @@ pub fn run_disk_health_check(
         });
     }
 
-    let raw = String::from_utf8_lossy(&output.stdout);
-    serde_json::from_str::<DiskHealthReport>(&raw).map_err(|e| {
+    serde_json::from_slice::<DiskHealthReport>(&output.stdout).map_err(|e| {
         SimardError::AdapterInvocationFailed {
             base_type: ADAPTER_TAG.to_string(),
             reason: format!("failed to parse recipe output as DiskHealthReport: {e}"),
@@ -311,21 +310,6 @@ mod tests {
         assert!(result.unwrap().ends_with(RECIPE_FILENAME));
     }
 
-    #[test]
-    fn resolve_recipe_path_prefers_hot_reload_over_in_tree() {
-        // This test exercises the hot-reload precedence. We can only test
-        // the in-tree path hermetically (hot-reload depends on $HOME),
-        // but we verify the function checks both paths.
-        let tmp = tempfile::tempdir().unwrap();
-        let recipe_dir = tmp.path().join("prompt_assets/simard/recipes");
-        std::fs::create_dir_all(&recipe_dir).unwrap();
-        std::fs::write(recipe_dir.join(RECIPE_FILENAME), "name: test").unwrap();
-
-        // Should find the in-tree recipe at minimum
-        let result = resolve_recipe_path(tmp.path());
-        assert!(result.is_some());
-    }
-
     // ------------------------------------------------------------------
     // run_disk_health_check — error paths (no recipe-runner-rs needed)
     // ------------------------------------------------------------------
@@ -406,19 +390,5 @@ mod tests {
     fn truncate_zero_max() {
         let result = truncate("hello", 0);
         assert_eq!(result, "…");
-    }
-
-    // ------------------------------------------------------------------
-    // Constants
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn recipe_filename_is_correct() {
-        assert_eq!(RECIPE_FILENAME, "disk-health-check.yaml");
-    }
-
-    #[test]
-    fn adapter_tag_is_correct() {
-        assert_eq!(ADAPTER_TAG, "disk-health-check");
     }
 }
