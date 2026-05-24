@@ -186,6 +186,88 @@ pub(crate) const PART_05: &str = r#"      try {
     setInterval(fetchMergeReadiness,30000);
     setInterval(fetchStatus,30000);
     setInterval(fetchIssues,120000);
+
+    /* --- Glossary / Jargon tooltips (#1996) --- */
+    const GLOSSARY={
+      'OODA':'Observe-Orient-Decide-Act — the decision-making loop Simard runs each cycle to decide what to do next.',
+      'facilitator':'The meeting facilitator component that manages discussions between Simard and the user, extracting goals and action items.',
+      'consolidation':'The process of merging short-term observations into long-term memory, strengthening important facts and pruning noise.',
+      'recipe runner':'The workflow engine that executes multi-step automation recipes (build, test, deploy sequences) as part of goal work.',
+      'spawn_engineer':'An action where Simard launches a sub-agent in a separate process to work on a specific task (e.g., fixing a bug or writing code).',
+      'cognitive memory':'Simard\u2019s multi-layered memory system: sensory (raw input), working (active context), episodic (past events), semantic (learned facts), procedural (how-to), and prospective (reminders).',
+      'semantic fact':'A learned piece of knowledge stored in long-term memory, like a concept or relationship Simard has observed.',
+      'episodic memory':'A record of a specific past event — what happened, when, and the outcome.',
+      'procedural memory':'How-to knowledge — step-by-step procedures Simard has learned for completing tasks.',
+      'prospective memory':'A planned future action or reminder that Simard intends to act on later.',
+      'working memory':'Short-term context currently being used — the facts and plans relevant to whatever Simard is working on right now.',
+      'sensory buffer':'Raw, unprocessed recent observations before they are categorised into other memory types.',
+      'goal board':'The prioritised list of active goals and backlog items that Simard is tracking.',
+      'backlog':'Goals queued for later — not actively being worked on, but available to promote to active status.',
+      'hive mind':'Multi-host synchronisation: sharing knowledge across multiple Simard instances running on different machines.',
+      'daemon':'The background process that runs Simard\u2019s autonomous decision-making loop continuously.',
+      'cycle':'One complete pass through the decision loop — observe the environment, orient priorities, decide on an action, and act on it.',
+      'gym':'A training environment where Simard practices and improves its skills on synthetic scenarios.',
+    };
+    function toggleGlossary(){
+      const p=document.getElementById('glossary-panel');
+      p.classList.toggle('open');
+    }
+    function annotateJargon(el){
+      if(!el)return;
+      const walker=document.createTreeWalker(el,NodeFilter.SHOW_TEXT,null);
+      const nodes=[];
+      while(walker.nextNode()) nodes.push(walker.currentNode);
+      const terms=Object.keys(GLOSSARY).sort((a,b)=>b.length-a.length);
+      const pattern=new RegExp('\\b('+terms.map(t=>t.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|')+')\\b','gi');
+      nodes.forEach(node=>{
+        if(node.parentElement&&(node.parentElement.tagName==='ABBR'||node.parentElement.tagName==='SCRIPT'||node.parentElement.tagName==='STYLE'||node.parentElement.tagName==='CODE'||node.parentElement.tagName==='INPUT'||node.parentElement.tagName==='TEXTAREA'))return;
+        const text=node.textContent;
+        if(!pattern.test(text))return;
+        pattern.lastIndex=0;
+        const frag=document.createDocumentFragment();
+        let lastIdx=0;
+        let match;
+        while((match=pattern.exec(text))!==null){
+          if(match.index>lastIdx) frag.appendChild(document.createTextNode(text.slice(lastIdx,match.index)));
+          const abbr=document.createElement('abbr');
+          const key=Object.keys(GLOSSARY).find(k=>k.toLowerCase()===match[1].toLowerCase())||match[1];
+          abbr.title=GLOSSARY[key]||'';
+          abbr.textContent=match[0];
+          frag.appendChild(abbr);
+          lastIdx=pattern.lastIndex;
+        }
+        if(lastIdx<text.length) frag.appendChild(document.createTextNode(text.slice(lastIdx)));
+        if(frag.childNodes.length>1) node.parentElement.replaceChild(frag,node);
+      });
+    }
+    // Run jargon annotation after each tab switch and data fetch
+    const origTabClickHandlers=[];
+    document.querySelectorAll('.tab').forEach(tab=>{
+      const origClick=tab.onclick;
+      tab.addEventListener('click',()=>{
+        setTimeout(()=>annotateJargon(document.querySelector('.tab-content.active')),300);
+      });
+    });
+    // Annotate overview on first load
+    setTimeout(()=>annotateJargon(document.querySelector('.tab-content.active')),500);
+  </script>
+
+  <div id="glossary-panel" class="glossary-panel">
+    <h3>Glossary <button class="close-btn" onclick="toggleGlossary()">&times;</button></h3>
+    <p style="color:#8b949e;font-size:.8rem;margin-bottom:1rem">Hover any <abbr title="Example tooltip">dotted-underlined term</abbr> in the dashboard for a quick explanation, or browse the full list below.</p>
+    <dl id="glossary-list"></dl>
+  </div>
+  <script>
+    (function(){
+      const dl=document.getElementById('glossary-list');
+      if(!dl)return;
+      Object.keys(GLOSSARY).sort().forEach(term=>{
+        const entry=document.createElement('div');
+        entry.className='glossary-entry';
+        entry.innerHTML='<dt>'+esc(term)+'</dt><dd>'+esc(GLOSSARY[term])+'</dd>';
+        dl.appendChild(entry);
+      });
+    })();
   </script>
 </body>
 </html>

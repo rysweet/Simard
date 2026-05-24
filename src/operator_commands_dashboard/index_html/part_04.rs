@@ -157,23 +157,28 @@ pub(crate) const PART_04: &str = r#"            let fmt;
             </div>`;
           }).join('');
         }else{document.getElementById('wb-actions').innerHTML='<span style="color:#8b949e;font-size:.85rem">No recent actions</span>';}
-        // Task memory (rich facts)
+        // Task memory (structured table — #1683)
         const tm=d.task_memory||{};
         document.getElementById('wb-facts-count').textContent=(tm.facts_count||0)+' facts';
         if(tm.recent_facts?.length){
-          document.getElementById('wb-facts-list').innerHTML=tm.recent_facts.map(f=>{
-            const conf=typeof f.confidence==='number'?(' <span style="color:#8b949e;font-size:.75rem">('+Math.round(f.confidence*100)+'%)</span>'):'';
-            const tags=(f.tags||[]).map(t=>'<span style="background:var(--border);padding:0 .3rem;border-radius:3px;font-size:.7rem;margin-left:.3rem">'+esc(t)+'</span>').join('');
-            return'<div style="padding:.25rem 0;border-bottom:1px solid var(--border)"><strong style="color:var(--accent);font-size:.8rem">'+esc(f.concept||'')+'</strong>'+conf+tags+'<div>'+esc(f.content||'')+'</div></div>';
-          }).join('');
+          document.getElementById('wb-facts-list').innerHTML='<table class="proc-table"><tr><th>Category</th><th>Content</th><th>Confidence</th><th>Tags</th></tr>'
+            +tm.recent_facts.map(f=>{
+            const cat=esc(f.category||f.concept||'');
+            const conf=typeof f.confidence==='number'?Math.round(f.confidence*100)+'%':'—';
+            const tags=(f.tags||[]).map(t=>'<span style="background:var(--border);padding:0 .3rem;border-radius:3px;font-size:.7rem;margin-right:.3rem">'+esc(t)+'</span>').join('')||'—';
+            const content=esc((f.content||'').substring(0,200));
+            return'<tr><td style="white-space:nowrap;color:var(--accent);font-weight:600;font-size:.8rem">'+cat+'</td><td style="font-size:.85rem">'+content+'</td><td style="text-align:center;font-size:.8rem">'+conf+'</td><td>'+tags+'</td></tr>';
+          }).join('')+'</table>';
         }else{document.getElementById('wb-facts-list').innerHTML='<span style="color:#8b949e">No recent facts in memory</span>';}
-        // Working memory
+        // Working memory (human-readable — #1683)
         const wm=d.working_memory||[];
         document.getElementById('wb-wm-count').textContent=wm.length+' slots';
         if(wm.length){
-          document.getElementById('wb-wm-list').innerHTML=wm.map(s=>{
-            return'<div style="padding:.25rem 0;border-bottom:1px solid var(--border)"><span style="color:var(--accent);font-weight:600;font-size:.8rem">'+esc(s.slot_type)+'</span> <span style="color:#8b949e;font-size:.75rem">['+esc(s.task_id)+'] rel='+((s.relevance||0).toFixed(2))+'</span><div>'+esc(s.content)+'</div></div>';
-          }).join('');
+          document.getElementById('wb-wm-list').innerHTML='<table class="proc-table"><tr><th>Type</th><th>Content</th><th>Related Goal</th><th>Relevance</th></tr>'
+            +wm.map(s=>{
+            const relColor=s.relevance>=0.8?'var(--green)':s.relevance>=0.5?'var(--yellow)':'#8b949e';
+            return'<tr><td style="white-space:nowrap;color:var(--accent);font-weight:600;font-size:.8rem">'+esc(s.type_label||'Note')+'</td><td style="font-size:.85rem">'+esc((s.content||'').substring(0,200))+'</td><td style="font-size:.8rem;color:#8b949e">'+esc(s.goal||'—')+'</td><td style="text-align:center"><span style="color:'+relColor+';font-weight:600;font-size:.8rem">'+esc(s.relevance_label||'—')+'</span></td></tr>';
+          }).join('')+'</table>';
         }else{document.getElementById('wb-wm-list').innerHTML='<span style="color:#8b949e">No active working memory</span>';}
         // Cognitive statistics
         const cs=d.cognitive_statistics;
