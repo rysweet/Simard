@@ -101,6 +101,13 @@ pub struct MeetingSummary {
     /// [`crate::meeting_backend::PartialReason`]).
     #[serde(default)]
     pub partial_reason: Option<crate::meeting_backend::PartialReason>,
+    /// Number of user messages whose corresponding `send_message` returned
+    /// `Err` after the user message was already pushed to history — orphan
+    /// turns with no assistant reply. Surfaced in the REPL exit banner and
+    /// the handoff JSON so operators and downstream tooling can gauge
+    /// transcript completeness. Issue #1983.
+    #[serde(default)]
+    pub orphan_turn_count: usize,
 }
 
 /// Current status of a meeting session.
@@ -186,6 +193,7 @@ mod tests {
             }],
             bundle_dir: Some("/home/user/.simard/meetings/20250101T000000Z-sprint/".to_string()),
             partial_reason: None,
+            orphan_turn_count: 0,
         };
         let json = serde_json::to_string(&summary).unwrap();
         let s2: MeetingSummary = serde_json::from_str(&json).unwrap();
@@ -212,6 +220,7 @@ mod tests {
         assert!(s.applied_templates.is_empty());
         assert!(s.bundle_dir.is_none());
         assert!(s.partial_reason.is_none());
+        assert_eq!(s.orphan_turn_count, 0);
     }
 
     #[test]
@@ -233,6 +242,7 @@ mod tests {
             applied_templates: vec![],
             bundle_dir: Some("/tmp/x".to_string()),
             partial_reason: Some(crate::meeting_backend::PartialReason::SummaryTimeout),
+            orphan_turn_count: 0,
         };
         let json = serde_json::to_string(&summary).unwrap();
         assert!(

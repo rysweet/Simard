@@ -1,5 +1,5 @@
 use super::repl::*;
-use super::test_support::{MockAgentSession, mock_bridge};
+use super::test_support::{FailingThenOkMockAgent, MockAgentSession, mock_bridge};
 use crate::meeting_facilitator::MeetingSessionStatus;
 use serial_test::serial;
 
@@ -800,5 +800,82 @@ fn repl_state_shows_explicit_items_immediately() {
     assert!(
         output_str.contains("*(explicit)*"),
         "/state should mark explicit questions as such: {output_str}"
+    );
+}
+
+// ── Structured backend-error banner (issue #1983) ───────────────────────
+//
+// When `send_message` returns `Err`, the REPL should render a structured
+// `[meeting:error]` banner with severity, source, and recovery hint —
+// instead of the old inline yellow `[agent error: …]` line. The closed
+// session should report the orphan-turn count.
+
+#[test]
+#[serial]
+fn renders_structured_banner_on_agent_error() {
+    // SAFETY: serial_test guards against parallel env mutations.
+    unsafe { std::env::set_var("NO_COLOR", "1") };
+
+    let bridge = mock_bridge();
+    // First call fails, second call succeeds, then /close.
+    let agent = FailingThenOkMockAgent::new(1, "recovered");
+    let input = b"this will fail\nthis will succeed\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Error banner test",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    unsafe { std::env::remove_var("NO_COLOR") };
+
+    let output_str = String::from_utf8(output).unwrap();
+
+    // 1. Structured banner must contain the stable marker.
+    assert!(
+        output_str.contains("[meeting:error] WARNING: backend error"),
+        "should contain stable [meeting:error] marker: {output_str}"
+    );
+
+    // 2. Banner must include the source label.
+    assert!(
+        output_str.contains("source=conversation"),
+        "should identify source=conversation: {output_str}"
+    );
+
+    // 3. Banner must include severity classification.
+    assert!(
+        output_str.contains("severity=transient"),
+        "simulated failure should classify as transient: {output_str}"
+    );
+
+    // 4. Recovery hint must be present.
+    assert!(
+        output_str.contains("meeting is still usable"),
+        "transient banner should include usability hint: {output_str}"
+    );
+
+    // 5. Old inline format must NOT appear.
+    assert!(
+        !output_str.contains("[agent error:"),
+        "old [agent error: …] format must not appear: {output_str}"
+    );
+
+    // 6. The successful second turn should still render normally.
+    assert!(
+        output_str.contains("recovered"),
+        "second turn should succeed and render: {output_str}"
+    );
+
+    // 7. Close-time orphan-turn banner should report exactly 1 orphan.
+    assert!(
+        output_str.contains("[meeting] WARNING: 1 orphan turn has no assistant reply"),
+        "close banner should report orphan turn count: {output_str}"
     );
 }

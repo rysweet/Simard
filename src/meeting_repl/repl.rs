@@ -31,6 +31,44 @@ fn prompt_string() -> String {
     cyan(PROMPT_TEXT)
 }
 
+/// Render a structured backend-error banner to the operator.
+///
+/// Emits a stable, greppable `[meeting:error]` marker (matching the
+/// `[meeting] handoff written:` convention) so operators can `grep` terminal
+/// scrollback reliably. The banner distinguishes *transient* errors (LLM
+/// hiccup — meeting still usable) from *permanent* errors (adapter crashed —
+/// meeting degraded) using a simple heuristic: `transient` unless the error
+/// string contains keywords indicating a non-recoverable condition.
+///
+/// Issue #1983.
+fn render_backend_error<W: Write>(output: &mut W, source: &str, err: &dyn std::fmt::Display) {
+    let err_str = err.to_string();
+
+    let is_permanent = err_str.contains("closed")
+        || err_str.contains("no longer available")
+        || err_str.contains("empty_adapter_response");
+    let severity = if is_permanent {
+        "permanent"
+    } else {
+        "transient"
+    };
+    let hint = if is_permanent {
+        "meeting is degraded — /preview to check state, /close to salvage"
+    } else {
+        "meeting is still usable — retry your message or /close to end"
+    };
+
+    writeln!(
+        output,
+        "{}",
+        yellow(&format!(
+            "[meeting:error] WARNING: backend error (source={source}, severity={severity}) — {err_str}"
+        ))
+    )
+    .ok();
+    writeln!(output, "{}", yellow(&format!("  ↳ {hint}"))).ok();
+}
+
 /// Run the interactive meeting REPL.
 ///
 /// Creates a `MeetingBackend` and loops on stdin. Returns a `MeetingSession`
@@ -288,7 +326,8 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                         }
                         Err(e) => {
                             spinner.stop();
-                            writeln!(output, "[agent error: {e}]").ok();
+                            backend.increment_orphan_turn_count();
+                            render_backend_error(output, "template", &e);
                         }
                     }
                 } else {
@@ -343,7 +382,8 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                     }
                     Err(e) => {
                         spinner.stop();
-                        writeln!(output, "{}", yellow(&format!("[agent error: {e}]"))).ok();
+                        backend.increment_orphan_turn_count();
+                        render_backend_error(output, "conversation", &e);
                     }
                 }
             }
@@ -468,6 +508,26 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                     yellow(&format!(
                         "[meeting] WARNING: partial close (reason={}). Review the bundle before relying on extracted decisions/action items.",
                         reason.as_wire_str()
+                    ))
+                )
+                .ok();
+            }
+            // Orphan-turn banner: printed when at least one
+            // `send_message` failed after the user message was already
+            // pushed to history, leaving turns with no assistant reply
+            // in the transcript. Issue #1983.
+            if summary.orphan_turn_count > 0 {
+                let plural = if summary.orphan_turn_count == 1 {
+                    "turn has"
+                } else {
+                    "turns have"
+                };
+                writeln!(
+                    output,
+                    "{}",
+                    yellow(&format!(
+                        "[meeting] WARNING: {} orphan {} no assistant reply (backend errors during conversation). Transcript may be incomplete.",
+                        summary.orphan_turn_count, plural
                     ))
                 )
                 .ok();

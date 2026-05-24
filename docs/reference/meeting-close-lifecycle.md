@@ -318,6 +318,34 @@ can match it deterministically:
           before relying on extracted decisions/action items.
 ```
 
+### Orphan-turn banner
+
+When one or more `send_message` calls failed after the user message
+was already pushed to history (creating turns with no assistant
+reply), the exit banner appends an orphan-turn warning:
+
+```
+[meeting] WARNING: 2 orphan turns have no assistant reply (backend errors during conversation). Transcript may be incomplete.
+```
+
+The count comes from `MeetingSummary.orphan_turn_count` (issue #1983).
+
+### Backend error banner (inline, during conversation)
+
+During the live REPL loop, backend errors render as a structured
+banner instead of a bare `[agent error: …]` line. The stable
+marker is `[meeting:error]`, greppable from terminal scrollback:
+
+```
+[meeting:error] WARNING: backend error (source=conversation, severity=transient) — simulated transient LLM failure
+  ↳ meeting is still usable — retry your message or /close to end
+```
+
+| Field | Values |
+|---|---|
+| `source` | `conversation`, `template` |
+| `severity` | `transient` (default — most LLM errors), `permanent` (adapter closed, empty response) |
+
 The `<wire>` value comes from the `PartialReason` `Display` impl
 (see [Casing](#partialreason-values) above).
 
