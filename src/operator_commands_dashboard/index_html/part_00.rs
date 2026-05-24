@@ -236,8 +236,29 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
   <div class="tab-content" id="tab-memory">
     <h1 class="page-h1">Memory</h1>
     <p class="page-lede">Everything Simard has learned and remembered, organised by memory type (working, semantic, episodic, procedural, prospective, and sensory) with full-text search.</p>
+
+    <div class="card" style="margin-bottom:1rem;border:1px solid #238636;background:linear-gradient(135deg,#0d1117,#0f1a12)">
+      <div style="display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap">
+        <div style="text-align:center;min-width:120px">
+          <div id="mem-recent-count" style="font-size:2.5rem;font-weight:700;color:#3fb950;line-height:1">—</div>
+          <div style="font-size:.85rem;color:#8b949e;margin-top:.25rem">items remembered<br>in the last hour</div>
+        </div>
+        <div style="flex:1;min-width:200px">
+          <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:.5rem">
+            <h2 style="margin:0;color:#3fb950;font-size:1rem">What Simard Remembers</h2>
+            <span id="mem-recent-total" style="color:#8b949e;font-size:.8rem"></span>
+            <button class="btn" onclick="fetchRecentMemories()" style="font-size:.75rem;margin-left:auto">Refresh</button>
+          </div>
+          <div id="mem-recent-list" style="max-height:340px;overflow-y:auto"><span class="loading">Loading recent memories…</span></div>
+        </div>
+      </div>
+    </div>
+
+    <details id="mem-advanced-toggle">
+      <summary style="cursor:pointer;color:var(--accent);font-size:.85rem;margin-bottom:1rem;user-select:none">▸ Show advanced memory view (graph, search, raw data)</summary>
+
     <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem">
-      <h2 style="margin:0">Memory</h2>
+      <h2 style="margin:0">Memory Graph</h2>
       <span id="mem-graph-stats" style="color:#8b949e;font-size:.8rem;margin-left:auto"></span>
       <button class="btn" onclick="fetchMemoryGraph()" style="font-size:.75rem">Refresh Graph</button>
     </div>
@@ -277,6 +298,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
       <div class="card" style="flex:1"><h2>Memory Overview</h2><div id="mem-overview"><span class="loading">Loading…</span></div></div>
       <div class="card" style="flex:1"><h2>Memory Files</h2><div id="mem-files"><span class="loading">Loading…</span></div></div>
     </div>
+    </details>
   </div>
 
   <div class="tab-content" id="tab-costs">

@@ -4,6 +4,249 @@ use serde_json::{Value, json};
 use super::routes::resolve_state_root;
 use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory, as_f64, as_i64, as_str};
 
+// ---------------------------------------------------------------------------
+// Recent memories — plain-English view for #1997
+// ---------------------------------------------------------------------------
+
+/// Extract an approximate Unix timestamp (seconds) from a UUIDv7 simple-hex
+/// string embedded in a LadybugDB node id like `epi_<uuid_hex>`.
+fn timestamp_from_v7_id(id: &str) -> Option<f64> {
+    let hex = id.split('_').nth(1)?;
+    if hex.len() < 12 {
+        return None;
+    }
+    // UUIDv7 encodes the Unix-epoch millisecond timestamp in the first 48
+    // bits (12 hex characters).
+    let millis = u64::from_str_radix(&hex[..12], 16).ok()?;
+    Some(millis as f64 / 1000.0)
+}
+
+/// Plain-English label for an internal node type.
+fn human_category(node_type: &str) -> &'static str {
+    match node_type {
+        "WorkingMemory" => "Current task context",
+        "SemanticFact" => "Learned fact",
+        "EpisodicMemory" => "Past event",
+        "ProceduralMemory" => "How-to knowledge",
+        "ProspectiveMemory" => "Planned reminder",
+        "SensoryBuffer" => "Recent observation",
+        _ => "Memory",
+    }
+}
+
+/// `GET /api/memory/recent` — returns recent memories sorted by time,
+/// with plain-English summaries and a count of items from the last hour.
+pub(crate) async fn memory_recent() -> Json<Value> {
+    let state_root = resolve_state_root();
+    let mem = match NativeCognitiveMemory::open_read_only(&state_root) {
+        Ok(m) => m,
+        Err(e) => {
+            return Json(json!({
+                "items": [],
+                "total": 0,
+                "last_hour_count": 0,
+                "error": format!("Cannot open memory store: {e}"),
+            }));
+        }
+    };
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let one_hour_ago = now_secs - 3600.0;
+
+    let query_rows =
+        |cypher: &str| -> Vec<Vec<lbug::Value>> { mem.query(cypher).unwrap_or_default() };
+
+    #[derive(Debug)]
+    struct RecentItem {
+        id: String,
+        node_type: &'static str,
+        summary: String,
+        detail: String,
+        ts: f64,
+    }
+
+    let mut items: Vec<RecentItem> = Vec::new();
+
+    // Working memory
+    for row in query_rows("MATCH (w:WorkingMemory) RETURN w.id, w.content, w.slot_type LIMIT 50") {
+        if let Some(id) = row.first().and_then(as_str) {
+            let content = row.get(1).and_then(as_str).unwrap_or("");
+            let summary = first_sentence(content);
+            items.push(RecentItem {
+                ts: timestamp_from_v7_id(id).unwrap_or(0.0),
+                id: id.to_string(),
+                node_type: "WorkingMemory",
+                summary,
+                detail: content.to_string(),
+            });
+        }
+    }
+
+    // Semantic facts
+    for row in query_rows("MATCH (f:Fact) RETURN f.id, f.concept, f.content, f.confidence LIMIT 50")
+    {
+        if let Some(id) = row.first().and_then(as_str) {
+            let concept = row.get(1).and_then(as_str).unwrap_or("");
+            let content = row.get(2).and_then(as_str).unwrap_or("");
+            let summary = if concept.is_empty() {
+                first_sentence(content)
+            } else {
+                concept.to_string()
+            };
+            items.push(RecentItem {
+                ts: timestamp_from_v7_id(id).unwrap_or(0.0),
+                id: id.to_string(),
+                node_type: "SemanticFact",
+                summary,
+                detail: content.to_string(),
+            });
+        }
+    }
+
+    // Episodes
+    for row in query_rows("MATCH (e:Episode) RETURN e.id, e.content, e.source_label LIMIT 50") {
+        if let Some(id) = row.first().and_then(as_str) {
+            let content = row.get(1).and_then(as_str).unwrap_or("");
+            let summary = first_sentence(content);
+            items.push(RecentItem {
+                ts: timestamp_from_v7_id(id).unwrap_or(0.0),
+                id: id.to_string(),
+                node_type: "EpisodicMemory",
+                summary,
+                detail: content.to_string(),
+            });
+        }
+    }
+
+    // Procedures
+    for row in query_rows("MATCH (p:Procedure) RETURN p.id, p.name, p.steps LIMIT 50") {
+        if let Some(id) = row.first().and_then(as_str) {
+            let name = row.get(1).and_then(as_str).unwrap_or("");
+            let summary = if name.is_empty() {
+                "(unnamed procedure)".to_string()
+            } else {
+                name.to_string()
+            };
+            items.push(RecentItem {
+                ts: timestamp_from_v7_id(id).unwrap_or(0.0),
+                id: id.to_string(),
+                node_type: "ProceduralMemory",
+                summary,
+                detail: row.get(2).and_then(as_str).unwrap_or("").to_string(),
+            });
+        }
+    }
+
+    // Prospective memory
+    for row in
+        query_rows("MATCH (p:Prospective) RETURN p.id, p.description, p.trigger_condition LIMIT 50")
+    {
+        if let Some(id) = row.first().and_then(as_str) {
+            let desc = row.get(1).and_then(as_str).unwrap_or("");
+            let summary = first_sentence(desc);
+            items.push(RecentItem {
+                ts: timestamp_from_v7_id(id).unwrap_or(0.0),
+                id: id.to_string(),
+                node_type: "ProspectiveMemory",
+                summary,
+                detail: desc.to_string(),
+            });
+        }
+    }
+
+    // Sensory
+    for row in query_rows("MATCH (s:Sensory) RETURN s.id, s.modality, s.raw_data LIMIT 50") {
+        if let Some(id) = row.first().and_then(as_str) {
+            let modality = row.get(1).and_then(as_str).unwrap_or("");
+            let raw = row.get(2).and_then(as_str).unwrap_or("");
+            let summary = if raw.is_empty() {
+                format!("({modality} observation)")
+            } else {
+                first_sentence(raw)
+            };
+            items.push(RecentItem {
+                ts: timestamp_from_v7_id(id).unwrap_or(0.0),
+                id: id.to_string(),
+                node_type: "SensoryBuffer",
+                summary,
+                detail: raw.to_string(),
+            });
+        }
+    }
+
+    // Sort newest first
+    items.sort_by(|a, b| b.ts.partial_cmp(&a.ts).unwrap_or(std::cmp::Ordering::Equal));
+
+    let total = items.len();
+    let last_hour_count = items.iter().filter(|i| i.ts >= one_hour_ago).count();
+
+    let json_items: Vec<Value> = items
+        .iter()
+        .take(100)
+        .map(|item| {
+            let ts_str = if item.ts > 0.0 {
+                chrono::DateTime::from_timestamp(item.ts as i64, 0)
+                    .map(|dt| dt.to_rfc3339())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            json!({
+                "id": item.id,
+                "category": human_category(item.node_type),
+                "summary": item.summary,
+                "detail": item.detail,
+                "timestamp": ts_str,
+                "epoch_secs": item.ts,
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "items": json_items,
+        "total": total,
+        "last_hour_count": last_hour_count,
+        "server_time": chrono::Utc::now().to_rfc3339(),
+    }))
+}
+
+/// Extract the first sentence (or first ~120 chars) as a summary.
+fn first_sentence(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return "(empty)".to_string();
+    }
+    // If it starts with '[' it might be a consolidation tag — skip it
+    let cleaned = if trimmed.starts_with('[') {
+        trimmed
+            .find(']')
+            .map(|i| &trimmed[i + 1..])
+            .unwrap_or(trimmed)
+            .trim()
+    } else {
+        trimmed
+    };
+    if cleaned.is_empty() {
+        return trimmed.chars().take(120).collect();
+    }
+    // Find first sentence boundary
+    for (i, c) in cleaned.char_indices() {
+        if i > 10 && (c == '.' || c == '!' || c == '?') {
+            let sentence: String = cleaned[..=i].to_string();
+            if sentence.len() <= 200 {
+                return sentence;
+            }
+        }
+        if i >= 120 {
+            return format!("{}…", &cleaned[..i]);
+        }
+    }
+    cleaned.to_string()
+}
+
 pub(crate) async fn memory_search(Json(body): Json<Value>) -> Json<Value> {
     let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
     if query.is_empty() {
