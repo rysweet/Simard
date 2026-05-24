@@ -167,6 +167,13 @@ pub struct MeetingBackend {
     /// `ooda-curate`, `act-on-decisions`, a GitHub handle). Surfaced on the
     /// `MeetingHandoff` via the new `next_owner` field. Added in #1954.
     explicit_next_owner: Option<String>,
+    /// The meeting's overarching objective, distinct from the short `topic`.
+    /// Set by `/goal <text>` at the REPL; falls back to the first user
+    /// message on close if unset. Added in issue #1987.
+    explicit_goal: Option<String>,
+    /// Number of messages dropped because `history` hit `MAX_HISTORY`.
+    /// Surfaced on `MeetingHandoff::history_truncated_count`. Issue #1987.
+    history_truncated_count: usize,
     /// Count of user messages whose `send_message` returned `Err` after the
     /// user message was already pushed to history. These are "orphan" turns
     /// with no assistant reply. Surfaced on `MeetingSummary` (issue #1983).
@@ -210,6 +217,8 @@ impl MeetingBackend {
             explicit_action_items: Vec::new(),
             explicit_questions: Vec::new(),
             explicit_next_owner: None,
+            explicit_goal: None,
+            history_truncated_count: 0,
             orphan_turn_count: 0,
         }
     }
@@ -421,6 +430,39 @@ impl MeetingBackend {
         self.explicit_next_owner.as_deref()
     }
 
+    /// Record the meeting's overarching objective via `/goal <text>`.
+    /// Empty values clear the field. Added in issue #1987.
+    pub fn set_goal(&mut self, text: &str) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            self.explicit_goal = None;
+        } else {
+            self.explicit_goal = Some(trimmed.to_string());
+        }
+    }
+
+    /// Read the explicit goal set by the operator (if any).
+    pub fn explicit_goal(&self) -> Option<&str> {
+        self.explicit_goal.as_deref()
+    }
+
+    /// Compute the effective goal for the handoff: explicit `/goal` text
+    /// if set, otherwise fall back to the first user message.
+    pub fn effective_goal(&self) -> Option<String> {
+        if let Some(ref g) = self.explicit_goal {
+            return Some(g.clone());
+        }
+        self.history
+            .iter()
+            .find(|m| matches!(m.role, Role::User))
+            .map(|m| m.content.clone())
+    }
+
+    /// Number of history messages dropped due to `MAX_HISTORY` cap.
+    pub fn history_truncated_count(&self) -> usize {
+        self.history_truncated_count
+    }
+
     // --- Private helpers ---
 
     /// Load active goal (slug, title) pairs from the default file-backed store.
@@ -467,6 +509,7 @@ impl MeetingBackend {
         if self.history.len() >= MAX_HISTORY {
             warn!("Conversation history at cap ({MAX_HISTORY}), dropping oldest message");
             self.history.remove(0);
+            self.history_truncated_count += 1;
         }
         self.history.push(ConversationMessage {
             role,

@@ -23,12 +23,14 @@ order:
 …
 
 # OUTPUT_FORMAT
-…(JSON schema)…
+…(text format: DECISION marker and labeled lines)…
 
 # EXAMPLES
 ### Example: continue_skipping
 CONTEXT: …
-OUTPUT: {…}
+OUTPUT:
+DECISION: continue_skipping
+RATIONALE: engineer touched worktree 8s ago; let it cook
 
 ### Example: reclaim_and_redispatch
 …
@@ -76,71 +78,66 @@ headers exist.
 
 ## Output Schema
 
-> **Updated as of [#1711](https://github.com/rysweet/Simard/issues/1711).**
-> The wire format is now **prose-first with a `DECISION:` marker** and a
-> hybrid prose-plus-JSON form for variants that need structured fields.
-> Pure JSON is still accepted for backward compatibility. The full
-> specification lives in
-> [Reference: OODA Brain Decision Protocol](ooda-brain-decision-protocol.md);
+> **Updated as of [#1980](https://github.com/rysweet/Simard/issues/1980).**
+> The wire format is **text-only with a `DECISION:` marker** and labeled
+> lines for structured fields. JSON is no longer accepted — the legacy
+> JSON path and hybrid prose-plus-JSON form from #1711 have been removed.
+> The full specification lives in
+> [Reference: text-parsing wire formats](text-parsing-wire-formats.md);
 > this section is a quick summary.
 
-**Preferred form (prose marker):**
+**Text marker form:**
 
 ```
 DECISION: continue_skipping
-engineer touched worktree 8 seconds ago; let it cook
+RATIONALE: engineer touched worktree 8 seconds ago; let it cook
 ```
 
-**Hybrid form (marker + JSON for variants needing fields):**
+**Structured variant (labeled lines):**
 
-````
+```
 DECISION: open_tracking_issue
-{
-  "rationale": "engineer panic recurred across 3 spawns",
-  "title": "Engineer panics on goal X",
-  "body": "Repro: …\nLog tail: …"
-}
-````
+TITLE: Engineer panics on goal X
+BODY: Repro: spawn engineer, wait 30s, observe panic in tail.
+RATIONALE: engineer panic recurred across 3 spawns
+```
 
-**Legacy form (still accepted):** a single JSON object whose `choice`
-discriminator names a variant, optionally wrapped in ```` ```json ... ````
-fences or surrounded by explanatory prose. The discriminator is `choice`.
+All variants accept an optional `RATIONALE:` label. If absent, non-labeled
+lines after the DECISION line are concatenated as the rationale.
 
 ### `continue_skipping`
 
-```json
-{ "choice": "continue_skipping", "rationale": "engineer made progress 12s ago" }
+```
+DECISION: continue_skipping
+RATIONALE: engineer made progress 12s ago
 ```
 
 ### `reclaim_and_redispatch`
 
-```json
-{
-  "choice": "reclaim_and_redispatch",
-  "rationale": "worktree idle 7h, no log activity",
-  "redispatch_context": "Previous engineer attempted X; log tail showed Y; please retry with Z."
-}
+```
+DECISION: reclaim_and_redispatch
+REDISPATCH_CONTEXT: Previous engineer attempted X; log tail showed Y; please retry with Z.
+RATIONALE: worktree idle 7h, no log activity
 ```
 
 `redispatch_context` is appended to the engineer task description on respawn.
 
 ### `deprioritize`
 
-```json
-{ "choice": "deprioritize", "rationale": "20 skips, 8 failures — reduce priority -10" }
+```
+DECISION: deprioritize
+RATIONALE: 20 skips, 8 failures — reduce priority -10
 ```
 
 Side-effect: `state.goal_priorities[goal_id] -= 10` (saturating).
 
 ### `open_tracking_issue`
 
-```json
-{
-  "choice": "open_tracking_issue",
-  "rationale": "log shows panic recurring across 3 spawns",
-  "title": "Engineer panics on goal X",
-  "body": "Repro: …\nLog tail: …"
-}
+```
+DECISION: open_tracking_issue
+TITLE: Engineer panics on goal X
+BODY: Repro: spawn engineer, wait 30s, observe panic in tail.
+RATIONALE: log shows panic recurring across 3 spawns
 ```
 
 Side-effect: appends a record to `<state_root>/pending_issues.jsonl`, a new
@@ -150,23 +147,19 @@ file is a write-only audit trail.
 
 ### `mark_goal_blocked`
 
-```json
-{
-  "choice": "mark_goal_blocked",
-  "rationale": "engineer log states 'requires human decision'",
-  "reason": "awaiting-human-decision"
-}
+```
+DECISION: mark_goal_blocked
+REASON: awaiting-human-decision
+RATIONALE: engineer log states 'requires human decision'
 ```
 
 Side-effect: `state.blocked_goals.insert(goal_id, reason)`.
 
 ### `consider_self_update`
 
-```json
-{
-  "choice": "consider_self_update",
-  "rationale": "current daemon is 6h behind upstream main; in-flight cycles quiescent for 4 minutes; safe-update window open"
-}
+```
+DECISION: consider_self_update
+RATIONALE: current daemon is 6h behind upstream main; in-flight cycles quiescent for 4 minutes; safe-update window open
 ```
 
 Side-effect: `apply_lifecycle_decision` invokes the `simard safe-update`
@@ -180,22 +173,29 @@ than firing on every cycle.
 
 ## Parser Rules
 
-`parse_decision_from_response` (in `src/ooda_brain/rustyclawd.rs`) tries
-three paths in order:
+`parse_decision_from_response` (in `src/ooda_brain/rustyclawd.rs`) uses the
+DECISION marker as its **sole** parser:
 
-1. **Prose marker path.** If the first non-blank line matches
-   `^\s*DECISION\s*:\s*<variant_token>\s*$` (case-insensitive on the
-   keyword `DECISION`; `<variant_token>` matched exact-snake-case against
-   the `EngineerLifecycleDecision` whitelist), the marker is consumed and
-   the remaining body is scanned for either an optional JSON object (which
-   supplies variant-specific fields) or free-form rationale text.
-2. **Marker-wins precedence.** If the JSON body contains a `choice` field
-   that disagrees with the marker, the marker wins and the JSON `choice`
-   is overwritten before field harvesting.
-3. **Legacy JSON path.** If no marker is present, the parser falls back to
-   the pre-#1711 behavior: trim whitespace, strip ```` ```json ```` /
-   ```` ``` ```` fences, slice from the first `{` to the last `}`, and
-   `serde_json::from_str::<EngineerLifecycleDecision>(slice)`.
+1. **Find the DECISION marker.** The first non-blank line matching
+   `DECISION:` (case-insensitive on the keyword `DECISION`) is found.
+   The variant token after the colon is matched exact-snake-case against
+   the `EngineerLifecycleDecision` whitelist.
+2. **Extract labeled fields.** Remaining lines are scanned for labeled
+   fields (`TITLE:`, `BODY:`, `REASON:`, `REDISPATCH_CONTEXT:`,
+   `RATIONALE:`). Labels are matched case-insensitively.
+3. **Collect rationale.** If no `RATIONALE:` label is found, non-labeled
+   lines after the DECISION line are concatenated as the rationale.
+4. **Construct the decision.** The text-parsed fields are assembled into
+   a `serde_json::Value::Object` and deserialized into
+   `EngineerLifecycleDecision` via `serde_json::from_value`. This is
+   **not** parsing LLM output — it is deserializing a controlled
+   construction from text-parsed fields. A `// SAFETY:` comment marks
+   this call.
+
+If no `DECISION:` marker is found, the parser returns
+`SimardError::BrainResponseUnparseable { raw, source }`. The JSON
+fallback path (legacy `find('{')..rfind('}')` extraction) and the
+hybrid prose-plus-JSON form have been removed as of #1980.
 
 Failures produce `SimardError::BrainResponseUnparseable { raw, source }`,
 logged at warn level with the **full raw response text** embedded
@@ -252,7 +252,7 @@ When adding a new variant:
 4. Add a row to the
    [Behavior matrix](ooda-brain-decision-protocol.md#behavior-matrix) in
    the protocol reference covering the new variant's marker-only,
-   marker-plus-JSON, and missing-required-fields cases.
+   marker-with-labeled-lines, and missing-required-fields cases.
 5. Add the matching `#[test]` function(s) to `src/ooda_brain/tests.rs`,
    numbered as the next available `Tn`. Behavior-matrix rows and tests
    must stay 1:1.
@@ -261,7 +261,9 @@ When adding a new variant:
 
 ## See Also
 
+* [Concept: text-based brain protocol](../concepts/text-based-brain-protocol.md)
 * [Concept: prompt-driven OODA brain](../concepts/prompt-driven-ooda-brain.md)
+* [Reference: text-parsing wire formats](text-parsing-wire-formats.md)
 * [Reference: `OodaBrain` API](ooda-brain-api.md)
 * [Reference: OODA Brain Decision Protocol](ooda-brain-decision-protocol.md)
 * [How-to: edit the OODA brain prompt](../howto/edit-the-ooda-brain-prompt.md)

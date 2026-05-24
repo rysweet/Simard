@@ -210,10 +210,18 @@ impl<S: LlmSubmitter> OodaOrientBrain for RustyClawdOrientBrain<S> {
     }
 }
 
-/// Extract a JSON object from the LLM response (LLMs sometimes wrap JSON in
-/// prose / markdown fences) and parse it as a judgment. On failure the error
-/// embeds the **full raw response text** (truncated for log safety) — see
-/// issue #1711.
+/// Parse the brain response using labeled-line format (issue #1980).
+/// Replaces the JSON `find('{')..rfind('}')` parser.
+///
+/// Expected format:
+/// ```text
+/// ADJUSTED_URGENCY: 0.4
+/// RATIONALE: transient failure, moderate demotion
+/// CONFIDENCE: 0.9
+/// ```
+///
+/// `ADJUSTED_URGENCY:` is required. `RATIONALE:` defaults to empty.
+/// `CONFIDENCE:` defaults to 1.0. Unknown lines are ignored.
 fn parse_judgment_from_response(raw: &str) -> Result<OrientJudgment, String> {
     let stripped = raw.trim();
     if stripped.is_empty() {
@@ -222,23 +230,70 @@ fn parse_judgment_from_response(raw: &str) -> Result<OrientJudgment, String> {
             raw
         ));
     }
-    let candidate = if let Some(start) = stripped.find('{')
-        && let Some(end) = stripped.rfind('}')
-        && end >= start
-    {
-        &stripped[start..=end]
-    } else {
-        return Err(format!(
-            "orient brain response had no JSON object; raw_response={:?}",
-            super::rustyclawd::truncate_for_log_pub(raw)
-        ));
-    };
-    serde_json::from_str::<OrientJudgment>(candidate).map_err(|e| {
+
+    let mut adjusted_urgency: Option<f64> = None;
+    let mut rationale = String::new();
+    let mut confidence: f64 = 1.0;
+
+    for line in stripped.lines() {
+        let trimmed = line.trim();
+        if let Some(val) = strip_label_ci(trimmed, "ADJUSTED_URGENCY:") {
+            adjusted_urgency = Some(val.parse::<f64>().map_err(|e| {
+                format!(
+                    "orient brain ADJUSTED_URGENCY parse error: {e}; raw_response={:?}",
+                    super::rustyclawd::truncate_for_log_pub(raw)
+                )
+            })?);
+        } else if let Some(val) = strip_label_ci(trimmed, "RATIONALE:") {
+            rationale = val.to_string();
+        } else if let Some(val) = strip_label_ci(trimmed, "CONFIDENCE:") {
+            confidence = val.parse::<f64>().unwrap_or(1.0);
+        }
+    }
+
+    let adjusted_urgency = adjusted_urgency.ok_or_else(|| {
         format!(
-            "orient-brain-parse-error: {e}; payload={candidate}; raw_response={:?}",
+            "orient brain response missing ADJUSTED_URGENCY: line; raw_response={:?}",
             super::rustyclawd::truncate_for_log_pub(raw)
         )
+    })?;
+
+    if rationale.is_empty() {
+        // If no explicit RATIONALE: line, use the full text minus the
+        // labeled lines as a best-effort rationale.
+        let prose: Vec<&str> = stripped
+            .lines()
+            .filter(|l| {
+                let t = l.trim();
+                !t.is_empty()
+                    && strip_label_ci(t, "ADJUSTED_URGENCY:").is_none()
+                    && strip_label_ci(t, "RATIONALE:").is_none()
+                    && strip_label_ci(t, "CONFIDENCE:").is_none()
+            })
+            .collect();
+        if !prose.is_empty() {
+            rationale = prose.join(" ");
+        } else {
+            rationale = "(no rationale provided)".to_string();
+        }
+    }
+
+    Ok(OrientJudgment {
+        adjusted_urgency,
+        rationale,
+        confidence,
+        demotion_applied: 0.0, // caller recomputes
     })
+}
+
+/// Case-insensitive label prefix strip. Returns the value after the label
+/// if the line starts with the label (case-insensitive).
+fn strip_label_ci<'a>(line: &'a str, label: &str) -> Option<&'a str> {
+    if line.len() >= label.len() && line[..label.len()].eq_ignore_ascii_case(label) {
+        Some(line[label.len()..].trim())
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -268,89 +323,109 @@ pub fn build_rustyclawd_orient_brain() -> SimardResult<Box<dyn OodaOrientBrain>>
 mod tests {
     use super::*;
 
-    // ----- (a) well-formed JSON pass-through -----------------------------
+    // ----- Labeled-line parser (issue #1980) ------------------------------
+
     #[test]
-    fn parse_well_formed_json_returns_judgment() {
-        let raw = r#"{"adjusted_urgency":0.4,"rationale":"transient","confidence":0.9}"#;
+    fn parse_full_labeled_response() {
+        let raw = "ADJUSTED_URGENCY: 0.4\nRATIONALE: transient failure\nCONFIDENCE: 0.9\n";
         let j = parse_judgment_from_response(raw).expect("must parse");
         assert!((j.adjusted_urgency - 0.4).abs() < 1e-9);
-        assert_eq!(j.rationale, "transient");
+        assert_eq!(j.rationale, "transient failure");
         assert!((j.confidence - 0.9).abs() < 1e-9);
     }
 
     #[test]
-    fn parse_well_formed_json_defaults_confidence_when_absent() {
-        let raw = r#"{"adjusted_urgency":0.3,"rationale":"x"}"#;
+    fn parse_defaults_confidence_when_absent() {
+        let raw = "ADJUSTED_URGENCY: 0.3\nRATIONALE: x\n";
         let j = parse_judgment_from_response(raw).expect("must parse");
         assert!((j.confidence - 1.0).abs() < 1e-9);
     }
 
-    // ----- (b) JSON with surrounding prose — fallback parser must salvage -
     #[test]
-    fn parse_salvages_json_wrapped_in_prose() {
-        let raw = "Reasoning:\n```json\n{\"adjusted_urgency\":0.0,\"rationale\":\"chronic\",\"confidence\":0.95}\n```\nDone.";
-        let j = parse_judgment_from_response(raw).expect("must salvage");
-        assert!(j.adjusted_urgency.abs() < 1e-9);
-        assert_eq!(j.rationale, "chronic");
+    fn parse_case_insensitive_labels() {
+        let raw = "adjusted_urgency: 0.5\nrationale: lower case\n";
+        let j = parse_judgment_from_response(raw).expect("must parse");
+        assert!((j.adjusted_urgency - 0.5).abs() < 1e-9);
+        assert_eq!(j.rationale, "lower case");
     }
 
     #[test]
-    fn parse_salvages_json_with_trailing_prose_only() {
-        let raw =
-            r#"{"adjusted_urgency":0.2,"rationale":"ok","confidence":1.0}  -- and that's all"#;
+    fn parse_zero_urgency() {
+        let raw = "ADJUSTED_URGENCY: 0.0\nRATIONALE: chronic failure\nCONFIDENCE: 0.95\n";
+        let j = parse_judgment_from_response(raw).expect("must parse");
+        assert!(j.adjusted_urgency.abs() < 1e-9);
+        assert_eq!(j.rationale, "chronic failure");
+    }
+
+    #[test]
+    fn parse_urgency_only_derives_rationale_from_prose() {
+        let raw = "ADJUSTED_URGENCY: 0.2\nThis is a transient issue that should recover.";
         let j = parse_judgment_from_response(raw).expect("must parse");
         assert!((j.adjusted_urgency - 0.2).abs() < 1e-9);
-    }
-
-    // ----- (c) completely unparseable returns Err, never panics ----------
-    #[test]
-    fn parse_unparseable_returns_structured_error_with_raw_body() {
-        let raw = "totally not json at all";
-        let err = parse_judgment_from_response(raw).expect_err("must Err");
-        // Anti-regression for #1711.
-        assert!(
-            err.contains(raw),
-            "error must embed raw response (issue #1711), got: {err}"
-        );
+        assert!(j.rationale.contains("transient"));
     }
 
     #[test]
-    fn parse_empty_response_returns_empty_error() {
+    fn parse_urgency_only_no_prose_gets_default_rationale() {
+        let raw = "ADJUSTED_URGENCY: 0.5\n";
+        let j = parse_judgment_from_response(raw).expect("must parse");
+        assert_eq!(j.rationale, "(no rationale provided)");
+    }
+
+    #[test]
+    fn parse_ignores_unknown_lines() {
+        let raw = "ADJUSTED_URGENCY: 0.4\nSOME_OTHER_FIELD: ignored\nRATIONALE: ok\n";
+        let j = parse_judgment_from_response(raw).expect("must parse");
+        assert!((j.adjusted_urgency - 0.4).abs() < 1e-9);
+        assert_eq!(j.rationale, "ok");
+    }
+
+    // ----- Error cases ---------------------------------------------------
+
+    #[test]
+    fn parse_empty_response_returns_error() {
         let err = parse_judgment_from_response("").expect_err("must Err");
-        assert!(
-            err.to_lowercase().contains("empty"),
-            "empty-response error must mention emptiness, got: {err}"
-        );
+        assert!(err.to_lowercase().contains("empty"));
     }
 
     #[test]
-    fn parse_whitespace_only_response_treated_as_empty() {
+    fn parse_whitespace_only_returns_error() {
         let err = parse_judgment_from_response("   \n\t  ").expect_err("must Err");
+        assert!(err.to_lowercase().contains("empty"));
+    }
+
+    #[test]
+    fn parse_missing_urgency_returns_error() {
+        let raw = "RATIONALE: forgot the urgency field\n";
+        let err = parse_judgment_from_response(raw).expect_err("must Err");
+        assert!(err.contains("ADJUSTED_URGENCY"));
+    }
+
+    #[test]
+    fn parse_invalid_urgency_value_returns_error() {
+        let raw = "ADJUSTED_URGENCY: not_a_number\nRATIONALE: bad\n";
+        let err = parse_judgment_from_response(raw).expect_err("must Err");
+        assert!(err.contains("parse error"));
+    }
+
+    #[test]
+    fn parse_json_input_rejected_without_labels() {
+        // Pure JSON (the old format) should now fail — no labeled lines
+        let raw = r#"{"adjusted_urgency":0.4,"rationale":"transient","confidence":0.9}"#;
+        let err = parse_judgment_from_response(raw).expect_err("must Err");
         assert!(
-            err.to_lowercase().contains("empty"),
-            "whitespace-only must be treated as empty, got: {err}"
+            err.contains("ADJUSTED_URGENCY"),
+            "JSON without labels should be rejected (issue #1980): {err}"
         );
     }
 
     #[test]
-    fn parse_malformed_json_with_braces_returns_parse_error() {
-        let raw = r#"{"adjusted_urgency":0.4,"rationale":}"#;
+    fn parse_json_wrapped_in_prose_rejected() {
+        let raw = "Here:\n```json\n{\"adjusted_urgency\":0.0,\"rationale\":\"chronic\"}\n```\n";
         let err = parse_judgment_from_response(raw).expect_err("must Err");
         assert!(
-            err.contains("orient-brain-parse-error"),
-            "malformed JSON must surface a structured serde error tag: {err}"
-        );
-        assert!(err.contains(raw), "raw_response must be embedded: {err}");
-    }
-
-    #[test]
-    fn parse_missing_required_field_returns_parse_error() {
-        // Schema guard: parses as JSON but lacks `adjusted_urgency`.
-        let raw = r#"{"rationale":"forgot the urgency field"}"#;
-        let err = parse_judgment_from_response(raw).expect_err("must Err");
-        assert!(
-            err.contains("orient-brain-parse-error"),
-            "missing required field must surface serde error: {err}"
+            err.contains("ADJUSTED_URGENCY"),
+            "JSON-in-prose should be rejected (issue #1980): {err}"
         );
     }
 }

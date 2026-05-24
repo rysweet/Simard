@@ -37,6 +37,10 @@ pub enum MeetingCommand {
     /// Empty payload (a bare `/owner`) falls through to conversation so
     /// the operator's intent isn't silently coerced. Added in issue #1954.
     Owner(String),
+    /// Operator sets the meeting's overarching objective (e.g.
+    /// `/goal Agree on the release plan for v2`). Empty payload falls
+    /// through to conversation. Added in issue #1987.
+    Goal(String),
     /// Natural language — forwarded to the LLM.
     Conversation(String),
 }
@@ -103,6 +107,14 @@ pub fn parse_command(input: &str) -> MeetingCommand {
                 MeetingCommand::Conversation(trimmed.to_string())
             } else {
                 MeetingCommand::Owner(arg)
+            }
+        }
+        _ if lower.starts_with("/goal ") => {
+            let arg = trimmed["/goal ".len()..].trim().to_string();
+            if arg.is_empty() {
+                MeetingCommand::Conversation(trimmed.to_string())
+            } else {
+                MeetingCommand::Goal(arg)
             }
         }
         _ => MeetingCommand::Conversation(trimmed.to_string()),
@@ -366,6 +378,40 @@ mod tests {
         assert_eq!(
             parse_command("/owner    "),
             MeetingCommand::Conversation("/owner".to_string()),
+        );
+    }
+
+    // ── Inline /goal (issue #1987) ───────────────────────────────────
+
+    #[test]
+    fn parse_goal_with_arg() {
+        assert_eq!(
+            parse_command("/goal Agree on the release plan for v2"),
+            MeetingCommand::Goal("Agree on the release plan for v2".to_string()),
+        );
+        assert_eq!(
+            parse_command("  /Goal  Ship the feature  "),
+            MeetingCommand::Goal("Ship the feature".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_goal_preserves_case() {
+        assert_eq!(
+            parse_command("/goal Finalize OAuth Flow"),
+            MeetingCommand::Goal("Finalize OAuth Flow".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_goal_empty_arg_is_conversation() {
+        assert_eq!(
+            parse_command("/goal"),
+            MeetingCommand::Conversation("/goal".to_string()),
+        );
+        assert_eq!(
+            parse_command("/goal    "),
+            MeetingCommand::Conversation("/goal".to_string()),
         );
     }
 }

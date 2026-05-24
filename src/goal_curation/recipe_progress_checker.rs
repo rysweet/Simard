@@ -141,15 +141,7 @@ impl ProgressEvidenceChecker for RecipeProgressChecker {
             };
         }
 
-        // Reuse the same parse logic from progress_reviewer
-        match super::progress_reviewer::parse_reviewer_response(&raw) {
-            Ok(parsed) => decision_from_response(parsed),
-            Err(parse_err) => EvidenceDecision::Accept {
-                reason: format!(
-                    "{ADAPTER_TAG}: parse error ({parse_err}); accepting to avoid blocking goal"
-                ),
-            },
-        }
+        parse_verdict_from_text(&raw)
     }
 }
 
@@ -168,32 +160,35 @@ fn render_wip_summary(goal: &ActiveGoal) -> String {
     s
 }
 
-/// Reuse the same ReviewerResponse → EvidenceDecision mapping.
-fn decision_from_response(r: super::progress_reviewer::ReviewerResponse) -> EvidenceDecision {
-    let trimmed = r.rationale.trim();
-    let rationale = {
-        let mut chars = trimmed.chars();
-        let prefix: String = chars.by_ref().take(RATIONALE_MAX_CHARS).collect();
-        if chars.next().is_some() {
-            prefix + "…"
-        } else {
-            prefix
-        }
-    };
-    let verdict_lc = r.verdict.trim().to_ascii_lowercase();
-    if verdict_lc == "accept" {
-        EvidenceDecision::Accept {
-            reason: format!("{ADAPTER_TAG}: accept — {rationale}"),
-        }
-    } else if verdict_lc == "reject" {
+/// Parse recipe stdout text for verdict keywords (accept/reject).
+///
+/// The recipe runs an agent that produces natural language output.
+/// We scan for the verdict keyword and use the surrounding text as
+/// the rationale. No JSON parsing needed — the agent already makes
+/// the decision; we just need to read it.
+///
+/// Scan rules:
+/// - Case-insensitive search for "accept" or "reject"
+/// - First match wins
+/// - The full text (truncated) becomes the rationale
+/// - If neither keyword found, accept with diagnostic (same fallback
+///   as the old JSON parse-error path)
+pub fn parse_verdict_from_text(text: &str) -> EvidenceDecision {
+    let lower = text.to_ascii_lowercase();
+    let rationale = truncate(text.trim(), RATIONALE_MAX_CHARS);
+
+    if lower.contains("reject") {
         EvidenceDecision::Reject {
             reason: format!("{ADAPTER_TAG}: reject — {rationale}"),
+        }
+    } else if lower.contains("accept") {
+        EvidenceDecision::Accept {
+            reason: format!("{ADAPTER_TAG}: accept — {rationale}"),
         }
     } else {
         EvidenceDecision::Accept {
             reason: format!(
-                "{ADAPTER_TAG}: unknown verdict {:?}; accepting to avoid blocking goal",
-                r.verdict
+                "{ADAPTER_TAG}: no verdict keyword found in recipe output; accepting to avoid blocking goal"
             ),
         }
     }
@@ -229,9 +224,6 @@ mod tests {
 
     #[test]
     fn downward_move_is_auto_accepted_without_recipe_call() {
-        // RecipeProgressChecker::new may fail in test env (no binary) so
-        // test the trait method directly via a constructed instance.
-        // We only need to test the fast path which doesn't invoke the binary.
         let checker = RecipeProgressChecker {
             recipe_path: PathBuf::from("/nonexistent/recipe.yaml"),
         };
@@ -264,13 +256,110 @@ mod tests {
         let g = goal_with_activity(Some("working on it"));
         match checker.check(&g, 10, 20, Utc::now()) {
             EvidenceDecision::Accept { reason } => {
-                // Should fail at spawn or recipe exit, either way accept
                 assert!(
                     reason.contains("recipe") || reason.contains("spawn"),
                     "got: {reason}"
                 );
             }
             EvidenceDecision::Reject { .. } => panic!("expected accept on infra failure"),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Text-based verdict parser (issue #1980)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn text_verdict_accept_detected() {
+        let text = "After reviewing the evidence, I accept the claimed progress.";
+        match parse_verdict_from_text(text) {
+            EvidenceDecision::Accept { reason } => {
+                assert!(reason.contains("accept"), "got: {reason}");
+            }
+            EvidenceDecision::Reject { .. } => panic!("expected accept"),
+        }
+    }
+
+    #[test]
+    fn text_verdict_reject_detected() {
+        let text = "The progress jump is not supported. I reject the claim.";
+        match parse_verdict_from_text(text) {
+            EvidenceDecision::Reject { reason } => {
+                assert!(reason.contains("reject"), "got: {reason}");
+            }
+            EvidenceDecision::Accept { .. } => panic!("expected reject"),
+        }
+    }
+
+    #[test]
+    fn text_verdict_case_insensitive() {
+        let text = "ACCEPT - the evidence checks out";
+        match parse_verdict_from_text(text) {
+            EvidenceDecision::Accept { reason } => {
+                assert!(reason.contains("accept"), "got: {reason}");
+            }
+            EvidenceDecision::Reject { .. } => panic!("expected accept"),
+        }
+    }
+
+    #[test]
+    fn text_verdict_reject_takes_priority_over_accept() {
+        // If both keywords appear, reject wins (safer default)
+        let text = "I cannot accept this, I must reject the claim.";
+        match parse_verdict_from_text(text) {
+            EvidenceDecision::Reject { reason } => {
+                assert!(reason.contains("reject"), "got: {reason}");
+            }
+            EvidenceDecision::Accept { .. } => panic!("expected reject when both keywords present"),
+        }
+    }
+
+    #[test]
+    fn text_verdict_no_keyword_falls_back_to_accept() {
+        let text = "The progress looks reasonable for this stage.";
+        match parse_verdict_from_text(text) {
+            EvidenceDecision::Accept { reason } => {
+                assert!(reason.contains("no verdict keyword"), "got: {reason}");
+            }
+            EvidenceDecision::Reject { .. } => {
+                panic!("expected accept fallback when no keyword found")
+            }
+        }
+    }
+
+    #[test]
+    fn text_verdict_empty_falls_back_to_accept() {
+        let text = "";
+        match parse_verdict_from_text(text) {
+            EvidenceDecision::Accept { reason } => {
+                assert!(reason.contains("no verdict keyword"), "got: {reason}");
+            }
+            EvidenceDecision::Reject { .. } => panic!("expected accept on empty text"),
+        }
+    }
+
+    #[test]
+    fn text_verdict_includes_rationale_from_text() {
+        let text = "Based on the PR and commit history, I accept this progress claim.";
+        match parse_verdict_from_text(text) {
+            EvidenceDecision::Accept { reason } => {
+                assert!(
+                    reason.contains("PR and commit"),
+                    "rationale should include text: {reason}"
+                );
+            }
+            EvidenceDecision::Reject { .. } => panic!("expected accept"),
+        }
+    }
+
+    #[test]
+    fn text_verdict_multiline_response() {
+        let text = "Looking at the evidence:\n\n- PR #2018 has 3 commits\n- Tests pass\n\nI accept the claimed progress from 30% to 45%.";
+        match parse_verdict_from_text(text) {
+            EvidenceDecision::Accept { reason } => {
+                assert!(reason.contains("accept"), "got: {reason}");
+            }
+            EvidenceDecision::Reject { .. } => panic!("expected accept"),
         }
     }
 }

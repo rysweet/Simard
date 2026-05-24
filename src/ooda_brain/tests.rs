@@ -189,12 +189,12 @@ fn decision_unknown_choice_fails_to_parse() {
 }
 
 // ---------------------------------------------------------------------------
-// (1) Stub returns continue when canned continue JSON
+// (1) Stub returns continue when canned DECISION marker response
 // ---------------------------------------------------------------------------
 
 #[test]
 fn stub_returns_continue_when_canned_continue_json() {
-    let stub = StubSubmitter::new(r#"{"choice":"continue_skipping","rationale":"hb ok"}"#);
+    let stub = StubSubmitter::new("DECISION: continue_skipping\nhb ok");
     let brain = RustyClawdBrain::new(stub);
     let decision = brain
         .decide_engineer_lifecycle(&sample_ctx())
@@ -208,13 +208,13 @@ fn stub_returns_continue_when_canned_continue_json() {
 }
 
 // ---------------------------------------------------------------------------
-// (2) Stub returns reclaim when canned reclaim JSON
+// (2) Stub returns reclaim when canned DECISION marker response
 // ---------------------------------------------------------------------------
 
 #[test]
 fn stub_returns_reclaim_when_canned_reclaim_json() {
     let stub = StubSubmitter::new(
-        r#"{"choice":"reclaim_and_redispatch","rationale":"7h idle","redispatch_context":"retry persistence layer"}"#,
+        "DECISION: reclaim_and_redispatch\nREDISPATCH_CONTEXT: retry persistence layer\nRATIONALE: 7h idle",
     );
     let brain = RustyClawdBrain::new(stub);
     let decision = brain
@@ -234,7 +234,7 @@ fn stub_returns_reclaim_when_canned_reclaim_json() {
 
 #[test]
 fn stub_unparseable_returns_brain_error() {
-    let stub = StubSubmitter::new("this is not JSON at all, sorry");
+    let stub = StubSubmitter::new("this is not a DECISION marker at all, sorry");
     let brain = RustyClawdBrain::new(stub);
     let result = brain.decide_engineer_lifecycle(&sample_ctx());
     assert!(
@@ -245,20 +245,19 @@ fn stub_unparseable_returns_brain_error() {
 
 #[test]
 fn stub_partial_garbage_then_brace_still_errors_cleanly() {
-    // No braces at all → must Err, not panic.
-    let stub = StubSubmitter::new("explanation but no JSON");
+    let stub = StubSubmitter::new("explanation but no DECISION marker");
     let brain = RustyClawdBrain::new(stub);
     let _ = brain.decide_engineer_lifecycle(&sample_ctx()); // just must not panic
 }
 
 // ---------------------------------------------------------------------------
-// (4) Stub extra fields are ignored (forward compat)
+// (4) Stub extra labeled fields are ignored (forward compat)
 // ---------------------------------------------------------------------------
 
 #[test]
 fn stub_extra_fields_are_ignored() {
     let stub = StubSubmitter::new(
-        r#"{"choice":"continue_skipping","rationale":"ok","future_field":"ignored","another":42}"#,
+        "DECISION: continue_skipping\nRATIONALE: ok\nFUTURE_FIELD: ignored\nANOTHER: 42",
     );
     let brain = RustyClawdBrain::new(stub);
     let decision = brain
@@ -271,20 +270,29 @@ fn stub_extra_fields_are_ignored() {
 }
 
 #[test]
-fn stub_response_with_surrounding_prose_still_parses() {
-    // LLMs sometimes wrap JSON in prose. The brain MUST extract the JSON
-    // object from the first `{` to the last `}`.
+fn stub_json_only_response_is_rejected() {
+    // Issue #1980: JSON-only responses are no longer accepted
+    let stub = StubSubmitter::new(r#"{"choice":"continue_skipping","rationale":"ok"}"#);
+    let brain = RustyClawdBrain::new(stub);
+    let result = brain.decide_engineer_lifecycle(&sample_ctx());
+    assert!(
+        result.is_err(),
+        "JSON-only response must be rejected (issue #1980)"
+    );
+}
+
+#[test]
+fn stub_json_in_prose_response_is_rejected() {
+    // Issue #1980: JSON wrapped in prose without DECISION marker is rejected
     let stub = StubSubmitter::new(
-        "Here is my decision:\n{\"choice\":\"continue_skipping\",\"rationale\":\"ok\"}\nLet me know if you need more.",
+        "Here is my decision:\n{\"choice\":\"continue_skipping\",\"rationale\":\"ok\"}\nLet me know.",
     );
     let brain = RustyClawdBrain::new(stub);
-    let decision = brain
-        .decide_engineer_lifecycle(&sample_ctx())
-        .expect("brain should extract JSON from prose-wrapped response");
-    assert!(matches!(
-        decision,
-        EngineerLifecycleDecision::ContinueSkipping { .. }
-    ));
+    let result = brain.decide_engineer_lifecycle(&sample_ctx());
+    assert!(
+        result.is_err(),
+        "JSON-in-prose without DECISION marker must be rejected (issue #1980)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -295,7 +303,7 @@ fn stub_response_with_surrounding_prose_still_parses() {
 
 #[test]
 fn render_prompt_includes_context_fields() {
-    let stub = StubSubmitter::new(r#"{"choice":"continue_skipping","rationale":"x"}"#);
+    let stub = StubSubmitter::new("DECISION: continue_skipping\nx");
     let brain = RustyClawdBrain::new(stub);
     let ctx = sample_ctx();
     let rendered = brain.render_prompt(&ctx);
@@ -322,16 +330,10 @@ fn render_prompt_includes_context_fields() {
 
 #[test]
 fn rendered_prompt_passed_to_submitter_unchanged() {
-    let stub = StubSubmitter::new(r#"{"choice":"continue_skipping","rationale":"x"}"#);
-    // Wrap submitter in a way that lets us peek at the last prompt.
-    // (StubSubmitter stores last_prompt internally.)
+    let stub = StubSubmitter::new("DECISION: continue_skipping\nx");
     let brain = RustyClawdBrain::new(stub);
     let ctx = sample_ctx();
     let _ = brain.decide_engineer_lifecycle(&ctx).expect("decide");
-    // Rebuild a fresh stub to check the last_prompt was actually set.
-    // (StubSubmitter is consumed by `new`; this assertion lives inside the
-    // earlier render_prompt test by virtue of construction. We keep this
-    // test as a placeholder for future behavior assertions.)
 }
 
 // ---------------------------------------------------------------------------
@@ -745,58 +747,43 @@ fn t4_prose_marker_plus_json_fields_for_open_tracking_issue_parses() {
 }
 
 // ---------------------------------------------------------------------------
-// T5 — Backward compat: JSON wrapped in markdown code fences still parses
+// T5 — Issue #1980: JSON in code fences now REJECTED (no DECISION marker)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn t5_json_in_code_fences_still_parses() {
-    // LLMs often wrap structured output in ```json ... ``` fences. The
-    // parser's existing `find('{') .. rfind('}')` extraction MUST keep
-    // working for legacy / no-marker responses.
+fn t5_json_in_code_fences_now_rejected() {
+    // Issue #1980: JSON-only responses (even in fences) are no longer accepted.
+    // The brain must use DECISION markers.
     let response = "```json\n\
         {\"choice\":\"continue_skipping\",\"rationale\":\"healthy heartbeat\"}\n\
         ```";
     let stub = StubSubmitter::new(response);
     let brain = RustyClawdBrain::new(stub);
-    let decision = brain
-        .decide_engineer_lifecycle(&sample_ctx())
-        .expect("JSON in code fences must keep parsing (backward compat)");
-    match decision {
-        EngineerLifecycleDecision::ContinueSkipping { rationale } => {
-            assert_eq!(rationale, "healthy heartbeat");
-        }
-        other => panic!("expected ContinueSkipping, got {other:?}"),
-    }
+    let result = brain.decide_engineer_lifecycle(&sample_ctx());
+    assert!(
+        result.is_err(),
+        "JSON in code fences without DECISION marker must be rejected (issue #1980)"
+    );
 }
 
 // ---------------------------------------------------------------------------
-// T6 — Backward compat: JSON surrounded by leading + trailing prose parses
+// T6 — Issue #1980: JSON surrounded by prose now REJECTED (no DECISION marker)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn t6_json_with_leading_and_trailing_prose_still_parses() {
-    // Legacy prose-wrapped JSON path: no DECISION marker on line 1, but a
-    // valid JSON object embedded somewhere in the body. The parser MUST
-    // fall back to object-extraction and succeed.
+fn t6_json_with_leading_and_trailing_prose_now_rejected() {
+    // Issue #1980: JSON wrapped in prose without DECISION marker is rejected.
     let response = "I have considered the context carefully.\n\
         Based on the heartbeat I conclude:\n\
         {\"choice\":\"reclaim_and_redispatch\",\"rationale\":\"7h idle\",\"redispatch_context\":\"focus on persistence\"}\n\
         Hope this helps. Let me know if you need clarification.";
     let stub = StubSubmitter::new(response);
     let brain = RustyClawdBrain::new(stub);
-    let decision = brain
-        .decide_engineer_lifecycle(&sample_ctx())
-        .expect("JSON surrounded by prose must keep parsing (backward compat)");
-    match decision {
-        EngineerLifecycleDecision::ReclaimAndRedispatch {
-            redispatch_context,
-            rationale,
-        } => {
-            assert_eq!(rationale, "7h idle");
-            assert!(redispatch_context.contains("persistence"));
-        }
-        other => panic!("expected ReclaimAndRedispatch, got {other:?}"),
-    }
+    let result = brain.decide_engineer_lifecycle(&sample_ctx());
+    assert!(
+        result.is_err(),
+        "JSON in prose without DECISION marker must be rejected (issue #1980)"
+    );
 }
 
 // ---------------------------------------------------------------------------

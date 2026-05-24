@@ -57,7 +57,7 @@ propagate errors.
 ## Decision
 
 ```rust
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 #[serde(tag = "choice", rename_all = "snake_case")]
 pub enum EngineerLifecycleDecision {
     ContinueSkipping {
@@ -89,13 +89,10 @@ The enum has **6 variants**. `ConsiderSelfUpdate` is dispatched by
 `apply_lifecycle_decision` to the `simard safe-update` path; it is the only
 variant that can mutate the running daemon binary.
 
-Forward-compatible:
-
-* New optional fields use `#[serde(default)]` so older payloads that omit them
-  still parse.
-* Unknown extra fields are ignored (serde's default; `deny_unknown_fields`
-  is intentionally **not** set).
-* Unknown `choice` values fail parsing and trigger the safe fallback (skip).
+`Deserialize` is no longer derived — the enum is never deserialized from
+JSON. It is constructed from text-parsed fields via the DECISION marker
+protocol (see [text-parsing wire formats § engineer lifecycle](../reference/text-parsing-wire-formats.md#1c-engineer-lifecycle-rustyclawdrs)).
+`Serialize` is retained for logging and state persistence.
 
 ## Implementations
 
@@ -104,7 +101,13 @@ Forward-compatible:
 Production brain. Loads the prompt via
 `include_str!("../../prompt_assets/simard/ooda_brain.md")`, substitutes
 `{{var}}` placeholders from the context, submits to an `LlmSubmitter`, and
-parses the JSON response.
+parses the text response using the DECISION marker protocol.
+
+The parser finds the first `DECISION: <variant>` line, extracts labeled
+fields for structured variants, and collects remaining lines as rationale.
+There is no JSON fallback — the DECISION marker is the sole parser. See
+[text-parsing wire formats § engineer lifecycle](../reference/text-parsing-wire-formats.md#1c-engineer-lifecycle-rustyclawdrs)
+for the full grammar.
 
 ```rust
 pub struct RustyClawdBrain<S: LlmSubmitter> {
@@ -151,7 +154,7 @@ pub(crate) trait LlmSubmitter: Send + Sync {
 ```
 
 Production: `RustyClawdSubmitter` (wraps `RustyClawdAdapter`).
-Tests: `StubSubmitter { canned: String }` returns a fixed JSON string. This is
+Tests: `StubSubmitter { canned: String }` returns a fixed text response. This is
 the seam used by all hermetic unit tests for the brain.
 
 ## Errors
@@ -168,10 +171,9 @@ SimardError::BrainResponseUnparseable {
     source: BrainParseSource,
 }
 
-/// Wraps the underlying cause so a single error variant can carry either a
-/// JSON-decode failure (legacy path) or a marker-grammar failure (new path).
+/// Wraps the underlying cause — marker-grammar failure only.
+/// The legacy `Json(serde_json::Error)` variant was removed in #1980.
 pub enum BrainParseSource {
-    Json(serde_json::Error),
     Marker(MarkerParseError),
 }
 ```

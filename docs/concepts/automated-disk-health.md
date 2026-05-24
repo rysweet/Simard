@@ -208,9 +208,13 @@ because:
    judgement, progress checking, and other policy decisions. Disk health
    follows the same pattern.
 
-The Rust shim remains thin: resolve the recipe path, invoke `recipe-runner-rs`,
-parse the JSON output. This is the same pattern used by
-`stewardship/recipe_merge_judge.rs` and `stewardship/recipe_progress_checker.rs`.
+The Rust code is a thin shim. All cleanup logic lives in the recipe YAML as
+a readable bash file, not compiled into the binary. Operators can `cat` it,
+`diff` it, or run it manually.
+
+The recipe outputs key=value lines to stdout (`DISK_USED_PCT=N`,
+`FREED_BYTES=N`, `ACTION: ...`) — the Rust shim parses these with simple
+string splitting. No JSON, no serde deserialization of recipe output.
 
 ## Related
 

@@ -17,7 +17,7 @@ the API is documented in
 
 | Value | Behavior |
 |---|---|
-| Unset, or any value other than `off` (case-insensitive) | `OodaBridges.progress_evidence` is wired to `LlmReviewerProgressChecker`, which delegates to an LLM to verify that proposed progress claims are coherent with the goal's plan and WIP artifacts. |
+| Unset, or any value other than `off` (case-insensitive) | `OodaBridges.progress_evidence` is wired to `RecipeProgressChecker`, which invokes a recipe-based LLM agent to verify that proposed progress claims are coherent with the goal's plan and WIP artifacts. |
 | `off` (case-insensitive) | `OodaBridges.progress_evidence` is wired to `NoopProgressEvidenceChecker`. Every progress claim is accepted. **No `"goal progress accepted:"` or `"brain hallucination detected:"` audit episodes are emitted.** |
 
 The variable is read once, at daemon startup, in the bridge-construction
@@ -119,7 +119,7 @@ The daemon logs the active checker at boot. The format is pinned by
 are stable; the parenthetical detail may evolve.
 
 ```
-[simard] progress-evidence: enabled (LlmReviewerProgressChecker)
+[simard] progress-evidence: enabled (RecipeProgressChecker)
 ```
 
 Or:
@@ -175,7 +175,7 @@ The kill switch is still useful for:
 
 When the underlying issue is resolved, remove the environment variable
 and restart the daemon. Confirm via the boot log line above that
-`LlmReviewerProgressChecker` is active. The next cycle that involves
+`RecipeProgressChecker` is active. The next cycle that involves
 a progress claim should produce either an `Accept` or a `Reject` audit
 episode in cognitive memory.
 

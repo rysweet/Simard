@@ -16,17 +16,40 @@ This guide shows how to iterate on that behavior **without touching Rust**.
 
 ## Prompt Structure
 
-The prompt has five fixed sections. The brain parser only cares about
-**OUTPUT_FORMAT** (the JSON schema) and **OPTIONS** (which `choice` strings
-are legal). Edit the others freely.
+The prompt has five fixed sections. The brain parser looks for `DECISION:`
+marker lines (not JSON) — the `OUTPUT_FORMAT` section instructs the model
+to emit text-based responses.
 
 | Section | Purpose | Editable? |
 |---|---|---|
 | `# ROLE` | Identity & tone for the LLM | Yes |
 | `# CONTEXT` | Templated variables Simard substitutes per call | Yes (must keep `{{var}}` placeholders the brain populates — see below) |
-| `# OPTIONS` | The five `choice` values the brain may return | **Add/remove only with a Rust enum change**; renaming text guidance is fine |
-| `# OUTPUT_FORMAT` | JSON schema for the response | **Do not change shape**; only edit prose |
+| `# OPTIONS` | The six `choice` values the brain may return | **Add/remove only with a Rust enum change**; renaming text guidance is fine |
+| `# OUTPUT_FORMAT` | Text format for the response (`DECISION: <variant>`) | **Do not change the marker format**; only edit prose and examples |
 | `# EXAMPLES` | Few-shot input→output pairs | Yes — most useful knob for steering behavior |
+
+### Output format
+
+The brain expects responses in the `DECISION:` marker format:
+
+```
+DECISION: continue_skipping
+RATIONALE: engineer is making progress, worktree modified 30s ago
+```
+
+For structured variants, labeled fields follow the decision line:
+
+```
+DECISION: open_tracking_issue
+TITLE: Engineer stuck in compile-error loop
+BODY: The engineer has failed for 6 consecutive cycles with E0277 errors.
+RATIONALE: Persistent failure needs human attention.
+```
+
+**Do not** instruct the model to emit JSON. The parser does not accept JSON —
+it looks for `DECISION:` markers and labeled lines only. See
+[text-parsing wire formats § engineer lifecycle](../reference/text-parsing-wire-formats.md#1c-engineer-lifecycle-rustyclawdrs)
+for the full grammar.
 
 ### Available context variables
 
@@ -55,7 +78,10 @@ Lower the idle threshold in your few-shot examples:
 -CONTEXT: skips=12, failures=0, worktree_idle=25200s, ...
 +### Example: reclaim_and_redispatch
 +CONTEXT: skips=4, failures=0, worktree_idle=3600s, ...
- OUTPUT: {"choice": "reclaim_and_redispatch", ...}
+ OUTPUT:
+ DECISION: reclaim_and_redispatch
+ REDISPATCH_CONTEXT: Previous engineer was idle for too long. Try fresh approach.
+ RATIONALE: 4 skips with stale worktree suggests engineer is stuck.
 ```
 
 LLMs imitate examples more reliably than they follow prose rules. Move the
@@ -69,7 +95,10 @@ phrase you want to treat as a block signal:
 ```markdown
 ### Example: mark_goal_blocked (compile error loop)
 CONTEXT: skips=6, log_tail=...error[E0277]: the trait bound...
-OUTPUT: {"choice": "mark_goal_blocked", "rationale": "engineer is stuck in a type-error loop", "reason": "compile-error-loop"}
+OUTPUT:
+DECISION: mark_goal_blocked
+REASON: compile-error-loop
+RATIONALE: engineer is stuck in a type-error loop
 ```
 
 ### Tune the rationale style
@@ -92,20 +121,54 @@ prefixes (`engineer alive — continue (brain): …`, `reclaimed pid …`, etc.)
 
 ## Constraints
 
-* The LLM **must** return a JSON object that deserializes into
-  `EngineerLifecycleDecision`. The parser tolerates a preamble or trailing
-  prose (it slices from the first `{` to the last `}`), but malformed JSON
-  or unknown `choice` values cause the brain to log
-  `BrainResponseUnparseable` and fall back to `continue_skipping` for that
-  cycle.
+* The LLM **must** return a `DECISION: <variant>` marker line as the first
+  non-blank line. The parser scans for this marker and extracts the variant
+  token. Responses without a `DECISION:` line trigger
+  `BrainResponseUnparseable` and the brain falls back to
+  `continue_skipping` for that cycle. The JSON format is no longer accepted.
+* For structured variants (`open_tracking_issue`, `mark_goal_blocked`,
+  `reclaim_and_redispatch`), the model must emit labeled lines for the
+  required fields (`TITLE:`, `BODY:`, `REASON:`, `REDISPATCH_CONTEXT:`).
+  Missing required fields use default values.
 * If you remove all examples for a given variant, the LLM may stop emitting
   it. Keep at least one example per variant you want reachable.
 * The prompt file is loaded via `include_str!`; it must be valid UTF-8 and
   small enough to embed in the binary without bloat. Keep it under ~32 KB
   as a soft guideline.
 
+## Editing the decide and orient prompts
+
+The decide and orient brains have their own prompt files:
+
+- `prompt_assets/simard/ooda_decide.md` — action-kind routing
+- `prompt_assets/simard/ooda_orient.md` — failure-penalty demotion
+
+These use the same text-based output formats:
+
+**Decide** uses `DECISION: <variant>`:
+```
+DECISION: advance_goal
+RATIONALE: ordinary goal id with open PR, default routing
+```
+
+**Orient** uses labeled lines:
+```
+ADJUSTED_URGENCY: 0.60
+DEMOTION_APPLIED: 0.20
+RATIONALE: 1 failure: standard floor demotion
+CONFIDENCE: 0.9
+```
+
+Edit the `OUTPUT_FORMAT` and `EXAMPLES` sections of each prompt to steer
+behavior. Do not use JSON examples — the parser does not accept JSON.
+
+See [text-parsing wire formats](../reference/text-parsing-wire-formats.md)
+for the full grammar of each format.
+
 ## See Also
 
+* [Concept: text-based brain protocol](../concepts/text-based-brain-protocol.md)
 * [Concept: prompt-driven OODA brain](../concepts/prompt-driven-ooda-brain.md)
-* [Reference: `ooda_brain.md` prompt schema](../reference/ooda-brain-prompt.md)
+* [Reference: text-parsing wire formats](../reference/text-parsing-wire-formats.md)
 * [Reference: `OodaBrain` API](../reference/ooda-brain-api.md)
+* [Reference: `ooda_brain.md` prompt schema](../reference/ooda-brain-prompt.md)

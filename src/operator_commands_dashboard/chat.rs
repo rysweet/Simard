@@ -299,6 +299,17 @@ pub(crate) async fn handle_ws_chat(mut socket: WebSocket) {
                             ))
                             .await;
                     }
+                    MeetingCommand::Goal(text) => {
+                        backend.set_goal(&text);
+                        let content = format!("Goal recorded: {text}");
+                        let _ = socket
+                            .send(Message::Text(
+                                json!({"role":"system","content": content})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await;
+                    }
                     MeetingCommand::Recap => {
                         let status = backend.status();
                         let themes = backend.explicit_themes();

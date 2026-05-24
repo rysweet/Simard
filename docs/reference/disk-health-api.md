@@ -30,7 +30,7 @@ a deterministic bash step — no LLM required.
 ## Module Layout
 
 ```
-src/disk_health.rs                           Rust shim (subprocess invocation, JSON parsing)
+src/disk_health.rs                           Rust shim (subprocess invocation, text parsing)
 prompt_assets/simard/recipes/disk-health-check.yaml   Recipe (bash cleanup script)
 ```
 
@@ -39,8 +39,8 @@ prompt_assets/simard/recipes/disk-health-check.yaml   Recipe (bash cleanup scrip
 ### `DiskHealthReport`
 
 ```rust
-/// JSON-deserializable report emitted by the disk-health-check recipe.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+/// Report parsed from key=value lines emitted by the disk-health-check recipe.
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct DiskHealthReport {
     /// Current disk usage percentage after any cleanup (0–100).
     pub disk_used_pct: u64,
@@ -51,8 +51,11 @@ pub struct DiskHealthReport {
 }
 ```
 
-The report is emitted as a single JSON object on stdout by the recipe's bash
-step. The Rust shim deserializes it from the subprocess output.
+The report is parsed from key=value lines on stdout by the recipe's bash
+step. The Rust shim uses `parse_disk_health_text()` to extract fields from
+the text output — no JSON parsing. See
+[text-parsing wire formats](./text-parsing-wire-formats.md#protocol-3-keyvalue-disk-health)
+for the full grammar.
 
 ### `run_disk_health_check`
 
@@ -61,7 +64,7 @@ step. The Rust shim deserializes it from the subprocess output.
 ///
 /// Resolves the recipe YAML relative to `repo_root`, invokes it via
 /// `recipe-runner-rs` as a subprocess, captures stdout, and parses the
-/// JSON report.
+/// key=value text output.
 ///
 /// # Arguments
 ///
@@ -77,7 +80,11 @@ step. The Rust shim deserializes it from the subprocess output.
 /// - The recipe YAML does not exist at the expected path
 /// - `recipe-runner-rs` is not found on `$PATH`
 /// - The subprocess exits non-zero
-/// - stdout does not contain valid JSON matching `DiskHealthReport`
+///
+/// Note: missing or malformed key=value lines do **not** cause an error.
+/// `parse_disk_health_text` defaults to `disk_used_pct=0`, `freed_bytes=0`,
+/// `actions_taken=[]` for any missing fields. This is intentional — a
+/// recipe that outputs only `DISK_USED_PCT=65` (no cleanup needed) is valid.
 ///
 /// # Example
 ///
@@ -95,6 +102,21 @@ pub fn run_disk_health_check(
     repo_root: &Path,
     state_root: &Path,
 ) -> Result<DiskHealthReport, SimardError>;
+```
+
+### `parse_disk_health_text`
+
+```rust
+/// Parse key=value lines from recipe stdout into a DiskHealthReport.
+///
+/// Scans each line for:
+/// - `DISK_USED_PCT=<u64>` — disk usage percentage
+/// - `FREED_BYTES=<u64>` — bytes freed during cleanup
+/// - `ACTION: <text>` — human-readable cleanup action (collected into Vec)
+///
+/// Lines that don't match any pattern are silently ignored (forward compatible).
+/// Missing fields default to zero/empty.
+fn parse_disk_health_text(stdout: &str) -> DiskHealthReport;
 ```
 
 ### `resolve_recipe_path` (internal)
@@ -118,7 +140,11 @@ Resolution order (matches `recipe_merge_judge.rs` and
 
 ## Recipe YAML — `disk-health-check.yaml`
 
-The recipe is a single bash step that receives two context variables:
+The recipe is a single bash step. Its stdout uses the key=value text format
+(not JSON). See [text-parsing wire formats § key=value](./text-parsing-wire-formats.md#protocol-3-keyvalue-disk-health)
+for the normative grammar.
+
+The recipe receives two context variables:
 
 | Variable     | Source              | Description                                              |
 | ------------ | ------------------- | -------------------------------------------------------- |
@@ -155,32 +181,30 @@ When disk usage exceeds 80%, the recipe performs these actions sequentially:
    `$STATE_ROOT/shared-target/` contents. These are shared incremental build
    caches that Cargo rebuilds on demand.
 
-### JSON output contract
+### Text output contract
 
-The bash step prints exactly one JSON object to stdout:
+The bash step prints key=value lines to stdout:
 
-```json
-{
-  "disk_used_pct": 72,
-  "freed_bytes": 53687091200,
-  "actions_taken": [
-    "Removed 48 stale worktrees (50.1G)",
-    "Removed cargo target dirs from 3 worktrees (1.2G)",
-    "Pruned 19 LadybugDB backups (512M)",
-    "Cleaned cargo-target/ (12.0G) and shared-target/ (2.8G)"
-  ]
-}
+```
+DISK_USED_PCT=72
+FREED_BYTES=53687091200
+ACTION: Removed 48 stale worktrees (50.1G)
+ACTION: Removed cargo target dirs from 3 worktrees (1.2G)
+ACTION: Pruned 19 LadybugDB backups (512M)
+ACTION: Cleaned cargo-target/ (12.0G) and shared-target/ (2.8G)
 ```
 
 When disk usage is below 80%, the report reflects no cleanup:
 
-```json
-{
-  "disk_used_pct": 65,
-  "freed_bytes": 0,
-  "actions_taken": []
-}
 ```
+DISK_USED_PCT=65
+FREED_BYTES=0
+```
+
+This format is natural to produce from bash (`echo "KEY=${VALUE}"`) and
+eliminates the JSON `printf` quoting fragility of the prior implementation.
+Filenames with special characters in action descriptions are safe — they are
+just text after `ACTION:`.
 
 ### Security constraints
 
@@ -255,7 +279,6 @@ All errors surface as `SimardError::AdapterInvocationFailed`:
 | Recipe YAML not found            | `"disk-health"`      | `"recipe not found at <path>"`             |
 | `recipe-runner-rs` not on PATH   | `"disk-health"`      | `"recipe-runner-rs not found"`             |
 | Subprocess non-zero exit         | `"disk-health"`      | `"recipe exited with status <code>: <stderr>"` |
-| JSON parse failure               | `"disk-health"`      | `"failed to parse report: <serde error>"`  |
 
 Per daemon convention, these errors are logged and the cycle continues. The
 disk health check never crashes the daemon.
@@ -314,15 +337,25 @@ mod tests {
     fn resolve_recipe_path_returns_none_for_missing_repo() { /* ... */ }
 
     #[test]
-    fn report_deserializes_from_json() { /* ... */ }
+    fn parse_disk_health_text_full_output() { /* ... */ }
+
+    #[test]
+    fn parse_disk_health_text_no_cleanup() { /* ... */ }
+
+    #[test]
+    fn parse_disk_health_text_malformed_lines_ignored() { /* ... */ }
 }
 ```
 
 - `resolve_recipe_path_returns_none_for_missing_repo` — verifies that
   `resolve_recipe_path` returns `None` when pointed at a temp dir without
   the recipe YAML.
-- `report_deserializes_from_json` — round-trips a `DiskHealthReport`
-  through serde to confirm the JSON contract.
+- `parse_disk_health_text_full_output` — parses a complete key=value output
+  with `DISK_USED_PCT`, `FREED_BYTES`, and multiple `ACTION:` lines.
+- `parse_disk_health_text_no_cleanup` — parses output with only
+  `DISK_USED_PCT` and `FREED_BYTES=0` (no `ACTION:` lines).
+- `parse_disk_health_text_malformed_lines_ignored` — verifies that non-matching
+  lines (debug output, warnings) are silently ignored.
 
 No integration tests spawn `recipe-runner-rs` — the recipe is a bash script
 tested by the daemon's existing smoke-test cycle.

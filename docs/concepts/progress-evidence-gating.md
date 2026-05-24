@@ -47,11 +47,17 @@ The single guiding principle of the fix is:
 ## How evidence is evaluated
 
 A proposed increase from `old_percent` to `new_percent` for goal `G` is
-submitted to an **LLM reviewer** (`LlmReviewerProgressChecker` in
-`src/goal_curation/progress_reviewer.rs`). The reviewer reads five inputs —
-the goal's **problem** description, **plan** (current activity), **prior
-percent**, **claimed percent**, and **WIP summary** — and returns
-`{verdict: "accept"|"reject", rationale: "..."}`.
+submitted to a **recipe-based reviewer** (`RecipeProgressChecker` in
+`src/goal_curation/recipe_progress_checker.rs`). The recipe runs an LLM
+agent that reads five inputs — the goal's **problem** description, **plan**
+(current activity), **prior percent**, **claimed percent**, and **WIP
+summary** — and returns a text verdict.
+
+The recipe stdout is scanned for `"accept"` or `"reject"` keywords
+(case-insensitive). The surrounding text is captured as the rationale.
+No JSON parsing is involved. See
+[text-parsing wire formats § progress checker](../reference/text-parsing-wire-formats.md#2a-progress-checker-recipe_progress_checkerrs)
+for the full grammar.
 
 The reviewer **accepts** when the claimed percent is coherent with the plan:
 
@@ -222,7 +228,7 @@ events, not silent suppressions.
 
 The gate fires only on progress-**increase** attempts — typically a handful
 per OODA cycle, not per cycle wall-clock. Each fire executes at most one
-LLM call (the `LlmReviewerProgressChecker` submits a single prompt).
+recipe invocation (the `RecipeProgressChecker` runs a single recipe).
 Downward/no-change moves are auto-accepted without an LLM call. The
 prompt template is kept short to minimize latency.
 

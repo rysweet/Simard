@@ -127,11 +127,10 @@ pub fn run_disk_health_check(
         });
     }
 
-    serde_json::from_slice::<DiskHealthReport>(&output.stdout).map_err(|e| {
-        SimardError::AdapterInvocationFailed {
-            base_type: ADAPTER_TAG.to_string(),
-            reason: format!("failed to parse recipe output as DiskHealthReport: {e}"),
-        }
+    let stdout_text = String::from_utf8_lossy(&output.stdout);
+    parse_disk_health_text(&stdout_text).map_err(|e| SimardError::AdapterInvocationFailed {
+        base_type: ADAPTER_TAG.to_string(),
+        reason: format!("failed to parse recipe text output: {e}"),
     })
 }
 
@@ -145,36 +144,87 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// Parse key=value and ACTION: lines from recipe stdout text.
+///
+/// Expected format (bash recipe outputs this directly):
+/// ```text
+/// DISK_USED_PCT=87
+/// FREED_BYTES=1024
+/// ACTION: removed stale worktrees
+/// ACTION: cleaned cargo target dirs
+/// ```
+///
+/// This replaces the brittle `serde_json::from_slice::<DiskHealthReport>`
+/// pattern — the recipe is a bash step, not an LLM. Bash can emit key=value
+/// lines trivially; asking it to emit valid JSON was the source of fragility.
+pub fn parse_disk_health_text(stdout: &str) -> Result<DiskHealthReport, String> {
+    let mut disk_used_pct: Option<u8> = None;
+    let mut freed_bytes: u64 = 0;
+    let mut actions_taken: Vec<String> = Vec::new();
+
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(val) = trimmed.strip_prefix("DISK_USED_PCT=") {
+            disk_used_pct = Some(
+                val.trim()
+                    .parse::<u8>()
+                    .map_err(|e| format!("invalid DISK_USED_PCT value '{val}': {e}"))?,
+            );
+        } else if let Some(val) = trimmed.strip_prefix("FREED_BYTES=") {
+            freed_bytes = val
+                .trim()
+                .parse::<u64>()
+                .map_err(|e| format!("invalid FREED_BYTES value '{val}': {e}"))?;
+        } else if let Some(action) = trimmed.strip_prefix("ACTION:") {
+            let action = action.trim();
+            if !action.is_empty() {
+                actions_taken.push(action.to_string());
+            }
+        }
+        // Unknown lines are silently ignored (forward-compat).
+    }
+
+    let disk_used_pct =
+        disk_used_pct.ok_or_else(|| "missing DISK_USED_PCT line in recipe output".to_string())?;
+
+    Ok(DiskHealthReport {
+        disk_used_pct,
+        freed_bytes,
+        actions_taken,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     // ------------------------------------------------------------------
-    // DiskHealthReport deserialization
+    // Text-based parser (issue #1980 — replaces JSON deserialization)
     // ------------------------------------------------------------------
 
     #[test]
-    fn report_deserializes_from_json_no_cleanup() {
-        let json = r#"{"disk_used_pct": 65, "freed_bytes": 0, "actions_taken": []}"#;
-        let report: DiskHealthReport = serde_json::from_str(json).unwrap();
+    fn text_parse_no_cleanup() {
+        let text = "DISK_USED_PCT=65\nFREED_BYTES=0\n";
+        let report = parse_disk_health_text(text).unwrap();
         assert_eq!(report.disk_used_pct, 65);
         assert_eq!(report.freed_bytes, 0);
         assert!(report.actions_taken.is_empty());
     }
 
     #[test]
-    fn report_deserializes_from_json_with_cleanup() {
-        let json = r#"{
-            "disk_used_pct": 87,
-            "freed_bytes": 53687091200,
-            "actions_taken": [
-                "removed 12 stale engineer worktrees",
-                "cleaned cargo target dirs in worktrees",
-                "pruned LadybugDB backups to 5 most recent",
-                "cleaned shared-target dir"
-            ]
-        }"#;
-        let report: DiskHealthReport = serde_json::from_str(json).unwrap();
+    fn text_parse_with_cleanup_actions() {
+        let text = "\
+DISK_USED_PCT=87
+FREED_BYTES=53687091200
+ACTION: removed 12 stale engineer worktrees
+ACTION: cleaned cargo target dirs in worktrees
+ACTION: pruned LadybugDB backups to 5 most recent
+ACTION: cleaned shared-target dir
+";
+        let report = parse_disk_health_text(text).unwrap();
         assert_eq!(report.disk_used_pct, 87);
         assert_eq!(report.freed_bytes, 53_687_091_200);
         assert_eq!(report.actions_taken.len(), 4);
@@ -182,45 +232,79 @@ mod tests {
     }
 
     #[test]
-    fn report_deserializes_at_boundary_100_percent() {
-        let json = r#"{"disk_used_pct": 100, "freed_bytes": 1024, "actions_taken": ["emergency cleanup"]}"#;
-        let report: DiskHealthReport = serde_json::from_str(json).unwrap();
+    fn text_parse_boundary_100_percent() {
+        let text = "DISK_USED_PCT=100\nFREED_BYTES=1024\nACTION: emergency cleanup\n";
+        let report = parse_disk_health_text(text).unwrap();
         assert_eq!(report.disk_used_pct, 100);
         assert_eq!(report.freed_bytes, 1024);
         assert_eq!(report.actions_taken.len(), 1);
     }
 
     #[test]
-    fn report_deserializes_at_boundary_0_percent() {
-        let json = r#"{"disk_used_pct": 0, "freed_bytes": 0, "actions_taken": []}"#;
-        let report: DiskHealthReport = serde_json::from_str(json).unwrap();
+    fn text_parse_boundary_0_percent() {
+        let text = "DISK_USED_PCT=0\nFREED_BYTES=0\n";
+        let report = parse_disk_health_text(text).unwrap();
         assert_eq!(report.disk_used_pct, 0);
     }
 
     #[test]
-    fn report_rejects_missing_field() {
-        let json = r#"{"disk_used_pct": 65, "freed_bytes": 0}"#;
-        let result = serde_json::from_str::<DiskHealthReport>(json);
-        assert!(result.is_err(), "should reject JSON missing actions_taken");
+    fn text_parse_missing_disk_used_pct_is_error() {
+        let text = "FREED_BYTES=0\n";
+        let result = parse_disk_health_text(text);
+        assert!(result.is_err(), "should reject missing DISK_USED_PCT");
+        assert!(result.unwrap_err().contains("missing DISK_USED_PCT"));
     }
 
     #[test]
-    fn report_rejects_invalid_type() {
-        let json = r#"{"disk_used_pct": "high", "freed_bytes": 0, "actions_taken": []}"#;
-        let result = serde_json::from_str::<DiskHealthReport>(json);
-        assert!(result.is_err(), "should reject non-numeric disk_used_pct");
+    fn text_parse_invalid_pct_value_is_error() {
+        let text = "DISK_USED_PCT=high\nFREED_BYTES=0\n";
+        let result = parse_disk_health_text(text);
+        assert!(result.is_err(), "should reject non-numeric DISK_USED_PCT");
     }
 
     #[test]
-    fn report_rejects_empty_string() {
-        let result = serde_json::from_str::<DiskHealthReport>("");
+    fn text_parse_empty_string_is_error() {
+        let result = parse_disk_health_text("");
         assert!(result.is_err());
     }
 
     #[test]
-    fn report_rejects_non_json() {
-        let result = serde_json::from_str::<DiskHealthReport>("not json at all");
-        assert!(result.is_err());
+    fn text_parse_freed_bytes_defaults_to_zero_when_absent() {
+        let text = "DISK_USED_PCT=50\n";
+        let report = parse_disk_health_text(text).unwrap();
+        assert_eq!(report.freed_bytes, 0);
+        assert!(report.actions_taken.is_empty());
+    }
+
+    #[test]
+    fn text_parse_ignores_unknown_lines() {
+        let text = "DISK_USED_PCT=42\nSOME_OTHER_KEY=foo\nFREED_BYTES=100\n";
+        let report = parse_disk_health_text(text).unwrap();
+        assert_eq!(report.disk_used_pct, 42);
+        assert_eq!(report.freed_bytes, 100);
+    }
+
+    #[test]
+    fn text_parse_handles_whitespace_around_values() {
+        let text = "  DISK_USED_PCT=42  \n  FREED_BYTES=100  \n  ACTION: did things  \n";
+        let report = parse_disk_health_text(text).unwrap();
+        assert_eq!(report.disk_used_pct, 42);
+        assert_eq!(report.freed_bytes, 100);
+        assert_eq!(report.actions_taken, vec!["did things"]);
+    }
+
+    #[test]
+    fn text_parse_skips_blank_lines() {
+        let text = "\n\nDISK_USED_PCT=50\n\nFREED_BYTES=0\n\n";
+        let report = parse_disk_health_text(text).unwrap();
+        assert_eq!(report.disk_used_pct, 50);
+    }
+
+    #[test]
+    fn text_parse_action_without_text_is_skipped() {
+        let text = "DISK_USED_PCT=50\nACTION:\nACTION: real action\n";
+        let report = parse_disk_health_text(text).unwrap();
+        assert_eq!(report.actions_taken, vec!["real action"]);
     }
 
     // ------------------------------------------------------------------
