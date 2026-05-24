@@ -276,12 +276,12 @@ mod tests {
     // shared formatter.
     // -------------------------------------------------------------------
 
-    /// Every one of the eleven top-level SPA tabs must carry a non-empty
+    /// Every one of the twelve top-level SPA tabs must carry a non-empty
     /// `title="…"` hover-tooltip. Iterates the canonical tab list so that
     /// adding/removing a tab in `part_00.rs` immediately surfaces a missing
     /// tooltip via this test rather than a silent UX regression.
     #[test]
-    fn index_html_all_eleven_tabs_have_tooltips() {
+    fn index_html_all_twelve_tabs_have_tooltips() {
         // Canonical SPA tab set (see part_00.rs:99-109). This list is the
         // contract — keep in sync if tabs are added or removed.
         let tabs = [
@@ -296,8 +296,9 @@ mod tests {
             "workboard",
             "thinking",
             "terminal",
+            "glossary",
         ];
-        assert_eq!(tabs.len(), 11, "expected exactly 11 top-level tabs");
+        assert_eq!(tabs.len(), 12, "expected exactly 12 top-level tabs");
 
         for tab in &tabs {
             let needle = format!(r#"data-tab="{tab}" title=""#);
