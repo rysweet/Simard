@@ -13,10 +13,22 @@ use super::args::{next_required, reject_extra_args};
 /// scoped to the home repo per PR1's design notes.
 const HOME_REPO: &str = "rysweet/Simard";
 
+pub(super) const MERGE_PR_HELP: &str = "\
+Simard merge-pr subcommand
+
+Usage: simard merge-pr <PR-number>
+
+Squash-merges the given PR in rysweet/Simard if it passes merge-readiness checks.
+";
+
 pub(crate) fn dispatch_merge_pr_command(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let pr_str = next_required(&mut args, "PR number")?;
+    if matches!(pr_str.as_str(), "--help" | "-h" | "help") {
+        print!("{MERGE_PR_HELP}");
+        return Ok(());
+    }
     let pr_number: u32 = pr_str
         .parse()
         .map_err(|_| format!("invalid PR number '{pr_str}'"))?;

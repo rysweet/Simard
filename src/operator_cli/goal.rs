@@ -38,6 +38,20 @@ use crate::ooda_actions::advance_goal::spawn::is_brain_failure_marker;
 
 use super::args::{next_required, reject_extra_args};
 
+pub(super) const GOAL_HELP: &str = "\
+Simard goal subcommand
+
+Usage: simard goal <command> [args]
+
+Commands:
+  list                        Print active + backlog goal snapshot.
+  unblock <goal-id>           Clear Blocked status (unconditional).
+  unblock-all                 Bulk-clear brain-failure-marker blocks only.
+  remove <id>...              Drop one or more goal ids (variadic, idempotent).
+  cleanup --placeholders      Sweep placeholder goals (description = 'Goal <id>').
+  help, -h, --help            Show this help message and exit.
+";
+
 /// Top-level `simard goal …` dispatcher. Routes to the per-verb handler
 /// and surfaces missing/unknown subcommand errors with the message
 /// patterns required by `tests_mod::test_goal_subcommand_*`.
@@ -46,6 +60,10 @@ pub(super) fn dispatch_goal_command(
 ) -> Result<(), Box<dyn Error>> {
     let subcommand = next_required(&mut args, "goal command")?;
     match subcommand.as_str() {
+        "--help" | "-h" | "help" => {
+            print!("{GOAL_HELP}");
+            Ok(())
+        }
         "list" => {
             reject_extra_args(args)?;
             handle_list()

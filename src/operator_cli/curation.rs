@@ -5,11 +5,37 @@ use crate::operator_commands::{
 
 use super::args::{next_optional_path, next_required, reject_extra_args};
 
+pub(super) const GOAL_CURATION_HELP: &str = "\
+Simard goal-curation subcommand
+
+Usage: simard goal-curation <command> [args]
+
+Commands:
+  run <base-type> <topology> <objective> [state-root]
+  read <base-type> <topology> [state-root]
+  help, -h, --help            Show this help message and exit.
+";
+
+pub(super) const IMPROVEMENT_CURATION_HELP: &str = "\
+Simard improvement-curation subcommand
+
+Usage: simard improvement-curation <command> [args]
+
+Commands:
+  run <base-type> <topology> <objective> [state-root]
+  read <base-type> <topology> [state-root]
+  help, -h, --help            Show this help message and exit.
+";
+
 pub(super) fn dispatch_goal_curation_command(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let subcommand = next_required(&mut args, "goal-curation command")?;
     match subcommand.as_str() {
+        "--help" | "-h" | "help" => {
+            print!("{GOAL_CURATION_HELP}");
+            Ok(())
+        }
         "run" => {
             let base_type = next_required(&mut args, "base type")?;
             let topology = next_required(&mut args, "topology")?;
@@ -34,6 +60,10 @@ pub(super) fn dispatch_improvement_curation_command(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let subcommand = next_required(&mut args, "improvement-curation command")?;
     match subcommand.as_str() {
+        "--help" | "-h" | "help" => {
+            print!("{IMPROVEMENT_CURATION_HELP}");
+            Ok(())
+        }
         "run" => {
             let base_type = next_required(&mut args, "base type")?;
             let topology = next_required(&mut args, "topology")?;

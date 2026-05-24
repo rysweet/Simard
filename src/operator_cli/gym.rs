@@ -2,11 +2,28 @@ use crate::operator_commands::{run_gym_compare, run_gym_list, run_gym_scenario, 
 
 use super::args::{next_required, reject_extra_args};
 
+pub(super) const GYM_HELP: &str = "\
+Simard gym subcommand
+
+Usage: simard gym <command> [args]
+
+Commands:
+  list                        List available gym scenarios.
+  run <scenario-id>           Run a specific gym scenario.
+  compare <scenario-id>       Compare results for a scenario.
+  run-suite <suite-id>        Run an entire scenario suite.
+  help, -h, --help            Show this help message and exit.
+";
+
 pub(super) fn dispatch_gym_command(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let subcommand = next_required(&mut args, "gym command")?;
     match subcommand.as_str() {
+        "--help" | "-h" | "help" => {
+            print!("{GYM_HELP}");
+            Ok(())
+        }
         "list" => {
             reject_extra_args(args)?;
             run_gym_list()
@@ -56,6 +73,18 @@ mod tests {
                 .to_string()
                 .contains("unsupported command 'gym nope'")
         );
+    }
+
+    #[test]
+    fn test_gym_help_exits_ok() {
+        let result = dispatch_operator_cli(vec!["gym".to_string(), "--help".to_string()]);
+        assert!(result.is_ok(), "gym --help must exit Ok, got: {result:?}");
+    }
+
+    #[test]
+    fn test_gym_short_help_exits_ok() {
+        let result = dispatch_operator_cli(vec!["gym".to_string(), "-h".to_string()]);
+        assert!(result.is_ok(), "gym -h must exit Ok, got: {result:?}");
     }
 
     #[test]

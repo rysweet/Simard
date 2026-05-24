@@ -10,11 +10,33 @@ use super::args::{
     next_optional_path, next_required, parse_state_root_and_json, reject_extra_args,
 };
 
+pub(super) const ENGINEER_HELP: &str = "\
+Simard engineer subcommand
+
+Usage: simard engineer <command> [args]
+
+Commands:
+  run <topology> <workspace-root> <objective> [state-root]
+  terminal <topology> <objective> [state-root]
+  terminal-file <topology> <objective-file> [state-root]
+  terminal-recipe-list
+  terminal-recipe-show <recipe-name>
+  terminal-recipe <topology> <recipe-name> [state-root]
+  copilot-submit <topology> [state-root] [--json]
+  terminal-read <topology> [state-root]
+  read <topology> [state-root]
+  help, -h, --help          Show this help message and exit.
+";
+
 pub(super) fn dispatch_engineer_command(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let subcommand = next_required(&mut args, "engineer command")?;
     match subcommand.as_str() {
+        "--help" | "-h" | "help" => {
+            print!("{ENGINEER_HELP}");
+            Ok(())
+        }
         "run" => {
             let topology = next_required(&mut args, "topology")?;
             let workspace_root = next_required(&mut args, "workspace root")?;
@@ -263,6 +285,31 @@ mod tests {
                 .to_string()
                 .contains("unexpected trailing")
         );
+    }
+
+    #[test]
+    fn test_engineer_help_exits_ok() {
+        let result = dispatch_operator_cli(vec!["engineer".to_string(), "--help".to_string()]);
+        assert!(
+            result.is_ok(),
+            "engineer --help must exit Ok, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_engineer_short_help_exits_ok() {
+        let result = dispatch_operator_cli(vec!["engineer".to_string(), "-h".to_string()]);
+        assert!(result.is_ok(), "engineer -h must exit Ok, got: {result:?}");
+    }
+
+    #[test]
+    fn test_engineer_help_text_lists_subcommands() {
+        for keyword in &["run", "terminal", "read", "copilot-submit"] {
+            assert!(
+                super::ENGINEER_HELP.contains(keyword),
+                "ENGINEER_HELP must mention '{keyword}'"
+            );
+        }
     }
 
     #[test]

@@ -12,7 +12,8 @@ pub struct RelaunchConfig {
 impl Default for RelaunchConfig {
     fn default() -> Self {
         Self {
-            canary_target_dir: PathBuf::from("/tmp/simard-canary"),
+            canary_target_dir: std::env::temp_dir()
+                .join(format!("simard-canary-{}", std::process::id())),
             health_timeout: Duration::from_secs(30),
             manifest_dir: PathBuf::from("."),
         }
@@ -90,6 +91,25 @@ mod tests {
     fn relaunch_config_default_manifest_dir() {
         let config = RelaunchConfig::default();
         assert_eq!(config.manifest_dir, PathBuf::from("."));
+    }
+
+    #[test]
+    fn relaunch_config_default_canary_dir_is_unique_per_process() {
+        let config = RelaunchConfig::default();
+        let dir = config.canary_target_dir;
+        // Must live under the system temp dir, not a hardcoded /tmp path.
+        assert!(
+            dir.starts_with(std::env::temp_dir()),
+            "canary_target_dir must be under temp_dir(), got: {}",
+            dir.display()
+        );
+        // Must contain the PID for per-process uniqueness.
+        let pid = std::process::id().to_string();
+        let dir_str = dir.to_string_lossy();
+        assert!(
+            dir_str.contains(&pid),
+            "canary_target_dir must include PID ({pid}) for uniqueness, got: {dir_str}"
+        );
     }
 
     #[test]

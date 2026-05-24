@@ -37,6 +37,15 @@ fn gh_create_issue_with_bin(bin: &str, title: &str, body: &str, label: &str) -> 
     }
 }
 
+pub(crate) const ACT_ON_DECISIONS_HELP: &str = "\
+Simard act-on-decisions subcommand
+
+Usage: simard act-on-decisions
+
+Read the latest meeting handoff and create GitHub issues for each decision
+and action item via `gh issue create`.
+";
+
 /// Read the latest meeting handoff and create GitHub issues for each
 /// decision and action item via `gh issue create`.
 pub(super) fn dispatch_act_on_decisions() -> Result<(), Box<dyn std::error::Error>> {

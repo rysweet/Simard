@@ -4,11 +4,26 @@ use crate::operator_commands_ooda::{DaemonDashboardConfig, run_ooda_daemon};
 
 use super::args::next_required;
 
+pub(super) const OODA_HELP: &str = "\
+Simard OODA daemon subcommand
+
+Usage: simard ooda <command> [args]
+
+Commands:
+  run [--cycles=N] [--no-auto-reload] [--no-dashboard] [--dashboard-port=PORT] [state-root]
+                              Run the OODA loop daemon.
+  help, -h, --help            Show this help message and exit.
+";
+
 pub(super) fn dispatch_ooda_command(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let subcommand = next_required(&mut args, "ooda command")?;
     match subcommand.as_str() {
+        "--help" | "-h" | "help" => {
+            print!("{OODA_HELP}");
+            Ok(())
+        }
         "run" => {
             let mut max_cycles: u32 = 0; // 0 = infinite
             let mut state_root: Option<PathBuf> = None;
@@ -67,6 +82,18 @@ mod tests {
                 .to_string()
                 .contains("unsupported command 'ooda xyz'")
         );
+    }
+
+    #[test]
+    fn test_ooda_help_exits_ok() {
+        let result = dispatch_operator_cli(vec!["ooda".to_string(), "--help".to_string()]);
+        assert!(result.is_ok(), "ooda --help must exit Ok, got: {result:?}");
+    }
+
+    #[test]
+    fn test_ooda_short_help_exits_ok() {
+        let result = dispatch_operator_cli(vec!["ooda".to_string(), "-h".to_string()]);
+        assert!(result.is_ok(), "ooda -h must exit Ok, got: {result:?}");
     }
 
     #[test]
