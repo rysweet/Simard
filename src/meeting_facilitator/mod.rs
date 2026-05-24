@@ -29,7 +29,9 @@ pub use session::{
     add_note, add_question, close_meeting, edit_item, record_action_item, record_decision,
     remove_item, start_meeting,
 };
-pub use types::{ActionItem, MeetingDecision, MeetingSession, MeetingSessionStatus, OpenQuestion};
+pub use types::{
+    ActionItem, MeetingDecision, MeetingSession, MeetingSessionStatus, NextActor, OpenQuestion,
+};
 
 #[cfg(test)]
 mod tests {
@@ -144,6 +146,7 @@ mod tests {
             explicit_questions: vec![],
             themes: vec![],
             next_owner: None,
+            goal: None,
         };
         let summary = session.durable_summary();
         assert!(summary.contains("Planning"));

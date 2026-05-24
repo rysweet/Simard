@@ -160,6 +160,8 @@ pub fn write_auto_save(transcript: &MeetingTranscript) -> SimardResult<PathBuf> 
 /// Optional enrichment fields carried into the persisted handoff.
 ///
 /// Issue #1954 added `next_owner` and `artifacts` to `MeetingHandoff`.
+/// Issue #1987 added `goal`, `next_actor`, `applied_templates`,
+/// `history_truncated_count`, and `partial_reason`.
 /// Producer paths in `closing.rs` populate this struct so the persist
 /// helpers don't grow yet another tuple of positional parameters.
 #[derive(Clone, Debug, Default)]
@@ -179,6 +181,17 @@ pub struct HandoffEnrichment<'a> {
     /// `None`, decisions are reconstructed from `&[String]` via the
     /// existing extract helpers (legacy behaviour).
     pub structured_decisions: Option<Vec<crate::meeting_facilitator::MeetingDecision>>,
+    /// The meeting's overarching objective. Set via `/goal` at the REPL.
+    /// Added in issue #1987.
+    pub goal: Option<&'a str>,
+    /// Structured routing hint for the next consumer. Added in issue #1987.
+    pub next_actor: Option<crate::meeting_facilitator::NextActor>,
+    /// Templates applied during the meeting via `/template`. Added in #1987.
+    pub applied_templates: Vec<crate::meeting_backend::AppliedTemplate>,
+    /// Number of history messages dropped due to MAX_HISTORY cap. Added in #1987.
+    pub history_truncated_count: usize,
+    /// Wire-string form of `PartialReason` from the close pipeline. Added in #1987.
+    pub partial_reason: Option<String>,
 }
 
 /// Write a `MeetingHandoff` artifact for OODA integration.
@@ -316,6 +329,7 @@ pub fn write_handoff_with_explicit(
     let themes = extract_themes(messages);
 
     let handoff = MeetingHandoff {
+        schema_version: 2,
         meeting_id: crate::meeting_facilitator::derive_meeting_id(&started_at, topic),
         topic: topic.to_string(),
         started_at,
@@ -331,6 +345,11 @@ pub fn write_handoff_with_explicit(
         transcript_path: None,
         next_owner: enrichment.next_owner.map(|s| s.to_string()),
         artifacts: enrichment.artifacts.clone(),
+        goal: enrichment.goal.map(|s| s.to_string()),
+        next_actor: enrichment.next_actor,
+        applied_templates: enrichment.applied_templates.clone(),
+        history_truncated_count: enrichment.history_truncated_count,
+        partial_reason: enrichment.partial_reason.clone(),
     };
 
     let dir = default_handoff_dir();
@@ -413,6 +432,7 @@ pub fn write_handoff_bundle(
 
     let meeting_id = derive_meeting_id(&started_at, topic);
     let mut handoff = MeetingHandoff {
+        schema_version: 2,
         meeting_id,
         topic: topic.to_string(),
         started_at,
@@ -428,6 +448,11 @@ pub fn write_handoff_bundle(
         transcript_path: None,
         next_owner: enrichment.next_owner.map(|s| s.to_string()),
         artifacts: enrichment.artifacts.clone(),
+        goal: enrichment.goal.map(|s| s.to_string()),
+        next_actor: enrichment.next_actor,
+        applied_templates: enrichment.applied_templates.clone(),
+        history_truncated_count: enrichment.history_truncated_count,
+        partial_reason: enrichment.partial_reason.clone(),
     };
 
     let lines: Vec<crate::meeting_facilitator::BundleTranscriptLine> = messages

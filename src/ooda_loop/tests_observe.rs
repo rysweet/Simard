@@ -156,6 +156,7 @@ fn scan_unprocessed_handoffs_returns_true_for_unprocessed() {
     let dir = TempDir::new().unwrap();
 
     let handoff = MeetingHandoff {
+        schema_version: 2,
         topic: "Sprint planning".to_string(),
         started_at: "2026-04-02T23:00:00Z".to_string(),
         closed_at: "2026-04-03T00:00:00Z".to_string(),
@@ -175,6 +176,11 @@ fn scan_unprocessed_handoffs_returns_true_for_unprocessed() {
         transcript_path: None,
         next_owner: None,
         artifacts: Vec::new(),
+        goal: None,
+        next_actor: None,
+        applied_templates: Vec::new(),
+        history_truncated_count: 0,
+        partial_reason: None,
     };
     write_meeting_handoff(dir.path(), &handoff).unwrap();
 
@@ -187,6 +193,7 @@ fn scan_unprocessed_handoffs_returns_false_when_processed() {
     let dir = TempDir::new().unwrap();
 
     let handoff = MeetingHandoff {
+        schema_version: 2,
         topic: "Sprint planning".to_string(),
         started_at: "2026-04-02T23:00:00Z".to_string(),
         closed_at: "2026-04-03T00:00:00Z".to_string(),
@@ -206,6 +213,11 @@ fn scan_unprocessed_handoffs_returns_false_when_processed() {
         transcript_path: None,
         next_owner: None,
         artifacts: Vec::new(),
+        goal: None,
+        next_actor: None,
+        applied_templates: Vec::new(),
+        history_truncated_count: 0,
+        partial_reason: None,
     };
     write_meeting_handoff(dir.path(), &handoff).unwrap();
 

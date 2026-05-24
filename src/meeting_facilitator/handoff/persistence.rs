@@ -576,6 +576,7 @@ mod bundle_tests {
 
     fn sample_handoff() -> MeetingHandoff {
         MeetingHandoff {
+            schema_version: 2,
             meeting_id: String::new(), // exercise auto-fill
             topic: "Sprint planning".to_string(),
             started_at: "2026-05-13T07:00:00Z".to_string(),
@@ -604,6 +605,11 @@ mod bundle_tests {
             transcript_path: None,
             next_owner: None,
             artifacts: Vec::new(),
+            goal: None,
+            next_actor: None,
+            applied_templates: Vec::new(),
+            history_truncated_count: 0,
+            partial_reason: None,
         }
     }
 

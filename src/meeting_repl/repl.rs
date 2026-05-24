@@ -130,7 +130,7 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
             MeetingCommand::Help => {
                 writeln!(
                     output,
-                    "Commands:\n  /status    — show session info\n  /state     — show current decisions, open questions, action items\n  /template  — list meeting templates\n  /template <name> — apply a template (standup, 1on1, retro, planning)\n  /theme <text>    — record a theme for this meeting\n  /decision <text> — record a decision deterministically (skips heuristic extraction)\n  /action <text>   — record an action item (assignee/deadline parsed inline)\n  /question <text> — record an open question deterministically\n  /owner <name>    — name the next agent/persona/human expected to action this handoff\n  /recap     — show color-coded session recap\n  /preview   — preview the handoff artifact\n  /export    — export meeting as markdown\n  /close     — end meeting and persist\n  /help      — this message\n\nEverything else is natural conversation with Simard."
+                    "Commands:\n  /status    — show session info\n  /state     — show current decisions, open questions, action items\n  /template  — list meeting templates\n  /template <name> — apply a template (standup, 1on1, retro, planning)\n  /theme <text>    — record a theme for this meeting\n  /decision <text> — record a decision deterministically (skips heuristic extraction)\n  /action <text>   — record an action item (assignee/deadline parsed inline)\n  /question <text> — record an open question deterministically\n  /owner <name>    — name the next agent/persona/human expected to action this handoff\n  /goal <text>     — set the meeting's overarching objective\n  /recap     — show color-coded session recap\n  /preview   — preview the handoff artifact\n  /export    — export meeting as markdown\n  /close     — end meeting and persist\n  /help      — this message\n\nEverything else is natural conversation with Simard."
                 )
                 .ok();
             }
@@ -260,6 +260,10 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
             MeetingCommand::Owner(text) => {
                 backend.push_next_owner(&text);
                 writeln!(output, "{}", cyan(&format!("Next owner recorded: {text}"))).ok();
+            }
+            MeetingCommand::Goal(text) => {
+                backend.set_goal(&text);
+                writeln!(output, "{}", cyan(&format!("Goal recorded: {text}"))).ok();
             }
             MeetingCommand::Recap => {
                 let status = backend.status();
@@ -562,5 +566,6 @@ fn empty_closed_session(topic: &str) -> MeetingSession {
         explicit_questions: Vec::new(),
         themes: Vec::new(),
         next_owner: None,
+        goal: None,
     }
 }

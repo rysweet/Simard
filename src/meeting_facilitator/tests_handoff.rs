@@ -21,6 +21,7 @@ fn make_session(
         explicit_questions: Vec::new(),
         themes: Vec::new(),
         next_owner: None,
+        goal: None,
     }
 }
 
@@ -388,6 +389,7 @@ fn round_trip_handoff_with_next_owner_and_artifacts() {
     // (serialize → deserialize → re-serialize → byte equality), which is
     // the acceptance bar from issue #1954.
     let handoff = MeetingHandoff {
+        schema_version: 2,
         meeting_id: "20260501T070000Z-sprint-planning".to_string(),
         topic: "Sprint planning".to_string(),
         started_at: "2026-05-01T07:00:00Z".to_string(),
@@ -406,6 +408,11 @@ fn round_trip_handoff_with_next_owner_and_artifacts() {
         transcript_path: Some("/tmp/meetings/transcript-2026-05-01.json".to_string()),
         next_owner: Some("engineer".to_string()),
         artifacts: sample_artifacts(),
+        goal: None,
+        next_actor: None,
+        applied_templates: Vec::new(),
+        history_truncated_count: 0,
+        partial_reason: None,
     };
 
     let json = serde_json::to_string_pretty(&handoff).expect("serialize ok");

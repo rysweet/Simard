@@ -81,6 +81,7 @@ fn scripted_meeting_emits_structured_handoff_bundle() {
         explicit_questions: Vec::new(),
         themes: Vec::new(),
         next_owner: None,
+        goal: None,
     };
 
     let mut handoff = MeetingHandoff::from_session(&session);
@@ -202,6 +203,7 @@ fn empty_transcript_still_produces_well_formed_bundle() {
     let _root = ScopedMeetingsRoot::new("empty-transcript");
 
     let mut handoff = MeetingHandoff {
+        schema_version: 2,
         meeting_id: String::new(), // exercise auto-fill
         topic: "Quick sync".to_string(),
         started_at: "2026-05-13T07:00:00Z".to_string(),
@@ -217,6 +219,11 @@ fn empty_transcript_still_produces_well_formed_bundle() {
         transcript_path: None,
         next_owner: None,
         artifacts: Vec::new(),
+        goal: None,
+        next_actor: None,
+        applied_templates: Vec::new(),
+        history_truncated_count: 0,
+        partial_reason: None,
     };
 
     let dir = write_meeting_bundle(&mut handoff, &[]).expect("write_meeting_bundle");

@@ -23,6 +23,7 @@ fn make_session(
         explicit_questions: Vec::new(),
         themes: Vec::new(),
         next_owner: None,
+        goal: None,
     }
 }
 
@@ -192,8 +193,193 @@ fn find_newest_prefers_timestamped_over_legacy() {
 }
 
 // -----------------------------------------------------------------------
-// WIP session persistence tests
+// Schema v2 round-trip and backward-compatibility tests (issue #1987)
 // -----------------------------------------------------------------------
+
+#[test]
+fn v2_handoff_round_trip_all_fields_preserved() {
+    use crate::meeting_backend::AppliedTemplate;
+    use crate::meeting_facilitator::types::NextActor;
+
+    let mut session = make_session(
+        "V2 full test",
+        vec!["TBD: rollout plan"],
+        vec![sample_decision()],
+        vec![sample_action()],
+        vec!["alice", "bob"],
+    );
+    session.goal = Some("Agree on the release plan for v2".to_string());
+
+    let mut handoff = MeetingHandoff::from_session(&session);
+    handoff.next_actor = Some(NextActor::Engineer);
+    handoff.applied_templates = vec![AppliedTemplate {
+        name: "retro".to_string(),
+        agenda: "## Retrospective\n1. What went well\n2. What didn't".to_string(),
+        applied_at: "2026-05-01T10:00:00Z".to_string(),
+    }];
+    handoff.history_truncated_count = 42;
+    handoff.partial_reason = Some("summary_timeout".to_string());
+
+    assert_eq!(handoff.schema_version, 2);
+    assert_eq!(
+        handoff.goal.as_deref(),
+        Some("Agree on the release plan for v2")
+    );
+
+    let json = serde_json::to_string_pretty(&handoff).unwrap();
+    let parsed: MeetingHandoff = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(parsed.schema_version, 2);
+    assert_eq!(parsed.goal, handoff.goal);
+    assert_eq!(parsed.next_actor, Some(NextActor::Engineer));
+    assert_eq!(parsed.applied_templates.len(), 1);
+    assert_eq!(parsed.applied_templates[0].name, "retro");
+    assert_eq!(parsed.history_truncated_count, 42);
+    assert_eq!(parsed.partial_reason.as_deref(), Some("summary_timeout"));
+    assert_eq!(handoff, parsed);
+}
+
+#[test]
+fn v1_handoff_without_new_fields_deserializes_with_defaults() {
+    // Simulate a v1 handoff JSON that lacks all 6 new fields.
+    let v1_json = r#"{
+        "meeting_id": "20260101T000000Z-legacy",
+        "topic": "Legacy meeting",
+        "started_at": "2026-01-01T00:00:00Z",
+        "closed_at": "2026-01-01T01:00:00Z",
+        "decisions": [],
+        "action_items": [],
+        "open_questions": [],
+        "processed": false,
+        "duration_secs": 3600,
+        "transcript": ["operator: hello"],
+        "participants": ["alice"],
+        "themes": ["legacy"],
+        "next_owner": "engineer",
+        "artifacts": []
+    }"#;
+
+    let parsed: MeetingHandoff = serde_json::from_str(v1_json).unwrap();
+
+    // schema_version defaults to 1 for legacy handoffs
+    assert_eq!(
+        parsed.schema_version, 1,
+        "v1 handoff should report schema_version=1"
+    );
+    assert_eq!(parsed.goal, None, "v1 handoff should have goal=None");
+    assert_eq!(
+        parsed.next_actor, None,
+        "v1 handoff should have next_actor=None"
+    );
+    assert!(
+        parsed.applied_templates.is_empty(),
+        "v1 handoff should have empty applied_templates"
+    );
+    assert_eq!(
+        parsed.history_truncated_count, 0,
+        "v1 handoff should have history_truncated_count=0"
+    );
+    assert_eq!(
+        parsed.partial_reason, None,
+        "v1 handoff should have partial_reason=None"
+    );
+
+    // Pre-existing fields should still be correct
+    assert_eq!(parsed.topic, "Legacy meeting");
+    assert_eq!(parsed.next_owner.as_deref(), Some("engineer"));
+    assert_eq!(parsed.duration_secs, Some(3600));
+}
+
+#[test]
+fn v2_handoff_strip_new_fields_still_deserializes() {
+    use crate::meeting_facilitator::types::NextActor;
+
+    let mut session = make_session(
+        "Strippable",
+        vec![],
+        vec![sample_decision()],
+        vec![sample_action()],
+        vec!["alice"],
+    );
+    session.goal = Some("Test goal".to_string());
+
+    let mut handoff = MeetingHandoff::from_session(&session);
+    handoff.next_actor = Some(NextActor::OodaCurate);
+
+    // Serialize to a serde_json::Value, strip the new fields, then deserialize
+    let mut value: serde_json::Value = serde_json::to_value(&handoff).unwrap();
+    let obj = value.as_object_mut().unwrap();
+    obj.remove("schema_version");
+    obj.remove("goal");
+    obj.remove("next_actor");
+    obj.remove("applied_templates");
+    obj.remove("history_truncated_count");
+    obj.remove("partial_reason");
+
+    let stripped_json = serde_json::to_string_pretty(&value).unwrap();
+    let parsed: MeetingHandoff = serde_json::from_str(&stripped_json).unwrap();
+
+    // Should deserialize as v1 defaults
+    assert_eq!(parsed.schema_version, 1);
+    assert_eq!(parsed.goal, None);
+    assert_eq!(parsed.next_actor, None);
+    assert!(parsed.applied_templates.is_empty());
+    assert_eq!(parsed.history_truncated_count, 0);
+    assert_eq!(parsed.partial_reason, None);
+
+    // Original fields preserved
+    assert_eq!(parsed.topic, "Strippable");
+    assert_eq!(parsed.decisions.len(), 1);
+}
+
+#[test]
+fn next_actor_serde_round_trip() {
+    use crate::meeting_facilitator::types::NextActor;
+
+    for actor in [
+        NextActor::Operator,
+        NextActor::Engineer,
+        NextActor::OodaCurate,
+        NextActor::External,
+    ] {
+        let json = serde_json::to_string(&actor).unwrap();
+        let parsed: NextActor = serde_json::from_str(&json).unwrap();
+        assert_eq!(actor, parsed);
+    }
+
+    // Verify the tag structure
+    let json = serde_json::to_string(&NextActor::Engineer).unwrap();
+    assert!(
+        json.contains("\"kind\""),
+        "NextActor should use tag='kind', got: {json}"
+    );
+    assert!(
+        json.contains("\"engineer\""),
+        "Engineer variant should serialize as 'engineer', got: {json}"
+    );
+}
+
+#[test]
+fn from_session_carries_goal() {
+    let mut session = make_session("Goal test", vec![], vec![], vec![], vec![]);
+    session.goal = Some("Ship the release".to_string());
+
+    let handoff = MeetingHandoff::from_session(&session);
+    assert_eq!(handoff.goal.as_deref(), Some("Ship the release"));
+    assert_eq!(handoff.schema_version, 2);
+}
+
+#[test]
+fn from_session_defaults_v2_schema() {
+    let session = make_session("Default v2", vec![], vec![], vec![], vec![]);
+    let handoff = MeetingHandoff::from_session(&session);
+    assert_eq!(handoff.schema_version, 2);
+    assert_eq!(handoff.goal, None);
+    assert_eq!(handoff.next_actor, None);
+    assert!(handoff.applied_templates.is_empty());
+    assert_eq!(handoff.history_truncated_count, 0);
+    assert_eq!(handoff.partial_reason, None);
+}
 
 #[test]
 fn save_and_load_wip_round_trip() {

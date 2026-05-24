@@ -202,6 +202,7 @@ mod tests {
 
     fn sample_handoff(decisions: Vec<MeetingDecision>) -> MeetingHandoff {
         MeetingHandoff {
+            schema_version: 2,
             topic: "Sprint planning".to_string(),
             started_at: "2026-04-02T23:00:00Z".to_string(),
             closed_at: "2026-04-03T00:00:00Z".to_string(),
@@ -217,6 +218,11 @@ mod tests {
             transcript_path: None,
             next_owner: None,
             artifacts: Vec::new(),
+            goal: None,
+            next_actor: None,
+            applied_templates: Vec::new(),
+            history_truncated_count: 0,
+            partial_reason: None,
         }
     }
 
@@ -225,6 +231,7 @@ mod tests {
         action_items: Vec<ActionItem>,
     ) -> MeetingHandoff {
         MeetingHandoff {
+            schema_version: 2,
             topic: "Sprint planning".to_string(),
             started_at: "2026-04-02T23:00:00Z".to_string(),
             closed_at: "2026-04-03T00:00:00Z".to_string(),
@@ -240,6 +247,11 @@ mod tests {
             transcript_path: None,
             next_owner: None,
             artifacts: Vec::new(),
+            goal: None,
+            next_actor: None,
+            applied_templates: Vec::new(),
+            history_truncated_count: 0,
+            partial_reason: None,
         }
     }
 
@@ -494,6 +506,7 @@ mod tests {
 
         // Handoff B — newer, empty (zero decisions, zero action items).
         let handoff_b = MeetingHandoff {
+            schema_version: 2,
             topic: "Empty dashboard chat".to_string(),
             started_at: "2026-04-03T00:05:00Z".to_string(),
             closed_at: "2026-04-03T00:05:01Z".to_string(),
@@ -509,6 +522,11 @@ mod tests {
             transcript_path: None,
             next_owner: None,
             artifacts: Vec::new(),
+            goal: None,
+            next_actor: None,
+            applied_templates: Vec::new(),
+            history_truncated_count: 0,
+            partial_reason: None,
         };
         let path_b = dir.path().join("handoff-2026-04-03T00-05-01_00-00.json");
         fs::write(&path_b, serde_json::to_string_pretty(&handoff_b).unwrap()).unwrap();
