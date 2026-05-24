@@ -20,3 +20,6 @@ gym-wave*-tmp/
 # Per-process engineer claim files written by the multi-worktree orchestrator;
 # never useful in version control.
 .simard-engineer-claim
+
+# Per-script audit output (issue #1990 / epic). Belt-and-suspenders with scripts/dashboard_audit/.gitignore.
+scripts/dashboard_audit/out/
