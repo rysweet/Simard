@@ -362,6 +362,7 @@ pub fn run_ooda_daemon(
         .checked_sub(Duration::from_secs(db_backup_interval_secs))
         .unwrap_or_else(Instant::now);
     let backup_consecutive_failures = AtomicU32::new(0);
+    let checkpoint_consecutive_failures = AtomicU32::new(0);
     daemon_log(
         &state_root,
         &format!(
@@ -428,22 +429,58 @@ pub fn run_ooda_daemon(
         // --- periodic DB backup (at START of cycle) ------------------------
         if last_db_backup.elapsed() >= Duration::from_secs(db_backup_interval_secs) {
             // Checkpoint first so committed-but-WAL-resident writes are
-            // captured by the file copy. Failures here are warnings only —
-            // we still attempt the copy because the prior backup may already
-            // be missing recent writes.
+            // captured by the file copy. Failures here increment the
+            // pre_backup_checkpoint_failed counter (issue #1975 G3) and
+            // are tracked alongside backup_consecutive_failures so the
+            // daemon refuses to declare success after N consecutive
+            // checkpoint failures.
             if let Err(e) = shared_mem.checkpoint() {
+                crate::cognitive_memory::metrics::increment(
+                    "pre_backup_checkpoint_failed",
+                    "daemon:periodic_backup",
+                );
+                let n = checkpoint_consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
                 daemon_log(
                     &state_root,
-                    &format!("[simard] DB backup: pre-copy checkpoint failed: {e}"),
+                    &format!("[simard] DB backup: pre-copy checkpoint failed (#{n}): {e}"),
                 );
+            } else {
+                checkpoint_consecutive_failures.store(0, Ordering::SeqCst);
             }
             match NativeCognitiveMemory::create_verified_backup(&state_root) {
                 Ok(backup_path) => {
-                    daemon_log(
-                        &state_root,
-                        &format!("[simard] DB backup created: {}", backup_path.display()),
-                    );
-                    NativeCognitiveMemory::prune_old_backups(&state_root, db_backup_keep);
+                    let ckpt_fails = checkpoint_consecutive_failures.load(Ordering::SeqCst);
+                    if ckpt_fails >= 3 {
+                        // G3: refuse to declare healthy backup when the
+                        // checkpoint that should have flushed WAL writes
+                        // has failed repeatedly — the backup may be stale.
+                        daemon_log(
+                            &state_root,
+                            &format!(
+                                "[simard] WARN: DB backup created at {} but \
+                                 pre-backup checkpoint has failed {ckpt_fails} \
+                                 consecutive times — backup may contain stale data",
+                                backup_path.display()
+                            ),
+                        );
+                    } else {
+                        daemon_log(
+                            &state_root,
+                            &format!("[simard] DB backup created: {}", backup_path.display()),
+                        );
+                    }
+                    let prune_outcome =
+                        NativeCognitiveMemory::prune_old_backups(&state_root, db_backup_keep);
+                    if !prune_outcome.failed.is_empty() {
+                        daemon_log(
+                            &state_root,
+                            &format!(
+                                "[simard] WARN: prune_old_backups: {} removed, {} failed",
+                                prune_outcome.removed,
+                                prune_outcome.failed.len()
+                            ),
+                        );
+                    }
                     backup_consecutive_failures.store(0, Ordering::SeqCst);
                 }
                 Err(e) => {

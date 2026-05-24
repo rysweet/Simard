@@ -53,14 +53,21 @@ pub fn spawn_server(
                 match conn {
                     Ok(stream) => {
                         let m = Arc::clone(&mem);
-                        thread::Builder::new()
-                            .name("memory-ipc-conn".into())
-                            .spawn(move || {
-                                if let Err(e) = serve_connection(stream, m) {
-                                    eprintln!("[simard] memory-ipc: connection error: {e}");
-                                }
-                            })
-                            .ok();
+                        if let Err(e) =
+                            thread::Builder::new()
+                                .name("memory-ipc-conn".into())
+                                .spawn(move || {
+                                    if let Err(e) = serve_connection(stream, m) {
+                                        eprintln!("[simard] memory-ipc: connection error: {e}");
+                                    }
+                                })
+                        {
+                            crate::cognitive_memory::metrics::increment(
+                                "ipc_spawn_failed",
+                                "spawn_server:per_conn",
+                            );
+                            eprintln!("[simard] memory-ipc: failed to spawn handler thread: {e}");
+                        }
                     }
                     Err(e) => {
                         eprintln!("[simard] memory-ipc: accept failed: {e}");
