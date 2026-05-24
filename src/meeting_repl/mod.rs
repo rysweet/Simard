@@ -10,6 +10,7 @@ mod spinner;
 mod test_support;
 #[cfg(test)]
 mod tests_repl;
+pub mod transcript_format;
 
 pub use color::{cyan, green, yellow};
 pub use repl::run_meeting_repl;

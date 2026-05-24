@@ -11,11 +11,14 @@ use crate::error::{SimardError, SimardResult};
 use crate::meeting_backend::persist::{
     extract_action_items, extract_decisions, extract_open_questions,
 };
-use crate::meeting_backend::{MeetingBackend, MeetingCommand, parse_command, strip_ansi_escapes};
+use crate::meeting_backend::{
+    MeetingBackend, MeetingCommand, Role, parse_command, strip_ansi_escapes,
+};
 use crate::meeting_facilitator::MeetingSession;
 
 use super::color::{cyan, green, yellow};
 use super::spinner::Spinner;
+use super::transcript_format::format_turn_prefix_now;
 
 const PROMPT_TEXT: &str = "simard:meeting> ";
 
@@ -26,12 +29,6 @@ const PROMPT_TEXT: &str = "simard:meeting> ";
 /// `color::cyan` helper which already honors `NO_COLOR`.
 fn prompt_string() -> String {
     cyan(PROMPT_TEXT)
-}
-
-/// Role label shown before each assistant response in the live conversation
-/// view. Color-coded green to mirror `simard:meeting>` (cyan) for the user.
-fn assistant_label() -> String {
-    green("Simard:")
 }
 
 /// Run the interactive meeting REPL.
@@ -285,7 +282,8 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                         Ok(resp) => {
                             spinner.stop();
                             if !resp.content.is_empty() {
-                                writeln!(output, "{} {}\n", assistant_label(), resp.content).ok();
+                                let prefix = format_turn_prefix_now(&Role::Assistant);
+                                writeln!(output, "\n{} {}\n", green(&prefix), resp.content).ok();
                             }
                         }
                         Err(e) => {
@@ -330,12 +328,17 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                 if text.is_empty() {
                     continue;
                 }
+                // Show user turn prefix
+                let user_prefix = format_turn_prefix_now(&Role::User);
+                writeln!(output, "{} {}", cyan(&user_prefix), text).ok();
+
                 let spinner = Spinner::after_default_delay("Thinking...");
                 match backend.send_message(&text) {
                     Ok(resp) => {
                         spinner.stop();
                         if !resp.content.is_empty() {
-                            writeln!(output, "\n{} {}\n", assistant_label(), resp.content).ok();
+                            let asst_prefix = format_turn_prefix_now(&Role::Assistant);
+                            writeln!(output, "{} {}\n", green(&asst_prefix), resp.content).ok();
                         }
                     }
                     Err(e) => {
