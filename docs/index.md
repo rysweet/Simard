@@ -23,6 +23,7 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [Tutorial: Run your first benchmark gym suite](./tutorials/run-your-first-benchmark-gym.md) - Run the shipped starter benchmark suite.
 - [How to configure bootstrap and inspect reflection](./howto/configure-bootstrap-and-inspect-reflection.md) - Bootstrap an explicit runtime selection and inspect the truthful runtime snapshot.
 - [How to reclaim disk space and run low-space Rust builds](./howto/reclaim-disk-space-and-run-low-space-rust-builds.md) - Reclaim stale build artifacts and run Cargo through one shared low-space target dir across worktrees.
+- [How to configure and monitor the disk health check](./howto/configure-disk-health-check.md) - Tune the per-cycle automated disk cleanup that prevents ENOSPC crashes (#2020).
 - [How to start a meeting with Simard](./howto/start-a-meeting.md) - Have a natural conversation with Simard from CLI or dashboard, with full history and memory.
 - [How to carry meeting decisions into engineer sessions](./howto/carry-meeting-decisions-into-engineer-sessions.md) - Persist meeting records under a shared state root and confirm later engineer runs carry them forward.
 - [How to inspect meeting records](./howto/inspect-meeting-records.md) - Read back the latest durable meeting record without mutating stored state.
@@ -47,6 +48,8 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [String truncation helpers](./reference/string-truncation-helpers.md) - Design for the planned `truncate_to_char_boundary` UTF-8-safe byte-budget helper (issue #1590 follow-up).
 - [Concept: truthful runtime metadata](./concepts/truthful-runtime-metadata.md) - Read the design rationale behind the stricter runtime contract.
 - [Concept: improvement context — denser execution evidence for the engineer loop](./concepts/improvement-context-execution-evidence-gap.md) - Captured improvement-curation context preserving the active "Capture denser execution evidence" goal and the observation that the legacy `simard_operator_probe` surface does not yet expose a terminal engineer-loop probe.
+- [Concept: automated disk health management](./concepts/automated-disk-health.md) - Design rationale for the per-cycle disk health check that prevents disk exhaustion (#2020).
+- [Disk health API reference](./reference/disk-health-api.md) - Full API surface for `simard::disk_health`, the recipe YAML contract, and daemon integration.
 
 ## Canonical executable surface
 

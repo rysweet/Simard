@@ -113,6 +113,9 @@ Whole-worktree cleanup still needs a judgment call about:
 
 Use `git worktree list --porcelain`, `git status --porcelain`, and branch/merge checks before removing whole worktrees.
 
+For automated per-cycle cleanup of stale worktrees and build artifacts, see
+[Configure the disk health check](./configure-disk-health-check.md).
+
 ## Suggested operating pattern
 
 For routine low-space work:

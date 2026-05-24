@@ -368,6 +368,19 @@ pub fn run_ooda_daemon(
             "[simard] OODA daemon: DB backup interval = {db_backup_interval_secs}s, keep = {db_backup_keep}"
         ),
     );
+
+    // --- periodic disk health check state ---------------------------------
+    let disk_health_interval_secs: u64 = std::env::var("SIMARD_DISK_HEALTH_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(900);
+    let mut last_disk_health = Instant::now()
+        .checked_sub(Duration::from_secs(disk_health_interval_secs))
+        .unwrap_or_else(Instant::now);
+    daemon_log(
+        &state_root,
+        &format!("[simard] OODA daemon: disk health interval = {disk_health_interval_secs}s"),
+    );
     // -------------------------------------------------------------------
 
     let mut cycles_run = 0u32;
@@ -453,6 +466,27 @@ pub fn run_ooda_daemon(
                 }
             }
             last_db_backup = Instant::now();
+        }
+        // ── Disk health check (before spawning engineers) ────────────────
+        if last_disk_health.elapsed() >= Duration::from_secs(disk_health_interval_secs) {
+            match crate::disk_health::run_disk_health_check(&bridges.repo_root, &state_root) {
+                Ok(report) => {
+                    daemon_log(&state_root, &format!("[simard] {}", report.summary()));
+                    if report.cleanup_performed() {
+                        daemon_log(
+                            &state_root,
+                            &format!("[simard] disk cleanup actions: {:?}", report.actions_taken),
+                        );
+                    }
+                }
+                Err(e) => {
+                    daemon_log(
+                        &state_root,
+                        &format!("[simard] WARN: disk health check failed: {e}"),
+                    );
+                }
+            }
+            last_disk_health = Instant::now();
         }
         // -------------------------------------------------------------------
 

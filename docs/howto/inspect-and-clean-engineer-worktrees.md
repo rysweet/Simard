@@ -153,3 +153,4 @@ A healthy run shows `https://github.com/.../pull/<n>` lines and **no**
 - [Per-Engineer Worktree Isolation](../reference/engineer-worktree-isolation.md) — full API/lifecycle reference
 - [How OODA spawns engineer agents](./spawn-engineers-from-ooda-daemon.md)
 - [Reclaim disk space and run low-space Rust builds](./reclaim-disk-space-and-run-low-space-rust-builds.md)
+- [Configure the disk health check](./configure-disk-health-check.md) — automated per-cycle cleanup
