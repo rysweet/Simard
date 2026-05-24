@@ -34,7 +34,6 @@ Field semantics:
   - `__improvement__` → run the gym-driven self-improvement loop
   - `__poll_activity__` → poll developer activity / ingest signals
   - `__extract_ideas__` → mine recent activity for new research ideas
-  - `__safe_update__` → brain-orchestrated safe self-update (see below)
 - `urgency` — Orient's score in `[0.0, 1.0]`. Already filtered to
   > `f64::EPSILON` upstream; you do not need to gate on it again.
 - `reason` — Human-readable rationale Orient attached to the priority.
@@ -49,8 +48,6 @@ Pick exactly one `choice` tag:
 - `run_improvement` — Use for `__improvement__`.
 - `poll_developer_activity` — Use for `__poll_activity__`.
 - `extract_ideas` — Use for `__extract_ideas__`.
-- `safe_update` — Use for `__safe_update__`. Only when all four conditions
-  in the Self-update awareness section below are satisfied.
 - `research_query` — Reserved for future use; only emit if the reason
   explicitly requests a literature/web research action.
 - `run_gym_eval`, `build_skill`, `launch_session` — Reserved for future

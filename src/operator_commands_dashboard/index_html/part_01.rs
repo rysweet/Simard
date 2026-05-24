@@ -200,7 +200,7 @@ pub(crate) const PART_01: &str = r#"      </div>
         clearTabTimers();
         if(tab.dataset.tab==='logs') {fetchLogs();tabRefreshTimers.logs=setInterval(fetchLogs,15000);}
         if(tab.dataset.tab==='processes') {fetchProcessTree();tabRefreshTimers.proc=setInterval(fetchProcessTree,15000);}
-        if(tab.dataset.tab==='memory') {fetchMemoryGraph();fetchMemory();}
+        if(tab.dataset.tab==='memory') {fetchRecentMemories();fetchMemoryGraph();fetchMemory();}
 
         if(tab.dataset.tab==='goals') fetchGoals();
         if(tab.dataset.tab==='costs') fetchCosts();

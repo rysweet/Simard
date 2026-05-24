@@ -136,6 +136,13 @@ async function mockAllApis(page: import('@playwright/test').Page) {
       }),
     }),
   );
+  await page.route('**/api/memory/recent', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ items: [], total: 0, last_hour_count: 0, server_time: new Date().toISOString() }),
+    }),
+  );
   await page.route('**/api/memory/graph', (route) =>
     route.fulfill({
       status: 200,

@@ -141,6 +141,38 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
       }catch(e){document.getElementById('trace-list').innerHTML='<span class="err">Failed to load traces — check /api/traces</span>';}
     }
 
+    /* --- Recent Memories (plain-English view, #1997) --- */
+    async function fetchRecentMemories(){
+      const countEl=document.getElementById('mem-recent-count');
+      const totalEl=document.getElementById('mem-recent-total');
+      const listEl=document.getElementById('mem-recent-list');
+      listEl.innerHTML='<span class="loading">Loading recent memories…</span>';
+      try{
+        const d=await apiFetch('/api/memory/recent');
+        if(d.error){listEl.innerHTML='<span class="err">'+esc(d.error)+'</span>';countEl.textContent='—';return;}
+        countEl.textContent=d.last_hour_count;
+        totalEl.textContent=d.total+' total';
+        if(!d.items||d.items.length===0){
+          listEl.innerHTML='<span style="color:#8b949e">No memories stored yet. Simard will remember things as it works.</span>';
+          return;
+        }
+        const catColors={'Learned fact':'#58a6ff','Past event':'#3fb950','Current task context':'#f0883e','How-to knowledge':'#a371f7','Planned reminder':'#d29922','Recent observation':'#8b949e'};
+        listEl.innerHTML=d.items.map(item=>{
+          const color=catColors[item.category]||'#8b949e';
+          const ts=item.timestamp?timeAgo(item.timestamp):'';
+          const summaryText=esc(item.summary).substring(0,200);
+          return`<div style="border-bottom:1px solid var(--border);padding:.45rem 0;font-size:.85rem">
+            <span style="display:inline-block;padding:1px 6px;border-radius:3px;font-size:.7rem;font-weight:600;background:${color}22;color:${color};margin-right:.5rem">${esc(item.category)}</span>
+            <span style="color:#8b949e;font-size:.75rem;float:right">${ts}</span>
+            <div style="margin-top:.2rem;color:var(--fg)">${summaryText}</div>
+          </div>`;
+        }).join('');
+      }catch(e){
+        countEl.textContent='—';
+        listEl.innerHTML='<span class="err">Failed to load — check /api/memory/recent</span>';
+      }
+    }
+
     /* --- Memory Search --- */
     async function searchMemory(){
       const q=document.getElementById('mem-search-input').value.trim();
