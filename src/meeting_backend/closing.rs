@@ -500,6 +500,7 @@ impl MeetingBackend {
             applied_templates: self.applied_templates.clone(),
             bundle_dir,
             partial_reason,
+            orphan_turn_count: self.orphan_turn_count,
         })
     }
 
@@ -746,6 +747,7 @@ impl MeetingBackend {
             applied_templates: self.applied_templates.clone(),
             bundle_dir,
             partial_reason,
+            orphan_turn_count: self.orphan_turn_count,
         })
     }
 }

@@ -167,6 +167,10 @@ pub struct MeetingBackend {
     /// `ooda-curate`, `act-on-decisions`, a GitHub handle). Surfaced on the
     /// `MeetingHandoff` via the new `next_owner` field. Added in #1954.
     explicit_next_owner: Option<String>,
+    /// Count of user messages whose `send_message` returned `Err` after the
+    /// user message was already pushed to history. These are "orphan" turns
+    /// with no assistant reply. Surfaced on `MeetingSummary` (issue #1983).
+    orphan_turn_count: usize,
 }
 
 impl MeetingBackend {
@@ -206,6 +210,7 @@ impl MeetingBackend {
             explicit_action_items: Vec::new(),
             explicit_questions: Vec::new(),
             explicit_next_owner: None,
+            orphan_turn_count: 0,
         }
     }
 
@@ -236,6 +241,19 @@ impl MeetingBackend {
     /// Access the session start time (for export).
     pub fn started_at(&self) -> &str {
         &self.started_at
+    }
+
+    /// Record that a `send_message` call failed after the user message was
+    /// already pushed to history — creating an orphan user turn with no
+    /// assistant reply. Called by the REPL error handler. Issue #1983.
+    pub fn increment_orphan_turn_count(&mut self) {
+        self.orphan_turn_count += 1;
+    }
+
+    /// Current orphan-turn count (user messages without matching assistant
+    /// replies due to `send_message` errors). Issue #1983.
+    pub fn orphan_turn_count(&self) -> usize {
+        self.orphan_turn_count
     }
 
     /// Append a synthetic conversation message without invoking the
