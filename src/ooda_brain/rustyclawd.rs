@@ -408,3 +408,426 @@ pub fn build_rustyclawd_brain() -> SimardResult<Box<dyn OodaBrain>> {
     let submitter = SessionLlmSubmitter::new(provider);
     Ok(Box::new(RustyClawdBrain::new(submitter)))
 }
+
+// ---------------------------------------------------------------------------
+// Inline tests (issue #1979 — per-source-file coverage of the RustyClawd
+// bridge: the prose-first marker parser, the legacy JSON-object salvage,
+// the UTF-8-safe log truncation, AND the bridge's end-to-end behaviour for
+// the four shapes the directive calls out (well-formed JSON, JSON with
+// trailing prose, completely unparseable, and a per-shape end-to-end run
+// through the bridge with a canned-response submitter).
+//
+// Sibling `tests.rs` covers higher-level dispatch; these inline tests pin
+// the private parser helpers that the bridge depends on. )
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    // ----- helpers -------------------------------------------------------
+
+    struct StubSubmitter {
+        response: SimardResult<String>,
+        calls: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl StubSubmitter {
+        fn ok(s: impl Into<String>) -> Self {
+            Self {
+                response: Ok(s.into()),
+                calls: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            }
+        }
+
+        fn err() -> Self {
+            Self {
+                response: Err(SimardError::AdapterInvocationFailed {
+                    base_type: "stub".into(),
+                    reason: "stub-network-down".into(),
+                }),
+                calls: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            }
+        }
+
+        fn call_counter(&self) -> std::sync::Arc<std::sync::atomic::AtomicU32> {
+            self.calls.clone()
+        }
+    }
+
+    impl LlmSubmitter for StubSubmitter {
+        fn submit(&self, _rendered_prompt: &str) -> SimardResult<String> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match &self.response {
+                Ok(s) => Ok(s.clone()),
+                Err(e) => Err(e.clone()),
+            }
+        }
+    }
+
+    fn ctx() -> EngineerLifecycleCtx {
+        EngineerLifecycleCtx {
+            goal_id: "g1".into(),
+            goal_description: "ship v1".into(),
+            cycle_number: 7,
+            consecutive_skip_count: 3,
+            failure_count: 0,
+            worktree_path: PathBuf::from("/tmp/wt"),
+            worktree_mtime_secs_ago: 60,
+            sentinel_pid: Some(42),
+            last_engineer_log_tail: "ok".into(),
+            commits_behind: 0,
+            in_flight_engineer_count: 1,
+            minutes_since_last_update_attempt: u64::MAX,
+        }
+    }
+
+    // ----- truncate_for_log: UTF-8 safety + truncation marker ------------
+
+    #[test]
+    fn truncate_for_log_returns_input_unchanged_when_under_cap() {
+        let input = "small body";
+        assert_eq!(truncate_for_log(input), input);
+    }
+
+    #[test]
+    fn truncate_for_log_inserts_marker_when_over_cap() {
+        let big = "a".repeat(MAX_RAW_LOG_BYTES + 100);
+        let out = truncate_for_log(&big);
+        assert!(
+            out.contains("truncated from"),
+            "must emit `truncated from N bytes` marker"
+        );
+        assert!(out.len() < big.len(), "must shrink");
+    }
+
+    #[test]
+    fn truncate_for_log_does_not_split_multibyte_codepoint() {
+        // Pad with 4-byte emoji past the cap. The slice must land on a
+        // char boundary — if it did not, the format! macro would panic in
+        // debug builds and produce invalid UTF-8 in release.
+        let prefix = "a".repeat(MAX_RAW_LOG_BYTES - 2);
+        let body = format!("{prefix}🦀🦀🦀");
+        let out = truncate_for_log(&body);
+        // No panic = pass; also assert the marker is present.
+        assert!(out.contains("truncated from"));
+        assert!(
+            std::str::from_utf8(out.as_bytes()).is_ok(),
+            "truncated body must be valid UTF-8"
+        );
+    }
+
+    #[test]
+    fn truncate_for_log_pub_matches_truncate_for_log() {
+        // Sibling re-export for decide.rs/orient.rs must apply the same policy.
+        let big = "x".repeat(MAX_RAW_LOG_BYTES + 50);
+        assert_eq!(truncate_for_log(&big), truncate_for_log_pub(&big));
+    }
+
+    // ----- extract_decision_marker: first non-blank line only ------------
+
+    #[test]
+    fn marker_parses_simple_decision_line() {
+        let (variant, rest) =
+            extract_decision_marker("DECISION: continue_skipping\nrationale: hb ok")
+                .expect("must extract");
+        assert_eq!(variant, "continue_skipping");
+        assert!(rest.starts_with("rationale:"));
+    }
+
+    #[test]
+    fn marker_is_case_insensitive_on_word_decision() {
+        for line in [
+            "decision: continue_skipping",
+            "Decision: continue_skipping",
+            "DECISION: continue_skipping",
+        ] {
+            let (v, _) = extract_decision_marker(line).expect("must extract");
+            assert_eq!(v, "continue_skipping");
+        }
+    }
+
+    #[test]
+    fn marker_ignores_later_decision_line_injection() {
+        // Security: a hostile/buggy model embedding a marker mid-response
+        // must NOT be treated as authoritative. Only first non-blank line.
+        let body = "the model is thinking\nDECISION: open_tracking_issue";
+        let extracted = extract_decision_marker(body);
+        assert!(
+            extracted.is_none(),
+            "mid-body DECISION marker must be ignored, got: {extracted:?}"
+        );
+    }
+
+    #[test]
+    fn marker_returns_none_when_absent() {
+        assert!(extract_decision_marker("just prose").is_none());
+        assert!(extract_decision_marker("").is_none());
+        assert!(extract_decision_marker("   ").is_none());
+    }
+
+    #[test]
+    fn marker_skips_leading_blank_lines() {
+        let (v, _) = extract_decision_marker("\n\nDECISION: deprioritize\n").expect("must extract");
+        assert_eq!(v, "deprioritize");
+    }
+
+    // ----- parse_with_marker: variant + body interaction -----------------
+
+    #[test]
+    fn parse_with_marker_rejects_unknown_variant() {
+        let err = parse_with_marker("not_a_real_variant", "", "raw").expect_err("must Err");
+        assert!(err.contains("not_a_real_variant"));
+        assert!(err.contains("raw_response"));
+    }
+
+    #[test]
+    fn parse_with_marker_derives_rationale_from_prose_remainder() {
+        let d = parse_with_marker("continue_skipping", "rationale: hb ok", "raw").unwrap();
+        match d {
+            EngineerLifecycleDecision::ContinueSkipping { rationale } => {
+                assert_eq!(rationale, "hb ok");
+            }
+            other => panic!("expected ContinueSkipping, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_with_marker_uses_default_rationale_when_remainder_empty() {
+        let d = parse_with_marker("continue_skipping", "", "raw").unwrap();
+        match d {
+            EngineerLifecycleDecision::ContinueSkipping { rationale } => {
+                assert!(rationale.contains("no rationale"));
+            }
+            other => panic!("expected ContinueSkipping, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_with_marker_pulls_required_fields_from_json_body() {
+        // open_tracking_issue requires title + body in the JSON body.
+        let body = r#"{"title":"engineer wedged","body":"see logs","rationale":"7h idle"}"#;
+        let d = parse_with_marker("open_tracking_issue", body, "raw").unwrap();
+        match d {
+            EngineerLifecycleDecision::OpenTrackingIssue {
+                title,
+                body,
+                rationale,
+            } => {
+                assert_eq!(title, "engineer wedged");
+                assert_eq!(body, "see logs");
+                assert_eq!(rationale, "7h idle");
+            }
+            other => panic!("expected OpenTrackingIssue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_with_marker_wins_over_conflicting_json_choice() {
+        // Security: prevent JSON-body variant smuggling. Marker is authoritative.
+        let body = r#"{"choice":"mark_goal_blocked","reason":"x","rationale":"y"}"#;
+        let d = parse_with_marker("continue_skipping", body, "raw").unwrap();
+        assert!(matches!(
+            d,
+            EngineerLifecycleDecision::ContinueSkipping { .. }
+        ));
+    }
+
+    // ----- parse_decision_from_response: full salvage matrix -------------
+
+    // (a) Well-formed JSON pass-through (legacy JSON-only path).
+    #[test]
+    fn parse_decision_well_formed_json_passes_through() {
+        let raw = r#"{"choice":"continue_skipping","rationale":"healthy"}"#;
+        let d = parse_decision_from_response(raw).expect("must parse");
+        assert!(matches!(
+            d,
+            EngineerLifecycleDecision::ContinueSkipping { .. }
+        ));
+    }
+
+    // (b) JSON with trailing prose — fallback parser must salvage.
+    #[test]
+    fn parse_decision_salvages_json_in_prose_wrapper() {
+        let raw = "Here's the call:\n```json\n{\"choice\":\"deprioritize\",\"rationale\":\"chronic\"}\n```";
+        let d = parse_decision_from_response(raw).expect("must salvage");
+        assert!(matches!(d, EngineerLifecycleDecision::Deprioritize { .. }));
+    }
+
+    // (c) Completely unparseable surfaces a structured error, never panics.
+    #[test]
+    fn parse_decision_unparseable_returns_err_with_raw_body() {
+        let raw = "no json no marker just words";
+        let err = parse_decision_from_response(raw).expect_err("must Err");
+        assert!(
+            err.contains(raw),
+            "raw must be embedded (issue #1711): {err}"
+        );
+        assert!(
+            err.contains("no DECISION marker") || err.contains("no JSON object"),
+            "error must explain the salvage failure: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_decision_empty_returns_empty_err() {
+        let err = parse_decision_from_response("").expect_err("must Err");
+        assert!(err.to_lowercase().contains("empty"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_decision_malformed_json_returns_serde_err_with_raw_body() {
+        let raw = r#"{"choice":"continue_skipping","rationale":}"#;
+        let err = parse_decision_from_response(raw).expect_err("must Err");
+        assert!(err.contains("JSON parse error"), "got: {err}");
+        assert!(err.contains(raw), "raw must be embedded: {err}");
+    }
+
+    #[test]
+    fn parse_decision_prefers_marker_over_embedded_json() {
+        // Mixed shape: prose marker + a body JSON. Marker is authoritative.
+        let raw =
+            "DECISION: mark_goal_blocked\n{\"reason\":\"needs API key\",\"rationale\":\"human\"}";
+        let d = parse_decision_from_response(raw).expect("must parse");
+        match d {
+            EngineerLifecycleDecision::MarkGoalBlocked { reason, .. } => {
+                assert_eq!(reason, "needs API key");
+            }
+            other => panic!("expected MarkGoalBlocked, got {other:?}"),
+        }
+    }
+
+    // ----- (d) RustyClawdBrain bridge: end-to-end with stub submitter ---
+
+    #[test]
+    fn bridge_returns_decision_on_well_formed_json() {
+        let stub = StubSubmitter::ok(r#"{"choice":"continue_skipping","rationale":"hb ok"}"#);
+        let brain = RustyClawdBrain::new(stub);
+        let d = brain.decide_engineer_lifecycle(&ctx()).expect("must Ok");
+        assert!(matches!(
+            d,
+            EngineerLifecycleDecision::ContinueSkipping { .. }
+        ));
+    }
+
+    #[test]
+    fn bridge_returns_decision_on_json_with_trailing_prose() {
+        let stub = StubSubmitter::ok(
+            "Some thinking...\n```json\n{\"choice\":\"deprioritize\",\"rationale\":\"chronic\"}\n```\nDone.",
+        );
+        let brain = RustyClawdBrain::new(stub);
+        let d = brain.decide_engineer_lifecycle(&ctx()).expect("must Ok");
+        assert!(matches!(d, EngineerLifecycleDecision::Deprioritize { .. }));
+    }
+
+    #[test]
+    fn bridge_surfaces_adapter_error_on_unparseable_response() {
+        let stub = StubSubmitter::ok("totally not json at all");
+        let brain = RustyClawdBrain::new(stub);
+        let err = brain
+            .decide_engineer_lifecycle(&ctx())
+            .expect_err("must Err so caller can fall back");
+        match err {
+            SimardError::AdapterInvocationFailed { base_type, reason } => {
+                assert_eq!(base_type, ADAPTER_TAG);
+                assert!(
+                    reason.contains("totally not json at all"),
+                    "adapter error must embed raw body for diagnosis: {reason}"
+                );
+            }
+            other => panic!("expected AdapterInvocationFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bridge_propagates_submitter_error_without_panic() {
+        let stub = StubSubmitter::err();
+        let brain = RustyClawdBrain::new(stub);
+        let err = brain
+            .decide_engineer_lifecycle(&ctx())
+            .expect_err("must Err");
+        // Network-style failure surfaces directly (not parsed as a brain
+        // response). The stub's own AdapterInvocationFailed bubbles up.
+        match err {
+            SimardError::AdapterInvocationFailed { base_type, .. } => {
+                assert_eq!(base_type, "stub");
+            }
+            other => panic!("expected AdapterInvocationFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bridge_calls_submitter_exactly_once_per_decision() {
+        // Resilience contract from the bridge module docstring: no internal
+        // retry loop — exactly one submit per decision so the OODA loop's
+        // outer cycle is the single retry boundary.
+        let stub = StubSubmitter::ok(r#"{"choice":"continue_skipping","rationale":"ok"}"#);
+        let counter = stub.call_counter();
+        let brain = RustyClawdBrain::new(stub);
+        let _ = brain.decide_engineer_lifecycle(&ctx()).unwrap();
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "bridge must call submitter exactly once per decision"
+        );
+    }
+
+    #[test]
+    fn bridge_renders_prompt_with_context_fields() {
+        let stub = StubSubmitter::ok(r#"{"choice":"continue_skipping","rationale":"ok"}"#);
+        let brain = RustyClawdBrain::new(stub);
+        let prompt = brain.render_prompt(&EngineerLifecycleCtx {
+            goal_id: "marker-goal".into(),
+            goal_description: "marker-desc".into(),
+            cycle_number: 99,
+            consecutive_skip_count: 5,
+            failure_count: 2,
+            worktree_path: PathBuf::from("/tmp/marker-wt"),
+            worktree_mtime_secs_ago: 0,
+            sentinel_pid: Some(12345),
+            last_engineer_log_tail: "marker-log-tail".into(),
+            commits_behind: 3,
+            in_flight_engineer_count: 1,
+            minutes_since_last_update_attempt: u64::MAX,
+        });
+        assert!(prompt.contains("marker-goal"));
+        assert!(prompt.contains("marker-desc"));
+        assert!(prompt.contains("/tmp/marker-wt"));
+        assert!(prompt.contains("marker-log-tail"));
+        assert!(prompt.contains("12345"));
+    }
+
+    #[test]
+    fn bridge_renders_sentinel_none_as_placeholder() {
+        let stub = StubSubmitter::ok(r#"{"choice":"continue_skipping","rationale":"ok"}"#);
+        let brain = RustyClawdBrain::new(stub);
+        let prompt = brain.render_prompt(&EngineerLifecycleCtx {
+            sentinel_pid: None,
+            ..ctx()
+        });
+        // None must render as the documented sentinel rather than panic.
+        assert!(prompt.contains("<none>"));
+    }
+
+    // ----- VALID_VARIANTS audit ------------------------------------------
+    #[test]
+    fn valid_variants_matches_decision_enum_tags() {
+        // Anti-drift: every variant the wire enum accepts must be in
+        // VALID_VARIANTS, or the marker parser will reject perfectly valid
+        // brain output as "invalid variant".
+        for tag in [
+            "continue_skipping",
+            "reclaim_and_redispatch",
+            "deprioritize",
+            "open_tracking_issue",
+            "mark_goal_blocked",
+            "consider_self_update",
+        ] {
+            assert!(
+                VALID_VARIANTS.contains(&tag),
+                "VALID_VARIANTS must include `{tag}`"
+            );
+        }
+    }
+}

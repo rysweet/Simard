@@ -255,3 +255,102 @@ pub fn build_rustyclawd_orient_brain() -> SimardResult<Box<dyn OodaOrientBrain>>
     let submitter = super::rustyclawd::SessionLlmSubmitter::new(provider);
     Ok(Box::new(RustyClawdOrientBrain::new(submitter)))
 }
+
+// ---------------------------------------------------------------------------
+// Inline tests (issue #1979 — per-source-file coverage of the JSON-parse
+// fallback parser the RustyClawd Orient bridge depends on. Sibling
+// `orient_tests.rs` covers the public API end-to-end; these inline tests
+// pin the private `parse_judgment_from_response` for the four shapes
+// `parse_failure::record_parse_failure` was added to surface in #1933.)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ----- (a) well-formed JSON pass-through -----------------------------
+    #[test]
+    fn parse_well_formed_json_returns_judgment() {
+        let raw = r#"{"adjusted_urgency":0.4,"rationale":"transient","confidence":0.9}"#;
+        let j = parse_judgment_from_response(raw).expect("must parse");
+        assert!((j.adjusted_urgency - 0.4).abs() < 1e-9);
+        assert_eq!(j.rationale, "transient");
+        assert!((j.confidence - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_well_formed_json_defaults_confidence_when_absent() {
+        let raw = r#"{"adjusted_urgency":0.3,"rationale":"x"}"#;
+        let j = parse_judgment_from_response(raw).expect("must parse");
+        assert!((j.confidence - 1.0).abs() < 1e-9);
+    }
+
+    // ----- (b) JSON with surrounding prose — fallback parser must salvage -
+    #[test]
+    fn parse_salvages_json_wrapped_in_prose() {
+        let raw = "Reasoning:\n```json\n{\"adjusted_urgency\":0.0,\"rationale\":\"chronic\",\"confidence\":0.95}\n```\nDone.";
+        let j = parse_judgment_from_response(raw).expect("must salvage");
+        assert!(j.adjusted_urgency.abs() < 1e-9);
+        assert_eq!(j.rationale, "chronic");
+    }
+
+    #[test]
+    fn parse_salvages_json_with_trailing_prose_only() {
+        let raw =
+            r#"{"adjusted_urgency":0.2,"rationale":"ok","confidence":1.0}  -- and that's all"#;
+        let j = parse_judgment_from_response(raw).expect("must parse");
+        assert!((j.adjusted_urgency - 0.2).abs() < 1e-9);
+    }
+
+    // ----- (c) completely unparseable returns Err, never panics ----------
+    #[test]
+    fn parse_unparseable_returns_structured_error_with_raw_body() {
+        let raw = "totally not json at all";
+        let err = parse_judgment_from_response(raw).expect_err("must Err");
+        // Anti-regression for #1711.
+        assert!(
+            err.contains(raw),
+            "error must embed raw response (issue #1711), got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_empty_response_returns_empty_error() {
+        let err = parse_judgment_from_response("").expect_err("must Err");
+        assert!(
+            err.to_lowercase().contains("empty"),
+            "empty-response error must mention emptiness, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_whitespace_only_response_treated_as_empty() {
+        let err = parse_judgment_from_response("   \n\t  ").expect_err("must Err");
+        assert!(
+            err.to_lowercase().contains("empty"),
+            "whitespace-only must be treated as empty, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_malformed_json_with_braces_returns_parse_error() {
+        let raw = r#"{"adjusted_urgency":0.4,"rationale":}"#;
+        let err = parse_judgment_from_response(raw).expect_err("must Err");
+        assert!(
+            err.contains("orient-brain-parse-error"),
+            "malformed JSON must surface a structured serde error tag: {err}"
+        );
+        assert!(err.contains(raw), "raw_response must be embedded: {err}");
+    }
+
+    #[test]
+    fn parse_missing_required_field_returns_parse_error() {
+        // Schema guard: parses as JSON but lacks `adjusted_urgency`.
+        let raw = r#"{"rationale":"forgot the urgency field"}"#;
+        let err = parse_judgment_from_response(raw).expect_err("must Err");
+        assert!(
+            err.contains("orient-brain-parse-error"),
+            "missing required field must surface serde error: {err}"
+        );
+    }
+}

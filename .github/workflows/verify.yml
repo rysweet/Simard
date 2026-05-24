@@ -195,6 +195,53 @@ jobs:
         # they are validated separately when credentials are available.
         run: npx playwright test --config=tests/e2e-dashboard/playwright.config.ts --project=structural tests/e2e-dashboard/specs/overview.spec.ts
 
+      # ---- Python tab-identity smoke test (#1993 / #1994 / #1995) ----
+      # Reuses the binary the TypeScript step downloaded plus the same
+      # ~/.simard/.dashkey provisioned above. The dashboard server is
+      # launched here on a dedicated port so we don't race the TS suite's
+      # webServer lifecycle.
+      - name: Set up Python for tab-identity smoke test
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install tab-identity smoke-test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r tests/e2e-dashboard/smoke_python/requirements.txt
+          python -m playwright install chromium
+
+      - name: Run tab-identity smoke test
+        env:
+          SIMARD_DASHKEY: testkey1
+          SIMARD_DASHBOARD_URL: http://localhost:18801
+        run: |
+          # Launch the dashboard on a dedicated port and wait for it to
+          # accept connections before invoking pytest. The PID is recorded
+          # so we can shut it down cleanly when the smoke test finishes.
+          target/debug/simard dashboard serve --port=18801 \
+            > /tmp/simard-dashboard-smoke.log 2>&1 &
+          DASH_PID=$!
+          echo "dashboard PID=$DASH_PID"
+          # Wait up to 30 s for the server to start serving HTTP.
+          for i in $(seq 1 30); do
+            if curl -s -o /dev/null -w "%{http_code}" http://localhost:18801/login | grep -q '^200$'; then
+              echo "dashboard ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          # Run the smoke test. `set +e` so we always stop the dashboard
+          # afterwards even if pytest fails.
+          set +e
+          pytest tests/e2e-dashboard/smoke_python/ -v --tb=short -s
+          rc=$?
+          set -e
+          echo "--- dashboard log tail ---"
+          tail -50 /tmp/simard-dashboard-smoke.log || true
+          kill "$DASH_PID" 2>/dev/null || true
+          exit $rc
+
       - name: Upload Playwright report on failure
         if: failure()
         uses: actions/upload-artifact@v4

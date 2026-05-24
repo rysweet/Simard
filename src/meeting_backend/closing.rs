@@ -30,7 +30,7 @@ impl MeetingBackend {
     ///
     /// Bounded by `SIMARD_MEETING_CLOSE_TIMEOUT_SECS` (default 60s,
     /// clamped to `[1, 600]`) plus an inner `agent.close()` budget of
-    /// `SIMARD_MEETING_AGENT_CLOSE_TIMEOUT_SECS` (default 15s, clamped to
+    /// `SIMARD_MEETING_AGENT_CLOSE_TIMEOUT_SECS` (default 45s, clamped to
     /// `[1, 120]`). On a timeout the close still returns
     /// `Ok(MeetingSummary)` with `partial_reason = Some(_)` and a
     /// deserialize-valid handoff bundle written to disk (issue #1908).
@@ -410,6 +410,36 @@ impl MeetingBackend {
             }
         };
 
+        // ── Per-meeting `memory_records.json` — issue #2000 fix. ──
+        // The companion `simard meeting read` command opens
+        // `<state_root>/memory_records.json` via `FileBackedMemoryStore`
+        // and hard-fails if the file is missing. Without this write, every
+        // successful REPL meeting produced an unreadable artifact. We
+        // write the file even when no decisions/action items were
+        // extracted (an empty-but-valid record) so the read path never
+        // hard-fails on a successful close.
+        if let Some(ref dir) = bundle_dir {
+            let bundle_path = std::path::PathBuf::from(dir);
+            if let Err(e) = persist::write_meeting_memory_records(
+                &bundle_path,
+                &self.topic,
+                &decisions,
+                &action_items,
+                &open_questions,
+            ) {
+                warn!(
+                    target: "simard::meeting_backend::closing",
+                    phase = "persist_memory_records",
+                    outcome = "error",
+                    error = %e,
+                    handoff_partial = true,
+                    reason = PartialReason::PersistenceError.as_wire_str(),
+                    "Failed to write meeting memory_records.json"
+                );
+                partial_reason.get_or_insert(PartialReason::PersistenceError);
+            }
+        }
+
         // ── Memory consolidation ── (no-op in current production; bridge
         // is always `None`. Kept for forward compatibility; bounded with
         // the agent-close budget if a future caller wires a bridge in.)
@@ -654,6 +684,31 @@ impl MeetingBackend {
                 None
             }
         };
+
+        // ── Per-meeting `memory_records.json` — issue #2000 fix. ──
+        // Mirrors the happy-path write in `close()` so the read companion
+        // works even when the close took the partial fast-path.
+        if let Some(ref dir) = bundle_dir {
+            let bundle_path = std::path::PathBuf::from(dir);
+            if let Err(e) = persist::write_meeting_memory_records(
+                &bundle_path,
+                &self.topic,
+                &decisions,
+                &action_items,
+                &open_questions,
+            ) {
+                warn!(
+                    target: "simard::meeting_backend::closing",
+                    phase = "persist_memory_records",
+                    outcome = "error",
+                    error = %e,
+                    handoff_partial = true,
+                    reason = PartialReason::PersistenceError.as_wire_str(),
+                    "Failed to write partial meeting memory_records.json"
+                );
+                partial_reason.get_or_insert(PartialReason::PersistenceError);
+            }
+        }
 
         info!(
             target: "simard::meeting_backend::closing",

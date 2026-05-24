@@ -121,17 +121,21 @@ fn sigterm_preserves_all_writes_across_restart() {
     );
 }
 
-/// Negative control: SIGKILL bypasses our shutdown handler and may strand
-/// writes in the WAL if lbug's auto-checkpoint hasn't fired yet. This test
-/// **must succeed**; we only assert the test framework can observe a count
-/// — we do **not** assert exact data loss because lbug may auto-checkpoint
-/// frequently enough to survive even SIGKILL on a small write set.
+/// SIGKILL durability test (promoted from negative-control by issue #1973).
 ///
-/// The point of this test is to prove the harness can detect durability
-/// regressions: if the SIGTERM test ever drops below N_FACTS while this
-/// SIGKILL run also drops, we know the test framework is functioning.
+/// Before issue #1973 this test only asserted `count <= N_FACTS` because
+/// lbug stranded acknowledged writes in its WAL until `Database::drop` (which
+/// SIGKILL bypasses), so any value in `0..=N_FACTS` was possible. The
+/// per-write fsync barrier added by issue #1973 promotes every successful
+/// mutating op to "on stable storage before return" — meaning **all**
+/// `N_FACTS` writes that the helper completed before printing `READY` must
+/// survive a subsequent SIGKILL.
+///
+/// This test paired with `sigterm_preserves_all_writes_across_restart` above
+/// covers both shutdown shapes (clean SIGTERM, unannounced SIGKILL) with the
+/// same `== N_FACTS` bar, which is the regression pin for the barrier.
 #[test]
-fn sigkill_run_is_observable_for_negative_control() {
+fn sigkill_preserves_all_acknowledged_writes() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state_root = tmp.path().join("simard-state");
 
@@ -139,6 +143,10 @@ fn sigkill_run_is_observable_for_negative_control() {
     let pid = read_ready_pid(&mut child);
     assert!(pid > 0);
 
+    // All N_FACTS writes have already completed and returned Ok(()) by the
+    // time the helper prints READY (see examples/sigterm_durability_helper.rs).
+    // With the per-write barrier (issue #1973), each Ok(()) implies fsync-to-
+    // stable-storage has happened, so SIGKILL here cannot lose any of them.
     kill(Pid::from_raw(pid as i32), Signal::SIGKILL).expect("send SIGKILL");
 
     let exited = wait_with_timeout(&mut child, Duration::from_secs(15)).expect("wait_with_timeout");
@@ -147,12 +155,12 @@ fn sigkill_run_is_observable_for_negative_control() {
         panic!("helper did not exit within 15s of SIGKILL");
     }
 
-    // Merely assert search succeeds — proves the harness can read post-mortem.
-    // We do NOT assert exact count because lbug may have auto-checkpointed
-    // some or all of the writes before SIGKILL landed.
     let count = count_facts(&state_root);
-    assert!(
-        count <= N_FACTS,
-        "post-SIGKILL fact count must be ≤ {N_FACTS} (got {count})"
+    assert_eq!(
+        count, N_FACTS,
+        "all {N_FACTS} writes that completed before READY must survive \
+         SIGKILL — per-write fsync barrier (issue #1973) guarantees every \
+         Ok(()) from a mutating op is durable before control returns. \
+         Got {count} surviving facts."
     );
 }

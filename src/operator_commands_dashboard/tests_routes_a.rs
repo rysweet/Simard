@@ -207,7 +207,8 @@ mod tests {
         assert!(INDEX_HTML.contains("Simard Dashboard"));
         assert!(INDEX_HTML.contains("/api/status"));
         assert!(INDEX_HTML.contains("/api/workboard"));
-        assert!(INDEX_HTML.contains("Whiteboard"));
+        // #1995: visible label was renamed Whiteboard → Workboard.
+        assert!(INDEX_HTML.contains("Workboard"));
         assert!(INDEX_HTML.contains("/api/issues"));
         assert!(INDEX_HTML.contains("fetchStatus"));
         assert!(INDEX_HTML.contains("mem-graph-canvas"));
@@ -216,23 +217,31 @@ mod tests {
 
     #[test]
     fn index_html_has_per_tab_intros_and_tooltips() {
-        // Issue #1662 pass-1: every tab gets a hover-tooltip and a one-sentence intro
-        // so first-time readers can orient without clicking through to documentation.
+        // Issue #1662 pass-1 + #1993/#1994: every tab gets a hover-tooltip,
+        // a per-tab <h1 class="page-h1">, and a one-sentence
+        // <p class="page-lede"> immediately under the H1.
         assert!(
-            INDEX_HTML.contains(r#"class="page-intro""#),
-            "page-intro CSS class should be used at least once"
+            INDEX_HTML.contains(r#"class="page-lede""#),
+            "page-lede CSS class should be used at least once"
         );
-        // .page-intro CSS rule is registered (style block).
-        assert!(INDEX_HTML.contains(".page-intro{"));
+        // .page-lede CSS rule is registered (style block).
+        assert!(INDEX_HTML.contains(".page-lede{"));
+        // .page-h1 CSS rule is registered.
+        assert!(INDEX_HTML.contains(".page-h1{"));
         // Spot-check a few tab tooltips so future refactors keep them in sync.
         assert!(INDEX_HTML.contains(r#"data-tab="overview" title="System health"#));
         assert!(INDEX_HTML.contains(r#"data-tab="goals" title="Active goals"#));
         assert!(INDEX_HTML.contains(r#"data-tab="terminal" title="Attach to the agent"#));
-        // All 11 tab-content containers should now precede a page-intro div.
-        let intro_count = INDEX_HTML.matches(r#"class="page-intro""#).count();
+        // All 11 tab-content containers should now carry a page-lede paragraph.
+        let lede_count = INDEX_HTML.matches(r#"class="page-lede""#).count();
         assert!(
-            intro_count >= 11,
-            "expected at least 11 .page-intro divs (one per tab), found {intro_count}"
+            lede_count >= 11,
+            "expected at least 11 .page-lede paragraphs (one per tab), found {lede_count}"
+        );
+        let h1_count = INDEX_HTML.matches(r#"class="page-h1""#).count();
+        assert!(
+            h1_count >= 11,
+            "expected at least 11 .page-h1 headings (one per tab), found {h1_count}"
         );
     }
 
@@ -341,11 +350,11 @@ mod tests {
     }
 
     /// Each of the eleven `tab-content` containers (`id="tab-<name>"`)
-    /// must contain at least one `<div class="page-intro">…</div>` inside
+    /// must contain at least one `<p class="page-lede">…</p>` inside
     /// its body — i.e. between the opening `id="tab-<name>"` and the next
     /// `id="tab-` of any kind (the next sibling tab-content). Guarantees
-    /// the intro banner is scoped to each page rather than leaking from a
-    /// neighbour.
+    /// the lede paragraph is scoped to each page rather than leaking from
+    /// a neighbour.
     #[test]
     fn index_html_each_tab_content_has_intro_inside_it() {
         let tabs = [
@@ -372,15 +381,20 @@ mod tests {
             let end_rel = after.find(r#"id="tab-"#).unwrap_or(after.len());
             let body = &after[..end_rel];
             assert!(
-                body.contains(r#"class="page-intro""#),
-                "tab `{tab}` (id=tab-{tab}) is missing its `<div class=\"page-intro\">` intro \
-                 banner inside the tab-content body — first-time readers won't get the \
-                 'What is this page?' orientation sentence."
+                body.contains(r#"class="page-lede""#),
+                "tab `{tab}` (id=tab-{tab}) is missing its `<p class=\"page-lede\">` \
+                 paragraph inside the tab-content body — first-time readers won't get \
+                 the 'What is this page?' orientation sentence."
+            );
+            assert!(
+                body.contains(r#"class="page-h1""#),
+                "tab `{tab}` (id=tab-{tab}) is missing its `<h1 class=\"page-h1\">` \
+                 heading inside the tab-content body — the page has no semantic title."
             );
         }
     }
 
-    /// The `.page-intro` CSS rule must use the accent-border styling
+    /// The `.page-lede` CSS rule must use the accent-border styling
     /// agreed in the design spec (a discreet left border in the accent
     /// colour). Locks the visual contract so future stylesheet refactors
     /// cannot silently drop the affordance.
@@ -388,20 +402,20 @@ mod tests {
     fn index_html_page_intro_css_uses_accent_border() {
         // Locate the CSS rule body and assert it carries the accent border.
         let rule_start = INDEX_HTML
-            .find(".page-intro{")
-            .expect(".page-intro{ CSS rule must be present");
+            .find(".page-lede{")
+            .expect(".page-lede{ CSS rule must be present");
         let rule_end_rel = INDEX_HTML[rule_start..]
             .find('}')
-            .expect(".page-intro CSS rule must be closed by `}`");
+            .expect(".page-lede CSS rule must be closed by `}`");
         let rule = &INDEX_HTML[rule_start..rule_start + rule_end_rel];
         assert!(
             rule.contains("border-left:") && rule.contains("var(--accent)"),
-            ".page-intro CSS rule must use a left border in the accent colour \
+            ".page-lede CSS rule must use a left border in the accent colour \
              (got: {rule:?})"
         );
         assert!(
             rule.contains("padding"),
-            ".page-intro should be padded so prose isn't flush against the border"
+            ".page-lede should be padded so prose isn't flush against the border"
         );
     }
 
@@ -620,17 +634,22 @@ mod tests {
         );
     }
 
-    /// Sanity-check on the page-intro count: there must be exactly 11
+    /// Sanity-check on the page-lede count: there must be exactly 11
     /// (one per tab) — a stricter bound than the existing `>= 11`
     /// assertion. If a refactor accidentally adds a 12th, we want to
     /// know immediately so we can decide whether the new container is
     /// actually a new tab or a misuse of the class.
     #[test]
     fn index_html_has_exactly_eleven_page_intros() {
-        let count = INDEX_HTML.matches(r#"class="page-intro""#).count();
+        let count = INDEX_HTML.matches(r#"class="page-lede""#).count();
         assert_eq!(
             count, 11,
-            "expected exactly 11 page-intro divs (one per top-level tab), got {count}"
+            "expected exactly 11 page-lede paragraphs (one per top-level tab), got {count}"
+        );
+        let h1_count = INDEX_HTML.matches(r#"class="page-h1""#).count();
+        assert_eq!(
+            h1_count, 11,
+            "expected exactly 11 page-h1 headings (one per top-level tab), got {h1_count}"
         );
     }
 

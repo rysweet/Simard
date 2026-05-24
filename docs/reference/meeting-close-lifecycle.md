@@ -62,7 +62,7 @@ unusual deployments.
 | Budget | Default | Env var | Scope |
 |---|---|---|---|
 | **Master close timeout** | 60s | `SIMARD_MEETING_CLOSE_TIMEOUT_SECS` | The entire `MeetingBackend::close()` call, end-to-end |
-| **Agent close timeout** | 15s | `SIMARD_MEETING_AGENT_CLOSE_TIMEOUT_SECS` | The inner `agent.close()` call (LLM/subprocess shutdown) |
+| **Agent close timeout** | 45s | `SIMARD_MEETING_AGENT_CLOSE_TIMEOUT_SECS` | The inner `agent.close()` call (LLM/subprocess shutdown) |
 | **Subprocess grace** | 2s | (not configurable) | SIGTERM → SIGKILL grace for any spawned bridge child |
 
 ### Clamping and validation
@@ -70,7 +70,7 @@ unusual deployments.
 | Env var | Range | Behavior outside range |
 |---|---|---|
 | `SIMARD_MEETING_CLOSE_TIMEOUT_SECS` | `[1, 600]` | Clamped silently; malformed value triggers WARN and falls back to 60 |
-| `SIMARD_MEETING_AGENT_CLOSE_TIMEOUT_SECS` | `[1, 120]` | Clamped silently; malformed value triggers WARN and falls back to 15 |
+| `SIMARD_MEETING_AGENT_CLOSE_TIMEOUT_SECS` | `[1, 120]` | Clamped silently; malformed value triggers WARN and falls back to 45 |
 
 Boot never fails on a malformed close-timeout env. The WARN line uses
 the static field name `reason="clamped"` or `reason="malformed"` for
@@ -261,7 +261,7 @@ to prevent LLM/subprocess output from leaking into log lines.
 | Reason (wire) | Meaning |
 |---|---|
 | `close_timeout` | The master 60s budget expired |
-| `agent_close_timeout` | The inner `agent.close()` exceeded 15s |
+| `agent_close_timeout` | The inner `agent.close()` exceeded 45s |
 | `bridge_timeout` | The cognitive-memory bridge `store_enriched_*` exceeded its inner budget |
 | `summary_empty` | The summarizer returned but produced no decisions/actions/questions |
 | `persistence_error` | An IO error occurred while persisting (e.g. `EACCES`, `ENOSPC`, parent `state_root` unwritable). The full-fidelity handoff is unavailable; the partial-handoff branch retried with the legacy `meeting_handoffs/handoff-<ts>.json` writer when possible |
@@ -347,7 +347,7 @@ This is a behavior fix only; no public API changed.
 | `SIMARD_HANDOFF_DIR` | `<state-root>/meeting_handoffs` | Narrow override for the handoff drop directory | [State-root resolution](./state-root-resolution.md#environment-variables) |
 | `SIMARD_MEETINGS_DIR` | `<state-root>/meetings` | Narrow override for per-meeting bundle root | [State-root resolution](./state-root-resolution.md#environment-variables) |
 | `SIMARD_MEETING_CLOSE_TIMEOUT_SECS` | `60` | Master close budget, clamp `[1, 600]` | [Timeout budgets](#timeout-budgets) |
-| `SIMARD_MEETING_AGENT_CLOSE_TIMEOUT_SECS` | `15` | Inner agent-close budget, clamp `[1, 120]` | [Timeout budgets](#timeout-budgets) |
+| `SIMARD_MEETING_AGENT_CLOSE_TIMEOUT_SECS` | `45` | Inner agent-close budget, clamp `[1, 120]` | [Timeout budgets](#timeout-budgets) |
 
 ---
 

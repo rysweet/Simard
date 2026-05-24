@@ -84,7 +84,7 @@ pub enum PartialReason {
     /// best-known partial data.
     CloseTimeout,
 
-    /// The inner `agent.close()` budget (default 15s, configurable via
+    /// The inner `agent.close()` budget (default 45s, configurable via
     /// `SIMARD_MEETING_AGENT_CLOSE_TIMEOUT_SECS`) expired. The agent
     /// worker thread is abandoned (see module-level "abandon-not-kill"
     /// trade-off) and the close proceeds.

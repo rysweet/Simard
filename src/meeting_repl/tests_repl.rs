@@ -240,10 +240,15 @@ fn repl_live_output_uses_colored_prompt_and_assistant_label() {
         output_str.contains("\x1b[36msimard:meeting> \x1b[0m"),
         "prompt should be color-coded cyan: {output_str:?}"
     );
-    // Assistant responses get a green-coded "Simard:" role label.
+    // Assistant responses get a green-coded "[facilitator HH:MM:SS]" turn prefix.
+    // We match on the structural pattern since the exact time varies.
     assert!(
-        output_str.contains("\x1b[32mSimard:\x1b[0m Acknowledged."),
-        "assistant response should be prefixed with colored role label: {output_str:?}"
+        output_str.contains("\x1b[32m[facilitator "),
+        "assistant response should be prefixed with colored turn prefix: {output_str:?}"
+    );
+    assert!(
+        output_str.contains("Acknowledged."),
+        "assistant response content should be present: {output_str:?}"
     );
 }
 
@@ -281,8 +286,17 @@ fn repl_no_color_env_strips_prompt_and_label_escapes() {
         "plain prompt still present: {output_str}"
     );
     assert!(
-        output_str.contains("Simard: Plain reply."),
-        "plain assistant label still present: {output_str}"
+        output_str.contains("[facilitator "),
+        "plain facilitator turn prefix still present: {output_str}"
+    );
+    assert!(
+        output_str.contains("Plain reply."),
+        "plain assistant content still present: {output_str}"
+    );
+    // User turn prefix should also be present
+    assert!(
+        output_str.contains("[user "),
+        "plain user turn prefix still present: {output_str}"
     );
 }
 

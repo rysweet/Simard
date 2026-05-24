@@ -1,6 +1,6 @@
 import { test, expect } from '../fixtures/simard-dashboard';
 
-test.describe('Whiteboard Tab @structural', () => {
+test.describe('Workboard Tab @structural', () => {
   test('whiteboard tab loads without JS errors', async ({
     authenticatedPage,
   }) => {
@@ -69,7 +69,7 @@ test.describe('Whiteboard Tab @structural', () => {
   });
 });
 
-test.describe('Whiteboard Tab Live @smoke', () => {
+test.describe('Workboard Tab Live @smoke', () => {
   test('whiteboard loads real data', async ({ authenticatedPage }) => {
     const errors: string[] = [];
     authenticatedPage.on('pageerror', (err) => errors.push(err.message));

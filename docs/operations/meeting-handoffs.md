@@ -175,10 +175,10 @@ before running the REPL if owner-only access matters.
 
 `/close` is bounded by a master timeout (default 60s, configurable
 via `SIMARD_MEETING_CLOSE_TIMEOUT_SECS`, clamped to `[1, 600]`)
-plus an inner agent-close budget (default 15s, configurable via
+plus an inner agent-close budget (default 45s, configurable via
 `SIMARD_MEETING_AGENT_CLOSE_TIMEOUT_SECS`, clamped to `[1, 120]`)
 plus a ~2s subprocess SIGTERM→SIGKILL grace. The combined
-worst-case wall-clock ceiling is therefore 77s (well under the
+worst-case wall-clock ceiling is therefore 107s (well under the
 documented 90s public ceiling). If any phase (agent shutdown,
 summary extraction, cognitive-memory flush) exceeds its inner
 budget, the close still writes a deserialize-valid bundle to disk
