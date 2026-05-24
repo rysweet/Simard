@@ -53,6 +53,8 @@ Pick exactly one `choice` tag:
 - `run_improvement` — Use for `__improvement__`.
 - `poll_developer_activity` — Use for `__poll_activity__`.
 - `extract_ideas` — Use for `__extract_ideas__`.
+- `safe_update` — Use for `__safe_update__` (see Self-update awareness below
+  for the four-part triggering doctrine).
 - `research_query` — Reserved for future use; only emit if the reason
   explicitly requests a literature/web research action.
 - `run_gym_eval`, `build_skill`, `launch_session` — Reserved for future
@@ -71,6 +73,7 @@ other OODA brains have already migrated to — see `ooda_brain.md`).
 **Do NOT output JSON.** The daemon parser reads the first non-blank line for a
 `DECISION:` marker — a JSON object on the first line is an immediate parse
 failure.
+
 
 **Rule 1 — first non-blank line is the decision.** Begin your response with:
 
