@@ -25,6 +25,7 @@ pub mod cognitive_memory;
 mod copilot_status_probe;
 mod copilot_task_submit;
 pub mod cost_tracking;
+pub mod disk_health;
 pub mod disk_pressure;
 pub mod engineer_loop;
 pub mod engineer_worktree;

@@ -50,6 +50,11 @@ The daemon dispatches one action per cycle. Action kinds include:
 | `research` | Issue a focused research query and persist findings. |
 | `assess-only` | When a goal cannot be safely dispatched (e.g. ambiguous scope), record the assessment and defer. |
 
+Before dispatching any action, the daemon runs the
+[disk health check](howto/configure-disk-health-check.md) once per cycle to
+proactively free disk when `/home` exceeds 80% usage. This prevents `ENOSPC`
+crashes (#2020) without blocking the cycle on failure.
+
 Each engineer dispatch:
 
 1. Allocates a per-engineer git worktree under `~/.simard/engineer-worktrees/<goal-id>-<epoch>-<6hex>/` so concurrent engineers cannot collide.

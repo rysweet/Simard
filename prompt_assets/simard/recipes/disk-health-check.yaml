@@ -1,0 +1,154 @@
+# disk-health-check.yaml — Deterministic disk cleanup recipe (no LLM).
+#
+# Invoked by src/disk_health.rs via recipe-runner-rs. Checks disk usage on
+# the home partition and triggers cleanup when usage exceeds 80%.
+#
+# Context vars (passed via -c):
+#   state_root  — path to ~/.simard (worktrees, backups, cargo dirs live here)
+#
+# Output: JSON to stdout:
+#   {"disk_used_pct": <0-100>, "freed_bytes": <int>, "actions_taken": [...]}
+#
+# Design: single bash step — no LLM, fully deterministic, hot-reloadable.
+
+name: "disk-health-check"
+description: "Check disk usage and clean stale artifacts when usage exceeds 80%"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "disk", "maintenance", "ops"]
+
+context:
+  state_root: "~/.simard"
+
+steps:
+  - id: "check-and-clean"
+    type: "bash"
+    command: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      STATE_ROOT="${state_root:-$HOME/.simard}"
+      THRESHOLD=80
+      BACKUP_KEEP=5
+
+      freed_bytes=0
+      actions=()
+
+      # ── Helper: add to freed_bytes and actions ──────────────────────────
+      record_freed() {
+        local bytes="$1" msg="$2"
+        freed_bytes=$((freed_bytes + bytes))
+        actions+=("$msg")
+      }
+
+      # ── Helper: size of a path in bytes (0 if missing) ─────────────────
+      path_bytes() {
+        if [ -e "$1" ]; then
+          du -sb "$1" 2>/dev/null | awk '{print $1}'
+        else
+          echo 0
+        fi
+      }
+
+      # ── 1. Measure current disk usage ──────────────────────────────────
+      disk_pct=$(df --output=pcent "$HOME" 2>/dev/null | tail -1 | tr -d ' %')
+      if [ -z "$disk_pct" ]; then
+        # Fallback for non-GNU df
+        disk_pct=$(df "$HOME" | tail -1 | awk '{gsub(/%/,""); print $5}')
+      fi
+
+      # ── 2. If below threshold, report and exit ─────────────────────────
+      if [ "$disk_pct" -lt "$THRESHOLD" ]; then
+        printf '{"disk_used_pct":%d,"freed_bytes":0,"actions_taken":[]}\n' "$disk_pct"
+        exit 0
+      fi
+
+      # ── 3. Clean stale engineer worktrees (>24h, no active process) ────
+      WORKTREE_DIR="$STATE_ROOT/engineer-worktrees"
+      if [ -d "$WORKTREE_DIR" ]; then
+        while IFS= read -r -d '' wt; do
+          # Skip symlinks
+          [ -L "$wt" ] && continue
+
+          # Check for active claim file with a live PID
+          claim="$wt/.simard-engineer-claim"
+          if [ -f "$claim" ]; then
+            pid=$(head -1 "$claim" 2>/dev/null || true)
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+              continue  # Active process — skip
+            fi
+          fi
+
+          sz=$(path_bytes "$wt")
+          rm -rf "$wt"
+          record_freed "$sz" "removed stale worktree: $(basename "$wt")"
+        done < <(find "$WORKTREE_DIR" -mindepth 1 -maxdepth 1 -type d -not -type l -mmin +1440 -print0 2>/dev/null)
+      fi
+
+      # ── 4. Remove cargo target dirs inside remaining engineer worktrees ─
+      if [ -d "$WORKTREE_DIR" ]; then
+        while IFS= read -r -d '' tgt; do
+          [ -L "$tgt" ] && continue
+          sz=$(path_bytes "$tgt")
+          rm -rf "$tgt"
+          record_freed "$sz" "removed worktree target: $(basename "$(dirname "$tgt")")/target"
+        done < <(find "$WORKTREE_DIR" -mindepth 2 -maxdepth 2 -type d -name target -print0 2>/dev/null)
+      fi
+
+      # ── 5. Prune LadybugDB backups to keep only N most recent ──────────
+      BACKUP_DIR="$STATE_ROOT/backups"
+      if [ -d "$BACKUP_DIR" ]; then
+        backup_count=$(find "$BACKUP_DIR" -maxdepth 1 -type f | wc -l)
+        if [ "$backup_count" -gt "$BACKUP_KEEP" ]; then
+          # Sort by mtime, delete oldest beyond BACKUP_KEEP
+          while IFS= read -r -d '' old; do
+            [ -L "$old" ] && continue
+            sz=$(path_bytes "$old")
+            rm -f "$old"
+            record_freed "$sz" "pruned backup: $(basename "$old")"
+          done < <(find "$BACKUP_DIR" -maxdepth 1 -type f -not -type l -printf '%T@\t%p\0' \
+                   | sort -z -t$'\t' -k1,1n \
+                   | head -z -n -"$BACKUP_KEEP" \
+                   | cut -z -f2-)
+        fi
+      fi
+
+      # ── 6. Clean cargo-target and shared-target caches ─────────────────
+      for cache_dir in "$STATE_ROOT/cargo-target" "$STATE_ROOT/shared-target"; do
+        if [ -d "$cache_dir" ]; then
+          sz=$(path_bytes "$cache_dir")
+          # Remove incremental and debug artifacts (largest consumers)
+          find "$cache_dir" -type d -name incremental -exec rm -rf {} + 2>/dev/null || true
+          find "$cache_dir" -type d -name debug -exec rm -rf {} + 2>/dev/null || true
+          sz_after=$(path_bytes "$cache_dir")
+          delta=$((sz - sz_after))
+          if [ "$delta" -gt 0 ]; then
+            record_freed "$delta" "cleaned cache: $(basename "$cache_dir") (incremental+debug)"
+          fi
+        fi
+      done
+
+      # ── 7. Re-measure disk and emit report ─────────────────────────────
+      disk_pct_after=$(df --output=pcent "$HOME" 2>/dev/null | tail -1 | tr -d ' %')
+      if [ -z "$disk_pct_after" ]; then
+        disk_pct_after=$(df "$HOME" | tail -1 | awk '{gsub(/%/,""); print $5}')
+      fi
+
+      # Build JSON array of actions
+      json_actions="["
+      first=true
+      for a in "${actions[@]}"; do
+        if [ "$first" = true ]; then
+          first=false
+        else
+          json_actions+=","
+        fi
+        # Escape double quotes in action strings
+        escaped=$(printf '%s' "$a" | sed 's/"/\\"/g')
+        json_actions+="\"$escaped\""
+      done
+      json_actions+="]"
+
+      printf '{"disk_used_pct":%d,"freed_bytes":%d,"actions_taken":%s}\n' \
+        "$disk_pct_after" "$freed_bytes" "$json_actions"
+    output: "disk_health_report"

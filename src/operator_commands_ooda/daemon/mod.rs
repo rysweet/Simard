@@ -454,6 +454,24 @@ pub fn run_ooda_daemon(
             }
             last_db_backup = Instant::now();
         }
+        // ── Disk health check (before spawning engineers) ────────────────
+        match crate::disk_health::run_disk_health_check(&bridges.repo_root, &state_root) {
+            Ok(report) => {
+                daemon_log(&state_root, &format!("[simard] {}", report.summary()));
+                if report.cleanup_performed() {
+                    daemon_log(
+                        &state_root,
+                        &format!("[simard] disk cleanup actions: {:?}", report.actions_taken),
+                    );
+                }
+            }
+            Err(e) => {
+                daemon_log(
+                    &state_root,
+                    &format!("[simard] WARN: disk health check failed: {e}"),
+                );
+            }
+        }
         // -------------------------------------------------------------------
 
         let cycle_start = Instant::now();

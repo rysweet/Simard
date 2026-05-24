@@ -343,7 +343,9 @@ git -C /home/azureuser/src/Simard worktree prune
 
 - **Disk pressure.** Each worktree is a full checkout. The startup orphan
   sweep plus deterministic reaper cleanup keep steady-state disk usage
-  bounded by `(active engineers) × (repo size)`.
+  bounded by `(active engineers) × (repo size)`. The per-cycle
+  [disk health check](../howto/configure-disk-health-check.md) adds
+  continuous hygiene for worktrees older than 24h whose engineers have exited.
 - **Build cache.** The shared `CARGO_TARGET_DIR` makes `cargo` builds across
   worktrees share one incremental cache. Without it, every engineer would
   trigger a cold `lbug` rebuild.
