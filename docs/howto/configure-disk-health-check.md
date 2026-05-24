@@ -84,8 +84,8 @@ YAML each time.
 
 ## Read a full disk health report
 
-The recipe outputs a JSON report to stdout, which the daemon captures and
-logs. To run the check manually outside the daemon:
+The recipe outputs a key=value text report to stdout, which the daemon captures
+and logs. To run the check manually outside the daemon:
 
 ```bash
 recipe-runner-rs prompt_assets/simard/recipes/disk-health-check.yaml \
@@ -93,19 +93,15 @@ recipe-runner-rs prompt_assets/simard/recipes/disk-health-check.yaml \
   -c REPO_ROOT="/home/azureuser/src/Simard"
 ```
 
-This prints the JSON report to stdout:
+This prints the text report to stdout:
 
-```json
-{
-  "disk_used_pct": 72,
-  "freed_bytes": 53687091200,
-  "actions_taken": [
-    "Removed 48 stale worktrees (50.1G)",
-    "Removed cargo target dirs from 3 worktrees (1.2G)",
-    "Pruned 19 LadybugDB backups (512M)",
-    "Cleaned cargo-target/ (12.0G) and shared-target/ (2.8G)"
-  ]
-}
+```
+DISK_USED_PCT=72
+FREED_BYTES=53687091200
+ACTION: Removed 48 stale worktrees (50.1G)
+ACTION: Removed cargo target dirs from 3 worktrees (1.2G)
+ACTION: Pruned 19 LadybugDB backups (512M)
+ACTION: Cleaned cargo-target/ (12.0G) and shared-target/ (2.8G)
 ```
 
 You can also run just the disk usage check (no cleanup) by looking at the
@@ -155,11 +151,13 @@ Common causes:
 - Permission denied on a directory under `$STATE_ROOT`
 - `du` or `find` not on PATH (unlikely on standard Linux)
 
-### 4. JSON parse failure
+### 4. Text parse shows unexpected values
 
-The Rust shim expects exactly one JSON object on stdout. If the bash script
-printed extra lines (warnings, debug output), the JSON parse fails. Fix the
-recipe to keep non-JSON output on stderr.
+The Rust shim parses key=value lines from stdout. If the bash script
+outputs lines with unexpected formats, the parser silently ignores them
+and defaults to zero. Check for typos in key names (`DISK_USED_PCT`, not
+`DISK_USED_PERCENT`) and ensure values are plain integers (no units, no
+commas).
 
 ## Handle persistent disk pressure
 
@@ -265,7 +263,7 @@ rm -rf ~/.simard/cargo-target/* ~/.simard/shared-target/*
 
 ## Related
 
-- [Disk health API reference](../reference/disk-health-api.md) — full API, JSON contract, error variants
+- [Disk health API reference](../reference/disk-health-api.md) — full API, text contract, error variants
 - [Automated disk health (concept)](../concepts/automated-disk-health.md) — design rationale
 - [Inspect and clean engineer worktrees](./inspect-and-clean-engineer-worktrees.md) — manual worktree operations
 - [Reclaim disk space and run low-space Rust builds](./reclaim-disk-space-and-run-low-space-rust-builds.md) — build artifact scripts

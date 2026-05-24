@@ -80,19 +80,21 @@ useful as an audit trail and can be processed manually.
 
 This PR establishes the **pattern** at one decision site. The same
 `OodaBrain`-style trait and `prompt_assets/simard/ooda_*.md` file convention
-will incrementally absorb the other OODA phases:
+has incrementally absorbed the other OODA phases. All use text-based wire
+formats (DECISION markers and labeled lines) — no JSON parsing of LLM output.
 
-| Phase | Future prompt | Scope |
-|---|---|---|
-| Observe | `ooda_observe.md` | Which signals to attend to this cycle |
-| Orient | `ooda_orient.md` | How to weight goals given recent failures |
-| Decide | `ooda_decide.md` | Which planned action to enact next |
-| Curate | `ooda_curate.md` | Goal/improvement curation triage |
-| Review | `ooda_review.md` | Engineer-output acceptance |
+| Phase | Prompt | Wire format | Status |
+|---|---|---|---|
+| Observe | `ooda_observe.md` | (future) | Planned |
+| Orient | `ooda_orient.md` | Labeled lines (`ADJUSTED_URGENCY:`, `RATIONALE:`, `CONFIDENCE:`) | **Shipped** |
+| Decide | `ooda_decide.md` | `DECISION:` marker | **Shipped** |
+| Curate | `ooda_curate.md` | (future) | Planned |
+| Review | `ooda_review.md` | (future) | Planned |
+| Engineer lifecycle | `ooda_brain.md` | `DECISION:` marker + labeled body lines | **Shipped** |
 
-Each migration follows the same recipe: add a prompt, define a trait + ctx +
-decision struct, wire it at one site, keep a deterministic fallback,
-preserve the on-disk schema.
+See [text-based brain protocol](./text-based-brain-protocol.md) for the
+design rationale and [text-parsing wire formats](../reference/text-parsing-wire-formats.md)
+for the normative grammar of each format.
 
 ## See Also
 

@@ -6,11 +6,12 @@
 > **Prerequisites:** read access to `~/.simard/logs/` on the daemon host;
 > familiarity with the `simard` CLI.
 
-The OODA brain decision parser is intentionally lenient — it accepts a prose
-`DECISION:` marker, hybrid prose-plus-JSON, or pure JSON. When it still
-rejects a response, the cycle falls back to `ContinueSkipping` and emits a
-`WARN`-level log line that contains the **full raw model response**. This
-guide tells you how to find that log, read it, and decide what to do.
+The OODA brain decision parser accepts a text-based `DECISION:` marker with
+labeled lines for structured fields. JSON is no longer accepted (removed in
+#1980). When the parser rejects a response, the cycle falls back to
+`ContinueSkipping` and emits a `WARN`-level log line that contains the
+**full raw model response**. This guide tells you how to find that log, read
+it, and decide what to do.
 
 For the full protocol definition see the
 [OODA Brain Decision Protocol reference](../reference/ooda-brain-decision-protocol.md).
@@ -46,7 +47,7 @@ You are looking for a line shaped like:
 WARN simard::ooda_brain: brain.decide_engineer_lifecycle parse failed
     goal=improve-amplihack-test-coverage
     raw="OK"
-    error=no DECISION: marker found and response is not valid JSON
+    error=no DECISION: marker found in LLM response (got 3 bytes)
 ```
 
 The `raw=...` field is the **complete** model response (truncated to 8 KB
@@ -64,9 +65,9 @@ Match the contents of `raw=` against this triage table.
 | `"OK"`, `"continue"`, `"yes"`                  | Model ignored the prompt; emitted a chat acknowledgment | [Step 3 — replay the prompt](#step-3-replay-the-prompt-locally) to confirm; consider tightening the prompt's role section. |
 | `""`                                           | LLM provider returned an empty body                     | Check the adapter logs (`~/.simard/logs/rustyclawd.log`) for a 5xx or rate-limit error.                                    |
 | `"DECISION: bogus_variant"`                    | Model invented a variant name                           | The error message lists the 6 valid variants; cross-check the prompt's enumeration block isn't drifting.                   |
-| `"DECISION: open_tracking_issue\n<no JSON>"`   | Model used the marker but omitted required fields       | The prompt's `# OPTIONS` section needs to remind the model that this variant requires `title` + `body`.                    |
-| Long prose with no `DECISION:` marker          | Model is in chat mode, not structured-output mode       | Check that `RustyClawdAdapter` is forcing structured output / JSON mode for the configured provider.                       |
-| Valid-looking JSON that still fails            | Field name typo or wrong `choice` casing                | Run `Step 3` and inspect — the parser only accepts the variant tokens listed in the [protocol reference](../reference/ooda-brain-decision-protocol.md#variant-whitelist). |
+| `"DECISION: open_tracking_issue\n<no labeled fields>"`| Model used the marker but omitted required labeled fields | The prompt's `# OPTIONS` section needs to remind the model that this variant requires `TITLE:` + `BODY:` labeled lines. |
+| Long prose with no `DECISION:` marker          | Model is in chat mode, not structured-output mode       | Strengthen the prompt's OUTPUT_FORMAT section to emphasize the `DECISION:` marker requirement.                            |
+| JSON object (legacy format)                    | Model following old JSON instructions from cached prompt | Update the prompt to use DECISION marker format. JSON is no longer accepted.                                              |
 
 ## Step 3: Replay the prompt locally
 
@@ -102,7 +103,7 @@ parsed. Discard the test before committing.
 | Chat acknowledgment / wrong mode           | Edit `prompt_assets/simard/ooda_brain.md` to strengthen the "respond ONLY with the marker" instruction. See [edit-the-ooda-brain-prompt](edit-the-ooda-brain-prompt.md). |
 | Adapter 5xx / rate limit                   | Investigate the adapter; the brain itself is healthy.                                                                      |
 | Bogus variant                              | The prompt should be the only place that lists variants; align it with the enum.                                            |
-| Missing required fields on hybrid form     | Update the prompt's `# OPTIONS` section to make the field requirement explicit.                                            |
+| Missing required labeled fields on structured variant | Update the prompt's `# OPTIONS` section to make the labeled field requirement explicit (`TITLE:`, `BODY:`, etc.).       |
 | Persistent unparseable noise from one model| Switch the provider in the brain config; the parser cannot fix a fundamentally non-cooperative model.                      |
 
 After editing the prompt, **do not** restart the daemon by hand. The
@@ -144,14 +145,16 @@ proceeding:
   need. Always go through `safe-update`, which performs the rebuild,
   drain, hot-swap, and health check together.
 * **Editing the parser to "just accept" a new ad-hoc shape** the model
-  emits. The protocol already accepts three forms; if the model is
-  emitting a fourth, the **prompt** is wrong, not the parser.
+  emits. The protocol accepts the DECISION marker format only; if the model
+  is emitting JSON or another format, the **prompt** is wrong, not the parser.
 * **Adding a fallback in `dispatch_spawn_engineer` for a specific raw
   response.** The single fallback path (`ContinueSkipping`) is intentional;
   a parse failure should be visible in the logs, not silently rerouted.
 
 ## See Also
 
+* [Concept: text-based brain protocol](../concepts/text-based-brain-protocol.md)
+* [Reference: text-parsing wire formats](../reference/text-parsing-wire-formats.md)
 * [Reference: OODA Brain Decision Protocol](../reference/ooda-brain-decision-protocol.md)
 * [How-to: edit the OODA brain prompt](edit-the-ooda-brain-prompt.md)
 * [Reference: `OodaBrain` API](../reference/ooda-brain-api.md)

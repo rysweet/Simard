@@ -190,11 +190,17 @@ impl<S: LlmSubmitter> OodaDecideBrain for RustyClawdDecideBrain<S> {
     }
 }
 
-/// Extract a JSON object from the LLM response (LLMs sometimes wrap JSON in
-/// prose / markdown fences) and parse it as a judgment. On failure the error
-/// embeds the **full raw response text** (truncated for log safety) so
-/// operators can diagnose the model behaviour — this replaces the legacy
-/// `got N bytes` byte-count format that originated the issue #1711 bug.
+/// Parse the brain response using the `DECISION:` marker protocol.
+/// Replaces the JSON `find('{')..rfind('}')` parser (issue #1980).
+///
+/// Expected format:
+/// ```text
+/// DECISION: advance_goal
+/// The goal should proceed because the evidence supports it.
+/// ```
+///
+/// The first non-blank line must contain `DECISION: <action_kind>`.
+/// The rest of the response is the rationale.
 fn parse_judgment_from_response(raw: &str) -> Result<DecideJudgment, String> {
     let stripped = raw.trim();
     if stripped.is_empty() {
@@ -203,23 +209,65 @@ fn parse_judgment_from_response(raw: &str) -> Result<DecideJudgment, String> {
             raw
         ));
     }
-    let candidate = if let Some(start) = stripped.find('{')
-        && let Some(end) = stripped.rfind('}')
-        && end >= start
+
+    // Extract DECISION marker from first non-blank line
+    let first_line = stripped.lines().find(|l| !l.trim().is_empty());
+    let first_line = match first_line {
+        Some(l) => l.trim(),
+        None => {
+            return Err(format!(
+                "decide brain response had no non-blank lines; raw_response={:?}",
+                super::rustyclawd::truncate_for_log_pub(raw)
+            ));
+        }
+    };
+
+    // Check for DECISION: prefix (case-insensitive)
+    if first_line.len() < "decision:".len()
+        || !first_line[.."decision:".len()].eq_ignore_ascii_case("decision:")
     {
-        &stripped[start..=end]
-    } else {
         return Err(format!(
-            "decide brain response had no JSON object; raw_response={:?}",
+            "decide brain response missing DECISION: marker on first line; raw_response={:?}",
             super::rustyclawd::truncate_for_log_pub(raw)
         ));
-    };
-    serde_json::from_str::<DecideJudgment>(candidate).map_err(|e| {
+    }
+
+    let after_marker = first_line["decision:".len()..].trim();
+    let choice = after_marker.split_whitespace().next().ok_or_else(|| {
         format!(
-            "decide-brain-parse-error: {e}; payload={candidate}; raw_response={:?}",
+            "decide brain DECISION: marker present but no variant token; raw_response={:?}",
             super::rustyclawd::truncate_for_log_pub(raw)
         )
-    })
+    })?;
+
+    // Remainder after the first line is the rationale
+    let rationale = stripped
+        .split_once('\n')
+        .map(|(_, r)| r.trim())
+        .unwrap_or("")
+        .to_string();
+    let rationale = if rationale.is_empty() {
+        "(no rationale provided)".to_string()
+    } else {
+        rationale
+    };
+
+    match choice {
+        "advance_goal" => Ok(DecideJudgment::AdvanceGoal { rationale }),
+        "run_improvement" => Ok(DecideJudgment::RunImprovement { rationale }),
+        "consolidate_memory" => Ok(DecideJudgment::ConsolidateMemory { rationale }),
+        "research_query" => Ok(DecideJudgment::ResearchQuery { rationale }),
+        "run_gym_eval" => Ok(DecideJudgment::RunGymEval { rationale }),
+        "build_skill" => Ok(DecideJudgment::BuildSkill { rationale }),
+        "launch_session" => Ok(DecideJudgment::LaunchSession { rationale }),
+        "poll_developer_activity" => Ok(DecideJudgment::PollDeveloperActivity { rationale }),
+        "extract_ideas" => Ok(DecideJudgment::ExtractIdeas { rationale }),
+        "safe_update" => Ok(DecideJudgment::SafeUpdate { rationale }),
+        _ => Err(format!(
+            "decide brain DECISION variant `{choice}` is not recognized; raw_response={:?}",
+            super::rustyclawd::truncate_for_log_pub(raw)
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -250,88 +298,148 @@ mod tests {
     use super::*;
     use crate::ooda_loop::ActionKind;
 
-    // ----- (a) well-formed JSON pass-through -----------------------------
+    // ----- DECISION marker parser (issue #1980) --------------------------
+
     #[test]
-    fn parse_well_formed_json_returns_judgment() {
-        let raw = r#"{"choice":"advance_goal","rationale":"go"}"#;
+    fn parse_decision_marker_advance_goal() {
+        let raw = "DECISION: advance_goal\nThe goal should proceed.";
         let j = parse_judgment_from_response(raw).expect("must parse");
         assert_eq!(j.action_kind(), ActionKind::AdvanceGoal);
-        assert_eq!(j.rationale(), "go");
+        assert!(j.rationale().contains("should proceed"));
     }
 
-    // ----- (b) JSON with surrounding prose — fallback parser must salvage -
     #[test]
-    fn parse_salvages_json_wrapped_in_prose() {
-        // Both leading and trailing prose around the object. The
-        // `find('{') .. rfind('}')` salvage must extract the JSON body.
-        let raw = "Here's my answer:\n```json\n{\"choice\":\"run_gym_eval\",\"rationale\":\"low score\"}\n```\nThanks!";
-        let j = parse_judgment_from_response(raw).expect("must salvage JSON in prose");
+    fn parse_decision_marker_run_gym_eval() {
+        let raw = "DECISION: run_gym_eval\nLow score warrants re-evaluation.";
+        let j = parse_judgment_from_response(raw).expect("must parse");
         assert_eq!(j.action_kind(), ActionKind::RunGymEval);
     }
 
     #[test]
-    fn parse_salvages_json_with_trailing_prose_only() {
-        // The parser slices from the first `{` to the last `}`, so trailing
-        // commentary after the closing brace must not break the salvage.
-        let raw = r#"{"choice":"consolidate_memory","rationale":"compaction"}  -- thanks"#;
+    fn parse_decision_marker_consolidate_memory() {
+        let raw = "DECISION: consolidate_memory\nMemory compaction needed.";
         let j = parse_judgment_from_response(raw).expect("must parse");
         assert_eq!(j.action_kind(), ActionKind::ConsolidateMemory);
     }
 
-    // ----- (c) completely unparseable returns Err, never panics ----------
     #[test]
-    fn parse_unparseable_returns_structured_error_with_raw_body() {
-        let raw = "totally not json at all";
-        let err = parse_judgment_from_response(raw).expect_err("must Err");
-        // Anti-regression for #1711: the error must embed the raw response
-        // so operators can diagnose. (`raw` has no `{` so it hits the
-        // "no JSON object" branch, not the serde-error branch.)
-        assert!(
-            err.contains(raw),
-            "error must embed raw response (issue #1711), got: {err}"
-        );
+    fn parse_decision_marker_safe_update() {
+        let raw = "DECISION: safe_update\nDivergence >= 3, conditions met.";
+        let j = parse_judgment_from_response(raw).expect("must parse");
+        assert_eq!(j.action_kind(), ActionKind::SafeUpdate);
+        assert!(j.rationale().contains("conditions met"));
     }
 
     #[test]
-    fn parse_empty_response_returns_empty_error() {
+    fn parse_decision_marker_case_insensitive() {
+        let raw = "decision: advance_goal\ngo";
+        let j = parse_judgment_from_response(raw).expect("must parse");
+        assert_eq!(j.action_kind(), ActionKind::AdvanceGoal);
+    }
+
+    #[test]
+    fn parse_decision_marker_skips_leading_blank_lines() {
+        let raw = "\n\nDECISION: advance_goal\ngo";
+        let j = parse_judgment_from_response(raw).expect("must parse");
+        assert_eq!(j.action_kind(), ActionKind::AdvanceGoal);
+    }
+
+    #[test]
+    fn parse_decision_marker_no_rationale_defaults() {
+        let raw = "DECISION: advance_goal";
+        let j = parse_judgment_from_response(raw).expect("must parse");
+        assert_eq!(j.action_kind(), ActionKind::AdvanceGoal);
+        assert_eq!(j.rationale(), "(no rationale provided)");
+    }
+
+    #[test]
+    fn parse_decision_marker_multiline_rationale() {
+        let raw = "DECISION: advance_goal\nLine 1 of reasoning.\nLine 2 of reasoning.";
+        let j = parse_judgment_from_response(raw).expect("must parse");
+        assert!(j.rationale().contains("Line 1"));
+        assert!(j.rationale().contains("Line 2"));
+    }
+
+    // ----- Error cases ---------------------------------------------------
+
+    #[test]
+    fn parse_empty_response_returns_error() {
         let err = parse_judgment_from_response("").expect_err("must Err");
-        assert!(
-            err.to_lowercase().contains("empty"),
-            "empty-response error must mention emptiness, got: {err}"
-        );
+        assert!(err.to_lowercase().contains("empty"));
     }
 
     #[test]
-    fn parse_whitespace_only_response_treated_as_empty() {
+    fn parse_whitespace_only_returns_error() {
         let err = parse_judgment_from_response("   \n\t  ").expect_err("must Err");
+        assert!(err.to_lowercase().contains("empty"));
+    }
+
+    #[test]
+    fn parse_no_decision_marker_returns_error() {
+        let raw = "I think we should advance the goal.";
+        let err = parse_judgment_from_response(raw).expect_err("must Err");
         assert!(
-            err.to_lowercase().contains("empty"),
-            "whitespace-only must be treated as empty, got: {err}"
+            err.contains("DECISION:"),
+            "error should mention missing marker: {err}"
         );
     }
 
     #[test]
-    fn parse_malformed_json_with_braces_returns_parse_error() {
-        // Hits the serde-error branch (has `{` and `}` but invalid JSON).
-        let raw = r#"{"choice":"advance_goal","rationale":}"#;
+    fn parse_unknown_variant_returns_error() {
+        let raw = "DECISION: do_a_barrel_roll\nwhy not";
         let err = parse_judgment_from_response(raw).expect_err("must Err");
         assert!(
-            err.contains("decide-brain-parse-error"),
-            "malformed JSON must surface a structured serde error tag, got: {err}"
+            err.contains("do_a_barrel_roll"),
+            "error should include the bad variant: {err}"
         );
-        // #1711: full raw must be embedded.
-        assert!(err.contains(raw), "raw_response must be embedded: {err}");
     }
 
     #[test]
-    fn parse_unknown_choice_tag_returns_error() {
-        // Schema guard: unrecognised `choice` tags must fail to parse so the
-        // consumer falls back to the deterministic mapping.
-        let raw = r#"{"choice":"do_a_barrel_roll","rationale":"why not"}"#;
+    fn parse_json_input_rejected_without_marker() {
+        // Pure JSON (the old format) should now fail — no DECISION marker
+        let raw = r#"{"choice":"advance_goal","rationale":"go"}"#;
         let err = parse_judgment_from_response(raw).expect_err("must Err");
         assert!(
-            err.contains("decide-brain-parse-error"),
-            "unknown variant must surface serde-tagged error: {err}"
+            err.contains("DECISION:"),
+            "JSON without DECISION marker should be rejected (issue #1980): {err}"
         );
+    }
+
+    #[test]
+    fn parse_json_wrapped_in_prose_rejected_without_marker() {
+        let raw = "Here's my answer:\n```json\n{\"choice\":\"run_gym_eval\",\"rationale\":\"low score\"}\n```\nThanks!";
+        let err = parse_judgment_from_response(raw).expect_err("must Err");
+        assert!(
+            err.contains("DECISION:"),
+            "JSON-in-prose without DECISION marker should be rejected (issue #1980): {err}"
+        );
+    }
+
+    // ----- All action kinds roundtrip ------------------------------------
+
+    #[test]
+    fn all_action_kinds_parse_from_decision_marker() {
+        let variants = vec![
+            ("advance_goal", ActionKind::AdvanceGoal),
+            ("run_improvement", ActionKind::RunImprovement),
+            ("consolidate_memory", ActionKind::ConsolidateMemory),
+            ("research_query", ActionKind::ResearchQuery),
+            ("run_gym_eval", ActionKind::RunGymEval),
+            ("build_skill", ActionKind::BuildSkill),
+            ("launch_session", ActionKind::LaunchSession),
+            ("poll_developer_activity", ActionKind::PollDeveloperActivity),
+            ("extract_ideas", ActionKind::ExtractIdeas),
+            ("safe_update", ActionKind::SafeUpdate),
+        ];
+        for (variant, expected_kind) in variants {
+            let raw = format!("DECISION: {variant}\ntest rationale");
+            let j = parse_judgment_from_response(&raw)
+                .unwrap_or_else(|e| panic!("variant {variant} failed: {e}"));
+            assert_eq!(
+                j.action_kind(),
+                expected_kind,
+                "variant {variant} wrong kind"
+            );
+        }
     }
 }

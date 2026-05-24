@@ -19,7 +19,7 @@ use std::process::Command;
 use crate::error::{SimardError, SimardResult};
 
 use super::merge_authority::PrSnapshot;
-use super::merge_judge::{JudgeOutcome, MergeJudge, MergeJudgeKind, parse_judge_response};
+use super::merge_judge::{JudgeOutcome, MergeJudge, MergeJudgeKind, Verdict};
 
 const ADAPTER_TAG: &str = "recipe-merge-judge";
 const RECIPE_FILENAME: &str = "merge-readiness-judge.yaml";
@@ -102,7 +102,7 @@ impl MergeJudge for RecipeMergeJudge {
         }
 
         let raw = String::from_utf8_lossy(&output.stdout).to_string();
-        parse_judge_response(&raw).map_err(|reason| SimardError::AdapterInvocationFailed {
+        parse_merge_verdict_from_text(&raw).map_err(|reason| SimardError::AdapterInvocationFailed {
             base_type: ADAPTER_TAG.to_string(),
             reason,
         })
@@ -123,13 +123,58 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// Parse recipe stdout text for merge-readiness verdict keywords.
+///
+/// The recipe runs an agent that produces natural language output.
+/// We scan for verdict keywords and use the surrounding text as rationale.
+/// No JSON parsing needed — the agent already makes the decision.
+///
+/// Scan rules (case-insensitive):
+/// - "not_ready" or "not ready" → NotReady
+/// - "unclear" → Unclear
+/// - "ready" (without "not" prefix) → Ready
+/// - None found → error
+pub fn parse_merge_verdict_from_text(text: &str) -> Result<JudgeOutcome, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{ADAPTER_TAG}: recipe returned empty output"));
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let rationale = truncate(trimmed, 500);
+
+    if lower.contains("not_ready") || lower.contains("not ready") {
+        Ok(JudgeOutcome {
+            verdict: Verdict::NotReady,
+            rationale,
+            blockers: vec![],
+        })
+    } else if lower.contains("unclear") {
+        Ok(JudgeOutcome {
+            verdict: Verdict::Unclear,
+            rationale,
+            blockers: vec![],
+        })
+    } else if lower.contains("ready") {
+        Ok(JudgeOutcome {
+            verdict: Verdict::Ready,
+            rationale,
+            blockers: vec![],
+        })
+    } else {
+        Err(format!(
+            "{ADAPTER_TAG}: no verdict keyword (ready/not_ready/unclear) found in recipe output; raw={:?}",
+            truncate(text, 200)
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn new_returns_none_when_recipe_missing() {
-        // Non-existent dir — no recipe file can be found
         let judge = RecipeMergeJudge::new(std::path::Path::new("/nonexistent"));
         assert!(judge.is_none());
     }
@@ -141,5 +186,85 @@ mod tests {
         };
         assert_eq!(judge.kind(), MergeJudgeKind::Recipe);
         assert!(judge.kind().is_configured());
+    }
+
+    // ------------------------------------------------------------------
+    // Text-based merge verdict parser (issue #1980)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn text_verdict_ready() {
+        let text = "After reviewing the PR body, I find it ready for merge. All six sections are present and substantive.";
+        let out = parse_merge_verdict_from_text(text).unwrap();
+        assert_eq!(out.verdict, Verdict::Ready);
+        assert!(out.rationale.contains("ready"));
+    }
+
+    #[test]
+    fn text_verdict_not_ready() {
+        let text = "The PR is not_ready because the Quality-audit section is missing.";
+        let out = parse_merge_verdict_from_text(text).unwrap();
+        assert_eq!(out.verdict, Verdict::NotReady);
+    }
+
+    #[test]
+    fn text_verdict_not_ready_with_space() {
+        let text = "This PR is not ready — the test plan section is empty.";
+        let out = parse_merge_verdict_from_text(text).unwrap();
+        assert_eq!(out.verdict, Verdict::NotReady);
+    }
+
+    #[test]
+    fn text_verdict_unclear() {
+        let text = "The PR body appears truncated. My verdict is unclear.";
+        let out = parse_merge_verdict_from_text(text).unwrap();
+        assert_eq!(out.verdict, Verdict::Unclear);
+    }
+
+    #[test]
+    fn text_verdict_case_insensitive() {
+        let text = "READY - all criteria met";
+        let out = parse_merge_verdict_from_text(text).unwrap();
+        assert_eq!(out.verdict, Verdict::Ready);
+    }
+
+    #[test]
+    fn text_verdict_not_ready_wins_over_ready() {
+        // "not_ready" contains "ready" but should match not_ready first
+        let text = "The PR is not_ready due to missing sections.";
+        let out = parse_merge_verdict_from_text(text).unwrap();
+        assert_eq!(out.verdict, Verdict::NotReady);
+    }
+
+    #[test]
+    fn text_verdict_empty_is_error() {
+        let result = parse_merge_verdict_from_text("");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("empty"));
+    }
+
+    #[test]
+    fn text_verdict_no_keyword_is_error() {
+        let result = parse_merge_verdict_from_text("The PR looks interesting but I cannot decide.");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("no verdict keyword"));
+    }
+
+    #[test]
+    fn text_verdict_multiline_response() {
+        let text = "## Merge Readiness Assessment\n\nAfter reviewing all sections:\n\n- Problem statement: ✓\n- Solution: ✓\n- Test plan: ✓\n\nVerdict: ready\n";
+        let out = parse_merge_verdict_from_text(text).unwrap();
+        assert_eq!(out.verdict, Verdict::Ready);
+    }
+
+    #[test]
+    fn text_verdict_rationale_is_full_text() {
+        let text = "Comprehensive analysis shows this PR is ready.";
+        let out = parse_merge_verdict_from_text(text).unwrap();
+        assert!(
+            out.rationale.contains("Comprehensive"),
+            "rationale should include full text: {}",
+            out.rationale
+        );
     }
 }

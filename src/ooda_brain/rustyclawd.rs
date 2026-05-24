@@ -195,78 +195,107 @@ fn parse_with_marker(
         ));
     }
 
-    // Try to extract a JSON object from the remainder for variant-specific
-    // fields. We use the same `find('{') .. rfind('}')` extraction the
-    // legacy parser uses, so a body that mixes prose and JSON still works.
+    // Parse labeled body lines and prose from the remainder (issue #1980).
+    // Replaces JSON body parsing — structured variants now use labeled lines
+    // (TITLE:, BODY:, REASON:, REDISPATCH_CONTEXT:) instead of JSON objects.
     let trimmed_rest = rest.trim();
-    let json_value: serde_json::Value = if let Some(start) = trimmed_rest.find('{')
+
+    // Extract labeled fields from the body
+    let mut fields: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut prose_lines: Vec<&str> = Vec::new();
+
+    for line in trimmed_rest.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Try to extract a labeled field (KEY: value)
+        if let Some(colon_pos) = trimmed.find(':') {
+            let key = trimmed[..colon_pos].trim();
+            let val = trimmed[colon_pos + 1..].trim();
+            // Only recognize known field labels (case-insensitive)
+            let key_upper = key.to_ascii_uppercase();
+            match key_upper.as_str() {
+                "TITLE" | "BODY" | "REASON" | "REDISPATCH_CONTEXT" | "RATIONALE" => {
+                    fields.insert(key_upper, val.to_string());
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        prose_lines.push(trimmed);
+    }
+
+    // Also try to extract fields from JSON body if present (backward-compat
+    // for the transition period where prompts may still emit JSON)
+    if let Some(start) = trimmed_rest.find('{')
         && let Some(end) = trimmed_rest.rfind('}')
         && end >= start
     {
         let candidate = &trimmed_rest[start..=end];
-        match serde_json::from_str::<serde_json::Value>(candidate) {
-            Ok(v) if v.is_object() => v,
-            // Body looks like JSON but isn't valid → treat as no JSON
-            // present and fall through to prose-rationale derivation. The
-            // marker is authoritative; we don't fail just because the
-            // optional body has a syntax error.
-            _ => serde_json::Value::Object(serde_json::Map::new()),
-        }
-    } else {
-        serde_json::Value::Object(serde_json::Map::new())
-    };
-
-    let mut obj = match json_value {
-        serde_json::Value::Object(m) => m,
-        _ => serde_json::Map::new(),
-    };
-
-    // Marker wins over any `choice` field in the JSON body.
-    obj.insert(
-        "choice".to_string(),
-        serde_json::Value::String(variant.to_string()),
-    );
-
-    // If the body did not provide a rationale, derive one from the prose
-    // remainder. Strip a leading `rationale:` prefix if present so
-    // `DECISION: continue_skipping\nrationale: hb ok` ends up with
-    // `rationale = "hb ok"` rather than `"rationale: hb ok"`.
-    if !obj.contains_key("rationale") {
-        let prose_rationale = if trimmed_rest.is_empty() {
-            "(no rationale provided)".to_string()
-        } else {
-            // Try to derive prose rationale by stripping JSON body if any.
-            // For variants with no JSON body, `trimmed_rest` IS the rationale.
-            // For variants with a JSON body that nonetheless omits rationale,
-            // we use the trimmed remainder verbatim as a best-effort.
-            let candidate = trimmed_rest;
-            let stripped = candidate
-                .strip_prefix("rationale:")
-                .or_else(|| candidate.strip_prefix("Rationale:"))
-                .or_else(|| candidate.strip_prefix("RATIONALE:"))
-                .unwrap_or(candidate)
-                .trim();
-            if stripped.is_empty() {
-                "(no rationale provided)".to_string()
-            } else {
-                stripped.to_string()
+        if let Ok(serde_json::Value::Object(map)) =
+            serde_json::from_str::<serde_json::Value>(candidate)
+        {
+            for (k, v) in &map {
+                let key_upper = k.to_ascii_uppercase();
+                if let Some(s) = v.as_str() {
+                    fields.entry(key_upper).or_insert_with(|| s.to_string());
+                }
             }
-        };
-        obj.insert(
-            "rationale".to_string(),
-            serde_json::Value::String(prose_rationale),
-        );
+        }
     }
 
-    serde_json::from_value::<EngineerLifecycleDecision>(serde_json::Value::Object(obj)).map_err(
-        |e| {
-            format!(
-                "brain DECISION marker `{variant}` present but field validation failed: {e}; \
-                 raw_response={:?}",
-                truncate_for_log(raw)
-            )
-        },
-    )
+    // Derive rationale: explicit RATIONALE field > prose lines > default
+    let rationale = if let Some(r) = fields.get("RATIONALE") {
+        r.clone()
+    } else if !prose_lines.is_empty() {
+        prose_lines.join(" ")
+    } else {
+        "(no rationale provided)".to_string()
+    };
+
+    // Build the decision based on variant
+    match variant {
+        "continue_skipping" => Ok(EngineerLifecycleDecision::ContinueSkipping { rationale }),
+        "deprioritize" => Ok(EngineerLifecycleDecision::Deprioritize { rationale }),
+        "consider_self_update" => Ok(EngineerLifecycleDecision::ConsiderSelfUpdate { rationale }),
+        "reclaim_and_redispatch" => {
+            let redispatch_context = fields
+                .get("REDISPATCH_CONTEXT")
+                .cloned()
+                .unwrap_or_default();
+            Ok(EngineerLifecycleDecision::ReclaimAndRedispatch {
+                rationale,
+                redispatch_context,
+            })
+        }
+        "open_tracking_issue" => {
+            let title = fields
+                .get("TITLE")
+                .cloned()
+                .unwrap_or_else(|| "(no title)".to_string());
+            let body = fields
+                .get("BODY")
+                .cloned()
+                .unwrap_or_else(|| "(no body)".to_string());
+            Ok(EngineerLifecycleDecision::OpenTrackingIssue {
+                rationale,
+                title,
+                body,
+            })
+        }
+        "mark_goal_blocked" => {
+            let reason = fields
+                .get("REASON")
+                .cloned()
+                .unwrap_or_else(|| "(no reason)".to_string());
+            Ok(EngineerLifecycleDecision::MarkGoalBlocked { rationale, reason })
+        }
+        _ => Err(format!(
+            "brain DECISION marker `{variant}` present but not handled; raw_response={:?}",
+            truncate_for_log(raw)
+        )),
+    }
 }
 
 /// Parse the brain's response into an [`EngineerLifecycleDecision`]. Accepts
@@ -297,28 +326,14 @@ fn parse_decision_from_response(raw: &str) -> Result<EngineerLifecycleDecision, 
         ));
     }
 
-    // Prose-first: try to extract a `DECISION:` marker from the first
-    // non-blank line. If present, the marker is authoritative.
+    // DECISION marker is the only accepted format (issue #1980).
+    // JSON fallback removed — it was the source of fallback storms.
     if let Some((variant, rest)) = extract_decision_marker(stripped) {
         return parse_with_marker(variant, rest, raw);
     }
 
-    // Backward-compat: legacy JSON object extraction.
-    if let Some(start) = stripped.find('{')
-        && let Some(end) = stripped.rfind('}')
-        && end >= start
-    {
-        let candidate = &stripped[start..=end];
-        return serde_json::from_str::<EngineerLifecycleDecision>(candidate).map_err(|e| {
-            format!(
-                "brain JSON parse error: {e}; payload={candidate}; raw_response={:?}",
-                truncate_for_log(raw)
-            )
-        });
-    }
-
     Err(format!(
-        "brain response had no DECISION marker and no JSON object; raw_response={:?}",
+        "brain response had no DECISION: marker on first line; raw_response={:?}",
         truncate_for_log(raw)
     ))
 }
@@ -634,25 +649,47 @@ mod tests {
         ));
     }
 
-    // ----- parse_decision_from_response: full salvage matrix -------------
+    // ----- parse_decision_from_response: DECISION marker only (issue #1980) -
 
-    // (a) Well-formed JSON pass-through (legacy JSON-only path).
+    // (a) DECISION marker with rationale — the supported format.
     #[test]
-    fn parse_decision_well_formed_json_passes_through() {
-        let raw = r#"{"choice":"continue_skipping","rationale":"healthy"}"#;
+    fn parse_decision_marker_continue_skipping() {
+        let raw = "DECISION: continue_skipping\nhealthy heartbeat";
         let d = parse_decision_from_response(raw).expect("must parse");
-        assert!(matches!(
-            d,
-            EngineerLifecycleDecision::ContinueSkipping { .. }
-        ));
+        match d {
+            EngineerLifecycleDecision::ContinueSkipping { rationale } => {
+                assert!(rationale.contains("healthy"));
+            }
+            other => panic!("expected ContinueSkipping, got {other:?}"),
+        }
     }
 
-    // (b) JSON with trailing prose — fallback parser must salvage.
     #[test]
-    fn parse_decision_salvages_json_in_prose_wrapper() {
-        let raw = "Here's the call:\n```json\n{\"choice\":\"deprioritize\",\"rationale\":\"chronic\"}\n```";
-        let d = parse_decision_from_response(raw).expect("must salvage");
+    fn parse_decision_marker_deprioritize() {
+        let raw = "DECISION: deprioritize\nchronic failure pattern";
+        let d = parse_decision_from_response(raw).expect("must parse");
         assert!(matches!(d, EngineerLifecycleDecision::Deprioritize { .. }));
+    }
+
+    // (b) JSON-only input is now REJECTED (issue #1980 — JSON fallback removed).
+    #[test]
+    fn parse_decision_json_only_is_rejected() {
+        let raw = r#"{"choice":"continue_skipping","rationale":"healthy"}"#;
+        let err = parse_decision_from_response(raw).expect_err("must Err");
+        assert!(
+            err.contains("DECISION:"),
+            "JSON without DECISION marker must be rejected (issue #1980): {err}"
+        );
+    }
+
+    #[test]
+    fn parse_decision_json_in_prose_is_rejected() {
+        let raw = "Here's the call:\n```json\n{\"choice\":\"deprioritize\",\"rationale\":\"chronic\"}\n```";
+        let err = parse_decision_from_response(raw).expect_err("must Err");
+        assert!(
+            err.contains("DECISION:"),
+            "JSON-in-prose without DECISION marker must be rejected (issue #1980): {err}"
+        );
     }
 
     // (c) Completely unparseable surfaces a structured error, never panics.
@@ -665,8 +702,8 @@ mod tests {
             "raw must be embedded (issue #1711): {err}"
         );
         assert!(
-            err.contains("no DECISION marker") || err.contains("no JSON object"),
-            "error must explain the salvage failure: {err}"
+            err.contains("DECISION:"),
+            "error must explain missing marker: {err}"
         );
     }
 
@@ -674,14 +711,6 @@ mod tests {
     fn parse_decision_empty_returns_empty_err() {
         let err = parse_decision_from_response("").expect_err("must Err");
         assert!(err.to_lowercase().contains("empty"), "got: {err}");
-    }
-
-    #[test]
-    fn parse_decision_malformed_json_returns_serde_err_with_raw_body() {
-        let raw = r#"{"choice":"continue_skipping","rationale":}"#;
-        let err = parse_decision_from_response(raw).expect_err("must Err");
-        assert!(err.contains("JSON parse error"), "got: {err}");
-        assert!(err.contains(raw), "raw must be embedded: {err}");
     }
 
     #[test]
@@ -698,11 +727,59 @@ mod tests {
         }
     }
 
+    // Structured variants with labeled body lines instead of JSON
+    #[test]
+    fn parse_decision_open_tracking_issue_with_labeled_body() {
+        let raw = "DECISION: open_tracking_issue\nTITLE: engineer panicked\nBODY: see logs for details\nrationale: repeated panic in loop";
+        let d = parse_decision_from_response(raw).expect("must parse");
+        match d {
+            EngineerLifecycleDecision::OpenTrackingIssue {
+                title,
+                body,
+                rationale,
+            } => {
+                assert_eq!(title, "engineer panicked");
+                assert_eq!(body, "see logs for details");
+                assert!(rationale.contains("panic"));
+            }
+            other => panic!("expected OpenTrackingIssue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_decision_mark_goal_blocked_with_labeled_body() {
+        let raw = "DECISION: mark_goal_blocked\nREASON: needs API key from operator\nrationale: external dependency";
+        let d = parse_decision_from_response(raw).expect("must parse");
+        match d {
+            EngineerLifecycleDecision::MarkGoalBlocked { reason, rationale } => {
+                assert_eq!(reason, "needs API key from operator");
+                assert!(rationale.contains("external"));
+            }
+            other => panic!("expected MarkGoalBlocked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_decision_reclaim_with_labeled_body() {
+        let raw = "DECISION: reclaim_and_redispatch\nREDISPATCH_CONTEXT: focus on the persistence layer\nrationale: stuck for 7 hours";
+        let d = parse_decision_from_response(raw).expect("must parse");
+        match d {
+            EngineerLifecycleDecision::ReclaimAndRedispatch {
+                rationale,
+                redispatch_context,
+            } => {
+                assert!(redispatch_context.contains("persistence"));
+                assert!(rationale.contains("stuck"));
+            }
+            other => panic!("expected ReclaimAndRedispatch, got {other:?}"),
+        }
+    }
+
     // ----- (d) RustyClawdBrain bridge: end-to-end with stub submitter ---
 
     #[test]
-    fn bridge_returns_decision_on_well_formed_json() {
-        let stub = StubSubmitter::ok(r#"{"choice":"continue_skipping","rationale":"hb ok"}"#);
+    fn bridge_returns_decision_on_marker_response() {
+        let stub = StubSubmitter::ok("DECISION: continue_skipping\nhb ok");
         let brain = RustyClawdBrain::new(stub);
         let d = brain.decide_engineer_lifecycle(&ctx()).expect("must Ok");
         assert!(matches!(
@@ -712,13 +789,36 @@ mod tests {
     }
 
     #[test]
-    fn bridge_returns_decision_on_json_with_trailing_prose() {
+    fn bridge_rejects_json_only_response() {
+        let stub = StubSubmitter::ok(r#"{"choice":"continue_skipping","rationale":"hb ok"}"#);
+        let brain = RustyClawdBrain::new(stub);
+        let err = brain
+            .decide_engineer_lifecycle(&ctx())
+            .expect_err("JSON-only must now be rejected (issue #1980)");
+        match err {
+            SimardError::AdapterInvocationFailed { reason, .. } => {
+                assert!(
+                    reason.contains("DECISION:"),
+                    "error should mention missing DECISION marker: {reason}"
+                );
+            }
+            other => panic!("wrong error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bridge_rejects_json_in_prose_response() {
         let stub = StubSubmitter::ok(
             "Some thinking...\n```json\n{\"choice\":\"deprioritize\",\"rationale\":\"chronic\"}\n```\nDone.",
         );
         let brain = RustyClawdBrain::new(stub);
-        let d = brain.decide_engineer_lifecycle(&ctx()).expect("must Ok");
-        assert!(matches!(d, EngineerLifecycleDecision::Deprioritize { .. }));
+        let err = brain
+            .decide_engineer_lifecycle(&ctx())
+            .expect_err("JSON-in-prose must now be rejected (issue #1980)");
+        match err {
+            SimardError::AdapterInvocationFailed { .. } => {} // expected
+            other => panic!("wrong error variant: {other:?}"),
+        }
     }
 
     #[test]
@@ -759,10 +859,7 @@ mod tests {
 
     #[test]
     fn bridge_calls_submitter_exactly_once_per_decision() {
-        // Resilience contract from the bridge module docstring: no internal
-        // retry loop — exactly one submit per decision so the OODA loop's
-        // outer cycle is the single retry boundary.
-        let stub = StubSubmitter::ok(r#"{"choice":"continue_skipping","rationale":"ok"}"#);
+        let stub = StubSubmitter::ok("DECISION: continue_skipping\nok");
         let counter = stub.call_counter();
         let brain = RustyClawdBrain::new(stub);
         let _ = brain.decide_engineer_lifecycle(&ctx()).unwrap();
@@ -775,7 +872,7 @@ mod tests {
 
     #[test]
     fn bridge_renders_prompt_with_context_fields() {
-        let stub = StubSubmitter::ok(r#"{"choice":"continue_skipping","rationale":"ok"}"#);
+        let stub = StubSubmitter::ok("DECISION: continue_skipping\nok");
         let brain = RustyClawdBrain::new(stub);
         let prompt = brain.render_prompt(&EngineerLifecycleCtx {
             goal_id: "marker-goal".into(),
@@ -800,7 +897,7 @@ mod tests {
 
     #[test]
     fn bridge_renders_sentinel_none_as_placeholder() {
-        let stub = StubSubmitter::ok(r#"{"choice":"continue_skipping","rationale":"ok"}"#);
+        let stub = StubSubmitter::ok("DECISION: continue_skipping\nok");
         let brain = RustyClawdBrain::new(stub);
         let prompt = brain.render_prompt(&EngineerLifecycleCtx {
             sentinel_pid: None,

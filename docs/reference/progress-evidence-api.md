@@ -5,16 +5,20 @@ Crate: `simard` · Module: `simard::goal_curation::progress_evidence`
 This module implements the gatekeeper described in
 [Progress-evidence gating](../concepts/progress-evidence-gating.md). It
 exposes one trait (`ProgressEvidenceChecker`), two concrete implementations
-(`LlmReviewerProgressChecker` in
-`simard::goal_curation::progress_reviewer`, `NoopProgressEvidenceChecker`),
+(`RecipeProgressChecker` in
+`simard::goal_curation::recipe_progress_checker`, `NoopProgressEvidenceChecker`),
 and a single façade function (`update_goal_progress_with_evidence`) in the
 sibling `simard::goal_curation::operations` module.
 
 > **History:** Prior to PR #2007, the production implementation was
 > `DefaultProgressEvidenceChecker`, which shelled out to `git log` and
 > `gh pr list`. That struct and its helper traits (`GitRunner`, `GhRunner`)
-> were removed in PR #2011. The gate now delegates to an LLM reviewer —
-> no subprocess calls, no local tooling requirements.
+> were removed in PR #2011. The gate then delegated to `LlmReviewerProgressChecker`
+> (JSON-based LLM response parsing), which was replaced by
+> `RecipeProgressChecker` with text-based keyword verdict parsing in #1980.
+> The `LlmReviewerProgressChecker` and its module (`progress_reviewer.rs`)
+> have been deleted — they were dead code once the recipe-based checker
+> became the primary tier.
 
 All public symbols below are re-exported from `simard::goal_curation`.
 
@@ -62,10 +66,10 @@ can be installed on `OodaBridges` and shared across all OODA actions.
 - `check` MAY perform blocking I/O (LLM calls). It is called at most
   a few times per OODA cycle, only on progress-increase attempts.
 - `check` MUST return `Accept` when evidence supports the claim and
-  `Reject` otherwise. The production `LlmReviewerProgressChecker`
-  accepts on LLM infrastructure failure (transport error, parse error,
-  empty response) — the gate's purpose is to catch hallucinated jumps,
-  not to block goals on LLM availability. See
+  `Reject` otherwise. The production `RecipeProgressChecker`
+  accepts on infrastructure failure (recipe not found, runner not
+  installed, non-zero exit) — the gate's purpose is to catch
+  hallucinated jumps, not to block goals on recipe availability. See
   [`SIMARD_PROGRESS_EVIDENCE`](../operations/progress-evidence-kill-switch.md)
   for the operator escape hatch.
 - The `since` argument is provided by the caller; the trait does not
@@ -80,57 +84,57 @@ can be installed on `OodaBridges` and shared across all OODA actions.
 | `new_percent` | `u32` | The proposed new percent (0–100). Only called when `new_percent > old_percent`. |
 | `since` | `DateTime<Utc>` | The cutoff timestamp; only artifacts at or after this instant count as evidence. |
 
-### Decision rules (LlmReviewerProgressChecker)
+### Decision rules (RecipeProgressChecker)
 
-The production implementation (`src/goal_curation/progress_reviewer.rs`)
-sends goal context to an LLM and parses a `{verdict, rationale}` JSON
-response. No git introspection, no `gh` shellouts — the LLM reads the
-problem, plan, and progress against the plan to determine whether the
-claimed percent is honest.
+The production implementation (`src/goal_curation/recipe_progress_checker.rs`)
+invokes a recipe that runs an LLM agent to review goal progress. The recipe
+stdout is parsed using the keyword verdict protocol — the checker scans for
+`"accept"` or `"reject"` keywords in the text output. See
+[text-parsing wire formats § progress checker](../reference/text-parsing-wire-formats.md#2a-progress-checker-recipe_progress_checkerrs)
+for the full grammar.
 
 | Condition | Result | `reason` template |
 |---|---|---|
-| `new_percent <= old_percent` | `Accept` (auto, no LLM call) | `"progress-assessment-reviewer: downward / no-change (<old> -> <new>) auto-accepted"` |
-| LLM returns `{"verdict":"accept","rationale":"..."}` | `Accept` | `"progress-assessment-reviewer: accept — <rationale>"` |
-| LLM returns `{"verdict":"reject","rationale":"..."}` | `Reject` | `"progress-assessment-reviewer: reject — <rationale>"` |
-| LLM transport/parse error or empty response | `Accept` (fail-open) | `"progress-assessment-reviewer: LLM submit failed (<error>); accepting to avoid blocking goal"` |
-| Unknown verdict string | `Accept` (fail-open) | `"progress-assessment-reviewer: unknown verdict \"<v>\"; accepting to avoid blocking goal"` |
+| `new_percent <= old_percent` | `Accept` (auto, no recipe call) | `"progress-assessment-reviewer: downward / no-change (<old> -> <new>) auto-accepted"` |
+| Recipe stdout contains `"accept"` keyword | `Accept` | `"progress-assessment-reviewer: accept — <surrounding text as rationale>"` |
+| Recipe stdout contains `"reject"` keyword | `Reject` | `"progress-assessment-reviewer: reject — <surrounding text as rationale>"` |
+| No keyword found in recipe stdout | `Accept` (fail-open) | `"progress-assessment-reviewer: no verdict keyword found; accepting to avoid blocking goal"` |
+| Recipe invocation failure | `Accept` (fail-open) | `"progress-assessment-reviewer: recipe failed (<error>); accepting to avoid blocking goal"` |
 
-The prompt template lives at
-`prompt_assets/simard/progress_assessment_reviewer.md`. It substitutes
-`{goal_id}`, `{problem}`, `{plan}`, `{prior_pct}`, `{claimed_pct}`, and
-`{wip_summary}` before submission.
+The recipe template lives at
+`prompt_assets/simard/recipes/progress-assessment.yaml`. The prompt within
+the recipe substitutes `{goal_id}`, `{problem}`, `{plan}`, `{prior_pct}`,
+`{claimed_pct}`, and `{wip_summary}` before submission to the LLM agent.
 
 ---
 
-## `LlmReviewerProgressChecker`
+## `RecipeProgressChecker`
 
 ```rust
-// In src/goal_curation/progress_reviewer.rs
+// In src/goal_curation/recipe_progress_checker.rs
 
-pub struct LlmReviewerProgressChecker<S: LlmSubmitter> {
-    submitter: S,
+pub struct RecipeProgressChecker {
+    repo_root: PathBuf,
 }
 
-impl<S: LlmSubmitter> LlmReviewerProgressChecker<S> {
-    pub fn new(submitter: S) -> Self;
+impl RecipeProgressChecker {
+    pub fn new(repo_root: PathBuf) -> Self;
 }
 ```
 
-The production checker. Generic over `LlmSubmitter` so tests can swap in a
-canned-response stub without global state. Constructed at daemon startup
-with the daemon's active `LlmSubmitter` implementation.
+The production checker. Invokes the progress-assessment recipe via
+`recipe-runner-rs` and parses the verdict from the text output using keyword
+scanning. No JSON parsing. No intermediate `ReviewerResponse` type.
 
 The checker:
 
-1. Auto-accepts downward/no-change moves without an LLM call.
-2. Renders the prompt template with goal context.
-3. Submits to the LLM via `submitter.submit(...)`.
-4. Parses the response JSON (tries: raw, fenced code blocks, brace-balanced
-   spans, outermost-brace fallback — same strategy as `merge_judge`).
-5. Maps `"accept"` / `"reject"` verdicts to `EvidenceDecision`.
-6. Fails open on any infrastructure error (LLM down, parse failure, unknown
-   verdict).
+1. Auto-accepts downward/no-change moves without a recipe call.
+2. Resolves the recipe YAML (hot-reload path, then in-tree).
+3. Invokes `recipe-runner-rs` with goal context as variables.
+4. Scans stdout for `"accept"` or `"reject"` (case-insensitive).
+5. Maps the keyword to `EvidenceDecision`, using surrounding text as rationale.
+6. Fails open on any infrastructure error (recipe not found, runner not
+   installed, non-zero exit).
 
 ---
 
@@ -280,7 +284,7 @@ pub struct OodaBridges {
 
 | Field | Default at daemon boot | Default in tests |
 |---|---|---|
-| `progress_evidence` | `Arc::new(LlmReviewerProgressChecker::new(submitter))`, or `Arc::new(NoopProgressEvidenceChecker)` when `SIMARD_PROGRESS_EVIDENCE=off` | `Arc::new(NoopProgressEvidenceChecker)` |
+| `progress_evidence` | `Arc::new(RecipeProgressChecker::new(repo_root))`, or `Arc::new(NoopProgressEvidenceChecker)` when `SIMARD_PROGRESS_EVIDENCE=off` | `Arc::new(NoopProgressEvidenceChecker)` |
 
 A new `OodaBridges::for_tests()` constructor wires the test defaults so
 that existing OODA-loop tests need only a single-line change to adopt the
@@ -321,7 +325,7 @@ No data migration is required.
 |---|---|
 | `EvidenceDecision`, `ProgressEvidenceChecker` | Public stable — semver-tracked. |
 | `update_goal_progress_with_evidence` | Public stable. |
-| `LlmReviewerProgressChecker` | Public stable — generic over `LlmSubmitter`. |
+| `RecipeProgressChecker` | Public stable. |
 | `NoopProgressEvidenceChecker` | Public stable; safe to use in any test. |
 | Episode prefix strings (`"goal progress accepted:"`, `"brain hallucination detected:"`) | **Behaviorally stable.** The dashboard and consolidation jobs match these prefixes verbatim; changing them is a breaking change. |
 | Prompt template (`progress_assessment_reviewer.md`) | Implementation detail; may evolve. |

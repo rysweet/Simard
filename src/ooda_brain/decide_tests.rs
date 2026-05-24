@@ -128,21 +128,29 @@ fn fallback_routes_ordinary_goal_to_advance_goal() {
 
 #[test]
 fn rustyclawd_brain_parses_canned_advance_goal_response() {
-    let stub = StubSubmitter::new(r#"{"choice":"advance_goal","rationale":"stub says go"}"#);
+    let stub = StubSubmitter::new("DECISION: advance_goal\nstub says go");
     let brain = RustyClawdDecideBrain::new(stub);
     let j = brain.judge_decision(&ctx("ship-v1")).unwrap();
     assert_eq!(j.action_kind(), ActionKind::AdvanceGoal);
-    assert_eq!(j.rationale(), "stub says go");
+    assert!(j.rationale().contains("stub says go"));
 }
 
 #[test]
-fn rustyclawd_brain_parses_response_wrapped_in_prose() {
-    let stub = StubSubmitter::new(
-        "Here is my answer:\n```json\n{\"choice\":\"consolidate_memory\",\"rationale\":\"reserved\"}\n```\nThanks.",
-    );
+fn rustyclawd_brain_parses_response_with_marker() {
+    let stub = StubSubmitter::new("DECISION: consolidate_memory\nreserved");
     let brain = RustyClawdDecideBrain::new(stub);
     let j = brain.judge_decision(&ctx("__memory__")).unwrap();
     assert_eq!(j.action_kind(), ActionKind::ConsolidateMemory);
+}
+
+#[test]
+fn rustyclawd_brain_rejects_json_only_response() {
+    // JSON without DECISION marker is now rejected (issue #1980)
+    let stub = StubSubmitter::new(r#"{"choice":"advance_goal","rationale":"ok"}"#);
+    let brain = RustyClawdDecideBrain::new(stub);
+    let err = brain.judge_decision(&ctx("ship-v1")).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("ooda-decide-brain"), "got: {msg}");
 }
 
 #[test]
@@ -161,9 +169,6 @@ fn rustyclawd_brain_unparseable_returns_error() {
 
 #[test]
 fn issue_1711_unparseable_error_embeds_raw_response_text() {
-    // The legacy code logged `no JSON object found in LLM response (got N bytes)`
-    // which dropped the actual response on the floor. This test pins that the
-    // raw response text is now embedded in the error so operators can diagnose.
     let stub = StubSubmitter::new("OK");
     let brain = RustyClawdDecideBrain::new(stub);
     let err = brain.judge_decision(&ctx("ship-v1")).unwrap_err();
@@ -182,8 +187,6 @@ fn issue_1711_unparseable_error_embeds_raw_response_text() {
 
 #[test]
 fn issue_1711_empty_response_error_does_not_silently_say_zero_bytes() {
-    // Empty response: error must clearly indicate emptiness (e.g. "empty
-    // response" or `""`) rather than the unhelpful `got 0 bytes`.
     let stub = StubSubmitter::new("");
     let brain = RustyClawdDecideBrain::new(stub);
     let err = brain.judge_decision(&ctx("ship-v1")).unwrap_err();
@@ -196,7 +199,7 @@ fn issue_1711_empty_response_error_does_not_silently_say_zero_bytes() {
 
 #[test]
 fn rustyclawd_brain_renders_prompt_with_context_fields() {
-    let stub = StubSubmitter::new(r#"{"choice":"advance_goal","rationale":"ok"}"#);
+    let stub = StubSubmitter::new("DECISION: advance_goal\nok");
     let brain = RustyClawdDecideBrain::new(stub);
     let prompt = brain.render_prompt(&DecideContext {
         goal_id: "marker-goal-id".to_string(),
