@@ -36,6 +36,25 @@ pub struct OpenQuestion {
     pub explicit: bool,
 }
 
+/// Identifies the next actor expected to consume a meeting handoff.
+///
+/// Used on `MeetingHandoff::next_actor` to provide structured routing
+/// (as opposed to the free-form `next_owner` string). Forward-compatible:
+/// new variants can be added without breaking existing consumers because
+/// the field is `Option<NextActor>` with `#[serde(default)]`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NextActor {
+    /// The human operator should review and act on the handoff.
+    Operator,
+    /// The engineer loop should pick up unprocessed decisions/actions.
+    Engineer,
+    /// The OODA curate cycle should ingest the handoff.
+    OodaCurate,
+    /// An external system or person outside Simard should act.
+    External,
+}
+
 /// Status of an in-progress meeting.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum MeetingSessionStatus {
@@ -75,6 +94,11 @@ pub struct MeetingSession {
     /// Added in issue #1954.
     #[serde(default)]
     pub next_owner: Option<String>,
+    /// The meeting's overarching objective, distinct from the short `topic`.
+    /// Set by the `/goal <text>` slash command or falls back to the first
+    /// user message. Added in issue #1987.
+    #[serde(default)]
+    pub goal: Option<String>,
 }
 
 impl MeetingSession {
@@ -261,6 +285,7 @@ mod tests {
             explicit_questions: vec!["What about testing?".to_string()],
             themes: vec!["performance".to_string()],
             next_owner: None,
+            goal: None,
         }
     }
 
@@ -332,6 +357,7 @@ mod tests {
             explicit_questions: vec![],
             themes: vec![],
             next_owner: None,
+            goal: None,
         };
         let summary = s.durable_summary();
         assert!(summary.contains("decisions=[none]"));
@@ -353,6 +379,7 @@ mod tests {
             explicit_questions: vec![],
             themes: vec![],
             next_owner: None,
+            goal: None,
         };
         let summary = s.durable_summary();
         assert!(summary.contains("duration=unknown"));

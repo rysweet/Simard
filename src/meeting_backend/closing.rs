@@ -338,10 +338,18 @@ impl MeetingBackend {
             &self.applied_templates,
         );
 
+        // Compute the effective goal once for both enrichment sites.
+        let effective_goal = self.effective_goal();
+
         let enrichment = persist::HandoffEnrichment {
             next_owner: next_owner_owned.as_deref(),
             artifacts: artifacts.clone(),
             structured_decisions: Some(structured_decisions.clone()),
+            goal: effective_goal.as_deref(),
+            next_actor: None,
+            applied_templates: self.applied_templates.clone(),
+            history_truncated_count: self.history_truncated_count,
+            partial_reason: partial_reason.map(|r| r.as_wire_str().to_string()),
         };
 
         // Write MeetingHandoff artifact for OODA integration.
@@ -631,10 +639,16 @@ impl MeetingBackend {
             &self.applied_templates,
         );
 
+        let partial_effective_goal = self.effective_goal();
         let enrichment = persist::HandoffEnrichment {
             next_owner: next_owner_owned.as_deref(),
             artifacts: artifacts.clone(),
             structured_decisions: Some(structured_decisions.clone()),
+            goal: partial_effective_goal.as_deref(),
+            next_actor: None,
+            applied_templates: self.applied_templates.clone(),
+            history_truncated_count: self.history_truncated_count,
+            partial_reason: partial_reason.map(|r| r.as_wire_str().to_string()),
         };
 
         if let Err(e) = persist::write_handoff_with_explicit(

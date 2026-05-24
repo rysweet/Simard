@@ -79,6 +79,14 @@ pub struct HandoffArtifact {
     pub description: Option<String>,
 }
 
+/// Default handoff schema version for new writes.
+const DEFAULT_HANDOFF_SCHEMA_VERSION: u32 = 2;
+
+/// Default version when deserializing v1 handoffs that lack the field.
+fn default_handoff_schema_version_v1() -> u32 {
+    1
+}
+
 /// A handoff artifact produced when a meeting closes. Contains decisions,
 /// action items, open questions, the next responsible owner, and a list
 /// of linked artifacts.
@@ -88,6 +96,10 @@ pub struct HandoffArtifact {
 /// with empty defaults. No on-disk migration step is required.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MeetingHandoff {
+    /// Schema version. v2 writes carry `2`; older v1 handoffs missing
+    /// this field default to `1` on read.
+    #[serde(default = "default_handoff_schema_version_v1")]
+    pub schema_version: u32,
     /// Stable, sortable identifier for this meeting. Derived from
     /// `started_at` plus a slug of the topic. Empty in legacy artifacts —
     /// callers reading old handoffs should fall back to
@@ -134,6 +146,32 @@ pub struct MeetingHandoff {
     /// deserialize as `[]`.
     #[serde(default)]
     pub artifacts: Vec<HandoffArtifact>,
+    /// The meeting's overarching objective, distinct from the short
+    /// `topic`. Set by `/goal <text>` at the REPL; falls back to the
+    /// first user message if unset. Added in issue #1987.
+    #[serde(default)]
+    pub goal: Option<String>,
+    /// Structured routing hint: which actor should consume this handoff
+    /// next. Complements the free-form `next_owner` string. Added in
+    /// issue #1987.
+    #[serde(default)]
+    pub next_actor: Option<super::types::NextActor>,
+    /// Templates applied during the meeting (via `/template <name>`).
+    /// Already present on `MeetingSummary`; promoted to the handoff
+    /// so downstream consumers see them without parsing the bundle.
+    /// Added in issue #1987.
+    #[serde(default)]
+    pub applied_templates: Vec<crate::meeting_backend::AppliedTemplate>,
+    /// Number of history messages dropped due to the `MAX_HISTORY` cap
+    /// (currently 500). Lets consumers gauge transcript completeness.
+    /// Added in issue #1987.
+    #[serde(default)]
+    pub history_truncated_count: usize,
+    /// Wire-string form of `PartialReason` from the close pipeline.
+    /// `Some("summary_timeout")` etc. when the close was partial;
+    /// `None` for a clean close. Added in issue #1987.
+    #[serde(default)]
+    pub partial_reason: Option<String>,
 }
 
 /// Build a stable, sortable meeting id from a started-at timestamp and a
@@ -311,6 +349,7 @@ impl MeetingHandoff {
         }
 
         Self {
+            schema_version: DEFAULT_HANDOFF_SCHEMA_VERSION,
             meeting_id: derive_meeting_id(&session.started_at, &session.topic),
             topic: session.topic.clone(),
             started_at: session.started_at.clone(),
@@ -326,6 +365,11 @@ impl MeetingHandoff {
             transcript_path: None,
             next_owner: session.next_owner.clone(),
             artifacts: Vec::new(),
+            goal: session.goal.clone(),
+            next_actor: None,
+            applied_templates: Vec::new(),
+            history_truncated_count: 0,
+            partial_reason: None,
         }
     }
 
@@ -401,6 +445,7 @@ mod tests {
             explicit_questions: vec![],
             themes: vec![],
             next_owner: None,
+            goal: None,
         }
     }
 
@@ -431,6 +476,7 @@ mod tests {
             explicit_questions: vec!["What about testing?".to_string()],
             themes: vec!["performance".to_string()],
             next_owner: Some("engineer".to_string()),
+            goal: None,
         }
     }
 

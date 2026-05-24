@@ -156,6 +156,7 @@ mod tests {
 
     fn sample_handoff(processed: bool) -> MeetingHandoff {
         MeetingHandoff {
+            schema_version: 2,
             topic: "Sprint Review".to_string(),
             started_at: "2025-01-01T00:00:00Z".to_string(),
             closed_at: "2025-01-01T01:00:00Z".to_string(),
@@ -184,6 +185,11 @@ mod tests {
             transcript_path: None,
             next_owner: None,
             artifacts: Vec::new(),
+            goal: None,
+            next_actor: None,
+            applied_templates: Vec::new(),
+            history_truncated_count: 0,
+            partial_reason: None,
         }
     }
 
@@ -245,6 +251,7 @@ mod tests {
     #[test]
     fn handoff_empty_decisions_and_actions() {
         let h = MeetingHandoff {
+            schema_version: 2,
             topic: "empty".to_string(),
             started_at: String::new(),
             closed_at: String::new(),
@@ -260,6 +267,11 @@ mod tests {
             transcript_path: None,
             next_owner: None,
             artifacts: Vec::new(),
+            goal: None,
+            next_actor: None,
+            applied_templates: Vec::new(),
+            history_truncated_count: 0,
+            partial_reason: None,
         };
         let json = serde_json::to_string(&h).unwrap();
         let h2: MeetingHandoff = serde_json::from_str(&json).unwrap();
