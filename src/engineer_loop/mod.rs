@@ -26,6 +26,9 @@ mod tests_types_extra;
 #[cfg(test)]
 mod tests_types_inline;
 
+#[cfg(test)]
+mod tests_meeting_decisions;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;

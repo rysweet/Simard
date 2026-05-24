@@ -422,6 +422,109 @@ pub fn write_meeting_bundle(
     Ok(dir)
 }
 
+/// A loaded per-meeting bundle: the structured handoff, the full transcript,
+/// and the optional markdown report. Returned by [`load_meeting_bundle`].
+#[derive(Clone, Debug)]
+pub struct MeetingBundle {
+    /// The structured `MeetingHandoff` artifact.
+    pub handoff: MeetingHandoff,
+    /// Full conversation transcript lines (empty if `transcript.json` was
+    /// missing or unparseable — legacy bundles may not have it).
+    pub transcript: Vec<BundleTranscriptLine>,
+    /// Human-readable markdown report (`meeting_handoff.md`), if present.
+    pub markdown_report: Option<String>,
+}
+
+/// Load a per-meeting bundle by `meeting_id`.
+///
+/// Reads the bundle directory at `<bundle_root>/<meeting_id>/` and returns
+/// a [`MeetingBundle`] containing the handoff JSON, the transcript lines,
+/// and the markdown report. Returns `Ok(None)` when the bundle directory
+/// does not exist (legacy handoffs that predate the bundle writer).
+///
+/// Individual files are tolerated missing: `transcript.json` and
+/// `meeting_handoff.md` are optional and logged at `info!` when absent.
+/// Only `meeting_handoff.json` is required — if it is missing or
+/// malformed, the function returns an error.
+pub fn load_meeting_bundle(meeting_id: &str) -> SimardResult<Option<MeetingBundle>> {
+    let dir = meeting_bundle_dir(meeting_id);
+    if !dir.is_dir() {
+        return Ok(None);
+    }
+
+    // meeting_handoff.json — required
+    let handoff_path = dir.join(BUNDLE_HANDOFF_JSON);
+    let handoff: MeetingHandoff = {
+        let raw = fs::read_to_string(&handoff_path).map_err(|e| SimardError::ArtifactIo {
+            path: handoff_path.clone(),
+            reason: format!("reading bundle handoff: {e}"),
+        })?;
+        serde_json::from_str(&raw).map_err(|e| SimardError::ArtifactIo {
+            path: handoff_path.clone(),
+            reason: format!("parsing bundle handoff JSON: {e}"),
+        })?
+    };
+
+    // transcript.json — optional (legacy bundles may lack it)
+    let transcript_path = dir.join(BUNDLE_TRANSCRIPT_JSON);
+    let transcript: Vec<BundleTranscriptLine> = if transcript_path.is_file() {
+        match fs::read_to_string(&transcript_path) {
+            Ok(raw) => {
+                let parsed: Result<BundleTranscript, _> = serde_json::from_str(&raw);
+                match parsed {
+                    Ok(bt) => bt.lines,
+                    Err(e) => {
+                        tracing::info!(
+                            path = %transcript_path.display(),
+                            error = %e,
+                            "bundle transcript.json is malformed; falling back to empty transcript"
+                        );
+                        Vec::new()
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::info!(
+                    path = %transcript_path.display(),
+                    error = %e,
+                    "could not read bundle transcript.json; falling back to empty transcript"
+                );
+                Vec::new()
+            }
+        }
+    } else {
+        tracing::info!(
+            path = %transcript_path.display(),
+            "bundle transcript.json not found; legacy handoff without transcript"
+        );
+        Vec::new()
+    };
+
+    // meeting_handoff.md — optional
+    let md_path = dir.join(BUNDLE_HANDOFF_MD);
+    let markdown_report = if md_path.is_file() {
+        match fs::read_to_string(&md_path) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::info!(
+                    path = %md_path.display(),
+                    error = %e,
+                    "could not read bundle markdown report"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    Ok(Some(MeetingBundle {
+        handoff,
+        transcript,
+        markdown_report,
+    }))
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct BundleTranscript {
     meeting_id: String,
