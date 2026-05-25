@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use super::activity::{activity, traces};
 use super::agent_log::{WS_AGENT_LOG_ROUTE, ws_agent_log_handler};
 use super::auth::{login, login_page, require_auth};
+use super::brain_failures::brain_failures;
 use super::chat::ws_chat_handler;
 use super::current_work::current_work;
 use super::distributed::{distributed, vacate_vm};
@@ -68,6 +69,7 @@ pub fn build_router() -> Router {
         .route("/api/workboard", get(workboard))
         .route("/api/current-work", get(current_work))
         .route("/api/ooda-thinking", get(ooda_thinking))
+        .route("/api/brain-failures", get(brain_failures))
         .route("/api/subagent-sessions", get(subagent_sessions))
         .route("/ws/chat", get(ws_chat_handler))
         .route(WS_AGENT_LOG_ROUTE, get(ws_agent_log_handler))
