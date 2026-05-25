@@ -70,7 +70,9 @@ CONFIDENCE: <float in [0,1]>
 | `ADJUSTED_URGENCY:` | `f64` | **Yes** | _(parse fails without it)_ | Must be in `[0.0, base_urgency]` |
 | `RATIONALE:` | `String` | No | `"<no rationale provided>"` | None |
 | `CONFIDENCE:` | `f64` | No | `1.0` | Must be in `[0.0, 1.0]` |
-| `DEMOTION_APPLIED:` | `f64` | No | Computed as `base_urgency - adjusted_urgency` | Must be ≥ 0 |
+
+`demotion_applied` is computed by the daemon as `base_urgency − adjusted_urgency`;
+the model should not emit it. The prompt explicitly tells the model to omit it.
 
 Labels are matched case-insensitively. Unknown labels are silently ignored
 (forward compatible). Non-labeled lines before or after the labeled fields

@@ -71,11 +71,13 @@ maps 1:1 to a `DecideJudgment` enum variant in `src/ooda_brain/decide.rs`.
 | `extract_ideas` | `DecideJudgment::ExtractIdeas` | Reserved `__extract_ideas__` synthetic ID |
 | `safe_update` | `DecideJudgment::SafeUpdate` | Reserved `__safe_update__` synthetic ID |
 | `research_query` | `DecideJudgment::ResearchQuery` | Reserved for future use |
-| `skip` | `DecideJudgment::Skip` | Explicit skip |
+| `run_gym_eval` | `DecideJudgment::RunGymEval` | Reserved for future use |
+| `build_skill` | `DecideJudgment::BuildSkill` | Reserved for future use |
+| `launch_session` | `DecideJudgment::LaunchSession` | Reserved for future use |
 
-Tokens are matched case-insensitively by the parser. The variant whitelist
-is the `DecideJudgment` enum itself — there is no parallel hand-maintained
-list.
+The `DECISION:` keyword is matched case-insensitively, but the variant token
+must match exactly (lowercase snake_case). The variant whitelist is the
+`DecideJudgment` enum itself — there is no parallel hand-maintained list.
 
 ## Output Format
 
@@ -110,9 +112,10 @@ The parser:
 2. Extracts the variant token and matches against the `DecideJudgment` enum.
 3. Collects remaining lines as the `rationale` field.
 
-If no `DECISION:` line is found, the deterministic prefix mapping fires:
-`__memory__` → `consolidate_memory`, `__improvement__` → `run_improvement`,
-etc. Real goal slugs → `advance_goal`.
+If no `DECISION:` line is found, the parser returns an error. The caller
+then falls back to `DeterministicFallbackDecideBrain`, which applies prefix
+mapping: `__memory__` → `consolidate_memory`, `__improvement__` →
+`run_improvement`, etc. Real goal slugs → `advance_goal`.
 
 ## Examples
 
