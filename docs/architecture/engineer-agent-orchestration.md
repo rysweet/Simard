@@ -58,23 +58,34 @@ OODA daemon
     │  advance_goal → task description
     ▼
 Engineer loop (run_local_engineer_loop)
+    │  Creates a SessionRecord (SessionPhase state machine)
     │
-    ├── Phase 1: inspect_workspace()           ← unchanged
-    │       → RepoInspection (branch, dirty files, active goals, …)
+    ├── SessionPhase::Intake
+    │   ├── inspect_workspace()
+    │   │       → RepoInspection (branch, dirty files, active goals, …)
+    │   └── pre-mutation guard (abort if mutating + dirty worktree)
     │
-    ├── Phase 2: build agent prompt            ← new
+    ├── SessionPhase::Preparation
+    │   └── load terminal bridge context
+    │
+    ├── SessionPhase::Planning
+    │   └── build agent prompt
     │       combines objective + RepoInspection into a natural-language prompt
     │
-    ├── Phase 3: spawn_agent_for_goal()        ← new (replaces select+execute+verify)
-    │       spawns copilot agent session
-    │       waits up to 3600 s for completion
-    │       returns execution_summary string
+    ├── SessionPhase::Execution
+    │   ├── spawn_agent_for_goal()
+    │   │       spawns copilot agent session
+    │   │       waits for completion (unbounded)
+    │   │       returns execution_summary string
+    │   └── agent-wait (blocks until session completes)
     │
-    ├── Phase 4: run_optional_review()         ← unchanged
-    │       diff-based review if agent mutated files
+    ├── SessionPhase::Reflection
+    │   └── run_optional_review()
+    │           diff-based review if agent mutated files
     │
-    └── Phase 5: persist_engineer_loop_artifacts()  ← unchanged
-            writes EngineerLoopRun → cycle report
+    └── SessionPhase::Persistence → Complete
+        └── persist_artifacts_with_session()
+                writes memory, evidence, handoff snapshot
 ```
 
 The three old phases (select, execute, verify) are collapsed into a single

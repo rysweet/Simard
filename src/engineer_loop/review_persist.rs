@@ -101,10 +101,6 @@ pub fn persist_engineer_loop_artifacts(
     verification: &VerificationReport,
     terminal_bridge_context: Option<&TerminalBridgeContext>,
 ) -> SimardResult<()> {
-    let memory_store = FileBackedMemoryStore::try_new(state_root.join("memory_records.json"))?;
-    let evidence_store =
-        FileBackedEvidenceStore::try_new(state_root.join("evidence_records.json"))?;
-
     let session_ids = UuidSessionIdGenerator;
     let mut session = SessionRecord::new(
         crate::identity::OperatingMode::Engineer,
@@ -113,20 +109,55 @@ pub fn persist_engineer_loop_artifacts(
         &session_ids,
     );
     session.advance(SessionPhase::Preparation)?;
+    session.advance(SessionPhase::Planning)?;
+    session.advance(SessionPhase::Execution)?;
+    session.advance(SessionPhase::Reflection)?;
+    session.advance(SessionPhase::Persistence)?;
+
+    persist_artifacts_with_session(
+        state_root,
+        topology,
+        &mut session,
+        inspection,
+        action,
+        verification,
+        terminal_bridge_context,
+    )
+}
+
+/// Persist engineer loop artifacts using an existing [`SessionRecord`].
+///
+/// The session must be at [`SessionPhase::Persistence`] when called. This
+/// variant is used by `run_local_engineer_loop` to maintain a single session
+/// identity from intake through completion (issue #2100).
+///
+/// The function writes scratch memory, execution evidence, summary/decision
+/// memory, prunes bounded scopes, advances the session to `Complete`, and
+/// creates a handoff snapshot.
+pub(crate) fn persist_artifacts_with_session(
+    state_root: &Path,
+    topology: RuntimeTopology,
+    session: &mut SessionRecord,
+    inspection: &RepoInspection,
+    action: &ExecutedEngineerAction,
+    verification: &VerificationReport,
+    terminal_bridge_context: Option<&TerminalBridgeContext>,
+) -> SimardResult<()> {
+    let memory_store = FileBackedMemoryStore::try_new(state_root.join("memory_records.json"))?;
+    let evidence_store =
+        FileBackedEvidenceStore::try_new(state_root.join("evidence_records.json"))?;
 
     let scratch_key = format!("{}-engineer-loop-scratch", session.id);
     memory_store.put(MemoryRecord {
         key: scratch_key.clone(),
         scope: MemoryScope::SessionScratch,
-        value: objective_metadata(objective),
+        value: objective_metadata(&session.objective),
         session_id: session.id.clone(),
         recorded_in: SessionPhase::Preparation,
         created_at: None,
     })?;
     session.attach_memory(scratch_key);
 
-    session.advance(SessionPhase::Planning)?;
-    session.advance(SessionPhase::Execution)?;
     let evidence_details = vec![
         format!("repo-root={}", inspection.repo_root.display()),
         format!("repo-branch={}", inspection.branch),
@@ -200,9 +231,6 @@ pub fn persist_engineer_loop_artifacts(
         })?;
         session.attach_evidence(evidence_id);
     }
-
-    session.advance(SessionPhase::Reflection)?;
-    session.advance(SessionPhase::Persistence)?;
 
     let summary_key = format!("{}-engineer-loop-summary", session.id);
     memory_store.put(MemoryRecord {
@@ -367,6 +395,7 @@ mod tests {
                 duration: std::time::Duration::from_millis(100),
                 outcome: super::super::types::PhaseOutcome::Success,
             }],
+            session_id: Some("session-test-persist".to_string()),
         };
         persist_error_reflection(dir.path(), &reflection);
 
@@ -379,6 +408,7 @@ mod tests {
         assert_eq!(restored.failed_phase, "agent-wait");
         assert_eq!(restored.error_message, "LLM timeout after 60s");
         assert_eq!(restored.phase_traces.len(), 1);
+        assert_eq!(restored.session_id.as_deref(), Some("session-test-persist"));
     }
 
     #[test]
@@ -390,6 +420,7 @@ mod tests {
             failed_phase: "inspect".to_string(),
             error_message: "not a repo".to_string(),
             phase_traces: vec![],
+            session_id: None,
         };
         persist_error_reflection(&nested, &reflection);
         assert!(nested.join("error_reflection.json").exists());
@@ -403,6 +434,7 @@ mod tests {
             failed_phase: "inspect".to_string(),
             error_message: "error".to_string(),
             phase_traces: vec![],
+            session_id: None,
         };
         // Path containing null bytes cannot be created — best-effort swallows the error
         persist_error_reflection(std::path::Path::new("/dev/null/impossible"), &reflection);

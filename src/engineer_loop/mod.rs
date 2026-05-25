@@ -33,8 +33,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use crate::base_types::BaseTypeId;
 use crate::error::{SimardError, SimardResult};
 use crate::runtime::RuntimeTopology;
+use crate::session::{SessionPhase, SessionRecord, UuidSessionIdGenerator};
 use crate::terminal_engineer_bridge::{SHARED_EXPLICIT_STATE_ROOT_SOURCE, TerminalBridgeContext};
 
 use execution::{parse_status_paths, run_command, trimmed_stdout, trimmed_stdout_allow_empty};
@@ -49,6 +51,7 @@ pub use types::{
 // Phase-entry-point re-exports for the recipe-driven engineer loop (Phase 2 rebuild).
 // These let `simard-engineer-step` (in src/bin/) drive each phase via JSON IPC.
 pub use agent_spawn::spawn_agent_for_goal;
+use review_persist::persist_artifacts_with_session;
 pub use review_persist::{
     persist_engineer_loop_artifacts, persist_error_reflection, run_optional_review,
 };
@@ -98,6 +101,22 @@ pub fn run_local_engineer_loop(
     let state_root = state_root.into();
     let mut phase_traces = Vec::new();
 
+    // Create a SessionRecord to track the session through the spec's
+    // SessionPhase state machine (issue #2100). The session starts at Intake
+    // and advances through Preparation → Planning → Execution → Reflection →
+    // Persistence → Complete, mirroring RuntimeKernel::execute_session.
+    let session_ids = UuidSessionIdGenerator;
+    let mut session = SessionRecord::new(
+        crate::identity::OperatingMode::Engineer,
+        objective.to_string(),
+        BaseTypeId::new(ENGINEER_BASE_TYPE),
+        &session_ids,
+    );
+    let session_id_str = session.id.to_string();
+
+    // --- SessionPhase::Intake ---
+    // Normalize the request, detect mode, and identify workspace context.
+
     let phase_start = Instant::now();
     let inspection = inspect_workspace(workspace_root.as_ref(), &state_root);
     let inspection = match &inspection {
@@ -116,6 +135,7 @@ pub fn run_local_engineer_loop(
                 outcome: PhaseOutcome::Failed(e.to_string()),
             });
             let err = inspection.unwrap_err();
+            let _ = session.advance(SessionPhase::Failed);
             persist_error_reflection(
                 &state_root,
                 &SessionErrorReflection {
@@ -123,6 +143,7 @@ pub fn run_local_engineer_loop(
                     failed_phase: "inspect".to_string(),
                     error_message: err.to_string(),
                     phase_traces: phase_traces.clone(),
+                    session_id: Some(session_id_str.clone()),
                 },
             );
             return Err(err);
@@ -144,6 +165,7 @@ pub fn run_local_engineer_loop(
         let err = SimardError::DirtyWorktree {
             changed_files: inspection.changed_files.clone(),
         };
+        let _ = session.advance(SessionPhase::Failed);
         persist_error_reflection(
             &state_root,
             &SessionErrorReflection {
@@ -151,10 +173,15 @@ pub fn run_local_engineer_loop(
                 failed_phase: phase_name.to_string(),
                 error_message: err.to_string(),
                 phase_traces: phase_traces.clone(),
+                session_id: Some(session_id_str.clone()),
             },
         );
         return Err(err);
     }
+
+    // --- SessionPhase::Preparation ---
+    // Gather current state, constraints, and existing memory relevant to the task.
+    session.advance(SessionPhase::Preparation)?;
 
     let phase_start = Instant::now();
     let terminal_bridge_context =
@@ -178,6 +205,7 @@ pub fn run_local_engineer_loop(
     let terminal_bridge_context = match terminal_bridge_context {
         Ok(ctx) => ctx,
         Err(e) => {
+            let _ = session.advance(SessionPhase::Failed);
             persist_error_reflection(
                 &state_root,
                 &SessionErrorReflection {
@@ -185,13 +213,17 @@ pub fn run_local_engineer_loop(
                     failed_phase: "load-bridge-context".to_string(),
                     error_message: e.to_string(),
                     phase_traces: phase_traces.clone(),
+                    session_id: Some(session_id_str.clone()),
                 },
             );
             return Err(e);
         }
     };
 
-    // Phase: agent-prompt-build
+    // --- SessionPhase::Planning ---
+    // Produce a bounded plan sized to the task.
+    session.advance(SessionPhase::Planning)?;
+
     let phase_start = Instant::now();
     let agent_prompt = agent_spawn::build_agent_prompt(objective, &inspection);
     phase_traces.push(PhaseTrace {
@@ -199,6 +231,10 @@ pub fn run_local_engineer_loop(
         duration: phase_start.elapsed(),
         outcome: PhaseOutcome::Success,
     });
+
+    // --- SessionPhase::Execution ---
+    // Perform shell actions, file changes, and tool calls while recording evidence.
+    session.advance(SessionPhase::Execution)?;
 
     // Phase: agent-spawn — start background thread that runs the
     // `amplihack RustyClawd --auto` subprocess. Spawning is infallible
@@ -245,6 +281,7 @@ pub fn run_local_engineer_loop(
                 duration: phase_start.elapsed(),
                 outcome: PhaseOutcome::Failed(e.to_string()),
             });
+            let _ = session.advance(SessionPhase::Failed);
             persist_error_reflection(
                 &state_root,
                 &SessionErrorReflection {
@@ -252,6 +289,7 @@ pub fn run_local_engineer_loop(
                     failed_phase: "agent-wait".to_string(),
                     error_message: e.to_string(),
                     phase_traces: phase_traces.clone(),
+                    session_id: Some(session_id_str.clone()),
                 },
             );
             return Err(e);
@@ -263,6 +301,10 @@ pub fn run_local_engineer_loop(
         summary: action.stdout.clone(),
         checks: vec![],
     };
+
+    // --- SessionPhase::Reflection ---
+    // Compare results against the objective and capture what succeeded/failed.
+    session.advance(SessionPhase::Reflection)?;
 
     // Optional LLM-driven review gate: only runs for mutating actions
     // when an LLM session is available (requires ANTHROPIC_API_KEY).
@@ -285,6 +327,7 @@ pub fn run_local_engineer_loop(
         }
     }
     if let Err(e) = review_result {
+        let _ = session.advance(SessionPhase::Failed);
         persist_error_reflection(
             &state_root,
             &SessionErrorReflection {
@@ -292,16 +335,21 @@ pub fn run_local_engineer_loop(
                 failed_phase: "review".to_string(),
                 error_message: e.to_string(),
                 phase_traces: phase_traces.clone(),
+                session_id: Some(session_id_str.clone()),
             },
         );
         return Err(e);
     }
 
+    // --- SessionPhase::Persistence ---
+    // Write session summary, memory updates, and benchmark records.
+    session.advance(SessionPhase::Persistence)?;
+
     let phase_start = Instant::now();
-    let persist_result = persist_engineer_loop_artifacts(
+    let persist_result = persist_artifacts_with_session(
         &state_root,
         topology,
-        objective,
+        &mut session,
         &inspection,
         &action,
         &verification,
@@ -324,6 +372,7 @@ pub fn run_local_engineer_loop(
         }
     }
     if let Err(e) = persist_result {
+        let _ = session.advance(SessionPhase::Failed);
         persist_error_reflection(
             &state_root,
             &SessionErrorReflection {
@@ -331,10 +380,13 @@ pub fn run_local_engineer_loop(
                 failed_phase: "persist".to_string(),
                 error_message: e.to_string(),
                 phase_traces: phase_traces.clone(),
+                session_id: Some(session_id_str.clone()),
             },
         );
         return Err(e);
     }
+
+    // Session has been advanced to Complete by persist_artifacts_with_session.
 
     Ok(EngineerLoopRun {
         state_root,
@@ -345,6 +397,7 @@ pub fn run_local_engineer_loop(
         terminal_bridge_context,
         elapsed_duration: loop_start.elapsed(),
         phase_traces,
+        session_record: Some(session),
     })
 }
 

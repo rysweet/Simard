@@ -176,6 +176,107 @@ fn is_mutating_false_for_run_shell_command() {
     assert!(!AnalyzedAction::RunShellCommand.is_mutating());
 }
 
+// ── PhaseTrace::session_phase mapping (issue #2100) ──────────────
+
+#[test]
+fn phase_trace_maps_inspect_to_intake() {
+    use crate::session::SessionPhase;
+    let trace = PhaseTrace {
+        name: "inspect".to_string(),
+        duration: std::time::Duration::from_millis(10),
+        outcome: PhaseOutcome::Success,
+    };
+    assert_eq!(trace.session_phase(), SessionPhase::Intake);
+}
+
+#[test]
+fn phase_trace_maps_pre_mutation_guard_to_intake() {
+    use crate::session::SessionPhase;
+    let trace = PhaseTrace {
+        name: "pre-mutation-guard".to_string(),
+        duration: std::time::Duration::from_millis(1),
+        outcome: PhaseOutcome::Failed("dirty".to_string()),
+    };
+    assert_eq!(trace.session_phase(), SessionPhase::Intake);
+}
+
+#[test]
+fn phase_trace_maps_load_bridge_context_to_preparation() {
+    use crate::session::SessionPhase;
+    let trace = PhaseTrace {
+        name: "load-bridge-context".to_string(),
+        duration: std::time::Duration::from_millis(5),
+        outcome: PhaseOutcome::Success,
+    };
+    assert_eq!(trace.session_phase(), SessionPhase::Preparation);
+}
+
+#[test]
+fn phase_trace_maps_agent_prompt_build_to_planning() {
+    use crate::session::SessionPhase;
+    let trace = PhaseTrace {
+        name: "agent-prompt-build".to_string(),
+        duration: std::time::Duration::from_millis(2),
+        outcome: PhaseOutcome::Success,
+    };
+    assert_eq!(trace.session_phase(), SessionPhase::Planning);
+}
+
+#[test]
+fn phase_trace_maps_agent_spawn_to_execution() {
+    use crate::session::SessionPhase;
+    let trace = PhaseTrace {
+        name: "agent-spawn".to_string(),
+        duration: std::time::Duration::from_millis(100),
+        outcome: PhaseOutcome::Success,
+    };
+    assert_eq!(trace.session_phase(), SessionPhase::Execution);
+}
+
+#[test]
+fn phase_trace_maps_agent_wait_to_execution() {
+    use crate::session::SessionPhase;
+    let trace = PhaseTrace {
+        name: "agent-wait".to_string(),
+        duration: std::time::Duration::from_secs(30),
+        outcome: PhaseOutcome::Success,
+    };
+    assert_eq!(trace.session_phase(), SessionPhase::Execution);
+}
+
+#[test]
+fn phase_trace_maps_review_to_reflection() {
+    use crate::session::SessionPhase;
+    let trace = PhaseTrace {
+        name: "review".to_string(),
+        duration: std::time::Duration::from_millis(500),
+        outcome: PhaseOutcome::Success,
+    };
+    assert_eq!(trace.session_phase(), SessionPhase::Reflection);
+}
+
+#[test]
+fn phase_trace_maps_persist_to_persistence() {
+    use crate::session::SessionPhase;
+    let trace = PhaseTrace {
+        name: "persist".to_string(),
+        duration: std::time::Duration::from_millis(50),
+        outcome: PhaseOutcome::Success,
+    };
+    assert_eq!(trace.session_phase(), SessionPhase::Persistence);
+}
+
+#[test]
+fn phase_trace_maps_unknown_to_execution_default() {
+    use crate::session::SessionPhase;
+    let trace = PhaseTrace {
+        name: "some-unknown-phase".to_string(),
+        duration: std::time::Duration::from_millis(1),
+        outcome: PhaseOutcome::Success,
+    };
+    assert_eq!(trace.session_phase(), SessionPhase::Execution);
+}
+
 // ── SessionErrorReflection ───────────────────────────────────────
 
 #[test]
@@ -189,6 +290,7 @@ fn session_error_reflection_serialization_round_trip() {
             duration: std::time::Duration::from_millis(42),
             outcome: PhaseOutcome::Success,
         }],
+        session_id: Some("session-test-001".to_string()),
     };
     let json = serde_json::to_string(&reflection).expect("serialize");
     let restored: SessionErrorReflection = serde_json::from_str(&json).expect("deserialize");
@@ -202,9 +304,68 @@ fn session_error_reflection_captures_all_fields() {
         failed_phase: "review".to_string(),
         error_message: "review blocked".to_string(),
         phase_traces: vec![],
+        session_id: None,
     };
     assert_eq!(reflection.objective, "update config");
     assert_eq!(reflection.failed_phase, "review");
     assert_eq!(reflection.error_message, "review blocked");
     assert!(reflection.phase_traces.is_empty());
+}
+
+#[test]
+fn session_error_reflection_session_id_backward_compat() {
+    // Old JSON without session_id field must deserialize with session_id = None
+    let json =
+        r#"{"objective":"test","failed_phase":"inspect","error_message":"err","phase_traces":[]}"#;
+    let restored: SessionErrorReflection = serde_json::from_str(json).expect("deserialize");
+    assert_eq!(restored.session_id, None);
+}
+
+#[test]
+fn engineer_loop_run_session_record_backward_compat() {
+    // EngineerLoopRun without session_record field should deserialize with None
+    let run = EngineerLoopRun {
+        state_root: std::path::PathBuf::from("/tmp"),
+        execution_scope: "local-only".to_string(),
+        inspection: crate::engineer_loop::types::RepoInspection {
+            workspace_root: std::path::PathBuf::from("/tmp"),
+            repo_root: std::path::PathBuf::from("/tmp"),
+            branch: "main".to_string(),
+            head: "abc".to_string(),
+            worktree_dirty: false,
+            changed_files: vec![],
+            active_goals: vec![],
+            carried_meeting_decisions: vec![],
+            architecture_gap_summary: String::new(),
+        },
+        action: crate::engineer_loop::types::ExecutedEngineerAction {
+            selected: crate::engineer_loop::types::SelectedEngineerAction {
+                label: "test".to_string(),
+                rationale: "test".to_string(),
+                argv: vec![],
+                plan_summary: "test".to_string(),
+                verification_steps: vec![],
+                expected_changed_files: vec![],
+                kind: crate::engineer_loop::types::EngineerActionKind::ReadOnlyScan,
+            },
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            changed_files: vec![],
+        },
+        verification: crate::engineer_loop::types::VerificationReport {
+            status: "ok".to_string(),
+            summary: "ok".to_string(),
+            checks: vec![],
+        },
+        terminal_bridge_context: None,
+        elapsed_duration: std::time::Duration::from_millis(100),
+        phase_traces: vec![],
+        session_record: None,
+    };
+    // Round-trip serialization with session_record = None
+    let json = serde_json::to_string(&run).unwrap();
+    assert!(!json.contains("session_record"), "None should be skipped");
+    let restored: EngineerLoopRun = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored.session_record, None);
 }

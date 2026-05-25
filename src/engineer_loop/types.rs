@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use crate::goals::GoalRecord;
+use crate::session::{SessionPhase, SessionRecord};
 use crate::terminal_engineer_bridge::TerminalBridgeContext;
 
 use std::path::PathBuf;
@@ -127,6 +128,25 @@ pub struct PhaseTrace {
     pub outcome: PhaseOutcome,
 }
 
+impl PhaseTrace {
+    /// Maps this trace's ad-hoc phase name to the corresponding [`SessionPhase`].
+    ///
+    /// The engineer loop's internal phase names predate the session orchestration
+    /// state machine. This method provides the structured mapping required by
+    /// the spec (ProductArchitecture.md §Session Orchestration).
+    pub fn session_phase(&self) -> SessionPhase {
+        match self.name.as_str() {
+            "inspect" | "pre-mutation-guard" => SessionPhase::Intake,
+            "load-bridge-context" => SessionPhase::Preparation,
+            "agent-prompt-build" => SessionPhase::Planning,
+            "agent-spawn" | "agent-wait" => SessionPhase::Execution,
+            "review" => SessionPhase::Reflection,
+            "persist" => SessionPhase::Persistence,
+            _ => SessionPhase::Execution,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EngineerLoopRun {
     pub state_root: PathBuf,
@@ -138,6 +158,11 @@ pub struct EngineerLoopRun {
     #[serde(with = "duration_millis")]
     pub elapsed_duration: Duration,
     pub phase_traces: Vec<PhaseTrace>,
+    /// The session record tracking phase progression through the spec's
+    /// SessionPhase state machine (Intake → … → Complete). `None` for
+    /// runs deserialized from older formats that predate session tracking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_record: Option<SessionRecord>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -219,4 +244,8 @@ pub struct SessionErrorReflection {
     pub error_message: String,
     /// Phase traces collected up to the point of failure.
     pub phase_traces: Vec<PhaseTrace>,
+    /// Session ID for correlating the failed session with persisted artifacts.
+    /// `None` for reflections created before session tracking was added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
