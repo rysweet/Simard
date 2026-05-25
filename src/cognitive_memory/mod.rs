@@ -517,3 +517,260 @@ mod tests_lock_vs_corruption_1967;
 
 #[cfg(test)]
 mod tests_hermetic_parity;
+
+// ============================================================================
+// Inline unit tests for mod.rs (issue #2036)
+// ============================================================================
+
+#[cfg(test)]
+mod tests_inline {
+    use super::*;
+
+    // ── NativeCognitiveMemory construction ──────────────────────────────
+
+    #[test]
+    fn in_memory_creates_successfully() {
+        let mem = NativeCognitiveMemory::in_memory().expect("in_memory should succeed");
+        assert!(!mem.read_only, "in_memory handle must not be read-only");
+        assert!(!mem.durable_writes, "in_memory must skip fsync barrier");
+    }
+
+    #[test]
+    fn in_memory_schema_is_applied() {
+        let mem = NativeCognitiveMemory::in_memory().unwrap();
+        // Schema DDL creates 8 node tables; a simple count query on each
+        // should succeed (returning 0) rather than erroring with
+        // "table does not exist".
+        for table in [
+            "Fact",
+            "Decision",
+            "Goal",
+            "Episode",
+            "Sensory",
+            "WorkingMemory",
+            "Procedure",
+            "Prospective",
+        ] {
+            let rows = mem
+                .query(&format!("MATCH (n:{table}) RETURN count(n)"))
+                .unwrap_or_else(|e| panic!("count query on {table} failed: {e}"));
+            assert_eq!(rows.len(), 1, "{table} count query should return one row");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn open_creates_db_directory_and_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_root = tmp.path().to_path_buf();
+        let _mem = NativeCognitiveMemory::open(&state_root).unwrap();
+        assert!(
+            state_root.join("cognitive_memory.ladybug").exists(),
+            "DB file must be created under state_root"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn open_sets_durable_writes_true() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mem = NativeCognitiveMemory::open(tmp.path()).unwrap();
+        assert!(
+            mem.durable_writes,
+            "on-disk writer must enable durable_writes"
+        );
+        assert!(!mem.read_only, "writer handle must not be read-only");
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn open_migrates_kuzu_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_root = tmp.path().to_path_buf();
+        let db_as_dir = state_root.join("cognitive_memory.ladybug");
+        std::fs::create_dir_all(&db_as_dir).unwrap();
+        std::fs::write(db_as_dir.join("dummy"), b"kuzu data").unwrap();
+
+        let _mem = NativeCognitiveMemory::open(&state_root).unwrap();
+
+        assert!(
+            !db_as_dir.is_dir() || db_as_dir.is_file(),
+            "old KuzuDB dir should be migrated away"
+        );
+        assert!(
+            state_root
+                .join("cognitive_memory.ladybug.kuzu-backup")
+                .exists(),
+            "backup of KuzuDB dir should exist"
+        );
+    }
+
+    // ── conn / query / execute helpers ──────────────────────────────────
+
+    #[test]
+    fn conn_creates_valid_connection() {
+        let mem = NativeCognitiveMemory::in_memory().unwrap();
+        let _conn = mem.conn().expect("conn() must return Ok");
+    }
+
+    #[test]
+    fn query_returns_rows() {
+        let mem = NativeCognitiveMemory::in_memory().unwrap();
+        let rows = mem.query("RETURN 42").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(as_i64(&rows[0][0]), Some(42));
+    }
+
+    #[test]
+    fn execute_runs_ddl_without_error() {
+        let mem = NativeCognitiveMemory::in_memory().unwrap();
+        // Schema already created; re-executing DDL with IF NOT EXISTS is idempotent.
+        mem.execute(
+            "CREATE NODE TABLE IF NOT EXISTS TestInline(id STRING PRIMARY KEY, val STRING)",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn execute_errors_on_invalid_cypher() {
+        let mem = NativeCognitiveMemory::in_memory().unwrap();
+        let err = mem.execute("THIS IS NOT VALID CYPHER !!!");
+        assert!(err.is_err(), "invalid Cypher must return Err");
+    }
+
+    // ── new_id ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn new_id_includes_prefix() {
+        let id = NativeCognitiveMemory::new_id("test");
+        assert!(id.starts_with("test_"), "id should start with prefix_");
+        assert!(id.len() > 5, "id should include uuid suffix");
+    }
+
+    #[test]
+    fn new_id_is_unique() {
+        let ids: Vec<String> = (0..100)
+            .map(|_| NativeCognitiveMemory::new_id("u"))
+            .collect();
+        let unique: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
+        assert_eq!(unique.len(), 100, "100 ids must all be unique");
+    }
+
+    // ── now_secs ───────────────────────────────────────────────────────
+
+    #[test]
+    fn now_secs_returns_plausible_epoch() {
+        let ts = NativeCognitiveMemory::now_secs().unwrap();
+        // After 2024-01-01 and before 2100-01-01
+        assert!(ts > 1_704_067_200.0, "timestamp too old: {ts}");
+        assert!(ts < 4_102_444_800.0, "timestamp too far future: {ts}");
+    }
+
+    // ── checkpoint ─────────────────────────────────────────────────────
+
+    #[test]
+    fn checkpoint_succeeds_on_in_memory() {
+        let mem = NativeCognitiveMemory::in_memory().unwrap();
+        // In-memory is not read_only, so checkpoint actually attempts
+        // the CHECKPOINT statement. It should succeed.
+        mem.checkpoint().expect("checkpoint should succeed");
+    }
+
+    #[test]
+    fn checkpoint_noop_on_read_only_in_memory() {
+        // Construct a mock read-only by flipping the flag on in_memory.
+        // This tests the early return branch.
+        let mut mem = NativeCognitiveMemory::in_memory().unwrap();
+        mem.read_only = true;
+        mem.checkpoint()
+            .expect("checkpoint on read-only must be Ok(())");
+    }
+
+    // ── post_write_barrier ─────────────────────────────────────────────
+
+    #[test]
+    fn post_write_barrier_noop_when_durable_writes_false() {
+        let mem = NativeCognitiveMemory::in_memory().unwrap();
+        assert!(!mem.durable_writes);
+        mem.post_write_barrier("test_op")
+            .expect("barrier must be no-op for in-memory");
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn post_write_barrier_succeeds_for_on_disk_writer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mem = NativeCognitiveMemory::open(tmp.path()).unwrap();
+        assert!(mem.durable_writes);
+        mem.post_write_barrier("test_op")
+            .expect("barrier must succeed on healthy on-disk file");
+    }
+
+    // ── Value conversion helpers ───────────────────────────────────────
+
+    #[test]
+    fn as_str_extracts_string() {
+        let val = lbug::Value::String("hello".to_string());
+        assert_eq!(as_str(&val), Some("hello"));
+    }
+
+    #[test]
+    fn as_str_returns_none_for_non_string() {
+        let val = lbug::Value::Int64(42);
+        assert_eq!(as_str(&val), None);
+    }
+
+    #[test]
+    fn as_i64_extracts_int() {
+        let val = lbug::Value::Int64(99);
+        assert_eq!(as_i64(&val), Some(99));
+    }
+
+    #[test]
+    fn as_i64_returns_none_for_string() {
+        let val = lbug::Value::String("not a number".to_string());
+        assert_eq!(as_i64(&val), None);
+    }
+
+    #[test]
+    fn as_f64_extracts_double() {
+        let val = lbug::Value::Double(42.5);
+        assert_eq!(as_f64(&val), Some(42.5));
+    }
+
+    #[test]
+    fn as_f64_coerces_int64_to_f64() {
+        let val = lbug::Value::Int64(7);
+        assert_eq!(as_f64(&val), Some(7.0));
+    }
+
+    #[test]
+    fn as_f64_returns_none_for_string() {
+        let val = lbug::Value::String("nope".to_string());
+        assert_eq!(as_f64(&val), None);
+    }
+
+    // ── CognitiveMemoryOps trait defaults ──────────────────────────────
+
+    #[test]
+    fn search_episodes_starting_with_default_returns_empty() {
+        let mem = NativeCognitiveMemory::in_memory().unwrap();
+        let result = mem.search_episodes_starting_with("any", 10).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn is_read_only_returns_false_for_writer() {
+        let mem = NativeCognitiveMemory::in_memory().unwrap();
+        assert!(
+            !CognitiveMemoryOps::is_read_only(&mem),
+            "writer handle reports read_only=false"
+        );
+    }
+
+    #[test]
+    fn trait_checkpoint_delegates_to_inherent() {
+        let mem = NativeCognitiveMemory::in_memory().unwrap();
+        CognitiveMemoryOps::checkpoint(&mem).expect("trait checkpoint should succeed");
+    }
+}
