@@ -1,30 +1,23 @@
 //! Hermetic outside-in cross-session recall gate.
 //!
-//! **Purpose.** This is a deliberately RED two-tier forcing function for
-//! the cognitive-memory persistence workstream. It encodes — as compilable
-//! Rust — the cross-session recall invariant from issue #1916 and demands
-//! the two follow-up workstreams whose absence keeps the invariant
-//! unenforceable today:
+//! **Purpose.** This test encodes the cross-session recall invariant from
+//! issue #1916 as a compilable, CI-enforced Rust integration test. It
+//! verifies that cognitive memory written by Session A survives process
+//! exit and is fully recallable by Session B through the public recovery
+//! API surface.
 //!
-//! * **Tier 1 (compile-time red, gates #1919).** This file references
-//!   `NativeCognitiveMemory::open_with_recovery` — a symbol that does not
-//!   exist yet. Until #1919 wires `load_latest_snapshot` into a real
-//!   recovery ladder behind a public constructor, `cargo build --tests`
-//!   fails for this binary with `no function or associated item named
-//!   open_with_recovery`. That compile error IS the acceptance signal.
-//!
-//! * **Tier 2 (runtime red, gates #1917).** Once #1919 lands and the file
-//!   compiles, the test asserts the on-disk snapshot JSON contains a
-//!   top-level `schema_version` field. Until #1917 introduces the
-//!   `PersistedEnvelope { schema_version }` wrapper, the assertion fails.
-//!
-//! Both reds resolve to the same artifact (this file), so the same CI
-//! run that turns the test green for #1919 will surface the #1917 gap.
+//! **What the test proves:**
+//! * `NativeCognitiveMemory::open_with_recovery` loads the latest snapshot
+//!   from disk and restores it into the DB (#1919).
+//! * The on-disk snapshot file carries a top-level `schema_version` field
+//!   via `PersistedEnvelope` (#1917), enabling forward-compatible
+//!   migration (#1941).
+//! * `ImprovementHistory` round-trips across sessions (already hermetic).
 //!
 //! **References.**
 //! * Parent task: #1916 (hermetic cross-session recall test gating every PR).
-//! * Schema envelope: #1917 (PersistedEnvelope { schema_version }).
-//! * Recovery ladder wiring: #1919 (load_latest_snapshot → public ctor).
+//! * Schema envelope: #1917 (`PersistedEnvelope { schema_version }`).
+//! * Recovery ladder wiring: #1919 (`load_latest_snapshot` → public ctor).
 //! * Migration policy: #1941 (forward-compat decision).
 //! * Anti-pattern reference: commit `ce418fd4` (fixes for #1923 / #1925)
 //!   eliminated test-fixture leakage into live cognitive memory by
@@ -32,11 +25,6 @@
 //!   This test defends that boundary: it pins `SIMARD_STATE_ROOT` to a
 //!   `tempfile::TempDir` via an inline `EnvGuard` and unsets
 //!   `SIMARD_MEMORY_SOCKET` so nothing leaks into or out of the suite.
-//!
-//! **DO NOT** add `#[ignore]` to silence this test. Doing so disarms the
-//! forcing function and defeats the entire purpose of the PR that
-//! introduced it. The PR is intentionally Draft / DO NOT MERGE until
-//! both #1917 and #1919 have landed and the test is genuinely green.
 
 #![cfg(unix)]
 
@@ -225,11 +213,10 @@ fn cognitive_memory_cross_session_recall() {
         // must observe the system as if a fresh process had started.
     }
 
-    // ─── Tier-2 red (gates #1917): snapshot must carry schema_version ───
-    // The on-disk snapshot today is a bare `MemorySnapshot` JSON. Issue
-    // #1917 introduces `PersistedEnvelope { schema_version, payload }`
-    // so consumers can migrate forward. This assertion is the acceptance
-    // criterion for that envelope.
+    // ─── Verify snapshot envelope (#1917) ─────────────────────────────
+    // The on-disk snapshot must be wrapped in `PersistedEnvelope` with a
+    // top-level `schema_version` field, enabling forward-compatible
+    // migration (issue #1941).
     let snapshot_files: Vec<_> = std::fs::read_dir(&snapshot_dir)
         .expect("list snapshot dir")
         .filter_map(|e| e.ok())
@@ -251,8 +238,8 @@ fn cognitive_memory_cross_session_recall() {
         serde_json::from_str(&snapshot_text).expect("snapshot must be valid JSON");
     assert!(
         snapshot_json.get("schema_version").is_some(),
-        "RED (gates #1917): snapshot at {} must include a top-level \
-         `schema_version` field (PersistedEnvelope). Current keys: {:?}",
+        "snapshot at {} must include a top-level \
+         `schema_version` field (PersistedEnvelope, #1917). Current keys: {:?}",
         snapshot_path.display(),
         snapshot_json
             .as_object()
@@ -261,19 +248,13 @@ fn cognitive_memory_cross_session_recall() {
     );
 
     // ─── Session B ──────────────────────────────────────────────────────
-    // Tier-1 red (gates #1919): `NativeCognitiveMemory::open_with_recovery`
-    // does not yet exist. This call is a compile-time error today; that
-    // error IS the forcing function. The contract is: opening with
-    // recovery against a state root that contains a prior snapshot MUST
-    // make every Session A write recallable via the public API surface,
+    // `open_with_recovery` opens the DB and restores the latest snapshot,
+    // so Session A's writes are recallable through the public API surface
     // with zero ambient global state and zero env leakage.
     {
         let mem = NativeCognitiveMemory::open_with_recovery(temp.path()).expect(
-            "RED (gates #1919): Session B must open the cognitive memory via the \
-             recovery ladder. `open_with_recovery` is the missing public constructor \
-             that wires `memory_snapshot::load_latest_snapshot` + `restore_snapshot` \
-             behind a single entry point so cross-session recall is the default, \
-             not an opt-in dance.",
+            "Session B: open_with_recovery must wire load_latest_snapshot + \
+             restore_snapshot behind a single entry point (#1919)",
         );
 
         // Recall the canary fact through the public search API.
@@ -285,7 +266,7 @@ fn cognitive_memory_cross_session_recall() {
             .find(|f| f.concept == fact_concept)
             .unwrap_or_else(|| {
                 panic!(
-                    "RED (gates #1919): Session B failed to recall canary fact \
+                    "Session B failed to recall canary fact \
                      `{fact_concept}` after `open_with_recovery`. Got {} facts: {:?}",
                     facts.len(),
                     facts.iter().map(|f| &f.concept).collect::<Vec<_>>(),

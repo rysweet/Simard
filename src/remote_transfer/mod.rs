@@ -54,6 +54,33 @@ pub struct MemorySnapshot {
     pub source_agent: String,
 }
 
+/// Current on-disk envelope schema version.
+///
+/// Bump this when the `PersistedEnvelope` or `MemorySnapshot` wire format
+/// changes in a backward-incompatible way. Consumers dispatch on this
+/// value to decide whether they can load the file directly or need a
+/// migration step (see issue #1941 for the migration policy decision).
+pub const ENVELOPE_SCHEMA_VERSION: u32 = 1;
+
+/// Durable on-disk wrapper for [`MemorySnapshot`] (issue #1917).
+///
+/// Every snapshot written to disk is serialized as a `PersistedEnvelope`
+/// rather than a bare `MemorySnapshot`. The top-level `schema_version`
+/// field lets future code detect the format without guessing, and
+/// enables the migration policy from issue #1941.
+///
+/// **Reading:** [`load_snapshot_from_file`] transparently handles both
+/// legacy (bare `MemorySnapshot`) and enveloped files — if the JSON has
+/// a `schema_version` key it's parsed as an envelope; otherwise it's
+/// deserialized directly as a `MemorySnapshot`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PersistedEnvelope {
+    /// Format version tag (currently [`ENVELOPE_SCHEMA_VERSION`]).
+    pub schema_version: u32,
+    /// The actual snapshot payload.
+    pub payload: MemorySnapshot,
+}
+
 impl Display for MemorySnapshot {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(
@@ -115,7 +142,11 @@ pub fn export_memory_snapshot(
     };
 
     if let Some(path) = path {
-        let json = serde_json::to_string_pretty(&snapshot).map_err(|e| {
+        let envelope = PersistedEnvelope {
+            schema_version: ENVELOPE_SCHEMA_VERSION,
+            payload: snapshot.clone(),
+        };
+        let json = serde_json::to_string_pretty(&envelope).map_err(|e| {
             SimardError::PersistentStoreIo {
                 store: "memory-snapshot".to_string(),
                 action: "serialize".to_string(),
@@ -169,6 +200,11 @@ pub fn import_memory_snapshot(
 
 /// Load a memory snapshot from a JSON file on disk.
 ///
+/// Transparently handles both the legacy bare `MemorySnapshot` format
+/// and the newer [`PersistedEnvelope`] format (issue #1917). If the
+/// JSON contains a top-level `schema_version` key it is parsed as an
+/// envelope; otherwise it falls back to bare `MemorySnapshot` deserialization.
+///
 /// # Deprecated
 /// Use the hive-mind distributed topology instead.
 #[deprecated(
@@ -183,12 +219,32 @@ pub fn load_snapshot_from_file(path: &Path) -> SimardResult<MemorySnapshot> {
         reason: e.to_string(),
     })?;
 
-    serde_json::from_str(&content).map_err(|e| SimardError::PersistentStoreIo {
-        store: "memory-snapshot".to_string(),
-        action: "deserialize".to_string(),
-        path: path.to_path_buf(),
-        reason: e.to_string(),
-    })
+    // Try envelope format first (has `schema_version`), fall back to bare snapshot.
+    let json: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| SimardError::PersistentStoreIo {
+            store: "memory-snapshot".to_string(),
+            action: "deserialize".to_string(),
+            path: path.to_path_buf(),
+            reason: e.to_string(),
+        })?;
+
+    if json.get("schema_version").is_some() {
+        let envelope: PersistedEnvelope =
+            serde_json::from_value(json).map_err(|e| SimardError::PersistentStoreIo {
+                store: "memory-snapshot".to_string(),
+                action: "deserialize-envelope".to_string(),
+                path: path.to_path_buf(),
+                reason: e.to_string(),
+            })?;
+        Ok(envelope.payload)
+    } else {
+        serde_json::from_value(json).map_err(|e| SimardError::PersistentStoreIo {
+            store: "memory-snapshot".to_string(),
+            action: "deserialize-legacy".to_string(),
+            path: path.to_path_buf(),
+            reason: e.to_string(),
+        })
+    }
 }
 
 fn current_epoch_seconds() -> SimardResult<u64> {

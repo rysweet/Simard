@@ -302,6 +302,34 @@ impl NativeCognitiveMemory {
         Ok(mem)
     }
     // Backup/recovery helpers — see backup.rs.
+
+    /// Open or create a cognitive memory database and then automatically
+    /// restore the latest snapshot from `<state_root>/snapshots/` if one
+    /// exists (issue #1919).
+    ///
+    /// This is the recommended entry point for session startup: it
+    /// combines [`Self::open`] with the snapshot recovery ladder so
+    /// cross-session recall is the default, not an opt-in dance.
+    ///
+    /// If no snapshot directory or snapshot file exists, this behaves
+    /// identically to [`Self::open`].
+    #[cfg(unix)]
+    pub fn open_with_recovery(state_root: &Path) -> SimardResult<Self> {
+        let mem = Self::open(state_root)?;
+
+        let snapshot_dir = state_root.join("snapshots");
+        if snapshot_dir.is_dir()
+            && let Some(snapshot) = crate::memory_snapshot::load_latest_snapshot(&snapshot_dir)
+        {
+            let count = crate::memory_snapshot::restore_snapshot(&mem, &snapshot)?;
+            eprintln!(
+                "[simard] recovery: restored {count} items from latest snapshot in {}",
+                snapshot_dir.display()
+            );
+        }
+
+        Ok(mem)
+    }
 }
 
 mod backup;
