@@ -2,7 +2,7 @@
 //! `recipe-runner-rs` executing the
 //! `prompt_assets/simard/recipes/ooda-decide.yaml` recipe.
 //!
-//! This replaces [`super::decide::RustyClawdDecideBrain`] for deployments
+//! This replaces the former `RustyClawdDecideBrain` for deployments
 //! where recipe-runner-rs is available, aligning with the architectural
 //! direction in issue #1971: Simard should use the amplihack recipe-runner
 //! as a design component rather than hand-coding Rust structs that wrap
@@ -97,7 +97,8 @@ impl OodaDecideBrain for RecipeDecideBrain {
             });
         }
 
-        let raw = String::from_utf8_lossy(&output.stdout).to_string();
+        let raw = String::from_utf8(output.stdout)
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
         Ok(parse_action_from_text(&raw))
     }
 }
@@ -113,8 +114,7 @@ impl OodaDecideBrain for RecipeDecideBrain {
 /// another, so scan order only matters for the (unlikely) case where the agent
 /// mentions multiple keywords in its prose.
 pub fn parse_action_from_text(text: &str) -> DecideJudgment {
-    let lower = text.to_ascii_lowercase();
-    let rationale = truncate(text.trim(), 500);
+    let text_bytes = text.as_bytes();
 
     // Check keywords. Order: more-specific / less-common first, but since no
     // keyword is a substring of another, order only matters when multiple
@@ -154,8 +154,8 @@ pub fn parse_action_from_text(text: &str) -> DecideJudgment {
     ];
 
     for (keyword, constructor) in pairs {
-        if lower.contains(keyword) {
-            return constructor(rationale);
+        if ascii_contains_ignore_case(text_bytes, keyword.as_bytes()) {
+            return constructor(truncate(text.trim(), 500));
         }
     }
 
@@ -167,13 +167,21 @@ pub fn parse_action_from_text(text: &str) -> DecideJudgment {
     }
 }
 
+/// Byte-level case-insensitive substring search for ASCII keywords.
+fn ascii_contains_ignore_case(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|w| w.eq_ignore_ascii_case(needle))
+}
+
 fn truncate(s: &str, max: usize) -> String {
-    let mut chars = s.chars();
-    let prefix: String = chars.by_ref().take(max).collect();
-    if chars.next().is_some() {
-        prefix + "…"
-    } else {
-        prefix
+    // Fast path: byte length ≤ max implies char count ≤ max (chars ≤ bytes).
+    if s.len() <= max {
+        return s.to_string();
+    }
+    match s.char_indices().nth(max) {
+        Some((byte_offset, _)) => format!("{}…", &s[..byte_offset]),
+        None => s.to_string(),
     }
 }
 
