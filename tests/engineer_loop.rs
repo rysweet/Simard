@@ -506,6 +506,11 @@ fn engineer_loop_meeting_handoff_load_failure_surfaces_in_stderr() {
         .env("SIMARD_HANDOFF_DIR", &handoff_dir)
         .output()
         .expect("engineer-loop probe should launch");
+
+    if skip_if_no_llm_provider(&output) {
+        return;
+    }
+
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     // The loop should still succeed (handoff errors are warnings, not fatal)
