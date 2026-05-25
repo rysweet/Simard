@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use super::activity::{activity, traces};
 use super::agent_log::{WS_AGENT_LOG_ROUTE, ws_agent_log_handler};
 use super::auth::{login, login_page, require_auth};
+use super::brain_failures::brain_failures;
 use super::chat::ws_chat_handler;
 use super::current_work::current_work;
 use super::distributed::{distributed, vacate_vm};
@@ -16,6 +17,7 @@ use super::goals::{
 use super::hosts::{add_host, get_hosts, remove_host};
 use super::logs::{logs, processes};
 use super::memory::{memory_graph, memory_recent, memory_search};
+use super::merge_judge::merge_judge_decisions;
 use super::merge_readiness::merge_readiness;
 use super::metrics::{memory_metrics, ooda_thinking};
 use super::monitoring::{costs, get_budget, metrics, set_budget};
@@ -62,12 +64,14 @@ pub fn build_router() -> Router {
         .route("/api/memory/recent", get(memory_recent))
         .route("/api/memory/search", post(memory_search))
         .route("/api/memory/graph", get(memory_graph))
+        .route("/api/merge-judge", get(merge_judge_decisions))
         .route("/api/merge-readiness", get(merge_readiness))
         .route("/api/traces", get(traces))
         .route("/api/activity", get(activity))
         .route("/api/workboard", get(workboard))
         .route("/api/current-work", get(current_work))
         .route("/api/ooda-thinking", get(ooda_thinking))
+        .route("/api/brain-failures", get(brain_failures))
         .route("/api/subagent-sessions", get(subagent_sessions))
         .route("/ws/chat", get(ws_chat_handler))
         .route(WS_AGENT_LOG_ROUTE, get(ws_agent_log_handler))

@@ -253,6 +253,12 @@ pub enum SimardError {
     MergeAuthorityEvaluationFailed {
         reason: String,
     },
+    /// Pre-mutation guard: the working tree has uncommitted changes and the
+    /// requested objective implies a mutating action. Per spec line 256 the
+    /// mutating path requires a clean repo.
+    DirtyWorktree {
+        changed_files: Vec<String>,
+    },
 }
 
 pub type SimardResult<T> = Result<T, SimardError>;

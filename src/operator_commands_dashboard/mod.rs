@@ -1,6 +1,7 @@
 mod activity;
 mod agent_log;
 mod auth;
+mod brain_failures;
 mod chat;
 mod current_work;
 mod distributed;
@@ -10,6 +11,7 @@ mod hosts;
 mod index_html;
 mod logs;
 mod memory;
+mod merge_judge;
 mod merge_readiness;
 mod metrics;
 mod monitoring;

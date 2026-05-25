@@ -53,6 +53,9 @@ pub struct TabMeta {
 pub const BANNED_JARGON: &[&str] = &[
     "OODA",
     "Observe-Orient-Decide-Act",
+    "spawn_engineer",
+    "LadybugDB",
+    "cognitive memory",
     "synergize",
     "leverage",
     "ideate",
@@ -151,6 +154,22 @@ pub const TAB_METADATA: &[TabMeta] = &[
         tooltip: "Live stream of the agent's reasoning between actions",
     },
     TabMeta {
+        slug: "brain-failures",
+        label: "Brain Failures",
+        title: "Brain Failures · Simard",
+        h1: "Brain Failures",
+        lede: "Every time the daemon's language-model brain returned an unparseable or invalid response and fell back to safe deterministic rules, listed with the failure type, which component triggered it, when it happened, and whether recovery succeeded.",
+        tooltip: "When and how the agent's brain failed, and whether it recovered",
+    },
+    TabMeta {
+        slug: "merge-decisions",
+        label: "Merge Decisions",
+        title: "Merge Decisions · Simard",
+        h1: "Merge Decisions",
+        lede: "A record of every pull request the merge judge has evaluated — which PRs were approved, rejected, or deferred, along with the reasoning and timestamp for each decision.",
+        tooltip: "History of merge-judge verdicts for each evaluated pull request",
+    },
+    TabMeta {
         slug: "terminal",
         label: "Terminal",
         title: "Terminal · Simard",
@@ -163,7 +182,7 @@ pub const TAB_METADATA: &[TabMeta] = &[
 /// Browser title shown on first page load. The client-side tab handler
 /// updates this when a different tab is activated. Uses `TAB_METADATA[0]`
 /// directly because [`tab_meta_slugs_unique`] asserts the table has
-/// exactly 11 entries — an empty table would already fail other tests.
+/// exactly 13 entries — an empty table would already fail other tests.
 pub fn default_title() -> &'static str {
     TAB_METADATA[0].title
 }
