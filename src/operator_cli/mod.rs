@@ -35,11 +35,11 @@ fn check_help_flag<I: Iterator<Item = String>>(
     args: &mut std::iter::Peekable<I>,
     help_text: &'static str,
 ) -> Option<&'static str> {
-    if let Some(first) = args.peek() {
-        if matches!(first.as_str(), "--help" | "-h" | "help") {
-            let _ = args.next(); // consume the flag
-            return Some(help_text);
-        }
+    if let Some(first) = args.peek()
+        && matches!(first.as_str(), "--help" | "-h" | "help")
+    {
+        let _ = args.next(); // consume the flag
+        return Some(help_text);
     }
     None
 }
