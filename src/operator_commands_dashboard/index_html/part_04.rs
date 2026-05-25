@@ -187,7 +187,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
             ['Sensory',cs.sensory_count],['Working',cs.working_count],['Episodic',cs.episodic_count],
             ['Semantic',cs.semantic_count],['Procedural',cs.procedural_count],['Prospective',cs.prospective_count],['Total',cs.total]
           ].map(([k,v])=>'<span style="margin-right:1rem"><strong>'+k+':</strong> '+(v||0)+'</span>').join('');
-        }else{document.getElementById('wb-cog-stats').innerHTML='<span style="color:#8b949e">No cognitive memory available</span>';}
+        }else{document.getElementById('wb-cog-stats').innerHTML='<span style="color:#8b949e">No agent memory available</span>';}
       }catch(e){document.getElementById('wb-engineers').innerHTML='<span class="err">Failed to load workboard data</span>';}
     }
 
@@ -196,7 +196,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
       try{
         const d=await apiFetch('/api/ooda-thinking');
         const el=document.getElementById('thinking-timeline');
-        if(!d.reports?.length){el.innerHTML='<span style="color:#8b949e">No cycle reports yet. The OODA daemon generates these during autonomous work.</span>';return;}
+        if(!d.reports?.length){el.innerHTML='<span style="color:#8b949e">No cycle reports yet. The agent daemon generates these during autonomous work.</span>';return;}
         el.innerHTML=d.reports.map(rpt=>{
           if(rpt.legacy){
             return `<div class="thinking-cycle legacy">
@@ -248,7 +248,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
                     const agent=se.subordinate_agent;
                     const agentLink=agent?`<a href='javascript:void(0)' onclick="openAgentLog('${esc(agent)}');return false;"><code>${esc(agent)}</code></a>`:'<em>(no agent)</em>';
                     seBlock=`<div class="spawn-engineer-block" style="margin-top:.35rem;padding:.4rem .55rem;border-left:3px solid ${statusColor};background:rgba(255,255,255,0.03);border-radius:4px">
-                      <div><span style="color:${statusColor}">●</span> <strong>spawn_engineer</strong> · ${esc(se.last_action||'')} · <span style="color:${statusColor}">${esc(se.status||'')}</span></div>
+                      <div><span style="color:${statusColor}">●</span> <strong>Launched sub-agent</strong> · ${esc(se.last_action||'')} · <span style="color:${statusColor}">${esc(se.status||'')}</span></div>
                       <div>subordinate: ${agentLink}${se.goal_id?` · goal <code>${esc(se.goal_id)}</code>`:''}</div>
                       ${se.task_summary?`<div>task: ${esc(se.task_summary)}</div>`:''}
                     </div>`;

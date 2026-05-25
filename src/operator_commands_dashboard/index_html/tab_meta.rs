@@ -53,6 +53,9 @@ pub struct TabMeta {
 pub const BANNED_JARGON: &[&str] = &[
     "OODA",
     "Observe-Orient-Decide-Act",
+    "spawn_engineer",
+    "LadybugDB",
+    "cognitive memory",
     "synergize",
     "leverage",
     "ideate",

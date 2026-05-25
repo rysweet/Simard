@@ -543,7 +543,7 @@ mod tests {
         );
     }
 
-    /// The Memory tab's "Last Consolidation" stat (part_02.rs) must render
+    /// The Memory tab's "Last Memory Compaction" stat (part_02.rs) must render
     /// its absolute timestamp via the shared `formatTime` helper, not via
     /// a direct `new Date(...).toLocaleString()` call. This was one of the
     /// three migrated call sites named in the design spec.
@@ -551,18 +551,18 @@ mod tests {
     fn index_html_last_consolidation_uses_format_time() {
         // The stat appears as a single template-literal line; locate by label.
         let pos = INDEX_HTML
-            .find("Last Consolidation")
-            .expect("'Last Consolidation' stat must exist on the Memory tab");
+            .find("Last Memory Compaction")
+            .expect("'Last Memory Compaction' stat must exist on the Memory tab");
         let window_end = (pos + 600).min(INDEX_HTML.len());
         let window = &INDEX_HTML[pos..window_end];
         assert!(
             window.contains("formatTime(d.last_consolidation)"),
-            "Last Consolidation stat must call formatTime(d.last_consolidation) — \
+            "Last Memory Compaction stat must call formatTime(d.last_consolidation) — \
              window: {window:?}"
         );
         assert!(
             !window.contains("new Date(d.last_consolidation).toLocaleString()"),
-            "Last Consolidation stat must not bypass formatTime — \
+            "Last Memory Compaction stat must not bypass formatTime — \
              window: {window:?}"
         );
     }
