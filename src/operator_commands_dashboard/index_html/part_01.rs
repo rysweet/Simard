@@ -208,6 +208,7 @@ pub(crate) const PART_01: &str = r#"      </div>
         if(tab.dataset.tab==='chat') initChat();
         if(tab.dataset.tab==='workboard') {fetchWorkboard();tabRefreshTimers.wb=setInterval(fetchWorkboard,30000);}
         if(tab.dataset.tab==='thinking') {fetchThinking();tabRefreshTimers.thinking=setInterval(fetchThinking,30000);}
+        if(tab.dataset.tab==='brain-failures') {fetchBrainFailures();tabRefreshTimers.brainFailures=setInterval(fetchBrainFailures,30000);}
         if(tab.dataset.tab==='terminal') {initAgentLogTerminal();fetchSubagentSessions();tabRefreshTimers.subagent=setInterval(fetchSubagentSessions,5000);fetchTmuxSessions();tabRefreshTimers.tmux=setInterval(fetchTmuxSessions,10000);}
       });
     });

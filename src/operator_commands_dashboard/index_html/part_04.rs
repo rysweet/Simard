@@ -279,6 +279,63 @@ pub(crate) const PART_04: &str = r#"            let fmt;
       }catch(e){document.getElementById('thinking-timeline').innerHTML='<span class="err">Failed to load: '+esc(e.toString())+'</span>';}
     }
 
+    /* --- Brain Failures (issue #2043) --- */
+    async function fetchBrainFailures(){
+      try{
+        const d=await apiFetch('/api/brain-failures');
+        const sumEl=document.getElementById('brain-failures-summary');
+        const listEl=document.getElementById('brain-failures-list');
+        const s=d.summary||{};
+        const totalFallbacks=s.total_fallback_count||0;
+        const totalParseFailures=s.total_parse_failure_count||0;
+        const totalFailures=totalFallbacks+totalParseFailures;
+        const scanned=s.cycles_scanned||0;
+        const statusClass=totalParseFailures>0?'err':(totalFallbacks>0?'warn':'ok');
+        const statusText=totalFailures===0?'No brain failures detected':''+totalFailures+' failure'+(totalFailures===1?'':'s')+' found';
+        sumEl.innerHTML=`
+          <div class="stat"><span class="label">Status</span><span class="value ${statusClass}">${statusText}</span></div>
+          <div class="stat"><span class="label">Parse failures (model response unparseable)</span><span class="value ${totalParseFailures>0?'err':'ok'}">${totalParseFailures}</span></div>
+          <div class="stat"><span class="label">Deterministic fallbacks (safe rules used instead of model)</span><span class="value ${totalFallbacks>0?'warn':'ok'}">${totalFallbacks}</span></div>
+          <div class="stat"><span class="label">Cycles scanned</span><span class="value">${scanned}</span></div>
+          <div class="stat"><span class="label">Last checked</span><span class="value">${timeAgo(d.timestamp)}</span></div>`;
+        const failures=d.failures||[];
+        if(!failures.length){
+          listEl.innerHTML='<div style="color:#8b949e;padding:.5rem 0">No brain failures in the last '+scanned+' cycles. The daemon\'s language-model brain has been responding correctly.</div>';
+          return;
+        }
+        listEl.innerHTML=failures.map(f=>{
+          const typeIcon=f.failure_type==='parse_failure'?'🔴':'🟡';
+          const escBadge=f.escalated?'<span style="background:var(--red);color:#fff;padding:1px 6px;border-radius:3px;font-size:11px;margin-left:6px">escalated to issue</span>':'';
+          const recoveryBadge=f.recovery_succeeded?'<span style="color:var(--green);font-size:.8rem">✓ recovered via fallback</span>':'<span style="color:var(--red);font-size:.8rem">✗ no recovery</span>';
+          let detail='';
+          if(f.parse_failure_detail){
+            const pf=f.parse_failure_detail;
+            detail=`<div style="margin-top:.35rem;padding:.4rem .55rem;border-left:3px solid var(--red);background:rgba(255,255,255,0.03);border-radius:4px;font-size:.8rem">
+              <div><strong>Error:</strong> ${esc(pf.error_message||'')}</div>
+              <div><strong>Prompt:</strong> ${esc(pf.prompt_name||'')} (version: ${esc(pf.prompt_version||'none')})</div>
+              <div><strong>Consecutive failures:</strong> ${pf.consecutive_count||0}</div>
+              ${pf.raw_response_truncated?'<details style="margin-top:.25rem"><summary style="cursor:pointer;color:#8b949e">Raw model response</summary><pre style="white-space:pre-wrap;max-height:200px;overflow:auto;margin-top:.25rem;padding:.35rem;background:#0d1117;border:1px solid var(--border);border-radius:4px;font-size:.75rem">'+esc(pf.raw_response_truncated)+'</pre></details>':''}
+            </div>`;
+          }
+          return `<div style="padding:.6rem 0;border-bottom:1px solid var(--border)">
+            <div style="display:flex;gap:.5rem;align-items:baseline;flex-wrap:wrap">
+              <span>${typeIcon}</span>
+              <strong>${esc(f.failure_type_plain||f.failure_type)}</strong>${escBadge}
+              <span style="color:#8b949e;font-size:.8rem">Cycle #${f.cycle_number} · ${timeAgo(f.timestamp)}</span>
+              <span style="margin-left:auto">${recoveryBadge}</span>
+            </div>
+            <div style="font-size:.85rem;color:#9bb1c4;margin-top:.2rem"><strong>Component:</strong> ${esc(f.phase_plain||f.phase)}</div>
+            <div style="font-size:.85rem;color:#9bb1c4;margin-top:.15rem">${esc(f.description||'')}</div>
+            ${f.rationale?'<div style="font-size:.8rem;color:#8b949e;margin-top:.15rem"><em>Rationale: '+esc(f.rationale)+'</em></div>':''}
+            ${detail}
+          </div>`;
+        }).join('');
+      }catch(e){
+        document.getElementById('brain-failures-summary').innerHTML='<span class="err">Failed to load: '+esc(e.toString())+'</span>';
+        document.getElementById('brain-failures-list').innerHTML='';
+      }
+    }
+
     /* --- Agent log terminal (issue #947) --- */
     let agentLogTerm = null;
     let agentLogWS = null;

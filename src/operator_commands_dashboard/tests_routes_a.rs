@@ -232,16 +232,16 @@ mod tests {
         assert!(INDEX_HTML.contains(r#"data-tab="overview" title="System health"#));
         assert!(INDEX_HTML.contains(r#"data-tab="goals" title="Active goals"#));
         assert!(INDEX_HTML.contains(r#"data-tab="terminal" title="Attach to the agent"#));
-        // All 11 tab-content containers should now carry a page-lede paragraph.
+        // All 12 tab-content containers should now carry a page-lede paragraph.
         let lede_count = INDEX_HTML.matches(r#"class="page-lede""#).count();
         assert!(
-            lede_count >= 11,
-            "expected at least 11 .page-lede paragraphs (one per tab), found {lede_count}"
+            lede_count >= 12,
+            "expected at least 12 .page-lede paragraphs (one per tab), found {lede_count}"
         );
         let h1_count = INDEX_HTML.matches(r#"class="page-h1""#).count();
         assert!(
-            h1_count >= 11,
-            "expected at least 11 .page-h1 headings (one per tab), found {h1_count}"
+            h1_count >= 12,
+            "expected at least 12 .page-h1 headings (one per tab), found {h1_count}"
         );
     }
 
@@ -276,7 +276,7 @@ mod tests {
     // shared formatter.
     // -------------------------------------------------------------------
 
-    /// Every one of the eleven top-level SPA tabs must carry a non-empty
+    /// Every one of the twelve top-level SPA tabs must carry a non-empty
     /// `title="…"` hover-tooltip. Iterates the canonical tab list so that
     /// adding/removing a tab in `part_00.rs` immediately surfaces a missing
     /// tooltip via this test rather than a silent UX regression.
@@ -295,9 +295,10 @@ mod tests {
             "chat",
             "workboard",
             "thinking",
+            "brain-failures",
             "terminal",
         ];
-        assert_eq!(tabs.len(), 11, "expected exactly 11 top-level tabs");
+        assert_eq!(tabs.len(), 12, "expected exactly 12 top-level tabs");
 
         for tab in &tabs {
             let needle = format!(r#"data-tab="{tab}" title=""#);
@@ -349,7 +350,7 @@ mod tests {
         }
     }
 
-    /// Each of the eleven `tab-content` containers (`id="tab-<name>"`)
+    /// Each of the twelve `tab-content` containers (`id="tab-<name>"`)
     /// must contain at least one `<p class="page-lede">…</p>` inside
     /// its body — i.e. between the opening `id="tab-<name>"` and the next
     /// `id="tab-` of any kind (the next sibling tab-content). Guarantees
@@ -368,6 +369,7 @@ mod tests {
             "chat",
             "workboard",
             "thinking",
+            "brain-failures",
             "terminal",
         ];
         for tab in &tabs {
@@ -634,22 +636,22 @@ mod tests {
         );
     }
 
-    /// Sanity-check on the page-lede count: there must be exactly 11
-    /// (one per tab) — a stricter bound than the existing `>= 11`
-    /// assertion. If a refactor accidentally adds a 12th, we want to
+    /// Sanity-check on the page-lede count: there must be exactly 12
+    /// (one per tab) — a stricter bound than the existing `>= 12`
+    /// assertion. If a refactor accidentally adds a 13th, we want to
     /// know immediately so we can decide whether the new container is
     /// actually a new tab or a misuse of the class.
     #[test]
     fn index_html_has_exactly_eleven_page_intros() {
         let count = INDEX_HTML.matches(r#"class="page-lede""#).count();
         assert_eq!(
-            count, 11,
-            "expected exactly 11 page-lede paragraphs (one per top-level tab), got {count}"
+            count, 12,
+            "expected exactly 12 page-lede paragraphs (one per top-level tab), got {count}"
         );
         let h1_count = INDEX_HTML.matches(r#"class="page-h1""#).count();
         assert_eq!(
-            h1_count, 11,
-            "expected exactly 11 page-h1 headings (one per top-level tab), got {h1_count}"
+            h1_count, 12,
+            "expected exactly 12 page-h1 headings (one per top-level tab), got {h1_count}"
         );
     }
 

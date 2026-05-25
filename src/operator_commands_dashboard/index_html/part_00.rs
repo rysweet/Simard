@@ -339,6 +339,19 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
     </div>
   </div>
 
+  <div class="tab-content" id="tab-brain-failures">
+    <h1 class="page-h1">Brain Failures</h1>
+    <p class="page-lede">Every time the daemon's language-model brain returned an unparseable or invalid response and fell back to safe deterministic rules, listed with the failure type, which component triggered it, when it happened, and whether recovery succeeded.</p>
+    <div class="card" style="margin-bottom:1rem">
+      <h2>Summary <button class="btn" onclick="fetchBrainFailures()">Refresh</button></h2>
+      <div id="brain-failures-summary"><span class="loading">Loading…</span></div>
+    </div>
+    <div class="card">
+      <h2>Recent Brain Failures</h2>
+      <div id="brain-failures-list"><span class="loading">Loading…</span></div>
+    </div>
+  </div>
+
   <div class="tab-content" id="tab-chat">
     <h1 class="page-h1">Chat</h1>
     <p class="page-lede">Talk to the running Simard agent in real time — anything you say here can become a new goal, and slash-commands like /close, /goals, and /status are available.</p>
