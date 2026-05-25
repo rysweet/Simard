@@ -379,6 +379,28 @@ This is a behavior fix only; no public API changed.
 
 ---
 
+## Consumers
+
+After a meeting closes and the handoff bundle lands on disk, three
+consumers read the artifacts. Each uses a different selector and reads
+different files:
+
+| Consumer | File | Selector | Reads |
+|---|---|---|---|
+| OODA curate | `src/ooda_loop/curate.rs` `check_meeting_handoffs` | `find_oldest_unprocessed_handoff` (FIFO) | Legacy `meeting_handoff.json` in handoff dir |
+| `act-on-decisions` | `src/operator_cli/decisions.rs::dispatch_act_on_decisions` | `load_meeting_handoff` (newest) | Legacy `meeting_handoff.json` in handoff dir |
+| Engineer carry-over | `src/engineer_loop/meeting_decisions.rs` | `find_oldest_unprocessed_handoff` (FIFO, issue #1985) | Legacy handoff **+** per-meeting bundle (`transcript.json`, `meeting_handoff.md`) via `load_meeting_bundle` |
+
+The engineer loop (updated in issue #1985) derives the `meeting_id`
+from the selected handoff and attempts to load the per-meeting bundle
+at `<bundle_root>/<meeting_id>/`. When the bundle exists, it adds
+lines naming the bundle directory path, transcript line count, and
+markdown report path to the carried-decision list. When the bundle is
+absent (legacy v1 handoffs), it falls back to the handoff-only path
+with no regression.
+
+---
+
 ## See also
 
 - [State-root resolution](./state-root-resolution.md) — where the

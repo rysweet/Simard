@@ -419,11 +419,11 @@ mod persistence;
 // clippy flags it as unused in non-test compilation. Keep the re-export stable.
 #[allow(unused_imports)]
 pub use persistence::{
-    BundleTranscriptLine, bundle_handoff_path, bundle_markdown_path, bundle_transcript_path,
-    default_bundle_root, find_newest_handoff, find_oldest_unprocessed_handoff,
-    load_meeting_handoff, load_session_wip, mark_handoff_processed_in_place,
-    mark_meeting_handoff_processed, meeting_bundle_dir, remove_session_wip, save_session_wip,
-    write_meeting_bundle, write_meeting_handoff,
+    BundleTranscriptLine, MeetingBundle, bundle_handoff_path, bundle_markdown_path,
+    bundle_transcript_path, default_bundle_root, find_newest_handoff,
+    find_oldest_unprocessed_handoff, load_meeting_bundle, load_meeting_handoff, load_session_wip,
+    mark_handoff_processed_in_place, mark_meeting_handoff_processed, meeting_bundle_dir,
+    remove_session_wip, save_session_wip, write_meeting_bundle, write_meeting_handoff,
 };
 
 #[cfg(test)]
