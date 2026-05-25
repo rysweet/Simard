@@ -191,3 +191,40 @@ fn display_merge_authority_evaluation_failed() {
     assert!(msg.contains("evaluation failed"), "{msg}");
     assert!(msg.contains("statusCheckRollup"), "{msg}");
 }
+
+// --- Display: DirtyWorktree ---
+
+#[test]
+fn display_dirty_worktree_single_file() {
+    let err = SimardError::DirtyWorktree {
+        changed_files: vec!["src/main.rs".to_string()],
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("pre-mutation guard"), "{msg}");
+    assert!(msg.contains("1 uncommitted change"), "{msg}");
+    assert!(msg.contains("clean repo"), "{msg}");
+}
+
+#[test]
+fn display_dirty_worktree_multiple_files() {
+    let err = SimardError::DirtyWorktree {
+        changed_files: vec![
+            "src/main.rs".to_string(),
+            "Cargo.toml".to_string(),
+            "README.md".to_string(),
+        ],
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("3 uncommitted change"), "{msg}");
+}
+
+#[test]
+fn dirty_worktree_equality() {
+    let a = SimardError::DirtyWorktree {
+        changed_files: vec!["a.rs".to_string()],
+    };
+    let b = SimardError::DirtyWorktree {
+        changed_files: vec!["a.rs".to_string()],
+    };
+    assert_eq!(a, b);
+}

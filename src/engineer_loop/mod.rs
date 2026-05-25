@@ -42,13 +42,16 @@ use execution::{parse_status_paths, run_command, trimmed_stdout, trimmed_stdout_
 // Re-export all public items so `crate::engineer_loop::X` still works.
 pub use types::{
     AnalyzedAction, EngineerActionKind, EngineerLoopRun, ExecutedEngineerAction, PhaseOutcome,
-    PhaseTrace, RepoInspection, SelectedEngineerAction, VerificationReport, analyze_objective,
+    PhaseTrace, RepoInspection, SelectedEngineerAction, SessionErrorReflection, VerificationReport,
+    analyze_objective,
 };
 
 // Phase-entry-point re-exports for the recipe-driven engineer loop (Phase 2 rebuild).
 // These let `simard-engineer-step` (in src/bin/) drive each phase via JSON IPC.
 pub use agent_spawn::spawn_agent_for_goal;
-pub use review_persist::{persist_engineer_loop_artifacts, run_optional_review};
+pub use review_persist::{
+    persist_engineer_loop_artifacts, persist_error_reflection, run_optional_review,
+};
 
 // Test-visible re-exports for the integration regression suite that pins the
 // Copilot subprocess permission contract (issue #1717,
@@ -112,9 +115,46 @@ pub fn run_local_engineer_loop(
                 duration: phase_start.elapsed(),
                 outcome: PhaseOutcome::Failed(e.to_string()),
             });
-            return Err(inspection.unwrap_err());
+            let err = inspection.unwrap_err();
+            persist_error_reflection(
+                &state_root,
+                &SessionErrorReflection {
+                    objective: objective.to_string(),
+                    failed_phase: "inspect".to_string(),
+                    error_message: err.to_string(),
+                    phase_traces: phase_traces.clone(),
+                },
+            );
+            return Err(err);
         }
     };
+
+    // Pre-mutation guard (issue #2082): if the objective implies a mutating
+    // action and the working tree has uncommitted changes, abort before
+    // spawning the agent. Per spec line 256 the mutating path requires a
+    // clean repo.
+    let analyzed = analyze_objective(objective);
+    if analyzed.is_mutating() && inspection.worktree_dirty {
+        let phase_name = "pre-mutation-guard";
+        phase_traces.push(PhaseTrace {
+            name: phase_name.to_string(),
+            duration: phase_start.elapsed(),
+            outcome: PhaseOutcome::Failed("dirty worktree".to_string()),
+        });
+        let err = SimardError::DirtyWorktree {
+            changed_files: inspection.changed_files.clone(),
+        };
+        persist_error_reflection(
+            &state_root,
+            &SessionErrorReflection {
+                objective: objective.to_string(),
+                failed_phase: phase_name.to_string(),
+                error_message: err.to_string(),
+                phase_traces: phase_traces.clone(),
+            },
+        );
+        return Err(err);
+    }
 
     let phase_start = Instant::now();
     let terminal_bridge_context =
@@ -135,7 +175,21 @@ pub fn run_local_engineer_loop(
             });
         }
     }
-    let terminal_bridge_context = terminal_bridge_context?;
+    let terminal_bridge_context = match terminal_bridge_context {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            persist_error_reflection(
+                &state_root,
+                &SessionErrorReflection {
+                    objective: objective.to_string(),
+                    failed_phase: "load-bridge-context".to_string(),
+                    error_message: e.to_string(),
+                    phase_traces: phase_traces.clone(),
+                },
+            );
+            return Err(e);
+        }
+    };
 
     // Phase: agent-prompt-build
     let phase_start = Instant::now();
@@ -191,6 +245,15 @@ pub fn run_local_engineer_loop(
                 duration: phase_start.elapsed(),
                 outcome: PhaseOutcome::Failed(e.to_string()),
             });
+            persist_error_reflection(
+                &state_root,
+                &SessionErrorReflection {
+                    objective: objective.to_string(),
+                    failed_phase: "agent-wait".to_string(),
+                    error_message: e.to_string(),
+                    phase_traces: phase_traces.clone(),
+                },
+            );
             return Err(e);
         }
     };
@@ -221,7 +284,18 @@ pub fn run_local_engineer_loop(
             });
         }
     }
-    review_result?;
+    if let Err(e) = review_result {
+        persist_error_reflection(
+            &state_root,
+            &SessionErrorReflection {
+                objective: objective.to_string(),
+                failed_phase: "review".to_string(),
+                error_message: e.to_string(),
+                phase_traces: phase_traces.clone(),
+            },
+        );
+        return Err(e);
+    }
 
     let phase_start = Instant::now();
     let persist_result = persist_engineer_loop_artifacts(
@@ -249,7 +323,18 @@ pub fn run_local_engineer_loop(
             });
         }
     }
-    persist_result?;
+    if let Err(e) = persist_result {
+        persist_error_reflection(
+            &state_root,
+            &SessionErrorReflection {
+                objective: objective.to_string(),
+                failed_phase: "persist".to_string(),
+                error_message: e.to_string(),
+                phase_traces: phase_traces.clone(),
+            },
+        );
+        return Err(e);
+    }
 
     Ok(EngineerLoopRun {
         state_root,

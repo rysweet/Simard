@@ -189,3 +189,34 @@ pub fn analyze_objective(objective: &str) -> AnalyzedAction {
         AnalyzedAction::ReadOnlyScan
     }
 }
+
+impl AnalyzedAction {
+    /// Returns `true` if this action category implies repository mutations
+    /// (file edits, commits, issue creation). Read-only scans, tests, and
+    /// checks are non-mutating.
+    pub fn is_mutating(&self) -> bool {
+        matches!(
+            self,
+            AnalyzedAction::CreateFile
+                | AnalyzedAction::AppendToFile
+                | AnalyzedAction::GitCommit
+                | AnalyzedAction::OpenIssue
+                | AnalyzedAction::StructuredTextReplace
+        )
+    }
+}
+
+/// Minimal reflection record produced when a session fails. Captures the
+/// error context so failures are not silently lost (issue #2088). The spec
+/// requires reflection on every session outcome including errors.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SessionErrorReflection {
+    /// The original objective that was being pursued.
+    pub objective: String,
+    /// Which phase the session was in when the error occurred.
+    pub failed_phase: String,
+    /// Human-readable error description.
+    pub error_message: String,
+    /// Phase traces collected up to the point of failure.
+    pub phase_traces: Vec<PhaseTrace>,
+}

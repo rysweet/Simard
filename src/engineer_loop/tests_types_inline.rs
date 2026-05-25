@@ -133,3 +133,78 @@ fn extract_command_none() {
         "inspect should default to ReadOnlyScan"
     );
 }
+
+// ── AnalyzedAction::is_mutating ──────────────────────────────────
+
+#[test]
+fn is_mutating_true_for_create_file() {
+    assert!(AnalyzedAction::CreateFile.is_mutating());
+}
+
+#[test]
+fn is_mutating_true_for_append_to_file() {
+    assert!(AnalyzedAction::AppendToFile.is_mutating());
+}
+
+#[test]
+fn is_mutating_true_for_git_commit() {
+    assert!(AnalyzedAction::GitCommit.is_mutating());
+}
+
+#[test]
+fn is_mutating_true_for_open_issue() {
+    assert!(AnalyzedAction::OpenIssue.is_mutating());
+}
+
+#[test]
+fn is_mutating_true_for_structured_text_replace() {
+    assert!(AnalyzedAction::StructuredTextReplace.is_mutating());
+}
+
+#[test]
+fn is_mutating_false_for_read_only_scan() {
+    assert!(!AnalyzedAction::ReadOnlyScan.is_mutating());
+}
+
+#[test]
+fn is_mutating_false_for_cargo_test() {
+    assert!(!AnalyzedAction::CargoTest.is_mutating());
+}
+
+#[test]
+fn is_mutating_false_for_run_shell_command() {
+    assert!(!AnalyzedAction::RunShellCommand.is_mutating());
+}
+
+// ── SessionErrorReflection ───────────────────────────────────────
+
+#[test]
+fn session_error_reflection_serialization_round_trip() {
+    let reflection = SessionErrorReflection {
+        objective: "fix the bug".to_string(),
+        failed_phase: "agent-wait".to_string(),
+        error_message: "LLM timeout".to_string(),
+        phase_traces: vec![PhaseTrace {
+            name: "inspect".to_string(),
+            duration: std::time::Duration::from_millis(42),
+            outcome: PhaseOutcome::Success,
+        }],
+    };
+    let json = serde_json::to_string(&reflection).expect("serialize");
+    let restored: SessionErrorReflection = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(reflection, restored);
+}
+
+#[test]
+fn session_error_reflection_captures_all_fields() {
+    let reflection = SessionErrorReflection {
+        objective: "update config".to_string(),
+        failed_phase: "review".to_string(),
+        error_message: "review blocked".to_string(),
+        phase_traces: vec![],
+    };
+    assert_eq!(reflection.objective, "update config");
+    assert_eq!(reflection.failed_phase, "review");
+    assert_eq!(reflection.error_message, "review blocked");
+    assert!(reflection.phase_traces.is_empty());
+}

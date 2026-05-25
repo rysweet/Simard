@@ -292,6 +292,13 @@ impl Display for SimardError {
             Self::MergeAuthorityEvaluationFailed { reason } => {
                 write!(f, "merge-authority: evaluation failed: {reason}")
             }
+            Self::DirtyWorktree { changed_files } => {
+                write!(
+                    f,
+                    "pre-mutation guard: working tree has {} uncommitted change(s) — mutating actions require a clean repo",
+                    changed_files.len()
+                )
+            }
         }
     }
 }
