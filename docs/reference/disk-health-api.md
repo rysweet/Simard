@@ -44,10 +44,10 @@ prompt_assets/simard/recipes/disk-health-check.yaml   Recipe (agent step with cl
 
 ```rust
 /// Report parsed from key=value lines emitted by the disk-health-check recipe.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct DiskHealthReport {
     /// Current disk usage percentage after any cleanup (0–100).
-    pub disk_used_pct: u64,
+    pub disk_used_pct: u8,
     /// Bytes freed during this check (0 if usage was below threshold).
     pub freed_bytes: u64,
     /// Human-readable list of cleanup actions taken.
@@ -115,13 +115,13 @@ pub fn run_disk_health_check(
 /// Parse key=value lines from recipe stdout into a DiskHealthReport.
 ///
 /// Scans each line for:
-/// - `DISK_USED_PCT=<u64>` — disk usage percentage
+/// - `DISK_USED_PCT=<u8>` — disk usage percentage (0–100)
 /// - `FREED_BYTES=<u64>` — bytes freed during cleanup
 /// - `ACTION: <text>` — human-readable cleanup action (collected into Vec)
 ///
 /// Lines that don't match any pattern are silently ignored (forward compatible).
 /// Missing fields default to zero/empty.
-fn parse_disk_health_text(stdout: &str) -> DiskHealthReport;
+fn parse_disk_health_text(stdout: &str) -> Result<DiskHealthReport, String>;
 ```
 
 ### `resolve_recipe_path` (internal)
@@ -350,34 +350,48 @@ in the environment to override it.
 
 ### Unit tests (`src/disk_health.rs`)
 
-```rust
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn resolve_recipe_path_returns_none_for_missing_repo() { /* ... */ }
+The module has 26 unit tests covering parsing, method behavior, path resolution,
+error paths, and the truncate helper. Key groups:
 
-    #[test]
-    fn parse_disk_health_text_full_output() { /* ... */ }
+**Text parsing** (`text_parse_*`, 12 tests):
 
-    #[test]
-    fn parse_disk_health_text_no_cleanup() { /* ... */ }
+- `text_parse_no_cleanup` — `DISK_USED_PCT` only, no `ACTION:` lines.
+- `text_parse_with_cleanup_actions` — full output with `DISK_USED_PCT`,
+  `FREED_BYTES`, and multiple `ACTION:` lines.
+- `text_parse_boundary_100_percent` / `text_parse_boundary_0_percent` — edge values.
+- `text_parse_missing_disk_used_pct_is_error` — returns `Err` when required field absent.
+- `text_parse_invalid_pct_value_is_error` — non-numeric `DISK_USED_PCT` returns `Err`.
+- `text_parse_empty_string_is_error` — empty input returns `Err`.
+- `text_parse_freed_bytes_defaults_to_zero_when_absent` — missing `FREED_BYTES` defaults to `0`.
+- `text_parse_ignores_unknown_lines` — non-matching lines silently skipped.
+- `text_parse_handles_whitespace_around_values` — trims whitespace around `=` values.
+- `text_parse_skips_blank_lines` — blank lines ignored.
+- `text_parse_action_without_text_is_skipped` — bare `ACTION:` with no text is dropped.
 
-    #[test]
-    fn parse_disk_health_text_malformed_lines_ignored() { /* ... */ }
-}
-```
+**`DiskHealthReport` methods** (4 tests):
 
-- `resolve_recipe_path_returns_none_for_missing_repo` — verifies that
-  `resolve_recipe_path` returns `None` when pointed at a temp dir without
-  the recipe YAML.
-- `parse_disk_health_text_full_output` — parses a complete key=value output
-  with `DISK_USED_PCT`, `FREED_BYTES`, and multiple `ACTION:` lines.
-- `parse_disk_health_text_no_cleanup` — parses output with only
-  `DISK_USED_PCT` and `FREED_BYTES=0` (no `ACTION:` lines).
-- `parse_disk_health_text_malformed_lines_ignored` — verifies that non-matching
-  lines (debug output, warnings) are silently ignored.
+- `cleanup_performed_true_when_freed_bytes_nonzero`
+- `cleanup_performed_true_when_actions_nonempty`
+- `cleanup_performed_false_when_nothing_happened`
+- `summary_no_cleanup` / `summary_with_cleanup`
 
-No integration tests spawn `recipe-runner-rs` — the recipe is a bash script
+**Path resolution** (2 tests):
+
+- `resolve_recipe_path_returns_none_for_nonexistent_dir` — `None` for missing dir.
+- `resolve_recipe_path_finds_in_tree_recipe` — finds recipe in `prompt_assets/` subtree.
+
+**`run_disk_health_check` error paths** (2 tests):
+
+- `run_returns_error_when_recipe_not_found` — `AdapterInvocationFailed` when recipe YAML absent.
+- `run_returns_error_when_recipe_runner_unavailable_or_recipe_invalid` — error when
+  binary missing or recipe invalid.
+
+**Truncate helper** (5 tests):
+
+- `truncate_short_string_unchanged`, `truncate_exact_length_unchanged`,
+  `truncate_long_string_adds_ellipsis`, `truncate_empty_string`, `truncate_zero_max`.
+
+No integration tests spawn `recipe-runner-rs` — the recipe is an agent step
 tested by the daemon's existing smoke-test cycle.
 
 ## Related
