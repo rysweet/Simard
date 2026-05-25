@@ -35,7 +35,7 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
             </tr>`;}).join('')}
           </table>
           <div style="margin-top:.5rem;color:#8b949e;font-size:.8rem">${d.active_count} active goal(s)</div>`;
-        }else{document.getElementById('goals-active').innerHTML='<span style="color:#8b949e">No active goals. Use "Seed Default Goals" or run the OODA daemon to generate goals from meetings.</span>';}
+        }else{document.getElementById('goals-active').innerHTML='<span style="color:#8b949e">No active goals. Use "Seed Default Goals" or run the agent daemon to generate goals from meetings.</span>';}
         if(d.backlog?.length){
           document.getElementById('goals-backlog').innerHTML=`<table class="proc-table">
             <tr><th>Title</th><th>Description</th><th>Source</th><th>Score</th><th>Actions</th></tr>
@@ -141,7 +141,7 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
               <span>${esc(String(msg))}</span>
             </div>`;
           }).join('');
-        }else{document.getElementById('trace-list').innerHTML='<span style="color:#8b949e">No trace data yet. Run the OODA daemon or make API calls to generate traces.</span>';}
+        }else{document.getElementById('trace-list').innerHTML='<span style="color:#8b949e">No trace data yet. Run the agent daemon or make API calls to generate traces.</span>';}
       }catch(e){document.getElementById('trace-list').innerHTML='<span class="err">Failed to load traces — check /api/traces</span>';}
     }
 

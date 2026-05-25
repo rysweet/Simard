@@ -224,7 +224,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
       <h2>Cycle Reports</h2>
       <div id="cycle-reports"><span class="loading">Loading…</span></div>
     </div>
-    <h2 style="color:var(--accent);font-size:1rem;margin-bottom:.5rem">OODA Transcripts</h2>
+    <h2 style="color:var(--accent);font-size:1rem;margin-bottom:.5rem">Agent Transcripts</h2>
     <div id="ooda-transcripts"><span class="loading">Loading…</span></div>
     <h2 style="color:var(--accent);font-size:1rem;margin:.75rem 0 .5rem">Terminal Session Transcripts</h2>
     <div id="terminal-transcripts"><span class="loading">Loading…</span></div>
@@ -334,7 +334,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
     <h1 class="page-h1">Thinking</h1>
     <p class="page-lede">A live stream of the daemon's internal reasoning between actions, showing what it considered before deciding what to do next.</p>
     <div class="card">
-      <h2>OODA Internal Reasoning <button class="btn" onclick="fetchThinking()">Refresh</button></h2>
+      <h2>Agent Internal Reasoning <button class="btn" onclick="fetchThinking()">Refresh</button></h2>
       <div id="thinking-timeline"><span class="loading">Loading…</span></div>
     </div>
   </div>
@@ -361,7 +361,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
         <strong style="color:var(--accent)">💡 Meeting Help:</strong>
         Use this chat or run <code>simard meeting &lt;topic&gt;</code> from the terminal.
         Commands: <code>/close</code> end session, <code>/goals</code> review goals, <code>/status</code> system status.
-        Meetings generate handoff documents that the OODA daemon ingests as new goals.
+        Meetings generate handoff documents that the agent daemon ingests as new goals.
       </div>
       <div class="ws-status disconnected" id="ws-status">● Disconnected <button class="btn" onclick="initChat()" style="font-size:.75rem;padding:.1rem .4rem;margin-left:.5rem">Reconnect</button></div>
       <div id="chat-messages"></div>

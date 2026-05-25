@@ -42,7 +42,7 @@ impl StatusChip {
             Self::Working => "Working",
             Self::Skipped => "Skipped",
             Self::Failed => "Failed",
-            Self::SpawnedEngineer => "Spawned engineer",
+            Self::SpawnedEngineer => "Launched sub-agent",
             Self::Waiting => "Waiting",
         }
     }
@@ -329,7 +329,7 @@ mod tests {
         assert_eq!(StatusChip::Working.as_str(), "Working");
         assert_eq!(StatusChip::Skipped.as_str(), "Skipped");
         assert_eq!(StatusChip::Failed.as_str(), "Failed");
-        assert_eq!(StatusChip::SpawnedEngineer.as_str(), "Spawned engineer");
+        assert_eq!(StatusChip::SpawnedEngineer.as_str(), "Launched sub-agent");
         assert_eq!(StatusChip::Waiting.as_str(), "Waiting");
     }
 

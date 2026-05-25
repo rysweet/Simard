@@ -189,14 +189,15 @@ pub(crate) const PART_05: &str = r#"      try {
 
     /* --- Glossary / Jargon tooltips (#1996) --- */
     const GLOSSARY={
-      'OODA':'Observe-Orient-Decide-Act — the decision-making loop Simard runs each cycle to decide what to do next.',
-      'facilitator':'The meeting facilitator component that manages discussions between Simard and the user, extracting goals and action items.',
-      'consolidation':'The process of merging short-term observations into long-term memory, strengthening important facts and pruning noise.',
+      'decision cycle':'Observe-Orient-Decide-Act — the decision-making loop Simard runs each cycle to decide what to do next.',
+      'coordinator':'The meeting coordinator component that manages discussions between Simard and the user, extracting goals and action items.',
+      'memory compaction':'The process of merging short-term observations into long-term memory, strengthening important facts and pruning noise.',
       'recipe runner':'The workflow engine that executes multi-step automation recipes (build, test, deploy sequences) as part of goal work.',
-      'spawn_engineer':'An action where Simard launches a sub-agent in a separate process to work on a specific task (e.g., fixing a bug or writing code).',
-      'cognitive memory':'Simard\u2019s multi-layered memory system: sensory (raw input), working (active context), episodic (past events), semantic (learned facts), procedural (how-to), and prospective (reminders).',
+      'launched sub-agent':'An action where Simard launches a sub-agent in a separate process to work on a specific task (e.g., fixing a bug or writing code).',
+      'agent memory':'Simard\u2019s multi-layered memory system: sensory (raw input), working (active context), event memories (past events), semantic (learned facts), procedural (how-to), and prospective (reminders).',
+      'memory store':'The built-in graph database Simard uses to persist memories across sessions, organised by memory type.',
       'semantic fact':'A learned piece of knowledge stored in long-term memory, like a concept or relationship Simard has observed.',
-      'episodic memory':'A record of a specific past event — what happened, when, and the outcome.',
+      'event memory':'A record of a specific past event — what happened, when, and the outcome.',
       'procedural memory':'How-to knowledge — step-by-step procedures Simard has learned for completing tasks.',
       'prospective memory':'A planned future action or reminder that Simard intends to act on later.',
       'working memory':'Short-term context currently being used — the facts and plans relevant to whatever Simard is working on right now.',

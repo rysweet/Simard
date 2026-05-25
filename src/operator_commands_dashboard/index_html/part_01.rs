@@ -231,7 +231,7 @@ pub(crate) const PART_01: &str = r#"      </div>
         }
         document.getElementById('status').innerHTML=`
           <div class="stat"><span class="label">Version</span><span class="value">${versionLink}</span></div>
-          <div class="stat"><span class="label">OODA Daemon</span><span class="value ${oc}">${esc(d.ooda_daemon)}${healthDetail}</span></div>
+          <div class="stat"><span class="label">Agent Daemon</span><span class="value ${oc}">${esc(d.ooda_daemon)}${healthDetail}</span></div>
           <div class="stat"><span class="label">Active Processes</span><span class="value">${d.active_processes??0}</span></div>
           <div class="stat"><span class="label">Disk Usage</span><span class="value ${dc}">${d.disk_usage_pct??'?'}%</span></div>
           <div class="stat"><span class="label">Updated</span><span class="value">${timeAgo(d.timestamp)}</span></div>`;
@@ -279,7 +279,7 @@ pub(crate) const PART_01: &str = r#"      </div>
 
         el.innerHTML=`
           <div style="display:flex;gap:2rem;flex-wrap:wrap;align-items:center;margin-bottom:.75rem">
-            <div><span style="font-size:1.5rem;${isRunning&&!isStale?'':'filter:grayscale(1)'}">${isRunning?(isStale?'🟡':'🟢'):'🔴'}</span> <strong style="font-size:1.1rem">${isRunning?(isStale?'Agent Stale':'OODA Loop Active'):'Agent Stopped'}</strong></div>
+            <div><span style="font-size:1.5rem;${isRunning&&!isStale?'':'filter:grayscale(1)'}">${isRunning?(isStale?'🟡':'🟢'):'🔴'}</span> <strong style="font-size:1.1rem">${isRunning?(isStale?'Agent Stale':'Decision Loop Active'):'Agent Stopped'}</strong></div>
             <div style="color:#8b949e">Cycle <strong style="color:var(--fg)">#${cycle}</strong> · Last heartbeat <strong style="color:var(--fg)">${heartbeat}</strong>${isStale?' <span style="color:var(--yellow)">(>10 min ago)</span>':''}</div>
           </div>
           ${currentFocus?`<div style="margin-bottom:.75rem"><span style="color:#8b949e">🎯 Top Priority:</span> ${currentFocus}</div>`:''}
@@ -329,7 +329,7 @@ pub(crate) const PART_01: &str = r#"      </div>
               <span style="flex:1">${renderActionDetail((function(){var arr=Array.from(a.detail||'');var d=arr.length>200?arr.slice(0,200).join('')+'…':arr.join('');return d||a.action_description||'';})())}</span>
             </div>`).join('');
         }else{
-          actEl.innerHTML='<span style="color:#8b949e">No structured action history yet. The OODA daemon records actions each cycle.</span>';
+          actEl.innerHTML='<span style="color:#8b949e">No structured action history yet. The agent daemon records actions each cycle.</span>';
         }
       }catch(e){
         console.warn('fetchAgentOverview failed:', e);
