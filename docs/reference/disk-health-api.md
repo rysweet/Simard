@@ -25,13 +25,13 @@ per OODA cycle, *before* spawning any engineer subprocesses. It prevents the
 proactively freeing disk when the home partition exceeds 80% usage.
 
 The Rust code is a thin shim. All cleanup logic lives in the recipe YAML as
-a deterministic bash step — no LLM required.
+an agent step that adaptively decides what to clean based on disk pressure.
 
 ## Module Layout
 
 ```
 src/disk_health.rs                           Rust shim (subprocess invocation, text parsing)
-prompt_assets/simard/recipes/disk-health-check.yaml   Recipe (bash cleanup script)
+prompt_assets/simard/recipes/disk-health-check.yaml   Recipe (agent cleanup step)
 ```
 
 ## Public API — `src/disk_health.rs`
@@ -51,7 +51,7 @@ pub struct DiskHealthReport {
 }
 ```
 
-The report is parsed from key=value lines on stdout by the recipe's bash
+The report is parsed from key=value lines on stdout by the recipe's agent
 step. The Rust shim uses `parse_disk_health_text()` to extract fields from
 the text output — no JSON parsing. See
 [text-parsing wire formats](./text-parsing-wire-formats.md#protocol-3-keyvalue-disk-health)
@@ -140,7 +140,7 @@ Resolution order (matches `recipe_merge_judge.rs` and
 
 ## Recipe YAML — `disk-health-check.yaml`
 
-The recipe is a single bash step. Its stdout uses the key=value text format
+The recipe is a single agent step. Its stdout uses the key=value text format
 (not JSON). See [text-parsing wire formats § key=value](./text-parsing-wire-formats.md#protocol-3-keyvalue-disk-health)
 for the normative grammar.
 
@@ -183,7 +183,7 @@ When disk usage exceeds 80%, the recipe performs these actions sequentially:
 
 ### Text output contract
 
-The bash step prints key=value lines to stdout:
+The agent step prints key=value lines to stdout:
 
 ```
 DISK_USED_PCT=72
