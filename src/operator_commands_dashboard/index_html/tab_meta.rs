@@ -162,6 +162,14 @@ pub const TAB_METADATA: &[TabMeta] = &[
         tooltip: "When and how the agent's brain failed, and whether it recovered",
     },
     TabMeta {
+        slug: "merge-decisions",
+        label: "Merge Decisions",
+        title: "Merge Decisions · Simard",
+        h1: "Merge Decisions",
+        lede: "A record of every pull request the merge judge has evaluated — which PRs were approved, rejected, or deferred, along with the reasoning and timestamp for each decision.",
+        tooltip: "History of merge-judge verdicts for each evaluated pull request",
+    },
+    TabMeta {
         slug: "terminal",
         label: "Terminal",
         title: "Terminal · Simard",
@@ -174,7 +182,7 @@ pub const TAB_METADATA: &[TabMeta] = &[
 /// Browser title shown on first page load. The client-side tab handler
 /// updates this when a different tab is activated. Uses `TAB_METADATA[0]`
 /// directly because [`tab_meta_slugs_unique`] asserts the table has
-/// exactly 12 entries — an empty table would already fail other tests.
+/// exactly 13 entries — an empty table would already fail other tests.
 pub fn default_title() -> &'static str {
     TAB_METADATA[0].title
 }

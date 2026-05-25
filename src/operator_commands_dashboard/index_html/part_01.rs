@@ -14,6 +14,15 @@ pub(crate) const PART_01: &str = r#"      </div>
     </div>
   </div>
 
+  <div class="tab-content" id="tab-merge-decisions">
+    <h1 class="page-h1">Merge Decisions</h1>
+    <p class="page-lede">A record of every pull request the merge judge has evaluated — which PRs were approved, rejected, or deferred, along with the reasoning and timestamp for each decision.</p>
+    <div class="card" style="max-width:980px">
+      <h2>Decision History <button class="btn" onclick="fetchMergeJudge()" style="font-size:.75rem">Refresh</button></h2>
+      <div id="merge-judge-panel"><span class="loading">Loading…</span></div>
+    </div>
+  </div>
+
   <div class="tab-content" id="tab-terminal">
     <h1 class="page-h1">Terminal</h1>
     <p class="page-lede">Attach to the live terminal of a running Simard sub-agent and watch its standard output and standard error stream in real time.</p>
@@ -209,6 +218,7 @@ pub(crate) const PART_01: &str = r#"      </div>
         if(tab.dataset.tab==='workboard') {fetchWorkboard();tabRefreshTimers.wb=setInterval(fetchWorkboard,30000);}
         if(tab.dataset.tab==='thinking') {fetchThinking();tabRefreshTimers.thinking=setInterval(fetchThinking,30000);}
         if(tab.dataset.tab==='brain-failures') {fetchBrainFailures();tabRefreshTimers.brainFailures=setInterval(fetchBrainFailures,30000);}
+        if(tab.dataset.tab==='merge-decisions') {fetchMergeJudge();tabRefreshTimers.mergeJudge=setInterval(fetchMergeJudge,30000);}
         if(tab.dataset.tab==='terminal') {initAgentLogTerminal();fetchSubagentSessions();tabRefreshTimers.subagent=setInterval(fetchSubagentSessions,5000);fetchTmuxSessions();tabRefreshTimers.tmux=setInterval(fetchTmuxSessions,10000);}
       });
     });
