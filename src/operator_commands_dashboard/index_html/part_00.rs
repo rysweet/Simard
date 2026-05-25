@@ -84,6 +84,17 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
     .outcome.success{background:rgba(63,185,80,0.1)}
     .outcome.failure{background:rgba(248,81,73,0.1)}
     .outcome-detail{font-size:.8rem;color:#8b949e;margin-top:.2rem;padding-left:1rem;font-family:monospace;white-space:pre-wrap;max-height:100px;overflow-y:auto}
+    abbr[title]{text-decoration:underline dotted var(--accent);text-underline-offset:2px;cursor:help;color:var(--fg)}
+    abbr[title]:hover{color:var(--accent)}
+    .glossary-toggle{cursor:pointer;color:var(--accent);font-size:.85rem;padding:.2rem .5rem;border:1px solid var(--accent);border-radius:4px;background:transparent;margin-left:.5rem}
+    .glossary-toggle:hover{background:rgba(88,166,255,0.1)}
+    .glossary-panel{display:none;position:fixed;right:0;top:0;width:340px;height:100vh;background:var(--card);border-left:1px solid var(--border);padding:1.5rem;overflow-y:auto;z-index:1000;box-shadow:-4px 0 12px rgba(0,0,0,0.3)}
+    .glossary-panel.open{display:block}
+    .glossary-panel h3{color:var(--accent);margin-bottom:1rem;display:flex;justify-content:space-between;align-items:center}
+    .glossary-panel .close-btn{cursor:pointer;color:#8b949e;font-size:1.2rem;background:none;border:none}
+    .glossary-entry{padding:.5rem 0;border-bottom:1px solid var(--border)}
+    .glossary-entry dt{color:var(--accent);font-weight:600;font-size:.9rem;margin-bottom:.2rem}
+    .glossary-entry dd{color:#8b949e;font-size:.85rem;margin:0;line-height:1.4}
   </style>
 </head>
 <body>
@@ -93,6 +104,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
       <span id="header-version" style="font-size:.75rem;color:#8b949e"></span>
       <a href="https://github.com/rysweet/Simard" target="_blank" style="color:#8b949e;text-decoration:none;font-size:.85rem;padding:.2rem .4rem" title="Source on GitHub">⟨/⟩ Source</a>
       <a href="https://github.com/rysweet/Simard/releases/latest" target="_blank" style="color:#3fb950;text-decoration:none;font-size:.85rem;border:1px solid #3fb950;padding:.2rem .6rem;border-radius:4px">📦 Releases</a>
+      <button class="glossary-toggle" onclick="toggleGlossary()" title="Show glossary of Simard terms">📖 Glossary</button>
       <span id="clock" style="color:#8b949e;font-size:.85rem"></span>
     </div>
   </header>

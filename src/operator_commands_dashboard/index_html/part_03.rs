@@ -38,17 +38,21 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
         }else{document.getElementById('goals-active').innerHTML='<span style="color:#8b949e">No active goals. Use "Seed Default Goals" or run the OODA daemon to generate goals from meetings.</span>';}
         if(d.backlog?.length){
           document.getElementById('goals-backlog').innerHTML=`<table class="proc-table">
-            <tr><th>ID</th><th>Description</th><th>Source</th><th>Score</th><th>Actions</th></tr>
-            ${d.backlog.map(b=>`<tr>
-              <td><code>${esc(b.id)}</code></td>
+            <tr><th>Title</th><th>Description</th><th>Source</th><th>Score</th><th>Actions</th></tr>
+            ${d.backlog.map(b=>{
+              const title=esc(b.display_id||b.id||'');
+              const isMemId=/^(sem|epi|wrk|pro|sns)_[0-9a-f]{8,}/.test(b.id||'');
+              const titleCell=isMemId?title:'<code>'+title+'</code>';
+              return`<tr>
+              <td>${titleCell}</td>
               <td>${esc(b.description)}</td>
-              <td>${esc(b.source||'')}</td>
-              <td>${b.score??'—'}</td>
+              <td style="font-size:.8rem;color:#8b949e">${esc(b.source||'')}</td>
+              <td>${typeof b.score==='number'?Math.round(b.score*100)+'%':(b.score??'—')}</td>
               <td>
                 <button class="btn" style="font-size:.7rem;padding:2px 6px" onclick="promoteGoal('${esc(b.id)}')">▲ Promote</button>
                 <button class="btn" style="font-size:.7rem;padding:2px 6px;margin-left:4px" onclick="removeGoal('${esc(b.id)}')">✕</button>
               </td>
-            </tr>`).join('')}
+            </tr>`}).join('')}
           </table>`;
         }else{document.getElementById('goals-backlog').innerHTML='<span style="color:#8b949e">No backlog items</span>';}
       }catch(e){document.getElementById('goals-active').innerHTML='<span class="err">Failed to load goals — check state root</span>';}
