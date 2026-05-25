@@ -108,6 +108,75 @@ pub(crate) const PART_05: &str = r#"      try {
       ws.onclose = () => { setAgentLogStatus('detached', '#8b949e'); if(agentLogWS === ws) agentLogWS = null; };
     }
 
+    /* --- Merge Judge Decisions (#2041) --- */
+    async function fetchMergeJudge(){
+      const el=document.getElementById('merge-judge-panel');
+      if(!el) return;
+      try {
+        const d = await apiFetch('/api/merge-judge');
+        const persistenceAvailable = !!d.persistence_available;
+        const decisions = Array.isArray(d.decisions) ? d.decisions : [];
+        const summary = d.summary || {};
+
+        if(!persistenceAvailable && decisions.length === 0){
+          el.innerHTML =
+              '<div style="padding:1rem;text-align:center">'
+            +   '<div style="font-size:2rem;margin-bottom:.5rem">📋</div>'
+            +   '<div style="color:#8b949e;font-size:.95rem;max-width:540px;margin:0 auto;line-height:1.6">'
+            +     'No merge-judge decisions have been recorded yet. '
+            +     'When the merge judge evaluates a pull request, the verdict — approved, rejected, '
+            +     'or deferred — will appear here with the reasoning and timestamp.'
+            +   '</div>'
+            +   '<div style="color:#8b949e;font-size:.8rem;margin-top:.75rem;padding:.5rem;background:#1a2332;border-radius:4px;display:inline-block">'
+            +     '⏳ Verdict persistence is not yet enabled. '
+            +     esc(d.persistence_reason || 'See issue #1893.')
+            +   '</div>'
+            + '</div>';
+          return;
+        }
+
+        if(decisions.length === 0){
+          el.innerHTML = '<div style="color:#8b949e;font-size:.85rem">No decisions recorded in this session.</div>';
+          return;
+        }
+
+        const summaryHtml =
+            '<div style="display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:.75rem;font-size:.85rem">'
+          +   '<span>Total: <strong>'+esc(String(summary.total||0))+'</strong></span>'
+          +   '<span class="ok">Approved: <strong>'+esc(String(summary.approved||0))+'</strong></span>'
+          +   '<span class="err">Rejected: <strong>'+esc(String(summary.rejected||0))+'</strong></span>'
+          +   '<span class="warn">Deferred: <strong>'+esc(String(summary.deferred||0))+'</strong></span>'
+          + '</div>';
+
+        const rows = decisions.map(function(dec){
+          const verdict = String(dec.verdict||'unknown');
+          let badge;
+          if(verdict === 'ready')          badge = '<span class="ok">✓ approved</span>';
+          else if(verdict === 'not_ready') badge = '<span class="err">✗ rejected</span>';
+          else if(verdict === 'unclear')   badge = '<span class="warn">? deferred</span>';
+          else                             badge = '<span style="color:#8b949e">'+esc(verdict)+'</span>';
+          const blockers = Array.isArray(dec.blockers) && dec.blockers.length
+            ? '<div style="margin-top:.3rem;font-size:.8rem;color:#8b949e">Blockers: '
+              + dec.blockers.map(function(b){return esc(b.section)+' ('+esc(b.severity)+'): '+esc(b.observation);}).join('; ')
+              + '</div>'
+            : '';
+          return '<tr>'
+               + '<td><a href="https://github.com/rysweet/Simard/pull/'+esc(String(dec.pr_number))+'" target="_blank" style="color:var(--accent)">#'+esc(String(dec.pr_number))+'</a></td>'
+               + '<td>'+badge+'</td>'
+               + '<td style="max-width:400px">'+esc(String(dec.rationale||''))+blockers+'</td>'
+               + '<td style="color:#8b949e">'+formatTime(dec.evaluated_at)+'</td>'
+               + '</tr>';
+        }).join('');
+
+        el.innerHTML = summaryHtml
+          + '<table class="proc-table" data-testid="merge-judge-table">'
+          + '<thead><tr><th>PR</th><th>Verdict</th><th>Reasoning</th><th>Evaluated</th></tr></thead>'
+          + '<tbody>' + rows + '</tbody></table>';
+      } catch(e) {
+        el.innerHTML = '<span class="err">Failed to load merge-judge decisions: '+esc(e.message||e)+'</span>';
+      }
+    }
+
     /* --- Merge Readiness (#1880) --- */
     async function fetchMergeReadiness(){
       const el=document.getElementById('merge-readiness-panel');

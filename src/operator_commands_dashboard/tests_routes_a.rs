@@ -296,9 +296,10 @@ mod tests {
             "workboard",
             "thinking",
             "brain-failures",
+            "merge-decisions",
             "terminal",
         ];
-        assert_eq!(tabs.len(), 12, "expected exactly 12 top-level tabs");
+        assert_eq!(tabs.len(), 13, "expected exactly 13 top-level tabs");
 
         for tab in &tabs {
             let needle = format!(r#"data-tab="{tab}" title=""#);
@@ -329,6 +330,8 @@ mod tests {
             "chat",
             "workboard",
             "thinking",
+            "brain-failures",
+            "merge-decisions",
             "terminal",
         ];
         for tab in &tabs {
@@ -370,6 +373,7 @@ mod tests {
             "workboard",
             "thinking",
             "brain-failures",
+            "merge-decisions",
             "terminal",
         ];
         for tab in &tabs {
@@ -636,22 +640,22 @@ mod tests {
         );
     }
 
-    /// Sanity-check on the page-lede count: there must be exactly 12
-    /// (one per tab) — a stricter bound than the existing `>= 12`
-    /// assertion. If a refactor accidentally adds a 13th, we want to
+    /// Sanity-check on the page-lede count: there must be exactly 13
+    /// (one per tab) — a stricter bound than the existing `>= 13`
+    /// assertion. If a refactor accidentally adds a 14th, we want to
     /// know immediately so we can decide whether the new container is
     /// actually a new tab or a misuse of the class.
     #[test]
     fn index_html_has_exactly_eleven_page_intros() {
         let count = INDEX_HTML.matches(r#"class="page-lede""#).count();
         assert_eq!(
-            count, 12,
-            "expected exactly 12 page-lede paragraphs (one per top-level tab), got {count}"
+            count, 13,
+            "expected exactly 13 page-lede paragraphs (one per top-level tab), got {count}"
         );
         let h1_count = INDEX_HTML.matches(r#"class="page-h1""#).count();
         assert_eq!(
-            h1_count, 12,
-            "expected exactly 12 page-h1 headings (one per top-level tab), got {h1_count}"
+            h1_count, 13,
+            "expected exactly 13 page-h1 headings (one per top-level tab), got {h1_count}"
         );
     }
 
