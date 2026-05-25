@@ -475,4 +475,176 @@ ACTION: cleaned shared-target dir
         let result = truncate("hello", 0);
         assert_eq!(result, "…");
     }
+
+    // ------------------------------------------------------------------
+    // Recipe YAML contract tests (TDD — written before implementation)
+    //
+    // These tests validate that disk-health-check.yaml satisfies the
+    // agent-step contract defined in issue #2051. They read the in-tree
+    // recipe file and assert structural + content properties.
+    // ------------------------------------------------------------------
+
+    fn load_recipe_yaml() -> String {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let recipe_path = std::path::Path::new(manifest_dir)
+            .join("prompt_assets/simard/recipes/disk-health-check.yaml");
+        std::fs::read_to_string(&recipe_path).unwrap_or_else(|e| {
+            panic!(
+                "failed to read recipe YAML at {}: {e}",
+                recipe_path.display()
+            )
+        })
+    }
+
+    #[test]
+    fn recipe_yaml_uses_agent_step_not_bash() {
+        let yaml = load_recipe_yaml();
+        assert!(
+            !yaml.contains("type: \"bash\"") && !yaml.contains("type: 'bash'"),
+            "recipe must NOT contain a bash step — should be agent-based"
+        );
+        assert!(
+            yaml.contains("type: \"agent\"") || yaml.contains("type: 'agent'"),
+            "recipe must contain an agent step"
+        );
+    }
+
+    #[test]
+    fn recipe_yaml_has_version_2() {
+        let yaml = load_recipe_yaml();
+        assert!(
+            yaml.contains("version: \"2.0.0\"") || yaml.contains("version: '2.0.0'"),
+            "recipe version must be 2.0.0 (behavioral change: bash → agent)"
+        );
+    }
+
+    #[test]
+    fn recipe_yaml_is_single_step() {
+        let yaml = load_recipe_yaml();
+        // Count occurrences of "- id:" which marks step boundaries
+        let step_count = yaml
+            .lines()
+            .filter(|l| {
+                let trimmed = l.trim();
+                trimmed.starts_with("- id:")
+            })
+            .count();
+        assert_eq!(
+            step_count, 1,
+            "recipe must have exactly one step, found {step_count}"
+        );
+    }
+
+    #[test]
+    fn recipe_yaml_preserves_context_state_root() {
+        let yaml = load_recipe_yaml();
+        assert!(
+            yaml.contains("state_root"),
+            "recipe must define state_root context variable"
+        );
+        assert!(
+            yaml.contains("~/.simard"),
+            "state_root default must be ~/.simard"
+        );
+    }
+
+    #[test]
+    fn recipe_yaml_prompt_instructs_disk_used_pct_marker() {
+        let yaml = load_recipe_yaml();
+        assert!(
+            yaml.contains("DISK_USED_PCT="),
+            "agent prompt must instruct emission of DISK_USED_PCT= marker"
+        );
+    }
+
+    #[test]
+    fn recipe_yaml_prompt_instructs_freed_bytes_marker() {
+        let yaml = load_recipe_yaml();
+        assert!(
+            yaml.contains("FREED_BYTES="),
+            "agent prompt must instruct emission of FREED_BYTES= marker"
+        );
+    }
+
+    #[test]
+    fn recipe_yaml_prompt_instructs_action_marker() {
+        let yaml = load_recipe_yaml();
+        assert!(
+            yaml.contains("ACTION:"),
+            "agent prompt must instruct emission of ACTION: markers"
+        );
+    }
+
+    #[test]
+    fn recipe_yaml_prompt_mentions_cleanup_targets() {
+        let yaml = load_recipe_yaml();
+        assert!(
+            yaml.contains("engineer-worktrees"),
+            "prompt must mention engineer-worktrees cleanup target"
+        );
+        assert!(
+            yaml.contains("backups"),
+            "prompt must mention backups cleanup target"
+        );
+        assert!(
+            yaml.contains("cargo-target") || yaml.contains("shared-target"),
+            "prompt must mention cargo/shared target cleanup targets"
+        );
+    }
+
+    #[test]
+    fn recipe_yaml_prompt_mentions_claim_file_check() {
+        let yaml = load_recipe_yaml();
+        assert!(
+            yaml.contains(".simard-engineer-claim"),
+            "prompt must describe .simard-engineer-claim PID-check pattern"
+        );
+    }
+
+    #[test]
+    fn recipe_yaml_prompt_mentions_df_measurement() {
+        let yaml = load_recipe_yaml();
+        assert!(
+            yaml.contains("df") || yaml.contains("disk usage"),
+            "prompt must instruct df-based disk measurement"
+        );
+    }
+
+    #[test]
+    fn recipe_yaml_prompt_mentions_80_percent_threshold() {
+        let yaml = load_recipe_yaml();
+        assert!(
+            yaml.contains("80%") || yaml.contains("80 %") || yaml.contains("eighty"),
+            "prompt must mention the 80% threshold"
+        );
+    }
+
+    #[test]
+    fn recipe_yaml_has_no_hardcoded_rm_or_find() {
+        let yaml = load_recipe_yaml();
+        // The recipe itself (outside the agent prompt) must not contain
+        // hardcoded bash commands. The YAML "command:" field should be gone.
+        assert!(
+            !yaml.contains("command: |"),
+            "recipe must not contain a bash command block — cleanup logic belongs to the agent"
+        );
+    }
+
+    #[test]
+    fn recipe_yaml_agent_step_has_prompt() {
+        let yaml = load_recipe_yaml();
+        assert!(
+            yaml.contains("prompt: |") || yaml.contains("prompt: >"),
+            "agent step must have a multi-line prompt field"
+        );
+    }
+
+    #[test]
+    fn recipe_yaml_agent_step_uses_default_agent() {
+        let yaml = load_recipe_yaml();
+        assert!(
+            yaml.contains("agent: \"default\"") || yaml.contains("agent: 'default'"),
+            "agent step must use agent: \"default\""
+        );
+    }
 }
