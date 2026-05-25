@@ -146,7 +146,10 @@ for labeled fields:
 1. Iterate `response.lines()`.
 2. For each line, check `starts_with("ADJUSTED_URGENCY:")` (case-insensitive),
    extract and parse the float value.
-3. Similarly for `RATIONALE:`, `CONFIDENCE:`, and `DEMOTION_APPLIED:`.
+3. Similarly for `RATIONALE:` and `CONFIDENCE:`.  (`DEMOTION_APPLIED:` is
+   **not** scanned — it is computed by the daemon as
+   `base_urgency − adjusted_urgency`; if the model emits it, the line is
+   silently ignored like any unknown label.)
 4. Non-matching lines are ignored.
 5. If `ADJUSTED_URGENCY:` is missing, return error; caller falls back to the
    deterministic floor formula.

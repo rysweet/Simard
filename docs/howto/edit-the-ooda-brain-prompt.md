@@ -154,10 +154,11 @@ RATIONALE: ordinary goal id with open PR, default routing
 **Orient** uses labeled lines:
 ```
 ADJUSTED_URGENCY: 0.60
-DEMOTION_APPLIED: 0.20
 RATIONALE: 1 failure: standard floor demotion
 CONFIDENCE: 0.9
 ```
+
+(`demotion_applied` is computed by the daemon — the model should not emit it.)
 
 Edit the `OUTPUT_FORMAT` and `EXAMPLES` sections of each prompt to steer
 behavior. Do not use JSON examples — the parser does not accept JSON.

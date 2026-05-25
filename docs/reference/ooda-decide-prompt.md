@@ -107,8 +107,9 @@ DECISION: <variant>
 ```
 
 The parser:
-1. Finds the first non-blank line matching `DECISION:` (case-insensitive on
-   the keyword).
+1. Finds the first non-blank line and checks that it starts with `DECISION:`
+   (case-insensitive on the keyword). Only the first non-blank line is
+   inspected — a `DECISION:` line later in the response is ignored.
 2. Extracts the variant token and matches against the `DecideJudgment` enum.
 3. Collects remaining lines as the `rationale` field.
 
@@ -165,7 +166,8 @@ must exist at build time and be valid UTF-8, and should stay under ~32 KB.
 `parse_judgment_from_response` (in `src/ooda_brain/decide.rs`) uses the
 DECISION marker as its **sole** parser:
 
-1. Find the first non-blank line matching `DECISION:` (case-insensitive).
+1. Find the first non-blank line; verify it starts with `DECISION:`
+   (case-insensitive). Only the first non-blank line is checked.
 2. Extract the variant token; match against `DecideJudgment` variants.
 3. Collect remaining text as the `rationale`.
 4. If no marker is found, return error; caller falls back to deterministic
