@@ -173,8 +173,19 @@ pub struct BenchmarkRunReport {
 pub struct BenchmarkSuiteScenarioSummary {
     pub scenario_id: String,
     pub passed: bool,
+    /// `true` when the scenario was skipped (e.g. auth unavailable).
+    /// Skipped scenarios do not count as failures for suite-level pass/fail.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub skipped: bool,
+    /// Human-readable reason the scenario was skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
     pub session_id: String,
     pub report_json: String,
+}
+
+fn is_false(v: &bool) -> bool {
+    !v
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

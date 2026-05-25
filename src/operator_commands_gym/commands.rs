@@ -120,11 +120,26 @@ pub fn run_gym_suite(suite_id: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("Suite: {}", report.suite_id);
     println!("Suite passed: {}", report.passed);
     for scenario in &report.scenarios {
+        if scenario.skipped {
+            let reason = scenario
+                .skip_reason
+                .as_deref()
+                .unwrap_or("auth unavailable");
+            println!("- {}: SKIPPED ({})", scenario.scenario_id, reason);
+        } else {
+            println!(
+                "- {}: {} ({})",
+                scenario.scenario_id,
+                if scenario.passed { "passed" } else { "failed" },
+                scenario.report_json
+            );
+        }
+    }
+    let skipped_count = report.scenarios.iter().filter(|s| s.skipped).count();
+    if skipped_count > 0 {
         println!(
-            "- {}: {} ({})",
-            scenario.scenario_id,
-            if scenario.passed { "passed" } else { "failed" },
-            scenario.report_json
+            "WARN: {} scenario(s) skipped due to unavailable auth",
+            skipped_count
         );
     }
     println!("Suite artifact report: {}", report.artifact_path);
