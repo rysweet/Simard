@@ -125,8 +125,14 @@ impl SessionBuilder {
     /// the base name for backward compatibility.
     pub fn adapter_tag(mut self, tag: &str) -> Self {
         // Normalise legacy tags: "meeting-rustyclawd" → "meeting"
-        let base = tag.replace("-rustyclawd", "").replace("-copilot", "");
-        self.adapter_tag = base;
+        // Check before replacing to avoid redundant allocations in the common case.
+        self.adapter_tag = if tag.contains("-rustyclawd") {
+            tag.replace("-rustyclawd", "")
+        } else if tag.contains("-copilot") {
+            tag.replace("-copilot", "")
+        } else {
+            tag.to_owned()
+        };
         self
     }
 
@@ -154,7 +160,15 @@ impl SessionBuilder {
     /// describing exactly which step failed.
     #[tracing::instrument(skip(self), fields(provider = ?self.provider, tag = %self.adapter_tag))]
     pub fn open(self) -> Result<Box<dyn BaseTypeSession>, String> {
-        let request = self.build_request();
+        // Inline request construction to move prompt_assets instead of cloning.
+        let request = BaseTypeSessionRequest {
+            session_id: SessionId::from_uuid(uuid::Uuid::now_v7()),
+            mode: self.mode,
+            topology: self.topology,
+            prompt_assets: self.prompt_assets,
+            runtime_node: RuntimeNodeId::new(&self.node_id),
+            mailbox_address: RuntimeAddress::new(&self.address),
+        };
         match self.provider {
             LlmProvider::Copilot => {
                 let tag = format!("{}-copilot", self.adapter_tag);
