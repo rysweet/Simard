@@ -194,7 +194,7 @@ test.describe('Dashboard Overview - live activity surfaces @structural', () => {
     );
     await expect(overview.agentLiveStatus).toBeVisible();
     const text = await overview.agentLiveStatus.textContent();
-    expect(text).toContain('OODA Loop Active');
+    expect(text).toContain('Decision Loop Active');
     expect(text).toContain('#42');
   });
 
