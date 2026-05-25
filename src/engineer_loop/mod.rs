@@ -312,6 +312,8 @@ pub fn inspect_workspace(workspace_root: &Path, state_root: &Path) -> SimardResu
 }
 
 mod meeting_decisions;
+#[cfg(test)]
+mod tests_meeting_decisions;
 // re-exported for cfg(test) consumers in engineer_loop/tests_mod_more.rs and tests_mod_most.rs (false-positive of clippy unused_imports on lib pass — see #1405)
 #[allow(unused_imports)]
 pub(crate) use meeting_decisions::{

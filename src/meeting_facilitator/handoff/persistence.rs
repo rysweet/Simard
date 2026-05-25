@@ -422,6 +422,112 @@ pub fn write_meeting_bundle(
     Ok(dir)
 }
 
+/// A loaded per-meeting bundle containing the structured handoff, the full
+/// transcript, and the optional human-readable markdown report.
+///
+/// Returned by [`load_meeting_bundle`]. Fields that could not be loaded
+/// (because the file was absent — e.g. legacy v1 handoffs that predate
+/// the bundle writer) are `None` / empty.
+#[derive(Clone, Debug)]
+pub struct MeetingBundle {
+    pub handoff: MeetingHandoff,
+    pub transcript: Vec<BundleTranscriptLine>,
+    pub markdown_report: Option<String>,
+    /// Filesystem path to the bundle directory.
+    pub bundle_dir: PathBuf,
+}
+
+/// Load the per-meeting bundle for `meeting_id`.
+///
+/// Reads `transcript.json` and `meeting_handoff.md` from the bundle
+/// directory alongside the structured handoff JSON that lives in the
+/// handoff queue. Returns `Ok(None)` when the bundle directory does not
+/// exist (legacy handoffs written before the bundle writer). Individual
+/// missing files inside an existing bundle dir are tolerated — the
+/// transcript defaults to `vec![]` and the markdown report to `None`.
+pub fn load_meeting_bundle(meeting_id: &str) -> SimardResult<Option<MeetingBundle>> {
+    let dir = meeting_bundle_dir(meeting_id);
+    if !dir.is_dir() {
+        return Ok(None);
+    }
+
+    // Read the structured handoff JSON from the bundle dir.
+    let handoff_path = dir.join(BUNDLE_HANDOFF_JSON);
+    let handoff = if handoff_path.is_file() {
+        let raw = fs::read_to_string(&handoff_path).map_err(|e| SimardError::ArtifactIo {
+            path: handoff_path.clone(),
+            reason: format!("reading bundle handoff: {e}"),
+        })?;
+        serde_json::from_str(&raw).map_err(|e| SimardError::ArtifactIo {
+            path: handoff_path.clone(),
+            reason: format!("parsing bundle handoff JSON: {e}"),
+        })?
+    } else {
+        // No handoff JSON in the bundle — caller should use the queue handoff.
+        return Ok(None);
+    };
+
+    // Transcript: best-effort.
+    let transcript_path = dir.join(BUNDLE_TRANSCRIPT_JSON);
+    let transcript = if transcript_path.is_file() {
+        match fs::read_to_string(&transcript_path) {
+            Ok(raw) => {
+                let bt: Result<BundleTranscript, _> = serde_json::from_str(&raw);
+                match bt {
+                    Ok(bt) => bt.lines,
+                    Err(e) => {
+                        tracing::info!(
+                            path = %transcript_path.display(),
+                            error = %e,
+                            "bundle transcript.json present but unparseable; falling back to empty"
+                        );
+                        Vec::new()
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::info!(
+                    path = %transcript_path.display(),
+                    error = %e,
+                    "bundle transcript.json unreadable; falling back to empty"
+                );
+                Vec::new()
+            }
+        }
+    } else {
+        tracing::info!(
+            meeting_id = meeting_id,
+            "no transcript.json in bundle dir — legacy handoff"
+        );
+        Vec::new()
+    };
+
+    // Markdown report: best-effort.
+    let md_path = dir.join(BUNDLE_HANDOFF_MD);
+    let markdown_report = if md_path.is_file() {
+        match fs::read_to_string(&md_path) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::info!(
+                    path = %md_path.display(),
+                    error = %e,
+                    "bundle meeting_handoff.md unreadable; skipping"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    Ok(Some(MeetingBundle {
+        handoff,
+        transcript,
+        markdown_report,
+        bundle_dir: dir,
+    }))
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct BundleTranscript {
     meeting_id: String,

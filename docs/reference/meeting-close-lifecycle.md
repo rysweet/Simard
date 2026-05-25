@@ -379,6 +379,34 @@ This is a behavior fix only; no public API changed.
 
 ---
 
+## Consumers
+
+The close pipeline writes a per-meeting bundle to
+`<state-root>/meetings/<meeting_id>/`. Three consumers read handoff
+artifacts today:
+
+| Consumer | File | Reads | Selector |
+|---|---|---|---|
+| OODA curate | `src/ooda_loop/curate.rs` `check_meeting_handoffs` | `meeting_handoff.json` (flat, in handoff queue) | `find_oldest_unprocessed_handoff` |
+| `act-on-decisions` | `src/operator_cli/decisions.rs` `dispatch_act_on_decisions` | `meeting_handoff.json` (flat, in handoff queue) | `load_meeting_handoff` (newest) |
+| Engineer carry-over | `src/engineer_loop/meeting_decisions.rs` `load_carried_meeting_decisions` | `meeting_handoff.json` (queue) + per-meeting bundle (`transcript.json`, `meeting_handoff.md`) | `find_oldest_unprocessed_handoff` + `load_meeting_bundle` |
+
+### Bundle path layout
+
+```
+<state-root>/meetings/<meeting_id>/
+├── meeting_handoff.json   # structured handoff (same schema as queue file)
+├── meeting_handoff.md     # human-readable report
+└── transcript.json        # full conversation (Vec<BundleTranscriptLine>)
+```
+
+The engineer loop derives `meeting_id` from the selected handoff's
+`meeting_id` field (v2+) or falls back to `derive_meeting_id(&started_at,
+&topic)` for legacy v1 handoffs. It tolerates absent bundle files — the
+legacy code path (flat handoff only) remains functional.
+
+---
+
 ## See also
 
 - [State-root resolution](./state-root-resolution.md) — where the

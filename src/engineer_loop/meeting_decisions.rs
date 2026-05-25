@@ -21,10 +21,21 @@ pub(crate) fn load_carried_meeting_decisions(state_root: &Path) -> SimardResult<
         })
         .collect::<Vec<_>>();
 
-    // Also check for unprocessed meeting handoff artifacts.
+    // Use find_oldest_unprocessed_handoff (FIFO queue) instead of the
+    // legacy load_meeting_handoff (newest-wins) — issue #1985 / #1649.
     let handoff_dir = crate::meeting_facilitator::default_handoff_dir();
-    match crate::meeting_facilitator::load_meeting_handoff(&handoff_dir) {
-        Ok(Some(handoff)) if !handoff.processed => {
+    match crate::meeting_facilitator::find_oldest_unprocessed_handoff(&handoff_dir) {
+        Ok(Some(handoff_path)) => {
+            let raw = fs::read_to_string(&handoff_path).map_err(|e| SimardError::ArtifactIo {
+                path: handoff_path.clone(),
+                reason: format!("reading handoff: {e}"),
+            })?;
+            let handoff: crate::meeting_facilitator::MeetingHandoff = serde_json::from_str(&raw)
+                .map_err(|e| SimardError::ArtifactIo {
+                    path: handoff_path.clone(),
+                    reason: format!("failed to parse handoff JSON: {e}"),
+                })?;
+
             for d in &handoff.decisions {
                 carried.push(format!(
                     "meeting handoff — {}: {} (rationale: {})",
@@ -37,11 +48,6 @@ pub(crate) fn load_carried_meeting_decisions(state_root: &Path) -> SimardResult<
                     handoff.topic, a.description, a.owner, a.priority,
                 ));
             }
-            // Issue #1954: surface `next_owner` and `artifacts[]` so the
-            // engineer loop's next inspect step can see who the meeting
-            // expected to pick up the work and which files to read. The
-            // canonical CarriedMeetingContext promotion is deferred to
-            // issue #6 of epic #1951.
             if let Some(ref owner) = handoff.next_owner {
                 carried.push(format!(
                     "meeting handoff — {} next_owner: {}",
@@ -59,11 +65,51 @@ pub(crate) fn load_carried_meeting_decisions(state_root: &Path) -> SimardResult<
                     handoff.topic, art.kind, art.uri_or_path, desc,
                 ));
             }
+
+            // Derive meeting_id: use the handoff's field, fall back to
+            // derive_meeting_id for legacy v1 handoffs with empty meeting_id.
+            let meeting_id = if handoff.meeting_id.is_empty() {
+                crate::meeting_facilitator::derive_meeting_id(&handoff.started_at, &handoff.topic)
+            } else {
+                handoff.meeting_id.clone()
+            };
+
+            // Attempt to load the per-meeting bundle (transcript.json +
+            // meeting_handoff.md). Tolerate absence — legacy handoffs
+            // predate the bundle writer.
+            match crate::meeting_facilitator::load_meeting_bundle(&meeting_id) {
+                Ok(Some(bundle)) => {
+                    carried.push(format!(
+                        "meeting handoff — bundle: {}",
+                        bundle.bundle_dir.display(),
+                    ));
+                    if !bundle.transcript.is_empty() {
+                        carried.push(format!(
+                            "meeting handoff — {} transcript lines: {}",
+                            handoff.topic,
+                            bundle.transcript.len(),
+                        ));
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!(
+                        meeting_id = %meeting_id,
+                        "no per-meeting bundle found — legacy handoff path"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        meeting_id = %meeting_id,
+                        error = %e,
+                        "failed to load per-meeting bundle; continuing with handoff only"
+                    );
+                }
+            }
         }
-        Ok(_) => {}
+        Ok(None) => {}
         Err(e) => {
             eprintln!(
-                "[simard] warning: failed to load meeting handoff from '{}': {e}",
+                "[simard] warning: failed to scan for unprocessed handoffs in '{}': {e}",
                 handoff_dir.display()
             );
         }
