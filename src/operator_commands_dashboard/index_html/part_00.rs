@@ -247,7 +247,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
 
   <div class="tab-content" id="tab-memory">
     <h1 class="page-h1">Memory</h1>
-    <p class="page-lede">Everything Simard has learned and remembered, organised by memory type (working, semantic, episodic, procedural, prospective, and sensory) with full-text search.</p>
+    <p class="page-lede">Everything Simard has learned and remembered — what it's thinking about, facts learned, events remembered, known procedures, planned actions, and recent observations — with full-text search.</p>
 
     <div class="card" style="margin-bottom:1rem;border:1px solid #238636;background:linear-gradient(135deg,#0d1117,#0f1a12)">
       <div style="display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap">
@@ -278,12 +278,12 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
     <div id="mem-graph-panel">
       <div class="card" style="margin-bottom:.5rem;padding:.5rem .75rem">
         <div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:center;font-size:.8rem">
-          <label style="color:#f0883e"><input type="checkbox" class="mem-filter" data-type="WorkingMemory" checked> Working</label>
-          <label style="color:#58a6ff"><input type="checkbox" class="mem-filter" data-type="SemanticFact" checked> Semantic</label>
-          <label style="color:#3fb950"><input type="checkbox" class="mem-filter" data-type="EpisodicMemory" checked> Episodic</label>
-          <label style="color:#a371f7"><input type="checkbox" class="mem-filter" data-type="ProceduralMemory" checked> Procedural</label>
-          <label style="color:#d29922"><input type="checkbox" class="mem-filter" data-type="ProspectiveMemory" checked> Prospective</label>
-          <label style="color:#8b949e"><input type="checkbox" class="mem-filter" data-type="SensoryBuffer" checked> Sensory</label>
+          <label style="color:#f0883e"><input type="checkbox" class="mem-filter" data-type="WorkingMemory" checked> Currently thinking about</label>
+          <label style="color:#58a6ff"><input type="checkbox" class="mem-filter" data-type="SemanticFact" checked> Facts learned</label>
+          <label style="color:#3fb950"><input type="checkbox" class="mem-filter" data-type="EpisodicMemory" checked> Events remembered</label>
+          <label style="color:#a371f7"><input type="checkbox" class="mem-filter" data-type="ProceduralMemory" checked> Known procedures</label>
+          <label style="color:#d29922"><input type="checkbox" class="mem-filter" data-type="ProspectiveMemory" checked> Planned actions</label>
+          <label style="color:#8b949e"><input type="checkbox" class="mem-filter" data-type="SensoryBuffer" checked> Recent observations</label>
         </div>
       </div>
       <div style="display:flex;gap:1rem">

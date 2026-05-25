@@ -165,12 +165,12 @@ pub(crate) const PART_02: &str = r#"          if(d.ooda_transcripts?.length){
           const nm=d.native_memory;
           overviewHtml+=`
           <h3 style="color:var(--accent);font-size:.9rem;margin-top:.75rem;border-top:1px solid var(--border);padding-top:.5rem">Memory Store</h3>
-          <div class="stat"><span class="label">Sensory</span><span class="value">${nm.sensory}</span></div>
-          <div class="stat"><span class="label">Working</span><span class="value">${nm.working}</span></div>
-          <div class="stat"><span class="label">Episodic</span><span class="value">${nm.episodic}</span></div>
-          <div class="stat"><span class="label">Semantic (Facts)</span><span class="value">${nm.semantic}</span></div>
-          <div class="stat"><span class="label">Procedural</span><span class="value">${nm.procedural}</span></div>
-          <div class="stat"><span class="label">Prospective</span><span class="value">${nm.prospective}</span></div>
+          <div class="stat"><span class="label">Recent observations</span><span class="value">${nm.sensory}</span></div>
+          <div class="stat"><span class="label">Currently thinking about</span><span class="value">${nm.working}</span></div>
+          <div class="stat"><span class="label">Events remembered</span><span class="value">${nm.episodic}</span></div>
+          <div class="stat"><span class="label">Facts learned</span><span class="value">${nm.semantic}</span></div>
+          <div class="stat"><span class="label">Known procedures</span><span class="value">${nm.procedural}</span></div>
+          <div class="stat"><span class="label">Planned actions</span><span class="value">${nm.prospective}</span></div>
           <div class="stat"><span class="label"><strong>Total Native</strong></span><span class="value"><strong>${nm.total}</strong></span></div>`;
         }
         document.getElementById('mem-overview').innerHTML=overviewHtml;

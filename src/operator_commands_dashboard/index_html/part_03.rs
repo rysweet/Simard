@@ -10,7 +10,8 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
               const detailText=g.detail||'';
               const detailHtml=detailText?'<span style="font-size:.8rem;margin-left:6px">'+esc(detailText)+'</span>':'';
               const full=g.detail_full||'';
-              const expandHtml=(full&&full!==detailText)?'<details style="display:inline;margin-left:6px"><summary style="display:inline;cursor:pointer;color:#8b949e;font-size:.7rem">[raw]</summary><pre style="margin:.3rem 0 0;white-space:pre-wrap;font-size:.75rem;color:#8b949e">'+esc(full)+'</pre></details>':'';
+              const isFailed=(chip==='Failed');
+              const expandHtml=(full&&full!==detailText)?'<details style="display:inline;margin-left:6px"'+(isFailed?' open':'')+' ><summary style="display:inline;cursor:pointer;color:'+(isFailed?'#f85149':'#8b949e')+';font-size:.7rem">'+(isFailed?'[error]':'[raw]')+'</summary><pre style="margin:.3rem 0 0;white-space:pre-wrap;font-size:.75rem;color:'+(isFailed?'#f85149':'#8b949e')+'">'+esc(full)+'</pre></details>':'';
               let wipHtml='—';
               if(chip!=='Waiting'||detailText||g.wip_refs?.length){
                 let parts=[];
@@ -225,7 +226,7 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
         if(d.error){document.getElementById('mem-graph-stats').textContent='Error: '+d.error;return;}
         const s=d.stats||{};
         document.getElementById('mem-graph-stats').textContent=
-          'W:'+(s.working||0)+' S:'+(s.semantic||0)+' E:'+(s.episodic||0)+' P:'+(s.procedural||0)+' Pr:'+(s.prospective||0)+' Se:'+(s.sensory||0);
+          'Thinking:'+(s.working||0)+' Facts:'+(s.semantic||0)+' Events:'+(s.episodic||0)+' Procedures:'+(s.procedural||0)+' Planned:'+(s.prospective||0)+' Observed:'+(s.sensory||0);
         mgNodes=(d.nodes||[]);mgEdges=(d.edges||[]);
         mgInitLayout();mgApplyFilters();mgSimulate();
       }catch(e){document.getElementById('mem-graph-stats').textContent='Load failed';}
