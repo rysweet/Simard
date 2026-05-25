@@ -6,8 +6,10 @@
 # Context vars (passed via -c):
 #   state_root  — path to ~/.simard (worktrees, backups, cargo dirs live here)
 #
-# Output: JSON to stdout:
-#   {"disk_used_pct": <0-100>, "freed_bytes": <int>, "actions_taken": [...]}
+# Output: text markers to stdout (one per line):
+#   DISK_USED_PCT=<0-100>
+#   FREED_BYTES=<int>
+#   ACTION: <description>   (one line per action taken; omitted if none)
 #
 # Design: single bash step — no LLM, fully deterministic, hot-reloadable.
 
@@ -65,7 +67,7 @@ steps:
 
       # ── 2. If below threshold, report and exit ─────────────────────────
       if [ "$disk_pct" -lt "$THRESHOLD" ]; then
-        printf '{"disk_used_pct":%d,"freed_bytes":0,"actions_taken":[]}\n' "$disk_pct"
+        printf 'DISK_USED_PCT=%d\nFREED_BYTES=0\n' "$disk_pct"
         exit 0
       fi
 
@@ -133,21 +135,9 @@ steps:
       if [ "$freed_kb" -lt 0 ]; then freed_kb=0; fi
       freed_bytes=$((freed_kb * 1024))
 
-      # Build JSON array of actions
-      json_actions="["
-      first=true
+      # Emit text markers (parsed by parse_disk_health_text in src/disk_health.rs)
+      printf 'DISK_USED_PCT=%d\nFREED_BYTES=%d\n' "$disk_pct_after" "$freed_bytes"
       for a in "${actions[@]}"; do
-        if [ "$first" = true ]; then
-          first=false
-        else
-          json_actions+=","
-        fi
-        # Escape double quotes in action strings
-        escaped=$(printf '%s' "$a" | sed 's/"/\\"/g')
-        json_actions+="\"$escaped\""
+        printf 'ACTION: %s\n' "$a"
       done
-      json_actions+="]"
-
-      printf '{"disk_used_pct":%d,"freed_bytes":%d,"actions_taken":%s}\n' \
-        "$disk_pct_after" "$freed_bytes" "$json_actions"
     output: "disk_health_report"
