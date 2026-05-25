@@ -441,3 +441,45 @@ fn test_help_text_mentions_goal_subcommands() {
         );
     }
 }
+
+// ── issue #1981: --help must work on every subcommand ──
+
+#[test]
+fn test_all_subcommands_accept_help_flag() {
+    // Every operator subcommand must accept --help, -h, and help
+    // without erroring. This is the regression test for issue #1981.
+    let subcommands = &[
+        "engineer",
+        "meeting",
+        "goal",
+        "goal-curation",
+        "improvement-curation",
+        "review",
+        "gym",
+        "ooda",
+        "dashboard",
+        "spawn",
+        "merge-pr",
+        "worktree-gc",
+        "handover",
+        "bootstrap",
+        "act-on-decisions",
+        "update",
+        "self-test",
+        "safe-update",
+        "rollback",
+        "rollback-watchdog",
+        "ensure-deps",
+        "cleanup",
+        "install",
+    ];
+    for subcmd in subcommands {
+        for flag in &["--help", "-h"] {
+            let result = dispatch_operator_cli(vec![subcmd.to_string(), flag.to_string()]);
+            assert!(
+                result.is_ok(),
+                "`simard {subcmd} {flag}` must exit Ok (issue #1981), got: {result:?}"
+            );
+        }
+    }
+}
