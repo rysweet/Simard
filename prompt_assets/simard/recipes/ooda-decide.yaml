@@ -1,0 +1,81 @@
+# ooda-decide.yaml — Recipe-runner recipe for the OODA Decide brain.
+#
+# Replaces the direct LLM call in RustyClawdDecideBrain for deployments
+# where recipe-runner-rs is available, aligning with the architectural
+# direction in issue #1971.
+#
+# Context vars (passed via -c):
+#   goal_id, urgency, reason
+#
+# Output: agent stdout — raw text whose first non-blank line is
+#   DECISION: <action_kind>
+# followed by a rationale on subsequent lines.
+
+name: "ooda-decide"
+description: "Recipe-runner-backed OODA Decide brain for Simard action-kind routing"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "ooda", "decide"]
+
+context: {}
+
+steps:
+  - id: "decide-action-kind"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      CRITICAL: Your first non-blank line MUST be `DECISION: <variant>`. Do NOT output JSON.
+
+      You are the routing brain for Simard's OODA Decide phase. The Orient phase
+      just ranked goals; for each priority, you decide which kind of action the
+      daemon should dispatch.
+
+      ## CONTEXT
+
+      A single priority entry produced by the Orient phase:
+
+      - goal_id: {{goal_id}}
+      - urgency: {{urgency}}
+      - reason: {{reason}}
+
+      Field semantics:
+
+      - goal_id — Either a real goal slug (e.g. improve-cognitive-memory-persistence)
+        or one of the reserved synthetic IDs:
+        - __memory__ → cross-session memory consolidation
+        - __improvement__ → run the gym-driven self-improvement loop
+        - __poll_activity__ → poll developer activity / ingest signals
+        - __extract_ideas__ → mine recent activity for new research ideas
+        - __safe_update__ → brain-orchestrated safe self-update
+      - urgency — Orient's score in [0.0, 1.0].
+      - reason — Human-readable rationale Orient attached to the priority.
+
+      ## OPTIONS
+
+      Pick exactly one choice:
+
+      - advance_goal — Default for any non-reserved goal_id.
+      - consolidate_memory — Use for the reserved __memory__ synthetic ID.
+      - run_improvement — Use for __improvement__.
+      - poll_developer_activity — Use for __poll_activity__.
+      - extract_ideas — Use for __extract_ideas__.
+      - safe_update — Use for __safe_update__.
+      - research_query — Only if the reason explicitly requests research.
+      - run_gym_eval — Reserved; only if explicitly enabled.
+      - build_skill — Reserved; only if explicitly enabled.
+      - launch_session — Reserved; only if explicitly enabled.
+
+      Be conservative: prefer advance_goal for ordinary goal IDs unless a clear
+      signal in the goal_id or reason indicates a special routing.
+
+      ## OUTPUT FORMAT
+
+      First non-blank line must be exactly:
+      DECISION: <variant>
+
+      Followed by a short rationale on subsequent lines.
+
+      Example:
+      DECISION: advance_goal
+      ordinary goal slug, default routing
+    output: "decide_result"

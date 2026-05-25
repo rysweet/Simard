@@ -22,6 +22,7 @@ mod judgment_record;
 mod orient;
 pub mod parse_failure;
 pub mod prompt_store;
+mod recipe_decide;
 mod rustyclawd;
 
 #[cfg(test)]
@@ -49,6 +50,7 @@ pub use orient::{
     build_rustyclawd_orient_brain,
 };
 pub use parse_failure::ParseFailureRecord;
+pub use recipe_decide::{RecipeDecideBrain, build_recipe_decide_brain};
 pub use rustyclawd::{
     LlmSubmitter, PROMPT_NAME as ACT_PROMPT_NAME, RustyClawdBrain, SessionLlmSubmitter,
     build_rustyclawd_brain,

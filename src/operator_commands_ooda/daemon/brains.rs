@@ -86,11 +86,27 @@ pub(super) fn build_act_brain(state_root: &Path) -> Arc<dyn crate::ooda_brain::O
     }
 }
 
-/// Construct the Decide brain (PR #1469 wire-up). Returns `None` on Err so
-/// `cycle::run_ooda_cycle` falls back to [`crate::ooda_brain::DeterministicFallbackDecideBrain`].
+/// Construct the Decide brain (PR #1469 wire-up). Tries, in order:
+///   1. Recipe-runner-rs backed brain (if binary + recipe YAML available)
+///   2. RustyClawdDecideBrain (direct LLM)
+///   3. DeterministicFallbackDecideBrain (no LLM)
+///
+/// Returns `None` on Err so `cycle::run_ooda_cycle` falls back to
+/// [`crate::ooda_brain::DeterministicFallbackDecideBrain`].
 pub(super) fn build_decide_brain(
     state_root: &Path,
 ) -> Option<Arc<dyn crate::ooda_brain::OodaDecideBrain>> {
+    // 1. Try recipe-runner-rs backed brain first (issue #2105)
+    let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    if let Some(b) = crate::ooda_brain::build_recipe_decide_brain(&repo_root) {
+        daemon_log(
+            state_root,
+            "[simard] OODA daemon: decide_brain = RecipeDecideBrain (recipe-runner-rs backed)",
+        );
+        return Some(Arc::from(b));
+    }
+
+    // 2. Fall back to direct LLM (RustyClawdDecideBrain)
     match crate::ooda_brain::build_rustyclawd_decide_brain() {
         Ok(b) => {
             daemon_log(
