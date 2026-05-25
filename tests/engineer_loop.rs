@@ -481,6 +481,7 @@ fn engineer_loop_run_includes_non_zero_elapsed_duration() {
 }
 
 #[test]
+#[ignore = "requires amplihack binary + LLM provider not available in CI"]
 fn engineer_loop_meeting_handoff_load_failure_surfaces_in_stderr() {
     // When SIMARD_HANDOFF_DIR points at a directory with a corrupt handoff file,
     // the engineer loop should emit a warning to stderr instead of silently swallowing it.
@@ -507,7 +508,8 @@ fn engineer_loop_meeting_handoff_load_failure_surfaces_in_stderr() {
         .output()
         .expect("engineer-loop probe should launch");
 
-    if skip_if_no_llm_provider(&output) {
+    let rendered = rendered_output(&output);
+    if skip_if_no_llm_provider(&rendered) {
         return;
     }
 
