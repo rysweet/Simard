@@ -172,3 +172,5 @@ for the full grammar of each format.
 * [Reference: text-parsing wire formats](../reference/text-parsing-wire-formats.md)
 * [Reference: `OodaBrain` API](../reference/ooda-brain-api.md)
 * [Reference: `ooda_brain.md` prompt schema](../reference/ooda-brain-prompt.md)
+* [Reference: `ooda_decide.md` prompt schema](../reference/ooda-decide-prompt.md)
+* [Reference: `ooda_orient.md` prompt schema](../reference/ooda-orient-prompt.md)

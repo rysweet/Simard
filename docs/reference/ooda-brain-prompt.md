@@ -261,6 +261,8 @@ When adding a new variant:
 
 ## See Also
 
+* [Reference: `ooda_decide.md` prompt schema](ooda-decide-prompt.md) — decide-phase prompt
+* [Reference: `ooda_orient.md` prompt schema](ooda-orient-prompt.md) — orient-phase prompt
 * [Concept: text-based brain protocol](../concepts/text-based-brain-protocol.md)
 * [Concept: prompt-driven OODA brain](../concepts/prompt-driven-ooda-brain.md)
 * [Reference: text-parsing wire formats](text-parsing-wire-formats.md)
