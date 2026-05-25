@@ -37,6 +37,8 @@ Field semantics:
   - `__improvement__` → run the gym-driven self-improvement loop
   - `__poll_activity__` → poll developer activity / ingest signals
   - `__extract_ideas__` → mine recent activity for new research ideas
+  - `__safe_update__` → brain-orchestrated safe self-update (see Self-update
+    awareness section below)
 - `urgency` — Orient's score in `[0.0, 1.0]`. Already filtered to
   > `f64::EPSILON` upstream; you do not need to gate on it again.
 - `reason` — Human-readable rationale Orient attached to the priority.

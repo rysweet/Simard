@@ -28,7 +28,10 @@ For the design rationale, see
 
 ## Protocol 1: DECISION marker (OODA brains)
 
-Used by: `ooda_brain::decide`, `ooda_brain::orient`, `ooda_brain::rustyclawd`
+Used by: `ooda_brain::decide`, `ooda_brain::rustyclawd`
+
+> **Note:** `ooda_brain::orient` uses JSON format instead — see
+> [§ 1b. Orient phase](#1b-orient-phase-orientrs).
 
 ### Grammar
 
@@ -126,38 +129,31 @@ unchanged.
 
 **Struct:** `OrientJudgment`
 
-**Labeled fields** (all optional):
+**JSON fields:**
 
-| Label | Type | Default | Validation |
+| Field | Type | Default | Validation |
 |-------|------|---------|------------|
-| `ADJUSTED_URGENCY:` | `f64` | Required (parse fails without it) | Must be in `[0.0, base_urgency]` |
-| `DEMOTION_APPLIED:` | `f64` | Computed as `base_urgency - adjusted_urgency` | Must be ≥ 0 |
-| `RATIONALE:` | `String` | `"<no rationale provided>"` | None |
-| `CONFIDENCE:` | `f64` | `1.0` | Must be in `[0.0, 1.0]` |
+| `adjusted_urgency` | `f64` | Required (parse fails without it) | Must be in `[0.0, base_urgency]` |
+| `demotion_applied` | `f64` | `0.0` (daemon recomputes) | Must be ≥ 0 |
+| `rationale` | `String` | Required (parse fails without it) | None |
+| `confidence` | `f64` | `1.0` | Must be in `[0.0, 1.0]` |
 
 **Example valid responses:**
 
-Minimal (all fields):
-```
-ADJUSTED_URGENCY: 0.60
-DEMOTION_APPLIED: 0.20
-RATIONALE: 1 failure: standard floor demotion
-CONFIDENCE: 0.9
+Full JSON object:
+```json
+{"adjusted_urgency": 0.60, "demotion_applied": 0.20, "rationale": "1 failure: standard floor demotion", "confidence": 0.9}
 ```
 
-With surrounding prose:
+With surrounding prose (tolerated, not encouraged):
 ```
-Given a single recent failure and no indication of persistent issues,
-I'll apply the standard floor demotion.
-
-ADJUSTED_URGENCY: 0.60
-RATIONALE: 1 failure: standard floor demotion
-CONFIDENCE: 0.9
+Given a single recent failure, I'll apply the standard floor demotion.
+{"adjusted_urgency": 0.60, "rationale": "1 failure: standard floor demotion", "confidence": 0.9}
 ```
 
-Minimal valid:
-```
-ADJUSTED_URGENCY: 0.6
+Minimal valid (confidence defaults to 1.0, demotion_applied defaults to 0.0):
+```json
+{"adjusted_urgency": 0.6, "rationale": "standard demotion"}
 ```
 
 **Validation:** `OrientJudgment::validate()` enforces:
@@ -168,9 +164,9 @@ ADJUSTED_URGENCY: 0.6
 If validation fails, the deterministic floor applies:
 `urgency - 0.2 × failure_count`, clamped to `[0.0, 1.0]`.
 
-**Prompt update:** The `ooda_orient.md` prompt's `OUTPUT_FORMAT` section now
-instructs models to emit labeled lines instead of a JSON object. The
-`EXAMPLES` section shows the text format.
+**Parser:** The `parse_judgment_from_response` function extracts the first
+`{…}` substring from the response and deserializes it via `serde_json`.
+The old labeled-line format is no longer accepted.
 
 ---
 
@@ -446,7 +442,7 @@ Each parser has inline `#[cfg(test)]` tests in its source file:
 | Module | Test count | Coverage |
 |--------|-----------|----------|
 | `decide.rs` | 8+ | All variant tokens, missing DECISION line, rationale extraction, fallback |
-| `orient.rs` | 6+ | All labeled fields, partial fields, validation failure, default confidence |
+| `orient.rs` | 8+ | JSON parsing, surrounding prose, missing fields, validation, extra fields, markdown fences, empty/invalid responses, labeled-line rejection |
 | `rustyclawd.rs` | 15+ (T1–T15) | Full behavior matrix per decision protocol reference |
 | `recipe_progress_checker.rs` | 4+ | Accept, reject, no keyword (default), mixed case |
 | `recipe_merge_judge.rs` | 5+ | Ready, not_ready, unclear, no keyword (default), substring safety |
@@ -458,14 +454,13 @@ Each parser has inline `#[cfg(test)]` tests in its source file:
 
 If you maintain OODA brain prompts (`prompt_assets/simard/ooda_*.md`):
 
-1. **OUTPUT_FORMAT sections now specify text format, not JSON.** The
-   `DECISION:` marker or labeled-line format is documented in each prompt's
-   `OUTPUT_FORMAT` section. Do not revert to JSON instructions.
+1. **OUTPUT_FORMAT sections specify the expected wire format.** The decide and
+   engineer-lifecycle brains use `DECISION:` marker format. The orient brain
+   uses **JSON object format**. Do not mix these formats across brains.
 
-2. **EXAMPLES sections use text format.** Update any custom examples you've
-   added to follow the text format. JSON examples will not cause parse
-   failures (the parser ignores lines it doesn't recognize) but the model
-   will learn the wrong output format.
+2. **EXAMPLES sections use the brain's wire format.** For decide/rustyclawd,
+   use text `DECISION:` examples. For orient, use JSON object examples.
+   Mismatched formats cause the model to learn the wrong output pattern.
 
 3. **The parser is more tolerant than JSON.** Models can emit prose before
    and after the structured content. This is by design — the parser finds
