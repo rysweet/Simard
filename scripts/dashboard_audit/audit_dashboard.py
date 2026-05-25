@@ -70,6 +70,10 @@ def discover_routes(page):
         c = counts[r["slug"]] = counts.get(r["slug"], 0) + 1
         if c > 1: r["slug"] = f"{r['slug']}_{c}"
     return routes[:MAX_ROUTES]
+def _tab_slug_from_href(href):
+    """Extract the data-tab slug from a hash href like '#/overview' or '#overview'."""
+    return href.lstrip("#").lstrip("/").split("?")[0].split("/")[0].strip()
+
 def capture_page(page, route):
     http_errs, console_errs = [], []
     on_r = lambda r: (getattr(r, "status", 0) >= 400) and http_errs.append({"url": getattr(r, "url", "?"), "status": r.status})
@@ -77,15 +81,69 @@ def capture_page(page, route):
     page.on("response", on_r); page.on("console", on_c)
     try:
         href, slug = route["href"], route["slug"]
-        if href.startswith("#"): _t(lambda: page.evaluate("(h)=>{window.location.hash=h.slice(1);}", href))
-        elif href.startswith("/"): _t(lambda: page.goto(f"{BASE_URL}{href}", wait_until="domcontentloaded"))
+        if href.startswith("#"):
+            tab_slug = _tab_slug_from_href(href)
+            # Click the actual .tab element — the dashboard doesn't listen for
+            # hashchange, it only switches tabs via click handlers on .tab[data-tab].
+            clicked = _t(lambda: page.evaluate(r"""(slug) => {
+                const tab = document.querySelector('.tab[data-tab="' + slug + '"]');
+                if (tab) { tab.click(); return true; }
+                // Fallback: try clicking any tab whose text matches the slug
+                for (const el of document.querySelectorAll('.tab')) {
+                    if ((el.textContent || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '') ===
+                        slug.toLowerCase().replace(/[^a-z0-9]/g, '')) {
+                        el.click(); return true;
+                    }
+                }
+                return false;
+            }""", tab_slug), False)
+            if not clicked:
+                print(f"[capture] {slug}: no matching tab element for '{tab_slug}'")
+            # Wait for the tab panel to become active
+            try:
+                page.wait_for_selector(f"#tab-{tab_slug}.active", timeout=5000)
+            except Exception:
+                pass  # not all tabs follow #tab-{slug} convention
+        elif href.startswith("/"):
+            _t(lambda: page.goto(f"{BASE_URL}{href}", wait_until="domcontentloaded"))
         _t(lambda: page.wait_for_load_state("networkidle", timeout=TIMEOUT_MS))
-        _t(lambda: page.wait_for_timeout(1200))
+        _t(lambda: page.wait_for_timeout(1500))
         _t(lambda: page.screenshot(path=str(OUT_DIR / f"{slug}.png"), full_page=True))
-        text = _t(lambda: page.evaluate("()=>document.body?document.body.innerText:''"), "") or ""
+        # Capture text from the active tab panel to get tab-specific content,
+        # falling back to full body if no active panel is found.
+        tab_slug = _tab_slug_from_href(href) if href.startswith("#") else ""
+        text = _t(lambda: page.evaluate(r"""(slug) => {
+            // Try the active tab-content panel first
+            const panel = document.querySelector('.tab-content.active');
+            if (panel && panel.innerText && panel.innerText.trim().length > 0) {
+                return panel.innerText;
+            }
+            // Try by #tab-{slug}
+            if (slug) {
+                const byId = document.getElementById('tab-' + slug);
+                if (byId && byId.innerText) return byId.innerText;
+            }
+            return document.body ? document.body.innerText : '';
+        }""", tab_slug), "") or ""
         if not isinstance(text, str): text = str(text)
         title = _t(lambda: page.evaluate("()=>document.title"), "") or ""
-        h1 = _t(lambda: page.evaluate("()=>{const h=document.querySelector('h1');return h?h.innerText.trim():null;}"))
+        h1 = _t(lambda: page.evaluate(r"""(slug) => {
+            // Look for h1 in the active tab panel first
+            const panel = document.querySelector('.tab-content.active');
+            if (panel) {
+                const h = panel.querySelector('h1, .page-h1');
+                if (h) return h.innerText.trim();
+            }
+            if (slug) {
+                const byId = document.getElementById('tab-' + slug);
+                if (byId) {
+                    const h = byId.querySelector('h1, .page-h1');
+                    if (h) return h.innerText.trim();
+                }
+            }
+            const h = document.querySelector('h1');
+            return h ? h.innerText.trim() : null;
+        }""", tab_slug))
         (OUT_DIR / f"{slug}.txt").write_text(text)
         (OUT_DIR / f"{slug}.errors.json").write_text(json.dumps({"http": http_errs, "console": console_errs}, indent=2))
         return {"slug": slug, "href": href, "url": href, "label": route.get("label", slug),
