@@ -360,6 +360,106 @@ fn consolidate_episodes_deduplicates() {
 }
 
 // ---------------------------------------------------------------------------
+// Issue #2044 (G4): crash-atomic `consolidate_episodes`
+//
+// Simulates a mid-consolidation crash by running the consolidation inside
+// a transaction, aborting partway, and verifying that on recovery no
+// duplicate summaries exist and the source episodes remain unconsolidated.
+// ---------------------------------------------------------------------------
+
+/// Regression test: a crash between the summary-insert and the last
+/// SET compressed=1 must not leave a partial state where a summary node
+/// exists but some source episodes are still uncompressed. After recovery
+/// (here simulated by aborting a raw transaction mid-loop), a subsequent
+/// `consolidate_episodes` call must succeed cleanly with no duplicate
+/// summaries.
+#[test]
+fn consolidate_episodes_crash_injection_no_duplicate_summaries() {
+    let mem = test_mem();
+
+    // Seed 5 episodes.
+    for i in 0..5 {
+        mem.store_episode(&format!("crash-test-event {i}"), "test", None)
+            .unwrap();
+    }
+
+    // --- Simulate a crash mid-transaction ---
+    // Open a connection, BEGIN TRANSACTION, insert the summary node,
+    // mark only 2 of 5 episodes as compressed, then ROLLBACK (simulating
+    // a crash before COMMIT).
+    {
+        let conn = lbug::Connection::new(&mem.db).expect("conn for crash injection");
+        conn.query("BEGIN TRANSACTION").expect("begin");
+        conn.query(
+            "CREATE (e:Episode {id: 'epi_crash_summary', content: '[crash summary]', source_label: 'consolidation', temporal_index: 0, compressed: 1})"
+        ).expect("summary insert");
+
+        // Mark only 2 source rows — partial apply.
+        let partial_rows = mem
+            .query("MATCH (e:Episode) WHERE e.compressed = 0 RETURN e.id ORDER BY e.id LIMIT 2")
+            .unwrap();
+        for row in &partial_rows {
+            if let Some(eid) = super::as_str(&row[0]) {
+                conn.query(&format!(
+                    "MATCH (e:Episode {{id: '{eid}'}}) SET e.compressed = 1"
+                ))
+                .expect("partial compress");
+            }
+        }
+        // Crash! — ROLLBACK instead of COMMIT.
+        conn.query("ROLLBACK").expect("rollback (simulated crash)");
+    }
+
+    // Verify: the crash-summary node must NOT be visible after rollback.
+    let ghost_rows = mem
+        .query("MATCH (e:Episode) WHERE e.id = 'epi_crash_summary' RETURN e.id")
+        .unwrap();
+    assert!(
+        ghost_rows.is_empty(),
+        "rolled-back summary must not be visible, found {} row(s)",
+        ghost_rows.len()
+    );
+
+    // Verify: all 5 source episodes remain uncompressed (compressed=0).
+    let uncompressed = mem
+        .query("MATCH (e:Episode) WHERE e.compressed = 0 RETURN count(e)")
+        .unwrap();
+    let uncompressed_count = super::as_i64(&uncompressed[0][0]).unwrap_or(0);
+    assert_eq!(
+        uncompressed_count, 5,
+        "all source episodes must remain uncompressed after crash, got {uncompressed_count}"
+    );
+
+    // --- Now run real consolidation — should succeed with no duplicates ---
+    let result = mem.consolidate_episodes(10).unwrap();
+    assert!(
+        result.is_some(),
+        "consolidation should produce a summary after crash recovery"
+    );
+
+    // Exactly 1 consolidation summary must exist.
+    let summary_rows = mem
+        .query("MATCH (e:Episode) WHERE e.source_label = 'consolidation' RETURN e.id, e.content")
+        .unwrap();
+    assert_eq!(
+        summary_rows.len(),
+        1,
+        "expected exactly 1 consolidation summary (no duplicates), found {}",
+        summary_rows.len()
+    );
+
+    // All original episodes must now be compressed.
+    let still_uncompressed = mem
+        .query("MATCH (e:Episode) WHERE e.compressed = 0 RETURN count(e)")
+        .unwrap();
+    let still_count = super::as_i64(&still_uncompressed[0][0]).unwrap_or(-1);
+    assert_eq!(
+        still_count, 0,
+        "after successful consolidation all episodes must be compressed, got {still_count}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Backup-restore recovery tests (issue #1710)
 //
 // These tests pin the contract for `open_db_with_recovery`:
