@@ -1,68 +1,102 @@
-# Reference: `ooda_decide.md` Prompt Schema
+# Reference: OODA Decide Recipe and Prompt Schema
 
-File: `prompt_assets/simard/ooda_decide.md`
-Loaded at compile time via `include_str!` from `src/ooda_brain/decide.rs`.
+Recipe: `prompt_assets/simard/recipes/ooda-decide.yaml`
+Prompt source: `prompt_assets/simard/ooda_decide.md` (content embedded in recipe YAML)
+Shim: `src/ooda_brain/recipe_decide.rs`
 
 This is the single source of truth for the decide-phase action-kind routing
-decision. Edit this file to change how Simard routes priorities to action
-kinds; no Rust changes required (rebuild + daemon restart).
+decision. The decide brain runs as a **recipe step** via `recipe-runner-rs`,
+following the same pattern as `progress-assessment.yaml` and
+`merge-readiness-judge.yaml`. The agent's prose output is scanned for action
+keywords — no `DECISION:` marker or structured output format is required.
 
-## File Layout
+> **History:** Before issue
+> [#2111](https://github.com/rysweet/Simard/issues/2111), the decide brain
+> was `RustyClawdDecideBrain`, which compiled the prompt via `include_str!`,
+> submitted it to an `LlmSubmitter`, and parsed the response using a
+> `DECISION:` marker on the first line. This was fragile — the agent
+> consistently returned the correct action keyword in its prose, but the
+> parser demanded a specific format the model frequently ignored. The
+> recipe-based approach removes the format requirement entirely and scans
+> for keywords instead.
 
-The prompt is a markdown document with five top-level sections, in this
-order:
+## Recipe Layout
 
-```markdown
-CRITICAL: Your first non-blank line MUST be `DECISION: <variant>`. Do NOT output JSON.
+```yaml
+name: ooda-decide
+description: Route an OODA priority to the correct action kind
+context:
+  goal_id: ""
+  urgency: ""
+  reason: ""
+steps:
+  - name: decide-action
+    type: agent
+    prompt: |
+      # OODA Brain — Decide Phase: Action-Kind Routing
 
-# OODA Brain — Decide Phase: Action-Kind Routing
+      ## ROLE
+      …
 
-## ROLE
-…
+      ## CONTEXT
+      Goal ID: {{goal_id}}
+      Urgency: {{urgency}}
+      Reason: {{reason}}
 
-## CONTEXT
-…(uses {goal_id}, {urgency}, {reason} placeholders)…
+      ## OPTIONS
+      …(variant tags: advance_goal, consolidate_memory, etc.)…
 
-## OPTIONS
-…(variant tags: advance_goal, consolidate_memory, etc.)…
+      ## EXAMPLES
+      …(text-format examples, one per routing case)…
 
-## OUTPUT_FORMAT
-…(prose-first DECISION marker protocol)…
+      ## Merge Authority
+      …
 
-## EXAMPLES
-…(text-format examples, one per routing case)…
+      ## Self-update awareness
+      …
 ```
 
-The **first line** of the file is an anti-JSON guard:
+The recipe is a single `agent` step. The recipe-runner-rs subprocess handles
+prompt rendering, agent invocation, and stdout capture. The Rust shim
+(`RecipeDecideBrain`) parses the stdout.
 
-```
-CRITICAL: Your first non-blank line MUST be `DECISION: <variant>`. Do NOT output JSON.
-```
+### What changed from `ooda_decide.md`
 
-This line exists because LLMs trained on JSON-heavy corpora will default to
-JSON output when the prompt's `OUTPUT_FORMAT` section is ambiguous. The guard
-line fires before the model reads any other instruction, making the constraint
-impossible to miss. It was added in PR #2035/#2040 after production logs showed
-12 decide-brain parse failures in 30 minutes — all caused by the model
-emitting `{"choice": "advance_goal", ...}` JSON instead of `DECISION:` markers.
+The recipe prompt preserves all content from the original `ooda_decide.md`
+**except**:
 
-## Placeholders
+- **Line 1 deleted** — the `CRITICAL: Your first non-blank line MUST be
+  DECISION: <variant>` guard is removed. The agent is no longer required
+  to emit a specific marker format.
+- **OUTPUT_FORMAT section deleted** — the entire section instructing the
+  model to emit `DECISION:` markers is removed. The keyword scanner finds
+  the action kind in natural prose.
+- **Placeholders converted** — `{goal_id}` → `{{goal_id}}`, `{urgency}` →
+  `{{urgency}}`, `{reason}` → `{{reason}}` to match recipe-runner-rs
+  Handlebars templating.
 
-`DecideBrain` performs literal `{name}` → value substitution in **CONTEXT**
-before submission. Unknown placeholders are left untouched.
+The ROLE, CONTEXT, OPTIONS, EXAMPLES, Merge Authority, and Self-update
+awareness sections are preserved verbatim.
 
-| Placeholder | Type | Source |
+## Placeholders (Context Variables)
+
+The recipe-runner-rs performs Handlebars `{{name}}` substitution from the
+context variables passed by `RecipeDecideBrain`.
+
+| Variable | Type | Source |
 |---|---|---|
-| `{goal_id}` | string | `ctx.goal_id` — goal slug or reserved synthetic ID |
-| `{urgency}` | f64 | `ctx.urgency` — Orient's score in `[0.0, 1.0]` |
-| `{reason}` | string | `ctx.reason` — Orient's rationale for this priority |
+| `{{goal_id}}` | string | `ctx.goal_id` — goal slug or reserved synthetic ID |
+| `{{urgency}}` | string (f64) | `ctx.urgency` — Orient's score in `[0.0, 1.0]` |
+| `{{reason}}` | string | `ctx.reason` — Orient's rationale for this priority |
 
-## Variant Tokens
+## Action Keywords
 
-The `OPTIONS` section enumerates the valid `DECISION:` variant tokens. Each
-maps 1:1 to a `DecideJudgment` enum variant in `src/ooda_brain/decide.rs`.
+The `OPTIONS` section enumerates the valid action keywords. Each maps 1:1
+to a `DecideJudgment` enum variant in `src/ooda_brain/decide.rs`. The keyword
+scanner in `recipe_decide.rs` finds these keywords in the agent's prose
+output.
 
-| Token | Enum variant | When to use |
+| Keyword | Enum variant | When to use |
 |---|---|---|
 | `advance_goal` | `DecideJudgment::AdvanceGoal` | Default for any non-reserved `goal_id` |
 | `consolidate_memory` | `DecideJudgment::ConsolidateMemory` | Reserved `__memory__` synthetic ID |
@@ -75,129 +109,175 @@ maps 1:1 to a `DecideJudgment` enum variant in `src/ooda_brain/decide.rs`.
 | `build_skill` | `DecideJudgment::BuildSkill` | Reserved for future use |
 | `launch_session` | `DecideJudgment::LaunchSession` | Reserved for future use |
 
-The `DECISION:` keyword is matched case-insensitively, but the variant token
-must match exactly (lowercase snake_case). The variant whitelist is the
-`DecideJudgment` enum itself — there is no parallel hand-maintained list.
+No keyword is a substring of another (verified at compile time). The scanner
+checks all 10 keywords on the lowercased output using `contains()`. If
+multiple keywords appear (rare — the agent is asked for a single routing
+decision), the first match in scan order is used.
 
-## Output Format
+## Keyword Scanner (replaces DECISION marker parser)
 
-The decide brain uses the **prose-first DECISION marker protocol**, the same
-format used by the engineer-lifecycle brain (`ooda_brain.md`). The wire format
-is documented normatively in
-[text-parsing wire formats § decide phase](text-parsing-wire-formats.md#1a-decide-phase-deciders).
+`RecipeDecideBrain` uses `parse_action_from_text()` in
+`src/ooda_brain/recipe_decide.rs` to extract the action kind from the
+agent's stdout. This follows the same **keyword verdict protocol** used by
+`recipe_progress_checker.rs` and `recipe_merge_judge.rs`.
 
-### Anti-JSON hardening
+### How it works
 
-The prompt contains **two** anti-JSON directives:
+1. Convert the full stdout to lowercase.
+2. Scan for each of the 10 action keywords using `contains()`.
+3. Return the first matching keyword as the `DecideJudgment`.
+4. If no keyword is found, return `DecideJudgment::AdvanceGoal` as the
+   default (same as the existing deterministic fallback for real goal slugs).
 
-1. **Line 1** — `CRITICAL: Your first non-blank line MUST be DECISION: <variant>. Do NOT output JSON.`
-2. **OUTPUT_FORMAT section** — `Do NOT output JSON. The daemon parser reads the first non-blank line for a DECISION: marker — a JSON object on the first line is an immediate parse failure.`
+### Why this works
 
-This redundancy is intentional. Production experience showed that a single
-`OUTPUT_FORMAT` instruction was insufficient — models would scan the
-examples section, find JSON-like patterns in the input context (which is
-a JSON object), and mirror that format in the output. The line-1 guard fires
-before any context is consumed.
-
-### Response format
+Production daemon logs showed that the agent **always** returned the correct
+action keyword in its prose. Typical responses:
 
 ```
-DECISION: <variant>
-<optional rationale prose>
+Looking at goal "__memory__", this is a reserved synthetic ID for memory
+consolidation. The appropriate action is consolidate_memory.
 ```
 
-The parser:
-1. Finds the first non-blank line and checks that it starts with `DECISION:`
-   (case-insensitive on the keyword). Only the first non-blank line is
-   inspected — a `DECISION:` line later in the response is ignored.
-2. Extracts the variant token and matches against the `DecideJudgment` enum.
-3. Collects remaining lines as the `rationale` field.
+```
+This is an ordinary goal with an open PR. The engineer should advance_goal
+to drive the PR to completion.
+```
 
-If no `DECISION:` line is found, the parser returns an error. The caller
-then falls back to `DeterministicFallbackDecideBrain`, which applies prefix
-mapping: `__memory__` → `consolidate_memory`, `__improvement__` →
-`run_improvement`, etc. Real goal slugs → `advance_goal`.
+The old `DECISION:` marker parser rejected both of these because the keyword
+wasn't on the first line in `DECISION: <variant>` format. The keyword scanner
+finds `consolidate_memory` and `advance_goal` directly.
+
+### Comparison with other keyword scanners
+
+| Site | Keywords | Default (no match) | Fail mode |
+|------|----------|--------------------|-----------|
+| Progress checker | `accept`, `reject` | `Accept` (fail-open) | Goal unblocked |
+| Merge judge | `ready`, `not_ready`, `unclear` | `NotReady` (fail-closed) | PR not merged |
+| **Decide brain** | 10 action keywords | `AdvanceGoal` (fail-safe) | Goal gets default routing |
+
+The `AdvanceGoal` default is safe because the deterministic fallback brain
+already maps real goal slugs to `advance_goal`. The keyword scanner simply
+makes the LLM's judgment reachable for edge cases where the deterministic
+mapping would be wrong (e.g., `research_query`).
+
+## Error Handling
+
+`RecipeDecideBrain` returns `Err(SimardError::AdapterInvocationFailed)` when:
+
+- The `recipe-runner-rs` binary is not found (construction fails;
+  `RecipeDecideBrain::new()` returns `None`).
+- The subprocess exits with a non-zero status.
+- The subprocess cannot be spawned (permission error, missing binary at
+  runtime, etc.).
+
+On `AdapterInvocationFailed`, the caller in `ooda_loop/decide.rs` records a
+parse failure, falls back per-priority to the deterministic mapping, and
+logs the error with the full stderr (truncated to 500 chars).
+
+The keyword scanner itself **never** returns an error — if no keyword is
+found, it returns `AdvanceGoal`. This is a conscious design choice: the
+agent is always given the option list, and `advance_goal` is the safe
+default for any real goal.
 
 ## Examples
 
-The prompt's `EXAMPLES` section contains text-format examples showing the
-correct output for each routing case. All examples use the DECISION marker
-format — no JSON examples appear in the prompt.
+The prompt's `EXAMPLES` section contains routing examples. Unlike the old
+DECISION marker format, examples now show natural prose responses:
 
-Example categories:
-
-| Case | Input pattern | Expected output |
+| Case | Input pattern | Example agent output |
 |---|---|---|
-| Reserved synthetic ID | `goal_id: "__memory__"` | `DECISION: consolidate_memory` |
-| Ordinary goal slug | `goal_id: "ship-v1"` | `DECISION: advance_goal` |
-| Activity polling | `goal_id: "__poll_activity__"` | `DECISION: poll_developer_activity` |
-| Negative example | Real goal with "memory" in name | `DECISION: advance_goal` (not `consolidate_memory`) |
+| Reserved synthetic ID | `goal_id: "__memory__"` | `This is a memory consolidation trigger. consolidate_memory.` |
+| Ordinary goal slug | `goal_id: "ship-v1"` | `Standard goal with open PR. advance_goal to drive completion.` |
+| Activity polling | `goal_id: "__poll_activity__"` | `Reserved polling ID. poll_developer_activity.` |
+| Negative example | Real goal with "memory" in name | `Despite the name, this is a real goal. advance_goal.` |
 
-Negative examples are critical: without them, models will pattern-match on
-substring similarity between the goal name and the variant token.
+Negative examples remain critical: without them, models pattern-match on
+substring similarity between the goal name and the action keyword.
 
 ## Merge Authority Section
 
 The prompt includes a `## Merge Authority` section documenting Simard's gated
 authority to squash-merge pull requests via `stewardship::merge_pr_if_merge_ready`.
 This section is **informational context** — it does not add a merge-related
-variant to the `DECISION:` whitelist. The brain surfaces merge-readiness
-observations in the rationale text and routes to `advance_goal`.
+action keyword. The brain surfaces merge-readiness observations in the
+rationale text and routes to `advance_goal`.
 
 ## Self-Update Awareness Section
 
 The prompt includes a `## Self-update awareness` section documenting the
-four-part doctrine for the `safe_update` variant. This variant triggers
+four-part doctrine for the `safe_update` action. This action triggers
 `simard safe-update` (drain → snapshot → pre-test → swap → exec → validate →
-optional rollback). The section gates the variant on:
+optional rollback). The section gates the action on:
 
 1. Divergence ≥ N commits behind `origin/main`
 2. No critical WIP (no in-flight engineers with PR-blocking goals)
 3. Clean previous cycle (no failures, no tracking issues)
 4. Cooldown elapsed (≥30 min since last attempt)
 
-## Compile-Time Embedding
+## Runtime Loading (not compile-time)
 
-Same rules as `ooda_brain.md`: the prompt is embedded with `include_str!`,
-must exist at build time and be valid UTF-8, and should stay under ~32 KB.
+Unlike `ooda_brain.md` (which is embedded via `include_str!`), the decide
+recipe is loaded at runtime by the recipe-runner-rs subprocess.
+`RecipeDecideBrain` resolves the recipe path relative to `repo_root`:
 
-## Parser Rules
+```
+{repo_root}/prompt_assets/simard/recipes/ooda-decide.yaml
+```
 
-`parse_judgment_from_response` (in `src/ooda_brain/decide.rs`) uses the
-DECISION marker as its **sole** parser:
+This means prompt edits take effect on the next daemon cycle **without a
+rebuild** — just edit the YAML and the next cycle picks it up. This is a
+significant improvement over the old `include_str!` approach, which required
+`cargo build` + `simard safe-update` for every prompt change.
 
-1. Find the first non-blank line; verify it starts with `DECISION:`
-   (case-insensitive). Only the first non-blank line is checked.
-2. Extract the variant token; match against `DecideJudgment` variants.
-3. Collect remaining text as the `rationale`.
-4. If no marker is found, return error; caller falls back to deterministic
-   prefix mapping.
-
-The JSON parser has been removed. A model that emits `{"choice":"advance_goal"}`
-will trigger `BrainResponseUnparseable` and the deterministic fallback.
+> **Note:** The `DECIDE_PROMPT_NAME` constant is retained in `decide.rs`
+> for audit-trail versioning via `prompt_store::current_version()`. It
+> identifies the prompt content for parse-failure diagnostics, not for
+> compile-time loading.
 
 ## Versioning & Compatibility
 
-Semantic changes (adding a new variant token) require a coordinated Rust
-change to `DecideJudgment` and `ActionKind`. Cosmetic edits (rationale
-guidance, examples, ROLE phrasing) are safe to ship alone.
-
-When adding a new variant:
+Semantic changes (adding a new action keyword) require a coordinated change:
 
 1. Add the variant to `DecideJudgment` in `src/ooda_brain/decide.rs`.
 2. Add the mapping from `DecideJudgment` → `ActionKind`.
-3. Add the variant to the `OPTIONS` section in the prompt.
-4. Add an example to the `EXAMPLES` section.
-5. Add a test to `src/ooda_brain/decide.rs` covering the new token.
-6. Update the variant table in
-   [text-parsing wire formats § decide](text-parsing-wire-formats.md#1a-decide-phase-deciders).
+3. Add the keyword to `parse_action_from_text()` in
+   `src/ooda_brain/recipe_decide.rs`.
+4. Add the keyword to the `OPTIONS` section in the recipe prompt.
+5. Add an example to the `EXAMPLES` section.
+6. Add a test to `recipe_decide.rs` covering the new keyword.
+7. Update the variant table in
+   [text-parsing wire formats § decide](text-parsing-wire-formats.md#2c-decide-brain-recipe_deciders).
+
+Cosmetic edits (rationale guidance, examples, ROLE phrasing) are safe to
+ship alone — and take effect without a rebuild.
+
+## Construction Pattern
+
+```rust
+let brain: Box<dyn OodaDecideBrain> = match RecipeDecideBrain::new(repo_root) {
+    Some(b) => Box::new(b),
+    None => {
+        eprintln!("[ooda] recipe-runner-rs not found; using deterministic fallback");
+        Box::new(DeterministicFallbackDecideBrain)
+    }
+};
+```
+
+`RecipeDecideBrain::new(repo_root)` returns `None` when:
+- The `recipe-runner-rs` binary is not on `$PATH`.
+- The recipe YAML file does not exist at the expected path.
+
+The daemon wiring in `operator_commands_ooda/daemon/brains.rs` calls
+`build_decide_brain(state_root, repo_root)`, which performs this
+construction.
 
 ## See Also
 
 * [Reference: `ooda_brain.md` prompt schema](ooda-brain-prompt.md) — engineer-lifecycle prompt
 * [Reference: `ooda_orient.md` prompt schema](ooda-orient-prompt.md) — orient-phase prompt
 * [Reference: text-parsing wire formats](text-parsing-wire-formats.md) — normative grammar
-* [Reference: OODA Brain Decision Protocol](ooda-brain-decision-protocol.md) — full behavior matrix
+* [Reference: `OodaBrain` API](ooda-brain-api.md) — trait and type definitions
 * [Concept: text-based brain protocol](../concepts/text-based-brain-protocol.md) — design rationale
 * [How-to: edit the OODA brain prompt](../howto/edit-the-ooda-brain-prompt.md) — editing guide
 * [How-to: diagnose decide/orient parse failures](../howto/diagnose-decide-orient-parse-failures.md) — operator runbook
