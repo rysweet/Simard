@@ -1,21 +1,23 @@
-# disk-health-check.yaml — Deterministic disk cleanup recipe (no LLM).
+# disk-health-check.yaml — Agent-based disk health check.
 #
-# Invoked by src/disk_health.rs via recipe-runner-rs. Checks disk usage on
-# the home partition and triggers cleanup when usage exceeds 80%.
+# Invoked by src/disk_health.rs via recipe-runner-rs. An agent checks disk
+# usage on the home partition and uses its judgment to clean up when usage
+# exceeds 80%.
 #
 # Context vars (passed via -c):
 #   state_root  — path to ~/.simard (worktrees, backups, cargo dirs live here)
 #
 # Output: text markers to stdout (one per line):
-#   DISK_USED_PCT=<0-100>
+#   DISK_USED_PCT=<0-255>
 #   FREED_BYTES=<int>
 #   ACTION: <description>   (one line per action taken; omitted if none)
 #
-# Design: single bash step — no LLM, fully deterministic, hot-reloadable.
+# Design: single agent step — the LLM decides what to clean and how
+# aggressively based on disk pressure. No hardcoded find/rm scripts.
 
 name: "disk-health-check"
-description: "Check disk usage and clean stale artifacts when usage exceeds 80%"
-version: "1.0.0"
+description: "Agent-based disk health check and adaptive cleanup"
+version: "2.0.0"
 author: "Simard"
 tags: ["simard", "disk", "maintenance", "ops"]
 
@@ -24,120 +26,76 @@ context:
 
 steps:
   - id: "check-and-clean"
-    type: "bash"
-    command: |
-      #!/usr/bin/env bash
-      set -euo pipefail
+    type: "agent"
+    agent: "default"
+    prompt: |
+      You are a disk health maintenance agent for Simard. Your job is to check
+      disk usage and, if needed, clean up stale artifacts to free space. You have
+      bash tools available to run shell commands.
 
-      STATE_ROOT="${state_root:-$HOME/.simard}"
-      THRESHOLD=80
-      # Emergency mode: keep fewer backups than normal (SIMARD_DB_BACKUP_KEEP
-      # defaults to 24) to reclaim space aggressively under disk pressure.
-      BACKUP_KEEP=5
+      ## Procedure
 
-      actions=()
+      1. **Measure current disk usage.** Run `df` on the `$HOME` partition to get
+         the current usage percentage. Parse the percentage from the output.
 
-      # ── Helper: record a cleanup action ─────────────────────────────────
-      record_action() {
-        actions+=("$1")
-      }
+      2. **If usage is below 80%**, no cleanup is needed. Print the output markers
+         and stop:
+         ```
+         DISK_USED_PCT=<current percentage>
+         FREED_BYTES=0
+         ```
 
-      # ── Helper: current disk usage percentage ──────────────────────────
-      get_disk_pct() {
-        local pct
-        pct=$(df --output=pcent "$HOME" 2>/dev/null | tail -1 | tr -d ' %')
-        if [ -z "$pct" ]; then
-          pct=$(df "$HOME" | tail -1 | awk '{gsub(/%/,""); print $5}')
-        fi
-        echo "$pct"
-      }
+      3. **If usage is 80% or above**, you need to free space. Record the available
+         space before cleanup (from `df`), then apply your judgment to clean from
+         the targets listed below. Be more aggressive when disk pressure is higher
+         (e.g., 95% warrants removing more than 82% does).
 
-      # ── Helper: available disk space in 1K blocks ──────────────────────
-      get_avail_kb() {
-        local kb
-        kb=$(df --output=avail "$HOME" 2>/dev/null | tail -1 | tr -d ' ')
-        if [ -z "$kb" ]; then
-          kb=$(df "$HOME" | tail -1 | awk '{print $4}')
-        fi
-        echo "$kb"
-      }
+      4. **After cleanup**, re-measure disk usage with `df`. Compute freed bytes
+         as the delta in available space (after minus before, in bytes). If the
+         delta is negative, report 0.
 
-      # ── 1. Measure current disk usage ──────────────────────────────────
-      disk_pct=$(get_disk_pct)
+      ## Cleanup Targets
 
-      # ── 2. If below threshold, report and exit ─────────────────────────
-      if [ "$disk_pct" -lt "$THRESHOLD" ]; then
-        printf 'DISK_USED_PCT=%d\nFREED_BYTES=0\n' "$disk_pct"
-        exit 0
-      fi
+      All cleanup targets live under `{{state_root}}`. Do NOT delete anything
+      outside this directory tree.
 
-      # ── 3. Clean stale engineer worktrees (>24h, no active process) ────
-      avail_before=$(get_avail_kb)
-      WORKTREE_DIR="$STATE_ROOT/engineer-worktrees"
-      if [ -d "$WORKTREE_DIR" ]; then
-        while IFS= read -r -d '' wt; do
-          # Skip symlinks
-          [ -L "$wt" ] && continue
+      - **`{{state_root}}/engineer-worktrees/`** — Stale worktrees older than 24
+        hours. Before removing a worktree, check for a `.simard-engineer-claim`
+        file inside it. If the file exists, read the first line as a PID and check
+        whether that PID is still alive (e.g., `kill -0 <pid>`). If the process is
+        alive, **skip** that worktree — it is actively in use. Only remove worktrees
+        where the claim file is missing or the PID is dead.
 
-          # Check for active claim file with a live PID
-          claim="$wt/.simard-engineer-claim"
-          if [ -f "$claim" ]; then
-            pid=$(head -1 "$claim" 2>/dev/null || true)
-            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-              continue  # Active process — skip
-            fi
-          fi
+      - **`{{state_root}}/engineer-worktrees/*/target/`** — Cargo build directories
+        inside remaining (non-stale) worktrees. These can be large and are always
+        safe to remove.
 
-          rm -rf "$wt"
-          record_action "removed stale worktree: $(basename "$wt")"
-        done < <(find "$WORKTREE_DIR" -mindepth 1 -maxdepth 1 -type d -not -type l -mmin +1440 -print0 2>/dev/null)
-      fi
+      - **`{{state_root}}/backups/`** — Database backup files. Keep approximately 5
+        of the most recent backups (by modification time) and remove the rest. Under
+        extreme disk pressure you may keep fewer, but never delete all backups.
 
-      # ── 4. Remove cargo target dirs inside remaining engineer worktrees ─
-      if [ -d "$WORKTREE_DIR" ]; then
-        while IFS= read -r -d '' tgt; do
-          [ -L "$tgt" ] && continue
-          rm -rf "$tgt"
-          record_action "removed worktree target: $(basename "$(dirname "$tgt")")/target"
-        done < <(find "$WORKTREE_DIR" -mindepth 2 -maxdepth 2 -type d -name target -print0 2>/dev/null)
-      fi
+      - **`{{state_root}}/cargo-target/`** and **`{{state_root}}/shared-target/`** —
+        Shared Cargo build caches. Remove `incremental/` and `debug/` subdirectories
+        within these. Under extreme pressure, you may remove more aggressively.
 
-      # ── 5. Prune LadybugDB backups to keep only N most recent ──────────
-      BACKUP_DIR="$STATE_ROOT/backups"
-      if [ -d "$BACKUP_DIR" ]; then
-        backup_count=$(find "$BACKUP_DIR" -maxdepth 1 -type f | wc -l)
-        if [ "$backup_count" -gt "$BACKUP_KEEP" ]; then
-          # Sort by mtime, delete oldest beyond BACKUP_KEEP
-          while IFS= read -r -d '' old; do
-            [ -L "$old" ] && continue
-            rm -f "$old"
-            record_action "pruned backup: $(basename "$old")"
-          done < <(find "$BACKUP_DIR" -maxdepth 1 -type f -not -type l -printf '%T@\t%p\0' \
-                   | sort -z -t$'\t' -k1,1n \
-                   | head -z -n -"$BACKUP_KEEP" \
-                   | cut -z -f2-)
-        fi
-      fi
+      ## Required Output Format
 
-      # ── 6. Clean cargo-target and shared-target caches ─────────────────
-      for cache_dir in "$STATE_ROOT/cargo-target" "$STATE_ROOT/shared-target"; do
-        if [ -d "$cache_dir" ]; then
-          find "$cache_dir" -type d -name incremental -exec rm -rf {} + 2>/dev/null || true
-          find "$cache_dir" -type d -name debug -exec rm -rf {} + 2>/dev/null || true
-          record_action "cleaned cache: $(basename "$cache_dir") (incremental+debug)"
-        fi
-      done
+      Your **final** output must contain these text markers, each on its own line.
+      The Rust shim (`parse_disk_health_text` in `src/disk_health.rs`) parses these
+      markers from your stdout. Any other lines are silently ignored.
 
-      # ── 7. Re-measure disk and compute freed bytes from df delta ───────
-      disk_pct_after=$(get_disk_pct)
-      avail_after=$(get_avail_kb)
-      freed_kb=$((avail_after - avail_before))
-      if [ "$freed_kb" -lt 0 ]; then freed_kb=0; fi
-      freed_bytes=$((freed_kb * 1024))
+      ```
+      DISK_USED_PCT=<integer 0-255>
+      FREED_BYTES=<integer, bytes freed>
+      ACTION: <one-line description of action taken>
+      ```
 
-      # Emit text markers (parsed by parse_disk_health_text in src/disk_health.rs)
-      printf 'DISK_USED_PCT=%d\nFREED_BYTES=%d\n' "$disk_pct_after" "$freed_bytes"
-      for a in "${actions[@]}"; do
-        printf 'ACTION: %s\n' "$a"
-      done
+      - `DISK_USED_PCT` is **required**. Use the post-cleanup percentage (or the
+        current percentage if no cleanup was needed).
+      - `FREED_BYTES` defaults to 0 if omitted. Use the actual `df` delta.
+      - `ACTION:` lines are optional. Emit one per cleanup action you took. If the
+        text after `ACTION:` is empty, it will be skipped.
+
+      Print these markers as plain text in your response — not inside code fences
+      or markdown formatting.
     output: "disk_health_report"

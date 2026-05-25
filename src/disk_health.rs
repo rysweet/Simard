@@ -3,13 +3,13 @@
 //! Invokes `recipe-runner-rs` executing
 //! `prompt_assets/simard/recipes/disk-health-check.yaml` as a subprocess,
 //! checks disk usage, triggers cleanup when usage exceeds 80%, and returns
-//! a structured JSON report.
+//! a structured [`DiskHealthReport`].
 //!
-//! The recipe YAML contains the deterministic bash cleanup logic; this
-//! module is a thin Rust shim that:
+//! The recipe YAML contains an agent step that adaptively decides what to
+//! clean based on disk pressure; this module is a thin Rust shim that:
 //!   1. Resolves the recipe path (hot-reload → in-tree fallback)
 //!   2. Spawns `recipe-runner-rs` with `-c` context vars
-//!   3. Parses stdout JSON into [`DiskHealthReport`]
+//!   3. Parses stdout text markers into [`DiskHealthReport`]
 //!   4. Logs results to daemon.log
 //!
 //! Follows the same pattern as `stewardship::recipe_merge_judge`.
@@ -26,7 +26,8 @@ const RECIPE_FILENAME: &str = "disk-health-check.yaml";
 
 /// Structured report returned by the disk-health-check recipe.
 ///
-/// The recipe's bash step outputs this as JSON to stdout.
+/// The recipe's agent step outputs text markers to stdout, parsed by
+/// [`parse_disk_health_text`].
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct DiskHealthReport {
     /// Current disk usage percentage (0–100).
@@ -86,8 +87,8 @@ fn resolve_recipe_path(repo_root: &Path) -> Option<PathBuf> {
 /// Run the disk health check recipe via `recipe-runner-rs`.
 ///
 /// `state_root` is the Simard state directory (typically `~/.simard`),
-/// passed to the recipe as a context var so the bash script knows where
-/// to find worktrees, backups, and cargo target dirs.
+/// passed to the recipe as a context var so the agent knows where to
+/// find worktrees, backups, and cargo target dirs.
 ///
 /// `repo_root` is used to locate the recipe YAML file.
 ///
@@ -146,7 +147,7 @@ fn truncate(s: &str, max: usize) -> String {
 
 /// Parse key=value and ACTION: lines from recipe stdout text.
 ///
-/// Expected format (bash recipe outputs this directly):
+/// Expected format (the agent step emits these markers):
 /// ```text
 /// DISK_USED_PCT=87
 /// FREED_BYTES=1024
@@ -154,9 +155,8 @@ fn truncate(s: &str, max: usize) -> String {
 /// ACTION: cleaned cargo target dirs
 /// ```
 ///
-/// This replaces the brittle `serde_json::from_slice::<DiskHealthReport>`
-/// pattern — the recipe is a bash step, not an LLM. Bash can emit key=value
-/// lines trivially; asking it to emit valid JSON was the source of fragility.
+/// Non-marker lines are silently ignored, making this forward-compatible
+/// with additional agent output.
 pub fn parse_disk_health_text(stdout: &str) -> Result<DiskHealthReport, String> {
     let mut disk_used_pct: Option<u8> = None;
     let mut freed_bytes: u64 = 0;
