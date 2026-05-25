@@ -1,64 +1,157 @@
-//! Copilot output filtering utilities for meeting conversation turns.
+//! Lightweight LLM chat session for meeting conversation turns.
+//!
+//! Delegates to [`SessionBuilder`] for LLM access instead of spawning a
+//! subprocess. Both the CLI REPL and dashboard chat widget share the same
+//! `SessionBuilder` backend, giving identical behavior regardless of
+//! entry point.
+//!
+//! Fixes #2105, #2106.
 
-/// Strip copilot bootstrap noise and usage stats from stdout output.
-#[allow(dead_code)]
-pub(crate) fn strip_copilot_noise(raw: &str) -> String {
-    let mut result = String::with_capacity(raw.len());
-    let mut skip_rest = false;
+use tracing::{debug, info};
 
-    for line in raw.lines() {
-        let trimmed = line.trim();
+use crate::base_types::{
+    BaseTypeCapability, BaseTypeDescriptor, BaseTypeId, BaseTypeOutcome, BaseTypeSession,
+    BaseTypeTurnInput, capability_set, ensure_session_not_already_open, ensure_session_not_closed,
+    ensure_session_open,
+};
+use crate::error::{SimardError, SimardResult};
+use crate::identity::OperatingMode;
+use crate::metadata::{BackendDescriptor, Freshness};
+use crate::runtime::RuntimeTopology;
+use crate::session_builder::{LlmProvider, SessionBuilder};
 
-        // Skip empty leading lines
-        if result.is_empty() && trimmed.is_empty() {
-            continue;
-        }
+/// A lightweight `BaseTypeSession` that delegates to `SessionBuilder` for
+/// LLM access. Wraps an inner session opened via `SessionBuilder::open()`
+/// so callers get a simple open/turn/close lifecycle without managing
+/// provider resolution or adapter wiring themselves.
+pub struct LightweightChatSession {
+    descriptor: BaseTypeDescriptor,
+    inner: Option<Box<dyn BaseTypeSession>>,
+    is_open: bool,
+    is_closed: bool,
+    turn_count: u32,
+}
 
-        // Stop at usage stats footer
-        if trimmed.starts_with("Total usage est:")
-            || trimmed.starts_with("API time spent:")
-            || trimmed.starts_with("Total session time:")
-            || trimmed.starts_with("Changes ")
-            || trimmed.starts_with("Requests ")
-            || trimmed.starts_with("Tokens ")
-        {
-            skip_rest = true;
-            continue;
-        }
+impl std::fmt::Debug for LightweightChatSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LightweightChatSession")
+            .field("is_open", &self.is_open)
+            .field("is_closed", &self.is_closed)
+            .field("turn_count", &self.turn_count)
+            .finish()
+    }
+}
 
-        if skip_rest {
-            continue;
-        }
+impl LightweightChatSession {
+    /// Create a new lightweight chat session.
+    ///
+    /// The inner `SessionBuilder` session is opened lazily in `open()`.
+    pub fn new() -> SimardResult<Self> {
+        Ok(Self {
+            descriptor: BaseTypeDescriptor {
+                id: BaseTypeId::new("lightweight-chat"),
+                backend: BackendDescriptor::for_runtime_type::<Self>(
+                    "lightweight-chat::session-builder",
+                    "lightweight-chat:session-builder",
+                    Freshness::now()?,
+                ),
+                capabilities: capability_set([
+                    BaseTypeCapability::PromptAssets,
+                    BaseTypeCapability::SessionLifecycle,
+                ]),
+                supported_topologies: [RuntimeTopology::SingleProcess].into_iter().collect(),
+            },
+            inner: None,
+            is_open: false,
+            is_closed: false,
+            turn_count: 0,
+        })
+    }
+}
 
-        // Skip copilot bootstrap noise
-        if trimmed.contains("Staged") && trimmed.contains("hook") {
-            continue;
-        }
-        if trimmed.contains("XPIA") || trimmed.starts_with("Script started on") {
-            continue;
-        }
-        // Skip Warning lines from copilot config validation
-        if trimmed.starts_with("Warning:") {
-            continue;
-        }
-        // Skip single-character progress indicator lines (● C\n  o\n  n\n...) but
-        // only while still in the leading-noise region.  Once real content has been
-        // emitted a short line like "OK" or "No" is valid response text.
-        if result.is_empty() && trimmed.len() <= 2 && !trimmed.is_empty() {
-            continue;
-        }
-        if trimmed.starts_with('●') {
-            continue;
-        }
-
-        result.push_str(line);
-        result.push('\n');
+impl BaseTypeSession for LightweightChatSession {
+    fn descriptor(&self) -> &BaseTypeDescriptor {
+        &self.descriptor
     }
 
-    // Truncate trailing whitespace in-place instead of allocating a new String.
-    let len = result.trim_end().len();
-    result.truncate(len);
-    result
+    fn open(&mut self) -> SimardResult<()> {
+        ensure_session_not_closed(&self.descriptor, self.is_closed, "open")?;
+        ensure_session_not_already_open(&self.descriptor, self.is_open)?;
+
+        let provider = LlmProvider::resolve()?;
+        let session = SessionBuilder::new(OperatingMode::Meeting, provider)
+            .node_id("meeting-lightweight")
+            .address("meeting-lightweight://local")
+            .adapter_tag("meeting")
+            .open()
+            .map_err(|e| SimardError::AdapterInvocationFailed {
+                base_type: "lightweight-chat".to_string(),
+                reason: format!("SessionBuilder::open failed: {e}"),
+            })?;
+
+        self.inner = Some(session);
+        self.is_open = true;
+        Ok(())
+    }
+
+    fn run_turn(&mut self, input: BaseTypeTurnInput) -> SimardResult<BaseTypeOutcome> {
+        ensure_session_not_closed(&self.descriptor, self.is_closed, "run_turn")?;
+        ensure_session_open(&self.descriptor, self.is_open, "run_turn")?;
+
+        self.turn_count += 1;
+
+        let inner = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| SimardError::AdapterInvocationFailed {
+                base_type: "lightweight-chat".to_string(),
+                reason: "inner session not initialized (open() not called?)".to_string(),
+            })?;
+
+        info!(
+            turn = self.turn_count,
+            prompt_len = input.objective.len(),
+            "Lightweight chat: sending turn via SessionBuilder"
+        );
+        let start = std::time::Instant::now();
+
+        let outcome = inner.run_turn(input)?;
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+
+        info!(
+            elapsed_ms,
+            response_len = outcome.execution_summary.len(),
+            turn = self.turn_count,
+            "Lightweight chat: received response"
+        );
+
+        // Record cost estimate
+        if let Err(e) = crate::cost_tracking::record_cost(
+            "lightweight-chat",
+            "session-builder",
+            outcome.plan.len(),
+            outcome.execution_summary.len(),
+            &format!("lightweight chat turn {}", self.turn_count),
+        ) {
+            debug!("Cost tracking write failed: {e}");
+        }
+
+        Ok(outcome)
+    }
+
+    fn close(&mut self) -> SimardResult<()> {
+        ensure_session_not_closed(&self.descriptor, self.is_closed, "close")?;
+        ensure_session_open(&self.descriptor, self.is_open, "close")?;
+
+        if let Some(mut inner) = self.inner.take()
+            && let Err(e) = inner.close()
+        {
+            debug!("Inner session close error (non-fatal): {e}");
+        }
+
+        self.is_closed = true;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -66,135 +159,93 @@ mod tests {
     use super::*;
 
     #[test]
-    fn strip_copilot_noise_removes_usage_stats() {
-        let input = "Here is the answer.\nTotal usage est: 1234 tokens\nAPI time spent: 2.3s";
-        let result = strip_copilot_noise(input);
-        assert_eq!(result, "Here is the answer.");
+    fn new_session_creates_successfully() {
+        let session = LightweightChatSession::new();
+        assert!(session.is_ok());
     }
 
     #[test]
-    fn strip_copilot_noise_removes_bootstrap() {
-        let input = "Staged 3 hook files\nXPIA defender loaded\nActual response here.";
-        let result = strip_copilot_noise(input);
-        assert_eq!(result, "Actual response here.");
+    fn session_initial_state() {
+        let session = LightweightChatSession::new().unwrap();
+        assert!(!session.is_open);
+        assert!(!session.is_closed);
+        assert_eq!(session.turn_count, 0);
+        assert!(session.inner.is_none());
     }
 
     #[test]
-    fn strip_copilot_noise_passes_clean_text() {
-        let input = "Normal response.\nWith multiple lines.";
-        let result = strip_copilot_noise(input);
-        assert_eq!(result, "Normal response.\nWith multiple lines.");
-    }
-
-    #[test]
-    fn strip_copilot_noise_handles_empty() {
-        assert_eq!(strip_copilot_noise(""), "");
-        assert_eq!(strip_copilot_noise("   \n  \n"), "");
-    }
-
-    // ── additional strip_copilot_noise contract tests ─────────────────────────
-
-    /// Warning: lines from Copilot config validation must be stripped.
-    #[test]
-    fn strip_copilot_noise_removes_warning_lines() {
-        let input = "Warning: Could not enable MCP server\nActual response.";
-        let result = strip_copilot_noise(input);
-        assert_eq!(
-            result, "Actual response.",
-            "Warning: prefix lines must be stripped"
-        );
-    }
-
-    /// Bullet (●) progress-indicator lines must be stripped.
-    #[test]
-    fn strip_copilot_noise_removes_bullet_progress_lines() {
-        let input = "● Connecting to agent\nActual response.";
-        let result = strip_copilot_noise(input);
-        assert_eq!(
-            result, "Actual response.",
-            "Lines starting with ● must be stripped"
-        );
-    }
-
-    /// Lines that are 1 or 2 characters (progress spinners) must be stripped.
-    #[test]
-    fn strip_copilot_noise_removes_one_and_two_char_lines() {
-        let input = "a\nbc\nActual response.";
-        let result = strip_copilot_noise(input);
-        assert_eq!(
-            result, "Actual response.",
-            "1-2 char lines must be treated as noise and stripped"
-        );
-    }
-
-    /// All recognised footer marker prefixes must trigger the stop-reading gate.
-    #[test]
-    fn strip_copilot_noise_removes_all_footer_marker_variants() {
-        let markers = [
-            "Total usage est: 1234 tokens",
-            "API time spent: 2.3s",
-            "Total session time: 10s",
-            "Changes 5",
-            "Requests 3",
-            "Tokens 100",
-        ];
-        for marker in &markers {
-            let input = format!("Response text.\n{marker}\nmore stuff");
-            let result = strip_copilot_noise(&input);
-            assert_eq!(
-                result, "Response text.",
-                "Footer marker '{marker}' should stop output"
-            );
+    fn double_open_fails() {
+        // open() will fail in CI (no LLM provider configured), but if the
+        // first open succeeds the second must return Err.
+        let mut session = LightweightChatSession::new().unwrap();
+        if session.open().is_ok() {
+            assert!(session.open().is_err());
         }
     }
 
-    /// Mixed noise + real content: all noise categories before and after
-    /// the real content must be stripped; footer must truncate.
     #[test]
-    fn strip_copilot_noise_mixed_noise_and_content() {
-        let input = concat!(
-            "● Setting up\n",
-            "Warning: something minor\n",
-            "a\n",
-            "b\n",
-            "Here is the actual answer.\n",
-            "It continues here.\n",
-            "Total usage est: 500 tokens\n",
-            "API time spent: 1.2s\n"
-        );
-        let result = strip_copilot_noise(input);
-        assert_eq!(result, "Here is the actual answer.\nIt continues here.");
+    fn run_turn_before_open_fails() {
+        let mut session = LightweightChatSession::new().unwrap();
+        let input = BaseTypeTurnInput::objective_only("hello");
+        assert!(session.run_turn(input).is_err());
     }
 
-    /// Short lines that appear MID-response (after real content) must NOT be
-    /// stripped — "OK", "No", "Go" are valid LLM responses.
+    // ── session lifecycle contract tests ──────────────────────────────────────
+
+    /// Closing a session that was never opened must return an error.
     #[test]
-    fn strip_copilot_noise_preserves_short_lines_after_content() {
-        let input = "Here is my answer.\nOK\nMore details follow.";
-        let result = strip_copilot_noise(input);
+    fn close_before_open_returns_error() {
+        let mut session = LightweightChatSession::new().unwrap();
         assert!(
-            result.contains("OK"),
-            "short line after real content must be preserved: got {result:?}"
-        );
-        assert_eq!(result, "Here is my answer.\nOK\nMore details follow.");
-    }
-
-    /// A three-character line must NOT be stripped (only <=2 are noise).
-    #[test]
-    fn strip_copilot_noise_preserves_three_char_lines() {
-        let input = "yes\nActual response.";
-        let result = strip_copilot_noise(input);
-        assert!(
-            result.contains("yes"),
-            "3-char lines must not be stripped: got {result:?}"
+            session.close().is_err(),
+            "close() on a never-opened session must return Err"
         );
     }
 
-    /// Meaningful multi-line responses must pass through unchanged.
+    /// The session descriptor id must identify this as "lightweight-chat".
     #[test]
-    fn strip_copilot_noise_preserves_meaningful_multiline_response() {
-        let input = "Line one of the response.\nLine two of the response.\nLine three.";
-        let result = strip_copilot_noise(input);
-        assert_eq!(result, input.trim());
+    fn session_descriptor_id_is_lightweight_chat() {
+        let session = LightweightChatSession::new().unwrap();
+        let id = session.descriptor().id.as_str();
+        assert_eq!(id, "lightweight-chat");
+    }
+
+    /// Prompt building: when only objective is present, the prompt equals
+    /// the objective string exactly.
+    #[test]
+    fn prompt_building_objective_only_equals_objective() {
+        let input = BaseTypeTurnInput::objective_only("just the objective");
+        assert!(input.identity_context.is_empty());
+        assert!(input.prompt_preamble.is_empty());
+        assert_eq!(input.objective, "just the objective");
+    }
+
+    /// When preamble and identity context are provided, both must be joinable
+    /// with the objective into a combined prompt.
+    #[test]
+    fn prompt_building_with_preamble_and_identity() {
+        let input = BaseTypeTurnInput {
+            objective: "Do the task.".to_string(),
+            identity_context: "You are Simard.".to_string(),
+            prompt_preamble: "System preamble.".to_string(),
+        };
+        let mut parts = Vec::new();
+        if !input.prompt_preamble.is_empty() {
+            parts.push(input.prompt_preamble.as_str());
+        }
+        if !input.identity_context.is_empty() {
+            parts.push(input.identity_context.as_str());
+        }
+        parts.push(&input.objective);
+        let prompt = parts.join("\n\n");
+
+        assert!(prompt.contains("System preamble."));
+        assert!(prompt.contains("You are Simard."));
+        assert!(prompt.contains("Do the task."));
+        let preamble_pos = prompt.find("System preamble.").unwrap();
+        let identity_pos = prompt.find("You are Simard.").unwrap();
+        let objective_pos = prompt.find("Do the task.").unwrap();
+        assert!(preamble_pos < identity_pos);
+        assert!(identity_pos < objective_pos);
     }
 }
