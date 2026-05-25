@@ -62,22 +62,18 @@ All thresholds live in the recipe YAML — no Rust recompile needed:
 $EDITOR prompt_assets/simard/recipes/disk-health-check.yaml
 ```
 
-The tunables are environment variables set at the top of the bash step:
+The tunables are described in the agent prompt within the recipe YAML. The
+agent uses its judgment based on the guidelines in the prompt:
 
-| Variable               | Default  | What it controls                                   |
+| Guideline              | Default  | What it controls                                   |
 | ---------------------- | -------- | -------------------------------------------------- |
-| `DISK_THRESHOLD_PCT`   | `80`     | Disk usage percentage that triggers cleanup         |
-| `WORKTREE_MAX_AGE_H`   | `24`     | Hours before a worktree is eligible for removal     |
-| `BACKUP_RETENTION`     | `5`      | Number of LadybugDB backups to keep                 |
+| Cleanup threshold      | `80%`    | Disk usage percentage that triggers cleanup         |
+| Worktree max age       | `24h`    | Hours before a worktree is eligible for removal     |
+| Backup retention       | `~5`     | Approximate number of LadybugDB backups to keep     |
 
-Example — lower the threshold to 70% and keep 10 backups:
-
-```yaml
-# In disk-health-check.yaml, modify the bash step env:
-env:
-  DISK_THRESHOLD_PCT: "70"
-  BACKUP_RETENTION: "10"
-```
+To change these, edit the agent prompt in the recipe YAML. For example,
+change "80%" to "70%" in the prompt text, or adjust the backup retention
+guidance.
 
 Changes take effect on the next OODA cycle — the daemon re-reads the recipe
 YAML each time.
@@ -153,7 +149,7 @@ Common causes:
 
 ### 4. Text parse shows unexpected values
 
-The Rust shim parses key=value lines from stdout. If the bash script
+The Rust shim parses key=value lines from stdout. If the agent
 outputs lines with unexpected formats, the parser silently ignores them
 and defaults to zero. Check for typos in key names (`DISK_USED_PCT`, not
 `DISK_USED_PERCENT`) and ensure values are plain integers (no units, no

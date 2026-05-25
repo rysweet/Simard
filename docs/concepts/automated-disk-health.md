@@ -57,15 +57,15 @@ contribute to exhaustion.
 
 ### Recipe-driven, not hardcoded
 
-The cleanup logic is a recipe YAML with a bash step, not compiled Rust. This
+The cleanup logic is a recipe YAML with an agent step, not compiled Rust. This
 means:
 
-- **Hot-reloadable thresholds.** Operators can change the 80% trigger, 24h
-  worktree age, or backup retention count by editing the YAML. No rebuild,
-  no restart. The daemon re-reads the recipe each cycle.
-- **Inspectable and auditable.** The cleanup script is a readable bash file,
-  not compiled into the binary. Operators can `cat` it, `diff` it, or run
-  it manually.
+- **Hot-reloadable policy.** Operators can change the cleanup guidelines,
+  threshold language, or target priorities by editing the YAML prompt. No
+  rebuild, no restart. The daemon re-reads the recipe each cycle.
+- **Inspectable and auditable.** The cleanup prompt is a readable YAML file,
+  not compiled into the binary. Operators can `cat` it, `diff` it, or review
+  the agent's reasoning in logs.
 - **Consistent with Simard's architecture.** Simard's design philosophy is
   recipes for policy, Rust for machinery. The disk health check follows this
   pattern exactly — the recipe defines *what* to clean and *when*, the Rust
@@ -194,23 +194,22 @@ because:
    are operational knobs that operators should be able to change without
    rebuilding Simard. A YAML file is editable; compiled Rust is not.
 
-2. **Bash is the natural language for filesystem operations.** `find`,
-   `du`, `stat`, `rm` — these are filesystem primitives. Writing them in
-   Rust adds `std::fs` boilerplate, `walkdir` dependencies, and error
-   handling code that doesn't improve correctness over the equivalent
-   4-line bash pipeline.
+2. **Agent-driven cleanup is adaptive.** The agent uses `df`, `find`, and
+   `rm` via bash tools, but the *logic* of what to clean and how aggressively
+   is agentic — it adapts to disk pressure level rather than following a
+   hardcoded script.
 
 3. **Recipes are inspectable.** An operator debugging disk issues can
-   `cat` the recipe YAML and see exactly what will be deleted. With
-   compiled Rust, they'd need the source code or docs.
+   `cat` the recipe YAML and see exactly what the agent is instructed to
+   do. The agent's reasoning is logged for auditability.
 
 4. **Consistency.** Simard already uses recipes for merge readiness
    judgement, progress checking, and other policy decisions. Disk health
    follows the same pattern.
 
-The Rust code is a thin shim. All cleanup logic lives in the recipe YAML as
-a readable bash file, not compiled into the binary. Operators can `cat` it,
-`diff` it, or run it manually.
+The Rust code is a thin shim. The cleanup prompt lives in the recipe YAML as
+a readable agent step, not compiled into the binary. Operators can `cat` it,
+`diff` it, or review the agent's decisions in logs.
 
 The recipe outputs key=value lines to stdout (`DISK_USED_PCT=N`,
 `FREED_BYTES=N`, `ACTION: ...`) — the Rust shim parses these with simple
