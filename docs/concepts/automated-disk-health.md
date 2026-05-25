@@ -55,21 +55,33 @@ contribute to exhaustion.
 
 ## Design principles
 
-### Recipe-driven, not hardcoded
+### Agent-driven, not hardcoded
 
-The cleanup logic is a recipe YAML with a bash step, not compiled Rust. This
-means:
+The cleanup logic is a recipe YAML with an **agent step** — an LLM that
+receives a prompt describing the disk situation and uses bash tools to
+inspect and clean. This replaced the prior v1.0.0 bash-script approach
+(issue #2051) because hardcoded `find`/`rm` commands were brittle: they
+couldn't adapt to unexpected directory layouts, couldn't reason about which
+artifacts are most valuable to keep, and required YAML edits for any
+threshold change.
 
-- **Hot-reloadable thresholds.** Operators can change the 80% trigger, 24h
-  worktree age, or backup retention count by editing the YAML. No rebuild,
-  no restart. The daemon re-reads the recipe each cycle.
-- **Inspectable and auditable.** The cleanup script is a readable bash file,
-  not compiled into the binary. Operators can `cat` it, `diff` it, or run
-  it manually.
+With the agent step:
+
+- **Adaptive cleanup.** The agent decides what to clean and how aggressively
+  based on current disk pressure. It can prioritize by size, skip directories
+  that look unusual, and escalate cleanup intensity if the first pass doesn't
+  free enough space. No hardcoded thresholds to maintain.
+- **Hot-reloadable prompt.** Operators can edit the prompt text in the recipe
+  YAML to change cleanup guidance — no rebuild, no restart. The daemon
+  re-reads the recipe each cycle.
+- **Inspectable and auditable.** The recipe YAML is a readable prompt, not
+  compiled into the binary. Operators can `cat` it to see exactly what
+  guidance the agent receives. Each cleanup run emits `ACTION:` lines
+  describing what was done.
 - **Consistent with Simard's architecture.** Simard's design philosophy is
   recipes for policy, Rust for machinery. The disk health check follows this
-  pattern exactly — the recipe defines *what* to clean and *when*, the Rust
-  shim handles *how to invoke* and *where to log*.
+  pattern exactly — the recipe prompt defines *what to consider* and *how
+  to reason*, the Rust shim handles *how to invoke* and *where to log*.
 
 ### Pre-emptive, not reactive
 
@@ -169,12 +181,9 @@ from stuck-but-not-crashed engineers survive for a full day. This is
 deliberate — we'd rather waste 1G of disk per stale worktree for 24 hours
 than risk deleting a worktree that's genuinely still making progress.
 
-If disk pressure is severe, operators can lower the threshold in the recipe:
-
-```yaml
-env:
-  WORKTREE_MAX_AGE_H: "4"
-```
+If disk pressure is severe, operators can adjust the guidance in the recipe
+prompt — for example, changing "older than 24 hours" to "older than 4 hours"
+in the worktree cleanup section of the prompt text.
 
 ### TOCTOU in age-based deletion
 
@@ -185,34 +194,37 @@ a newly-started engineer writes the claim before touching the worktree. The
 residual TOCTOU window (between claim creation and the health check's stat)
 is sub-second and matches the accepted risk in `sweep_orphaned_worktrees`.
 
-## Why a recipe and not pure Rust
+## Why an agent step and not pure Rust or hardcoded bash
 
-The cleanup logic could be written entirely in Rust. We chose a recipe
-because:
+The cleanup logic could be written entirely in Rust, or as a deterministic
+bash script (as it was in v1.0.0). We chose an agent step because:
 
-1. **Thresholds change.** The 80% trigger, 24h age, and 5-backup retention
-   are operational knobs that operators should be able to change without
-   rebuilding Simard. A YAML file is editable; compiled Rust is not.
+1. **Cleanup requires judgment.** Not all stale-looking worktrees are safe
+   to delete. Not all build caches are equally expendable. An agent can
+   inspect the situation (disk pressure, directory sizes, claim file PIDs)
+   and make proportional decisions — clean lightly at 81%, aggressively
+   at 95%.
 
-2. **Bash is the natural language for filesystem operations.** `find`,
-   `du`, `stat`, `rm` — these are filesystem primitives. Writing them in
-   Rust adds `std::fs` boilerplate, `walkdir` dependencies, and error
-   handling code that doesn't improve correctness over the equivalent
-   4-line bash pipeline.
+2. **Hardcoded scripts are brittle.** The v1.0.0 bash script had 8
+   `find`/`rm` pipelines with specific `-maxdepth`, `-mmin`, and
+   `-print0` invocations. Any change to the directory layout required
+   editing the script. The agent reads the prompt guidance and adapts.
 
-3. **Recipes are inspectable.** An operator debugging disk issues can
-   `cat` the recipe YAML and see exactly what will be deleted. With
-   compiled Rust, they'd need the source code or docs.
+3. **The prompt is the policy.** Operators can edit the prompt to change
+   cleanup priorities without understanding bash pipeline syntax. "Keep
+   approximately 10 backups instead of 5" is a prose edit, not a
+   `head -z -n -"$BACKUP_KEEP"` pipeline change.
 
-4. **Consistency.** Simard already uses recipes for merge readiness
-   judgement, progress checking, and other policy decisions. Disk health
-   follows the same pattern.
+4. **Consistency.** Simard already uses agent-step recipes for merge
+   readiness judgement (`merge-readiness-judge.yaml`) and progress
+   assessment (`progress-assessment.yaml`). Disk health now follows
+   the same pattern.
 
-The Rust code is a thin shim. All cleanup logic lives in the recipe YAML as
-a readable bash file, not compiled into the binary. Operators can `cat` it,
-`diff` it, or run it manually.
+The Rust code remains a thin shim. The agent uses bash tools (via its own
+tool-use capability) to run `df`, `find`, `du`, `rm` — but the *logic*
+of what to clean and how aggressively is agentic, not scripted.
 
-The recipe outputs key=value lines to stdout (`DISK_USED_PCT=N`,
+The agent outputs key=value text markers to stdout (`DISK_USED_PCT=N`,
 `FREED_BYTES=N`, `ACTION: ...`) — the Rust shim parses these with simple
 string splitting. No JSON, no serde deserialization of recipe output.
 

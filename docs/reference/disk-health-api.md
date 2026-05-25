@@ -24,14 +24,18 @@ per OODA cycle, *before* spawning any engineer subprocesses. It prevents the
 `ENOSPC` crash that killed the daemon on 2026-05-24 (issue #2020) by
 proactively freeing disk when the home partition exceeds 80% usage.
 
-The Rust code is a thin shim. All cleanup logic lives in the recipe YAML as
-a deterministic bash step — no LLM required.
+The Rust code is a thin shim. The recipe YAML contains a single **agent step**
+— an LLM-backed agent that receives a prompt describing the disk situation,
+uses bash tools to inspect and clean, and emits structured text markers that
+the Rust shim parses. The agent decides *what* to clean and *how aggressively*
+based on current conditions; the prompt provides guidance on known cleanup
+targets, safety constraints, and the required output format.
 
 ## Module Layout
 
 ```
 src/disk_health.rs                           Rust shim (subprocess invocation, text parsing)
-prompt_assets/simard/recipes/disk-health-check.yaml   Recipe (bash cleanup script)
+prompt_assets/simard/recipes/disk-health-check.yaml   Recipe (agent step with cleanup prompt)
 ```
 
 ## Public API — `src/disk_health.rs`
@@ -51,9 +55,10 @@ pub struct DiskHealthReport {
 }
 ```
 
-The report is parsed from key=value lines on stdout by the recipe's bash
+The report is parsed from key=value lines on stdout emitted by the agent
 step. The Rust shim uses `parse_disk_health_text()` to extract fields from
-the text output — no JSON parsing. See
+the text output — no JSON parsing. The agent is instructed to emit these
+markers as the last lines of its output. See
 [text-parsing wire formats](./text-parsing-wire-formats.md#protocol-3-keyvalue-disk-health)
 for the full grammar.
 
@@ -140,86 +145,101 @@ Resolution order (matches `recipe_merge_judge.rs` and
 
 ## Recipe YAML — `disk-health-check.yaml`
 
-The recipe is a single bash step. Its stdout uses the key=value text format
-(not JSON). See [text-parsing wire formats § key=value](./text-parsing-wire-formats.md#protocol-3-keyvalue-disk-health)
+The recipe is a single **agent step** (`type: "agent"`, `agent: "default"`).
+The agent receives a prompt describing the disk situation and known cleanup
+targets under `{{state_root}}`. The agent uses its bash tool-use capability
+to run `df`, `find`, `du`, and `rm` commands — but the *logic* of what to
+clean and how aggressively is determined by the agent, not hardcoded.
+
+The agent's stdout must include key=value text markers (not JSON). See
+[text-parsing wire formats § key=value](./text-parsing-wire-formats.md#protocol-3-keyvalue-disk-health)
 for the normative grammar.
 
-The recipe receives two context variables:
+The recipe receives one context variable:
 
 | Variable     | Source              | Description                                              |
 | ------------ | ------------------- | -------------------------------------------------------- |
-| `STATE_ROOT` | `state_root` param  | Absolute path to `~/.simard/` (or `$SIMARD_STATE_ROOT`)  |
-| `REPO_ROOT`  | `repo_root` param   | Absolute path to the Simard repo root                    |
+| `state_root` | Context default     | Path to `~/.simard` (worktrees, backups, cargo dirs)     |
+
+### Agent prompt guidance
+
+The agent prompt instructs the agent to:
+
+1. Check disk usage via `df` on the `$HOME` partition
+2. If below 80%, emit `DISK_USED_PCT` and `FREED_BYTES=0` and stop
+3. If ≥ 80%, apply judgment to clean from these targets under `{{state_root}}`:
+   - `engineer-worktrees/` — stale worktrees (>24h old, no live PID in `.simard-engineer-claim`)
+   - `engineer-worktrees/*/target/` — cargo build dirs in remaining worktrees
+   - `backups/` — prune to approximately 5 most recent
+   - `cargo-target/`, `shared-target/` — incremental/debug build artifacts
+4. Measure freed space via `df` delta before/after cleanup
+5. Emit the required text markers
+
+The prompt lists these targets as **guidance**, not hard commands. The agent
+can skip targets that don't exist, adjust retention counts based on disk
+pressure severity, and adapt to unexpected directory layouts.
+
+### Safety constraints in the prompt
+
+The prompt constrains the agent's cleanup scope:
+
+- **Only clean under `{{state_root}}`** — no paths outside the Simard state directory
+- **Check `.simard-engineer-claim` before removing worktrees** — if the claim file
+  contains a PID that responds to `kill -0`, the worktree is active and must be skipped
+- **Never remove the main repository worktree** or anything outside `{{state_root}}`
+- **Emit `ACTION:` lines for every deletion** so the Rust shim can log what happened
 
 ### Cleanup thresholds
 
-| Parameter                     | Value | Rationale                                         |
-| ----------------------------- | ----- | ------------------------------------------------- |
-| Disk usage trigger            | 80%   | Leaves 20% headroom for active builds             |
-| Worktree max age              | 24h   | Engineers run ≤2h; 24h is 12× safety margin       |
-| LadybugDB backup retention    | 5     | At 5-min interval, covers 25 min of rollback      |
-| Cargo target dirs cleaned     | all   | Engineer worktrees can rebuild; 10-min cost max    |
+Because the agent interprets the prompt adaptively, there are no hardcoded
+threshold variables. The prompt text provides guidance values that the agent
+uses as starting points:
 
-### Cleanup actions (in order)
+| Guidance                      | Value | Agent behavior                                     |
+| ----------------------------- | ----- | -------------------------------------------------- |
+| Disk usage trigger            | ~80%  | Agent checks df and decides whether cleanup needed |
+| Worktree age suggestion       | ~24h  | Agent uses mtime/age heuristics, may adjust        |
+| Backup retention suggestion   | ~5    | Agent keeps approximately this many, adjusts for pressure |
+| Cargo cache cleaning          | all   | Agent removes incremental/debug dirs from caches   |
 
-When disk usage exceeds 80%, the recipe performs these actions sequentially:
-
-1. **Remove stale engineer worktrees** — directories under
-   `$STATE_ROOT/engineer-worktrees/` older than 24 hours with no active
-   process holding a `.simard-engineer-claim` lockfile. Symlinks are skipped.
-   Each path is canonicalized and prefix-checked against the worktrees root
-   before deletion.
-
-2. **Remove cargo target dirs in engineer worktrees** — any `target/`
-   directory inside surviving `$STATE_ROOT/engineer-worktrees/*/` entries.
-   These are build artifacts that engineers can regenerate.
-
-3. **Prune LadybugDB backups** — in `$STATE_ROOT/backups/`, sort by mtime
-   descending and remove all but the 5 most recent files.
-
-4. **Clean shared cargo caches** — remove `$STATE_ROOT/cargo-target/` and
-   `$STATE_ROOT/shared-target/` contents. These are shared incremental build
-   caches that Cargo rebuilds on demand.
+To change these, edit the prompt text in `disk-health-check.yaml`. For example,
+change "older than 24 hours" to "older than 4 hours" to be more aggressive with
+worktree cleanup.
 
 ### Text output contract
 
-The bash step prints key=value lines to stdout:
+The agent emits key=value lines to stdout as the final part of its response:
 
 ```
 DISK_USED_PCT=72
 FREED_BYTES=53687091200
-ACTION: Removed 48 stale worktrees (50.1G)
-ACTION: Removed cargo target dirs from 3 worktrees (1.2G)
-ACTION: Pruned 19 LadybugDB backups (512M)
-ACTION: Cleaned cargo-target/ (12.0G) and shared-target/ (2.8G)
+ACTION: Removed 12 stale engineer worktrees older than 24h
+ACTION: Removed cargo target dirs from 3 worktrees
+ACTION: Pruned LadybugDB backups to 5 most recent
+ACTION: Cleaned shared-target/ incremental and debug dirs
 ```
 
-When disk usage is below 80%, the report reflects no cleanup:
+When disk usage is below 80%, the agent reports no cleanup:
 
 ```
 DISK_USED_PCT=65
 FREED_BYTES=0
 ```
 
-This format is natural to produce from bash (`echo "KEY=${VALUE}"`) and
-eliminates the JSON `printf` quoting fragility of the prior implementation.
-Filenames with special characters in action descriptions are safe — they are
-just text after `ACTION:`.
+The `DISK_USED_PCT` marker is **required** — the Rust parser returns an error
+if it is missing. `FREED_BYTES` defaults to 0 if absent. `ACTION:` lines are
+optional (zero or more). Unknown lines (agent reasoning, intermediate output)
+are silently ignored by the parser — this is forward-compatible by design.
 
 ### Security constraints
 
-The bash step follows the same security hardening as the rest of the Simard
-bash surface:
-
 | Defense                         | Mechanism                                                       |
 | ------------------------------- | --------------------------------------------------------------- |
-| Hardcoded path prefixes         | All `rm -rf` and `find -delete` operate only under `$STATE_ROOT/backups/`, `$STATE_ROOT/engineer-worktrees/`, `$STATE_ROOT/cargo-target/`, or `$STATE_ROOT/shared-target/` |
-| No symlink following            | `find -not -type l` excludes symlinks from deletion candidates  |
-| Canonicalize before delete      | `realpath` + prefix check before every `rm -rf`                 |
-| Quoted expansions               | Every `$VAR` is double-quoted to prevent word splitting          |
-| No eval / backtick on untrusted | No `eval`, no command substitution on user-controlled data       |
-| Audit trail                     | Every deletion is logged to stderr with the exact path           |
-| TOCTOU acceptance               | Stat-before-delete with accepted residual window (matches `sweep_orphaned_worktrees` pattern) |
+| Scoped to `{{state_root}}`      | Prompt constrains all cleanup to the `{{state_root}}` subtree   |
+| PID-based claim check           | Prompt instructs agent to check `.simard-engineer-claim` PIDs   |
+| No secrets in prompt            | Recipe YAML is plain text, stored in-tree, no credentials       |
+| Agent output parsed by Rust     | `parse_disk_health_text()` ignores non-marker lines — no injection risk |
+| `state_root` from daemon config | Not user input — no shell injection vector                      |
 
 ## Daemon integration
 
@@ -290,17 +310,17 @@ disk health check never crashes the daemon.
 | `SIMARD_STATE_ROOT`  | Root for all cleanup targets                              | `~/.simard/`  |
 | `CARGO_TARGET_DIR`   | If set, shared target is at this path instead of default  | (not set)     |
 
-The cleanup thresholds (80%, 24h, 5 backups) are defined in the recipe YAML,
-not in Rust. To change them, edit `disk-health-check.yaml` — no recompile
-needed.
+The cleanup guidance values (80% trigger, 24h worktree age, 5 backup retention)
+are specified in the agent prompt text within the recipe YAML, not in Rust or
+environment variables. To change them, edit the prompt in
+`disk-health-check.yaml` — no recompile needed.
 
 **Note on backup retention interaction:** The daemon's existing DB backup code
 uses `SIMARD_DB_BACKUP_KEEP` (default 24) to prune backups *after* creating
-each new one. The disk health recipe applies a stricter retention of 5 *before*
-the backup step in the cycle. The recipe's retention wins in practice — it
-prunes to 5 before the daemon creates a new backup. Operators who want more
-retention should update *both* `BACKUP_RETENTION` in the recipe YAML and
-`SIMARD_DB_BACKUP_KEEP` in the environment.
+each new one. The disk health agent applies a stricter retention of ~5 *before*
+the backup step in the cycle. The agent's retention wins in practice. Operators
+who want more retention should update *both* the prompt guidance in the recipe
+YAML and `SIMARD_DB_BACKUP_KEEP` in the environment.
 
 ## `.cargo/config.toml` — shared target directory
 

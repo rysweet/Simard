@@ -15,10 +15,12 @@ related:
 # Configure and monitor the disk health check
 
 Simard runs an automated disk health check at the start of every OODA cycle.
-When the home partition exceeds 80% usage, it cleans stale engineer worktrees,
-cargo build artifacts, and old LadybugDB backups — then reports what it freed.
+The recipe uses an **agent step** — an LLM that inspects disk usage, decides
+what to clean based on current conditions, and reports what it freed. When the
+home partition exceeds ~80% usage, the agent cleans stale engineer worktrees,
+cargo build artifacts, and old LadybugDB backups.
 
-This guide shows how to observe the check in action, tune its thresholds, and
+This guide shows how to observe the check in action, tune its behavior, and
 handle the edge cases.
 
 ## When to use this
@@ -26,7 +28,7 @@ handle the edge cases.
 Use this guide when:
 
 - The daemon logged `disk health: N% used` and you want to understand what happened
-- You want to change the 80% trigger threshold or 24h worktree age limit
+- You want to change the cleanup aggressiveness or target priorities
 - You want to change how many LadybugDB backups are retained
 - The daemon logged `disk health check failed` and you need to diagnose it
 - Disk is critically low despite the automated check
@@ -54,55 +56,58 @@ journalctl --user -u simard-ooda --since '1 hour ago' \
   | grep -A5 'disk_health'
 ```
 
-## Tune cleanup thresholds
+## Tune cleanup behavior
 
-All thresholds live in the recipe YAML — no Rust recompile needed:
+The cleanup logic is driven by an agent prompt in the recipe YAML. To change
+the agent's behavior, edit the prompt text:
 
 ```bash
 $EDITOR prompt_assets/simard/recipes/disk-health-check.yaml
 ```
 
-The tunables are environment variables set at the top of the bash step:
+The prompt provides guidance values that the agent uses as starting points.
+These are prose instructions, not shell variables:
 
-| Variable               | Default  | What it controls                                   |
-| ---------------------- | -------- | -------------------------------------------------- |
-| `DISK_THRESHOLD_PCT`   | `80`     | Disk usage percentage that triggers cleanup         |
-| `WORKTREE_MAX_AGE_H`   | `24`     | Hours before a worktree is eligible for removal     |
-| `BACKUP_RETENTION`     | `5`      | Number of LadybugDB backups to keep                 |
+| Guidance                 | Default  | Where in prompt                                     |
+| ------------------------ | -------- | --------------------------------------------------- |
+| Disk usage trigger       | ~80%     | "If disk usage is below 80%..."                     |
+| Worktree age threshold   | ~24h     | "older than 24 hours"                               |
+| Backup retention count   | ~5       | "keep approximately 5 most recent"                  |
+| Cargo cache cleaning     | all      | "clean incremental and debug build artifacts"       |
 
 Example — lower the threshold to 70% and keep 10 backups:
 
-```yaml
-# In disk-health-check.yaml, modify the bash step env:
-env:
-  DISK_THRESHOLD_PCT: "70"
-  BACKUP_RETENTION: "10"
-```
+Edit the prompt text to change "below 80%" to "below 70%" and "keep
+approximately 5 most recent" to "keep approximately 10 most recent".
 
 Changes take effect on the next OODA cycle — the daemon re-reads the recipe
-YAML each time.
+YAML each time. No rebuild or restart required.
 
 ## Read a full disk health report
 
-The recipe outputs a key=value text report to stdout, which the daemon captures
+The agent outputs a key=value text report to stdout, which the daemon captures
 and logs. To run the check manually outside the daemon:
 
 ```bash
 recipe-runner-rs prompt_assets/simard/recipes/disk-health-check.yaml \
-  -c STATE_ROOT="$HOME/.simard" \
-  -c REPO_ROOT="/home/azureuser/src/Simard"
+  -c state_root="$HOME/.simard"
 ```
 
-This prints the text report to stdout:
+This invokes the agent, which inspects disk, performs cleanup if needed, and
+prints the text report to stdout:
 
 ```
 DISK_USED_PCT=72
 FREED_BYTES=53687091200
-ACTION: Removed 48 stale worktrees (50.1G)
-ACTION: Removed cargo target dirs from 3 worktrees (1.2G)
-ACTION: Pruned 19 LadybugDB backups (512M)
-ACTION: Cleaned cargo-target/ (12.0G) and shared-target/ (2.8G)
+ACTION: Removed 12 stale engineer worktrees older than 24h
+ACTION: Removed cargo target dirs from 3 worktrees
+ACTION: Pruned LadybugDB backups to 5 most recent
+ACTION: Cleaned shared-target/ incremental and debug dirs
 ```
+
+Note: because this is an agent step (not a bash step), running it manually
+requires an LLM provider to be available. The agent may also produce
+reasoning text before the markers — the Rust parser ignores non-marker lines.
 
 You can also run just the disk usage check (no cleanup) by looking at the
 partition directly:
@@ -135,29 +140,38 @@ If missing (e.g., the file was deleted or the repo is in a detached worktree
 that doesn't have it), the shim returns `AdapterInvocationFailed` and the
 daemon warns and continues.
 
-### 3. Bash step failed
+### 3. Agent step failed or LLM unavailable
 
-Check stderr from the recipe:
+The disk health check uses an agent step, which requires an LLM provider.
+If the LLM is unavailable, the recipe will fail and the daemon will log the
+error and continue (warn-and-continue behavior).
+
+Check the recipe output manually:
 
 ```bash
 recipe-runner-rs prompt_assets/simard/recipes/disk-health-check.yaml \
-  -c STATE_ROOT="$HOME/.simard" \
-  -c REPO_ROOT="/home/azureuser/src/Simard" 2>&1
+  -c state_root="$HOME/.simard" 2>&1
 ```
 
 Common causes:
 
-- `$STATE_ROOT` directory doesn't exist
-- Permission denied on a directory under `$STATE_ROOT`
-- `du` or `find` not on PATH (unlikely on standard Linux)
+- LLM provider not configured or rate-limited
+- `state_root` directory doesn't exist
+- Agent emitted malformed markers (check stdout for `DISK_USED_PCT=`)
 
 ### 4. Text parse shows unexpected values
 
-The Rust shim parses key=value lines from stdout. If the bash script
-outputs lines with unexpected formats, the parser silently ignores them
-and defaults to zero. Check for typos in key names (`DISK_USED_PCT`, not
-`DISK_USED_PERCENT`) and ensure values are plain integers (no units, no
-commas).
+The Rust shim parses key=value lines from the agent's stdout. The agent is
+instructed to emit these markers, but if the markers are missing or malformed:
+
+- Missing `DISK_USED_PCT` → parser returns an error
+- Missing `FREED_BYTES` → defaults to 0
+- Non-numeric values → parser returns an error
+- Extra lines (agent reasoning) → silently ignored
+
+If the agent consistently fails to emit markers, check the prompt in the
+recipe YAML — the output format instructions may have been accidentally
+edited.
 
 ## Handle persistent disk pressure
 
@@ -240,14 +254,13 @@ You should see one `disk health:` line per OODA cycle (default: every 60s).
 To run cleanup outside the daemon without waiting for a cycle:
 
 ```bash
-# Run the recipe directly
+# Run the recipe directly (requires LLM provider)
 recipe-runner-rs prompt_assets/simard/recipes/disk-health-check.yaml \
-  -c STATE_ROOT="$HOME/.simard" \
-  -c REPO_ROOT="/home/azureuser/src/Simard"
+  -c state_root="$HOME/.simard"
 ```
 
-Or clean specific categories manually (these skip the claim-file safety
-check — only use when you know no engineers are running):
+Or clean specific categories manually (these skip the agent's judgment and
+claim-file safety check — only use when you know no engineers are running):
 
 ```bash
 # Stale worktrees only (no claim-file check — the recipe is safer)
