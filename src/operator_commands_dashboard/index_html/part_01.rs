@@ -23,6 +23,16 @@ pub(crate) const PART_01: &str = r#"      </div>
     </div>
   </div>
 
+  <div class="tab-content" id="tab-pr-readiness">
+    <h1 class="page-h1">PR Readiness</h1>
+    <p class="page-lede">Every open pull request under management with its CI status, review state, and remaining blockers — so you can see what is ready to merge without leaving the dashboard.</p>
+    <div class="card" style="max-width:1100px">
+      <h2>Open Pull Requests <button class="btn" onclick="fetchPrReadiness()" style="font-size:.75rem">Refresh</button></h2>
+      <div id="pr-readiness-summary" style="margin-bottom:.75rem"><span class="loading">Loading…</span></div>
+      <div id="pr-readiness-panel"><span class="loading">Loading…</span></div>
+    </div>
+  </div>
+
   <div class="tab-content" id="tab-terminal">
     <h1 class="page-h1">Terminal</h1>
     <p class="page-lede">Attach to the live terminal of a running Simard sub-agent and watch its standard output and standard error stream in real time.</p>
@@ -219,6 +229,7 @@ pub(crate) const PART_01: &str = r#"      </div>
         if(tab.dataset.tab==='thinking') {fetchThinking();tabRefreshTimers.thinking=setInterval(fetchThinking,30000);}
         if(tab.dataset.tab==='brain-failures') {fetchBrainFailures();tabRefreshTimers.brainFailures=setInterval(fetchBrainFailures,30000);}
         if(tab.dataset.tab==='merge-decisions') {fetchMergeJudge();tabRefreshTimers.mergeJudge=setInterval(fetchMergeJudge,30000);}
+        if(tab.dataset.tab==='pr-readiness') {fetchPrReadiness();tabRefreshTimers.prReadiness=setInterval(fetchPrReadiness,30000);}
         if(tab.dataset.tab==='terminal') {initAgentLogTerminal();fetchSubagentSessions();tabRefreshTimers.subagent=setInterval(fetchSubagentSessions,5000);fetchTmuxSessions();tabRefreshTimers.tmux=setInterval(fetchTmuxSessions,10000);}
       });
     });
