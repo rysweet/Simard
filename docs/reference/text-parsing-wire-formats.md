@@ -126,51 +126,47 @@ unchanged.
 
 **Struct:** `OrientJudgment`
 
-**Labeled fields** (all optional):
+**Format:** Single-line JSON object (parsed via `serde_json::from_str` after
+extracting the `{…}` substring).
 
-| Label | Type | Default | Validation |
-|-------|------|---------|------------|
-| `ADJUSTED_URGENCY:` | `f64` | Required (parse fails without it) | Must be in `[0.0, base_urgency]` |
-| `DEMOTION_APPLIED:` | `f64` | Computed as `base_urgency - adjusted_urgency` | Must be ≥ 0 |
-| `RATIONALE:` | `String` | `"<no rationale provided>"` | None |
-| `CONFIDENCE:` | `f64` | `1.0` | Must be in `[0.0, 1.0]` |
+| JSON field | Type | Required | Default | Validation |
+|------------|------|----------|---------|------------|
+| `adjusted_urgency` | `f64` | **Yes** | _(parse fails without it)_ | Must be in `[0.0, base_urgency]`; must be finite |
+| `demotion_applied` | `f64` | No | `0.0` | Convenience; daemon recomputes as `base_urgency − adjusted_urgency` |
+| `rationale` | `String` | **Yes** | _(parse fails without it)_ | None |
+| `confidence` | `f64` | No | `1.0` | Must be in `[0.0, 1.0]` |
+
+Extra fields are silently ignored (forward compatible).
 
 **Example valid responses:**
 
-Minimal (all fields):
-```
-ADJUSTED_URGENCY: 0.60
-DEMOTION_APPLIED: 0.20
-RATIONALE: 1 failure: standard floor demotion
-CONFIDENCE: 0.9
+Full payload (single line):
+```json
+{"adjusted_urgency": 0.60, "demotion_applied": 0.20, "rationale": "1 failure: standard floor demotion", "confidence": 0.9}
 ```
 
-With surrounding prose:
+With surrounding prose (tolerated — parser extracts first `{` to last `}`):
 ```
-Given a single recent failure and no indication of persistent issues,
-I'll apply the standard floor demotion.
-
-ADJUSTED_URGENCY: 0.60
-RATIONALE: 1 failure: standard floor demotion
-CONFIDENCE: 0.9
+Given a single recent failure, standard demotion.
+{"adjusted_urgency": 0.60, "rationale": "1 failure: standard floor demotion", "confidence": 0.9}
 ```
 
 Minimal valid:
-```
-ADJUSTED_URGENCY: 0.6
+```json
+{"adjusted_urgency": 0.6, "rationale": "ok"}
 ```
 
 **Validation:** `OrientJudgment::validate()` enforces:
+- `adjusted_urgency` is finite
 - `adjusted_urgency` in `[0.0, 1.0]`
-- `adjusted_urgency <= base_urgency` (no escalation)
-- `confidence` in `[0.0, 1.0]`
+- `adjusted_urgency <= base_urgency` (no escalation; `1e-9` FP slack)
 
 If validation fails, the deterministic floor applies:
 `urgency - 0.2 × failure_count`, clamped to `[0.0, 1.0]`.
 
-**Prompt update:** The `ooda_orient.md` prompt's `OUTPUT_FORMAT` section now
-instructs models to emit labeled lines instead of a JSON object. The
-`EXAMPLES` section shows the text format.
+**Note:** The orient brain does **not** use the `DECISION:` marker protocol
+or labeled-line format. Labeled-line responses (e.g. `ADJUSTED_URGENCY: 0.6`)
+will fail parsing and trigger the deterministic fallback.
 
 ---
 
@@ -446,7 +442,7 @@ Each parser has inline `#[cfg(test)]` tests in its source file:
 | Module | Test count | Coverage |
 |--------|-----------|----------|
 | `decide.rs` | 8+ | All variant tokens, missing DECISION line, rationale extraction, fallback |
-| `orient.rs` | 6+ | All labeled fields, partial fields, validation failure, default confidence |
+| `orient.rs` | 11+ | Full JSON, defaults, extra fields, prose-wrapped JSON, markdown-fenced JSON, empty, no-JSON, invalid JSON, labeled-line rejection |
 | `rustyclawd.rs` | 15+ (T1–T15) | Full behavior matrix per decision protocol reference |
 | `recipe_progress_checker.rs` | 4+ | Accept, reject, no keyword (default), mixed case |
 | `recipe_merge_judge.rs` | 5+ | Ready, not_ready, unclear, no keyword (default), substring safety |
@@ -458,9 +454,10 @@ Each parser has inline `#[cfg(test)]` tests in its source file:
 
 If you maintain OODA brain prompts (`prompt_assets/simard/ooda_*.md`):
 
-1. **OUTPUT_FORMAT sections now specify text format, not JSON.** The
-   `DECISION:` marker or labeled-line format is documented in each prompt's
-   `OUTPUT_FORMAT` section. Do not revert to JSON instructions.
+1. **OUTPUT_FORMAT sections specify the phase-appropriate format.** The
+   `DECISION:` marker protocol is used by the decide and engineer-lifecycle
+   brains. The orient brain uses single-line JSON format. Each prompt's
+   `OUTPUT_FORMAT` section is the source of truth for its wire format.
 
 2. **EXAMPLES sections use text format.** Update any custom examples you've
    added to follow the text format. JSON examples will not cause parse
