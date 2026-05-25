@@ -168,8 +168,8 @@ pub use cost_tracking::{
 };
 pub use engineer_loop::{
     AnalyzedAction, EngineerLoopRun, ExecutedEngineerAction, PhaseOutcome, PhaseTrace,
-    RepoInspection, SelectedEngineerAction, VerificationReport, analyze_objective,
-    run_local_engineer_loop, spawn_agent_for_goal,
+    RepoInspection, SelectedEngineerAction, SessionErrorReflection, VerificationReport,
+    analyze_objective, run_local_engineer_loop, spawn_agent_for_goal,
 };
 pub use error::{SimardError, SimardResult};
 pub use evidence::{

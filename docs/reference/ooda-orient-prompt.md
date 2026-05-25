@@ -24,15 +24,15 @@ The prompt is a markdown document with six top-level sections:
 …(demotion guidelines and reference scale)…
 
 ## OUTPUT_FORMAT
-…(labeled-line format: ADJUSTED_URGENCY, RATIONALE, CONFIDENCE)…
+…(JSON object: adjusted_urgency, demotion_applied, rationale, confidence)…
 
 ## EXAMPLES
-…(text-format examples, one per demotion scenario)…
+…(JSON-format examples, one per demotion scenario)…
 ```
 
 Unlike the decide and engineer-lifecycle brains, the orient brain does **not**
-use a `DECISION:` marker. It uses **labeled-line format** — each output field
-appears on its own line with a case-insensitive prefix label.
+use a `DECISION:` marker. It uses **JSON object format** — the model returns
+a single JSON object on one line with the required fields.
 
 ## Placeholders
 
@@ -51,32 +51,28 @@ this brain — they are not subject to failure-penalty demotion.
 
 ## Output Format
 
-The orient brain uses **labeled-line format**. The wire format is documented
+The orient brain uses **JSON object format**. The wire format is documented
 normatively in
 [text-parsing wire formats § orient phase](text-parsing-wire-formats.md#1b-orient-phase-orientrs).
 
 ### Response format
 
-```
-ADJUSTED_URGENCY: <float in [0,1]>
-RATIONALE: <short reason>
-CONFIDENCE: <float in [0,1]>
+```json
+{"adjusted_urgency": <float in [0,1]>, "demotion_applied": <float ≥ 0>, "rationale": "<short reason>", "confidence": <float in [0,1]>}
 ```
 
-### Labeled fields
+### JSON fields
 
-| Label | Type | Required | Default | Validation |
+| Field | Type | Required | Default | Validation |
 |---|---|---|---|---|
-| `ADJUSTED_URGENCY:` | `f64` | **Yes** | _(parse fails without it)_ | Must be in `[0.0, base_urgency]` |
-| `RATIONALE:` | `String` | No | `"<no rationale provided>"` | None |
-| `CONFIDENCE:` | `f64` | No | `1.0` | Must be in `[0.0, 1.0]` |
+| `adjusted_urgency` | `f64` | **Yes** | _(parse fails without it)_ | Must be in `[0.0, base_urgency]` |
+| `rationale` | `String` | **Yes** | _(parse fails without it)_ | None |
+| `confidence` | `f64` | No | `1.0` | Must be in `[0.0, 1.0]` |
+| `demotion_applied` | `f64` | No | `0.0` | Convenience; daemon recomputes |
 
-`demotion_applied` is computed by the daemon as `base_urgency − adjusted_urgency`;
-the model should not emit it. The prompt explicitly tells the model to omit it.
-
-Labels are matched case-insensitively. Unknown labels are silently ignored
-(forward compatible). Non-labeled lines before or after the labeled fields
-are ignored — the model may include reasoning prose around the labels.
+The parser extracts the first `{…}` substring from the response, so the
+model may optionally surround the JSON with prose (tolerated, not encouraged).
+Extra fields are silently ignored (forward compatible).
 
 ### Validation
 
@@ -90,17 +86,12 @@ are ignored — the model may include reasoning prose around the labels.
 If validation fails, the deterministic floor applies:
 `urgency - 0.2 × failure_count`, clamped to `[0.0, 1.0]`.
 
-### Anti-JSON note
+### JSON parsing notes
 
-The prompt's `OUTPUT_FORMAT` section explicitly states:
-
-> Do NOT output JSON — the daemon parser reads labeled lines, not JSON objects.
-
-The orient parser does not accept JSON. A model that emits
-`{"adjusted_urgency": 0.6, ...}` will fail parsing (no `ADJUSTED_URGENCY:`
-label found) and the deterministic floor will apply. This instruction was
-strengthened in PR #2035/#2040 to prevent models from mimicking the JSON
-format of the input context.
+The parser uses `serde_json::from_str` on the extracted `{…}` substring.
+Malformed JSON or a response with no `{` causes a parse failure, and the
+deterministic floor applies. The old labeled-line format
+(`ADJUSTED_URGENCY:`, `RATIONALE:`, `CONFIDENCE:`) is no longer accepted.
 
 ## DECISION Section
 
@@ -123,8 +114,8 @@ The brain may deviate from this scale:
 
 ## Examples
 
-The prompt's `EXAMPLES` section contains labeled-line examples. All examples
-use the text format — no JSON examples appear in the prompt.
+The prompt's `EXAMPLES` section contains JSON-format examples matching the
+parser's expected wire format.
 
 | Scenario | `failure_count` | Expected `ADJUSTED_URGENCY` | Key signal |
 |---|---|---|---|
@@ -140,22 +131,19 @@ must exist at build time and be valid UTF-8, and should stay under ~32 KB.
 
 ## Parser Rules
 
-`parse_judgment_from_response` (in `src/ooda_brain/orient.rs`) scans lines
-for labeled fields:
+`parse_judgment_from_response` (in `src/ooda_brain/orient.rs`) extracts and
+deserializes a JSON object from the brain response:
 
-1. Iterate `response.lines()`.
-2. For each line, check `starts_with("ADJUSTED_URGENCY:")` (case-insensitive),
-   extract and parse the float value.
-3. Similarly for `RATIONALE:` and `CONFIDENCE:`.  (`DEMOTION_APPLIED:` is
-   **not** scanned — it is computed by the daemon as
-   `base_urgency − adjusted_urgency`; if the model emits it, the line is
-   silently ignored like any unknown label.)
-4. Non-matching lines are ignored.
-5. If `ADJUSTED_URGENCY:` is missing, return error; caller falls back to the
-   deterministic floor formula.
+1. Trim whitespace; reject empty responses.
+2. Find the first `{` and last `}` in the response to locate the JSON object.
+3. Deserialize the substring via `serde_json::from_str::<OrientJudgment>`.
+4. `adjusted_urgency` and `rationale` are required fields; `confidence`
+   defaults to `1.0` and `demotion_applied` defaults to `0.0`.
+5. If no JSON object is found or deserialization fails, return error; caller
+   falls back to the deterministic floor formula.
 
-The JSON parser has been removed. `serde_json::from_str` is never called on
-the LLM response.
+The old labeled-line parser has been removed. Labeled-line responses
+(e.g. `ADJUSTED_URGENCY: 0.6`) will fail parsing because no `{` is found.
 
 ## Deterministic Fallback
 
@@ -167,7 +155,7 @@ adjusted_urgency = max(0.0, base_urgency - 0.2 * failure_count)
 
 This fallback fires when:
 - No LLM is configured.
-- The LLM response cannot be parsed (missing `ADJUSTED_URGENCY:` label).
+- The LLM response cannot be parsed (no JSON object found, or deserialization fails).
 - The parsed judgment fails validation (`adjusted_urgency > base_urgency`).
 
 The fallback is **not** a silent error handler — the parse failure is surfaced
@@ -177,13 +165,13 @@ GitHub issue escalation) before the fallback is applied.
 ## Versioning & Compatibility
 
 The orient brain has no enum variants to extend — it produces a single
-`OrientJudgment` struct. Adding new labeled fields to the prompt is safe:
-the parser ignores unknown labels (forward compatible), and new fields
-will not be parsed until the Rust parser is updated.
+`OrientJudgment` struct. Adding new JSON fields to the prompt is safe:
+the `serde` deserializer ignores unknown fields (forward compatible), and
+new fields will not be parsed until the Rust struct is updated.
 
 Changes to the demotion reference scale or guidance prose are safe to ship
-alone. Changes to the labeled-line field names require a coordinated Rust
-change to the parser in `orient.rs`.
+alone. Changes to the JSON field names require a coordinated Rust change
+to the `OrientJudgment` struct and parser in `orient.rs`.
 
 ## See Also
 
