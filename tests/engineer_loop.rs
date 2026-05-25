@@ -507,7 +507,8 @@ fn engineer_loop_meeting_handoff_load_failure_surfaces_in_stderr() {
         .output()
         .expect("engineer-loop probe should launch");
 
-    if skip_if_no_llm_provider(&output) {
+    let rendered = rendered_output(&output);
+    if skip_if_no_llm_provider(&rendered) {
         return;
     }
 
