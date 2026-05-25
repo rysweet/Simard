@@ -155,8 +155,12 @@ pub fn run_ooda_daemon(
         "[simard] OODA daemon: LLM session opened for autonomous work",
     );
 
+    // Compute repo_root early — needed by both brain construction and
+    // progress-evidence checker.
+    let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
     let brain = brains::build_act_brain(&state_root);
-    let decide_brain = brains::build_decide_brain(&state_root);
+    let decide_brain = brains::build_decide_brain(&state_root, &repo_root);
     let orient_brain = brains::build_orient_brain(&state_root);
 
     // After all three brains are constructed, surface the cumulative
@@ -205,7 +209,6 @@ pub fn run_ooda_daemon(
     //   3. NoopProgressEvidenceChecker (fallback)
     //
     // Honors `SIMARD_PROGRESS_EVIDENCE=off` as a kill switch.
-    let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let kill_switch = std::env::var("SIMARD_PROGRESS_EVIDENCE")
         .ok()
         .map(|v| v.eq_ignore_ascii_case("off"))

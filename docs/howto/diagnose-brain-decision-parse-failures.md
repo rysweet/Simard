@@ -13,6 +13,14 @@ labeled lines for structured fields. JSON is no longer accepted (removed in
 **full raw model response**. This guide tells you how to find that log, read
 it, and decide what to do.
 
+> **Note:** This guide covers the **engineer-lifecycle** brain only (the
+> `DECISION:` marker protocol in `rustyclawd.rs`). The **decide** brain
+> (action-kind routing) no longer uses `DECISION:` markers — as of
+> [#2111](https://github.com/rysweet/Simard/issues/2111), it runs as a
+> recipe step with keyword scanning. See
+> [OODA decide recipe and prompt schema](../reference/ooda-decide-prompt.md)
+> for the current decide brain protocol.
+
 For the full protocol definition see the
 [OODA Brain Decision Protocol reference](../reference/ooda-brain-decision-protocol.md).
 

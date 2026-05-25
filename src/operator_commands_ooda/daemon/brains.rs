@@ -86,21 +86,27 @@ pub(super) fn build_act_brain(state_root: &Path) -> Arc<dyn crate::ooda_brain::O
     }
 }
 
-/// Construct the Decide brain (PR #1469 wire-up). Returns `None` on Err so
+/// Construct the Decide brain (issue #2111 — recipe-runner-rs backed).
+/// Returns `None` when recipe-runner-rs is unavailable so
 /// `cycle::run_ooda_cycle` falls back to [`crate::ooda_brain::DeterministicFallbackDecideBrain`].
 pub(super) fn build_decide_brain(
     state_root: &Path,
+    repo_root: &Path,
 ) -> Option<Arc<dyn crate::ooda_brain::OodaDecideBrain>> {
-    match crate::ooda_brain::build_rustyclawd_decide_brain() {
-        Ok(b) => {
+    match crate::ooda_brain::RecipeDecideBrain::new(repo_root) {
+        Some(b) => {
             daemon_log(
                 state_root,
-                "[simard] OODA daemon: decide_brain = RustyClawdDecideBrain (prompt-driven)",
+                "[simard] OODA daemon: decide_brain = RecipeDecideBrain (recipe-runner-rs backed)",
             );
-            Some(Arc::from(b))
+            Some(Arc::new(b))
         }
-        Err(e) => {
-            record_fallback(state_root, "decide", &e.to_string());
+        None => {
+            record_fallback(
+                state_root,
+                "decide",
+                "recipe-runner-rs or ooda-decide.yaml not available",
+            );
             None
         }
     }

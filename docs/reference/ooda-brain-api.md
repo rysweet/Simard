@@ -247,26 +247,111 @@ context → decision) and lets state mutations live alongside the other
 
 ```
 src/ooda_brain/
-├── mod.rs          # trait, decision enum, error wiring         (~110 LOC)
-├── ctx.rs          # gather_engineer_lifecycle_ctx + redaction  (~90  LOC)
-├── rustyclawd.rs   # RustyClawdBrain + LlmSubmitter             (~140 LOC)
-├── fallback.rs     # DeterministicFallbackBrain                 (~35  LOC)
-└── tests.rs        # parse, ctx, integration tests              (~200 LOC)
+├── mod.rs            # trait, decision enum, error wiring           (~110 LOC)
+├── ctx.rs            # gather_engineer_lifecycle_ctx + redaction    (~90  LOC)
+├── rustyclawd.rs     # RustyClawdBrain + LlmSubmitter               (~140 LOC)
+├── decide.rs         # OodaDecideBrain trait, DecideJudgment,
+│                     #   DeterministicFallbackDecideBrain            (~200 LOC)
+├── recipe_decide.rs  # RecipeDecideBrain: recipe-runner-rs shim
+│                     #   + keyword scanner + inline tests            (~180 LOC)
+├── fallback.rs       # DeterministicFallbackBrain                   (~35  LOC)
+├── decide_tests.rs   # JSON round-trip + DeterministicFallback tests (~90  LOC)
+└── tests.rs          # parse, ctx, integration tests                (~200 LOC)
 ```
 
 All files respect the per-module 400-LOC cap (#1266).
 
+## Decide Brain: `RecipeDecideBrain`
+
+> **New in [#2111](https://github.com/rysweet/Simard/issues/2111).**
+> Replaces `RustyClawdDecideBrain` which parsed `DECISION:` markers.
+
+```rust
+pub struct RecipeDecideBrain {
+    recipe_path: PathBuf,
+}
+
+impl RecipeDecideBrain {
+    /// Returns `Some(brain)` if `recipe-runner-rs` is on $PATH and the
+    /// recipe YAML exists; `None` otherwise.
+    pub fn new(repo_root: &Path) -> Option<Self>;
+}
+
+impl OodaDecideBrain for RecipeDecideBrain {
+    fn judge(&self, ctx: &DecideContext) -> SimardResult<DecideJudgment>;
+}
+```
+
+The `judge` method:
+
+1. Spawns `recipe-runner-rs` as a subprocess with the recipe path and
+   context variables (`goal_id`, `urgency`, `reason`) passed as arguments.
+2. Captures stdout.
+3. Scans stdout for action keywords using `parse_action_from_text()`.
+4. Returns the matched `DecideJudgment` variant.
+
+### `parse_action_from_text`
+
+```rust
+pub(crate) fn parse_action_from_text(text: &str) -> DecideJudgment;
+```
+
+Scans the lowercased text for any of the 10 known action keywords using
+`contains()`. Returns the first match. If no keyword is found, returns
+`DecideJudgment::AdvanceGoal` (the safe default).
+
+This function is the keyword-verdict equivalent of the deleted
+`parse_judgment_from_response` — but simpler, because it has no failure
+mode. It always returns a valid `DecideJudgment`.
+
+### Construction pattern
+
+```rust
+// In daemon/brains.rs:
+pub fn build_decide_brain(
+    state_root: &Path,
+    repo_root: &Path,
+) -> Box<dyn OodaDecideBrain> {
+    match RecipeDecideBrain::new(repo_root) {
+        Some(b) => Box::new(b),
+        None => {
+            eprintln!("[ooda] recipe-runner-rs not found; \
+                       using deterministic decide fallback");
+            Box::new(DeterministicFallbackDecideBrain)
+        }
+    }
+}
+```
+
+### What was deleted
+
+- `RustyClawdDecideBrain` — compiled in prompt via `include_str!`,
+  submitted to `LlmSubmitter`, parsed `DECISION:` markers.
+- `parse_judgment_from_response` — the `DECISION:` marker parser in
+  `decide.rs`.
+- `build_rustyclawd_decide_brain` — factory function.
+- `StubSubmitter` and `RustyClawdDecideBrain` tests in `decide_tests.rs`.
+
 ## Test Inventory
 
-`src/ooda_brain/tests.rs` is the authoritative inventory; the file ships
-the legacy parse / context / end-to-end tests **plus** the 15 protocol
-tests (T1 – T15) enumerated in the **Behavior matrix** of the
+`src/ooda_brain/tests.rs` is the authoritative inventory for the
+engineer-lifecycle brain; the file ships the legacy parse / context /
+end-to-end tests **plus** the 15 protocol tests (T1 – T15) enumerated in
+the **Behavior matrix** of the
 [OODA Brain Decision Protocol reference](ooda-brain-decision-protocol.md#behavior-matrix).
-Each row of that matrix maps 1:1 to a `#[test]` function in this file —
-keep them in lockstep when editing either side.
+
+`src/ooda_brain/recipe_decide.rs` contains inline `#[cfg(test)]` tests for
+the keyword scanner, covering all 10 action keywords, the no-keyword
+default, mixed-case input, and multi-keyword input.
+
+`src/ooda_brain/decide_tests.rs` retains the JSON round-trip tests for
+`DecideJudgment` serialization and the `DeterministicFallbackDecideBrain`
+tests.
 
 ## See Also
 
 * [Concept: prompt-driven OODA brain](../concepts/prompt-driven-ooda-brain.md)
 * [Reference: `ooda_brain.md` prompt schema](ooda-brain-prompt.md)
+* [Reference: OODA decide recipe and prompt schema](ooda-decide-prompt.md)
+* [Reference: text-parsing wire formats](text-parsing-wire-formats.md)
 * [Reference: base type adapters](base-type-adapters.md)

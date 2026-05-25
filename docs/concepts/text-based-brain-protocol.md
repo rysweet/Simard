@@ -98,8 +98,8 @@ to avoid false positives from substring matching.
 
 ### Labeled lines for structured data
 
-OODA brain parsers (decide, orient, rustyclawd) use labeled-line formats
-where each field appears on its own line with a prefix:
+OODA brain parsers (engineer-lifecycle `rustyclawd.rs`) use labeled-line
+formats where each field appears on its own line with a prefix:
 
 ```
 DECISION: advance_goal
@@ -136,7 +136,11 @@ marks this call and explains why it is not part of the anti-pattern.
 
 ### 1. DECISION marker protocol (OODA brains)
 
-Used by: `decide.rs`, `orient.rs`, `rustyclawd.rs`
+Used by: `rustyclawd.rs`
+
+> **Note:** `decide.rs` has moved to the keyword verdict protocol (§ 2)
+> as of [#2111](https://github.com/rysweet/Simard/issues/2111).
+> `orient.rs` uses JSON format.
 
 The model emits a leading `DECISION: <variant>` line. For variants that
 need structured fields, labeled body lines follow:
@@ -162,7 +166,7 @@ for the full grammar and variant-specific field requirements.
 
 ### 2. Keyword verdict protocol (recipe shims)
 
-Used by: `recipe_progress_checker.rs`, `recipe_merge_judge.rs`
+Used by: `recipe_progress_checker.rs`, `recipe_merge_judge.rs`, `recipe_decide.rs`
 
 The recipe runs an agent step. The agent's stdout is scanned for a verdict
 keyword. Everything else is treated as rationale.
@@ -181,8 +185,18 @@ The parser:
    first — prevents `"not_ready"` matching as `"ready"`.
 3. Checks for `"ready"` or `"accept"`.
 4. If no keyword found, defaults to the safe option (`Accept` for progress
-   checker — fail-open; `NotReady` for merge judge — fail-closed).
+   checker — fail-open; `NotReady` for merge judge — fail-closed;
+   `AdvanceGoal` for decide brain — fail-safe).
 5. Extracts the full stdout (minus the keyword line) as rationale.
+
+> **New in [#2111](https://github.com/rysweet/Simard/issues/2111):**
+> The decide brain (`recipe_decide.rs`) now uses this protocol. It scans
+> for 10 action keywords (`advance_goal`, `consolidate_memory`,
+> `run_improvement`, etc.) in the agent's prose output. No keyword is a
+> substring of another, so no ordering-dependent disambiguation is needed.
+> If no keyword is found, `advance_goal` is the default — the same result
+> the `DeterministicFallbackDecideBrain` produces for real goal slugs.
+> This eliminated all decide-brain parse failures in production.
 
 ### 3. Key=value protocol (disk health)
 
@@ -208,7 +222,7 @@ The parser:
 
 ## Dead code removal
 
-Two modules were deleted as part of this change:
+Several modules were deleted or cleaned up as part of the text-migration changes:
 
 - **`progress_reviewer.rs`** — `LlmReviewerProgressChecker` and
   `parse_reviewer_response`. Replaced by the keyword verdict parser in
@@ -222,6 +236,14 @@ Two modules were deleted as part of this change:
   `RefusingMergeJudge`. There is no LLM tier. Types (`JudgeOutcome`,
   `Verdict`, `Blocker`, `MergeJudgeKind`), traits (`MergeJudge`), and
   `RefusingMergeJudge` / `build_merge_judge` are retained.
+
+- **`decide.rs` (partial, #2111)** — `RustyClawdDecideBrain`,
+  `parse_judgment_from_response`, `build_rustyclawd_decide_brain`. The
+  DECISION marker parser and LLM submitter-based brain are removed. The
+  decide brain now uses `RecipeDecideBrain` in `recipe_decide.rs`, which
+  invokes `recipe-runner-rs` and scans stdout for action keywords. The
+  `OodaDecideBrain` trait, `DecideContext`, `DecideJudgment`,
+  `DeterministicFallbackDecideBrain`, and `DECIDE_PROMPT_NAME` are retained.
 
 The daemon wiring in `operator_commands_ooda/daemon/mod.rs` was updated to
 match: the `LlmReviewerProgressChecker` fallback arm was removed. The chain
@@ -248,6 +270,14 @@ open PRs not getting engineers spawned. The flow:
 With text parsing, step 3 succeeds directly. The model's response
 `"advance_goal"` is found by keyword scan. No fallback needed. Goals
 with open PRs flow to `dispatch_spawn_engineer` reliably.
+
+> **Completed in [#2111](https://github.com/rysweet/Simard/issues/2111):**
+> The decide brain now runs as a recipe step with keyword scanning via
+> `RecipeDecideBrain`. The `DECISION:` marker parser and
+> `RustyClawdDecideBrain` have been deleted. The agent's prose output is
+> scanned directly for action keywords — the same keyword verdict protocol
+> used by the progress checker and merge judge. Parse failures from the
+> decide phase are eliminated entirely.
 
 ## Security improvements
 

@@ -16,52 +16,87 @@ owner: simard
 > `~/.simard/cycle_reports/`, and `~/.simard/metrics/` on the daemon
 > host; familiarity with the `simard` CLI and `jq`.
 
-The decide and orient brains use text-based wire formats — `DECISION:` markers
-and labeled lines — instead of JSON. Parse failures are rare because the
-text format is tolerant of prose, but they can still occur when a model emits
-a response with no recognizable decision marker or labeled field.
+## Decide brain: recipe-based keyword scanning
 
-Parse failures fire four visibility channels in lock-step. This guide tells
-you how to find them, read them, and decide what to do.
+> **Updated in [#2111](https://github.com/rysweet/Simard/issues/2111).**
+> The decide brain no longer uses `DECISION:` markers. It runs as a recipe
+> step and scans the agent's prose for action keywords. Parse failures in
+> the traditional sense (format rejected) **cannot occur** — the keyword
+> scanner always returns a valid action kind. If no keyword is found, the
+> default `advance_goal` is used.
+
+### Decide-brain failure modes
+
+The decide brain can still fail at the **infrastructure** level:
+
+| Failure | Log signature | Action |
+|---------|--------------|--------|
+| `recipe-runner-rs` not found | `[ooda] recipe-runner-rs not found; using deterministic decide fallback` | Install `recipe-runner-rs` or verify `$PATH`. |
+| Recipe subprocess exits non-zero | `ERROR simard::ooda_brain: recipe_decide invocation failed` + stderr | Check the recipe YAML syntax and the agent's error output. |
+| Recipe YAML not found | `RecipeDecideBrain::new() returned None` | Verify `prompt_assets/simard/recipes/ooda-decide.yaml` exists. |
+
+When `RecipeDecideBrain` fails to construct or the subprocess fails, the
+daemon falls back to `DeterministicFallbackDecideBrain`, which maps goal
+prefixes to action kinds (`__memory__` → `consolidate_memory`, etc.; real
+goals → `advance_goal`). This fallback is correct for most cases but does
+not preserve the agent's judgment for edge cases.
+
+### Verifying the decide brain is using the recipe
+
+```bash
+tail -F ~/.simard/logs/rustyclawd.log \
+  | grep -E 'recipe_decide|build_decide_brain'
+```
+
+On successful construction, no log line is emitted. On fallback:
+
+```
+WARN simard::operator_commands_ooda: [ooda] recipe-runner-rs not found; using deterministic decide fallback
+```
+
+## Orient brain: text-based parse failures
+
+The orient brain uses JSON format and can still produce parse failures.
+Parse failures fire four visibility channels in lock-step. This section
+tells you how to find them, read them, and decide what to do.
 
 For the wire format specifications, see
 [Reference: text-parsing wire formats](../reference/text-parsing-wire-formats.md).
 The engineer-lifecycle equivalent (#1711) is covered by
 [Diagnose OODA brain decision parse failures](./diagnose-brain-decision-parse-failures.md).
 
-## Step 1: Find the failing cycle
+## Step 1: Find the failing cycle (orient brain)
 
 Symptoms that justify reading parse-failure evidence:
 
 * A goal's `consecutive_skip` or "no progress" counter climbs every cycle
   even though the dashboard says recent decisions succeeded.
 * `~/.simard/cycle_reports/cycle_*.json` shows `brain_judgments[].fallback == true`
-  for `decide` or `orient` on consecutive cycles and the new `parse_failure`
+  for `orient` on consecutive cycles and the new `parse_failure`
   block on the same record is non-null.
 * The metric jsonl shows non-zero `brain_parse_failure` counters.
-* A GitHub issue titled `OODA decide brain parse failure: goal=<id> (N consecutive)`
+* A GitHub issue titled `OODA orient brain parse failure: goal=<id> (N consecutive)`
   was auto-filed against the `ESCALATION_REPO_SLUG` repo.
 
 ### Tail the structured log
 
-The daemon writes to `~/.simard/logs/` on the host. Look for the constant
-`brain.decide parse failed` / `brain.orient parse failed` message strings —
-both are at `ERROR` level:
+The daemon writes to `~/.simard/logs/` on the host. Look for the
+`brain.orient parse failed` message string at `ERROR` level:
 
 ```bash
 tail -F ~/.simard/logs/rustyclawd.log \
-  | grep -E 'brain\.(decide|orient) parse failed'
+  | grep -E 'brain\.orient parse failed'
 ```
 
 A matching line looks like:
 
 ```
-ERROR simard::ooda_brain: brain.decide parse failed
-    phase="decide"
+ERROR simard::ooda_brain: brain.orient parse failed
+    phase="orient"
     goal_id="improve-amplihack-test-coverage"
-    error="no DECISION marker found in LLM response (got 3 bytes)"
+    error="no JSON object found in LLM response (got 3 bytes)"
     raw_response_truncated="OK"
-    prompt_name="ooda_decide.md"
+    prompt_name="ooda_orient.md"
     prompt_version="a1b2c3d4e5f6"
     consecutive_count=2
     retry_attempted=false
@@ -100,11 +135,10 @@ Open the `raw_response_truncated` value and match against this triage table.
 
 | `raw_response_truncated` looks like… | Likely cause | Action |
 |----|----|----|
-| `"OK"`, `"continue"`, `"yes"` | Model ignored the text-output instruction; emitted a chat ack | [Step 3 — replay the prompt](#step-3-replay-the-prompt-locally); strengthen the prompt's `OUTPUT_FORMAT` section |
+| `"OK"`, `"continue"`, `"yes"` | Model ignored the JSON-output instruction; emitted a chat ack | [Step 3 — replay the prompt](#step-3-replay-the-prompt-locally); strengthen the prompt's output instructions |
 | `""` (empty string) | Adapter returned `Err` with no body (5xx, timeout) | Check adapter logs for 5xx / rate-limit / timeout |
-| Long prose without any `DECISION:` line or labeled fields | Model is in chat mode, not following the output format | Strengthen the `OUTPUT_FORMAT` section examples |
-| Text with a `DECISION:` line but unknown variant token | Variant token drift or prompt/code mismatch | Diff `prompt_assets/simard/$prompt_name` against the known variant list |
-| JSON object (legacy format) | Model following old JSON instructions from cached prompt | Update the prompt to use text format; the parser no longer accepts JSON |
+| Long prose without any JSON object | Model is in chat mode, not following the output format | Strengthen the prompt's output section examples |
+| JSON object with wrong or missing field names | Model emitting wrong field structure | Diff `prompt_assets/simard/ooda_orient.md` against the expected fields (`adjusted_urgency`, `rationale`, `confidence`) |
 | Partial text ending mid-word | Adapter truncated mid-stream | Check adapter log for `EOF` / `truncated stream` |
 
 If `consecutive_count` is 1 or 2 and the next cycle shows `parse_failure == null`,
@@ -114,11 +148,9 @@ If `consecutive_count` reaches 3, the daemon has auto-filed a GitHub issue.
 
 ## Step 3: Replay the prompt locally
 
-Use the crate-level helpers to test parsing:
+Use the crate-level helper to test orient parsing:
 
 ```rust
-pub fn try_parse_decide_response(raw: &str)
-    -> Result<DecideJudgment, SimardError>;
 pub fn try_parse_orient_response(raw: &str)
     -> Result<OrientJudgment, SimardError>;
 ```
@@ -129,7 +161,7 @@ Add a one-off test:
 #[test]
 fn repro_parse_failure() {
     let raw = "OK"; // <-- paste unescaped payload here
-    let result = crate::ooda_brain::try_parse_decide_response(raw);
+    let result = crate::ooda_brain::try_parse_orient_response(raw);
     eprintln!("{result:?}");
 }
 ```
@@ -148,11 +180,15 @@ gh issue list --repo rysweet/Simard \
 
 | Cause from Step 2 | Remediation |
 |----|----|
-| Chat ack / wrong mode | Edit the `OUTPUT_FORMAT` section of `prompt_assets/simard/ooda_decide.md` (or `ooda_orient.md`). Ensure it specifies `DECISION: <variant>` or labeled-line format, not JSON. See [edit-the-ooda-brain-prompt](edit-the-ooda-brain-prompt.md). |
+| Chat ack / wrong mode | Edit `prompt_assets/simard/ooda_orient.md` to strengthen the JSON output instruction. See [edit-the-ooda-brain-prompt](edit-the-ooda-brain-prompt.md). |
 | Adapter 5xx / rate limit / timeout | Investigate the adapter; the brain itself is healthy. |
-| JSON output (legacy format) | The model is following outdated JSON instructions. Update the prompt to clearly specify text format. Remove any `OUTPUT_FORMAT` JSON schema examples. |
-| Variant token drift | Diff the prompt against the known variant list in the Rust parser. The variant whitelist is the enum itself — there is no parallel list. |
+| JSON output wrong fields | The model is emitting JSON with wrong field names. Update the prompt's examples to use the correct fields (`adjusted_urgency`, `rationale`, `confidence`). |
 | Persistent non-cooperative model | Switch the provider in the brain config. |
+
+> **Note:** The decide brain no longer has parse failures. It uses keyword
+> scanning via a recipe step. If the decide brain is producing unexpected
+> routing, edit `prompt_assets/simard/recipes/ooda-decide.yaml` — no rebuild
+> required. See [OODA decide recipe and prompt schema](../reference/ooda-decide-prompt.md).
 
 After editing a prompt, rebuild and hot-swap:
 
@@ -179,9 +215,13 @@ You should see:
 
 ## Anti-patterns
 
-* **Reverting to JSON output format in the prompt.** The parser no longer
-  accepts JSON. Adding JSON examples to the prompt will cause models to emit
-  JSON, which will be parse-rejected.
+* **Reverting to JSON output format in the orient prompt.** The orient parser
+  expects JSON. Adding non-JSON examples to the orient prompt will cause
+  models to emit prose, which will be parse-rejected.
+* **Adding a `DECISION:` marker format to the decide recipe prompt.** The
+  decide brain uses keyword scanning — there is no marker parser. Adding
+  `OUTPUT_FORMAT` sections with `DECISION:` instructions is unnecessary
+  and may confuse the agent.
 * **Restarting the daemon directly** to "clear" parse failures. Use
   `simard safe-update` for any code/prompt change.
 * **Suppressing the `ERROR` log line** with a tracing filter.
