@@ -177,6 +177,78 @@ pub(crate) const PART_05: &str = r#"      try {
       }
     }
 
+    /* --- PR Readiness (#2042) --- */
+    async function fetchPrReadiness(){
+      const sumEl=document.getElementById('pr-readiness-summary');
+      const el=document.getElementById('pr-readiness-panel');
+      if(!el) return;
+      try {
+        const d = await apiFetch('/api/prs');
+        const prs = Array.isArray(d.prs) ? d.prs : [];
+        const summary = d.summary || {};
+
+        if(d.error){
+          sumEl.innerHTML='<div class="err" style="font-size:.85rem">'+esc(d.error)+'</div>';
+        } else {
+          sumEl.innerHTML=
+              '<div style="display:flex;gap:1rem;flex-wrap:wrap;font-size:.85rem">'
+            +   '<span>Total: <strong>'+esc(String(summary.total||0))+'</strong></span>'
+            +   '<span class="ok">Ready: <strong>'+esc(String(summary.ready||0))+'</strong></span>'
+            +   '<span class="err">Blocked: <strong>'+esc(String(summary.blocked||0))+'</strong></span>'
+            +   '<span class="warn">Pending: <strong>'+esc(String(summary.pending||0))+'</strong></span>'
+            + '</div>';
+        }
+
+        if(prs.length === 0){
+          el.innerHTML =
+              '<div style="padding:1rem;text-align:center">'
+            +   '<div style="font-size:2rem;margin-bottom:.5rem">📋</div>'
+            +   '<div style="color:#8b949e;font-size:.95rem;max-width:540px;margin:0 auto;line-height:1.6">'
+            +     'No open pull requests found. When Simard opens or manages PRs, they will appear here with their readiness status.'
+            +   '</div>'
+            + '</div>';
+          return;
+        }
+
+        const rows = prs.map(function(pr){
+          let ciBadge;
+          if(pr.ci_status==='passing')       ciBadge='<span class="ok">✓ passing</span>';
+          else if(pr.ci_status==='failing')  ciBadge='<span class="err">✗ failing</span>';
+          else if(pr.ci_status==='pending')  ciBadge='<span class="warn">⏳ pending</span>';
+          else                               ciBadge='<span style="color:#8b949e">'+esc(pr.ci_status||'none')+'</span>';
+          let reviewBadge;
+          if(pr.review_status==='approved')              reviewBadge='<span class="ok">✓ approved</span>';
+          else if(pr.review_status==='changes_requested') reviewBadge='<span class="err">✗ changes requested</span>';
+          else if(pr.review_status==='review_required')  reviewBadge='<span class="warn">⏳ review required</span>';
+          else                                           reviewBadge='<span style="color:#8b949e">'+esc(pr.review_status||'none')+'</span>';
+          const blockerList = Array.isArray(pr.blockers) && pr.blockers.length
+            ? '<div style="margin-top:.2rem;font-size:.8rem;color:#f85149">'+pr.blockers.map(function(b){return '• '+esc(b);}).join('<br>')+'</div>'
+            : '';
+          const readyBadge = pr.ready
+            ? '<span class="ok" style="font-weight:700">✓ Ready</span>'
+            : '<span class="err" style="font-weight:700">✗ Blocked</span>';
+          const draft = pr.is_draft ? ' <span class="badge" style="background:#21262d;color:#8b949e">draft</span>' : '';
+          const titleEsc = esc(String(pr.title||'').slice(0,80));
+          return '<tr data-testid="pr-row-'+pr.number+'">'
+               + '<td><a href="'+esc(pr.url||'')+'" target="_blank" style="color:var(--accent)">#'+esc(String(pr.number))+'</a>'+draft+'</td>'
+               + '<td style="max-width:320px">'+titleEsc+'</td>'
+               + '<td><code>'+esc(String(pr.base_branch||''))+'</code></td>'
+               + '<td>'+ciBadge+'</td>'
+               + '<td>'+reviewBadge+'</td>'
+               + '<td>'+readyBadge+blockerList+'</td>'
+               + '<td style="color:#8b949e;font-size:.8rem">'+formatTime(pr.updated_at)+'</td>'
+               + '</tr>';
+        }).join('');
+
+        el.innerHTML =
+            '<table class="proc-table" data-testid="pr-readiness-table">'
+          + '<thead><tr><th>PR</th><th>Title</th><th>Base</th><th>CI</th><th>Review</th><th>Status</th><th>Updated</th></tr></thead>'
+          + '<tbody>' + rows + '</tbody></table>';
+      } catch(e) {
+        el.innerHTML = '<span class="err">Failed to load PR readiness: '+esc(e.message||e)+'</span>';
+      }
+    }
+
     /* --- Merge Readiness (#1880) --- */
     async function fetchMergeReadiness(){
       const el=document.getElementById('merge-readiness-panel');

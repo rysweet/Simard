@@ -170,6 +170,14 @@ pub const TAB_METADATA: &[TabMeta] = &[
         tooltip: "History of merge-judge verdicts for each evaluated pull request",
     },
     TabMeta {
+        slug: "pr-readiness",
+        label: "PR Readiness",
+        title: "PR Readiness · Simard",
+        h1: "PR Readiness",
+        lede: "Every open pull request under management with its CI status, review state, and remaining blockers — so you can see what is ready to merge without leaving the dashboard.",
+        tooltip: "Open PRs with CI status, review state, and merge blockers",
+    },
+    TabMeta {
         slug: "terminal",
         label: "Terminal",
         title: "Terminal · Simard",

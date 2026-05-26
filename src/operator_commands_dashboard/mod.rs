@@ -15,6 +15,7 @@ mod merge_judge;
 mod merge_readiness;
 mod metrics;
 mod monitoring;
+mod pr_readiness;
 mod registry;
 pub(crate) mod routes;
 mod subagent;
