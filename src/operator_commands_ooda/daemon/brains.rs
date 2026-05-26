@@ -70,7 +70,19 @@ fn record_fallback(state_root: &Path, phase: &str, reason: &str) {
 /// Construct the engineer-lifecycle brain. Always returns an Arc — falls
 /// back to [`crate::ooda_brain::DeterministicFallbackBrain`] on Err,
 /// loudly per [`record_fallback`].
-pub(super) fn build_act_brain(state_root: &Path) -> Arc<dyn crate::ooda_brain::OodaBrain> {
+pub(super) fn build_act_brain(
+    state_root: &Path,
+    repo_root: &Path,
+) -> Arc<dyn crate::ooda_brain::OodaBrain> {
+    // Try recipe brain first (recipe-runner-rs backed)
+    if let Some(b) = crate::ooda_brain::RecipeEngineerLifecycleBrain::new(repo_root) {
+        daemon_log(
+            state_root,
+            "[simard] OODA daemon: brain = RecipeEngineerLifecycleBrain (recipe-runner-rs backed)",
+        );
+        return Arc::new(b);
+    }
+    // Fall back to LLM-backed brain
     match crate::ooda_brain::build_rustyclawd_brain() {
         Ok(b) => {
             daemon_log(
@@ -116,7 +128,17 @@ pub(super) fn build_decide_brain(
 /// [`build_decide_brain`].
 pub(super) fn build_orient_brain(
     state_root: &Path,
+    repo_root: &Path,
 ) -> Option<Arc<dyn crate::ooda_brain::OodaOrientBrain>> {
+    // Try recipe brain first (recipe-runner-rs backed)
+    if let Some(b) = crate::ooda_brain::RecipeOrientBrain::new(repo_root) {
+        daemon_log(
+            state_root,
+            "[simard] OODA daemon: orient_brain = RecipeOrientBrain (recipe-runner-rs backed)",
+        );
+        return Some(Arc::new(b));
+    }
+    // Fall back to LLM-backed brain
     match crate::ooda_brain::build_rustyclawd_orient_brain() {
         Ok(b) => {
             daemon_log(
