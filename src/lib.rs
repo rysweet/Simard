@@ -286,7 +286,7 @@ pub use prompt_assets::{
 pub use reflection::{ReflectionReport, ReflectionSnapshot, ReflectiveRuntime};
 pub use remote_azlin::{AzlinConfig, AzlinExecutor, AzlinVm, RealAzlinExecutor};
 pub use remote_session::{RemoteConfig, RemoteSession, RemoteStatus};
-pub use remote_transfer::MemorySnapshot;
+pub use remote_transfer::{ENVELOPE_SCHEMA_VERSION, MemorySnapshot, PersistedEnvelope};
 pub use research_tracker::{
     DeveloperWatch, ExtractionResult, IdeaProposal, ResearchStatus, ResearchTopic, ResearchTracker,
     add_research_topic, extract_ideas, load_research_topics, summarize_extraction, track_developer,
