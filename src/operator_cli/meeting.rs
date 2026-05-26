@@ -346,6 +346,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_meeting_resume_no_wip_errors() {
         let dir = tempfile::tempdir().expect("temp dir");
         unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", dir.path()) };
@@ -360,6 +361,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_meeting_resume_discard_no_wip_ok() {
         let dir = tempfile::tempdir().expect("temp dir");
         unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", dir.path()) };
@@ -376,6 +378,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_meeting_resume_discard_removes_wip() {
         let dir = tempfile::tempdir().expect("temp dir");
         let wip_path = dir.path().join("meeting_session_wip.json");
