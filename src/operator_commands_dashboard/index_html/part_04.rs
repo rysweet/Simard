@@ -184,8 +184,8 @@ pub(crate) const PART_04: &str = r#"            let fmt;
         const cs=d.cognitive_statistics;
         if(cs){
           document.getElementById('wb-cog-stats').innerHTML=[
-            ['Sensory',cs.sensory_count],['Working',cs.working_count],['Episodic',cs.episodic_count],
-            ['Semantic',cs.semantic_count],['Procedural',cs.procedural_count],['Prospective',cs.prospective_count],['Total',cs.total]
+            ['Recent observations',cs.sensory_count],['Currently thinking about',cs.working_count],['Events remembered',cs.episodic_count],
+            ['Facts learned',cs.semantic_count],['Known procedures',cs.procedural_count],['Planned actions',cs.prospective_count],['Total',cs.total]
           ].map(([k,v])=>'<span style="margin-right:1rem"><strong>'+k+':</strong> '+(v||0)+'</span>').join('');
         }else{document.getElementById('wb-cog-stats').innerHTML='<span style="color:#8b949e">No agent memory available</span>';}
       }catch(e){document.getElementById('wb-engineers').innerHTML='<span class="err">Failed to load workboard data</span>';}

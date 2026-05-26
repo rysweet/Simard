@@ -118,7 +118,7 @@ pub const TAB_METADATA: &[TabMeta] = &[
         label: "Memory",
         title: "Memory · Simard",
         h1: "Memory",
-        lede: "Everything Simard has learned and remembered, organised by memory type (working, semantic, episodic, procedural, prospective, and sensory) with full-text search.",
+        lede: "Everything Simard has learned and remembered \u{2014} what it's thinking about, facts learned, events remembered, known procedures, planned actions, and recent observations \u{2014} with full-text search.",
         tooltip: "What the agent has learned and remembered, across all memory types",
     },
     TabMeta {
