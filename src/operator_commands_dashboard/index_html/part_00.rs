@@ -84,6 +84,17 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
     .outcome.success{background:rgba(63,185,80,0.1)}
     .outcome.failure{background:rgba(248,81,73,0.1)}
     .outcome-detail{font-size:.8rem;color:#8b949e;margin-top:.2rem;padding-left:1rem;font-family:monospace;white-space:pre-wrap;max-height:100px;overflow-y:auto}
+    abbr[title]{text-decoration:underline dotted var(--accent);text-underline-offset:2px;cursor:help;color:var(--fg)}
+    abbr[title]:hover{color:var(--accent)}
+    .glossary-toggle{cursor:pointer;color:var(--accent);font-size:.85rem;padding:.2rem .5rem;border:1px solid var(--accent);border-radius:4px;background:transparent;margin-left:.5rem}
+    .glossary-toggle:hover{background:rgba(88,166,255,0.1)}
+    .glossary-panel{display:none;position:fixed;right:0;top:0;width:340px;height:100vh;background:var(--card);border-left:1px solid var(--border);padding:1.5rem;overflow-y:auto;z-index:1000;box-shadow:-4px 0 12px rgba(0,0,0,0.3)}
+    .glossary-panel.open{display:block}
+    .glossary-panel h3{color:var(--accent);margin-bottom:1rem;display:flex;justify-content:space-between;align-items:center}
+    .glossary-panel .close-btn{cursor:pointer;color:#8b949e;font-size:1.2rem;background:none;border:none}
+    .glossary-entry{padding:.5rem 0;border-bottom:1px solid var(--border)}
+    .glossary-entry dt{color:var(--accent);font-weight:600;font-size:.9rem;margin-bottom:.2rem}
+    .glossary-entry dd{color:#8b949e;font-size:.85rem;margin:0;line-height:1.4}
   </style>
 </head>
 <body>
@@ -93,6 +104,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
       <span id="header-version" style="font-size:.75rem;color:#8b949e"></span>
       <a href="https://github.com/rysweet/Simard" target="_blank" style="color:#8b949e;text-decoration:none;font-size:.85rem;padding:.2rem .4rem" title="Source on GitHub">⟨/⟩ Source</a>
       <a href="https://github.com/rysweet/Simard/releases/latest" target="_blank" style="color:#3fb950;text-decoration:none;font-size:.85rem;border:1px solid #3fb950;padding:.2rem .6rem;border-radius:4px">📦 Releases</a>
+      <button class="glossary-toggle" onclick="toggleGlossary()" title="Show glossary of Simard terms">📖 Glossary</button>
       <span id="clock" style="color:#8b949e;font-size:.85rem"></span>
     </div>
   </header>
@@ -212,7 +224,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
       <h2>Cycle Reports</h2>
       <div id="cycle-reports"><span class="loading">Loading…</span></div>
     </div>
-    <h2 style="color:var(--accent);font-size:1rem;margin-bottom:.5rem">OODA Transcripts</h2>
+    <h2 style="color:var(--accent);font-size:1rem;margin-bottom:.5rem">Agent Transcripts</h2>
     <div id="ooda-transcripts"><span class="loading">Loading…</span></div>
     <h2 style="color:var(--accent);font-size:1rem;margin:.75rem 0 .5rem">Terminal Session Transcripts</h2>
     <div id="terminal-transcripts"><span class="loading">Loading…</span></div>
@@ -235,7 +247,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
 
   <div class="tab-content" id="tab-memory">
     <h1 class="page-h1">Memory</h1>
-    <p class="page-lede">Everything Simard has learned and remembered, organised by memory type (working, semantic, episodic, procedural, prospective, and sensory) with full-text search.</p>
+    <p class="page-lede">Everything Simard has learned and remembered — what it's thinking about, facts learned, events remembered, known procedures, planned actions, and recent observations — with full-text search.</p>
 
     <div class="card" style="margin-bottom:1rem;border:1px solid #238636;background:linear-gradient(135deg,#0d1117,#0f1a12)">
       <div style="display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap">
@@ -266,12 +278,12 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
     <div id="mem-graph-panel">
       <div class="card" style="margin-bottom:.5rem;padding:.5rem .75rem">
         <div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:center;font-size:.8rem">
-          <label style="color:#f0883e"><input type="checkbox" class="mem-filter" data-type="WorkingMemory" checked> Working</label>
-          <label style="color:#58a6ff"><input type="checkbox" class="mem-filter" data-type="SemanticFact" checked> Semantic</label>
-          <label style="color:#3fb950"><input type="checkbox" class="mem-filter" data-type="EpisodicMemory" checked> Episodic</label>
-          <label style="color:#a371f7"><input type="checkbox" class="mem-filter" data-type="ProceduralMemory" checked> Procedural</label>
-          <label style="color:#d29922"><input type="checkbox" class="mem-filter" data-type="ProspectiveMemory" checked> Prospective</label>
-          <label style="color:#8b949e"><input type="checkbox" class="mem-filter" data-type="SensoryBuffer" checked> Sensory</label>
+          <label style="color:#f0883e"><input type="checkbox" class="mem-filter" data-type="WorkingMemory" checked> Currently thinking about</label>
+          <label style="color:#58a6ff"><input type="checkbox" class="mem-filter" data-type="SemanticFact" checked> Facts learned</label>
+          <label style="color:#3fb950"><input type="checkbox" class="mem-filter" data-type="EpisodicMemory" checked> Events remembered</label>
+          <label style="color:#a371f7"><input type="checkbox" class="mem-filter" data-type="ProceduralMemory" checked> Known procedures</label>
+          <label style="color:#d29922"><input type="checkbox" class="mem-filter" data-type="ProspectiveMemory" checked> Planned actions</label>
+          <label style="color:#8b949e"><input type="checkbox" class="mem-filter" data-type="SensoryBuffer" checked> Recent observations</label>
         </div>
       </div>
       <div style="display:flex;gap:1rem">
@@ -322,8 +334,21 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
     <h1 class="page-h1">Thinking</h1>
     <p class="page-lede">A live stream of the daemon's internal reasoning between actions, showing what it considered before deciding what to do next.</p>
     <div class="card">
-      <h2>OODA Internal Reasoning <button class="btn" onclick="fetchThinking()">Refresh</button></h2>
+      <h2>Agent Internal Reasoning <button class="btn" onclick="fetchThinking()">Refresh</button></h2>
       <div id="thinking-timeline"><span class="loading">Loading…</span></div>
+    </div>
+  </div>
+
+  <div class="tab-content" id="tab-brain-failures">
+    <h1 class="page-h1">Brain Failures</h1>
+    <p class="page-lede">Every time the daemon's language-model brain returned an unparseable or invalid response and fell back to safe deterministic rules, listed with the failure type, which component triggered it, when it happened, and whether recovery succeeded.</p>
+    <div class="card" style="margin-bottom:1rem">
+      <h2>Summary <button class="btn" onclick="fetchBrainFailures()">Refresh</button></h2>
+      <div id="brain-failures-summary"><span class="loading">Loading…</span></div>
+    </div>
+    <div class="card">
+      <h2>Recent Brain Failures</h2>
+      <div id="brain-failures-list"><span class="loading">Loading…</span></div>
     </div>
   </div>
 
@@ -336,7 +361,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
         <strong style="color:var(--accent)">💡 Meeting Help:</strong>
         Use this chat or run <code>simard meeting &lt;topic&gt;</code> from the terminal.
         Commands: <code>/close</code> end session, <code>/goals</code> review goals, <code>/status</code> system status.
-        Meetings generate handoff documents that the OODA daemon ingests as new goals.
+        Meetings generate handoff documents that the agent daemon ingests as new goals.
       </div>
       <div class="ws-status disconnected" id="ws-status">● Disconnected <button class="btn" onclick="initChat()" style="font-size:.75rem;padding:.1rem .4rem;margin-left:.5rem">Reconnect</button></div>
       <div id="chat-messages"></div>

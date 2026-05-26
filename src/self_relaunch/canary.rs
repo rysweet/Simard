@@ -160,6 +160,36 @@ mod tests {
     }
 
     #[test]
+    fn build_canary_creates_target_dir_and_propagates_failure() {
+        // Use a unique tempdir so we can verify create_dir_all works
+        // and that a build failure (bogus manifest) returns Err, not Ok.
+        let tmp =
+            std::env::temp_dir().join(format!("simard-canary-test-build-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(!tmp.exists(), "precondition: temp dir must not exist yet");
+
+        let config = RelaunchConfig {
+            canary_target_dir: tmp.clone(),
+            manifest_dir: PathBuf::from("/tmp/no-such-manifest-dir-for-canary-test"),
+            ..Default::default()
+        };
+        let result = build_canary(&config);
+        // The target dir should have been created even though the build fails.
+        assert!(tmp.exists(), "build_canary must create canary_target_dir");
+        // The build must fail because the manifest dir doesn't exist.
+        assert!(
+            result.is_err(),
+            "bogus manifest must cause build_canary to return Err"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("build failed") || err_msg.contains("cargo"),
+            "error must mention the build failure, got: {err_msg}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn coordinated_relaunch_acquires_semaphore() {
         let dir = std::env::temp_dir().join(format!("simard-relaunch-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

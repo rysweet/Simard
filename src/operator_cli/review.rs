@@ -2,11 +2,26 @@ use crate::operator_commands::{run_review_probe, run_review_read_probe};
 
 use super::args::{next_optional_path, next_required, reject_extra_args};
 
+pub(super) const REVIEW_HELP: &str = "\
+Simard review subcommand
+
+Usage: simard review <command> [args]
+
+Commands:
+  run <base-type> <topology> <objective> [state-root]
+  read <base-type> <topology> [state-root]
+  help, -h, --help            Show this help message and exit.
+";
+
 pub(super) fn dispatch_review_command(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let subcommand = next_required(&mut args, "review command")?;
     match subcommand.as_str() {
+        "--help" | "-h" | "help" => {
+            print!("{REVIEW_HELP}");
+            Ok(())
+        }
         "run" => {
             let base_type = next_required(&mut args, "base type")?;
             let topology = next_required(&mut args, "topology")?;
@@ -52,6 +67,21 @@ mod tests {
                 .to_string()
                 .contains("unsupported command 'review bogus'")
         );
+    }
+
+    #[test]
+    fn test_review_help_exits_ok() {
+        let result = dispatch_operator_cli(vec!["review".to_string(), "--help".to_string()]);
+        assert!(
+            result.is_ok(),
+            "review --help must exit Ok, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_review_short_help_exits_ok() {
+        let result = dispatch_operator_cli(vec!["review".to_string(), "-h".to_string()]);
+        assert!(result.is_ok(), "review -h must exit Ok, got: {result:?}");
     }
 
     #[test]

@@ -516,3 +516,402 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
         })
     }
 }
+
+// ============================================================================
+// Inline unit tests for ops.rs (issue #2036)
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_mem() -> NativeCognitiveMemory {
+        NativeCognitiveMemory::in_memory().expect("in-memory DB should create")
+    }
+
+    // ── escape_cypher ──────────────────────────────────────────────────
+
+    #[test]
+    fn escape_cypher_passthrough_for_ascii() {
+        assert_eq!(escape_cypher("hello world"), "hello world");
+    }
+
+    #[test]
+    fn escape_cypher_escapes_backslash() {
+        assert_eq!(escape_cypher("a\\b"), "a\\\\b");
+    }
+
+    #[test]
+    fn escape_cypher_escapes_single_quote() {
+        assert_eq!(escape_cypher("it's"), "it\\'s");
+    }
+
+    #[test]
+    fn escape_cypher_escapes_control_chars() {
+        assert_eq!(escape_cypher("\n"), "\\n");
+        assert_eq!(escape_cypher("\r"), "\\r");
+        assert_eq!(escape_cypher("\t"), "\\t");
+        assert_eq!(escape_cypher("\0"), "\\0");
+    }
+
+    #[test]
+    fn escape_cypher_handles_empty_string() {
+        assert_eq!(escape_cypher(""), "");
+    }
+
+    #[test]
+    fn escape_cypher_handles_mixed_special_chars() {
+        assert_eq!(
+            escape_cypher("it's a\nnew\\world\0"),
+            "it\\'s a\\nnew\\\\world\\0"
+        );
+    }
+
+    #[test]
+    fn escape_cypher_preserves_unicode() {
+        assert_eq!(escape_cypher("日本語🦀"), "日本語🦀");
+    }
+
+    // ── record_sensory / prune_expired_sensory ─────────────────────────
+
+    #[test]
+    fn record_sensory_returns_id_with_prefix() {
+        let mem = test_mem();
+        let id = mem.record_sensory("audio", "raw-bytes", 300).unwrap();
+        assert!(
+            id.starts_with("sen_"),
+            "sensory id must start with sen_: {id}"
+        );
+    }
+
+    #[test]
+    fn record_sensory_is_queryable() {
+        let mem = test_mem();
+        mem.record_sensory("visual", "frame-1", 3600).unwrap();
+        let rows = mem
+            .query("MATCH (s:Sensory) WHERE s.modality = 'visual' RETURN s.raw_data")
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(as_str(&rows[0][0]), Some("frame-1"));
+    }
+
+    #[test]
+    fn prune_expired_sensory_removes_expired() {
+        let mem = test_mem();
+        mem.record_sensory("test", "will-expire", 0).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let pruned = mem.prune_expired_sensory().unwrap();
+        assert!(pruned >= 1, "should prune at least 1 expired entry");
+    }
+
+    #[test]
+    fn prune_expired_sensory_keeps_valid() {
+        let mem = test_mem();
+        mem.record_sensory("test", "long-lived", 99999).unwrap();
+        let pruned = mem.prune_expired_sensory().unwrap();
+        assert_eq!(pruned, 0, "non-expired sensory must not be pruned");
+        let stats = mem.get_statistics().unwrap();
+        assert_eq!(stats.sensory_count, 1);
+    }
+
+    // ── push_working / get_working / clear_working ─────────────────────
+
+    #[test]
+    fn push_working_returns_prefixed_id() {
+        let mem = test_mem();
+        let id = mem.push_working("goal", "content", "task-1", 0.8).unwrap();
+        assert!(id.starts_with("wrk_"), "working id must start with wrk_");
+    }
+
+    #[test]
+    fn get_working_returns_matching_slots() {
+        let mem = test_mem();
+        mem.push_working("goal", "g1", "task-A", 1.0).unwrap();
+        mem.push_working("ctx", "c1", "task-A", 0.5).unwrap();
+        mem.push_working("goal", "g2", "task-B", 0.9).unwrap();
+
+        let slots = mem.get_working("task-A").unwrap();
+        assert_eq!(slots.len(), 2, "only task-A slots returned");
+        assert!(
+            slots.iter().all(|s| s.task_id == "task-A"),
+            "all slots must belong to task-A"
+        );
+    }
+
+    #[test]
+    fn get_working_returns_empty_for_unknown_task() {
+        let mem = test_mem();
+        let slots = mem.get_working("nonexistent").unwrap();
+        assert!(slots.is_empty());
+    }
+
+    #[test]
+    fn clear_working_returns_count_and_removes() {
+        let mem = test_mem();
+        mem.push_working("a", "x", "task-C", 1.0).unwrap();
+        mem.push_working("b", "y", "task-C", 0.5).unwrap();
+
+        let cleared = mem.clear_working("task-C").unwrap();
+        assert_eq!(cleared, 2);
+        assert!(mem.get_working("task-C").unwrap().is_empty());
+    }
+
+    #[test]
+    fn clear_working_returns_zero_for_empty() {
+        let mem = test_mem();
+        let cleared = mem.clear_working("no-such-task").unwrap();
+        assert_eq!(cleared, 0);
+    }
+
+    // ── store_episode / consolidate_episodes ───────────────────────────
+
+    #[test]
+    fn store_episode_returns_prefixed_id() {
+        let mem = test_mem();
+        let id = mem.store_episode("event happened", "source", None).unwrap();
+        assert!(id.starts_with("epi_"), "episode id must start with epi_");
+    }
+
+    #[test]
+    fn store_episode_persists_content() {
+        let mem = test_mem();
+        mem.store_episode("test event", "my-source", None).unwrap();
+        let rows = mem
+            .query("MATCH (e:Episode) WHERE e.source_label = 'my-source' RETURN e.content")
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(as_str(&rows[0][0]), Some("test event"));
+    }
+
+    #[test]
+    fn consolidate_episodes_needs_at_least_two() {
+        let mem = test_mem();
+        mem.store_episode("solo", "src", None).unwrap();
+        assert!(mem.consolidate_episodes(10).unwrap().is_none());
+    }
+
+    #[test]
+    fn consolidate_episodes_creates_summary() {
+        let mem = test_mem();
+        mem.store_episode("alpha", "src", None).unwrap();
+        mem.store_episode("beta", "src", None).unwrap();
+        let summary_id = mem.consolidate_episodes(10).unwrap();
+        assert!(summary_id.is_some());
+        let sid = summary_id.unwrap();
+        assert!(sid.starts_with("epi_"));
+    }
+
+    #[test]
+    fn consolidate_episodes_marks_originals_compressed() {
+        let mem = test_mem();
+        for i in 0..3 {
+            mem.store_episode(&format!("e{i}"), "src", None).unwrap();
+        }
+        mem.consolidate_episodes(10).unwrap();
+        let rows = mem
+            .query("MATCH (e:Episode) WHERE e.compressed = 0 RETURN count(e)")
+            .unwrap();
+        let uncompressed = as_i64(&rows[0][0]).unwrap();
+        assert_eq!(
+            uncompressed, 0,
+            "all originals should be marked compressed=1"
+        );
+    }
+
+    // ── store_fact / search_facts ──────────────────────────────────────
+
+    #[test]
+    fn store_fact_returns_prefixed_id() {
+        let mem = test_mem();
+        let id = mem
+            .store_fact("concept", "content", 0.9, &[], "src")
+            .unwrap();
+        assert!(id.starts_with("sem_"), "fact id must start with sem_");
+    }
+
+    #[test]
+    fn store_fact_with_tags() {
+        let mem = test_mem();
+        let tags = vec!["rust".to_string(), "perf".to_string()];
+        mem.store_fact("concept", "content", 0.8, &tags, "src")
+            .unwrap();
+        let facts = mem.search_facts("concept", 10, 0.0).unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].tags, tags);
+    }
+
+    #[test]
+    fn search_facts_by_content() {
+        let mem = test_mem();
+        mem.store_fact("k", "needle in haystack", 0.9, &[], "src")
+            .unwrap();
+        let results = mem.search_facts("needle", 10, 0.0).unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn search_facts_respects_limit() {
+        let mem = test_mem();
+        for i in 0..5 {
+            mem.store_fact(&format!("topic{i}"), "common-content", 0.9, &[], "src")
+                .unwrap();
+        }
+        let results = mem.search_facts("common-content", 3, 0.0).unwrap();
+        assert!(results.len() <= 3, "limit must be respected");
+    }
+
+    #[test]
+    fn search_facts_empty_result_for_no_match() {
+        let mem = test_mem();
+        mem.store_fact("rust", "fast", 0.9, &[], "src").unwrap();
+        let results = mem.search_facts("python", 10, 0.0).unwrap();
+        assert!(results.is_empty());
+    }
+
+    // ── store_procedure / recall_procedure ─────────────────────────────
+
+    #[test]
+    fn store_procedure_returns_prefixed_id() {
+        let mem = test_mem();
+        let id = mem
+            .store_procedure("deploy", &["build".into(), "push".into()], &[])
+            .unwrap();
+        assert!(id.starts_with("proc_"), "procedure id prefix");
+    }
+
+    #[test]
+    fn recall_procedure_returns_steps_and_prerequisites() {
+        let mem = test_mem();
+        let steps = vec!["compile".to_string(), "test".to_string()];
+        let prereqs = vec!["install-deps".to_string()];
+        mem.store_procedure("build-flow", &steps, &prereqs).unwrap();
+
+        let procs = mem.recall_procedure("build-flow", 10).unwrap();
+        assert_eq!(procs.len(), 1);
+        assert_eq!(procs[0].steps, steps);
+        assert_eq!(procs[0].prerequisites, prereqs);
+        assert_eq!(procs[0].usage_count, 0);
+    }
+
+    #[test]
+    fn recall_procedure_empty_for_no_match() {
+        let mem = test_mem();
+        let procs = mem.recall_procedure("nonexistent", 10).unwrap();
+        assert!(procs.is_empty());
+    }
+
+    // ── store_prospective / check_triggers ─────────────────────────────
+
+    #[test]
+    fn store_prospective_returns_prefixed_id() {
+        let mem = test_mem();
+        let id = mem
+            .store_prospective("desc", "trigger", "action", 5)
+            .unwrap();
+        assert!(id.starts_with("pro_"), "prospective id prefix");
+    }
+
+    #[test]
+    fn check_triggers_matches_substring() {
+        let mem = test_mem();
+        mem.store_prospective("watch for failure", "FAIL", "alert", 1)
+            .unwrap();
+        let triggered = mem.check_triggers("build FAILED with errors").unwrap();
+        assert_eq!(triggered.len(), 1);
+        assert_eq!(triggered[0].description, "watch for failure");
+        assert_eq!(triggered[0].priority, 1);
+    }
+
+    #[test]
+    fn check_triggers_returns_empty_on_no_match() {
+        let mem = test_mem();
+        mem.store_prospective("watch for failure", "FAIL", "alert", 1)
+            .unwrap();
+        let triggered = mem.check_triggers("everything is fine").unwrap();
+        assert!(triggered.is_empty());
+    }
+
+    #[test]
+    fn check_triggers_only_returns_pending() {
+        let mem = test_mem();
+        mem.store_prospective("p1", "match-me", "act", 1).unwrap();
+        // Manually flip status to 'done' to confirm pending-only filter.
+        mem.execute(
+            "MATCH (p:Prospective) WHERE p.trigger_condition = 'match-me' SET p.status = 'done'",
+        )
+        .unwrap();
+        let triggered = mem.check_triggers("match-me").unwrap();
+        assert!(
+            triggered.is_empty(),
+            "non-pending prospectives must not trigger"
+        );
+    }
+
+    // ── get_statistics ─────────────────────────────────────────────────
+
+    #[test]
+    fn get_statistics_empty_db() {
+        let mem = test_mem();
+        let stats = mem.get_statistics().unwrap();
+        assert_eq!(stats.sensory_count, 0);
+        assert_eq!(stats.working_count, 0);
+        assert_eq!(stats.episodic_count, 0);
+        assert_eq!(stats.semantic_count, 0);
+        assert_eq!(stats.procedural_count, 0);
+        assert_eq!(stats.prospective_count, 0);
+    }
+
+    #[test]
+    fn get_statistics_reflects_all_types() {
+        let mem = test_mem();
+        mem.record_sensory("m", "d", 300).unwrap();
+        mem.push_working("s", "c", "t", 1.0).unwrap();
+        mem.store_episode("e", "l", None).unwrap();
+        mem.store_fact("f", "c", 0.5, &[], "s").unwrap();
+        mem.store_procedure("p", &[], &[]).unwrap();
+        mem.store_prospective("d", "t", "a", 1).unwrap();
+        let stats = mem.get_statistics().unwrap();
+        assert_eq!(stats.sensory_count, 1);
+        assert_eq!(stats.working_count, 1);
+        assert_eq!(stats.episodic_count, 1);
+        assert_eq!(stats.semantic_count, 1);
+        assert_eq!(stats.procedural_count, 1);
+        assert_eq!(stats.prospective_count, 1);
+    }
+
+    // ── Cypher injection safety ────────────────────────────────────────
+
+    #[test]
+    fn store_fact_with_quotes_in_all_fields() {
+        let mem = test_mem();
+        let id = mem
+            .store_fact(
+                "con'cept",
+                "con'tent",
+                0.5,
+                &["tag'1".to_string()],
+                "src'id",
+            )
+            .unwrap();
+        assert!(id.starts_with("sem_"));
+        let facts = mem.search_facts("con", 10, 0.0).unwrap();
+        assert_eq!(facts.len(), 1);
+    }
+
+    #[test]
+    fn store_episode_with_newlines() {
+        let mem = test_mem();
+        let content = "line1\nline2\ttab\rreturn";
+        mem.store_episode(content, "src", None).unwrap();
+        let stats = mem.get_statistics().unwrap();
+        assert_eq!(stats.episodic_count, 1);
+    }
+
+    // ── is_read_only ───────────────────────────────────────────────────
+
+    #[test]
+    fn is_read_only_false_for_in_memory() {
+        let mem = test_mem();
+        assert!(!mem.is_read_only());
+    }
+}

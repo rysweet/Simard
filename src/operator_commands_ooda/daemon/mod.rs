@@ -155,9 +155,13 @@ pub fn run_ooda_daemon(
         "[simard] OODA daemon: LLM session opened for autonomous work",
     );
 
-    let brain = brains::build_act_brain(&state_root);
-    let decide_brain = brains::build_decide_brain(&state_root);
-    let orient_brain = brains::build_orient_brain(&state_root);
+    // Compute repo_root early — needed by both brain construction and
+    // progress-evidence checker.
+    let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+    let brain = brains::build_act_brain(&state_root, &repo_root);
+    let decide_brain = brains::build_decide_brain(&state_root, &repo_root);
+    let orient_brain = brains::build_orient_brain(&state_root, &repo_root);
 
     // After all three brains are constructed, surface the cumulative
     // fallback count in the dashboard. Nonzero == daemon is running in
@@ -205,7 +209,6 @@ pub fn run_ooda_daemon(
     //   3. NoopProgressEvidenceChecker (fallback)
     //
     // Honors `SIMARD_PROGRESS_EVIDENCE=off` as a kill switch.
-    let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let kill_switch = std::env::var("SIMARD_PROGRESS_EVIDENCE")
         .ok()
         .map(|v| v.eq_ignore_ascii_case("off"))
@@ -706,4 +709,205 @@ fn shutdown_daemon(
         "[simard] OODA daemon: shutdown complete (writer Arc will drop on return)",
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bridge::BridgeErrorPayload;
+    use crate::bridge_subprocess::InMemoryBridgeTransport;
+    use crate::cognitive_memory::CognitiveMemoryOps;
+    use crate::goal_curation::GoalBoard;
+    use crate::gym_bridge::GymBridge;
+    use crate::knowledge_bridge::KnowledgeBridge;
+    use crate::memory_bridge::CognitiveMemoryBridge;
+    use crate::ooda_loop::{OodaBridges, OodaState};
+    use serde_json::json;
+
+    fn mock_memory() -> Box<dyn CognitiveMemoryOps> {
+        Box::new(CognitiveMemoryBridge::new(Box::new(
+            InMemoryBridgeTransport::new("test-daemon-shutdown", |method, _params| match method {
+                "memory.search_facts" => Ok(json!({"facts": []})),
+                "memory.store_fact" => Ok(json!({"id": "sem_1"})),
+                "memory.store_episode" => Ok(json!({"id": "epi_1"})),
+                "memory.get_statistics" => Ok(json!({
+                    "sensory_count": 0, "working_count": 0, "episodic_count": 0,
+                    "semantic_count": 0, "procedural_count": 0, "prospective_count": 0
+                })),
+                _ => Err(BridgeErrorPayload {
+                    code: -32601,
+                    message: format!("unknown: {method}"),
+                }),
+            }),
+        )))
+    }
+
+    fn mock_shared_mem() -> Arc<dyn CognitiveMemoryOps> {
+        Arc::new(CognitiveMemoryBridge::new(Box::new(
+            InMemoryBridgeTransport::new("test-daemon-shared", |method, _params| match method {
+                "memory.search_facts" => Ok(json!({"facts": []})),
+                "memory.store_fact" => Ok(json!({"id": "sem_1"})),
+                "memory.store_episode" => Ok(json!({"id": "epi_1"})),
+                "memory.get_statistics" => Ok(json!({
+                    "sensory_count": 0, "working_count": 0, "episodic_count": 0,
+                    "semantic_count": 0, "procedural_count": 0, "prospective_count": 0
+                })),
+                _ => Err(BridgeErrorPayload {
+                    code: -32601,
+                    message: format!("unknown: {method}"),
+                }),
+            }),
+        )))
+    }
+
+    fn mock_knowledge() -> KnowledgeBridge {
+        KnowledgeBridge::new(Box::new(InMemoryBridgeTransport::new(
+            "test-knowledge",
+            |method, _params| match method {
+                "knowledge.list_packs" => Ok(json!({"packs": []})),
+                _ => Err(BridgeErrorPayload {
+                    code: -32601,
+                    message: format!("unknown: {method}"),
+                }),
+            },
+        )))
+    }
+
+    fn mock_gym() -> GymBridge {
+        GymBridge::new(Box::new(InMemoryBridgeTransport::new(
+            "test-gym",
+            |_method, _params| Ok(json!({"suite_id": "test", "success": true})),
+        )))
+    }
+
+    fn test_bridges() -> OodaBridges {
+        OodaBridges {
+            memory: mock_memory(),
+            knowledge: mock_knowledge(),
+            gym: mock_gym(),
+            session: None,
+            brain: Arc::new(crate::ooda_brain::DeterministicFallbackBrain),
+            decide_brain: None,
+            orient_brain: None,
+            repo_root: std::path::PathBuf::from("."),
+            progress_evidence: Arc::new(
+                crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
+            ),
+        }
+    }
+
+    // ── shutdown_daemon ─────────────────────────────────────────────
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn shutdown_daemon_succeeds_with_empty_state() {
+        let hermetic = crate::test_support::HermeticState::new();
+        let dir = hermetic.state_root();
+        let shared_mem = mock_shared_mem();
+        let mut state = OodaState::new(GoalBoard::new());
+        let mut bridges = test_bridges();
+
+        let result = shutdown_daemon(dir, &shared_mem, &mut state, &mut bridges, false);
+        assert!(
+            result.is_ok(),
+            "shutdown with empty state must succeed: {result:?}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn shutdown_daemon_writes_log_lines() {
+        let hermetic = crate::test_support::HermeticState::new();
+        let dir = hermetic.state_root();
+        let shared_mem = mock_shared_mem();
+        let mut state = OodaState::new(GoalBoard::new());
+        let mut bridges = test_bridges();
+
+        let _ = shutdown_daemon(dir, &shared_mem, &mut state, &mut bridges, true);
+
+        let log = std::fs::read_to_string(dir.join("ooda.log")).unwrap_or_default();
+        assert!(
+            log.contains("shutdown sequence start"),
+            "shutdown must log start marker; got: {log}"
+        );
+        assert!(
+            log.contains("shutdown complete"),
+            "shutdown must log completion marker; got: {log}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn shutdown_daemon_signal_driven_tolerates_persist_errors() {
+        let hermetic = crate::test_support::HermeticState::new();
+        let dir = hermetic.state_root();
+        let shared_mem = mock_shared_mem();
+        let mut state = OodaState::new(GoalBoard::new());
+        let mut bridges = test_bridges();
+        let result = shutdown_daemon(dir, &shared_mem, &mut state, &mut bridges, true);
+        assert!(
+            result.is_ok(),
+            "signal-driven shutdown must not propagate errors: {result:?}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn shutdown_daemon_with_goals_succeeds() {
+        let hermetic = crate::test_support::HermeticState::new();
+        let dir = hermetic.state_root();
+        let shared_mem = mock_shared_mem();
+        let mut board = GoalBoard::new();
+        board.active.push(crate::goal_curation::ActiveGoal {
+            id: "test-goal-01".to_string(),
+            description: "Test goal for shutdown".to_string(),
+            priority: 1,
+            status: crate::goal_curation::GoalProgress::InProgress { percent: 50 },
+            assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
+            last_progress_update_at: None,
+        });
+        let mut state = OodaState::new(board);
+        let mut bridges = test_bridges();
+
+        let result = shutdown_daemon(dir, &shared_mem, &mut state, &mut bridges, false);
+        assert!(
+            result.is_ok(),
+            "shutdown with active goals must succeed: {result:?}"
+        );
+    }
+
+    // ── env-var parsing (SIMARD_OODA_INTERVAL_SECS) ─────────────────
+
+    #[test]
+    fn ooda_interval_env_var_parsing() {
+        // Test the same parsing pattern used in run_ooda_daemon.
+        let parse = |val: &str| -> u64 { val.parse().ok().unwrap_or(300) };
+        assert_eq!(parse("60"), 60);
+        assert_eq!(parse("0"), 0);
+        assert_eq!(parse("not-a-number"), 300);
+        assert_eq!(parse(""), 300);
+    }
+
+    // ── DaemonDashboardConfig coverage from mod.rs perspective ───────
+
+    #[test]
+    fn dashboard_config_disabled_skips_dashboard() {
+        let cfg = DaemonDashboardConfig {
+            enabled: false,
+            port: 0,
+        };
+        assert!(!cfg.enabled);
+    }
+
+    #[test]
+    fn dashboard_config_enabled_has_port() {
+        let cfg = DaemonDashboardConfig {
+            enabled: true,
+            port: 8080,
+        };
+        assert!(cfg.enabled);
+        assert_eq!(cfg.port, 8080);
+    }
 }

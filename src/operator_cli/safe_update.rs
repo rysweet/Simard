@@ -19,6 +19,34 @@ use crate::safe_update::{
     SafeUpdateOrchestrator, UpdateConfig, default_install_bin, do_rollback, validate,
 };
 
+pub(crate) const SAFE_UPDATE_HELP: &str = "\
+Simard safe-update subcommand
+
+Usage: simard safe-update
+
+Drain → snapshot → pre-test → swap → exec. Downloads the latest release,
+runs safety gates, and replaces the running binary if all checks pass.
+Does not return on success (exec replaces the process image).
+";
+
+pub(crate) const ROLLBACK_HELP: &str = "\
+Simard rollback subcommand
+
+Usage: simard rollback
+
+Restore the latest backup over the install path and record phase=rolled_back.
+Idempotent.
+";
+
+pub(crate) const ROLLBACK_WATCHDOG_HELP: &str = "\
+Simard rollback-watchdog subcommand
+
+Usage: simard rollback-watchdog [--once] [--interval=SECS] [--max-iterations=N]
+
+Long-running loop that polls upgrade-status.json and triggers rollback on
+validate_timeout. Pass --once for a single check-and-act cycle.
+";
+
 /// `simard safe-update`: run phases 1–4 (drain → snapshot → pre-test →
 /// swap+handover) using the already-downloaded candidate binary at
 /// `~/.simard/bin/simard.candidate` (the path `simard update` writes to).

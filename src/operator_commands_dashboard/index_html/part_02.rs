@@ -4,7 +4,7 @@ pub(crate) const PART_02: &str = r#"          if(d.ooda_transcripts?.length){
                 <h3>${esc(t.name)} <span class="badge">${fmtB(t.size_bytes)}</span></h3>
                 <div class="log-box" style="max-height:200px">${esc((t.preview_lines||[]).join('\n'))||'(empty)'}</div>
               </div>`).join('');
-          }else{tEl.innerHTML='<span style="color:#8b949e">No OODA transcripts found in state root.</span>';}
+          }else{tEl.innerHTML='<span style="color:#8b949e">No agent transcripts found in state root.</span>';}
         }
         // Render cycle reports
         const crEl=document.getElementById('cycle-reports');
@@ -18,7 +18,7 @@ pub(crate) const PART_02: &str = r#"          if(d.ooda_transcripts?.length){
                 <div class="log-box" style="max-height:100px">${esc(text)}</div>
               </div>`;
             }).join('');
-          }else{crEl.innerHTML='<span style="color:#8b949e">No cycle reports found. Run the OODA daemon to generate cycle data.</span>';}
+          }else{crEl.innerHTML='<span style="color:#8b949e">No cycle reports found. Run the agent daemon to generate cycle data.</span>';}
         }
         const ttEl=document.getElementById('terminal-transcripts');
         if(ttEl){
@@ -100,7 +100,7 @@ pub(crate) const PART_02: &str = r#"          if(d.ooda_transcripts?.length){
         if (!container) return;
         const procs = d.processes || [];
         if (procs.length) {
-          const rootLabel = d.root_pid ? ` — OODA daemon PID ${d.root_pid}` : '';
+          const rootLabel = d.root_pid ? ` — agent daemon PID ${d.root_pid}` : '';
           if (summary) summary.textContent = `${procs.length} process(es)${rootLabel} — updated ${timeAgo(d.timestamp)}`;
           // Build tree from flat list using ppid
           const byPid = {};
@@ -124,7 +124,7 @@ pub(crate) const PART_02: &str = r#"          if(d.ooda_transcripts?.length){
               ? `<span class="proc-toggle" onclick="this.parentElement.parentElement.querySelector('.proc-kids').classList.toggle('collapsed');this.textContent=this.textContent==='▼'?'▶':'▼'" style="cursor:pointer;user-select:none;width:1em;display:inline-block">▼</span>`
               : `<span style="width:1em;display:inline-block;color:#484f58">·</span>`;
             const isRoot = n.is_ooda_root === true;
-            const label = isRoot ? '🤖 Simard OODA Daemon' : '';
+            const label = isRoot ? '🤖 Simard Agent Daemon' : '';
             const cmd = esc(n.full_args || n.command || '');
             const cmdShort = cmd.length > 90 ? cmd.substring(0,87)+'…' : cmd;
             const rootBadge = isRoot ? `<span style="background:#238636;color:#fff;padding:1px 6px;border-radius:4px;font-size:.75rem;margin-right:4px">${label}</span>` : '';
@@ -159,25 +159,25 @@ pub(crate) const PART_02: &str = r#"          if(d.ooda_transcripts?.length){
         const d=await apiFetch('/api/memory');
         let overviewHtml=`
           <div class="stat"><span class="label">Total Facts</span><span class="value">${d.total_facts}</span></div>
-          <div class="stat"><span class="label">Last Consolidation</span><span class="value">${d.last_consolidation?timeAgo(d.last_consolidation)+' ('+formatTime(d.last_consolidation)+')':'Never'}</span></div>
+          <div class="stat"><span class="label">Last Memory Compaction</span><span class="value">${d.last_consolidation?timeAgo(d.last_consolidation)+' ('+formatTime(d.last_consolidation)+')':'Never'}</span></div>
           <div class="stat"><span class="label">State Root</span><span class="value" style="font-size:.8rem;word-break:break-all">${esc(d.state_root)}</span></div>`;
         if(d.native_memory){
           const nm=d.native_memory;
           overviewHtml+=`
-          <h3 style="color:var(--accent);font-size:.9rem;margin-top:.75rem;border-top:1px solid var(--border);padding-top:.5rem">LadybugDB (Native Memory)</h3>
-          <div class="stat"><span class="label">Sensory</span><span class="value">${nm.sensory}</span></div>
-          <div class="stat"><span class="label">Working</span><span class="value">${nm.working}</span></div>
-          <div class="stat"><span class="label">Episodic</span><span class="value">${nm.episodic}</span></div>
-          <div class="stat"><span class="label">Semantic (Facts)</span><span class="value">${nm.semantic}</span></div>
-          <div class="stat"><span class="label">Procedural</span><span class="value">${nm.procedural}</span></div>
-          <div class="stat"><span class="label">Prospective</span><span class="value">${nm.prospective}</span></div>
+          <h3 style="color:var(--accent);font-size:.9rem;margin-top:.75rem;border-top:1px solid var(--border);padding-top:.5rem">Memory Store</h3>
+          <div class="stat"><span class="label">Recent observations</span><span class="value">${nm.sensory}</span></div>
+          <div class="stat"><span class="label">Currently thinking about</span><span class="value">${nm.working}</span></div>
+          <div class="stat"><span class="label">Events remembered</span><span class="value">${nm.episodic}</span></div>
+          <div class="stat"><span class="label">Facts learned</span><span class="value">${nm.semantic}</span></div>
+          <div class="stat"><span class="label">Known procedures</span><span class="value">${nm.procedural}</span></div>
+          <div class="stat"><span class="label">Planned actions</span><span class="value">${nm.prospective}</span></div>
           <div class="stat"><span class="label"><strong>Total Native</strong></span><span class="value"><strong>${nm.total}</strong></span></div>`;
         }
         document.getElementById('mem-overview').innerHTML=overviewHtml;
         const files=[
           {key:'memory_records',label:'Memory Records'},
           {key:'evidence_records',label:'Evidence Records'},
-          {key:'goal_records',label:'Goal Records (cognitive memory)'},
+          {key:'goal_records',label:'Goal Records (agent memory)'},
           {key:'handoff',label:'Latest Handoff'}];
         document.getElementById('mem-files').innerHTML=files.map(f=>{
           const info=d[f.key]||{};
@@ -250,7 +250,7 @@ pub(crate) const PART_02: &str = r#"          if(d.ooda_transcripts?.length){
       }catch(e){document.getElementById('cluster-topology').innerHTML='<span class="err">Failed to query distributed status — check network and azlin</span>';}
     }
     async function vacateVM(vmName){
-      if(!confirm(`Vacate "${vmName}"? This will:\n1. Stop all Simard processes on the VM\n2. Export cognitive memory snapshot\n3. Transfer workloads to this host\n\nProceed?`))return;
+      if(!confirm(`Vacate "${vmName}"? This will:\n1. Stop all Simard processes on the VM\n2. Export agent memory snapshot\n3. Transfer workloads to this host\n\nProceed?`))return;
       const el=document.getElementById('remote-vms');
       const origHtml=el.innerHTML;
       el.innerHTML=`<span class="loading">Vacating ${esc(vmName)}… stopping processes and exporting memory</span>`;

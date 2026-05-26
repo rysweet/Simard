@@ -19,7 +19,7 @@ fn tab_meta_slugs_unique() {
             t.slug
         );
     }
-    assert_eq!(TAB_METADATA.len(), 11, "expected 11 tabs");
+    assert_eq!(TAB_METADATA.len(), 14, "expected 14 tabs");
 }
 
 #[test]

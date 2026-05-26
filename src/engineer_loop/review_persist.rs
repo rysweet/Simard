@@ -15,7 +15,8 @@ use crate::terminal_engineer_bridge::{
 };
 
 use super::types::{
-    EngineerActionKind, ExecutedEngineerAction, RepoInspection, VerificationReport,
+    EngineerActionKind, ExecutedEngineerAction, RepoInspection, SessionErrorReflection,
+    VerificationReport,
 };
 use super::{ENGINEER_BASE_TYPE, ENGINEER_IDENTITY, EXECUTION_SCOPE, MAX_PERSISTED_MEETING_MEMORY};
 
@@ -100,10 +101,6 @@ pub fn persist_engineer_loop_artifacts(
     verification: &VerificationReport,
     terminal_bridge_context: Option<&TerminalBridgeContext>,
 ) -> SimardResult<()> {
-    let memory_store = FileBackedMemoryStore::try_new(state_root.join("memory_records.json"))?;
-    let evidence_store =
-        FileBackedEvidenceStore::try_new(state_root.join("evidence_records.json"))?;
-
     let session_ids = UuidSessionIdGenerator;
     let mut session = SessionRecord::new(
         crate::identity::OperatingMode::Engineer,
@@ -112,20 +109,55 @@ pub fn persist_engineer_loop_artifacts(
         &session_ids,
     );
     session.advance(SessionPhase::Preparation)?;
+    session.advance(SessionPhase::Planning)?;
+    session.advance(SessionPhase::Execution)?;
+    session.advance(SessionPhase::Reflection)?;
+    session.advance(SessionPhase::Persistence)?;
+
+    persist_artifacts_with_session(
+        state_root,
+        topology,
+        &mut session,
+        inspection,
+        action,
+        verification,
+        terminal_bridge_context,
+    )
+}
+
+/// Persist engineer loop artifacts using an existing [`SessionRecord`].
+///
+/// The session must be at [`SessionPhase::Persistence`] when called. This
+/// variant is used by `run_local_engineer_loop` to maintain a single session
+/// identity from intake through completion (issue #2100).
+///
+/// The function writes scratch memory, execution evidence, summary/decision
+/// memory, prunes bounded scopes, advances the session to `Complete`, and
+/// creates a handoff snapshot.
+pub(crate) fn persist_artifacts_with_session(
+    state_root: &Path,
+    topology: RuntimeTopology,
+    session: &mut SessionRecord,
+    inspection: &RepoInspection,
+    action: &ExecutedEngineerAction,
+    verification: &VerificationReport,
+    terminal_bridge_context: Option<&TerminalBridgeContext>,
+) -> SimardResult<()> {
+    let memory_store = FileBackedMemoryStore::try_new(state_root.join("memory_records.json"))?;
+    let evidence_store =
+        FileBackedEvidenceStore::try_new(state_root.join("evidence_records.json"))?;
 
     let scratch_key = format!("{}-engineer-loop-scratch", session.id);
     memory_store.put(MemoryRecord {
         key: scratch_key.clone(),
         scope: MemoryScope::SessionScratch,
-        value: objective_metadata(objective),
+        value: objective_metadata(&session.objective),
         session_id: session.id.clone(),
         recorded_in: SessionPhase::Preparation,
         created_at: None,
     })?;
     session.attach_memory(scratch_key);
 
-    session.advance(SessionPhase::Planning)?;
-    session.advance(SessionPhase::Execution)?;
     let evidence_details = vec![
         format!("repo-root={}", inspection.repo_root.display()),
         format!("repo-branch={}", inspection.branch),
@@ -200,9 +232,6 @@ pub fn persist_engineer_loop_artifacts(
         session.attach_evidence(evidence_id);
     }
 
-    session.advance(SessionPhase::Reflection)?;
-    session.advance(SessionPhase::Persistence)?;
-
     let summary_key = format!("{}-engineer-loop-summary", session.id);
     memory_store.put(MemoryRecord {
         key: summary_key.clone(),
@@ -274,6 +303,21 @@ pub fn persist_engineer_loop_artifacts(
     Ok(())
 }
 
+/// Best-effort reflection persistence for failed sessions (issue #2088).
+///
+/// The spec requires reflection on every session outcome, including errors.
+/// This function writes a minimal `SessionErrorReflection` JSON file into
+/// the state root so failures are captured for post-mortem analysis.
+/// Errors during persistence are swallowed — the original session error
+/// takes priority.
+pub fn persist_error_reflection(state_root: &Path, reflection: &SessionErrorReflection) {
+    let path = state_root.join("error_reflection.json");
+    if let Ok(json) = serde_json::to_string_pretty(reflection) {
+        let _ = std::fs::create_dir_all(state_root);
+        let _ = std::fs::write(path, json);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,5 +381,62 @@ mod tests {
         };
         // ReadOnlyScan is non-mutating, so review should be skipped (return Ok)
         assert!(run_optional_review(&inspection, &action).is_ok());
+    }
+
+    #[test]
+    fn persist_error_reflection_writes_json_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let reflection = SessionErrorReflection {
+            objective: "fix the bug".to_string(),
+            failed_phase: "agent-wait".to_string(),
+            error_message: "LLM timeout after 60s".to_string(),
+            phase_traces: vec![super::super::types::PhaseTrace {
+                name: "inspect".to_string(),
+                duration: std::time::Duration::from_millis(100),
+                outcome: super::super::types::PhaseOutcome::Success,
+            }],
+            session_id: Some("session-test-persist".to_string()),
+        };
+        persist_error_reflection(dir.path(), &reflection);
+
+        let path = dir.path().join("error_reflection.json");
+        assert!(path.exists(), "error_reflection.json should be written");
+        let content = std::fs::read_to_string(&path).unwrap();
+        let restored: SessionErrorReflection =
+            serde_json::from_str(&content).expect("should be valid JSON");
+        assert_eq!(restored.objective, "fix the bug");
+        assert_eq!(restored.failed_phase, "agent-wait");
+        assert_eq!(restored.error_message, "LLM timeout after 60s");
+        assert_eq!(restored.phase_traces.len(), 1);
+        assert_eq!(restored.session_id.as_deref(), Some("session-test-persist"));
+    }
+
+    #[test]
+    fn persist_error_reflection_creates_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("deep/nested/state");
+        let reflection = SessionErrorReflection {
+            objective: "test".to_string(),
+            failed_phase: "inspect".to_string(),
+            error_message: "not a repo".to_string(),
+            phase_traces: vec![],
+            session_id: None,
+        };
+        persist_error_reflection(&nested, &reflection);
+        assert!(nested.join("error_reflection.json").exists());
+    }
+
+    #[test]
+    fn persist_error_reflection_best_effort_on_bad_path() {
+        // Should not panic even with an impossible path
+        let reflection = SessionErrorReflection {
+            objective: "test".to_string(),
+            failed_phase: "inspect".to_string(),
+            error_message: "error".to_string(),
+            phase_traces: vec![],
+            session_id: None,
+        };
+        // Path containing null bytes cannot be created — best-effort swallows the error
+        persist_error_reflection(std::path::Path::new("/dev/null/impossible"), &reflection);
     }
 }

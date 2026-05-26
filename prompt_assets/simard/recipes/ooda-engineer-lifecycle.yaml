@@ -1,0 +1,128 @@
+# ooda-engineer-lifecycle.yaml — Recipe-runner recipe for the OODA Act brain
+# (engineer lifecycle decision).
+#
+# Replaces the direct LLM call + DECISION: marker parsing in RustyClawdBrain
+# (issue #2115). The prompt content is adapted from
+# prompt_assets/simard/ooda_brain.md (single-brace {var} → double-brace
+# {{var}} for recipe-runner substitution).
+#
+# The Rust shim (recipe_engineer_lifecycle.rs) parses the output using:
+#   1. DECISION: marker on first non-blank line
+#   2. Keyword fallback scan (case-insensitive)
+#   3. Default → ContinueSkipping
+#
+# Context vars (passed via -c):
+#   goal_id, goal_description, cycle_number, consecutive_skip_count,
+#   failure_count, worktree_path, worktree_mtime_secs_ago, sentinel_pid,
+#   last_engineer_log_tail, commits_behind, in_flight_engineer_count,
+#   minutes_since_last_update_attempt
+#
+# Output: agent stdout — DECISION: marker with variant + labeled fields
+
+name: "ooda-engineer-lifecycle"
+description: "OODA Act brain — engineer lifecycle decision"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "ooda", "act", "engineer-lifecycle"]
+
+context: {}
+
+steps:
+  - id: "engineer-lifecycle-decision"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      # OODA Brain — Engineer Lifecycle Decision
+
+      ## ROLE
+
+      You are the brain of Simard's OODA daemon. The Act phase is about to skip a goal because a live engineer worktree already exists for it. Before that skip happens, decide whether the engineer is genuinely making progress, is wedged, or warrants escalation. Output a single DECISION marker judgment the daemon will execute. Be conservative: prefer `continue_skipping` unless evidence clearly points elsewhere.
+
+      ## CONTEXT
+
+      - goal_id: {{goal_id}}
+      - goal_description: {{goal_description}}
+      - cycle_number: {{cycle_number}}
+      - consecutive_skip_count: {{consecutive_skip_count}}
+      - failure_count: {{failure_count}}
+      - worktree_path: {{worktree_path}}
+      - worktree_mtime_secs_ago: {{worktree_mtime_secs_ago}}
+      - sentinel_pid: {{sentinel_pid}}
+      - commits_behind: {{commits_behind}}
+      - in_flight_engineer_count: {{in_flight_engineer_count}}
+      - minutes_since_last_update_attempt: {{minutes_since_last_update_attempt}}
+      - engineer log tail:
+
+      ```
+      {{last_engineer_log_tail}}
+      ```
+
+      ## OPTIONS
+
+      Pick exactly one of these `choice` tags. The daemon maps each choice to a concrete side effect:
+
+      - `continue_skipping` — Engineer is healthy / recently active / making visible progress. Do nothing this cycle. Default when in doubt.
+      - `reclaim_and_redispatch` — Worktree is stale, wedged, or the log tail shows the engineer is stuck. Tear down the worktree, kill the sentinel pid, clear `assigned_to`, and re-dispatch. Use sparingly.
+      - `deprioritize` — Goal has burned many cycles without finishing but the engineer is not wedged.
+      - `open_tracking_issue` — Something looks wrong enough that a human should see it (stack trace, repeated panics, suspicious failures).
+      - `mark_goal_blocked` — The goal cannot proceed without external input (missing API key, upstream service down).
+      - `consider_self_update` — The running daemon binary is meaningfully behind `origin/main` and the moment looks right for a safe-update. Emit only when all four conditions hold:
+        1. `commits_behind >= 3`
+        2. `in_flight_engineer_count <= 1`
+        3. `minutes_since_last_update_attempt >= 30`
+        4. Current goal's engineer is healthy
+
+      ## OUTPUT FORMAT
+
+      Begin your response with a `DECISION:` marker on the first line:
+
+      ```
+      DECISION: <variant>
+      ```
+
+      For variants without extra fields (`continue_skipping`, `deprioritize`, `consider_self_update`), follow with free-form rationale prose.
+
+      For variants with required fields (`reclaim_and_redispatch`, `open_tracking_issue`, `mark_goal_blocked`), follow with labeled lines:
+
+      - `reclaim_and_redispatch`: `REDISPATCH_CONTEXT: <text>`
+      - `open_tracking_issue`: `TITLE: <text>`, `BODY: <text>`
+      - `mark_goal_blocked`: `REASON: <text>`
+
+      Always include `RATIONALE: <text>` explaining your reasoning.
+
+      ## EXAMPLES
+
+      ```
+      DECISION: continue_skipping
+      RATIONALE: engineer committed 2 minutes ago, healthy progress
+      ```
+
+      ```
+      DECISION: reclaim_and_redispatch
+      RATIONALE: worktree idle 7h, log truncated mid-tool-call
+      REDISPATCH_CONTEXT: previous engineer hung during file edit; start fresh
+      ```
+
+      ```
+      DECISION: deprioritize
+      RATIONALE: 20 cycles of no-op skips while engineer churns on same file
+      ```
+
+      ```
+      DECISION: open_tracking_issue
+      TITLE: Engineer OOM on cycle 12
+      BODY: Engineer process ran out of memory at 03:14 UTC
+      RATIONALE: Recurring OOM needs human investigation
+      ```
+
+      ```
+      DECISION: mark_goal_blocked
+      REASON: ANTHROPIC_API_KEY not set in daemon environment
+      RATIONALE: engineer cannot make API calls
+      ```
+
+      ```
+      DECISION: consider_self_update
+      RATIONALE: binary is 12 commits behind, last update 4h ago, no other engineers in flight
+      ```
+    output: "lifecycle_result"

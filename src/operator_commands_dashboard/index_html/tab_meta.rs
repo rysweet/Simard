@@ -53,6 +53,9 @@ pub struct TabMeta {
 pub const BANNED_JARGON: &[&str] = &[
     "OODA",
     "Observe-Orient-Decide-Act",
+    "spawn_engineer",
+    "LadybugDB",
+    "cognitive memory",
     "synergize",
     "leverage",
     "ideate",
@@ -115,7 +118,7 @@ pub const TAB_METADATA: &[TabMeta] = &[
         label: "Memory",
         title: "Memory · Simard",
         h1: "Memory",
-        lede: "Everything Simard has learned and remembered, organised by memory type (working, semantic, episodic, procedural, prospective, and sensory) with full-text search.",
+        lede: "Everything Simard has learned and remembered \u{2014} what it's thinking about, facts learned, events remembered, known procedures, planned actions, and recent observations \u{2014} with full-text search.",
         tooltip: "What the agent has learned and remembered, across all memory types",
     },
     TabMeta {
@@ -151,6 +154,30 @@ pub const TAB_METADATA: &[TabMeta] = &[
         tooltip: "Live stream of the agent's reasoning between actions",
     },
     TabMeta {
+        slug: "brain-failures",
+        label: "Brain Failures",
+        title: "Brain Failures · Simard",
+        h1: "Brain Failures",
+        lede: "Every time the daemon's language-model brain returned an unparseable or invalid response and fell back to safe deterministic rules, listed with the failure type, which component triggered it, when it happened, and whether recovery succeeded.",
+        tooltip: "When and how the agent's brain failed, and whether it recovered",
+    },
+    TabMeta {
+        slug: "merge-decisions",
+        label: "Merge Decisions",
+        title: "Merge Decisions · Simard",
+        h1: "Merge Decisions",
+        lede: "A record of every pull request the merge judge has evaluated — which PRs were approved, rejected, or deferred, along with the reasoning and timestamp for each decision.",
+        tooltip: "History of merge-judge verdicts for each evaluated pull request",
+    },
+    TabMeta {
+        slug: "pr-readiness",
+        label: "PR Readiness",
+        title: "PR Readiness · Simard",
+        h1: "PR Readiness",
+        lede: "Every open pull request under management with its CI status, review state, and remaining blockers — so you can see what is ready to merge without leaving the dashboard.",
+        tooltip: "Open PRs with CI status, review state, and merge blockers",
+    },
+    TabMeta {
         slug: "terminal",
         label: "Terminal",
         title: "Terminal · Simard",
@@ -163,7 +190,7 @@ pub const TAB_METADATA: &[TabMeta] = &[
 /// Browser title shown on first page load. The client-side tab handler
 /// updates this when a different tab is activated. Uses `TAB_METADATA[0]`
 /// directly because [`tab_meta_slugs_unique`] asserts the table has
-/// exactly 11 entries — an empty table would already fail other tests.
+/// exactly 13 entries — an empty table would already fail other tests.
 pub fn default_title() -> &'static str {
     TAB_METADATA[0].title
 }

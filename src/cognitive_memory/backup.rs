@@ -826,3 +826,382 @@ impl NativeCognitiveMemory {
         result
     }
 }
+
+// ============================================================================
+// Inline unit tests for backup.rs (issue #2036)
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cognitive_memory::CognitiveMemoryOps;
+
+    fn test_mem() -> NativeCognitiveMemory {
+        NativeCognitiveMemory::in_memory().expect("in-memory DB should create")
+    }
+
+    // ── sha256_file ────────────────────────────────────────────────────
+
+    #[test]
+    fn sha256_file_produces_64_hex_chars() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), b"hello world").unwrap();
+        let hash = sha256_file(tmp.path()).unwrap();
+        assert_eq!(hash.len(), 64, "SHA-256 hex digest must be 64 chars");
+        assert!(
+            hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "must be hex chars"
+        );
+    }
+
+    #[test]
+    fn sha256_file_deterministic() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), b"deterministic content").unwrap();
+        let h1 = sha256_file(tmp.path()).unwrap();
+        let h2 = sha256_file(tmp.path()).unwrap();
+        assert_eq!(h1, h2, "same content must produce same hash");
+    }
+
+    #[test]
+    fn sha256_file_differs_for_different_content() {
+        let f1 = tempfile::NamedTempFile::new().unwrap();
+        let f2 = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(f1.path(), b"aaa").unwrap();
+        std::fs::write(f2.path(), b"bbb").unwrap();
+        let h1 = sha256_file(f1.path()).unwrap();
+        let h2 = sha256_file(f2.path()).unwrap();
+        assert_ne!(h1, h2, "different content must produce different hashes");
+    }
+
+    #[test]
+    fn sha256_file_errors_on_missing_file() {
+        let result = sha256_file(std::path::Path::new("/nonexistent/file"));
+        assert!(result.is_err());
+    }
+
+    // ── atomic_copy_with_fsync ─────────────────────────────────────────
+
+    #[test]
+    fn atomic_copy_with_fsync_creates_exact_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source.db");
+        let dst = dir.path().join("dest.db");
+        std::fs::write(&src, b"important data here").unwrap();
+
+        atomic_copy_with_fsync(&src, &dst).unwrap();
+
+        assert!(dst.exists(), "destination must exist after copy");
+        assert_eq!(
+            std::fs::read(&src).unwrap(),
+            std::fs::read(&dst).unwrap(),
+            "dst must be byte-identical to src"
+        );
+    }
+
+    #[test]
+    fn atomic_copy_with_fsync_removes_leftover_tmp() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source.db");
+        let dst = dir.path().join("dest.db");
+        let tmp = dir.path().join("dest.db.tmp");
+        std::fs::write(&src, b"source data").unwrap();
+        std::fs::write(&tmp, b"stale tmp leftover").unwrap();
+
+        atomic_copy_with_fsync(&src, &dst).unwrap();
+
+        assert!(!tmp.exists(), "leftover .tmp must be cleaned up");
+        assert!(dst.exists());
+    }
+
+    #[test]
+    fn atomic_copy_with_fsync_errors_on_missing_src() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("missing.db");
+        let dst = dir.path().join("dest.db");
+        let result = atomic_copy_with_fsync(&src, &dst);
+        assert!(result.is_err(), "missing source must be an error");
+    }
+
+    #[test]
+    fn atomic_copy_with_fsync_overwrites_existing_dst() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source.db");
+        let dst = dir.path().join("dest.db");
+        std::fs::write(&src, b"new content").unwrap();
+        std::fs::write(&dst, b"old content").unwrap();
+
+        atomic_copy_with_fsync(&src, &dst).unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), b"new content");
+    }
+
+    // ── post_write_barrier ─────────────────────────────────────────────
+
+    #[test]
+    fn post_write_barrier_noop_for_in_memory() {
+        let mem = test_mem();
+        assert!(!mem.durable_writes);
+        mem.post_write_barrier("test")
+            .expect("in-memory barrier must be no-op");
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn post_write_barrier_succeeds_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mem = NativeCognitiveMemory::open(tmp.path()).unwrap();
+        assert!(mem.durable_writes);
+        mem.post_write_barrier("test_backup")
+            .expect("on-disk barrier must succeed");
+    }
+
+    // ── wal_paths ──────────────────────────────────────────────────────
+
+    #[test]
+    fn wal_paths_returns_two_entries() {
+        let db_path = std::path::Path::new("/tmp/cognitive_memory.ladybug");
+        let paths = NativeCognitiveMemory::wal_paths(db_path);
+        assert_eq!(paths.len(), 2);
+        for p in &paths {
+            let s = p.to_string_lossy();
+            assert!(s.contains("wal"), "WAL path should contain 'wal': {s}");
+        }
+    }
+
+    // ── preemptive_wal_cleanup ──────────────────────────────────────────
+
+    #[test]
+    fn preemptive_wal_cleanup_removes_empty_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.ladybug");
+        std::fs::write(&db_path, b"db data").unwrap();
+
+        for wal in NativeCognitiveMemory::wal_paths(&db_path) {
+            std::fs::write(&wal, b"").unwrap(); // empty WAL
+        }
+
+        NativeCognitiveMemory::preemptive_wal_cleanup(&db_path).unwrap();
+
+        for wal in NativeCognitiveMemory::wal_paths(&db_path) {
+            assert!(
+                !wal.exists(),
+                "empty WAL should be removed: {}",
+                wal.display()
+            );
+        }
+    }
+
+    #[test]
+    fn preemptive_wal_cleanup_keeps_nonempty_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.ladybug");
+        std::fs::write(&db_path, b"db data").unwrap();
+
+        let wals = NativeCognitiveMemory::wal_paths(&db_path);
+        std::fs::write(&wals[0], b"valid wal data").unwrap();
+
+        NativeCognitiveMemory::preemptive_wal_cleanup(&db_path).unwrap();
+
+        assert!(wals[0].exists(), "non-empty WAL must be preserved");
+    }
+
+    #[test]
+    fn preemptive_wal_cleanup_noop_when_no_wals() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.ladybug");
+        std::fs::write(&db_path, b"db data").unwrap();
+        // No WAL files exist
+        NativeCognitiveMemory::preemptive_wal_cleanup(&db_path).unwrap();
+    }
+
+    // ── is_lock_contention_error ────────────────────────────────────────
+
+    #[test]
+    fn is_lock_contention_detects_lock_message() {
+        let err = SimardError::RuntimeInitFailed {
+            component: "cognitive-memory".into(),
+            reason: "Could not set lock on file /some/path".into(),
+        };
+        assert!(NativeCognitiveMemory::is_lock_contention_error(&err));
+    }
+
+    #[test]
+    fn is_lock_contention_detects_eagain() {
+        let err = SimardError::RuntimeInitFailed {
+            component: "cognitive-memory".into(),
+            reason: "Resource temporarily unavailable".into(),
+        };
+        assert!(NativeCognitiveMemory::is_lock_contention_error(&err));
+    }
+
+    #[test]
+    fn is_lock_contention_rejects_corruption() {
+        let err = SimardError::RuntimeInitFailed {
+            component: "cognitive-memory".into(),
+            reason: "WAL header CRC mismatch".into(),
+        };
+        assert!(!NativeCognitiveMemory::is_lock_contention_error(&err));
+    }
+
+    // ── find_backups_newest_first ────────────────────────────────────────
+
+    #[test]
+    fn find_backups_newest_first_sorted_descending() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_root = dir.path();
+        let backup_dir = state_root.join("backups");
+        std::fs::create_dir_all(&backup_dir).unwrap();
+
+        let db_path = state_root.join("cognitive_memory.ladybug");
+
+        // Create backup files with known epochs
+        for epoch in [100u64, 300, 200] {
+            std::fs::write(
+                backup_dir.join(format!("cognitive_memory.ladybug.{epoch}")),
+                b"db",
+            )
+            .unwrap();
+        }
+
+        let backups = NativeCognitiveMemory::find_backups_newest_first(&db_path);
+        assert_eq!(backups.len(), 3);
+        // Should be sorted newest first: 300, 200, 100
+        let names: Vec<String> = backups
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(names[0].ends_with(".300"), "newest first: {names:?}");
+        assert!(names[1].ends_with(".200"), "middle: {names:?}");
+        assert!(names[2].ends_with(".100"), "oldest last: {names:?}");
+    }
+
+    #[test]
+    fn find_backups_returns_empty_when_no_backup_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("cognitive_memory.ladybug");
+        let backups = NativeCognitiveMemory::find_backups_newest_first(&db_path);
+        assert!(backups.is_empty());
+    }
+
+    // ── verify_db_health ────────────────────────────────────────────────
+
+    #[test]
+    fn verify_db_health_succeeds_on_healthy_db() {
+        let mem = test_mem();
+        NativeCognitiveMemory::verify_db_health(&mem.db).unwrap();
+    }
+
+    // ── create_verified_backup ──────────────────────────────────────────
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn create_verified_backup_produces_valid_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_root = tmp.path().to_path_buf();
+
+        {
+            let mem = NativeCognitiveMemory::open(&state_root).unwrap();
+            mem.store_fact("backup-test", "data", 0.9, &[], "test")
+                .unwrap();
+        }
+
+        let backup_path = NativeCognitiveMemory::create_verified_backup(&state_root).unwrap();
+        assert!(backup_path.exists(), "backup file must exist");
+        assert!(
+            backup_path
+                .to_string_lossy()
+                .contains("backups/cognitive_memory.ladybug."),
+            "backup must be in backups/ dir"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn create_verified_backup_errors_when_no_db_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = NativeCognitiveMemory::create_verified_backup(tmp.path());
+        assert!(err.is_err(), "no DB file → must error");
+    }
+
+    // ── prune_old_backups ──────────────────────────────────────────────
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn prune_old_backups_keeps_n_newest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_root = tmp.path().to_path_buf();
+        let backup_dir = state_root.join("backups");
+        std::fs::create_dir_all(&backup_dir).unwrap();
+
+        for epoch in [100u64, 200, 300, 400, 500] {
+            std::fs::write(
+                backup_dir.join(format!("cognitive_memory.ladybug.{epoch}")),
+                b"db",
+            )
+            .unwrap();
+        }
+
+        let outcome = NativeCognitiveMemory::prune_old_backups(&state_root, 2);
+        assert_eq!(outcome.removed, 3, "should remove 3 oldest");
+        assert!(outcome.failed.is_empty(), "no failures expected");
+
+        // The 2 newest (500, 400) should survive
+        assert!(backup_dir.join("cognitive_memory.ladybug.500").exists());
+        assert!(backup_dir.join("cognitive_memory.ladybug.400").exists());
+        assert!(!backup_dir.join("cognitive_memory.ladybug.100").exists());
+    }
+
+    #[test]
+    fn prune_old_backups_noop_when_no_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outcome = NativeCognitiveMemory::prune_old_backups(tmp.path(), 5);
+        assert_eq!(outcome.removed, 0);
+        assert!(outcome.failed.is_empty());
+    }
+
+    // ── with_open_lock ─────────────────────────────────────────────────
+
+    #[test]
+    fn with_open_lock_executes_closure() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.ladybug");
+        std::fs::write(&db_path, b"").unwrap();
+
+        let result = NativeCognitiveMemory::with_open_lock(&db_path, || Ok(42u32));
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[test]
+    fn with_open_lock_propagates_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.ladybug");
+        std::fs::write(&db_path, b"").unwrap();
+
+        let result: SimardResult<()> = NativeCognitiveMemory::with_open_lock(&db_path, || {
+            Err(SimardError::RuntimeInitFailed {
+                component: "test".into(),
+                reason: "intentional".into(),
+            })
+        });
+        assert!(result.is_err());
+    }
+
+    // ── fsync_recovery_replay ──────────────────────────────────────────
+
+    #[test]
+    fn fsync_recovery_replay_succeeds_on_real_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.ladybug");
+        std::fs::write(&db_path, b"db contents for fsync test").unwrap();
+        NativeCognitiveMemory::fsync_recovery_replay(&db_path)
+            .expect("fsync_recovery_replay must succeed on a real file");
+    }
+
+    #[test]
+    fn fsync_recovery_replay_errors_on_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("nonexistent.ladybug");
+        let result = NativeCognitiveMemory::fsync_recovery_replay(&db_path);
+        assert!(result.is_err(), "missing file must error");
+    }
+}

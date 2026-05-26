@@ -86,7 +86,7 @@ formats (DECISION markers and labeled lines) — no JSON parsing of LLM output.
 | Phase | Prompt | Wire format | Status |
 |---|---|---|---|
 | Observe | `ooda_observe.md` | (future) | Planned |
-| Orient | `ooda_orient.md` | Labeled lines (`ADJUSTED_URGENCY:`, `RATIONALE:`, `CONFIDENCE:`) | **Shipped** |
+| Orient | `ooda_orient.md` | JSON object (`adjusted_urgency`, `rationale`, `confidence`) | **Shipped** |
 | Decide | `ooda_decide.md` | `DECISION:` marker | **Shipped** |
 | Curate | `ooda_curate.md` | (future) | Planned |
 | Review | `ooda_review.md` | (future) | Planned |

@@ -28,7 +28,11 @@ For the design rationale, see
 
 ## Protocol 1: DECISION marker (OODA brains)
 
-Used by: `ooda_brain::decide`, `ooda_brain::orient`, `ooda_brain::rustyclawd`
+Used by: `ooda_brain::rustyclawd`
+
+> **Note:** `ooda_brain::decide` has moved to the keyword verdict protocol
+> (Protocol 2, § 2c) as of #2111. `ooda_brain::orient` uses JSON format —
+> see [§ 1b. Orient phase](#1b-orient-phase-orientrs).
 
 ### Grammar
 
@@ -70,55 +74,20 @@ No `serde_json`. No regex. Only `str` methods: `trim()`, `starts_with()`,
 
 ---
 
-### 1a. Decide phase (`decide.rs`)
+### 1a. Decide phase — MOVED to keyword verdict protocol
 
-**Enum:** `DecideJudgment`
-
-**Variant tokens** (case-insensitive):
-
-| Token | Maps to | Notes |
-|-------|---------|-------|
-| `advance_goal` | `DecideJudgment::AdvanceGoal` | Default for real goal slugs |
-| `consolidate_memory` | `DecideJudgment::ConsolidateMemory` | For `__memory__` |
-| `run_improvement` | `DecideJudgment::RunImprovement` | For `__improvement__` |
-| `poll_developer_activity` | `DecideJudgment::PollDeveloperActivity` | For `__poll_activity__` |
-| `extract_ideas` | `DecideJudgment::ExtractIdeas` | For `__extract_ideas__` |
-| `research_query` | `DecideJudgment::ResearchQuery` | Reserved |
-| `safe_update` | `DecideJudgment::SafeUpdate` | For `__safe_update__` |
-| `skip` | `DecideJudgment::Skip` | Explicit skip |
-
-**Labeled fields:** `RATIONALE:`
-
-**Example valid responses:**
-
-Minimal:
-```
-DECISION: advance_goal
-```
-
-With rationale:
-```
-DECISION: advance_goal
-RATIONALE: PR #2023 is open; engineer needed to drive it to completion
-```
-
-Prose before decision (ignored):
-```
-Looking at the priority entry, this is a real goal slug with an open PR.
-The engineer should advance it.
-
-DECISION: advance_goal
-RATIONALE: ordinary goal id with open PR, default routing
-```
-
-**Fallback:** If no `DECISION:` line is found, the deterministic prefix
-mapping fires: `__memory__` → `consolidate_memory`, `__improvement__` →
-`run_improvement`, etc. Real goal slugs → `advance_goal`.
-
-**Prompt update:** The `ooda_decide.md` prompt's `OUTPUT_FORMAT` section now
-instructs models to emit `DECISION: <variant>` instead of a JSON object.
-The `EXAMPLES` section shows the text format. The `OPTIONS` section is
-unchanged.
+> **Moved in [#2111](https://github.com/rysweet/Simard/issues/2111).**
+> The decide brain no longer uses the DECISION marker protocol. It now uses
+> the **keyword verdict protocol** (§ 2c below), the same pattern as the
+> progress checker and merge judge. The decide prompt is now a recipe YAML
+> at `prompt_assets/simard/recipes/ooda-decide.yaml`, invoked via
+> `recipe-runner-rs`. See
+> [§ 2c. Decide brain](#2c-decide-brain-recipe_deciders) for the current
+> wire format.
+>
+> The `DECISION:` marker parser (`parse_judgment_from_response`) and
+> `RustyClawdDecideBrain` have been deleted. The `DECIDE_PROMPT_NAME`
+> constant is retained for audit-trail versioning only.
 
 ---
 
@@ -126,38 +95,31 @@ unchanged.
 
 **Struct:** `OrientJudgment`
 
-**Labeled fields** (all optional):
+**JSON fields:**
 
-| Label | Type | Default | Validation |
+| Field | Type | Default | Validation |
 |-------|------|---------|------------|
-| `ADJUSTED_URGENCY:` | `f64` | Required (parse fails without it) | Must be in `[0.0, base_urgency]` |
-| `DEMOTION_APPLIED:` | `f64` | Computed as `base_urgency - adjusted_urgency` | Must be ≥ 0 |
-| `RATIONALE:` | `String` | `"<no rationale provided>"` | None |
-| `CONFIDENCE:` | `f64` | `1.0` | Must be in `[0.0, 1.0]` |
+| `adjusted_urgency` | `f64` | Required (parse fails without it) | Must be in `[0.0, base_urgency]` |
+| `demotion_applied` | `f64` | `0.0` (daemon recomputes) | Must be ≥ 0 |
+| `rationale` | `String` | Required (parse fails without it) | None |
+| `confidence` | `f64` | `1.0` | Must be in `[0.0, 1.0]` |
 
 **Example valid responses:**
 
-Minimal (all fields):
-```
-ADJUSTED_URGENCY: 0.60
-DEMOTION_APPLIED: 0.20
-RATIONALE: 1 failure: standard floor demotion
-CONFIDENCE: 0.9
+Full JSON object:
+```json
+{"adjusted_urgency": 0.60, "demotion_applied": 0.20, "rationale": "1 failure: standard floor demotion", "confidence": 0.9}
 ```
 
-With surrounding prose:
+With surrounding prose (tolerated, not encouraged):
 ```
-Given a single recent failure and no indication of persistent issues,
-I'll apply the standard floor demotion.
-
-ADJUSTED_URGENCY: 0.60
-RATIONALE: 1 failure: standard floor demotion
-CONFIDENCE: 0.9
+Given a single recent failure, I'll apply the standard floor demotion.
+{"adjusted_urgency": 0.60, "rationale": "1 failure: standard floor demotion", "confidence": 0.9}
 ```
 
-Minimal valid:
-```
-ADJUSTED_URGENCY: 0.6
+Minimal valid (confidence defaults to 1.0, demotion_applied defaults to 0.0):
+```json
+{"adjusted_urgency": 0.6, "rationale": "standard demotion"}
 ```
 
 **Validation:** `OrientJudgment::validate()` enforces:
@@ -168,9 +130,9 @@ ADJUSTED_URGENCY: 0.6
 If validation fails, the deterministic floor applies:
 `urgency - 0.2 × failure_count`, clamped to `[0.0, 1.0]`.
 
-**Prompt update:** The `ooda_orient.md` prompt's `OUTPUT_FORMAT` section now
-instructs models to emit labeled lines instead of a JSON object. The
-`EXAMPLES` section shows the text format.
+**Parser:** The `parse_judgment_from_response` function extracts the first
+`{…}` substring from the response and deserializes it via `serde_json`.
+The old labeled-line format is no longer accepted.
 
 ---
 
@@ -231,7 +193,7 @@ from text-parsed fields. A `// SAFETY:` comment marks this call.
 
 ## Protocol 2: Keyword verdict (recipe shims)
 
-Used by: `goal_curation::recipe_progress_checker`, `stewardship::recipe_merge_judge`
+Used by: `goal_curation::recipe_progress_checker`, `stewardship::recipe_merge_judge`, `ooda_brain::recipe_decide`
 
 ### Grammar
 
@@ -345,6 +307,77 @@ recipe prompt can be updated to emit `BLOCKER:` labeled lines.
 
 ---
 
+### 2c. Decide brain (`recipe_decide.rs`)
+
+> **New in [#2111](https://github.com/rysweet/Simard/issues/2111).**
+> The decide brain moved from the DECISION marker protocol (§ 1a, now
+> deleted) to the keyword verdict protocol. This follows the same pattern
+> as the progress checker and merge judge.
+
+**Keywords:**
+
+| Keyword | Maps to | Notes |
+|---------|---------|-------|
+| `advance_goal` | `DecideJudgment::AdvanceGoal` | Default for real goal slugs |
+| `consolidate_memory` | `DecideJudgment::ConsolidateMemory` | For `__memory__` |
+| `run_improvement` | `DecideJudgment::RunImprovement` | For `__improvement__` |
+| `poll_developer_activity` | `DecideJudgment::PollDeveloperActivity` | For `__poll_activity__` |
+| `extract_ideas` | `DecideJudgment::ExtractIdeas` | For `__extract_ideas__` |
+| `safe_update` | `DecideJudgment::SafeUpdate` | For `__safe_update__` |
+| `research_query` | `DecideJudgment::ResearchQuery` | Reserved |
+| `run_gym_eval` | `DecideJudgment::RunGymEval` | Reserved |
+| `build_skill` | `DecideJudgment::BuildSkill` | Reserved |
+| `launch_session` | `DecideJudgment::LaunchSession` | Reserved |
+
+**Default (no keyword):** `DecideJudgment::AdvanceGoal` — fail-safe. An
+unrecognized response routes to the most common action kind. This matches
+the existing `DeterministicFallbackDecideBrain` behavior for real goal slugs.
+
+**Keyword safety:** No keyword is a substring of another. This was verified
+by exhaustive pairwise comparison of the 10 keywords. Unlike the merge
+judge (where `not_ready` contains `ready`), no ordering-dependent
+disambiguation is needed.
+
+**Example recipe stdout:**
+
+```
+Looking at goal "__memory__", this is a reserved synthetic ID for memory
+consolidation. The urgency is high at 0.85 because memory hasn't been
+consolidated in 12 hours.
+
+The appropriate action is consolidate_memory.
+```
+
+Parser result: `DecideJudgment::ConsolidateMemory`
+
+```
+This is goal "ship-v1", an ordinary goal slug with an open PR and
+moderate urgency. The engineer should advance_goal to drive the PR
+to completion.
+```
+
+Parser result: `DecideJudgment::AdvanceGoal`
+
+**Changes from prior implementation:**
+
+- `parse_judgment_from_response` (which parsed `DECISION:` markers from
+  LLM output) is removed from `decide.rs`.
+- `RustyClawdDecideBrain` (which compiled in the prompt via `include_str!`
+  and submitted to an `LlmSubmitter`) is removed from `decide.rs`.
+- `build_rustyclawd_decide_brain` factory function is removed.
+- `RecipeDecideBrain` in `recipe_decide.rs` replaces the above — it
+  invokes `recipe-runner-rs` as a subprocess and scans stdout for keywords.
+- The prompt is now a recipe YAML at
+  `prompt_assets/simard/recipes/ooda-decide.yaml`, not a compiled-in
+  markdown file. The prompt's `OUTPUT_FORMAT` section and line-1
+  `CRITICAL:` guard have been removed — the agent is no longer required
+  to emit a specific format.
+- The daemon wiring in `build_decide_brain()` now constructs
+  `RecipeDecideBrain::new(repo_root)` instead of
+  `build_rustyclawd_decide_brain(state_root)`.
+
+---
+
 ## Protocol 3: Key=value (disk health)
 
 Used by: `disk_health`
@@ -445,8 +478,9 @@ Each parser has inline `#[cfg(test)]` tests in its source file:
 
 | Module | Test count | Coverage |
 |--------|-----------|----------|
-| `decide.rs` | 8+ | All variant tokens, missing DECISION line, rationale extraction, fallback |
-| `orient.rs` | 6+ | All labeled fields, partial fields, validation failure, default confidence |
+| `decide.rs` | 4+ | JSON round-trip, DeterministicFallback tests |
+| `recipe_decide.rs` | 10+ | All 10 action keywords, no keyword (default), mixed case, multiple keywords |
+| `orient.rs` | 8+ | JSON parsing, surrounding prose, missing fields, validation, extra fields, markdown fences, empty/invalid responses, labeled-line rejection |
 | `rustyclawd.rs` | 15+ (T1–T15) | Full behavior matrix per decision protocol reference |
 | `recipe_progress_checker.rs` | 4+ | Accept, reject, no keyword (default), mixed case |
 | `recipe_merge_judge.rs` | 5+ | Ready, not_ready, unclear, no keyword (default), substring safety |
@@ -456,16 +490,19 @@ Each parser has inline `#[cfg(test)]` tests in its source file:
 
 ## Migration notes for prompt editors
 
-If you maintain OODA brain prompts (`prompt_assets/simard/ooda_*.md`):
+If you maintain OODA brain prompts (`prompt_assets/simard/ooda_*.md` or
+`prompt_assets/simard/recipes/ooda-decide.yaml`):
 
-1. **OUTPUT_FORMAT sections now specify text format, not JSON.** The
-   `DECISION:` marker or labeled-line format is documented in each prompt's
-   `OUTPUT_FORMAT` section. Do not revert to JSON instructions.
+1. **Each brain has its own wire format.** The engineer-lifecycle brain
+   (`rustyclawd.rs`) uses `DECISION:` marker format. The orient brain uses
+   **JSON object format**. The decide brain uses **keyword verdict** format
+   (action keyword anywhere in prose — no markers, no structured output).
+   Do not mix these formats across brains.
 
-2. **EXAMPLES sections use text format.** Update any custom examples you've
-   added to follow the text format. JSON examples will not cause parse
-   failures (the parser ignores lines it doesn't recognize) but the model
-   will learn the wrong output format.
+2. **EXAMPLES sections use the brain's wire format.** For the engineer-lifecycle
+   brain, use text `DECISION:` examples. For orient, use JSON object examples.
+   For decide, use natural-prose examples containing the action keyword.
+   Mismatched formats cause the model to learn the wrong output pattern.
 
 3. **The parser is more tolerant than JSON.** Models can emit prose before
    and after the structured content. This is by design — the parser finds

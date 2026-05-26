@@ -10,7 +10,8 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
               const detailText=g.detail||'';
               const detailHtml=detailText?'<span style="font-size:.8rem;margin-left:6px">'+esc(detailText)+'</span>':'';
               const full=g.detail_full||'';
-              const expandHtml=(full&&full!==detailText)?'<details style="display:inline;margin-left:6px"><summary style="display:inline;cursor:pointer;color:#8b949e;font-size:.7rem">[raw]</summary><pre style="margin:.3rem 0 0;white-space:pre-wrap;font-size:.75rem;color:#8b949e">'+esc(full)+'</pre></details>':'';
+              const isFailed=(chip==='Failed');
+              const expandHtml=(full&&full!==detailText)?'<details style="display:inline;margin-left:6px"'+(isFailed?' open':'')+' ><summary style="display:inline;cursor:pointer;color:'+(isFailed?'#f85149':'#8b949e')+';font-size:.7rem">'+(isFailed?'[error]':'[raw]')+'</summary><pre style="margin:.3rem 0 0;white-space:pre-wrap;font-size:.75rem;color:'+(isFailed?'#f85149':'#8b949e')+'">'+esc(full)+'</pre></details>':'';
               let wipHtml='—';
               if(chip!=='Waiting'||detailText||g.wip_refs?.length){
                 let parts=[];
@@ -35,20 +36,24 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
             </tr>`;}).join('')}
           </table>
           <div style="margin-top:.5rem;color:#8b949e;font-size:.8rem">${d.active_count} active goal(s)</div>`;
-        }else{document.getElementById('goals-active').innerHTML='<span style="color:#8b949e">No active goals. Use "Seed Default Goals" or run the OODA daemon to generate goals from meetings.</span>';}
+        }else{document.getElementById('goals-active').innerHTML='<span style="color:#8b949e">No active goals. Use "Seed Default Goals" or run the agent daemon to generate goals from meetings.</span>';}
         if(d.backlog?.length){
           document.getElementById('goals-backlog').innerHTML=`<table class="proc-table">
-            <tr><th>ID</th><th>Description</th><th>Source</th><th>Score</th><th>Actions</th></tr>
-            ${d.backlog.map(b=>`<tr>
-              <td><code>${esc(b.id)}</code></td>
+            <tr><th>Title</th><th>Description</th><th>Source</th><th>Score</th><th>Actions</th></tr>
+            ${d.backlog.map(b=>{
+              const title=esc(b.display_id||b.id||'');
+              const isMemId=/^(sem|epi|wrk|pro|sns)_[0-9a-f]{8,}/.test(b.id||'');
+              const titleCell=isMemId?title:'<code>'+title+'</code>';
+              return`<tr>
+              <td>${titleCell}</td>
               <td>${esc(b.description)}</td>
-              <td>${esc(b.source||'')}</td>
-              <td>${b.score??'—'}</td>
+              <td style="font-size:.8rem;color:#8b949e">${esc(b.source||'')}</td>
+              <td>${typeof b.score==='number'?Math.round(b.score*100)+'%':(b.score??'—')}</td>
               <td>
                 <button class="btn" style="font-size:.7rem;padding:2px 6px" onclick="promoteGoal('${esc(b.id)}')">▲ Promote</button>
                 <button class="btn" style="font-size:.7rem;padding:2px 6px;margin-left:4px" onclick="removeGoal('${esc(b.id)}')">✕</button>
               </td>
-            </tr>`).join('')}
+            </tr>`}).join('')}
           </table>`;
         }else{document.getElementById('goals-backlog').innerHTML='<span style="color:#8b949e">No backlog items</span>';}
       }catch(e){document.getElementById('goals-active').innerHTML='<span class="err">Failed to load goals — check state root</span>';}
@@ -137,7 +142,7 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
               <span>${esc(String(msg))}</span>
             </div>`;
           }).join('');
-        }else{document.getElementById('trace-list').innerHTML='<span style="color:#8b949e">No trace data yet. Run the OODA daemon or make API calls to generate traces.</span>';}
+        }else{document.getElementById('trace-list').innerHTML='<span style="color:#8b949e">No trace data yet. Run the agent daemon or make API calls to generate traces.</span>';}
       }catch(e){document.getElementById('trace-list').innerHTML='<span class="err">Failed to load traces — check /api/traces</span>';}
     }
 
@@ -221,7 +226,7 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
         if(d.error){document.getElementById('mem-graph-stats').textContent='Error: '+d.error;return;}
         const s=d.stats||{};
         document.getElementById('mem-graph-stats').textContent=
-          'W:'+(s.working||0)+' S:'+(s.semantic||0)+' E:'+(s.episodic||0)+' P:'+(s.procedural||0)+' Pr:'+(s.prospective||0)+' Se:'+(s.sensory||0);
+          'Thinking:'+(s.working||0)+' Facts:'+(s.semantic||0)+' Events:'+(s.episodic||0)+' Procedures:'+(s.procedural||0)+' Planned:'+(s.prospective||0)+' Observed:'+(s.sensory||0);
         mgNodes=(d.nodes||[]);mgEdges=(d.edges||[]);
         mgInitLayout();mgApplyFilters();mgSimulate();
       }catch(e){document.getElementById('mem-graph-stats').textContent='Load failed';}

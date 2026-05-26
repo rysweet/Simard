@@ -12,6 +12,43 @@ use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 // Workboard API — aggregated view of Simard's current mental state
 // ---------------------------------------------------------------------------
 
+/// Human-readable label for a working memory slot type (#1683).
+fn human_slot_type(raw: &str) -> &'static str {
+    match raw {
+        "context" | "Context" => "Task context",
+        "plan" | "Plan" => "Current plan",
+        "observation" | "Observation" => "Observation",
+        "hypothesis" | "Hypothesis" => "Hypothesis",
+        "decision" | "Decision" => "Decision",
+        "action" | "Action" => "Action taken",
+        "result" | "Result" => "Result",
+        "goal" | "Goal" => "Goal detail",
+        _ => "Note",
+    }
+}
+
+/// Human-readable category for a fact concept string (#1683).
+fn human_fact_category(concept: &str) -> &'static str {
+    let c = concept.to_lowercase();
+    if c.contains("goal") || c.contains("objective") {
+        "Goal"
+    } else if c.contains("action") || c.contains("task") {
+        "Action"
+    } else if c.contains("decision") {
+        "Decision"
+    } else if c.contains("episode") || c.contains("event") {
+        "Event"
+    } else if c.contains("observation") || c.contains("insight") {
+        "Insight"
+    } else if c.contains("meeting") || c.contains("discussion") {
+        "Meeting note"
+    } else if c.contains("snapshot") {
+        "Snapshot"
+    } else {
+        "Fact"
+    }
+}
+
 pub(crate) async fn workboard() -> Json<Value> {
     let state_root = resolve_state_root();
 
@@ -224,16 +261,25 @@ pub(crate) async fn workboard() -> Json<Value> {
             }));
         }
 
-        // Working memory slots for each active goal
+        // Working memory slots for each active goal (#1683: human-readable labels)
         if let Some(board) = &goal_board {
             for goal in &board.active {
                 if let Ok(slots) = mem.get_working(&goal.id) {
                     for slot in slots {
+                        let type_label = human_slot_type(&slot.slot_type);
+                        let goal_label = &goal.description;
+                        let relevance_label = if slot.relevance >= 0.8 {
+                            "High"
+                        } else if slot.relevance >= 0.5 {
+                            "Medium"
+                        } else {
+                            "Low"
+                        };
                         working_memory.push(json!({
-                            "id": slot.node_id,
-                            "slot_type": slot.slot_type,
+                            "type_label": type_label,
                             "content": slot.content,
-                            "task_id": slot.task_id,
+                            "goal": goal_label,
+                            "relevance_label": relevance_label,
                             "relevance": slot.relevance,
                         }));
                     }
@@ -242,6 +288,7 @@ pub(crate) async fn workboard() -> Json<Value> {
         }
 
         // Recent semantic facts (search across common tags, collect up to 20)
+        // (#1683: provide human-readable category labels instead of raw IDs)
         for tag in &[
             "action",
             "goal",
@@ -253,8 +300,9 @@ pub(crate) async fn workboard() -> Json<Value> {
             if let Ok(facts) = mem.search_facts(tag, 10, 0.0) {
                 for fact in facts {
                     if recent_facts.len() < 20 {
+                        let category = human_fact_category(&fact.concept);
                         recent_facts.push(json!({
-                            "id": fact.node_id,
+                            "category": category,
                             "concept": fact.concept,
                             "content": fact.content,
                             "confidence": fact.confidence,

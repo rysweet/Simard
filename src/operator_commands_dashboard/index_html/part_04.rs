@@ -157,32 +157,37 @@ pub(crate) const PART_04: &str = r#"            let fmt;
             </div>`;
           }).join('');
         }else{document.getElementById('wb-actions').innerHTML='<span style="color:#8b949e;font-size:.85rem">No recent actions</span>';}
-        // Task memory (rich facts)
+        // Task memory (structured table — #1683)
         const tm=d.task_memory||{};
         document.getElementById('wb-facts-count').textContent=(tm.facts_count||0)+' facts';
         if(tm.recent_facts?.length){
-          document.getElementById('wb-facts-list').innerHTML=tm.recent_facts.map(f=>{
-            const conf=typeof f.confidence==='number'?(' <span style="color:#8b949e;font-size:.75rem">('+Math.round(f.confidence*100)+'%)</span>'):'';
-            const tags=(f.tags||[]).map(t=>'<span style="background:var(--border);padding:0 .3rem;border-radius:3px;font-size:.7rem;margin-left:.3rem">'+esc(t)+'</span>').join('');
-            return'<div style="padding:.25rem 0;border-bottom:1px solid var(--border)"><strong style="color:var(--accent);font-size:.8rem">'+esc(f.concept||'')+'</strong>'+conf+tags+'<div>'+esc(f.content||'')+'</div></div>';
-          }).join('');
+          document.getElementById('wb-facts-list').innerHTML='<table class="proc-table"><tr><th>Category</th><th>Content</th><th>Confidence</th><th>Tags</th></tr>'
+            +tm.recent_facts.map(f=>{
+            const cat=esc(f.category||f.concept||'');
+            const conf=typeof f.confidence==='number'?Math.round(f.confidence*100)+'%':'—';
+            const tags=(f.tags||[]).map(t=>'<span style="background:var(--border);padding:0 .3rem;border-radius:3px;font-size:.7rem;margin-right:.3rem">'+esc(t)+'</span>').join('')||'—';
+            const content=esc((f.content||'').substring(0,200));
+            return'<tr><td style="white-space:nowrap;color:var(--accent);font-weight:600;font-size:.8rem">'+cat+'</td><td style="font-size:.85rem">'+content+'</td><td style="text-align:center;font-size:.8rem">'+conf+'</td><td>'+tags+'</td></tr>';
+          }).join('')+'</table>';
         }else{document.getElementById('wb-facts-list').innerHTML='<span style="color:#8b949e">No recent facts in memory</span>';}
-        // Working memory
+        // Working memory (human-readable — #1683)
         const wm=d.working_memory||[];
         document.getElementById('wb-wm-count').textContent=wm.length+' slots';
         if(wm.length){
-          document.getElementById('wb-wm-list').innerHTML=wm.map(s=>{
-            return'<div style="padding:.25rem 0;border-bottom:1px solid var(--border)"><span style="color:var(--accent);font-weight:600;font-size:.8rem">'+esc(s.slot_type)+'</span> <span style="color:#8b949e;font-size:.75rem">['+esc(s.task_id)+'] rel='+((s.relevance||0).toFixed(2))+'</span><div>'+esc(s.content)+'</div></div>';
-          }).join('');
+          document.getElementById('wb-wm-list').innerHTML='<table class="proc-table"><tr><th>Type</th><th>Content</th><th>Related Goal</th><th>Relevance</th></tr>'
+            +wm.map(s=>{
+            const relColor=s.relevance>=0.8?'var(--green)':s.relevance>=0.5?'var(--yellow)':'#8b949e';
+            return'<tr><td style="white-space:nowrap;color:var(--accent);font-weight:600;font-size:.8rem">'+esc(s.type_label||'Note')+'</td><td style="font-size:.85rem">'+esc((s.content||'').substring(0,200))+'</td><td style="font-size:.8rem;color:#8b949e">'+esc(s.goal||'—')+'</td><td style="text-align:center"><span style="color:'+relColor+';font-weight:600;font-size:.8rem">'+esc(s.relevance_label||'—')+'</span></td></tr>';
+          }).join('')+'</table>';
         }else{document.getElementById('wb-wm-list').innerHTML='<span style="color:#8b949e">No active working memory</span>';}
         // Cognitive statistics
         const cs=d.cognitive_statistics;
         if(cs){
           document.getElementById('wb-cog-stats').innerHTML=[
-            ['Sensory',cs.sensory_count],['Working',cs.working_count],['Episodic',cs.episodic_count],
-            ['Semantic',cs.semantic_count],['Procedural',cs.procedural_count],['Prospective',cs.prospective_count],['Total',cs.total]
+            ['Recent observations',cs.sensory_count],['Currently thinking about',cs.working_count],['Events remembered',cs.episodic_count],
+            ['Facts learned',cs.semantic_count],['Known procedures',cs.procedural_count],['Planned actions',cs.prospective_count],['Total',cs.total]
           ].map(([k,v])=>'<span style="margin-right:1rem"><strong>'+k+':</strong> '+(v||0)+'</span>').join('');
-        }else{document.getElementById('wb-cog-stats').innerHTML='<span style="color:#8b949e">No cognitive memory available</span>';}
+        }else{document.getElementById('wb-cog-stats').innerHTML='<span style="color:#8b949e">No agent memory available</span>';}
       }catch(e){document.getElementById('wb-engineers').innerHTML='<span class="err">Failed to load workboard data</span>';}
     }
 
@@ -191,7 +196,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
       try{
         const d=await apiFetch('/api/ooda-thinking');
         const el=document.getElementById('thinking-timeline');
-        if(!d.reports?.length){el.innerHTML='<span style="color:#8b949e">No cycle reports yet. The OODA daemon generates these during autonomous work.</span>';return;}
+        if(!d.reports?.length){el.innerHTML='<span style="color:#8b949e">No cycle reports yet. The agent daemon generates these during autonomous work.</span>';return;}
         el.innerHTML=d.reports.map(rpt=>{
           if(rpt.legacy){
             return `<div class="thinking-cycle legacy">
@@ -243,7 +248,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
                     const agent=se.subordinate_agent;
                     const agentLink=agent?`<a href='javascript:void(0)' onclick="openAgentLog('${esc(agent)}');return false;"><code>${esc(agent)}</code></a>`:'<em>(no agent)</em>';
                     seBlock=`<div class="spawn-engineer-block" style="margin-top:.35rem;padding:.4rem .55rem;border-left:3px solid ${statusColor};background:rgba(255,255,255,0.03);border-radius:4px">
-                      <div><span style="color:${statusColor}">●</span> <strong>spawn_engineer</strong> · ${esc(se.last_action||'')} · <span style="color:${statusColor}">${esc(se.status||'')}</span></div>
+                      <div><span style="color:${statusColor}">●</span> <strong>Launched sub-agent</strong> · ${esc(se.last_action||'')} · <span style="color:${statusColor}">${esc(se.status||'')}</span></div>
                       <div>subordinate: ${agentLink}${se.goal_id?` · goal <code>${esc(se.goal_id)}</code>`:''}</div>
                       ${se.task_summary?`<div>task: ${esc(se.task_summary)}</div>`:''}
                     </div>`;
@@ -272,6 +277,63 @@ pub(crate) const PART_04: &str = r#"            let fmt;
           </div>`;
         }).join('');
       }catch(e){document.getElementById('thinking-timeline').innerHTML='<span class="err">Failed to load: '+esc(e.toString())+'</span>';}
+    }
+
+    /* --- Brain Failures (issue #2043) --- */
+    async function fetchBrainFailures(){
+      try{
+        const d=await apiFetch('/api/brain-failures');
+        const sumEl=document.getElementById('brain-failures-summary');
+        const listEl=document.getElementById('brain-failures-list');
+        const s=d.summary||{};
+        const totalFallbacks=s.total_fallback_count||0;
+        const totalParseFailures=s.total_parse_failure_count||0;
+        const totalFailures=totalFallbacks+totalParseFailures;
+        const scanned=s.cycles_scanned||0;
+        const statusClass=totalParseFailures>0?'err':(totalFallbacks>0?'warn':'ok');
+        const statusText=totalFailures===0?'No brain failures detected':''+totalFailures+' failure'+(totalFailures===1?'':'s')+' found';
+        sumEl.innerHTML=`
+          <div class="stat"><span class="label">Status</span><span class="value ${statusClass}">${statusText}</span></div>
+          <div class="stat"><span class="label">Parse failures (model response unparseable)</span><span class="value ${totalParseFailures>0?'err':'ok'}">${totalParseFailures}</span></div>
+          <div class="stat"><span class="label">Deterministic fallbacks (safe rules used instead of model)</span><span class="value ${totalFallbacks>0?'warn':'ok'}">${totalFallbacks}</span></div>
+          <div class="stat"><span class="label">Cycles scanned</span><span class="value">${scanned}</span></div>
+          <div class="stat"><span class="label">Last checked</span><span class="value">${timeAgo(d.timestamp)}</span></div>`;
+        const failures=d.failures||[];
+        if(!failures.length){
+          listEl.innerHTML='<div style="color:#8b949e;padding:.5rem 0">No brain failures in the last '+scanned+' cycles. The daemon\'s language-model brain has been responding correctly.</div>';
+          return;
+        }
+        listEl.innerHTML=failures.map(f=>{
+          const typeIcon=f.failure_type==='parse_failure'?'🔴':'🟡';
+          const escBadge=f.escalated?'<span style="background:var(--red);color:#fff;padding:1px 6px;border-radius:3px;font-size:11px;margin-left:6px">escalated to issue</span>':'';
+          const recoveryBadge=f.recovery_succeeded?'<span style="color:var(--green);font-size:.8rem">✓ recovered via fallback</span>':'<span style="color:var(--red);font-size:.8rem">✗ no recovery</span>';
+          let detail='';
+          if(f.parse_failure_detail){
+            const pf=f.parse_failure_detail;
+            detail=`<div style="margin-top:.35rem;padding:.4rem .55rem;border-left:3px solid var(--red);background:rgba(255,255,255,0.03);border-radius:4px;font-size:.8rem">
+              <div><strong>Error:</strong> ${esc(pf.error_message||'')}</div>
+              <div><strong>Prompt:</strong> ${esc(pf.prompt_name||'')} (version: ${esc(pf.prompt_version||'none')})</div>
+              <div><strong>Consecutive failures:</strong> ${pf.consecutive_count||0}</div>
+              ${pf.raw_response_truncated?'<details style="margin-top:.25rem"><summary style="cursor:pointer;color:#8b949e">Raw model response</summary><pre style="white-space:pre-wrap;max-height:200px;overflow:auto;margin-top:.25rem;padding:.35rem;background:#0d1117;border:1px solid var(--border);border-radius:4px;font-size:.75rem">'+esc(pf.raw_response_truncated)+'</pre></details>':''}
+            </div>`;
+          }
+          return `<div style="padding:.6rem 0;border-bottom:1px solid var(--border)">
+            <div style="display:flex;gap:.5rem;align-items:baseline;flex-wrap:wrap">
+              <span>${typeIcon}</span>
+              <strong>${esc(f.failure_type_plain||f.failure_type)}</strong>${escBadge}
+              <span style="color:#8b949e;font-size:.8rem">Cycle #${f.cycle_number} · ${timeAgo(f.timestamp)}</span>
+              <span style="margin-left:auto">${recoveryBadge}</span>
+            </div>
+            <div style="font-size:.85rem;color:#9bb1c4;margin-top:.2rem"><strong>Component:</strong> ${esc(f.phase_plain||f.phase)}</div>
+            <div style="font-size:.85rem;color:#9bb1c4;margin-top:.15rem">${esc(f.description||'')}</div>
+            ${f.rationale?'<div style="font-size:.8rem;color:#8b949e;margin-top:.15rem"><em>Rationale: '+esc(f.rationale)+'</em></div>':''}
+            ${detail}
+          </div>`;
+        }).join('');
+      }catch(e){
+        document.getElementById('brain-failures-summary').innerHTML='<span class="err">Failed to load: '+esc(e.toString())+'</span>';
+        document.getElementById('brain-failures-list').innerHTML='';
+      }
     }
 
     /* --- Agent log terminal (issue #947) --- */

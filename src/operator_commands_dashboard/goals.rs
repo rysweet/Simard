@@ -17,6 +17,57 @@ fn load_board_or_empty() -> GoalBoard {
     dashboard_goal_board_snapshot(&state_root).unwrap_or_default()
 }
 
+/// Returns `true` when `s` looks like a debug key=value dump rather than
+/// prose — e.g. `"priority=3 status=proposed rationale=Action…"`. Heuristic:
+/// three or more `word=` patterns in one short string (#1686).
+fn looks_like_debug_string(s: &str) -> bool {
+    let kv_count = s
+        .split_whitespace()
+        .filter(|w| {
+            let eq = w.find('=');
+            // The key must be at least 2 chars long and the value at least 1.
+            matches!(eq, Some(pos) if pos >= 2 && pos + 1 < w.len())
+        })
+        .count();
+    kv_count >= 3
+}
+
+/// Derive a short human-readable ID from content + concept instead of
+/// exposing the raw `sem_019e18ac…` node ID (#1686). Takes the first few
+/// words of the content, or falls back to the concept label.
+fn human_backlog_id(content: &str, concept: &str) -> String {
+    let words: Vec<&str> = content.split_whitespace().take(6).collect();
+    if words.len() >= 2 {
+        let slug = words.join(" ");
+        if slug.len() > 50 {
+            format!("{}…", &slug[..50].trim_end())
+        } else {
+            slug
+        }
+    } else {
+        human_source_label(concept).to_string()
+    }
+}
+
+/// Plain-English label for a cognitive-memory concept path, replacing the
+/// raw `cognitive-memory/<concept>` prefix (#1686).
+fn human_source_label(concept: &str) -> &'static str {
+    let c = concept.to_lowercase();
+    if c.contains("goal") {
+        "From goals"
+    } else if c.contains("action") {
+        "From actions"
+    } else if c.contains("decision") {
+        "From decisions"
+    } else if c.contains("meeting") {
+        "From meeting"
+    } else if c.contains("episode") {
+        "From past event"
+    } else {
+        "From memory"
+    }
+}
+
 pub(crate) async fn goals() -> Json<Value> {
     let state_root = resolve_state_root();
     let board = dashboard_goal_board_snapshot(&state_root).unwrap_or_default();
@@ -60,6 +111,7 @@ pub(crate) async fn goals() -> Json<Value> {
         .collect();
 
     // Pull meeting-captured actions and decisions from cognitive memory (#415)
+    // (#1686: filter out raw memory IDs and debug strings, provide clean labels)
     if let Ok(mem) = NativeCognitiveMemory::open_read_only(&state_root) {
         for tag in &["goal", "action", "decision"] {
             if let Ok(facts) = mem.search_facts(tag, 20, 0.0) {
@@ -74,15 +126,25 @@ pub(crate) async fn goals() -> Json<Value> {
                     if trimmed.starts_with('{') || trimmed.starts_with('[') {
                         continue;
                     }
+                    // (#1686) Skip facts whose content looks like debug key=value
+                    // strings (e.g. "priority=3 status=proposed rationale=Action…")
+                    if looks_like_debug_string(trimmed) {
+                        continue;
+                    }
                     let already_listed = active
                         .iter()
                         .chain(backlog.iter())
                         .any(|g| g.get("id").and_then(|v| v.as_str()) == Some(&fact.node_id));
                     if !already_listed {
+                        // (#1686) Derive a human-readable title from the content
+                        // instead of exposing the raw `sem_019e18ac…` node ID.
+                        let display_id = human_backlog_id(&fact.content, &fact.concept);
+                        let source_label = human_source_label(&fact.concept);
                         backlog.push(json!({
                             "id": fact.node_id,
+                            "display_id": display_id,
                             "description": fact.content,
-                            "source": format!("cognitive-memory/{}", fact.concept),
+                            "source": source_label,
                             "score": fact.confidence,
                         }));
                     }
@@ -332,5 +394,54 @@ pub(crate) async fn demote_goal(Path(id): Path<String>) -> Json<Value> {
     match dashboard_save_goal_board(&state_root, &board) {
         Ok(()) => Json(json!({"status": "ok"})),
         Err(e) => Json(json!({"error": format!("{e}")})),
+    }
+}
+
+#[cfg(test)]
+mod tests_backlog_helpers {
+    use super::*;
+
+    #[test]
+    fn debug_string_detected() {
+        assert!(looks_like_debug_string(
+            "priority=3 status=proposed rationale=Action needed"
+        ));
+    }
+
+    #[test]
+    fn normal_prose_not_detected_as_debug() {
+        assert!(!looks_like_debug_string("Fix the login page CSS"));
+        assert!(!looks_like_debug_string(
+            "Improve error handling in the auth module"
+        ));
+    }
+
+    #[test]
+    fn two_kv_pairs_not_flagged() {
+        assert!(!looks_like_debug_string("status=active priority=1"));
+    }
+
+    #[test]
+    fn human_backlog_id_from_long_content() {
+        let id = human_backlog_id(
+            "Improve the login page to handle OAuth better",
+            "goal-action",
+        );
+        assert_eq!(id, "Improve the login page to handle");
+    }
+
+    #[test]
+    fn human_backlog_id_from_short_content() {
+        let id = human_backlog_id("OK", "goal-action");
+        assert_eq!(id, "From goals");
+    }
+
+    #[test]
+    fn human_source_label_maps_concepts() {
+        assert_eq!(human_source_label("goal-action"), "From goals");
+        assert_eq!(human_source_label("action-item"), "From actions");
+        assert_eq!(human_source_label("decision-record"), "From decisions");
+        assert_eq!(human_source_label("meeting-note"), "From meeting");
+        assert_eq!(human_source_label("other-concept"), "From memory");
     }
 }

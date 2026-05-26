@@ -27,6 +27,23 @@ use crate::self_relaunch::{
 
 use args::{next_optional_path, next_required, reject_extra_args};
 
+/// Check whether an args iterator starts with a help flag, consuming it if so.
+/// Returns `Some(help_text)` when `--help` / `-h` is the only argument,
+/// `None` otherwise (leaving the iterator at the original position for
+/// commands that don't peek).
+fn check_help_flag<I: Iterator<Item = String>>(
+    args: &mut std::iter::Peekable<I>,
+    help_text: &'static str,
+) -> Option<&'static str> {
+    if let Some(first) = args.peek()
+        && matches!(first.as_str(), "--help" | "-h" | "help")
+    {
+        let _ = args.next(); // consume the flag
+        return Some(help_text);
+    }
+    None
+}
+
 pub(super) const OPERATOR_CLI_HELP: &str = "\
 Simard unified operator CLI
 
@@ -101,6 +118,70 @@ Operator utilities:
 Compatibility binaries remain available: simard_operator_probe, simard-gym
 ";
 
+const SPAWN_HELP: &str = "\
+Simard spawn subcommand
+
+Usage: simard spawn <agent-name> <goal> <worktree-path> [--depth=N]
+
+Spawn a subordinate engineer agent in the given worktree.
+";
+
+const BOOTSTRAP_HELP: &str = "\
+Simard bootstrap subcommand
+
+Usage: simard bootstrap run <identity> <base-type> <topology> <objective> [state-root]
+
+Run the bootstrap probe with the given identity.
+";
+
+const HANDOVER_HELP: &str = "\
+Simard handover subcommand
+
+Usage: simard handover [--canary-dir=PATH] [--manifest-dir=PATH]
+
+Build a canary binary, run gate checks, and exec into the canary on success.
+";
+
+const UPDATE_HELP: &str = "\
+Simard update subcommand
+
+Usage: simard update
+
+Download and install the latest Simard release.
+";
+
+const SELF_TEST_HELP: &str = "\
+Simard self-test subcommand
+
+Usage: simard self-test
+
+Run the built-in self-test suite.
+";
+
+const ENSURE_DEPS_HELP: &str = "\
+Simard ensure-deps subcommand
+
+Usage: simard ensure-deps
+
+Check and install required runtime dependencies.
+";
+
+const CLEANUP_HELP: &str = "\
+Simard cleanup subcommand
+
+Usage: simard cleanup
+
+Remove stale state files and temporary artifacts.
+";
+
+const INSTALL_HELP: &str = "\
+Simard install subcommand
+
+Usage: simard install
+
+Install or reinstall the Simard binary to the standard path.
+";
+
 pub fn dispatch_operator_cli<I>(args: I) -> Result<(), Box<dyn std::error::Error>>
 where
     I: IntoIterator<Item = String>,
@@ -138,35 +219,82 @@ where
         "handover" => dispatch_handover_command(args),
         "bootstrap" => dispatch_bootstrap_command(args),
         "act-on-decisions" => {
+            let mut args = args.peekable();
+            if let Some(help) = check_help_flag(&mut args, decisions::ACT_ON_DECISIONS_HELP) {
+                print!("{help}");
+                return Ok(());
+            }
             reject_extra_args(args)?;
             decisions::dispatch_act_on_decisions()
         }
         "update" => {
+            let mut args = args.peekable();
+            if let Some(help) = check_help_flag(&mut args, UPDATE_HELP) {
+                print!("{help}");
+                return Ok(());
+            }
             reject_extra_args(args)?;
             handle_self_update()
         }
         "self-test" => {
+            let mut args = args.peekable();
+            if let Some(help) = check_help_flag(&mut args, SELF_TEST_HELP) {
+                print!("{help}");
+                return Ok(());
+            }
             reject_extra_args(args)?;
             handle_self_test()
         }
         "safe-update" => {
+            let mut args = args.peekable();
+            if let Some(help) = check_help_flag(&mut args, safe_update::SAFE_UPDATE_HELP) {
+                print!("{help}");
+                return Ok(());
+            }
             reject_extra_args(args)?;
             safe_update::handle_safe_update()
         }
         "rollback" => {
+            let mut args = args.peekable();
+            if let Some(help) = check_help_flag(&mut args, safe_update::ROLLBACK_HELP) {
+                print!("{help}");
+                return Ok(());
+            }
             reject_extra_args(args)?;
             safe_update::handle_rollback()
         }
-        "rollback-watchdog" => safe_update::handle_rollback_watchdog(args),
+        "rollback-watchdog" => {
+            let mut args = args.peekable();
+            if let Some(help) = check_help_flag(&mut args, safe_update::ROLLBACK_WATCHDOG_HELP) {
+                print!("{help}");
+                return Ok(());
+            }
+            safe_update::handle_rollback_watchdog(args)
+        }
         "ensure-deps" => {
+            let mut args = args.peekable();
+            if let Some(help) = check_help_flag(&mut args, ENSURE_DEPS_HELP) {
+                print!("{help}");
+                return Ok(());
+            }
             reject_extra_args(args)?;
             handle_ensure_deps()
         }
         "cleanup" => {
+            let mut args = args.peekable();
+            if let Some(help) = check_help_flag(&mut args, CLEANUP_HELP) {
+                print!("{help}");
+                return Ok(());
+            }
             reject_extra_args(args)?;
             handle_cleanup()
         }
         "install" => {
+            let mut args = args.peekable();
+            if let Some(help) = check_help_flag(&mut args, INSTALL_HELP) {
+                print!("{help}");
+                return Ok(());
+            }
             reject_extra_args(args)?;
             handle_install()
         }
@@ -187,6 +315,10 @@ fn dispatch_bootstrap_command(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let subcommand = next_required(&mut args, "bootstrap command")?;
     match subcommand.as_str() {
+        "--help" | "-h" | "help" => {
+            print!("{BOOTSTRAP_HELP}");
+            Ok(())
+        }
         "run" => {
             let identity = next_required(&mut args, "identity")?;
             let base_type = next_required(&mut args, "base type")?;
@@ -204,6 +336,10 @@ fn dispatch_spawn_command(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let agent_name = next_required(&mut args, "agent name")?;
+    if matches!(agent_name.as_str(), "--help" | "-h" | "help") {
+        print!("{SPAWN_HELP}");
+        return Ok(());
+    }
     let goal = next_required(&mut args, "goal")?;
     let worktree_path = next_required(&mut args, "worktree path")?;
 
@@ -241,7 +377,10 @@ fn dispatch_handover_command(
     let mut manifest_dir: Option<PathBuf> = None;
 
     for arg in args {
-        if let Some(v) = arg.strip_prefix("--canary-dir=") {
+        if matches!(arg.as_str(), "--help" | "-h" | "help") {
+            print!("{HANDOVER_HELP}");
+            return Ok(());
+        } else if let Some(v) = arg.strip_prefix("--canary-dir=") {
             canary_dir = Some(PathBuf::from(v));
         } else if let Some(v) = arg.strip_prefix("--manifest-dir=") {
             manifest_dir = Some(PathBuf::from(v));

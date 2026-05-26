@@ -167,7 +167,9 @@ fn fallback_judgment_passes_validate() {
 
 #[test]
 fn rustyclawd_brain_parses_canned_response() {
-    let stub = StubSubmitter::new("ADJUSTED_URGENCY: 0.5\nRATIONALE: transient\nCONFIDENCE: 0.7\n");
+    let stub = StubSubmitter::new(
+        r#"{"adjusted_urgency": 0.5, "rationale": "transient", "confidence": 0.7}"#,
+    );
     let brain = RustyClawdOrientBrain::new(stub);
     let j = brain.judge_orientation(&ctx(1, 0.8)).unwrap();
     assert!((j.adjusted_urgency - 0.5).abs() < 1e-9);
@@ -175,18 +177,19 @@ fn rustyclawd_brain_parses_canned_response() {
 }
 
 #[test]
-fn rustyclawd_brain_parses_labeled_lines() {
-    let stub =
-        StubSubmitter::new("ADJUSTED_URGENCY: 0.0\nRATIONALE: chronic failure\nCONFIDENCE: 0.95\n");
+fn rustyclawd_brain_parses_json_with_demotion() {
+    let stub = StubSubmitter::new(
+        r#"{"adjusted_urgency": 0.0, "demotion_applied": 0.80, "rationale": "chronic failure", "confidence": 0.95}"#,
+    );
     let brain = RustyClawdOrientBrain::new(stub);
     let j = brain.judge_orientation(&ctx(5, 0.8)).unwrap();
     assert!(j.adjusted_urgency.abs() < 1e-9);
 }
 
 #[test]
-fn rustyclawd_brain_rejects_json_only_response() {
-    // JSON without labeled lines is now rejected (issue #1980)
-    let stub = StubSubmitter::new(r#"{"adjusted_urgency":0.5,"rationale":"ok","confidence":1.0}"#);
+fn rustyclawd_brain_rejects_labeled_line_response() {
+    // Labeled-line format (the old format) is now rejected — JSON is required
+    let stub = StubSubmitter::new("ADJUSTED_URGENCY: 0.5\nRATIONALE: ok\nCONFIDENCE: 1.0\n");
     let brain = RustyClawdOrientBrain::new(stub);
     let err = brain.judge_orientation(&ctx(1, 0.8)).unwrap_err();
     let msg = format!("{err}");
@@ -239,7 +242,9 @@ fn issue_1711_empty_response_error_does_not_silently_say_zero_bytes() {
 
 #[test]
 fn rustyclawd_brain_rejects_escalation() {
-    let stub = StubSubmitter::new("ADJUSTED_URGENCY: 0.95\nRATIONALE: escalate\nCONFIDENCE: 1.0\n");
+    let stub = StubSubmitter::new(
+        r#"{"adjusted_urgency": 0.95, "rationale": "escalate", "confidence": 1.0}"#,
+    );
     let brain = RustyClawdOrientBrain::new(stub);
     // base_urgency=0.5 → 0.95 is escalation → must error so caller falls back.
     let err = brain.judge_orientation(&ctx(1, 0.5)).unwrap_err();
@@ -249,7 +254,8 @@ fn rustyclawd_brain_rejects_escalation() {
 
 #[test]
 fn rustyclawd_brain_renders_prompt_with_context_fields() {
-    let stub = StubSubmitter::new("ADJUSTED_URGENCY: 0.0\nRATIONALE: x\nCONFIDENCE: 1.0\n");
+    let stub =
+        StubSubmitter::new(r#"{"adjusted_urgency": 0.0, "rationale": "x", "confidence": 1.0}"#);
     let brain = RustyClawdOrientBrain::new(stub);
     let prompt = brain.render_prompt(&OrientContext {
         goal_id: "marker-goal-id".to_string(),
@@ -269,7 +275,8 @@ fn rustyclawd_brain_renders_prompt_with_context_fields() {
 
 #[test]
 fn trait_object_compiles_for_both_impls() {
-    let stub = StubSubmitter::new("ADJUSTED_URGENCY: 0.5\nRATIONALE: x\nCONFIDENCE: 1.0\n");
+    let stub =
+        StubSubmitter::new(r#"{"adjusted_urgency": 0.5, "rationale": "x", "confidence": 1.0}"#);
     let brains: Vec<Box<dyn OodaOrientBrain>> = vec![
         Box::new(DeterministicFallbackOrientBrain),
         Box::new(RustyClawdOrientBrain::new(stub)),

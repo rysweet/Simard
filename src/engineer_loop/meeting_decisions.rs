@@ -21,8 +21,8 @@ pub(crate) fn load_carried_meeting_decisions(state_root: &Path) -> SimardResult<
         })
         .collect::<Vec<_>>();
 
-    // Use find_oldest_unprocessed_handoff (FIFO queue) instead of the
-    // legacy load_meeting_handoff (newest-wins) — issue #1985 / #1649.
+    // Use find_oldest_unprocessed_handoff (FIFO queue) instead of
+    // load_meeting_handoff (newest-by-filename). Issue #1985 / #1649.
     let handoff_dir = crate::meeting_facilitator::default_handoff_dir();
     match crate::meeting_facilitator::find_oldest_unprocessed_handoff(&handoff_dir) {
         Ok(Some(handoff_path)) => {
@@ -33,9 +33,10 @@ pub(crate) fn load_carried_meeting_decisions(state_root: &Path) -> SimardResult<
             let handoff: crate::meeting_facilitator::MeetingHandoff = serde_json::from_str(&raw)
                 .map_err(|e| SimardError::ArtifactIo {
                     path: handoff_path.clone(),
-                    reason: format!("failed to parse handoff JSON: {e}"),
+                    reason: format!("parsing handoff JSON: {e}"),
                 })?;
 
+            // Extract decisions and action items from the handoff.
             for d in &handoff.decisions {
                 carried.push(format!(
                     "meeting handoff — {}: {} (rationale: {})",
@@ -48,6 +49,7 @@ pub(crate) fn load_carried_meeting_decisions(state_root: &Path) -> SimardResult<
                     handoff.topic, a.description, a.owner, a.priority,
                 ));
             }
+            // Issue #1954: surface `next_owner` and `artifacts[]`.
             if let Some(ref owner) = handoff.next_owner {
                 carried.push(format!(
                     "meeting handoff — {} next_owner: {}",
@@ -66,39 +68,49 @@ pub(crate) fn load_carried_meeting_decisions(state_root: &Path) -> SimardResult<
                 ));
             }
 
-            // Derive meeting_id: use the handoff's field, fall back to
-            // derive_meeting_id for legacy v1 handoffs with empty meeting_id.
+            // Issue #1985: derive meeting_id and try to load the
+            // per-meeting bundle (transcript.json + meeting_handoff.md).
             let meeting_id = if handoff.meeting_id.is_empty() {
                 crate::meeting_facilitator::derive_meeting_id(&handoff.started_at, &handoff.topic)
             } else {
                 handoff.meeting_id.clone()
             };
 
-            // Attempt to load the per-meeting bundle (transcript.json +
-            // meeting_handoff.md). Tolerate absence — legacy handoffs
-            // predate the bundle writer.
             match crate::meeting_facilitator::load_meeting_bundle(&meeting_id) {
                 Ok(Some(bundle)) => {
+                    let bundle_dir = crate::meeting_facilitator::meeting_bundle_dir(&meeting_id);
                     carried.push(format!(
-                        "meeting handoff — bundle: {}",
-                        bundle.bundle_dir.display(),
+                        "meeting handoff — {} bundle: {}",
+                        handoff.topic,
+                        bundle_dir.display(),
                     ));
+
                     if !bundle.transcript.is_empty() {
                         carried.push(format!(
-                            "meeting handoff — {} transcript lines: {}",
+                            "meeting handoff — {} transcript: {} lines from {}",
                             handoff.topic,
                             bundle.transcript.len(),
+                            crate::meeting_facilitator::bundle_transcript_path(&meeting_id)
+                                .display(),
+                        ));
+                    }
+
+                    if bundle.markdown_report.is_some() {
+                        carried.push(format!(
+                            "meeting handoff — {} markdown report: {}",
+                            handoff.topic,
+                            crate::meeting_facilitator::bundle_markdown_path(&meeting_id).display(),
                         ));
                     }
                 }
                 Ok(None) => {
                     tracing::info!(
                         meeting_id = %meeting_id,
-                        "no per-meeting bundle found — legacy handoff path"
+                        "no per-meeting bundle found; legacy handoff without bundle"
                     );
                 }
                 Err(e) => {
-                    tracing::warn!(
+                    tracing::info!(
                         meeting_id = %meeting_id,
                         error = %e,
                         "failed to load per-meeting bundle; continuing with handoff only"

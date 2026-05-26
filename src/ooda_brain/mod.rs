@@ -22,6 +22,9 @@ mod judgment_record;
 mod orient;
 pub mod parse_failure;
 pub mod prompt_store;
+mod recipe_decide;
+mod recipe_engineer_lifecycle;
+mod recipe_orient;
 mod rustyclawd;
 
 #[cfg(test)]
@@ -36,7 +39,7 @@ mod tests;
 pub use context::{count_live_engineer_claims, gather_engineer_lifecycle_ctx, redact_secrets};
 pub use decide::{
     DecideContext, DecideJudgment, DeterministicFallbackDecideBrain, OodaDecideBrain,
-    PROMPT_NAME as DECIDE_PROMPT_NAME, RustyClawdDecideBrain, build_rustyclawd_decide_brain,
+    PROMPT_NAME as DECIDE_PROMPT_NAME,
 };
 pub use fallback::DeterministicFallbackBrain;
 pub use judgment_record::{
@@ -49,6 +52,9 @@ pub use orient::{
     build_rustyclawd_orient_brain,
 };
 pub use parse_failure::ParseFailureRecord;
+pub use recipe_decide::RecipeDecideBrain;
+pub use recipe_engineer_lifecycle::RecipeEngineerLifecycleBrain;
+pub use recipe_orient::RecipeOrientBrain;
 pub use rustyclawd::{
     LlmSubmitter, PROMPT_NAME as ACT_PROMPT_NAME, RustyClawdBrain, SessionLlmSubmitter,
     build_rustyclawd_brain,

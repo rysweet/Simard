@@ -2,11 +2,25 @@ use crate::operator_commands_dashboard;
 
 use super::args::next_required;
 
+pub(super) const DASHBOARD_HELP: &str = "\
+Simard dashboard subcommand
+
+Usage: simard dashboard <command> [args]
+
+Commands:
+  serve [--port=PORT]         Start the dashboard HTTP server (default: 8080).
+  help, -h, --help            Show this help message and exit.
+";
+
 pub fn dispatch_dashboard_command(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let subcommand = next_required(&mut args, "dashboard subcommand (serve)")?;
     match subcommand.as_str() {
+        "--help" | "-h" | "help" => {
+            print!("{DASHBOARD_HELP}");
+            Ok(())
+        }
         "serve" => {
             let mut port: u16 = 8080;
             for arg in args {
@@ -47,6 +61,23 @@ mod tests {
                 .to_string()
                 .contains("unsupported command")
         );
+    }
+
+    #[test]
+    fn help_flag_exits_ok() {
+        let args = vec!["--help".to_string()].into_iter();
+        let result = dispatch_dashboard_command(args);
+        assert!(
+            result.is_ok(),
+            "dashboard --help must exit Ok, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn short_help_flag_exits_ok() {
+        let args = vec!["-h".to_string()].into_iter();
+        let result = dispatch_dashboard_command(args);
+        assert!(result.is_ok(), "dashboard -h must exit Ok, got: {result:?}");
     }
 
     #[test]

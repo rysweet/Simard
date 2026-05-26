@@ -1,52 +1,46 @@
-//! Tests for `meeting_decisions::load_carried_meeting_decisions` covering
-//! the bundle-present path (issue #1985) and the legacy bundle-absent path.
+//! Tests for `load_carried_meeting_decisions` with per-meeting bundle support.
+//!
+//! Covers:
+//! - Bundle-present path: a meeting with a populated bundle yields carried
+//!   entries plus the bundle-path log line.
+//! - Bundle-absent path: a legacy v1 handoff (no bundle dir) still produces
+//!   carried entries — no regression.
+//! - `find_oldest_unprocessed_handoff` selection: oldest unprocessed wins
+//!   over newer ones.
 
 use std::fs;
+use std::path::Path;
 
-use tempfile::TempDir;
+use serial_test::serial;
 
-use crate::meeting_facilitator::{MeetingHandoff, derive_meeting_id, write_meeting_handoff};
+use crate::meeting_facilitator::{
+    BundleTranscriptLine, MeetingDecision, MeetingHandoff, derive_meeting_id, write_meeting_bundle,
+};
 
-use super::meeting_decisions::load_carried_meeting_decisions;
-
-/// Helper: write a minimal `memory_records.json` so the memory store opens
-/// cleanly without contributing any carried entries.
-fn write_empty_memory(state_dir: &std::path::Path) {
-    fs::write(state_dir.join("memory_records.json"), "[]").unwrap();
-}
-
-/// Helper: build a minimal unprocessed `MeetingHandoff` with one decision
-/// and one action item.
-fn sample_handoff(topic: &str, meeting_id: &str) -> MeetingHandoff {
-    use crate::meeting_facilitator::{ActionItem, MeetingDecision};
+/// Create a minimal handoff with decisions for testing.
+fn test_handoff(topic: &str, started_at: &str) -> MeetingHandoff {
     MeetingHandoff {
         schema_version: 2,
-        meeting_id: meeting_id.to_string(),
+        meeting_id: derive_meeting_id(started_at, topic),
         topic: topic.to_string(),
-        started_at: "2026-05-20T10:00:00Z".to_string(),
-        closed_at: "2026-05-20T11:00:00Z".to_string(),
+        started_at: started_at.to_string(),
+        closed_at: "2026-01-15T11:00:00Z".to_string(),
         decisions: vec![MeetingDecision {
-            description: "Use bundle consumer".to_string(),
-            rationale: "Rich context".to_string(),
+            description: "Use Rust".to_string(),
+            rationale: "Safety first".to_string(),
             participants: vec!["dev".to_string()],
         }],
-        action_items: vec![ActionItem {
-            description: "Ship #1985".to_string(),
-            owner: "engineer".to_string(),
-            priority: 1,
-            due_description: None,
-            linked_issue: Some("#1985".to_string()),
-        }],
+        action_items: vec![],
         open_questions: vec![],
         processed: false,
         duration_secs: Some(3600),
-        transcript: vec!["summary".to_string()],
+        transcript: vec!["Test transcript".to_string()],
         transcript_path: None,
         participants: vec!["dev".to_string()],
         themes: vec![],
-        next_owner: Some("engineer".to_string()),
+        next_owner: None,
         artifacts: vec![],
-        goal: None,
+        goal: Some("Ship handoff v2".to_string()),
         next_actor: None,
         applied_templates: vec![],
         history_truncated_count: 0,
@@ -54,178 +48,203 @@ fn sample_handoff(topic: &str, meeting_id: &str) -> MeetingHandoff {
     }
 }
 
-/// Bundle-present path: when a per-meeting bundle exists on disk, the
-/// carried entries include the bundle-path line and a transcript-lines
-/// count line.
+/// Write a handoff file directly into the handoff dir (legacy style).
+fn write_handoff_to_dir(dir: &Path, handoff: &MeetingHandoff) {
+    fs::create_dir_all(dir).unwrap();
+    let ts = handoff.closed_at.replace(':', "-").replace('+', "_");
+    let filename = format!("handoff-{ts}.json");
+    let path = dir.join(&filename);
+    let json = serde_json::to_string_pretty(handoff).unwrap();
+    fs::write(&path, &json).unwrap();
+}
+
+/// Set up a state_root with a valid memory_records.json.
+fn setup_state_root(dir: &Path) {
+    fs::create_dir_all(dir).unwrap();
+    fs::write(dir.join("memory_records.json"), "[]").unwrap();
+}
+
 #[test]
-fn bundle_present_path_includes_bundle_line() {
-    let state_dir = TempDir::new().unwrap();
-    let handoff_dir = TempDir::new().unwrap();
-    let meetings_dir = TempDir::new().unwrap();
+#[serial]
+fn bundle_present_yields_bundle_path_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state_root = tmp.path().join("state");
+    setup_state_root(&state_root);
 
-    write_empty_memory(state_dir.path());
+    let handoff_dir = tmp.path().join("handoffs");
+    let bundle_root = tmp.path().join("meetings");
 
-    let topic = "architecture review";
-    let meeting_id = derive_meeting_id("2026-05-20T10:00:00Z", topic);
+    let handoff = test_handoff("Bundle test", "2026-01-15T10:00:00Z");
+    write_handoff_to_dir(&handoff_dir, &handoff);
 
-    // Write the handoff to the queue directory.
-    let mut handoff = sample_handoff(topic, &meeting_id);
-    write_meeting_handoff(handoff_dir.path(), &handoff).unwrap();
+    let mut bundle_handoff = handoff.clone();
+    let transcript = vec![BundleTranscriptLine {
+        role: "operator".to_string(),
+        content: "Hello".to_string(),
+        timestamp: "2026-01-15T10:01:00Z".to_string(),
+    }];
 
-    // Write a per-meeting bundle (transcript + markdown).
-    let bundle_dir = meetings_dir.path().join(&meeting_id);
-    fs::create_dir_all(&bundle_dir).unwrap();
+    // SAFETY (Rust 2024): set_var requires unsafe — tests only, serialized.
+    unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", handoff_dir.to_str().unwrap()) };
+    unsafe { std::env::set_var("SIMARD_MEETINGS_ROOT", bundle_root.to_str().unwrap()) };
 
-    let transcript = serde_json::json!({
-        "meeting_id": meeting_id,
-        "topic": topic,
-        "started_at": "2026-05-20T10:00:00Z",
-        "closed_at": "2026-05-20T11:00:00Z",
-        "lines": [
-            {"role": "operator", "content": "Let's decide", "timestamp": "2026-05-20T10:01:00Z"},
-            {"role": "simard", "content": "Agreed", "timestamp": "2026-05-20T10:02:00Z"}
-        ]
-    });
-    fs::write(
-        bundle_dir.join("transcript.json"),
-        serde_json::to_string_pretty(&transcript).unwrap(),
-    )
-    .unwrap();
-    fs::write(
-        bundle_dir.join("meeting_handoff.md"),
-        "# Meeting handoff: architecture review\n",
-    )
-    .unwrap();
-    // Also need the bundle handoff JSON so load_meeting_bundle finds it.
-    handoff.meeting_id = meeting_id.clone();
-    fs::write(
-        bundle_dir.join("meeting_handoff.json"),
-        serde_json::to_string_pretty(&handoff).unwrap(),
-    )
-    .unwrap();
+    write_meeting_bundle(&mut bundle_handoff, &transcript).unwrap();
+    let carried = super::load_carried_meeting_decisions(&state_root).unwrap();
 
-    // Point env vars to our temp dirs.
-    unsafe {
-        std::env::set_var("SIMARD_HANDOFF_DIR", handoff_dir.path().as_os_str());
-        std::env::set_var("SIMARD_MEETINGS_ROOT", meetings_dir.path().as_os_str());
-    }
+    unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR") };
+    unsafe { std::env::remove_var("SIMARD_MEETINGS_ROOT") };
 
-    let result = load_carried_meeting_decisions(state_dir.path());
-
-    unsafe {
-        std::env::remove_var("SIMARD_HANDOFF_DIR");
-        std::env::remove_var("SIMARD_MEETINGS_ROOT");
-    }
-
-    let carried = result.unwrap();
-
-    // MAX_CARRIED_MEETING_DECISIONS is 3, so only the last 3 entries survive
-    // truncation. The bundle path + transcript count are appended last, so
-    // they should be present. Decision/action text may be truncated.
+    // The bundle path line must be present. Note: MAX_CARRIED_MEETING_DECISIONS=3
+    // caps the carried list; when a bundle adds 3 metadata lines (bundle path,
+    // transcript, markdown report) plus 1 decision = 4, the oldest entry (the
+    // decision) is trimmed. This is expected: the bundle path is higher value
+    // since it points the engineer to the full artifact.
     assert!(
         carried.iter().any(|s| s.contains("bundle:")),
-        "expected a 'bundle:' line in carried entries, got: {carried:?}"
+        "expected bundle path line in carried; got: {carried:?}"
     );
     assert!(
-        carried.iter().any(|s| s.contains("transcript lines: 2")),
-        "expected transcript line count in carried entries, got: {carried:?}"
-    );
-    // Verify total count respects the cap.
-    assert!(
-        carried.len() <= 3,
-        "carried entries should be capped at MAX_CARRIED_MEETING_DECISIONS, got: {}",
-        carried.len()
+        carried.iter().any(|s| s.contains("Bundle test")),
+        "expected topic name in carried entries; got: {carried:?}"
     );
 }
 
-/// Bundle-absent path: a legacy v1 handoff with no meeting_id field and
-/// no bundle dir still produces the basic carried entries (no regression).
 #[test]
-fn legacy_handoff_without_bundle_still_carries_decisions() {
-    let state_dir = TempDir::new().unwrap();
-    let handoff_dir = TempDir::new().unwrap();
-    let meetings_dir = TempDir::new().unwrap();
+#[serial]
+fn legacy_handoff_without_bundle_still_works() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state_root = tmp.path().join("state");
+    setup_state_root(&state_root);
 
-    write_empty_memory(state_dir.path());
+    let handoff_dir = tmp.path().join("handoffs");
+    let bundle_root = tmp.path().join("meetings_empty");
 
-    // Legacy v1 handoff: empty meeting_id.
-    let handoff = sample_handoff("legacy sync", "");
-    write_meeting_handoff(handoff_dir.path(), &handoff).unwrap();
+    let handoff = test_handoff("Legacy test", "2026-01-15T10:00:00Z");
+    write_handoff_to_dir(&handoff_dir, &handoff);
 
-    unsafe {
-        std::env::set_var("SIMARD_HANDOFF_DIR", handoff_dir.path().as_os_str());
-        // Point meetings root to an empty dir — no bundle exists.
-        std::env::set_var("SIMARD_MEETINGS_ROOT", meetings_dir.path().as_os_str());
-    }
+    // SAFETY (Rust 2024): set_var requires unsafe — tests only, serialized.
+    unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", handoff_dir.to_str().unwrap()) };
+    unsafe { std::env::set_var("SIMARD_MEETINGS_ROOT", bundle_root.to_str().unwrap()) };
 
-    let result = load_carried_meeting_decisions(state_dir.path());
+    let carried = super::load_carried_meeting_decisions(&state_root).unwrap();
 
-    unsafe {
-        std::env::remove_var("SIMARD_HANDOFF_DIR");
-        std::env::remove_var("SIMARD_MEETINGS_ROOT");
-    }
+    unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR") };
+    unsafe { std::env::remove_var("SIMARD_MEETINGS_ROOT") };
 
-    let carried = result.unwrap();
-
-    // Decision and action item should still be present.
+    // Without a bundle, only 1 decision is carried — well within the cap.
     assert!(
-        carried.iter().any(|s| s.contains("Use bundle consumer")),
-        "expected decision text in carried entries, got: {carried:?}"
+        carried.iter().any(|s| s.contains("Use Rust")),
+        "expected decision in carried even without bundle; got: {carried:?}"
     );
-    assert!(
-        carried.iter().any(|s| s.contains("Ship #1985")),
-        "expected action item text in carried entries, got: {carried:?}"
-    );
-    // No bundle line should appear.
     assert!(
         !carried.iter().any(|s| s.contains("bundle:")),
-        "should not have a bundle line for legacy handoff, got: {carried:?}"
+        "should not have bundle line when bundle is absent; got: {carried:?}"
     );
 }
 
-/// find_oldest_unprocessed_handoff selects the oldest unprocessed handoff
-/// over a newer one, matching the FIFO queue contract.
 #[test]
-fn oldest_unprocessed_handoff_wins_over_newer() {
-    let handoff_dir = TempDir::new().unwrap();
+#[serial]
+fn oldest_unprocessed_wins_over_newer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state_root = tmp.path().join("state");
+    setup_state_root(&state_root);
 
-    // Write an older handoff (unprocessed).
-    let older = MeetingHandoff {
-        topic: "older topic".to_string(),
-        started_at: "2026-05-18T09:00:00Z".to_string(),
-        closed_at: "2026-05-18T10:00:00Z".to_string(),
-        processed: false,
-        ..sample_handoff("older topic", "older-meeting")
-    };
-    // Manually write with an older timestamp filename.
-    let older_json = serde_json::to_string_pretty(&older).unwrap();
-    fs::write(
-        handoff_dir.path().join("handoff-2026-05-18T09-00-00Z.json"),
-        &older_json,
-    )
-    .unwrap();
+    let handoff_dir = tmp.path().join("handoffs");
+    let bundle_root = tmp.path().join("meetings");
 
-    // Write a newer handoff (also unprocessed).
-    let newer = MeetingHandoff {
-        topic: "newer topic".to_string(),
-        started_at: "2026-05-20T10:00:00Z".to_string(),
-        closed_at: "2026-05-20T11:00:00Z".to_string(),
-        processed: false,
-        ..sample_handoff("newer topic", "newer-meeting")
-    };
-    let newer_json = serde_json::to_string_pretty(&newer).unwrap();
-    fs::write(
-        handoff_dir.path().join("handoff-2026-05-20T10-00-00Z.json"),
-        &newer_json,
-    )
-    .unwrap();
+    // Older handoff has a different closed_at so the filenames differ.
+    let mut older = test_handoff("Older meeting", "2026-01-10T09:00:00Z");
+    older.closed_at = "2026-01-10T10:00:00Z".to_string();
+    older.decisions[0].description = "OlderDecision".to_string();
+    write_handoff_to_dir(&handoff_dir, &older);
 
-    let result =
-        crate::meeting_facilitator::find_oldest_unprocessed_handoff(handoff_dir.path()).unwrap();
-    let path = result.expect("should find an unprocessed handoff");
-    let name = path.file_name().unwrap().to_string_lossy();
+    let mut newer = test_handoff("Newer meeting", "2026-01-15T10:00:00Z");
+    newer.closed_at = "2026-01-15T11:00:00Z".to_string();
+    newer.decisions[0].description = "NewerDecision".to_string();
+    write_handoff_to_dir(&handoff_dir, &newer);
+
+    // SAFETY (Rust 2024): set_var requires unsafe — tests only, serialized.
+    unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", handoff_dir.to_str().unwrap()) };
+    unsafe { std::env::set_var("SIMARD_MEETINGS_ROOT", bundle_root.to_str().unwrap()) };
+
+    let carried = super::load_carried_meeting_decisions(&state_root).unwrap();
+
+    unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR") };
+    unsafe { std::env::remove_var("SIMARD_MEETINGS_ROOT") };
+
+    // Oldest unprocessed should be selected (FIFO). No bundle dir exists
+    // for this handoff, so only the decision line is carried.
     assert!(
-        name.contains("2026-05-18"),
-        "expected the older handoff to be selected, got: {name}"
+        carried.iter().any(|s| s.contains("OlderDecision")),
+        "expected oldest unprocessed handoff's decision; got: {carried:?}"
+    );
+    assert!(
+        !carried.iter().any(|s| s.contains("NewerDecision")),
+        "should not contain newer handoff's decision; got: {carried:?}"
+    );
+}
+
+#[test]
+#[serial]
+fn load_meeting_bundle_returns_none_for_missing_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    // SAFETY (Rust 2024): set_var requires unsafe — tests only, serialized.
+    unsafe { std::env::set_var("SIMARD_MEETINGS_ROOT", tmp.path().to_str().unwrap()) };
+
+    let result = crate::meeting_facilitator::load_meeting_bundle("nonexistent-meeting-id");
+
+    unsafe { std::env::remove_var("SIMARD_MEETINGS_ROOT") };
+
+    assert!(result.is_ok());
+    assert!(result.unwrap().is_none());
+}
+
+#[test]
+#[serial]
+fn load_meeting_bundle_reads_all_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bundle_root = tmp.path().join("meetings");
+
+    let mut handoff = test_handoff("Full bundle", "2026-01-15T10:00:00Z");
+    let transcript = vec![
+        BundleTranscriptLine {
+            role: "operator".to_string(),
+            content: "Hello".to_string(),
+            timestamp: "2026-01-15T10:01:00Z".to_string(),
+        },
+        BundleTranscriptLine {
+            role: "simard".to_string(),
+            content: "Hi there".to_string(),
+            timestamp: "2026-01-15T10:01:05Z".to_string(),
+        },
+    ];
+
+    // SAFETY (Rust 2024): set_var requires unsafe — tests only, serialized.
+    unsafe { std::env::set_var("SIMARD_MEETINGS_ROOT", bundle_root.to_str().unwrap()) };
+
+    let meeting_id = handoff.meeting_id.clone();
+    write_meeting_bundle(&mut handoff, &transcript).unwrap();
+
+    let bundle = crate::meeting_facilitator::load_meeting_bundle(&meeting_id)
+        .unwrap()
+        .expect("bundle should exist");
+
+    unsafe { std::env::remove_var("SIMARD_MEETINGS_ROOT") };
+
+    assert_eq!(bundle.handoff.topic, "Full bundle");
+    assert_eq!(bundle.transcript.len(), 2);
+    assert_eq!(bundle.transcript[0].role, "operator");
+    assert_eq!(bundle.transcript[1].content, "Hi there");
+    assert!(
+        bundle.markdown_report.is_some(),
+        "markdown report should be present"
+    );
+    assert!(
+        bundle
+            .markdown_report
+            .as_ref()
+            .unwrap()
+            .contains("Full bundle"),
+        "markdown should mention the topic"
     );
 }

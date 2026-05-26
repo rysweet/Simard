@@ -381,29 +381,23 @@ This is a behavior fix only; no public API changed.
 
 ## Consumers
 
-The close pipeline writes a per-meeting bundle to
-`<state-root>/meetings/<meeting_id>/`. Three consumers read handoff
-artifacts today:
+After a meeting closes and the handoff bundle lands on disk, three
+consumers read the artifacts. Each uses a different selector and reads
+different files:
 
-| Consumer | File | Reads | Selector |
+| Consumer | File | Selector | Reads |
 |---|---|---|---|
-| OODA curate | `src/ooda_loop/curate.rs` `check_meeting_handoffs` | `meeting_handoff.json` (flat, in handoff queue) | `find_oldest_unprocessed_handoff` |
-| `act-on-decisions` | `src/operator_cli/decisions.rs` `dispatch_act_on_decisions` | `meeting_handoff.json` (flat, in handoff queue) | `load_meeting_handoff` (newest) |
-| Engineer carry-over | `src/engineer_loop/meeting_decisions.rs` `load_carried_meeting_decisions` | `meeting_handoff.json` (queue) + per-meeting bundle (`transcript.json`, `meeting_handoff.md`) | `find_oldest_unprocessed_handoff` + `load_meeting_bundle` |
+| OODA curate | `src/ooda_loop/curate.rs` `check_meeting_handoffs` | `find_oldest_unprocessed_handoff` (FIFO) | Legacy `meeting_handoff.json` in handoff dir |
+| `act-on-decisions` | `src/operator_cli/decisions.rs::dispatch_act_on_decisions` | `load_meeting_handoff` (newest) | Legacy `meeting_handoff.json` in handoff dir |
+| Engineer carry-over | `src/engineer_loop/meeting_decisions.rs` | `find_oldest_unprocessed_handoff` (FIFO, issue #1985) | Legacy handoff **+** per-meeting bundle (`transcript.json`, `meeting_handoff.md`) via `load_meeting_bundle` |
 
-### Bundle path layout
-
-```
-<state-root>/meetings/<meeting_id>/
-├── meeting_handoff.json   # structured handoff (same schema as queue file)
-├── meeting_handoff.md     # human-readable report
-└── transcript.json        # full conversation (Vec<BundleTranscriptLine>)
-```
-
-The engineer loop derives `meeting_id` from the selected handoff's
-`meeting_id` field (v2+) or falls back to `derive_meeting_id(&started_at,
-&topic)` for legacy v1 handoffs. It tolerates absent bundle files — the
-legacy code path (flat handoff only) remains functional.
+The engineer loop (updated in issue #1985) derives the `meeting_id`
+from the selected handoff and attempts to load the per-meeting bundle
+at `<bundle_root>/<meeting_id>/`. When the bundle exists, it adds
+lines naming the bundle directory path, transcript line count, and
+markdown report path to the carried-decision list. When the bundle is
+absent (legacy v1 handoffs), it falls back to the handoff-only path
+with no regression.
 
 ---
 

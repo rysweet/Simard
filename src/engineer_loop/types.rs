@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use crate::goals::GoalRecord;
+use crate::session::{SessionPhase, SessionRecord};
 use crate::terminal_engineer_bridge::TerminalBridgeContext;
 
 use std::path::PathBuf;
@@ -127,6 +128,25 @@ pub struct PhaseTrace {
     pub outcome: PhaseOutcome,
 }
 
+impl PhaseTrace {
+    /// Maps this trace's ad-hoc phase name to the corresponding [`SessionPhase`].
+    ///
+    /// The engineer loop's internal phase names predate the session orchestration
+    /// state machine. This method provides the structured mapping required by
+    /// the spec (ProductArchitecture.md §Session Orchestration).
+    pub fn session_phase(&self) -> SessionPhase {
+        match self.name.as_str() {
+            "inspect" | "pre-mutation-guard" => SessionPhase::Intake,
+            "load-bridge-context" => SessionPhase::Preparation,
+            "agent-prompt-build" => SessionPhase::Planning,
+            "agent-spawn" | "agent-wait" => SessionPhase::Execution,
+            "review" => SessionPhase::Reflection,
+            "persist" => SessionPhase::Persistence,
+            _ => SessionPhase::Execution,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EngineerLoopRun {
     pub state_root: PathBuf,
@@ -138,6 +158,11 @@ pub struct EngineerLoopRun {
     #[serde(with = "duration_millis")]
     pub elapsed_duration: Duration,
     pub phase_traces: Vec<PhaseTrace>,
+    /// The session record tracking phase progression through the spec's
+    /// SessionPhase state machine (Intake → … → Complete). `None` for
+    /// runs deserialized from older formats that predate session tracking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_record: Option<SessionRecord>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -188,4 +213,39 @@ pub fn analyze_objective(objective: &str) -> AnalyzedAction {
     } else {
         AnalyzedAction::ReadOnlyScan
     }
+}
+
+impl AnalyzedAction {
+    /// Returns `true` if this action category implies repository mutations
+    /// (file edits, commits, issue creation). Read-only scans, tests, and
+    /// checks are non-mutating.
+    pub fn is_mutating(&self) -> bool {
+        matches!(
+            self,
+            AnalyzedAction::CreateFile
+                | AnalyzedAction::AppendToFile
+                | AnalyzedAction::GitCommit
+                | AnalyzedAction::OpenIssue
+                | AnalyzedAction::StructuredTextReplace
+        )
+    }
+}
+
+/// Minimal reflection record produced when a session fails. Captures the
+/// error context so failures are not silently lost (issue #2088). The spec
+/// requires reflection on every session outcome including errors.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SessionErrorReflection {
+    /// The original objective that was being pursued.
+    pub objective: String,
+    /// Which phase the session was in when the error occurred.
+    pub failed_phase: String,
+    /// Human-readable error description.
+    pub error_message: String,
+    /// Phase traces collected up to the point of failure.
+    pub phase_traces: Vec<PhaseTrace>,
+    /// Session ID for correlating the failed session with persisted artifacts.
+    /// `None` for reflections created before session tracking was added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
