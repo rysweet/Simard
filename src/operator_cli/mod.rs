@@ -60,6 +60,8 @@ Product modes:
   meeting run <base-type> <topology> <objective> [state-root]
   meeting read <base-type> <topology> <state-root>
   meeting repl [topic]
+  meeting resume             — resume an interrupted meeting from the last WIP checkpoint
+  meeting resume --discard   — discard the saved WIP checkpoint without resuming
   goal list                — print active + backlog snapshot to stdout
   goal unblock <goal-id>   — operator escape hatch: clear any Blocked
                              status (unconditional) and restore to
