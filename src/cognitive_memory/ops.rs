@@ -212,36 +212,28 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
         );
         let summary_id = Self::new_id("epi");
 
-        // Issue #1975 (G4): LadybugDB auto-commits each statement (no
-        // BEGIN/COMMIT). Use a compensating-action pattern: if any SET
-        // compressed = 1 fails mid-loop, delete the summary node so the
-        // caller never sees Ok(Some(summary_id)) for a partial apply.
-        self.execute(&format!(
+        // Issue #2044 (G4): wrap the summary-insert + per-source
+        // SET compressed=1 loop in a single BEGIN/COMMIT transaction
+        // so a mid-loop crash cannot produce duplicate summaries.
+        // Replaces the previous compensating-action pattern (#1975)
+        // which was vulnerable to a crash between the summary CREATE
+        // and the compensating DELETE.
+        let mut txn_stmts = Vec::with_capacity(rows.len() + 1);
+        txn_stmts.push(format!(
             "CREATE (e:Episode {{id: '{}', content: '{}', source_label: 'consolidation', temporal_index: 0, compressed: 1}})",
             escape_cypher(&summary_id),
             escape_cypher(&summary),
-        ))?;
-
+        ));
         for row in &rows {
-            if let Some(eid) = as_str(&row[0])
-                && let Err(e) = self.execute(&format!(
+            if let Some(eid) = as_str(&row[0]) {
+                txn_stmts.push(format!(
                     "MATCH (e:Episode {{id: '{}'}}) SET e.compressed = 1",
                     escape_cypher(eid)
-                ))
-            {
-                // Compensate: remove the summary node so subsequent
-                // consolidation attempts don't see a partial result.
-                let _ = self.execute(&format!(
-                    "MATCH (e:Episode {{id: '{}'}}) DELETE e",
-                    escape_cypher(&summary_id)
                 ));
-                crate::cognitive_memory::metrics::increment(
-                    "consolidation_partial_apply",
-                    "consolidate_episodes:set_compressed",
-                );
-                return Err(e);
             }
         }
+        self.execute_in_transaction(&txn_stmts)?;
+
         // Per-write barrier — one barrier for the whole consolidation op
         // (summary insert + N compress flips), not per Cypher statement.
         // Issue #1973 spec rationale (decision D5): consolidation is a

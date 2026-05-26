@@ -340,6 +340,43 @@ impl NativeCognitiveMemory {
         Ok(())
     }
 
+    /// Execute multiple Cypher statements atomically within a single
+    /// `BEGIN TRANSACTION` / `COMMIT` block on one connection.
+    ///
+    /// If any statement fails, `ROLLBACK` is issued so no partial state
+    /// is visible to subsequent reads. This is the crash-atomicity
+    /// primitive used by `consolidate_episodes` (issue #2044, goal G4).
+    fn execute_in_transaction(&self, statements: &[String]) -> SimardResult<()> {
+        let conn = self.conn()?;
+        conn.query("BEGIN TRANSACTION")
+            .map_err(|e| SimardError::BridgeCallFailed {
+                bridge: "cognitive-memory-native".into(),
+                method: "execute_in_transaction".into(),
+                reason: format!("BEGIN TRANSACTION failed: {e}"),
+            })?;
+        for stmt in statements {
+            if let Err(e) = conn.query(stmt) {
+                // Best-effort rollback — if this also fails, the
+                // original error is more informative.
+                let _ = conn.query("ROLLBACK");
+                return Err(SimardError::BridgeCallFailed {
+                    bridge: "cognitive-memory-native".into(),
+                    method: "execute_in_transaction".into(),
+                    reason: format!("{e}\nCypher: {stmt}"),
+                });
+            }
+        }
+        conn.query("COMMIT").map_err(|e| {
+            let _ = conn.query("ROLLBACK");
+            SimardError::BridgeCallFailed {
+                bridge: "cognitive-memory-native".into(),
+                method: "execute_in_transaction".into(),
+                reason: format!("COMMIT failed: {e}"),
+            }
+        })?;
+        Ok(())
+    }
+
     fn ensure_schema(&self) -> SimardResult<()> {
         for ddl in schema::SCHEMA_DDL {
             if let Err(e) = self.execute(ddl) {
