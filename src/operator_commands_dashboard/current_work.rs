@@ -97,6 +97,9 @@ pub(crate) async fn current_work() -> Json<Value> {
                 .iter()
                 .map(|g| {
                     let (status_str, blocker) = match &g.status {
+                        crate::goal_curation::GoalProgress::Proposed => {
+                            ("proposed".to_string(), None)
+                        }
                         crate::goal_curation::GoalProgress::NotStarted => {
                             ("not_started".to_string(), None)
                         }
@@ -106,6 +109,7 @@ pub(crate) async fn current_work() -> Json<Value> {
                         crate::goal_curation::GoalProgress::Blocked(reason) => {
                             ("blocked".to_string(), Some(reason.clone()))
                         }
+                        crate::goal_curation::GoalProgress::Paused => ("paused".to_string(), None),
                         crate::goal_curation::GoalProgress::Completed => {
                             ("completed".to_string(), None)
                         }

@@ -9,20 +9,33 @@ use serde::{Deserialize, Serialize};
 pub const MAX_ACTIVE_GOALS: usize = 5;
 
 /// Progress state for an active goal.
+///
+/// Variants align with the spec-mandated lifecycle statuses in
+/// [`crate::goals::GoalStatus`] (`Proposed`, `Active`/progress variants,
+/// `Paused`, `Completed`) so the operator-facing goal curation path can
+/// distinguish proposed-vs-active goals and pause goals (issue #2098).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum GoalProgress {
+    /// Goal has been proposed but not yet accepted onto the active board.
+    Proposed,
     NotStarted,
-    InProgress { percent: u32 },
+    InProgress {
+        percent: u32,
+    },
     Blocked(String),
+    /// Goal is temporarily paused — not blocked, but deliberately on hold.
+    Paused,
     Completed,
 }
 
 impl Display for GoalProgress {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Proposed => f.write_str("proposed"),
             Self::NotStarted => f.write_str("not-started"),
             Self::InProgress { percent } => write!(f, "in-progress({percent}%)"),
             Self::Blocked(reason) => write!(f, "blocked: {reason}"),
+            Self::Paused => f.write_str("paused"),
             Self::Completed => f.write_str("completed"),
         }
     }
@@ -133,6 +146,11 @@ mod tests {
     // ── GoalProgress Display ────────────────────────────────────────
 
     #[test]
+    fn goal_progress_display_proposed() {
+        assert_eq!(GoalProgress::Proposed.to_string(), "proposed");
+    }
+
+    #[test]
     fn goal_progress_display_not_started() {
         assert_eq!(GoalProgress::NotStarted.to_string(), "not-started");
     }
@@ -162,6 +180,11 @@ mod tests {
     }
 
     #[test]
+    fn goal_progress_display_paused() {
+        assert_eq!(GoalProgress::Paused.to_string(), "paused");
+    }
+
+    #[test]
     fn goal_progress_display_completed() {
         assert_eq!(GoalProgress::Completed.to_string(), "completed");
     }
@@ -171,9 +194,11 @@ mod tests {
     #[test]
     fn goal_progress_serde_all_variants() {
         let variants = vec![
+            GoalProgress::Proposed,
             GoalProgress::NotStarted,
             GoalProgress::InProgress { percent: 50 },
             GoalProgress::Blocked("reason".to_string()),
+            GoalProgress::Paused,
             GoalProgress::Completed,
         ];
         for v in variants {

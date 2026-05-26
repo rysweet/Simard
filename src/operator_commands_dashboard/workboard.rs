@@ -168,6 +168,9 @@ pub(crate) async fn workboard() -> Json<Value> {
                 .iter()
                 .map(|g| {
                     let (status_str, progress_pct) = match &g.status {
+                        crate::goal_curation::GoalProgress::Proposed => {
+                            ("proposed".to_string(), 0u32)
+                        }
                         crate::goal_curation::GoalProgress::NotStarted => {
                             ("queued".to_string(), 0u32)
                         }
@@ -177,6 +180,7 @@ pub(crate) async fn workboard() -> Json<Value> {
                         crate::goal_curation::GoalProgress::Blocked(reason) => {
                             (format!("blocked: {reason}"), 0)
                         }
+                        crate::goal_curation::GoalProgress::Paused => ("paused".to_string(), 0),
                         crate::goal_curation::GoalProgress::Completed => ("done".to_string(), 100),
                     };
                     json!({
