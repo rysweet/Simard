@@ -159,9 +159,9 @@ pub fn run_ooda_daemon(
     // progress-evidence checker.
     let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
-    let brain = brains::build_act_brain(&state_root);
+    let brain = brains::build_act_brain(&state_root, &repo_root);
     let decide_brain = brains::build_decide_brain(&state_root, &repo_root);
-    let orient_brain = brains::build_orient_brain(&state_root);
+    let orient_brain = brains::build_orient_brain(&state_root, &repo_root);
 
     // After all three brains are constructed, surface the cumulative
     // fallback count in the dashboard. Nonzero == daemon is running in
