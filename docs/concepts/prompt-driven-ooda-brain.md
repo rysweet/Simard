@@ -86,11 +86,14 @@ formats (DECISION markers and labeled lines) — no JSON parsing of LLM output.
 | Phase | Prompt | Wire format | Status |
 |---|---|---|---|
 | Observe | `ooda_observe.md` | (future) | Planned |
-| Orient | `ooda_orient.md` | JSON object (`adjusted_urgency`, `rationale`, `confidence`) | **Shipped** |
-| Decide | `ooda_decide.md` | `DECISION:` marker | **Shipped** |
+| Orient | `ooda-orient.yaml` | First-float extraction | **Shipped** |
+| Decide | `ooda-decide.yaml` | First-word extraction | **Shipped** |
 | Curate | `ooda_curate.md` | (future) | Planned |
 | Review | `ooda_review.md` | (future) | Planned |
-| Engineer lifecycle | `ooda_brain.md` | `DECISION:` marker + labeled body lines | **Shipped** |
+| Engineer lifecycle | `ooda-engineer-lifecycle.yaml` | First-word extraction | **Shipped** |
+
+> **Changed in #2144:** All three shipped phases now use first-word/first-float
+> extraction. The `DECISION:` marker and JSON object formats have been removed.
 
 See [text-based brain protocol](./text-based-brain-protocol.md) for the
 design rationale and [text-parsing wire formats](../reference/text-parsing-wire-formats.md)
