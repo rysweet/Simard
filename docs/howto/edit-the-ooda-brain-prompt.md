@@ -1,60 +1,55 @@
 # How-To: Edit the OODA Brain Prompt
 
-The OODA daemon's engineer-lifecycle behavior is reasoned about by an LLM
-reading `prompt_assets/simard/ooda_brain.md`.
-This guide shows how to iterate on that behavior **without touching Rust**.
+The OODA daemon's three brain phases (decide, orient, lifecycle) each have
+a recipe YAML prompt that controls their behavior. All three use
+**first-word/first-float extraction** — the parser takes the first token
+from the LLM output and matches it against known variants. This guide shows
+how to iterate on behavior **without touching Rust**.
 
 ## TL;DR
 
-1. Edit `prompt_assets/simard/ooda_brain.md`.
-2. Rebuild: `cargo build --release -p simard`.
-   (The prompt is compiled in via `include_str!`; a rebuild is required.)
-3. Restart the daemon (see
-   [run-ooda-daemon](run-ooda-daemon.md)).
-4. Tail `~/.simard/ooda.log` and the latest
+1. Edit the recipe YAML in `prompt_assets/simard/recipes/`.
+2. **No rebuild required** — recipe YAMLs are loaded at runtime.
+3. Tail `~/.simard/ooda.log` and the latest
    `~/.simard/cycle_reports/cycle_*.json` to confirm the new behavior.
 
 ## Prompt Structure
 
-The prompt has five fixed sections. The brain parser looks for `DECISION:`
-marker lines (not JSON) — the `OUTPUT_FORMAT` section instructs the model
-to emit text-based responses.
+All three brains use the same prompt pattern. The parser expects the LLM
+to output the decision as the **very first word** (or first number for
+orient).
 
 | Section | Purpose | Editable? |
 |---|---|---|
 | `# ROLE` | Identity & tone for the LLM | Yes |
-| `# CONTEXT` | Templated variables Simard substitutes per call | Yes (must keep `{{var}}` placeholders the brain populates — see below) |
-| `# OPTIONS` | The six `choice` values the brain may return | **Add/remove only with a Rust enum change**; renaming text guidance is fine |
-| `# OUTPUT_FORMAT` | Text format for the response (`DECISION: <variant>`) | **Do not change the marker format**; only edit prose and examples |
-| `# EXAMPLES` | Few-shot input→output pairs | Yes — most useful knob for steering behavior |
+| `# CONTEXT` | Templated variables substituted per call | Yes (must keep `{{var}}` placeholders) |
+| `# OPTIONS` | The variant names the brain may return | **Add/remove only with a Rust enum change** |
+| `# OUTPUT FORMAT` | Instructs "output the variant name as the first word" | **Do not remove** — the parser depends on first-word format |
+| `# EXAMPLES` | Few-shot input→output pairs in first-word format | Yes — most useful knob for steering behavior |
 
 ### Output format
 
-The brain expects responses in the `DECISION:` marker format:
+All three brains expect the decision as the first token:
 
+**Decide brain:**
 ```
-DECISION: continue_skipping
-RATIONALE: engineer is making progress, worktree modified 30s ago
-```
-
-For structured variants, labeled fields follow the decision line:
-
-```
-DECISION: open_tracking_issue
-TITLE: Engineer stuck in compile-error loop
-BODY: The engineer has failed for 6 consecutive cycles with E0277 errors.
-RATIONALE: Persistent failure needs human attention.
+advance_goal PR is open; engineer needed to drive it to completion.
 ```
 
-**Do not** instruct the model to emit JSON. The parser does not accept JSON —
-it looks for `DECISION:` markers and labeled lines only. See
-[text-parsing wire formats § engineer lifecycle](../reference/text-parsing-wire-formats.md#1c-engineer-lifecycle-rustyclawdrs)
-for the full grammar.
+**Orient brain:**
+```
+0.60 Standard demotion for 1 failure. The goal is healthy.
+```
 
-### Available context variables
+**Lifecycle brain:**
+```
+continue_skipping engineer is making progress, worktree modified 30s ago
+```
 
-These are substituted by `gather_engineer_lifecycle_ctx` before the prompt is
-sent to the LLM. Unknown placeholders are left as literal text.
+**Do not** instruct the model to emit JSON, `DECISION:` markers, or place
+the keyword later in the text. The parser checks only the first word.
+
+### Available context variables (lifecycle brain)
 
 | Placeholder | Source |
 |---|---|
@@ -65,7 +60,7 @@ sent to the LLM. Unknown placeholders are left as literal text.
 | `{{failure_count}}` | `state.goal_failure_counts.get(goal_id)` |
 | `{{worktree_mtime_secs_ago}}` | Seconds since the worktree was last modified |
 | `{{sentinel_pid}}` | Live engineer's PID |
-| `{{last_engineer_log_tail}}` | Last ~8 KB of the newest `~/.simard/agent_logs/engineer-{goal_id}-*.log`, with secrets redacted |
+| `{{last_engineer_log_tail}}` | Last ~8 KB of the newest engineer log, with secrets redacted |
 
 ## Common Iterations
 
@@ -76,12 +71,10 @@ Lower the idle threshold in your few-shot examples:
 ```diff
 -### Example: reclaim_and_redispatch
 -CONTEXT: skips=12, failures=0, worktree_idle=25200s, ...
+-OUTPUT: reclaim_and_redispatch Previous engineer was idle for 7 hours. Try fresh approach.
 +### Example: reclaim_and_redispatch
 +CONTEXT: skips=4, failures=0, worktree_idle=3600s, ...
- OUTPUT:
- DECISION: reclaim_and_redispatch
- REDISPATCH_CONTEXT: Previous engineer was idle for too long. Try fresh approach.
- RATIONALE: 4 skips with stale worktree suggests engineer is stuck.
++OUTPUT: reclaim_and_redispatch Previous engineer was idle for 1 hour. Try fresh approach.
 ```
 
 LLMs imitate examples more reliably than they follow prose rules. Move the
@@ -89,71 +82,24 @@ threshold by moving the example.
 
 ### Add stricter blocking criteria
 
-Add a new few-shot example to **EXAMPLES** showing a log tail containing the
-phrase you want to treat as a block signal:
+Add a new few-shot example to **EXAMPLES** showing when to block:
 
 ```markdown
 ### Example: mark_goal_blocked (compile error loop)
 CONTEXT: skips=6, log_tail=...error[E0277]: the trait bound...
-OUTPUT:
-DECISION: mark_goal_blocked
-REASON: compile-error-loop
-RATIONALE: engineer is stuck in a type-error loop
+OUTPUT: mark_goal_blocked compile-error-loop Engineer stuck in type-error loop for 6 cycles.
 ```
 
 ### Tune the rationale style
 
-Change the **ROLE** section's tone. Example: change "be terse" to "explain in
-one sentence why you chose this option". The `rationale` field will follow.
+Change the **ROLE** section's tone. The text after the first word becomes
+the rationale field.
 
-## Validating Your Edits
-
-The fastest validation loop is the brain's unit tests, which exercise the
-parser against the shipped prompt and a stub LLM submitter:
-
-```bash
-cargo test -p simard ooda_brain
-```
-
-For end-to-end behavior, restart the daemon (TL;DR above) and watch
-`~/.simard/cycle_reports/cycle_*.json` for the new `ActionOutcome.detail`
-prefixes (`engineer alive — continue (brain): …`, `reclaimed pid …`, etc.).
-
-## Constraints
-
-* The LLM **must** return a `DECISION: <variant>` marker line as the first
-  non-blank line (for the **engineer-lifecycle** brain only). The parser
-  scans for this marker and extracts the variant token. Responses without
-  a `DECISION:` line trigger `BrainResponseUnparseable` and the brain
-  falls back to `continue_skipping` for that cycle. The JSON format is
-  no longer accepted.
-* The **decide brain** does NOT require a `DECISION:` marker. It uses
-  keyword scanning — the agent can mention the action keyword anywhere in
-  its prose. If no keyword is found, `advance_goal` is used as the default.
-  The decide brain prompt has no `OUTPUT_FORMAT` section.
-* For structured variants (`open_tracking_issue`, `mark_goal_blocked`,
-  `reclaim_and_redispatch`), the model must emit labeled lines for the
-  required fields (`TITLE:`, `BODY:`, `REASON:`, `REDISPATCH_CONTEXT:`).
-  Missing required fields use default values.
-* If you remove all examples for a given variant, the LLM may stop emitting
-  it. Keep at least one example per variant you want reachable.
-* The engineer-lifecycle prompt file is loaded via `include_str!`; it must
-  be valid UTF-8 and small enough to embed in the binary without bloat.
-  Keep it under ~32 KB as a soft guideline.
-* The decide prompt is loaded at runtime from a recipe YAML and has no
-  compile-time embedding constraint.
-
-## Editing the decide and orient prompts
-
-The decide and orient brains have their own prompt files:
-
-- `prompt_assets/simard/recipes/ooda-decide.yaml` — action-kind routing (recipe step)
-- `prompt_assets/simard/ooda_orient.md` — failure-penalty demotion (compiled in)
+## Editing the three prompts
 
 ### Decide prompt (recipe-based — no rebuild required)
 
-The decide prompt lives inside the recipe YAML file. Edit the `prompt:`
-field in `prompt_assets/simard/recipes/ooda-decide.yaml`:
+Edit `prompt_assets/simard/recipes/ooda-decide.yaml`:
 
 ```yaml
 steps:
@@ -163,47 +109,90 @@ steps:
       # OODA Brain — Decide Phase: Action-Kind Routing
       ## ROLE
       …
+      ## OUTPUT FORMAT
+      Output the action keyword as the very first word of your response.
+      Follow with a brief rationale.
       ## OPTIONS
       …
+      ## EXAMPLES
+      advance_goal Standard goal with open PR, drive to completion.
+      consolidate_memory This is a memory consolidation trigger.
 ```
 
-**No rebuild or `safe-update` required.** Because the recipe YAML is loaded
-at runtime by `recipe-runner-rs`, edits take effect on the next OODA cycle
-automatically.
+The decide brain matches the first word against 10 action keywords. If no
+match, defaults to `advance_goal`.
 
-The decide brain uses **keyword scanning** — the agent's prose output is
-scanned for action keywords (`advance_goal`, `consolidate_memory`, etc.).
-There is no `DECISION:` marker format, no `OUTPUT_FORMAT` section, and no
-structured output requirement. The agent simply mentions the action kind
-in its reasoning and the keyword scanner finds it.
+### Orient prompt (recipe-based — no rebuild required)
 
-To steer the agent toward different routing:
+Edit `prompt_assets/simard/recipes/ooda-orient.yaml`:
 
-1. **Edit the `OPTIONS` section** — add or remove action keywords.
-   Adding a keyword requires a coordinated Rust change to `DecideJudgment`
-   and `parse_action_from_text()`.
-2. **Edit the `EXAMPLES` section** — the most effective knob. LLMs imitate
-   examples more reliably than they follow prose rules.
-3. **Add negative examples** — critical for preventing substring
-   pattern-matching (e.g., a goal named "memory-allocation" should route to
-   `advance_goal`, not `consolidate_memory`).
-
-### Orient prompt (compiled in — rebuild required)
-
-**Orient** uses labeled lines (JSON format):
-```json
-{"adjusted_urgency": 0.60, "rationale": "1 failure: standard floor demotion", "confidence": 0.9}
+```yaml
+steps:
+  - name: orient-urgency
+    type: agent
+    prompt: |
+      # OODA Brain — Orient Phase: Failure-Penalty Demotion
+      ## OUTPUT FORMAT
+      Output the adjusted urgency as a bare decimal number (e.g. `0.42`)
+      as the first token of your response. Follow with your rationale.
+      ## EXAMPLES
+      0.60 Standard demotion for 1 failure.
+      0.0 Driven to zero after 5 consecutive failures.
 ```
 
-Edit `prompt_assets/simard/ooda_orient.md`, then rebuild:
+The orient brain extracts the first float from the text. If no float found,
+falls back to deterministic floor formula.
+
+### Lifecycle prompt (recipe-based — no rebuild required)
+
+Edit `prompt_assets/simard/recipes/ooda-engineer-lifecycle.yaml`:
+
+```yaml
+steps:
+  - name: lifecycle-decision
+    type: agent
+    prompt: |
+      # OODA Brain — Engineer Lifecycle Decision
+      ## OUTPUT FORMAT
+      Output the variant name as the very first word of your response.
+      Follow with your rationale.
+      ## OPTIONS
+      continue_skipping, reclaim_and_redispatch, deprioritize,
+      open_tracking_issue, mark_goal_blocked, consider_self_update
+      ## EXAMPLES
+      continue_skipping engineer is healthy, worktree modified recently.
+      reclaim_and_redispatch engineer idle for 7 hours, try fresh approach.
+```
+
+The lifecycle brain matches the first word against 6 variant names. If no
+match, defaults to `continue_skipping`.
+
+## Validating Your Edits
+
+The fastest validation loop is the brain's unit tests:
 
 ```bash
-cargo build --release -p simard
-simard safe-update
+cargo test -p simard recipe_brain
 ```
 
-See [text-parsing wire formats](../reference/text-parsing-wire-formats.md)
-for the full grammar of each format.
+For end-to-end behavior, wait for the next OODA cycle (recipe YAMLs are
+loaded at runtime — no rebuild needed) and watch the logs.
+
+## Constraints
+
+* **First word must be a recognized variant** (decide, lifecycle) or a
+  **decimal number** (orient). If the LLM outputs prose before the keyword,
+  the parser will default. Ensure the OUTPUT FORMAT section says "as the
+  very first word."
+* **Case-insensitive matching** on the first word — `Advance_Goal` and
+  `ADVANCE_GOAL` both match. This is a single `eq_ignore_ascii_case()`
+  call, not a scan.
+* **Extra fields on lifecycle variants use defaults.** There is no
+  labeled-line extraction for `TITLE:`, `BODY:`, `REASON:`,
+  `REDISPATCH_CONTEXT:`. The LLM's prose after the first word becomes
+  the rationale.
+* If you remove all examples for a given variant, the LLM may stop emitting
+  it. Keep at least one example per variant you want reachable.
 
 ## See Also
 
@@ -212,5 +201,5 @@ for the full grammar of each format.
 * [Reference: text-parsing wire formats](../reference/text-parsing-wire-formats.md)
 * [Reference: `OodaBrain` API](../reference/ooda-brain-api.md)
 * [Reference: `ooda_brain.md` prompt schema](../reference/ooda-brain-prompt.md)
-* [Reference: `ooda_decide.md` prompt schema](../reference/ooda-decide-prompt.md) — decide recipe and keyword scanner
+* [Reference: `ooda_decide.md` prompt schema](../reference/ooda-decide-prompt.md)
 * [Reference: `ooda_orient.md` prompt schema](../reference/ooda-orient-prompt.md)

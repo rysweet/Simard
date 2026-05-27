@@ -6,158 +6,111 @@
 > **Prerequisites:** read access to `~/.simard/logs/` on the daemon host;
 > familiarity with the `simard` CLI.
 
-The OODA brain decision parser accepts a text-based `DECISION:` marker with
-labeled lines for structured fields. JSON is no longer accepted (removed in
-#1980). When the parser rejects a response, the cycle falls back to
-`ContinueSkipping` and emits a `WARN`-level log line that contains the
-**full raw model response**. This guide tells you how to find that log, read
-it, and decide what to do.
+The OODA brain lifecycle parser uses **first-word extraction** — it takes
+the first non-whitespace token from the recipe output and matches it
+case-insensitively against the 6 lifecycle variant names. If no match is
+found, it returns `ContinueSkipping` as the default. The parser never
+returns an error.
 
-> **Note:** This guide covers the **engineer-lifecycle** brain only (the
-> `DECISION:` marker protocol in `rustyclawd.rs`). The **decide** brain
-> (action-kind routing) no longer uses `DECISION:` markers — as of
-> [#2111](https://github.com/rysweet/Simard/issues/2111), it runs as a
-> recipe step with keyword scanning. See
-> [OODA decide recipe and prompt schema](../reference/ooda-decide-prompt.md)
-> for the current decide brain protocol.
+> **Updated in [#2144](https://github.com/rysweet/Simard/issues/2144).**
+> The `DECISION:` marker protocol, labeled-line field extraction, and
+> keyword-anywhere scanning have been removed. The parser now uses trivial
+> first-word extraction. Parse failures in the traditional sense (format
+> rejected) cannot occur. If a goal is stuck in `continue_skipping`, it
+> means either:
+> 1. The LLM is outputting `continue_skipping` as its first word (correct
+>    behavior — the LLM believes the engineer should keep running).
+> 2. The LLM is outputting an unrecognized first word, and the parser
+>    defaults to `ContinueSkipping`.
 
 For the full protocol definition see the
 [OODA Brain Decision Protocol reference](../reference/ooda-brain-decision-protocol.md).
 
 ## Step 1: Find the failing cycle
 
-Symptoms that justify reading parse-failure logs:
+Symptoms that justify investigation:
 
 * A goal stays in `continue_skipping` for many cycles even though the
   engineer worktree mtime is hours old.
-* The dashboard (or a manual scan of the goal-board) shows a stable
-  goal whose consecutive-skip count climbs every minute.
-* The most recent decision rationale for the goal is the literal string
-  `"deterministic fallback"` — the sentinel emitted by
-  `DeterministicFallbackBrain` when the real brain failed to construct.
+* The dashboard shows a stable goal whose consecutive-skip count climbs
+  every minute.
 
-Tail the daemon log directly. There is no `simard logs` subcommand; the
-daemon writes to `~/.simard/logs/` on the host:
+Tail the daemon log:
 
 ```bash
 tail -F ~/.simard/logs/rustyclawd.log \
   | grep -E 'brain\.decide_engineer_lifecycle|goal=<your-goal-id>'
 ```
 
-> **Future-work commands.** A future PR may add `simard ooda status`,
-> `simard ooda last-decision`, `simard ooda dry-run`, and `simard logs
-> tail` to wrap the patterns below. Until those land, drive everything
-> from `~/.simard/logs/` and `simard safe-update`.
-
-You are looking for a line shaped like:
+With first-word extraction, the log will show the parsed variant:
 
 ```
-WARN simard::ooda_brain: brain.decide_engineer_lifecycle parse failed
+INFO simard::ooda_brain: brain.decide_engineer_lifecycle result
     goal=improve-amplihack-test-coverage
-    raw="OK"
-    error=no DECISION: marker found in LLM response (got 3 bytes)
+    variant=continue_skipping
+    rationale="engineer touched worktree 8 seconds ago"
 ```
 
-The `raw=...` field is the **complete** model response (truncated to 8 KB
-with a `…(truncated, total N bytes)` suffix if longer). Before #1711 this
-field was a misleading `got 3 bytes`; if you still see that form, the daemon
-is running a pre-#1711 build and needs `simard safe-update` to pick up the
-fix.
+If the variant is consistently `continue_skipping` when you expect a
+different decision, check what the LLM is actually outputting.
 
-## Step 2: Classify the response
+## Step 2: Check the recipe output
 
-Match the contents of `raw=` against this triage table.
+The recipe output's first word determines the decision. If the LLM is
+not producing the expected variant name as the first word:
 
-| `raw` looks like…                              | Likely cause                                            | Action                                                            |
-|------------------------------------------------|---------------------------------------------------------|-------------------------------------------------------------------|
-| `"OK"`, `"continue"`, `"yes"`                  | Model ignored the prompt; emitted a chat acknowledgment | [Step 3 — replay the prompt](#step-3-replay-the-prompt-locally) to confirm; consider tightening the prompt's role section. |
-| `""`                                           | LLM provider returned an empty body                     | Check the adapter logs (`~/.simard/logs/rustyclawd.log`) for a 5xx or rate-limit error.                                    |
-| `"DECISION: bogus_variant"`                    | Model invented a variant name                           | The error message lists the 6 valid variants; cross-check the prompt's enumeration block isn't drifting.                   |
-| `"DECISION: open_tracking_issue\n<no labeled fields>"`| Model used the marker but omitted required labeled fields | The prompt's `# OPTIONS` section needs to remind the model that this variant requires `TITLE:` + `BODY:` labeled lines. |
-| Long prose with no `DECISION:` marker          | Model is in chat mode, not structured-output mode       | Strengthen the prompt's OUTPUT_FORMAT section to emphasize the `DECISION:` marker requirement.                            |
-| JSON object (legacy format)                    | Model following old JSON instructions from cached prompt | Update the prompt to use DECISION marker format. JSON is no longer accepted.                                              |
+| First word looks like… | Cause | Action |
+|------------------------|-------|--------|
+| `continue_skipping` | LLM correctly chose this variant | No action needed; the engineer may genuinely be healthy |
+| `continue`, `ok`, `yes` | LLM emitting a chat ack instead of a variant name | Strengthen the prompt's OUTPUT FORMAT section |
+| Random prose word | LLM not following the first-word format | Add/strengthen the OUTPUT FORMAT instruction in the recipe YAML |
+| A valid variant name | Correct parse — check if the action handler is working | Debug the action handler, not the parser |
 
-## Step 3: Replay the prompt locally
+## Step 3: Replay the output locally
 
-There is no dedicated `dry-run` subcommand yet. To confirm a hypothesis
-without waiting for the next cycle, use the parser directly from a
-hermetic unit test against the captured `raw=` text:
+```rust
+#[test]
+fn repro_lifecycle_issue() {
+    let raw = "OK"; // <-- paste the recipe output here
+    let result = crate::ooda_brain::recipe_brain::parse_lifecycle_from_text(raw);
+    eprintln!("{result:?}");
+}
+```
 
-1. Copy the `raw=` payload from the log line (it is rendered with `{:?}`,
-   so you may need to unescape `\n` → newline and `\"` → `"`).
-2. Add a one-off test to `src/ooda_brain/tests.rs`:
-
-   ```rust
-   #[test]
-   fn repro_1711_OK_payload() {
-       let raw = "OK"; // <-- paste the unescaped payload here
-       let result = crate::ooda_brain::rustyclawd::parse_decision_from_response(raw);
-       eprintln!("{result:?}");
-       // Either Ok(EngineerLifecycleDecision::...) or
-       // Err(BrainResponseUnparseable { ... }) — matches the daemon's behavior.
-   }
-   ```
-
-3. Run with `cargo test repro_1711_OK_payload -- --nocapture`.
-
-Because `parse_decision_from_response` has no I/O dependencies, this is a
-faithful replay — what the test prints is what the daemon would have
-parsed. Discard the test before committing.
+Run with `cargo test repro_lifecycle_issue -- --nocapture`.
 
 ## Step 4: Pick a remediation
 
-| Cause from Step 2                          | Remediation                                                                                                                |
-|--------------------------------------------|----------------------------------------------------------------------------------------------------------------------------|
-| Chat acknowledgment / wrong mode           | Edit `prompt_assets/simard/ooda_brain.md` to strengthen the "respond ONLY with the marker" instruction. See [edit-the-ooda-brain-prompt](edit-the-ooda-brain-prompt.md). |
-| Adapter 5xx / rate limit                   | Investigate the adapter; the brain itself is healthy.                                                                      |
-| Bogus variant                              | The prompt should be the only place that lists variants; align it with the enum.                                            |
-| Missing required labeled fields on structured variant | Update the prompt's `# OPTIONS` section to make the labeled field requirement explicit (`TITLE:`, `BODY:`, etc.).       |
-| Persistent unparseable noise from one model| Switch the provider in the brain config; the parser cannot fix a fundamentally non-cooperative model.                      |
+| Cause | Remediation |
+|-------|-------------|
+| LLM outputting chat ack / wrong first word | Edit `prompt_assets/simard/recipes/ooda-engineer-lifecycle.yaml` to strengthen OUTPUT FORMAT. |
+| LLM consistently choosing `continue_skipping` for a stuck goal | Add examples showing when to choose `reclaim_and_redispatch` or `mark_goal_blocked`. |
+| Adapter 5xx / rate limit | Investigate the adapter; the brain itself is healthy. |
+| Persistent non-cooperative model | Switch the provider in the brain config. |
 
-After editing the prompt, **do not** restart the daemon by hand. The
-prompt is embedded with `include_str!`, so a new prompt requires a rebuild
-and a daemon update via:
-
-```bash
-/home/azureuser/.simard/bin/simard safe-update
-```
-
-`safe-update` rebuilds, drains in-flight cycles, hot-swaps the binary,
-and verifies the new daemon is responsive — see
-[safe-self-update](../safe-self-update.md).
+After editing the recipe YAML, **no rebuild required** — edits take effect
+on the next OODA cycle automatically.
 
 ## Step 5: Verify the fix
-
-After `safe-update` completes:
 
 ```bash
 tail -F ~/.simard/logs/rustyclawd.log | grep -E 'goal=<goal-id>'
 ```
 
 You should see a non-`continue_skipping` decision within one cycle, or, if
-the goal genuinely should keep skipping, a `DECISION: continue_skipping`
-log with a substantive rationale (not the `"deterministic fallback"`
-sentinel).
+the goal genuinely should keep skipping, a `continue_skipping` with a
+substantive rationale.
 
 ## Anti-patterns
 
-The following patterns indicate the operator is **fighting** the protocol
-rather than diagnosing it. Stop and re-read the
-[protocol reference](../reference/ooda-brain-decision-protocol.md) before
-proceeding:
-
-* **Restarting the daemon directly** (`kill <pid>`, or
-  `systemctl --user restart simard-ooda`, bypassing `simard safe-update`)
-  to "clear" parse failures. The parser is stateless; a bare restart
-  accomplishes nothing except dropping the parse-failure log evidence you
-  need. Always go through `safe-update`, which performs the rebuild,
-  drain, hot-swap, and health check together.
-* **Editing the parser to "just accept" a new ad-hoc shape** the model
-  emits. The protocol accepts the DECISION marker format only; if the model
-  is emitting JSON or another format, the **prompt** is wrong, not the parser.
-* **Adding a fallback in `dispatch_spawn_engineer` for a specific raw
-  response.** The single fallback path (`ContinueSkipping`) is intentional;
-  a parse failure should be visible in the logs, not silently rerouted.
+* **Restarting the daemon directly** to "clear" defaults. The parser is
+  stateless; a bare restart accomplishes nothing.
+* **Adding back `DECISION:` marker parsing or keyword-anywhere scanning.**
+  The first-word parser is intentionally simple. Fix the **prompt**, not
+  the parser.
+* **Adding labeled-line extraction back** for `TITLE:`, `BODY:`, etc.
+  Structured fields use defaults. If you need richer field extraction in
+  the future, that's a separate design decision.
 
 ## See Also
 

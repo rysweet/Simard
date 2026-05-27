@@ -25,7 +25,9 @@ constructor, same `resolve_recipe_path`, same `truncate()` helper, same
 filename, the adapter tag for error messages, and the trait impl body.
 
 `RecipeBrain` is a single struct that takes the recipe filename and adapter tag
-as constructor parameters. It implements all three brain traits.
+as constructor parameters. It implements all three brain traits. All three parse
+functions use trivial first-word or first-float extraction — no keyword
+scanning, no JSON extraction, no marker protocols.
 
 ## Principle
 
@@ -69,16 +71,15 @@ All three calls return `Option<RecipeBrain>`. The constructor:
 
 | Trait | Method | Recipe YAML | Output parser |
 |-------|--------|-------------|---------------|
-| `OodaDecideBrain` | `judge_decision()` | `ooda-decide.yaml` | `parse_action_from_text()` — keyword scan for 10 action keywords |
-| `OodaOrientBrain` | `judge_orientation()` | `ooda-orient.yaml` | `parse_orient_from_text()` — 3-tier cascade (JSON → bare float → deterministic floor) |
-| `OodaBrain` | `decide_engineer_lifecycle()` | `ooda-engineer-lifecycle.yaml` | `parse_lifecycle_from_text()` — DECISION marker → keyword scan → default |
+| `OodaDecideBrain` | `judge_decision()` | `ooda-decide.yaml` | `parse_action_from_text()` — first-word case-insensitive match for 10 action keywords |
+| `OodaOrientBrain` | `judge_orientation()` | `ooda-orient.yaml` | `parse_orient_from_text()` — 2-tier (first float → deterministic floor) |
+| `OodaBrain` | `decide_engineer_lifecycle()` | `ooda-engineer-lifecycle.yaml` | `parse_lifecycle_from_text()` — first-word case-insensitive match for 6 lifecycle variants |
 
 Each trait impl invokes `recipe-runner-rs` with the stored `recipe_path` and
 phase-specific `-c` context vars, then delegates to the corresponding parse
-function. The parse functions remain standalone public functions in their
-original per-phase files (`recipe_decide.rs`, `recipe_orient.rs`,
-`recipe_engineer_lifecycle.rs`) — they are pure `&str -> Judgment` transforms
-with no struct dependency.
+function. The parse functions are standalone public functions in
+`recipe_brain.rs` — they are pure `&str -> Judgment` transforms with no
+struct dependency.
 
 ## Shared helpers
 
@@ -90,9 +91,13 @@ These functions exist once in `recipe_brain.rs`:
   (in-tree).
 - **`truncate(s, max)`** — char-aware truncation with `…` suffix. Used in
   error messages and rationale fields to cap unbounded LLM output.
-- **`ascii_contains_ignore_case(haystack, needle)`** — byte-level
-  case-insensitive substring search. Used by keyword-scanning parse functions
-  (decide, lifecycle). Not used by orient (which does JSON/float extraction).
+- **`try_first_float(text)`** — regex-free decimal scan. Finds the first
+  float in text for orient urgency extraction.
+
+> **Removed in [#2144](https://github.com/rysweet/Simard/issues/2144):**
+> `ascii_contains_ignore_case(haystack, needle)` — byte-level case-insensitive
+> substring search. This was used by the keyword-scanning parse functions.
+> Replaced by `eq_ignore_ascii_case()` on the first word only.
 
 ## Wiring in the daemon
 
@@ -119,14 +124,21 @@ chain varies per phase (logged at ERROR severity per issues #1711, #1748):
 ## What was deleted
 
 - `src/ooda_brain/recipe_decide.rs` — struct, constructor, and duplicated
-  helpers removed. Parse function (`parse_action_from_text`) and its tests
-  remain in this file.
+  helpers removed. Parse function (`parse_action_from_text`) moved to
+  `recipe_brain.rs`.
 - `src/ooda_brain/recipe_orient.rs` — struct, constructor, and duplicated
-  helpers removed. Parse function (`parse_orient_from_text`) and its tests
-  remain in this file.
+  helpers removed. Parse function (`parse_orient_from_text`) moved to
+  `recipe_brain.rs`.
 - `src/ooda_brain/recipe_engineer_lifecycle.rs` — struct, constructor, and
-  duplicated helpers removed. Parse function (`parse_lifecycle_from_text`),
-  `LIFECYCLE_KEYWORDS`, and tests remain in this file.
+  duplicated helpers removed. Parse function (`parse_lifecycle_from_text`)
+  moved to `recipe_brain.rs`.
+
+> **Additionally removed in [#2144](https://github.com/rysweet/Simard/issues/2144):**
+> From `recipe_brain.rs`: `ascii_contains_ignore_case`, `LIFECYCLE_KEYWORDS`,
+> `try_keyword_scan`, `build_keyword_decision`, `parse_with_marker` /
+> `extract_decision_marker`, `try_json_extraction`. These were the multi-tier
+> parse cascades. Replaced by trivial first-word/first-float extraction
+> (<20 lines each).
 
 ## Security invariants preserved
 

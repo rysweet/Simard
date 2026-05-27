@@ -25,100 +25,124 @@ For the design rationale, see
 
 ---
 
-## Protocol 1: DECISION marker (OODA brains)
+## Protocol 1: First-word extraction (OODA brains)
 
-Used by: `ooda_brain::rustyclawd`
+Used by: all three OODA brain parsers in `recipe_brain.rs`
 
-> **Note:** `ooda_brain::decide` has moved to the keyword verdict protocol
-> (Protocol 2, § 2c) as of #2111. `ooda_brain::orient` uses JSON format —
-> see [§ 1b. Orient phase](#1b-orient-phase-orientrs).
+> **Simplified in [#2144](https://github.com/rysweet/Simard/issues/2144).**
+> All three OODA brain parsers (decide, orient, lifecycle) now use the same
+> **first-word extraction** pattern. The DECISION marker protocol, keyword
+> scanning, and JSON extraction have been deleted. The recipe prompts
+> instruct the LLM to output the decision as the first token.
 
 ### Grammar
 
 ```
-response     = *blank-line decision-line *body-line
-decision-line = "DECISION" *SP ":" *SP variant-token *SP LF
-body-line    = labeled-line / rationale-line
-labeled-line = label-token *SP ":" *SP value LF
-rationale-line = <any line not matching labeled-line> LF
-blank-line   = *SP LF
+response      = first-token *SP rationale
+first-token   = 1*<non-whitespace character>
+rationale     = <remaining text after first token, trimmed>
 ```
 
-- `variant-token` is matched case-insensitively against the known enum variants
-  for the specific brain (see per-brain sections below).
-- `label-token` is matched case-insensitively against the known field labels
-  for the matched variant.
-- `value` extends to end-of-line, trimmed.
-- Lines before the first `DECISION:` line are ignored.
-- Rationale lines (non-labeled lines after `DECISION:`) are concatenated with
-  newlines to form the `rationale` field, unless a `RATIONALE:` labeled line
-  is present (which takes precedence).
+- `first-token` is extracted by splitting on whitespace and taking the first
+  element.
+- The token is lowercased via `.to_ascii_lowercase()` for matching.
+- Matching uses `.eq_ignore_ascii_case()` — a single comparison per variant,
+  not a scan.
+- All remaining text after the first word becomes the rationale (truncated
+  to 500 chars).
 
-### Common parser implementation
+### Common parser pattern
 
 All three OODA brain parsers share the same core logic:
 
 ```rust
-fn parse_decision_text(raw: &str, known_variants: &[&str]) -> ParseResult {
-    // 1. Find first non-blank line starting with "DECISION:" (case-insensitive)
-    // 2. Extract variant token, match against known_variants
-    // 3. Scan remaining lines for labeled fields
-    // 4. Collect unlabeled lines as rationale (fallback)
-    // 5. Return structured decision with text fields
+fn parse_phase_from_text(raw: &str) -> PhaseJudgment {
+    let first_word = raw.split_whitespace().next().unwrap_or("");
+    let rest = raw[first_word.len()..].trim();
+    match first_word.to_ascii_lowercase().as_str() {
+        "variant_a" => PhaseJudgment::VariantA { rationale: truncate(rest, 500) },
+        "variant_b" => PhaseJudgment::VariantB { rationale: truncate(rest, 500) },
+        _ => PhaseJudgment::Default { rationale: truncate(raw, 500) },
+    }
 }
 ```
 
-No `serde_json`. No regex. Only `str` methods: `trim()`, `starts_with()`,
-`split_once()`, `to_lowercase()`, `parse::<f64>()`.
+No `serde_json`. No regex. No keyword scanning. Only `str` methods:
+`split_whitespace()`, `trim()`, `to_ascii_lowercase()`,
+`eq_ignore_ascii_case()`.
 
 ---
 
-### 1a. Decide phase — MOVED to keyword verdict protocol
+### 1a. Decide phase (`recipe_brain.rs`)
 
-> **Moved in [#2111](https://github.com/rysweet/Simard/issues/2111).**
-> The decide brain no longer uses the DECISION marker protocol. It now uses
-> the **keyword verdict protocol** (§ 2c below), the same pattern as the
-> progress checker and merge judge. The decide prompt is now a recipe YAML
-> at `prompt_assets/simard/recipes/ooda-decide.yaml`, invoked via
-> `recipe-runner-rs`. See
-> [§ 2c. Decide brain](#2c-decide-brain-recipe_deciders) for the current
-> wire format.
->
-> The `DECISION:` marker parser (`parse_judgment_from_response`) and
-> `RustyClawdDecideBrain` have been deleted. The `DECIDE_PROMPT_NAME`
-> constant is retained for audit-trail versioning only.
+**Enum:** `DecideJudgment`
 
----
+The first word of the recipe output is matched case-insensitively against
+the 10 action keywords. Default: `AdvanceGoal`.
 
-### 1b. Orient phase (`orient.rs`)
+**Variant tokens** (case-insensitive first word):
 
-**Struct:** `OrientJudgment`
-
-**JSON fields:**
-
-| Field | Type | Default | Validation |
-|-------|------|---------|------------|
-| `adjusted_urgency` | `f64` | Required (parse fails without it) | Must be in `[0.0, base_urgency]` |
-| `demotion_applied` | `f64` | `0.0` (daemon recomputes) | Must be ≥ 0 |
-| `rationale` | `String` | Required (parse fails without it) | None |
-| `confidence` | `f64` | `1.0` | Must be in `[0.0, 1.0]` |
+| Token | Maps to |
+|-------|---------|
+| `advance_goal` | `DecideJudgment::AdvanceGoal` |
+| `consolidate_memory` | `DecideJudgment::ConsolidateMemory` |
+| `run_improvement` | `DecideJudgment::RunImprovement` |
+| `poll_developer_activity` | `DecideJudgment::PollDeveloperActivity` |
+| `extract_ideas` | `DecideJudgment::ExtractIdeas` |
+| `safe_update` | `DecideJudgment::SafeUpdate` |
+| `research_query` | `DecideJudgment::ResearchQuery` |
+| `run_gym_eval` | `DecideJudgment::RunGymEval` |
+| `build_skill` | `DecideJudgment::BuildSkill` |
+| `launch_session` | `DecideJudgment::LaunchSession` |
 
 **Example valid responses:**
 
-Full JSON object:
-```json
-{"adjusted_urgency": 0.60, "demotion_applied": 0.20, "rationale": "1 failure: standard floor demotion", "confidence": 0.9}
+```
+advance_goal PR #2023 is open; engineer needed to drive it to completion.
 ```
 
-With surrounding prose (tolerated, not encouraged):
 ```
-Given a single recent failure, I'll apply the standard floor demotion.
-{"adjusted_urgency": 0.60, "rationale": "1 failure: standard floor demotion", "confidence": 0.9}
+consolidate_memory This is a reserved synthetic ID for memory consolidation.
 ```
 
-Minimal valid (confidence defaults to 1.0, demotion_applied defaults to 0.0):
-```json
-{"adjusted_urgency": 0.6, "rationale": "standard demotion"}
+> **Changed in [#2144](https://github.com/rysweet/Simard/issues/2144):**
+> Previously, the keyword could appear anywhere in the prose (keyword-anywhere
+> scanning via `ascii_contains_ignore_case`). Now the keyword must be the
+> first word. The recipe YAML prompt instructs the LLM accordingly.
+
+---
+
+### 1b. Orient phase (`recipe_brain.rs`)
+
+**Struct:** `OrientJudgment`
+
+The parser extracts the first float from the output text. This is a 2-tier
+parse:
+
+1. **First float** (`try_first_float`) — scans for the first decimal number
+   in the text. This becomes `adjusted_urgency`.
+2. **Deterministic floor** — `base_urgency - 0.2 × failure_count`, clamped
+   to `[0.0, 1.0]`.
+
+**Fields produced:**
+
+| Field | Source | Default |
+|-------|--------|---------|
+| `adjusted_urgency` | First float in text | Deterministic floor |
+| `rationale` | Full text of response | `"deterministic floor"` |
+| `confidence` | Always `1.0` | `1.0` |
+| `demotion_applied` | `0.0` (daemon recomputes) | `0.0` |
+
+**Example valid responses:**
+
+Bare float as first token (preferred):
+```
+0.60 Standard demotion for 1 failure. The goal is healthy but needs a penalty.
+```
+
+Float embedded in prose (still works — first float is extracted):
+```
+After analysis, the adjusted urgency should be 0.45 given 2 consecutive failures.
 ```
 
 **Validation:** `OrientJudgment::validate()` enforces:
@@ -126,73 +150,73 @@ Minimal valid (confidence defaults to 1.0, demotion_applied defaults to 0.0):
 - `adjusted_urgency <= base_urgency` (no escalation)
 - `confidence` in `[0.0, 1.0]`
 
-If validation fails, the deterministic floor applies:
-`urgency - 0.2 × failure_count`, clamped to `[0.0, 1.0]`.
+If validation fails, the deterministic floor applies.
 
-**Parser:** The `parse_judgment_from_response` function extracts the first
-`{…}` substring from the response and deserializes it via `serde_json`.
-The old labeled-line format is no longer accepted.
+> **Removed in [#2144](https://github.com/rysweet/Simard/issues/2144):**
+> The JSON extraction tier (`try_json_extraction` using `serde_json`) has
+> been deleted. The orient prompt now instructs the LLM to output a bare
+> decimal as its first token. The `try_bare_float` function has been renamed
+> to `try_first_float` — logic unchanged.
 
 ---
 
-### 1c. Engineer lifecycle (`rustyclawd.rs`)
+### 1c. Engineer lifecycle (`recipe_brain.rs`)
 
 **Enum:** `EngineerLifecycleDecision`
 
-This is the original DECISION marker protocol. The JSON fallback path that
-previously existed (lines 306-318 in the old code) has been removed.
-`parse_decision_from_response` now uses the DECISION marker as its **sole**
-parser.
+The first word of the recipe output is matched case-insensitively against
+the 6 lifecycle variant names. Default: `ContinueSkipping`.
 
-**Variant tokens** (case-insensitive):
+**Variant tokens** (case-insensitive first word):
 
-| Token | Required labeled fields |
-|-------|----------------------|
+| Token | Extra fields (defaults) |
+|-------|------------------------|
 | `continue_skipping` | _(none)_ |
-| `reclaim_and_redispatch` | `REDISPATCH_CONTEXT:` |
+| `reclaim_and_redispatch` | `redispatch_context: ""` |
 | `deprioritize` | _(none)_ |
-| `open_tracking_issue` | `TITLE:`, `BODY:` |
-| `mark_goal_blocked` | `REASON:` |
+| `open_tracking_issue` | `title: "OODA stuck"`, `body: truncate(rest, 500)` |
+| `mark_goal_blocked` | `reason: truncate(rest, 500)` |
 | `consider_self_update` | _(none)_ |
 
-**All variants** accept an optional `RATIONALE:` label. If absent, non-labeled
-lines after the DECISION line are concatenated as the rationale. If no rationale
-text is found at all, the default `"<no rationale provided>"` is used.
+All variants: `rationale` is `truncate(remaining_text, 500)`.
 
 **Example valid responses:**
 
 Simple variant:
 ```
-DECISION: continue_skipping
-RATIONALE: engineer is making progress, worktree modified 30s ago
+continue_skipping engineer is making progress, worktree modified 30s ago
 ```
 
-Structured variant:
+Structured variant (extra fields use defaults):
 ```
-DECISION: open_tracking_issue
-TITLE: Engineer stuck in compile-error loop for improve-test-coverage
-BODY: The engineer has been failing for 6 consecutive cycles with E0277 type errors. The worktree has not been modified in 25200 seconds.
-RATIONALE: Persistent failure pattern needs human attention.
+open_tracking_issue Engineer stuck in compile-error loop for improve-test-coverage. The engineer has been failing for 6 consecutive cycles with E0277 type errors.
 ```
 
-Reclaim with context:
+Reclaim:
 ```
-DECISION: reclaim_and_redispatch
-REDISPATCH_CONTEXT: Previous engineer was stuck on type errors in src/auth. Try a different approach using the existing AuthProvider trait.
-RATIONALE: 12 consecutive skips with no worktree modification.
+reclaim_and_redispatch Previous engineer was stuck on type errors. Try a different approach using AuthProvider trait. Worktree idle 7h.
 ```
 
-**Retained `serde_json::from_value`:** After the text parser extracts all
-fields from labeled lines, it constructs a `serde_json::Value::Object` from
-the parsed strings and deserializes it into `EngineerLifecycleDecision`. This
-is **not** parsing LLM output — it is deserializing a controlled construction
-from text-parsed fields. A `// SAFETY:` comment marks this call.
+> **Removed in [#2144](https://github.com/rysweet/Simard/issues/2144):**
+> The `DECISION:` marker protocol, labeled-line field extraction
+> (`TITLE:`, `BODY:`, `REASON:`, `REDISPATCH_CONTEXT:`, `RATIONALE:`),
+> `LIFECYCLE_KEYWORDS` constant, `try_keyword_scan`, `build_keyword_decision`,
+> `parse_with_marker`, and `ascii_contains_ignore_case` have all been deleted.
+> Structured fields on lifecycle variants now use defaults — the LLM's prose
+> after the first word becomes the rationale. The `serde_json::from_value`
+> call that constructed `EngineerLifecycleDecision` from parsed fields is
+> also removed.
 
 ---
 
 ## Protocol 2: Keyword verdict (recipe shims)
 
-Used by: `goal_curation::recipe_progress_checker`, `stewardship::recipe_merge_judge`, `ooda_brain::recipe_decide`
+Used by: `goal_curation::recipe_progress_checker`, `stewardship::recipe_merge_judge`
+
+> **Note:** The decide brain was moved **out** of Protocol 2 in
+> [#2144](https://github.com/rysweet/Simard/issues/2144). It now uses
+> first-word extraction (Protocol 1, § 1a above), the same pattern as the
+> orient and lifecycle brains.
 
 ### Grammar
 
@@ -306,77 +330,6 @@ recipe prompt can be updated to emit `BLOCKER:` labeled lines.
 
 ---
 
-### 2c. Decide brain (`recipe_decide.rs`)
-
-> **New in [#2111](https://github.com/rysweet/Simard/issues/2111).**
-> The decide brain moved from the DECISION marker protocol (§ 1a, now
-> deleted) to the keyword verdict protocol. This follows the same pattern
-> as the progress checker and merge judge.
-
-**Keywords:**
-
-| Keyword | Maps to | Notes |
-|---------|---------|-------|
-| `advance_goal` | `DecideJudgment::AdvanceGoal` | Default for real goal slugs |
-| `consolidate_memory` | `DecideJudgment::ConsolidateMemory` | For `__memory__` |
-| `run_improvement` | `DecideJudgment::RunImprovement` | For `__improvement__` |
-| `poll_developer_activity` | `DecideJudgment::PollDeveloperActivity` | For `__poll_activity__` |
-| `extract_ideas` | `DecideJudgment::ExtractIdeas` | For `__extract_ideas__` |
-| `safe_update` | `DecideJudgment::SafeUpdate` | For `__safe_update__` |
-| `research_query` | `DecideJudgment::ResearchQuery` | Reserved |
-| `run_gym_eval` | `DecideJudgment::RunGymEval` | Reserved |
-| `build_skill` | `DecideJudgment::BuildSkill` | Reserved |
-| `launch_session` | `DecideJudgment::LaunchSession` | Reserved |
-
-**Default (no keyword):** `DecideJudgment::AdvanceGoal` — fail-safe. An
-unrecognized response routes to the most common action kind. This matches
-the existing `DeterministicFallbackDecideBrain` behavior for real goal slugs.
-
-**Keyword safety:** No keyword is a substring of another. This was verified
-by exhaustive pairwise comparison of the 10 keywords. Unlike the merge
-judge (where `not_ready` contains `ready`), no ordering-dependent
-disambiguation is needed.
-
-**Example recipe stdout:**
-
-```
-Looking at goal "__memory__", this is a reserved synthetic ID for memory
-consolidation. The urgency is high at 0.85 because memory hasn't been
-consolidated in 12 hours.
-
-The appropriate action is consolidate_memory.
-```
-
-Parser result: `DecideJudgment::ConsolidateMemory`
-
-```
-This is goal "ship-v1", an ordinary goal slug with an open PR and
-moderate urgency. The engineer should advance_goal to drive the PR
-to completion.
-```
-
-Parser result: `DecideJudgment::AdvanceGoal`
-
-**Changes from prior implementation:**
-
-- `parse_judgment_from_response` (which parsed `DECISION:` markers from
-  LLM output) is removed from `decide.rs`.
-- `RustyClawdDecideBrain` (which compiled in the prompt via `include_str!`
-  and submitted to an `LlmSubmitter`) is removed from `decide.rs`.
-- `build_rustyclawd_decide_brain` factory function is removed.
-- `RecipeDecideBrain` in `recipe_decide.rs` replaces the above — it
-  invokes `recipe-runner-rs` as a subprocess and scans stdout for keywords.
-- The prompt is now a recipe YAML at
-  `prompt_assets/simard/recipes/ooda-decide.yaml`, not a compiled-in
-  markdown file. The prompt's `OUTPUT_FORMAT` section and line-1
-  `CRITICAL:` guard have been removed — the agent is no longer required
-  to emit a specific format.
-- The daemon wiring in `build_decide_brain()` now constructs
-  `RecipeDecideBrain::new(repo_root)` instead of
-  `build_rustyclawd_decide_brain(state_root)`.
-
----
-
 ## Protocol 3: Key=value (disk health)
 
 Used by: `disk_health`
@@ -477,10 +430,9 @@ Each parser has inline `#[cfg(test)]` tests in its source file:
 
 | Module | Test count | Coverage |
 |--------|-----------|----------|
-| `decide.rs` | 4+ | JSON round-trip, DeterministicFallback tests |
-| `recipe_decide.rs` | 10+ | All 10 action keywords, no keyword (default), mixed case, multiple keywords |
-| `orient.rs` | 8+ | JSON parsing, surrounding prose, missing fields, validation, extra fields, markdown fences, empty/invalid responses, labeled-line rejection |
-| `rustyclawd.rs` | 15+ (T1–T15) | Full behavior matrix per decision protocol reference |
+| `decide.rs` | 4+ | DeterministicFallback tests |
+| `recipe_brain.rs` | 50+ | First-word extraction for all 10 action keywords, first-float extraction, lifecycle first-word for all 6 variants, case-insensitive matching, no-match defaults, empty input, multi-word rationale capture |
+| `orient.rs` | 8+ | Legacy JSON round-trip, DeterministicFallback, validation |
 | `recipe_progress_checker.rs` | 4+ | Accept, reject, no keyword (default), mixed case |
 | `recipe_merge_judge.rs` | 5+ | Ready, not_ready, unclear, no keyword (default), substring safety |
 | `disk_health.rs` | 3+ | Full output, no-cleanup output, malformed lines |
@@ -489,27 +441,30 @@ Each parser has inline `#[cfg(test)]` tests in its source file:
 
 ## Migration notes for prompt editors
 
-If you maintain OODA brain prompts (`prompt_assets/simard/ooda_*.md` or
-`prompt_assets/simard/recipes/ooda-decide.yaml`):
+If you maintain OODA brain prompts (`prompt_assets/simard/recipes/*.yaml`):
 
-1. **Each brain has its own wire format.** The engineer-lifecycle brain
-   (`rustyclawd.rs`) uses `DECISION:` marker format. The orient brain uses
-   **JSON object format**. The decide brain uses **keyword verdict** format
-   (action keyword anywhere in prose — no markers, no structured output).
-   Do not mix these formats across brains.
+1. **All three brains use first-word/first-float extraction.** The decide
+   and lifecycle brains expect the variant name as the first word. The orient
+   brain expects a bare decimal as the first token. Do not instruct the model
+   to emit JSON, `DECISION:` markers, or keyword-anywhere prose. The first
+   token IS the decision.
 
-2. **EXAMPLES sections use the brain's wire format.** For the engineer-lifecycle
-   brain, use text `DECISION:` examples. For orient, use JSON object examples.
-   For decide, use natural-prose examples containing the action keyword.
-   Mismatched formats cause the model to learn the wrong output pattern.
+2. **EXAMPLES sections use first-word format.** For the decide brain:
+   `advance_goal PR is open, engineer needed.` For the lifecycle brain:
+   `continue_skipping engineer is healthy.` For orient:
+   `0.60 Standard demotion for 1 failure.` Mismatched formats cause the
+   model to learn the wrong output pattern.
 
-3. **The parser is more tolerant than JSON.** Models can emit prose before
-   and after the structured content. This is by design — the parser finds
-   the keywords/labels it needs and ignores everything else.
+3. **The parser is NOT tolerant of keywords later in the text.** Unlike
+   the previous keyword-anywhere scanning, only the first word is checked.
+   If the LLM buries the keyword in prose, it will not be matched and the
+   default variant will be used. Ensure your prompt examples show the
+   keyword as the very first word.
 
-4. **Forward compatibility is preserved.** Unknown labels are ignored.
-   New labeled fields can be added to prompts without code changes — they
-   just won't be parsed until the Rust parser is updated.
+4. **Structured lifecycle fields use defaults.** The labeled-line extraction
+   for `TITLE:`, `BODY:`, `REASON:`, `REDISPATCH_CONTEXT:` no longer exists.
+   The LLM's prose after the first word becomes the rationale. If you need
+   structured fields in the future, update the Rust parser.
 
 See [How-to: edit the OODA brain prompt](../howto/edit-the-ooda-brain-prompt.md)
 for the full editing guide.

@@ -22,8 +22,9 @@ trait impl — you do **not** create a new struct.
 ### 1. Write the recipe YAML
 
 Create `prompt_assets/simard/recipes/ooda-<phase>.yaml`. The recipe receives
-context as `-c key=value` args and writes its decision to stdout as natural
-language containing a keyword or structured marker.
+context as `-c key=value` args and writes its decision to stdout. The OUTPUT
+FORMAT section should instruct the LLM to output the variant name as the
+very first word of its response, followed by rationale text.
 
 ### 2. Define the trait (if new)
 
@@ -40,8 +41,15 @@ pub trait OodaNewPhaseBrain: Send + Sync {
 Create `src/ooda_brain/recipe_<phase>.rs` with a public
 `parse_<phase>_from_text(text: &str) -> NewPhaseJudgment` function. This
 follows the existing pattern — each phase keeps its parse function and tests
-in its own file. Use `ascii_contains_ignore_case()` for keyword scanning and
-`truncate()` for rationale capping (imported from `recipe_brain.rs`).
+in its own file. Use first-word extraction with `eq_ignore_ascii_case()` for
+variant matching and `truncate()` for rationale capping (imported from
+`recipe_brain.rs`).
+
+The parse function should:
+1. Extract the first word via `text.split_whitespace().next()`.
+2. Match it case-insensitively against known variants.
+3. Return the matching variant with remaining text as rationale (truncated).
+4. Default to a safe variant if no match.
 
 ### 4. Implement the trait on RecipeBrain
 
@@ -81,8 +89,8 @@ pub(super) fn build_new_phase_brain(
 Add tests for `parse_new_phase_from_text()` in the `#[cfg(test)] mod tests`
 block in `recipe_<phase>.rs` (the same file as the parse function). Test:
 
-- Each keyword is recognized (case-insensitive).
-- No-keyword input returns the safe default.
+- Each variant is recognized as the first word (case-insensitive).
+- No-match first word returns the safe default.
 - Rationale is truncated for long output.
 - Constructor returns `None` for missing recipe file.
 
@@ -90,6 +98,6 @@ block in `recipe_<phase>.rs` (the same file as the parse function). Test:
 
 - Do **not** create a new struct. `RecipeBrain` handles all phases.
 - Do **not** duplicate `resolve_recipe_path`, `truncate`, or
-  `ascii_contains_ignore_case`. They are shared.
+  `try_first_float`. They are shared.
 - Do **not** add the recipe filename as a module-level `const`. Pass it to
   `RecipeBrain::new()` from `brains.rs`.

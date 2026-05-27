@@ -1,15 +1,22 @@
 # Reference: `ooda_orient.md` Prompt Schema
 
-File: `prompt_assets/simard/ooda_orient.md`
-Loaded at compile time via `include_str!` from `src/ooda_brain/orient.rs`.
+File: `prompt_assets/simard/recipes/ooda-orient.yaml`
+Parser: `parse_orient_from_text()` in `src/ooda_brain/recipe_brain.rs`
 
 This is the single source of truth for the orient-phase failure-penalty
-demotion judgment. Edit this file to change how Simard demotes chronically
-failing goals; no Rust changes required (rebuild + daemon restart).
+demotion judgment. The orient brain runs as a recipe step via
+`recipe-runner-rs`. The agent outputs a bare decimal number as the first
+token — the parser extracts the first float from the text.
+
+> **Changed in [#2144](https://github.com/rysweet/Simard/issues/2144):**
+> The orient brain previously used JSON object format (`{"adjusted_urgency":
+> 0.6, "rationale": "..."}`) parsed via `serde_json`. This has been replaced
+> with bare-float extraction. The prompt now instructs the LLM to output the
+> adjusted urgency as a bare decimal as its first token.
 
 ## File Layout
 
-The prompt is a markdown document with six top-level sections:
+The prompt is embedded in a recipe YAML with these top-level sections:
 
 ```markdown
 # OODA Brain — Orient Phase: Failure-Penalty Demotion
@@ -18,61 +25,55 @@ The prompt is a markdown document with six top-level sections:
 …
 
 ## CONTEXT
-…(uses {goal_id}, {base_urgency}, {base_reason}, {failure_count} placeholders)…
+…(uses {{goal_id}}, {{base_urgency}}, {{base_reason}}, {{failure_count}} placeholders)…
 
 ## DECISION
 …(demotion guidelines and reference scale)…
 
-## OUTPUT_FORMAT
-…(JSON object: adjusted_urgency, demotion_applied, rationale, confidence)…
+## OUTPUT FORMAT
+Output the adjusted urgency as a bare decimal number (e.g. `0.42`) as
+the first token of your response. Follow with your rationale.
 
 ## EXAMPLES
-…(JSON-format examples, one per demotion scenario)…
+…(bare-float format examples, one per demotion scenario)…
 ```
-
-Unlike the decide and engineer-lifecycle brains, the orient brain does **not**
-use a `DECISION:` marker. It uses **JSON object format** — the model returns
-a single JSON object on one line with the required fields.
 
 ## Placeholders
 
-`OrientBrain` performs literal `{name}` → value substitution in **CONTEXT**
-before submission.
-
 | Placeholder | Type | Source |
 |---|---|---|
-| `{goal_id}` | string | `ctx.goal_id` — goal slug from the active board |
-| `{base_urgency}` | f64 | `ctx.base_urgency` — urgency before failure penalty, in `[0.0, 1.0]` |
-| `{base_reason}` | string | `ctx.base_reason` — rationale Orient has accumulated so far |
-| `{failure_count}` | u32 | `ctx.failure_count` — consecutive failures recorded (always ≥ 1) |
+| `{{goal_id}}` | string | `ctx.goal_id` — goal slug from the active board |
+| `{{base_urgency}}` | f64 | `ctx.base_urgency` — urgency before failure penalty, in `[0.0, 1.0]` |
+| `{{base_reason}}` | string | `ctx.base_reason` — rationale Orient has accumulated so far |
+| `{{failure_count}}` | u32 | `ctx.failure_count` — consecutive failures recorded (always ≥ 1) |
 
 Reserved synthetic IDs (`__memory__`, `__improvement__`, etc.) never reach
 this brain — they are not subject to failure-penalty demotion.
 
 ## Output Format
 
-The orient brain uses **JSON object format**. The wire format is documented
-normatively in
-[text-parsing wire formats § orient phase](text-parsing-wire-formats.md#1b-orient-phase-orientrs).
+The orient brain uses **bare-float format**. The first number in the
+output text becomes `adjusted_urgency`. The full text becomes `rationale`.
 
 ### Response format
 
-```json
-{"adjusted_urgency": <float in [0,1]>, "demotion_applied": <float ≥ 0>, "rationale": "<short reason>", "confidence": <float in [0,1]>}
+```
+<float> <rationale text>
 ```
 
-### JSON fields
+Example:
+```
+0.60 Standard demotion for 1 failure. The goal is healthy but needs a penalty.
+```
 
-| Field | Type | Required | Default | Validation |
-|---|---|---|---|---|
-| `adjusted_urgency` | `f64` | **Yes** | _(parse fails without it)_ | Must be in `[0.0, base_urgency]` |
-| `rationale` | `String` | **Yes** | _(parse fails without it)_ | None |
-| `confidence` | `f64` | No | `1.0` | Must be in `[0.0, 1.0]` |
-| `demotion_applied` | `f64` | No | `0.0` | Convenience; daemon recomputes |
+### Fields produced
 
-The parser extracts the first `{…}` substring from the response, so the
-model may optionally surround the JSON with prose (tolerated, not encouraged).
-Extra fields are silently ignored (forward compatible).
+| Field | Source | Default |
+|---|---|---|
+| `adjusted_urgency` | First float in text (`try_first_float`) | Deterministic floor |
+| `rationale` | Full text of response | `"deterministic floor"` |
+| `confidence` | Always `1.0` | `1.0` |
+| `demotion_applied` | `0.0` (daemon recomputes) | `0.0` |
 
 ### Validation
 
@@ -86,18 +87,11 @@ Extra fields are silently ignored (forward compatible).
 If validation fails, the deterministic floor applies:
 `urgency - 0.2 × failure_count`, clamped to `[0.0, 1.0]`.
 
-### JSON parsing notes
-
-The parser uses `serde_json::from_str` on the extracted `{…}` substring.
-Malformed JSON or a response with no `{` causes a parse failure, and the
-deterministic floor applies. The old labeled-line format
-(`ADJUSTED_URGENCY:`, `RATIONALE:`, `CONFIDENCE:`) is no longer accepted.
-
 ## DECISION Section
 
 The prompt includes a `## DECISION` section (note: this is a prompt section
-header, not the `DECISION:` wire format marker used by other brains). This
-section provides the demotion reference scale:
+header, not a wire format marker). This section provides the demotion
+reference scale:
 
 | `failure_count` | Expected demotion | Guidance |
 |---|---|---|
@@ -114,36 +108,31 @@ The brain may deviate from this scale:
 
 ## Examples
 
-The prompt's `EXAMPLES` section contains JSON-format examples matching the
-parser's expected wire format.
+The prompt's `EXAMPLES` section uses bare-float format:
 
-| Scenario | `failure_count` | Expected `ADJUSTED_URGENCY` | Key signal |
-|---|---|---|---|
-| Standard floor demotion | 1 | `base - 0.2` | Default case |
-| Chronic failures | 5 | `0.0` | Drive to zero |
-| Transient cause (leniency) | 2 | Slightly above floor | Dirty tree suggests active work |
-| Negative: escalation | 1 | _(rejected)_ | `adjusted > base` triggers fallback |
-
-## Compile-Time Embedding
-
-Same rules as `ooda_brain.md`: the prompt is embedded with `include_str!`,
-must exist at build time and be valid UTF-8, and should stay under ~32 KB.
+| Scenario | `failure_count` | Example output |
+|---|---|---|
+| Standard floor demotion | 1 | `0.60 Standard demotion. 1 failure, penalty of 0.2 applied.` |
+| Chronic failures | 5 | `0.0 Driven to zero. 5 consecutive failures, goal should yield to all unfailed work.` |
+| Transient cause (leniency) | 2 | `0.55 Slightly above floor. Dirty tree suggests active work despite failures.` |
 
 ## Parser Rules
 
-`parse_judgment_from_response` (in `src/ooda_brain/orient.rs`) extracts and
-deserializes a JSON object from the brain response:
+`parse_orient_from_text()` in `src/ooda_brain/recipe_brain.rs` extracts
+the urgency from the brain response:
 
-1. Trim whitespace; reject empty responses.
-2. Find the first `{` and last `}` in the response to locate the JSON object.
-3. Deserialize the substring via `serde_json::from_str::<OrientJudgment>`.
-4. `adjusted_urgency` and `rationale` are required fields; `confidence`
-   defaults to `1.0` and `demotion_applied` defaults to `0.0`.
-5. If no JSON object is found or deserialization fails, return error; caller
-   falls back to the deterministic floor formula.
+1. Call `try_first_float(text)` — scans for the first decimal substring.
+2. If found, use it as `adjusted_urgency`; full text as `rationale`;
+   `confidence = 1.0`.
+3. If no float found, apply deterministic floor:
+   `max(0.0, base_urgency - 0.2 * failure_count)`.
+4. Call `OrientJudgment::validate()` — if bounds violated, fall back to
+   deterministic floor.
 
-The old labeled-line parser has been removed. Labeled-line responses
-(e.g. `ADJUSTED_URGENCY: 0.6`) will fail parsing because no `{` is found.
+> **Removed in [#2144](https://github.com/rysweet/Simard/issues/2144):**
+> The JSON extraction tier (`try_json_extraction` using `serde_json::from_str`
+> on `{…}` substrings) has been deleted. The `try_bare_float` function has
+> been renamed to `try_first_float` — logic unchanged.
 
 ## Deterministic Fallback
 
@@ -155,23 +144,30 @@ adjusted_urgency = max(0.0, base_urgency - 0.2 * failure_count)
 
 This fallback fires when:
 - No LLM is configured.
-- The LLM response cannot be parsed (no JSON object found, or deserialization fails).
+- The recipe subprocess fails.
+- No float is found in the output text.
 - The parsed judgment fails validation (`adjusted_urgency > base_urgency`).
 
 The fallback is **not** a silent error handler — the parse failure is surfaced
 through all four visibility channels (structured log, metric, cycle report,
 GitHub issue escalation) before the fallback is applied.
 
+## Runtime Loading
+
+The orient recipe is loaded at runtime by the recipe-runner-rs subprocess.
+`RecipeBrain` resolves the recipe path relative to `repo_root`:
+
+```
+{repo_root}/prompt_assets/simard/recipes/ooda-orient.yaml
+```
+
+Prompt edits take effect on the next daemon cycle **without a rebuild**.
+
 ## Versioning & Compatibility
 
 The orient brain has no enum variants to extend — it produces a single
-`OrientJudgment` struct. Adding new JSON fields to the prompt is safe:
-the `serde` deserializer ignores unknown fields (forward compatible), and
-new fields will not be parsed until the Rust struct is updated.
-
-Changes to the demotion reference scale or guidance prose are safe to ship
-alone. Changes to the JSON field names require a coordinated Rust change
-to the `OrientJudgment` struct and parser in `orient.rs`.
+`OrientJudgment` struct. Changes to the demotion reference scale or guidance
+prose are safe to ship alone — and take effect without a rebuild.
 
 ## See Also
 
