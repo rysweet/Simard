@@ -19,17 +19,23 @@
 ///
 /// Returns an owned `String` that is safe to embed in `-c key=value` args.
 pub(super) fn sanitize_context_var(s: &str, max_len: usize) -> String {
-    // Step 1+2: split_whitespace handles \n, \r, \t, and consecutive spaces
-    let collapsed: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Step 1+2: split_whitespace handles \n, \r, \t, and consecutive spaces.
+    // Push directly into a pre-sized String — avoids intermediate Vec<&str>.
+    let mut collapsed = String::with_capacity(s.len());
+    for word in s.split_whitespace() {
+        if !collapsed.is_empty() {
+            collapsed.push(' ');
+        }
+        collapsed.push_str(word);
+    }
 
-    // Step 3: truncate on char boundary
-    if collapsed.chars().count() <= max_len {
-        return collapsed;
+    // Step 3: truncate on char boundary.
+    // Single char_indices().nth() pass replaces separate .count() + .nth().
+    if let Some((byte_offset, _)) = collapsed.char_indices().nth(max_len) {
+        collapsed.truncate(byte_offset);
+        collapsed.push('…');
     }
-    match collapsed.char_indices().nth(max_len) {
-        Some((byte_offset, _)) => format!("{}…", &collapsed[..byte_offset]),
-        None => collapsed,
-    }
+    collapsed
 }
 
 // ---------------------------------------------------------------------------

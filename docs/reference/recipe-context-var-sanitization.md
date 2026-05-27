@@ -75,7 +75,7 @@ assert_eq!(truncated.chars().count(), 11); // 10 content chars + "…"
 | Char-boundary safe | Truncation never splits a multi-byte UTF-8 sequence |
 | Idempotent | `sanitize(sanitize(s, n), n)` == `sanitize(s, n)` (modulo the ellipsis already being present) |
 | Pure | No I/O. Allocates only the returned `String` |
-| Empty-safe | Empty input returns empty output; `max_len = 0` returns `""` |
+| Empty-safe | Empty input returns empty output. `max_len = 0` with non-empty input returns `"…"` (truncation marker only) |
 
 ## Application Sites
 
