@@ -165,7 +165,14 @@ fn apply_and_review_empty_diff_is_applied() {
 #[test]
 fn run_autonomous_improvement_empty_proposals() {
     let inspection = test_inspection();
-    let results = run_autonomous_improvement(&[], Path::new("/tmp"), &inspection);
+    let results = run_autonomous_improvement(
+        &[],
+        Path::new("/tmp"),
+        &inspection,
+        &ApprovalPolicy::AutoApproveWithAuditTrail {
+            justification: "test".to_string(),
+        },
+    );
     assert!(results.is_empty());
 }
 
@@ -174,7 +181,14 @@ fn run_autonomous_improvement_planning_unavailable() {
     unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
     let inspection = test_inspection();
     let proposals = vec!["improve X".to_string(), "improve Y".to_string()];
-    let results = run_autonomous_improvement(&proposals, Path::new("/tmp"), &inspection);
+    let results = run_autonomous_improvement(
+        &proposals,
+        Path::new("/tmp"),
+        &inspection,
+        &ApprovalPolicy::AutoApproveWithAuditTrail {
+            justification: "test".to_string(),
+        },
+    );
     // Both should fail with PlanFailed since no LLM is available
     assert_eq!(results.len(), 2);
     for r in &results {
@@ -187,7 +201,14 @@ fn run_autonomous_improvement_continues_on_non_critical_plan_failure() {
     unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
     let inspection = test_inspection();
     let proposals = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-    let results = run_autonomous_improvement(&proposals, Path::new("/tmp"), &inspection);
+    let results = run_autonomous_improvement(
+        &proposals,
+        Path::new("/tmp"),
+        &inspection,
+        &ApprovalPolicy::AutoApproveWithAuditTrail {
+            justification: "test".to_string(),
+        },
+    );
     // All three should be attempted (PlanFailed is not a critical ReviewBlocked)
     assert_eq!(results.len(), 3);
 }
@@ -215,4 +236,106 @@ fn test_inspection() -> crate::engineer_loop::RepoInspection {
         carried_meeting_decisions: Vec::new(),
         architecture_gap_summary: String::new(),
     }
+}
+
+// ── Approval gate tests (spec lines 695/700, issue #2097) ───────
+
+#[test]
+fn approval_gate_blocks_unapproved_execution() {
+    let inspection = test_inspection();
+    let proposals = vec!["improve X".to_string(), "improve Y".to_string()];
+    let results = run_autonomous_improvement(
+        &proposals,
+        Path::new("/tmp"),
+        &inspection,
+        &ApprovalPolicy::RequireOperatorApproval,
+    );
+    assert_eq!(results.len(), 2);
+    for r in &results {
+        assert!(
+            matches!(r, ApplyResult::ApprovalRequired { .. }),
+            "default policy must block execution, got: {r:?}"
+        );
+    }
+}
+
+#[test]
+fn approval_gate_default_policy_is_require_approval() {
+    assert_eq!(
+        ApprovalPolicy::default(),
+        ApprovalPolicy::RequireOperatorApproval,
+        "default ApprovalPolicy must require operator approval per spec"
+    );
+}
+
+#[test]
+fn approval_required_is_not_applied() {
+    let r = ApplyResult::ApprovalRequired {
+        proposal: "test".to_string(),
+    };
+    assert!(!r.is_applied());
+}
+
+#[test]
+fn approval_required_has_no_critical_findings() {
+    let r = ApplyResult::ApprovalRequired {
+        proposal: "test".to_string(),
+    };
+    assert!(!r.has_critical());
+}
+
+#[test]
+fn approval_required_has_empty_findings() {
+    let r = ApplyResult::ApprovalRequired {
+        proposal: "test".to_string(),
+    };
+    assert!(r.findings().is_empty());
+}
+
+#[test]
+fn approval_required_display() {
+    let r = ApplyResult::ApprovalRequired {
+        proposal: "fix cache".to_string(),
+    };
+    assert_eq!(r.to_string(), "approval-required: fix cache");
+}
+
+#[test]
+fn approval_policy_display_require() {
+    assert_eq!(
+        ApprovalPolicy::RequireOperatorApproval.to_string(),
+        "require-operator-approval"
+    );
+}
+
+#[test]
+fn approval_policy_display_auto() {
+    let p = ApprovalPolicy::AutoApproveWithAuditTrail {
+        justification: "sandbox test".to_string(),
+    };
+    assert_eq!(p.to_string(), "auto-approve (justification: sandbox test)");
+}
+
+#[test]
+fn auto_approve_policy_allows_execution() {
+    // When auto-approve is set, proposals should NOT get ApprovalRequired.
+    // They may still fail for other reasons (no LLM key), but the gate should pass.
+    unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
+    let inspection = test_inspection();
+    let proposals = vec!["improve Z".to_string()];
+    let results = run_autonomous_improvement(
+        &proposals,
+        Path::new("/tmp"),
+        &inspection,
+        &ApprovalPolicy::AutoApproveWithAuditTrail {
+            justification: "test run".to_string(),
+        },
+    );
+    assert_eq!(results.len(), 1);
+    // Should be PlanFailed (no LLM) — NOT ApprovalRequired
+    assert!(
+        matches!(&results[0], ApplyResult::PlanFailed { .. }),
+        "auto-approve policy should allow execution past the gate, got: {:?}",
+        results[0]
+    );
 }

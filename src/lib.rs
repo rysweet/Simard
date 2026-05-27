@@ -321,7 +321,8 @@ pub use self_improve::{
     apply_improvements, run_improvement_cycle, summarize_cycle,
 };
 pub use self_improve_executor::{
-    ApplyResult, ImprovementPatch, apply_and_review, generate_patch, run_autonomous_improvement,
+    ApplyResult, ApprovalPolicy, ImprovementPatch, apply_and_review, generate_patch,
+    run_autonomous_improvement,
 };
 pub use self_metrics::{
     DailyReport, MetricEntry, collect_and_record_all, daily_report, query_metrics, recent_metrics,
