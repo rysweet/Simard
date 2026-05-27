@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use super::decide::{DecideContext, DecideJudgment, OodaDecideBrain};
+use super::sanitize::sanitize_context_var;
 use crate::error::{SimardError, SimardResult};
 
 const ADAPTER_TAG: &str = "recipe-decide-brain";
@@ -74,11 +75,14 @@ impl OodaDecideBrain for RecipeDecideBrain {
         let output = Command::new("recipe-runner-rs")
             .arg(self.recipe_path.as_os_str())
             .arg("-c")
-            .arg(format!("goal_id={}", ctx.goal_id))
+            .arg(format!(
+                "goal_id={}",
+                sanitize_context_var(&ctx.goal_id, 500)
+            ))
             .arg("-c")
             .arg(format!("urgency={:.3}", ctx.urgency))
             .arg("-c")
-            .arg(format!("reason={}", ctx.reason))
+            .arg(format!("reason={}", sanitize_context_var(&ctx.reason, 500)))
             .output()
             .map_err(|e| SimardError::AdapterInvocationFailed {
                 base_type: ADAPTER_TAG.to_string(),

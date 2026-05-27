@@ -28,6 +28,7 @@ use super::orient::DeterministicFallbackOrientBrain;
 use super::orient::{
     FAILURE_PENALTY_PER_CONSECUTIVE, OodaOrientBrain, OrientContext, OrientJudgment,
 };
+use super::sanitize::sanitize_context_var;
 use crate::error::{SimardError, SimardResult};
 
 const ADAPTER_TAG: &str = "recipe-orient-brain";
@@ -82,11 +83,17 @@ impl OodaOrientBrain for RecipeOrientBrain {
         let output = Command::new("recipe-runner-rs")
             .arg(self.recipe_path.as_os_str())
             .arg("-c")
-            .arg(format!("goal_id={}", ctx.goal_id))
+            .arg(format!(
+                "goal_id={}",
+                sanitize_context_var(&ctx.goal_id, 500)
+            ))
             .arg("-c")
             .arg(format!("base_urgency={:.3}", ctx.base_urgency))
             .arg("-c")
-            .arg(format!("base_reason={}", ctx.base_reason))
+            .arg(format!(
+                "base_reason={}",
+                sanitize_context_var(&ctx.base_reason, 500)
+            ))
             .arg("-c")
             .arg(format!("failure_count={}", ctx.failure_count))
             .output()

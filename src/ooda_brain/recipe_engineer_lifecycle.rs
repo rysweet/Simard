@@ -26,6 +26,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use super::sanitize::sanitize_context_var;
 use super::{EngineerLifecycleCtx, EngineerLifecycleDecision, OodaBrain};
 use crate::error::{SimardError, SimardResult};
 
@@ -107,9 +108,15 @@ impl OodaBrain for RecipeEngineerLifecycleBrain {
         let output = Command::new("recipe-runner-rs")
             .arg(self.recipe_path.as_os_str())
             .arg("-c")
-            .arg(format!("goal_id={}", ctx.goal_id))
+            .arg(format!(
+                "goal_id={}",
+                sanitize_context_var(&ctx.goal_id, 500)
+            ))
             .arg("-c")
-            .arg(format!("goal_description={}", ctx.goal_description))
+            .arg(format!(
+                "goal_description={}",
+                sanitize_context_var(&ctx.goal_description, 500)
+            ))
             .arg("-c")
             .arg(format!("cycle_number={}", ctx.cycle_number))
             .arg("-c")
@@ -120,7 +127,10 @@ impl OodaBrain for RecipeEngineerLifecycleBrain {
             .arg("-c")
             .arg(format!("failure_count={}", ctx.failure_count))
             .arg("-c")
-            .arg(format!("worktree_path={}", ctx.worktree_path.display()))
+            .arg(format!(
+                "worktree_path={}",
+                sanitize_context_var(&ctx.worktree_path.display().to_string(), 500)
+            ))
             .arg("-c")
             .arg(format!(
                 "worktree_mtime_secs_ago={}",
@@ -131,7 +141,7 @@ impl OodaBrain for RecipeEngineerLifecycleBrain {
             .arg("-c")
             .arg(format!(
                 "last_engineer_log_tail={}",
-                ctx.last_engineer_log_tail
+                sanitize_context_var(&ctx.last_engineer_log_tail, 2000)
             ))
             .arg("-c")
             .arg(format!("commits_behind={}", ctx.commits_behind))
