@@ -261,6 +261,8 @@ fn benchmark_suite_scenario_summary_fields() {
     let s = BenchmarkSuiteScenarioSummary {
         scenario_id: "test-scenario".to_string(),
         passed: false,
+        skipped: false,
+        skip_reason: None,
         session_id: "session-abc".to_string(),
         report_json: "/path/report.json".to_string(),
     };

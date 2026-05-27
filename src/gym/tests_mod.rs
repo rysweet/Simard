@@ -198,3 +198,48 @@ fn default_output_root_has_two_components() {
     let components: Vec<_> = root.components().collect();
     assert_eq!(components.len(), 2);
 }
+
+// --- is_skippable_auth_error (issue #1743) ---
+
+#[test]
+fn skippable_auth_error_matches_adapter_invocation_with_authentication() {
+    let err = SimardError::AdapterInvocationFailed {
+        base_type: "rusty-clawd".to_string(),
+        reason: "Copilot backend requires authentication. Use Client::new_copilot().".to_string(),
+    };
+    assert!(is_skippable_auth_error(&err, "rusty-clawd"));
+}
+
+#[test]
+fn skippable_auth_error_does_not_match_local_harness() {
+    let err = SimardError::AdapterInvocationFailed {
+        base_type: "local-harness".to_string(),
+        reason: "requires authentication".to_string(),
+    };
+    assert!(!is_skippable_auth_error(&err, "local-harness"));
+}
+
+#[test]
+fn skippable_auth_error_does_not_match_unrelated_invocation_failure() {
+    let err = SimardError::AdapterInvocationFailed {
+        base_type: "rusty-clawd".to_string(),
+        reason: "timeout after 30s".to_string(),
+    };
+    assert!(!is_skippable_auth_error(&err, "rusty-clawd"));
+}
+
+#[test]
+fn skippable_auth_error_matches_adapter_not_registered() {
+    let err = SimardError::AdapterNotRegistered {
+        base_type: "rusty-clawd".to_string(),
+    };
+    assert!(is_skippable_auth_error(&err, "rusty-clawd"));
+}
+
+#[test]
+fn skippable_auth_error_does_not_match_other_error_variants() {
+    let err = SimardError::BenchmarkSuiteNotFound {
+        suite_id: "nonexistent".to_string(),
+    };
+    assert!(!is_skippable_auth_error(&err, "rusty-clawd"));
+}

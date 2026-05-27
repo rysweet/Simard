@@ -98,14 +98,38 @@ pub fn run_benchmark_suite(
     let mut suite_passed = true;
 
     for scenario in benchmark_scenarios().iter().copied() {
-        let report = executor::execute_scenario(scenario, suite_id, output_root)?;
-        suite_passed &= report.passed;
-        scenario_summaries.push(BenchmarkSuiteScenarioSummary {
-            scenario_id: report.scenario.id.to_string(),
-            passed: report.passed,
-            session_id: report.session_id.clone(),
-            report_json: report.artifacts.report_json.clone(),
-        });
+        match executor::execute_scenario(scenario, suite_id, output_root) {
+            Ok(report) => {
+                suite_passed &= report.passed;
+                scenario_summaries.push(BenchmarkSuiteScenarioSummary {
+                    scenario_id: report.scenario.id.to_string(),
+                    passed: report.passed,
+                    skipped: false,
+                    skip_reason: None,
+                    session_id: report.session_id.clone(),
+                    report_json: report.artifacts.report_json.clone(),
+                });
+            }
+            Err(ref e) if is_skippable_auth_error(e, scenario.base_type) => {
+                eprintln!(
+                    "WARN: skipping scenario '{}' (base_type={}): \
+                     backend requires authentication that is not available at gate-time",
+                    scenario.id, scenario.base_type,
+                );
+                scenario_summaries.push(BenchmarkSuiteScenarioSummary {
+                    scenario_id: scenario.id.to_string(),
+                    passed: false,
+                    skipped: true,
+                    skip_reason: Some(format!(
+                        "backend '{}' requires authentication unavailable at gate-time",
+                        scenario.base_type,
+                    )),
+                    session_id: String::new(),
+                    report_json: String::new(),
+                });
+            }
+            Err(e) => return Err(e),
+        }
     }
 
     let suite_dir = output_root.join("suites");
@@ -198,6 +222,28 @@ pub fn compare_latest_benchmark_runs(
         reporting::render_text_comparison_report(&report),
     )?;
     Ok(report)
+}
+
+/// Returns `true` when `err` is an auth-related invocation failure for a
+/// base type that requires external credentials (e.g. `rusty-clawd` needs
+/// Copilot auth). Such errors are expected on stock dev machines and should
+/// be skipped rather than failing the entire suite (issue #1743).
+fn is_skippable_auth_error(err: &SimardError, base_type: &str) -> bool {
+    // Only skip for base types known to require external auth.
+    if base_type == "local-harness" {
+        return false;
+    }
+    match err {
+        SimardError::AdapterInvocationFailed { reason, .. } => {
+            reason.contains("authentication")
+                || reason.contains("requires auth")
+                || reason.contains("new_copilot")
+        }
+        // AdapterNotRegistered also fires when the base-type factory cannot
+        // instantiate because the auth subsystem is absent.
+        SimardError::AdapterNotRegistered { .. } => true,
+        _ => false,
+    }
 }
 
 fn restore_from_handoff(
