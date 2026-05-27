@@ -16,13 +16,13 @@ owner: simard
 > `~/.simard/cycle_reports/`, and `~/.simard/metrics/` on the daemon
 > host; familiarity with the `simard` CLI and `jq`.
 
-## Decide brain: recipe-based keyword scanning
+## Decide brain: first-word extraction
 
-> **Updated in [#2111](https://github.com/rysweet/Simard/issues/2111).**
-> The decide brain no longer uses `DECISION:` markers. It runs as a recipe
-> step and scans the agent's prose for action keywords. Parse failures in
-> the traditional sense (format rejected) **cannot occur** — the keyword
-> scanner always returns a valid action kind. If no keyword is found, the
+> **Updated in [#2144](https://github.com/rysweet/Simard/issues/2144).**
+> The decide brain extracts the first word from the recipe output and matches
+> it case-insensitively against 10 action keywords. Parse failures in the
+> traditional sense (format rejected) **cannot occur** — the first-word
+> parser always returns a valid action kind. If no keyword matches, the
 > default `advance_goal` is used.
 
 ### Decide-brain failure modes
@@ -54,11 +54,12 @@ On successful construction, no log line is emitted. On fallback:
 WARN simard::operator_commands_ooda: [ooda] recipe-runner-rs not found; using deterministic decide fallback
 ```
 
-## Orient brain: text-based parse failures
+## Orient brain: first-float extraction
 
-The orient brain uses JSON format and can still produce parse failures.
-Parse failures fire four visibility channels in lock-step. This section
-tells you how to find them, read them, and decide what to do.
+> **Updated in [#2144](https://github.com/rysweet/Simard/issues/2144).**
+> The orient brain now extracts the first bare decimal from the recipe output
+> instead of parsing a JSON object. Parse failures still fire four visibility
+> channels. If no float is found, the deterministic floor applies.
 
 For the wire format specifications, see
 [Reference: text-parsing wire formats](../reference/text-parsing-wire-formats.md).
@@ -94,7 +95,7 @@ A matching line looks like:
 ERROR simard::ooda_brain: brain.orient parse failed
     phase="orient"
     goal_id="improve-amplihack-test-coverage"
-    error="no JSON object found in LLM response (got 3 bytes)"
+    error="no float found in LLM response (got 3 bytes)"
     raw_response_truncated="OK"
     prompt_name="ooda_orient.md"
     prompt_version="a1b2c3d4e5f6"
@@ -135,10 +136,10 @@ Open the `raw_response_truncated` value and match against this triage table.
 
 | `raw_response_truncated` looks like… | Likely cause | Action |
 |----|----|----|
-| `"OK"`, `"continue"`, `"yes"` | Model ignored the JSON-output instruction; emitted a chat ack | [Step 3 — replay the prompt](#step-3-replay-the-prompt-locally); strengthen the prompt's output instructions |
+| `"OK"`, `"continue"`, `"yes"` | Model ignored the output instruction; emitted a chat ack | [Step 3 — replay the prompt](#step-3-replay-the-prompt-locally); strengthen the prompt's output instructions |
 | `""` (empty string) | Adapter returned `Err` with no body (5xx, timeout) | Check adapter logs for 5xx / rate-limit / timeout |
-| Long prose without any JSON object | Model is in chat mode, not following the output format | Strengthen the prompt's output section examples |
-| JSON object with wrong or missing field names | Model emitting wrong field structure | Diff `prompt_assets/simard/ooda_orient.md` against the expected fields (`adjusted_urgency`, `rationale`, `confidence`) |
+| Long prose without any number | Model is in chat mode, not following the output format | Strengthen the prompt's OUTPUT_FORMAT section to require a bare decimal as the first token |
+| Decimal number but out of range | Model emitted a valid float but outside `[0.0, base_urgency]` | Check the validation logic; the deterministic floor will have been applied |
 | Partial text ending mid-word | Adapter truncated mid-stream | Check adapter log for `EOF` / `truncated stream` |
 
 If `consecutive_count` is 1 or 2 and the next cycle shows `parse_failure == null`,
@@ -180,15 +181,16 @@ gh issue list --repo rysweet/Simard \
 
 | Cause from Step 2 | Remediation |
 |----|----|
-| Chat ack / wrong mode | Edit `prompt_assets/simard/ooda_orient.md` to strengthen the JSON output instruction. See [edit-the-ooda-brain-prompt](edit-the-ooda-brain-prompt.md). |
+| Chat ack / wrong mode | Edit the orient recipe YAML to strengthen the output instruction (bare decimal as first token). See [edit-the-ooda-brain-prompt](edit-the-ooda-brain-prompt.md). |
 | Adapter 5xx / rate limit / timeout | Investigate the adapter; the brain itself is healthy. |
-| JSON output wrong fields | The model is emitting JSON with wrong field names. Update the prompt's examples to use the correct fields (`adjusted_urgency`, `rationale`, `confidence`). |
+| Float out of range | Check that `base_urgency` in the prompt context is correct. The deterministic floor will have been applied. |
 | Persistent non-cooperative model | Switch the provider in the brain config. |
 
-> **Note:** The decide brain no longer has parse failures. It uses keyword
-> scanning via a recipe step. If the decide brain is producing unexpected
-> routing, edit `prompt_assets/simard/recipes/ooda-decide.yaml` — no rebuild
-> required. See [OODA decide recipe and prompt schema](../reference/ooda-decide-prompt.md).
+> **Note:** The decide and lifecycle brains no longer have parse failures.
+> They use first-word extraction, which always returns a valid result. If the
+> decide brain is producing unexpected routing, edit
+> `prompt_assets/simard/recipes/ooda-decide.yaml` — no rebuild required.
+> See [OODA decide recipe and prompt schema](../reference/ooda-decide-prompt.md).
 
 After editing a prompt, rebuild and hot-swap:
 
@@ -216,12 +218,15 @@ You should see:
 ## Anti-patterns
 
 * **Reverting to JSON output format in the orient prompt.** The orient parser
-  expects JSON. Adding non-JSON examples to the orient prompt will cause
-  models to emit prose, which will be parse-rejected.
-* **Adding a `DECISION:` marker format to the decide recipe prompt.** The
-  decide brain uses keyword scanning — there is no marker parser. Adding
-  `OUTPUT_FORMAT` sections with `DECISION:` instructions is unnecessary
-  and may confuse the agent.
+  now expects a bare decimal, not JSON. Adding JSON examples will cause models
+  to emit JSON objects, and the float may not be found as the first token.
+* **Adding a `DECISION:` marker format to any recipe prompt.** No brain uses
+  the marker protocol anymore. Adding `OUTPUT_FORMAT` sections with
+  `DECISION:` instructions is unnecessary and may confuse the agent.
+* **Adding keyword-anywhere instructions.** The decide and lifecycle brains
+  use first-word extraction only. Instructing the model to "mention the
+  keyword in your response" will cause it to bury the keyword in prose,
+  which will not be found.
 * **Restarting the daemon directly** to "clear" parse failures. Use
   `simard safe-update` for any code/prompt change.
 * **Suppressing the `ERROR` log line** with a tracing filter.

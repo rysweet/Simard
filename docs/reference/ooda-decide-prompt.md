@@ -5,20 +5,19 @@ Prompt source: `prompt_assets/simard/ooda_decide.md` (content embedded in recipe
 Shim: `src/ooda_brain/recipe_decide.rs`
 
 This is the single source of truth for the decide-phase action-kind routing
-decision. The decide brain runs as a **recipe step** via `recipe-runner-rs`,
-following the same pattern as `progress-assessment.yaml` and
-`merge-readiness-judge.yaml`. The agent's prose output is scanned for action
-keywords — no `DECISION:` marker or structured output format is required.
+decision. The decide brain runs as a **recipe step** via `recipe-runner-rs`.
+The parser extracts the **first word** of the agent's output and matches it
+against the 10 action keywords.
 
-> **History:** Before issue
-> [#2111](https://github.com/rysweet/Simard/issues/2111), the decide brain
-> was `RustyClawdDecideBrain`, which compiled the prompt via `include_str!`,
-> submitted it to an `LlmSubmitter`, and parsed the response using a
-> `DECISION:` marker on the first line. This was fragile — the agent
-> consistently returned the correct action keyword in its prose, but the
-> parser demanded a specific format the model frequently ignored. The
-> recipe-based approach removes the format requirement entirely and scans
-> for keywords instead.
+> **Changed in [#2144](https://github.com/rysweet/Simard/issues/2144):**
+> The decide parser no longer scans the entire response for keywords. It
+> extracts only the first whitespace-delimited token and matches it
+> case-insensitively. The recipe prompt now instructs the LLM to output the
+> action keyword as the very first word.
+>
+> **History:** Before #2111, the decide brain was `RustyClawdDecideBrain`,
+> which used a `DECISION:` marker parser. #2111 replaced it with keyword
+> scanning. #2144 further simplified to first-word extraction.
 
 ## Recipe Layout
 
@@ -65,12 +64,8 @@ prompt rendering, agent invocation, and stdout capture. The Rust shim
 The recipe prompt preserves all content from the original `ooda_decide.md`
 **except**:
 
-- **Line 1 deleted** — the `CRITICAL: Your first non-blank line MUST be
-  DECISION: <variant>` guard is removed. The agent is no longer required
-  to emit a specific marker format.
-- **OUTPUT_FORMAT section deleted** — the entire section instructing the
-  model to emit `DECISION:` markers is removed. The keyword scanner finds
-  the action kind in natural prose.
+- **OUTPUT_FORMAT section added** — instructs the model to output the
+  action keyword as the very first word of its response.
 - **Placeholders converted** — `{goal_id}` → `{{goal_id}}`, `{urgency}` →
   `{{urgency}}`, `{reason}` → `{{reason}}` to match recipe-runner-rs
   Handlebars templating.
@@ -92,9 +87,8 @@ context variables passed by `RecipeDecideBrain`.
 ## Action Keywords
 
 The `OPTIONS` section enumerates the valid action keywords. Each maps 1:1
-to a `DecideJudgment` enum variant in `src/ooda_brain/decide.rs`. The keyword
-scanner in `recipe_decide.rs` finds these keywords in the agent's prose
-output.
+to a `DecideJudgment` enum variant in `src/ooda_brain/decide.rs`. The
+first-word parser in `recipe_brain.rs` matches these keywords.
 
 | Keyword | Enum variant | When to use |
 |---|---|---|
@@ -109,64 +103,36 @@ output.
 | `build_skill` | `DecideJudgment::BuildSkill` | Reserved for future use |
 | `launch_session` | `DecideJudgment::LaunchSession` | Reserved for future use |
 
-No keyword is a substring of another (verified at compile time). The scanner
-checks all 10 keywords on the lowercased output using `contains()`. If
-multiple keywords appear (rare — the agent is asked for a single routing
-decision), the first match in scan order is used.
+## First-Word Parser
 
-## Keyword Scanner (replaces DECISION marker parser)
-
-`RecipeDecideBrain` uses `parse_action_from_text()` in
-`src/ooda_brain/recipe_decide.rs` to extract the action kind from the
-agent's stdout. This follows the same **keyword verdict protocol** used by
-`recipe_progress_checker.rs` and `recipe_merge_judge.rs`.
+`RecipeBrain` uses `parse_action_from_text()` in
+`src/ooda_brain/recipe_brain.rs` to extract the action kind from the
+agent's stdout.
 
 ### How it works
 
-1. Convert the full stdout to lowercase.
-2. Scan for each of the 10 action keywords using `contains()`.
-3. Return the first matching keyword as the `DecideJudgment`.
-4. If no keyword is found, return `DecideJudgment::AdvanceGoal` as the
-   default (same as the existing deterministic fallback for real goal slugs).
+1. Call `split_whitespace().next()` to get the first token.
+2. Lowercase it via `to_ascii_lowercase()`.
+3. Match against the 10 action keywords.
+4. Return the matching `DecideJudgment` variant.
+5. If no keyword matches, return `DecideJudgment::AdvanceGoal` as the default.
 
-### Why this works
+### Why first-word instead of keyword scanning
 
-Production daemon logs showed that the agent **always** returned the correct
-action keyword in its prose. Typical responses:
+When the prompt instructs "output the action keyword as your first word",
+models comply reliably. First-word extraction is simpler, unambiguous (no
+question of which keyword to pick if multiple appear), and has zero
+false-positive risk from keyword substrings.
 
-```
-Looking at goal "__memory__", this is a reserved synthetic ID for memory
-consolidation. The appropriate action is consolidate_memory.
-```
-
-```
-This is an ordinary goal with an open PR. The engineer should advance_goal
-to drive the PR to completion.
-```
-
-The old `DECISION:` marker parser rejected both of these because the keyword
-wasn't on the first line in `DECISION: <variant>` format. The keyword scanner
-finds `consolidate_memory` and `advance_goal` directly.
-
-### Comparison with other keyword scanners
-
-| Site | Keywords | Default (no match) | Fail mode |
-|------|----------|--------------------|-----------|
-| Progress checker | `accept`, `reject` | `Accept` (fail-open) | Goal unblocked |
-| Merge judge | `ready`, `not_ready`, `unclear` | `NotReady` (fail-closed) | PR not merged |
-| **Decide brain** | 10 action keywords | `AdvanceGoal` (fail-safe) | Goal gets default routing |
-
-The `AdvanceGoal` default is safe because the deterministic fallback brain
-already maps real goal slugs to `advance_goal`. The keyword scanner simply
-makes the LLM's judgment reachable for edge cases where the deterministic
-mapping would be wrong (e.g., `research_query`).
+> **Removed in #2144:** `ascii_contains_ignore_case()` keyword scanning,
+> which checked every token in the response.
 
 ## Error Handling
 
-`RecipeDecideBrain` returns `Err(SimardError::AdapterInvocationFailed)` when:
+`RecipeBrain` returns `Err(SimardError::AdapterInvocationFailed)` when:
 
 - The `recipe-runner-rs` binary is not found (construction fails;
-  `RecipeDecideBrain::new()` returns `None`).
+  `RecipeBrain::new()` returns `None`).
 - The subprocess exits with a non-zero status.
 - The subprocess cannot be spawned (permission error, missing binary at
   runtime, etc.).
@@ -175,22 +141,22 @@ On `AdapterInvocationFailed`, the caller in `ooda_loop/decide.rs` records a
 parse failure, falls back per-priority to the deterministic mapping, and
 logs the error with the full stderr (truncated to 500 chars).
 
-The keyword scanner itself **never** returns an error — if no keyword is
+The first-word parser itself **never** returns an error — if no keyword is
 found, it returns `AdvanceGoal`. This is a conscious design choice: the
 agent is always given the option list, and `advance_goal` is the safe
 default for any real goal.
 
 ## Examples
 
-The prompt's `EXAMPLES` section contains routing examples. Unlike the old
-DECISION marker format, examples now show natural prose responses:
+The prompt's `EXAMPLES` section contains routing examples. Examples now show
+the action keyword as the first word:
 
 | Case | Input pattern | Example agent output |
 |---|---|---|
-| Reserved synthetic ID | `goal_id: "__memory__"` | `This is a memory consolidation trigger. consolidate_memory.` |
-| Ordinary goal slug | `goal_id: "ship-v1"` | `Standard goal with open PR. advance_goal to drive completion.` |
-| Activity polling | `goal_id: "__poll_activity__"` | `Reserved polling ID. poll_developer_activity.` |
-| Negative example | Real goal with "memory" in name | `Despite the name, this is a real goal. advance_goal.` |
+| Reserved synthetic ID | `goal_id: "__memory__"` | `consolidate_memory Memory hasn't been consolidated in 12 hours.` |
+| Ordinary goal slug | `goal_id: "ship-v1"` | `advance_goal Standard goal with open PR — drive to completion.` |
+| Activity polling | `goal_id: "__poll_activity__"` | `poll_developer_activity Reserved polling ID.` |
+| Negative example | Real goal with "memory" in name | `advance_goal Despite the name, this is a real goal.` |
 
 Negative examples remain critical: without them, models pattern-match on
 substring similarity between the goal name and the action keyword.
@@ -242,12 +208,12 @@ Semantic changes (adding a new action keyword) require a coordinated change:
 1. Add the variant to `DecideJudgment` in `src/ooda_brain/decide.rs`.
 2. Add the mapping from `DecideJudgment` → `ActionKind`.
 3. Add the keyword to `parse_action_from_text()` in
-   `src/ooda_brain/recipe_decide.rs`.
+   `src/ooda_brain/recipe_brain.rs`.
 4. Add the keyword to the `OPTIONS` section in the recipe prompt.
 5. Add an example to the `EXAMPLES` section.
-6. Add a test to `recipe_decide.rs` covering the new keyword.
+6. Add a test to `recipe_brain.rs` covering the new keyword.
 7. Update the variant table in
-   [text-parsing wire formats § decide](text-parsing-wire-formats.md#2c-decide-brain-recipe_deciders).
+   [text-parsing wire formats § decide](text-parsing-wire-formats.md#1a-decide-phase-recipe_brainrs).
 
 Cosmetic edits (rationale guidance, examples, ROLE phrasing) are safe to
 ship alone — and take effect without a rebuild.

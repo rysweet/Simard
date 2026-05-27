@@ -101,18 +101,27 @@ Parses stdout via `parse_lifecycle_from_text()`.
 These are public, pure functions. They take recipe stdout text and return
 typed judgments. No struct dependency — usable in tests and other contexts.
 
+All three parsers use the same **first-word extraction** pattern: split the
+output on whitespace, take the first token, match it case-insensitively
+against known variants, and default to a safe variant if unrecognized. No
+keyword scanning, no JSON extraction, no marker protocols. The recipe YAML
+prompts instruct the LLM to output the decision word as the first token.
+
 ### `parse_action_from_text`
 
 ```rust
 pub fn parse_action_from_text(text: &str) -> DecideJudgment
 ```
 
-Scans for any of 10 action keywords (`advance_goal`, `consolidate_memory`,
-`run_improvement`, `poll_developer_activity`, `extract_ideas`, `safe_update`,
-`research_query`, `run_gym_eval`, `build_skill`, `launch_session`) using
-case-insensitive ASCII matching. Returns the first match with the agent's
-prose as rationale (truncated to 500 chars). Defaults to `AdvanceGoal` if no
-keyword found.
+Extracts the first non-whitespace word from `text`, lowercases it, and
+matches against the 10 action keywords (`advance_goal`,
+`consolidate_memory`, `run_improvement`, `poll_developer_activity`,
+`extract_ideas`, `safe_update`, `research_query`, `run_gym_eval`,
+`build_skill`, `launch_session`). Returns the matching `DecideJudgment`
+variant. Defaults to `AdvanceGoal` if no match.
+
+The remaining text after the first word is captured as the rationale
+(truncated to 500 chars).
 
 ### `parse_orient_from_text`
 
@@ -124,11 +133,21 @@ pub fn parse_orient_from_text(
 ) -> OrientJudgment
 ```
 
-3-tier parse cascade:
+2-tier parse:
 
-1. JSON extraction — `{"adjusted_urgency": f64, ...}` via serde.
-2. Bare float — regex-free decimal scan.
-3. Deterministic floor — `base_urgency - 0.2 * failure_count`, clamped to 0.
+1. **First float** — regex-free decimal scan (`try_first_float`). Finds the
+   first substring matching `[0-9]+\.[0-9]+` or `[0-9]+` and parses it as
+   `f64`. This becomes `adjusted_urgency`.
+2. **Deterministic floor** — `base_urgency - 0.2 * failure_count`, clamped
+   to `[0.0, 1.0]`.
+
+The full text is used as `rationale`. `confidence` is always `1.0`.
+`OrientJudgment::validate()` enforces bounds after extraction.
+
+> **Removed in [#2144](https://github.com/rysweet/Simard/issues/2144):**
+> The JSON extraction tier (`try_json_extraction`) has been deleted. The
+> orient prompt now instructs the LLM to output a bare decimal as its first
+> token. No `serde_json::from_str` on LLM output.
 
 ### `parse_lifecycle_from_text`
 
@@ -136,13 +155,24 @@ pub fn parse_orient_from_text(
 pub fn parse_lifecycle_from_text(text: &str) -> EngineerLifecycleDecision
 ```
 
-2-tier parse:
+Extracts the first non-whitespace word from `text`, lowercases it, and
+matches against the 6 lifecycle variant names (`continue_skipping`,
+`reclaim_and_redispatch`, `deprioritize`, `open_tracking_issue`,
+`mark_goal_blocked`, `consider_self_update`). Returns the matching
+`EngineerLifecycleDecision` with default extra fields. Defaults to
+`ContinueSkipping` if no match.
 
-1. `DECISION:` marker on first non-blank line → extract variant + labeled fields.
-2. Keyword scan for 6 lifecycle variant names (`continue_skipping`,
-   `reclaim_and_redispatch`, `deprioritize`, `open_tracking_issue`,
-   `mark_goal_blocked`, `consider_self_update`).
-3. Default: `ContinueSkipping`.
+Extra fields use defaults:
+- `open_tracking_issue` → `title: "OODA stuck"`, `body: truncate(remaining_text, 500)`
+- `mark_goal_blocked` → `reason: truncate(remaining_text, 500)`
+- `reclaim_and_redispatch` → `redispatch_context: ""`
+- All variants: `rationale: truncate(remaining_text_after_first_word, 500)`
+
+> **Removed in [#2144](https://github.com/rysweet/Simard/issues/2144):**
+> The `DECISION:` marker parser, keyword scan fallback, labeled-line field
+> extraction, and `LIFECYCLE_KEYWORDS` constant have been deleted. The
+> lifecycle prompt now instructs the LLM to output the variant name as its
+> first word.
 
 ---
 
@@ -169,10 +199,21 @@ fn truncate(s: &str, max: usize) -> String
 
 Char-aware truncation. Appends `…` when truncated. Safe on multi-byte UTF-8.
 
-### `ascii_contains_ignore_case`
+### `try_first_float`
 
 ```rust
-fn ascii_contains_ignore_case(haystack: &[u8], needle: &[u8]) -> bool
+fn try_first_float(text: &str) -> Option<f64>
 ```
 
-Byte-level sliding window with `eq_ignore_ascii_case`. No regex, no allocations.
+Scans `text` for the first substring that looks like a decimal number
+(`[0-9]+\.[0-9]+` or bare `[0-9]+`). Returns the parsed `f64` or `None`.
+Used by `parse_orient_from_text()` to extract the urgency adjustment.
+
+> **Removed in [#2144](https://github.com/rysweet/Simard/issues/2144):**
+> `ascii_contains_ignore_case` (byte-level sliding window keyword scanner),
+> `try_json_extraction` (JSON `{…}` extraction + serde),
+> `parse_with_marker` / `extract_decision_marker` (DECISION: marker line parser),
+> `try_keyword_scan` (multi-keyword full-text scan),
+> `build_keyword_decision` (decision builder from keyword scan results),
+> and `LIFECYCLE_KEYWORDS` (static keyword array) have all been deleted.
+> All three parse functions now use trivial first-word/first-float extraction.
