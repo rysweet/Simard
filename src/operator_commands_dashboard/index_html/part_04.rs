@@ -279,6 +279,72 @@ pub(crate) const PART_04: &str = r#"            let fmt;
       }catch(e){document.getElementById('thinking-timeline').innerHTML='<span class="err">Failed to load: '+esc(e.toString())+'</span>';}
     }
 
+    /* --- OODA Cycle History (issue #2135) --- */
+    async function fetchOodaCycles(){
+      try{
+        const d=await apiFetch('/api/ooda-cycles');
+        const trendEl=document.getElementById('ooda-cycle-trend');
+        const histEl=document.getElementById('ooda-cycle-history');
+        const cycles=d.cycles||[];
+        const trend=d.duration_trend||{};
+        // Render trend summary
+        const trendColors={improving:'var(--green)',degrading:'var(--red)',stable:'var(--yellow)',insufficient_data:'#8b949e'};
+        const trendLabels={improving:'↓ Improving',degrading:'↑ Degrading',stable:'→ Stable',insufficient_data:'— Not enough data'};
+        const dir=trend.direction||'insufficient_data';
+        const trendColor=trendColors[dir]||'#8b949e';
+        let trendHtml=`<div style="display:flex;gap:1.5rem;align-items:center;flex-wrap:wrap">
+          <div><strong style="color:${trendColor}">${trendLabels[dir]||dir}</strong></div>
+          <div style="color:#8b949e;font-size:.85rem">${d.total_cycles||0} cycles recorded</div>`;
+        if(trend.recent_avg_secs!=null){
+          trendHtml+=`<div style="font-size:.85rem">Recent avg: <strong>${trend.recent_avg_secs}s</strong></div>
+            <div style="font-size:.85rem">Older avg: <strong>${trend.older_avg_secs}s</strong></div>
+            <div style="font-size:.85rem">Change: <strong style="color:${trendColor}">${trend.change_pct>0?'+':''}${trend.change_pct}%</strong></div>`;
+        }
+        if(trend.detail){trendHtml+=`<div style="color:#8b949e;font-size:.8rem">${esc(trend.detail)}</div>`;}
+        trendHtml+='</div>';
+        trendEl.innerHTML=trendHtml;
+        // Duration bar chart (inline SVG)
+        if(cycles.length){
+          const durations=cycles.map(c=>c.duration_secs||0).reverse();
+          const nums=cycles.map(c=>c.cycle_number).reverse();
+          const maxD=Math.max(...durations,1);
+          const barW=Math.max(6,Math.min(24,Math.floor(600/durations.length)));
+          const chartH=80;
+          const borderClr='var(--border)';
+          const bars=durations.map((d,i)=>{
+            const h=Math.max(2,(d/maxD)*chartH);
+            const x=i*(barW+2);
+            const color=d===0?borderClr:'var(--accent)';
+            return `<rect x="${x}" y="${chartH-h}" width="${barW}" height="${h}" fill="${color}" rx="1"><title>Cycle ${nums[i]}: ${d}s</title></rect>`;
+          }).join('');
+          const svgW=durations.length*(barW+2);
+          trendEl.innerHTML+=`<div style="margin-top:.5rem;overflow-x:auto"><svg width="${svgW}" height="${chartH+16}" style="display:block"><g>${bars}</g><line x1="0" y1="${chartH}" x2="${svgW}" y2="${chartH}" stroke="${borderClr}" stroke-width="1"/></svg></div>`;
+        }
+        // History table
+        if(!cycles.length){histEl.innerHTML='<span style="color:#8b949e">No cycle history available. Run the agent daemon to generate cycle data.</span>';return;}
+        histEl.innerHTML=`<div style="overflow-x:auto"><table class="proc-table">
+          <tr><th>#</th><th>Phase</th><th>Duration</th><th>Actions</th><th>Summary</th><th>Time</th></tr>
+          ${cycles.map(c=>{
+            const phaseColors={act:'var(--green)',decide:'#a371f7',orient:'var(--yellow)',observe:'var(--accent)',unknown:'#8b949e'};
+            const pColor=phaseColors[c.phase]||'#8b949e';
+            const dur=c.duration_secs!=null?c.duration_secs+'s':'—';
+            const summary=c.summary||'';
+            const shortSummary=summary.length>120?summary.substring(0,120)+'…':summary;
+            return `<tr>
+              <td style="font-weight:600;color:var(--accent)">${c.cycle_number}</td>
+              <td><span style="color:${pColor}">${esc(c.phase)}</span></td>
+              <td>${dur}</td>
+              <td>${c.action_count||0}</td>
+              <td style="font-size:.8rem;max-width:400px">${esc(shortSummary)}</td>
+              <td style="color:#8b949e;font-size:.8rem;white-space:nowrap">${c.timestamp?timeAgo(c.timestamp):'—'}</td>
+            </tr>`;}).join('')}
+        </table></div>`;
+      }catch(e){
+        const el=document.getElementById('ooda-cycle-history');
+        if(el) el.innerHTML='<span class="err">Failed to load cycle history: '+esc(e.toString())+'</span>';
+      }
+    }
+
     /* --- Brain Failures (issue #2043) --- */
     async function fetchBrainFailures(){
       try{

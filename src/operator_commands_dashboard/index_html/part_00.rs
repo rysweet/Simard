@@ -333,6 +333,11 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
   <div class="tab-content" id="tab-thinking">
     <h1 class="page-h1">Thinking</h1>
     <p class="page-lede">A live stream of the daemon's internal reasoning between actions, showing what it considered before deciding what to do next.</p>
+    <div class="card" style="margin-bottom:1rem">
+      <h2>Cycle History <button class="btn" onclick="fetchOodaCycles()">Refresh</button></h2>
+      <div id="ooda-cycle-trend" style="margin-bottom:.75rem"><span class="loading">Loading…</span></div>
+      <div id="ooda-cycle-history"><span class="loading">Loading…</span></div>
+    </div>
     <div class="card">
       <h2>Agent Internal Reasoning <button class="btn" onclick="fetchThinking()">Refresh</button></h2>
       <div id="thinking-timeline"><span class="loading">Loading…</span></div>
