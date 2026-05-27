@@ -162,15 +162,23 @@ impl TerminalReadView {
         print_text("Reflection summary", reflection_summary);
     }
 
+    /// Render readback header in the deterministic section order defined by
+    /// `Specs/ProductArchitecture.md` line 293: runtime header → handoff
+    /// session summary → adapter details.
     fn print_terminal_audit_header(&self) {
+        // --- Section 1: Runtime header ---
         print_text("Terminal handoff source", &self.handoff_source);
         print_text("Mode boundary", TERMINAL_MODE_BOUNDARY);
         print_text("Identity", &self.identity);
-        print_text("Selected base type", &self.selected_base_type);
-        print_text("Topology", &self.topology);
         print_display("State root", self.state_root.display());
+
+        // --- Section 2: Handoff session summary ---
         print_text("Session phase", &self.session_phase);
         print_text("Objective metadata", &self.objective_metadata);
+
+        // --- Section 3: Adapter details ---
+        print_text("Selected base type", &self.selected_base_type);
+        print_text("Topology", &self.topology);
         print_text("Adapter implementation", &self.adapter_implementation);
     }
 
