@@ -26,6 +26,7 @@ mod recipe_decide;
 mod recipe_engineer_lifecycle;
 mod recipe_orient;
 mod rustyclawd;
+mod sanitize;
 
 #[cfg(test)]
 mod decide_tests;

@@ -77,6 +77,7 @@ nav:
     - Operator Read State-Root Contract: reference/operator-read-state-root-contract.md
     - Bridge Wire Protocol: reference/bridge-wire-protocol.md
     - Dashboard E2E Tests: reference/dashboard-e2e-tests.md
+    - Recipe Context Var Sanitization: reference/recipe-context-var-sanitization.md
     # Hidden from nav until issue #1590 implementation lands:
     #   - reference/cognitive-memory-bridge-helpers.md
     #   - reference/goal-board-api.md
