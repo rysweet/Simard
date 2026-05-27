@@ -255,14 +255,20 @@ pub fn summarize_cycle(cycle: &ImprovementCycle) -> String {
     lines.join("\n")
 }
 
-/// Apply improvement proposals autonomously via the plan+review pipeline.
+/// Apply improvement proposals, gated by operator approval policy.
 ///
 /// Delegates to [`crate::self_improve_executor::run_autonomous_improvement`].
-/// Each proposal is planned, executed, reviewed, and committed or rolled back.
+/// Per spec lines 695/700, the `policy` parameter controls whether proposals
+/// are executed autonomously or blocked pending operator approval. The default
+/// policy ([`ApprovalPolicy::RequireOperatorApproval`]) blocks all autonomous
+/// execution.
 pub fn apply_improvements(
     proposals: &[String],
     workspace: &Path,
     inspection: &RepoInspection,
+    policy: &crate::self_improve_executor::ApprovalPolicy,
 ) -> Vec<ApplyResult> {
-    crate::self_improve_executor::run_autonomous_improvement(proposals, workspace, inspection)
+    crate::self_improve_executor::run_autonomous_improvement(
+        proposals, workspace, inspection, policy,
+    )
 }

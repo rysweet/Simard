@@ -2,6 +2,38 @@
 
 use crate::review_pipeline::{ReviewFinding, Severity};
 
+/// Controls whether autonomous improvement execution is permitted.
+///
+/// Per spec line 695 ("No silent self-modification in production paths") and
+/// line 700 ("The shipped slice is explicit review artifact generation plus
+/// operator-driven improvement curation"), the default policy requires
+/// operator approval before any code mutation.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum ApprovalPolicy {
+    /// Operator must explicitly approve each improvement before application.
+    /// This is the default and spec-required behavior for v1.
+    #[default]
+    RequireOperatorApproval,
+    /// Improvements may be applied autonomously, but every application is
+    /// logged with the given justification for audit trail purposes.
+    /// Use only in controlled offline/sandbox environments.
+    AutoApproveWithAuditTrail {
+        /// Why autonomous execution was authorized (e.g. "offline sandbox run").
+        justification: String,
+    },
+}
+
+impl std::fmt::Display for ApprovalPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RequireOperatorApproval => f.write_str("require-operator-approval"),
+            Self::AutoApproveWithAuditTrail { justification } => {
+                write!(f, "auto-approve (justification: {justification})")
+            }
+        }
+    }
+}
+
 /// A planned improvement patch ready for execution and review.
 #[derive(Clone, Debug)]
 pub struct ImprovementPatch {
@@ -29,6 +61,13 @@ pub enum ApplyResult {
         reason: String,
         findings: Vec<ReviewFinding>,
     },
+    /// The improvement requires operator approval before it can be applied.
+    /// Per spec lines 695/700, autonomous execution is blocked until the
+    /// operator explicitly approves or a policy override is in effect.
+    ApprovalRequired {
+        /// The proposal description that needs approval.
+        proposal: String,
+    },
 }
 
 impl ApplyResult {
@@ -43,7 +82,7 @@ impl ApplyResult {
             Self::Applied { findings }
             | Self::ReviewBlocked { findings }
             | Self::CommitFailed { findings, .. } => findings,
-            Self::PlanFailed { .. } => return false,
+            Self::PlanFailed { .. } | Self::ApprovalRequired { .. } => return false,
         };
         findings.iter().any(|f| f.severity == Severity::Critical)
     }
@@ -54,7 +93,7 @@ impl ApplyResult {
             Self::Applied { findings }
             | Self::ReviewBlocked { findings }
             | Self::CommitFailed { findings, .. } => findings,
-            Self::PlanFailed { .. } => &[],
+            Self::PlanFailed { .. } | Self::ApprovalRequired { .. } => &[],
         }
     }
 }
@@ -79,6 +118,9 @@ impl std::fmt::Display for ApplyResult {
                 let n = findings.len();
                 let noun = if n == 1 { "finding" } else { "findings" };
                 write!(f, "commit-failed: {reason} ({n} {noun})")
+            }
+            Self::ApprovalRequired { proposal } => {
+                write!(f, "approval-required: {proposal}")
             }
         }
     }
