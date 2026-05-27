@@ -210,7 +210,7 @@ test.describe('Dashboard Overview - live activity surfaces @structural', () => {
     await expect(overview.recentActionsList).toBeVisible();
     const text = await overview.recentActionsList.textContent();
     expect(text).toContain('Fixed bug in parser');
-    expect(text).toContain('edit');
+    expect(text).toContain('Edit');
     expect(text).toContain('#42');
   });
 
