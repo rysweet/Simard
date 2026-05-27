@@ -20,6 +20,7 @@ use std::process::Command;
 use serde::Deserialize;
 
 use crate::error::{SimardError, SimardResult};
+use crate::runtime_config::RuntimeConfig;
 
 const ADAPTER_TAG: &str = "disk-health-check";
 const RECIPE_FILENAME: &str = "disk-health-check.yaml";
@@ -105,8 +106,11 @@ pub fn run_disk_health_check(
             ),
         })?;
 
+    let agent_binary = RuntimeConfig::load()?.llm_provider.agent_binary_value();
+
     let output = Command::new("recipe-runner-rs")
         .arg(recipe_path.as_os_str())
+        .env("AMPLIHACK_AGENT_BINARY", agent_binary)
         .arg("-c")
         .arg(format!("state_root={}", state_root.display()))
         .output()

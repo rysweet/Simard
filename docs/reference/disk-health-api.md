@@ -276,6 +276,7 @@ All errors surface as `SimardError::AdapterInvocationFailed`:
 
 | Scenario                         | `base_type`          | `reason`                                   |
 | -------------------------------- | -------------------- | ------------------------------------------ |
+| Runtime config unavailable       | `"disk-health"`      | `"missing required config: SIMARD_LLM_PROVIDER ..."` |
 | Recipe YAML not found            | `"disk-health"`      | `"recipe not found at <path>"`             |
 | `recipe-runner-rs` not on PATH   | `"disk-health"`      | `"recipe-runner-rs not found"`             |
 | Subprocess non-zero exit         | `"disk-health"`      | `"recipe exited with status <code>: <stderr>"` |
@@ -289,6 +290,14 @@ disk health check never crashes the daemon.
 | -------------------- | --------------------------------------------------------- | ------------- |
 | `SIMARD_STATE_ROOT`  | Root for all cleanup targets                              | `~/.simard/`  |
 | `CARGO_TARGET_DIR`   | If set, shared target is at this path instead of default  | (not set)     |
+
+`run_disk_health_check` also reads `RuntimeConfig` (env var
+`SIMARD_LLM_PROVIDER` → `~/.simard/config.toml`) to set
+`AMPLIHACK_AGENT_BINARY` on the `recipe-runner-rs` subprocess. If neither
+source provides the LLM provider, the function returns
+`SimardError::MissingRequiredConfig`. See
+[subprocess environment propagation](./subprocess-env-propagation.md) for
+the full contract.
 
 The cleanup thresholds (80%, 24h, 5 backups) are defined in the recipe YAML,
 not in Rust. To change them, edit `disk-health-check.yaml` — no recompile

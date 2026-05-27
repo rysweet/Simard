@@ -71,14 +71,17 @@ fn resolve_recipe_path(repo_root: &std::path::Path) -> Option<PathBuf> {
 /// Recipe-runner-backed engineer lifecycle brain.
 pub struct RecipeEngineerLifecycleBrain {
     recipe_path: PathBuf,
+    agent_binary: &'static str,
 }
 
 impl RecipeEngineerLifecycleBrain {
     /// Construct if recipe file and recipe-runner-rs binary are both available.
     pub fn new(repo_root: &std::path::Path) -> Option<Self> {
         let recipe_path = resolve_recipe_path(repo_root)?;
+        let agent_binary = crate::session_builder::LlmProvider::resolve_agent_binary()?;
         if Command::new("recipe-runner-rs")
             .arg("--version")
+            .env("AMPLIHACK_AGENT_BINARY", agent_binary)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
@@ -86,7 +89,10 @@ impl RecipeEngineerLifecycleBrain {
         {
             return None;
         }
-        Some(Self { recipe_path })
+        Some(Self {
+            recipe_path,
+            agent_binary,
+        })
     }
 }
 
@@ -107,6 +113,7 @@ impl OodaBrain for RecipeEngineerLifecycleBrain {
 
         let output = Command::new("recipe-runner-rs")
             .arg(self.recipe_path.as_os_str())
+            .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
             .arg("-c")
             .arg(format!(
                 "goal_id={}",
@@ -927,6 +934,7 @@ mod tests {
     fn decide_lifecycle_with_missing_binary_returns_error() {
         let brain = RecipeEngineerLifecycleBrain {
             recipe_path: PathBuf::from("/nonexistent/recipe.yaml"),
+            agent_binary: "copilot",
         };
         let ctx = EngineerLifecycleCtx {
             goal_id: "test-goal".into(),

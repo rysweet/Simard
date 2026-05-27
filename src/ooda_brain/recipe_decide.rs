@@ -51,14 +51,17 @@ fn resolve_recipe_path(repo_root: &std::path::Path) -> Option<PathBuf> {
 /// Recipe-runner-backed decide brain.
 pub struct RecipeDecideBrain {
     recipe_path: PathBuf,
+    agent_binary: &'static str,
 }
 
 impl RecipeDecideBrain {
     /// Construct if recipe file and recipe-runner-rs binary are both available.
     pub fn new(repo_root: &std::path::Path) -> Option<Self> {
         let recipe_path = resolve_recipe_path(repo_root)?;
+        let agent_binary = crate::session_builder::LlmProvider::resolve_agent_binary()?;
         if Command::new("recipe-runner-rs")
             .arg("--version")
+            .env("AMPLIHACK_AGENT_BINARY", agent_binary)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
@@ -66,7 +69,10 @@ impl RecipeDecideBrain {
         {
             return None;
         }
-        Some(Self { recipe_path })
+        Some(Self {
+            recipe_path,
+            agent_binary,
+        })
     }
 }
 
@@ -74,6 +80,7 @@ impl OodaDecideBrain for RecipeDecideBrain {
     fn judge_decision(&self, ctx: &DecideContext) -> SimardResult<DecideJudgment> {
         let output = Command::new("recipe-runner-rs")
             .arg(self.recipe_path.as_os_str())
+            .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
             .arg("-c")
             .arg(format!(
                 "goal_id={}",
@@ -445,6 +452,7 @@ mod tests {
         // Construct with a fake path to bypass the recipe file check
         let brain = RecipeDecideBrain {
             recipe_path: PathBuf::from("/nonexistent/recipe.yaml"),
+            agent_binary: "copilot",
         };
         let ctx = DecideContext {
             goal_id: "test-goal".to_string(),
