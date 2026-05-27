@@ -1,19 +1,16 @@
 # ooda-decide.yaml — Recipe-runner recipe for the OODA Decide brain.
 #
-# Replaces the direct LLM call + DECISION: marker parsing in
-# RustyClawdDecideBrain (issue #2111). The prompt content is adapted from
-# prompt_assets/simard/ooda_decide.md (single-brace {var} → double-brace
-# {{var}} for recipe-runner substitution, OUTPUT_FORMAT section removed).
+# Replaces the direct LLM call + keyword scanning in
+# RustyClawdDecideBrain (issue #2111). Parsers eliminated in issue #2144.
 #
-# The agent returns natural-language prose containing one of the 10 known
-# action keywords; the Rust shim (recipe_decide.rs) scans for the keyword
-# rather than demanding a structured format.
+# The agent outputs the action keyword as the FIRST WORD of its response.
+# The Rust shim (recipe_brain.rs) extracts the first whitespace-delimited
+# token and matches it case-insensitively to the 10 known action kinds.
 #
 # Context vars (passed via -c):
 #   goal_id, urgency, reason
 #
-# Output: agent stdout — prose containing an action keyword
-#   (advance_goal, consolidate_memory, run_improvement, etc.)
+# Output: agent stdout — action keyword as first word, followed by rationale
 
 name: "ooda-decide"
 description: "OODA Decide brain — routes priorities to action kinds"
@@ -197,7 +194,8 @@ steps:
 
       ## Instructions
 
-      Analyze the input priority and state which action kind is appropriate.
-      Mention the action keyword (e.g. `advance_goal`, `consolidate_memory`) in
-      your response. Provide a brief rationale citing the goal_id or reason.
+      Output the action keyword as the very first word of your response
+      (e.g. `advance_goal`, `consolidate_memory`). Follow with a brief
+      rationale citing the goal_id or reason. The daemon reads only the
+      first whitespace-delimited token; everything after is rationale.
     output: "decide_result"
