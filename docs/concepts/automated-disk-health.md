@@ -6,7 +6,6 @@ review_schedule: as-needed
 owner: simard
 doc_type: concept
 related:
-  - ../reference/disk-health-api.md
   - ../howto/configure-disk-health-check.md
   - ../reference/engineer-worktree-isolation.md
   - ./goal-board-persistence.md
@@ -217,7 +216,6 @@ string splitting. No JSON, no serde deserialization of recipe output.
 
 ## Related
 
-- [Disk health API reference](../reference/disk-health-api.md) — full API surface
 - [Configure disk health check (how-to)](../howto/configure-disk-health-check.md) — operator guide
 - [Per-Engineer Worktree Isolation](../reference/engineer-worktree-isolation.md) — worktree lifecycle
 - [Daemon mode](../daemon-mode.md) — OODA cycle overview

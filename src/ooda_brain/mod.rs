@@ -22,9 +22,7 @@ mod judgment_record;
 mod orient;
 pub mod parse_failure;
 pub mod prompt_store;
-mod recipe_decide;
-mod recipe_engineer_lifecycle;
-mod recipe_orient;
+mod recipe_brain;
 mod rustyclawd;
 mod sanitize;
 
@@ -53,9 +51,11 @@ pub use orient::{
     build_rustyclawd_orient_brain,
 };
 pub use parse_failure::ParseFailureRecord;
-pub use recipe_decide::RecipeDecideBrain;
-pub use recipe_engineer_lifecycle::RecipeEngineerLifecycleBrain;
-pub use recipe_orient::RecipeOrientBrain;
+pub use recipe_brain::RecipeBrain;
+/// Backward-compatible type aliases (issue #2132).
+pub type RecipeDecideBrain = RecipeBrain;
+pub type RecipeEngineerLifecycleBrain = RecipeBrain;
+pub type RecipeOrientBrain = RecipeBrain;
 pub use rustyclawd::{
     LlmSubmitter, PROMPT_NAME as ACT_PROMPT_NAME, RustyClawdBrain, SessionLlmSubmitter,
     build_rustyclawd_brain,

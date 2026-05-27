@@ -9,7 +9,6 @@ related:
   - ../reference/text-parsing-wire-formats.md
   - ../reference/ooda-brain-api.md
   - ../reference/ooda-brain-decision-protocol.md
-  - ../reference/disk-health-api.md
   - ../reference/progress-evidence-api.md
   - ../howto/edit-the-ooda-brain-prompt.md
   - ../howto/diagnose-decide-orient-parse-failures.md
@@ -297,7 +296,6 @@ Removing the JSON extraction patterns is a net security improvement:
 - [Reference: text-parsing wire formats](../reference/text-parsing-wire-formats.md) — full grammar for each protocol
 - [Reference: OODA Brain API](../reference/ooda-brain-api.md) — trait and type definitions
 - [Reference: OODA Brain Decision Protocol](../reference/ooda-brain-decision-protocol.md) — DECISION marker for engineer lifecycle
-- [Reference: Disk Health API](../reference/disk-health-api.md) — key=value disk health contract
 - [Reference: Progress-evidence API](../reference/progress-evidence-api.md) — keyword verdict for progress checking
 - [How-to: edit the OODA brain prompt](../howto/edit-the-ooda-brain-prompt.md) — prompt editing after the text migration
 - [How-to: diagnose decide/orient parse failures](../howto/diagnose-decide-orient-parse-failures.md) — operator runbook

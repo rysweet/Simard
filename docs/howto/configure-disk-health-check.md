@@ -6,7 +6,6 @@ review_schedule: as-needed
 owner: simard
 doc_type: howto
 related:
-  - ../reference/disk-health-api.md
   - ../concepts/automated-disk-health.md
   - ./inspect-and-clean-engineer-worktrees.md
   - ./reclaim-disk-space-and-run-low-space-rust-builds.md
@@ -259,7 +258,6 @@ rm -rf ~/.simard/cargo-target/* ~/.simard/shared-target/*
 
 ## Related
 
-- [Disk health API reference](../reference/disk-health-api.md) — full API, text contract, error variants
 - [Automated disk health (concept)](../concepts/automated-disk-health.md) — design rationale
 - [Inspect and clean engineer worktrees](./inspect-and-clean-engineer-worktrees.md) — manual worktree operations
 - [Reclaim disk space and run low-space Rust builds](./reclaim-disk-space-and-run-low-space-rust-builds.md) — build artifact scripts
