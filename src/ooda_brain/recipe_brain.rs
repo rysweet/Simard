@@ -433,11 +433,7 @@ fn default_continue_skipping() -> EngineerLifecycleDecision {
 }
 
 // ---------------------------------------------------------------------------
-// Tests — TDD: define the contract FIRST, implement SECOND.
-//
-// These tests specify the behavior of the unified RecipeBrain struct.
-// At the TDD stage, all tests FAIL (todo! panics). After implementation,
-// all tests pass.
+// Tests — behavioral contracts for the unified RecipeBrain struct.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
