@@ -20,6 +20,7 @@ use std::process::Command;
 use serde::Deserialize;
 
 use crate::error::{SimardError, SimardResult};
+use crate::runtime_config::RuntimeConfig;
 
 const ADAPTER_TAG: &str = "disk-health-check";
 const RECIPE_FILENAME: &str = "disk-health-check.yaml";
@@ -105,8 +106,11 @@ pub fn run_disk_health_check(
             ),
         })?;
 
+    let agent_binary = RuntimeConfig::load()?.llm_provider.agent_binary_value();
+
     let output = Command::new("recipe-runner-rs")
         .arg(recipe_path.as_os_str())
+        .env("AMPLIHACK_AGENT_BINARY", agent_binary)
         .arg("-c")
         .arg(format!("state_root={}", state_root.display()))
         .output()
@@ -428,7 +432,11 @@ ACTION: cleaned shared-target dir
         std::fs::create_dir_all(&recipe_dir).unwrap();
         std::fs::write(recipe_dir.join(RECIPE_FILENAME), "name: test").unwrap();
 
+        // Ensure RuntimeConfig::load() succeeds (CI has no config.toml).
+        // SAFETY: test-only, single-threaded access to env var.
+        unsafe { std::env::set_var("SIMARD_LLM_PROVIDER", "copilot") };
         let result = run_disk_health_check(tmp.path(), tmp.path());
+        unsafe { std::env::remove_var("SIMARD_LLM_PROVIDER") };
         assert!(result.is_err());
         let err = result.unwrap_err();
         match &err {

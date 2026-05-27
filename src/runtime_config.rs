@@ -127,10 +127,7 @@ impl RuntimeConfig {
 
     /// Serialize to TOML for writing to disk.
     pub fn to_toml_string(&self) -> String {
-        let provider_str = match self.llm_provider {
-            LlmProvider::Copilot => "copilot",
-            LlmProvider::RustyClawd => "rustyclawd",
-        };
+        let provider_str = self.llm_provider.agent_binary_value();
         format!(
             "# Simard runtime configuration\n\
              # Loaded by every Simard process at startup. Subprocesses\n\
@@ -349,5 +346,33 @@ mod tests {
         let body = "# top comment\n\n# llm_provider = \"rustyclawd\"\nllm_provider = \"copilot\"\n";
         let cfg = RuntimeConfig::from_toml_str(body).unwrap();
         assert_eq!(cfg.llm_provider, LlmProvider::Copilot);
+    }
+
+    // ------------------------------------------------------------------
+    // agent_binary_value mapping (issue #2132)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn agent_binary_value_matches_toml_string_for_copilot() {
+        assert_eq!(LlmProvider::Copilot.agent_binary_value(), "copilot");
+    }
+
+    #[test]
+    fn agent_binary_value_matches_toml_string_for_rustyclawd() {
+        assert_eq!(LlmProvider::RustyClawd.agent_binary_value(), "rustyclawd");
+    }
+
+    #[test]
+    fn config_load_provides_usable_agent_binary_value() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join(CONFIG_FILE_NAME),
+            "llm_provider = \"copilot\"\n",
+        )
+        .unwrap();
+        with_clean_env(|| {
+            let cfg = RuntimeConfig::load_from(tmp.path()).unwrap();
+            assert_eq!(cfg.llm_provider.agent_binary_value(), "copilot");
+        });
     }
 }
