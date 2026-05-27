@@ -1,5 +1,6 @@
-use super::history::ImprovementHistory;
+use super::history::{CURRENT_SCHEMA_VERSION, HistoryMeta, ImprovementHistory};
 use super::types::*;
+use crate::error::SimardError;
 use crate::gym_bridge::ScoreDimensions;
 use crate::gym_scoring::GymSuiteScore;
 
@@ -384,4 +385,137 @@ fn last_n_cycles_empty_history() {
     let (_dir, hist) = temp_history();
     let result = hist.last_n_cycles(5).unwrap();
     assert!(result.is_empty());
+}
+
+// ---- Sidecar envelope tests (issue #2126) ----
+
+#[test]
+fn sidecar_legacy_upgrade_no_sidecar() {
+    // When no sidecar exists on disk, load() auto-creates it (legacy v0 upgrade).
+    let dir = tempfile::TempDir::new().unwrap();
+    let hist = ImprovementHistory::open(dir.path()).unwrap();
+
+    // Sidecar should not exist yet (open doesn't touch it).
+    assert!(
+        !hist.meta_path().exists(),
+        "sidecar should not exist before first load/append"
+    );
+
+    // load() auto-creates the sidecar.
+    let cycles = hist.load().unwrap();
+    assert!(cycles.is_empty());
+    assert!(
+        hist.meta_path().exists(),
+        "sidecar should be auto-created on load"
+    );
+
+    let raw = std::fs::read_to_string(hist.meta_path()).unwrap();
+    let meta: HistoryMeta = serde_json::from_str(&raw).unwrap();
+    assert_eq!(meta.schema_version, CURRENT_SCHEMA_VERSION);
+}
+
+#[test]
+fn sidecar_matching_version_loads_normally() {
+    // When the sidecar version matches CURRENT_SCHEMA_VERSION, load works.
+    let dir = tempfile::TempDir::new().unwrap();
+    let hist = ImprovementHistory::open(dir.path()).unwrap();
+
+    // Write a cycle (which creates the sidecar).
+    let cycle = make_cycle(
+        0.7,
+        ImprovementDecision::Commit {
+            net_improvement: 0.05,
+        },
+        vec![],
+    );
+    hist.append(&cycle).unwrap();
+    assert!(hist.meta_path().exists());
+
+    // Verify we can load with the sidecar present.
+    let loaded = hist.load().unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert!((loaded[0].baseline.overall - 0.7).abs() < 1e-9);
+
+    // Verify sidecar content.
+    let raw = std::fs::read_to_string(hist.meta_path()).unwrap();
+    let meta: HistoryMeta = serde_json::from_str(&raw).unwrap();
+    assert_eq!(meta.schema_version, CURRENT_SCHEMA_VERSION);
+}
+
+#[test]
+fn sidecar_future_version_triggers_schema_too_new() {
+    // When the sidecar carries a version > CURRENT_SCHEMA_VERSION,
+    // load() must return SchemaTooNew.
+    let dir = tempfile::TempDir::new().unwrap();
+    let hist = ImprovementHistory::open(dir.path()).unwrap();
+
+    // Write a cycle first so the JSONL file exists.
+    let cycle = make_cycle(
+        0.6,
+        ImprovementDecision::Commit {
+            net_improvement: 0.02,
+        },
+        vec![],
+    );
+    hist.append(&cycle).unwrap();
+
+    // Overwrite the sidecar with a future version.
+    let future_meta = HistoryMeta {
+        schema_version: CURRENT_SCHEMA_VERSION + 99,
+    };
+    std::fs::write(
+        hist.meta_path(),
+        serde_json::to_string(&future_meta).unwrap(),
+    )
+    .unwrap();
+
+    // load() should fail with SchemaTooNew.
+    let err = hist.load().unwrap_err();
+    match &err {
+        SimardError::SchemaTooNew {
+            store,
+            found_version,
+            max_supported,
+            ..
+        } => {
+            assert_eq!(store, "improvement_history");
+            assert_eq!(*found_version, CURRENT_SCHEMA_VERSION + 99);
+            assert_eq!(*max_supported, CURRENT_SCHEMA_VERSION);
+        }
+        other => panic!("expected SchemaTooNew, got: {other:?}"),
+    }
+}
+
+#[test]
+fn append_creates_sidecar_if_missing() {
+    // append() should also create the sidecar, not just load().
+    let dir = tempfile::TempDir::new().unwrap();
+    let hist = ImprovementHistory::open(dir.path()).unwrap();
+    assert!(!hist.meta_path().exists());
+
+    let cycle = make_cycle(
+        0.8,
+        ImprovementDecision::Commit {
+            net_improvement: 0.1,
+        },
+        vec![],
+    );
+    hist.append(&cycle).unwrap();
+    assert!(hist.meta_path().exists());
+
+    let raw = std::fs::read_to_string(hist.meta_path()).unwrap();
+    let meta: HistoryMeta = serde_json::from_str(&raw).unwrap();
+    assert_eq!(meta.schema_version, CURRENT_SCHEMA_VERSION);
+}
+
+#[test]
+fn open_file_derives_sidecar_path() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let jsonl = dir.path().join("improvement_history.jsonl");
+    let hist = ImprovementHistory::open_file(jsonl);
+    assert!(
+        hist.meta_path().ends_with("improvement_history.meta.json"),
+        "meta_path should be derived from jsonl: {:?}",
+        hist.meta_path()
+    );
 }

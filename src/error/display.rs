@@ -299,6 +299,20 @@ impl Display for SimardError {
                     changed_files.len()
                 )
             }
+            Self::SchemaTooNew {
+                store,
+                found_version,
+                max_supported,
+                path,
+            } => {
+                write!(
+                    f,
+                    "store '{store}' at '{}' has schema version {found_version} \
+                     but this binary only supports up to {max_supported} — \
+                     upgrade Simard before loading this data",
+                    path.display()
+                )
+            }
         }
     }
 }
