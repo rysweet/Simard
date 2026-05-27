@@ -49,7 +49,8 @@ modules within `ooda_brain` via `use super::sanitize::sanitize_context_var`.
 
 1. Replace every `\n` (LF) and `\r` (CR) with a single ASCII space.
 2. Collapse consecutive whitespace by splitting on whitespace boundaries and
-   rejoining with a single space (`split_whitespace().collect::<Vec<_>>().join(" ")`).
+   rejoining with a single space (via `split_whitespace()`, pushing directly
+   into a pre-sized `String` to avoid an intermediate `Vec` allocation).
 3. Truncate to `max_len` on a UTF-8 char boundary. If truncation occurs,
    append `"…"` (U+2026 HORIZONTAL ELLIPSIS) to signal data loss.
 
