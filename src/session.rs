@@ -75,6 +75,7 @@ pub enum SessionPhase {
     Planning,
     Execution,
     Reflection,
+    Summarize,
     Persistence,
     Complete,
     Failed,
@@ -88,6 +89,7 @@ impl Display for SessionPhase {
             Self::Planning => "planning",
             Self::Execution => "execution",
             Self::Reflection => "reflection",
+            Self::Summarize => "summarize",
             Self::Persistence => "persistence",
             Self::Complete => "complete",
             Self::Failed => "failed",
@@ -104,6 +106,10 @@ impl SessionPhase {
                 | (Self::Preparation, Self::Planning)
                 | (Self::Planning, Self::Execution)
                 | (Self::Execution, Self::Reflection)
+                | (Self::Reflection, Self::Summarize)
+                | (Self::Summarize, Self::Persistence)
+                // Legacy path: allow direct Reflection→Persistence for callers
+                // that have not yet adopted the Summarize phase.
                 | (Self::Reflection, Self::Persistence)
                 | (Self::Persistence, Self::Complete)
                 | (_, Self::Failed)
@@ -249,6 +255,10 @@ mod tests {
         assert!(SessionPhase::Preparation.can_transition_to(SessionPhase::Planning));
         assert!(SessionPhase::Planning.can_transition_to(SessionPhase::Execution));
         assert!(SessionPhase::Execution.can_transition_to(SessionPhase::Reflection));
+        assert!(SessionPhase::Reflection.can_transition_to(SessionPhase::Summarize));
+        assert!(SessionPhase::Summarize.can_transition_to(SessionPhase::Persistence));
+        // Legacy path: Reflection→Persistence still valid for callers that
+        // have not yet adopted the Summarize phase.
         assert!(SessionPhase::Reflection.can_transition_to(SessionPhase::Persistence));
         assert!(SessionPhase::Persistence.can_transition_to(SessionPhase::Complete));
     }
@@ -261,6 +271,7 @@ mod tests {
             SessionPhase::Planning,
             SessionPhase::Execution,
             SessionPhase::Reflection,
+            SessionPhase::Summarize,
             SessionPhase::Persistence,
             SessionPhase::Complete,
         ];
@@ -277,13 +288,26 @@ mod tests {
         assert!(!SessionPhase::Preparation.can_transition_to(SessionPhase::Intake));
         assert!(!SessionPhase::Complete.can_transition_to(SessionPhase::Execution));
         assert!(!SessionPhase::Planning.can_transition_to(SessionPhase::Preparation));
+        assert!(!SessionPhase::Summarize.can_transition_to(SessionPhase::Reflection));
     }
 
     #[test]
     fn session_phase_display_renders_lowercase() {
         assert_eq!(SessionPhase::Intake.to_string(), "intake");
+        assert_eq!(SessionPhase::Summarize.to_string(), "summarize");
         assert_eq!(SessionPhase::Complete.to_string(), "complete");
         assert_eq!(SessionPhase::Failed.to_string(), "failed");
+    }
+
+    #[test]
+    fn summarize_phase_transitions() {
+        // Reflection → Summarize → Persistence is the new canonical path
+        assert!(SessionPhase::Reflection.can_transition_to(SessionPhase::Summarize));
+        assert!(SessionPhase::Summarize.can_transition_to(SessionPhase::Persistence));
+        // Legacy path still works
+        assert!(SessionPhase::Reflection.can_transition_to(SessionPhase::Persistence));
+        // Summarize cannot skip to Complete
+        assert!(!SessionPhase::Summarize.can_transition_to(SessionPhase::Complete));
     }
 
     // --- SessionRecord ---

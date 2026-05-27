@@ -43,9 +43,9 @@ use execution::{parse_status_paths, run_command, trimmed_stdout, trimmed_stdout_
 
 // Re-export all public items so `crate::engineer_loop::X` still works.
 pub use types::{
-    AnalyzedAction, EngineerActionKind, EngineerLoopRun, ExecutedEngineerAction, PhaseOutcome,
-    PhaseTrace, RepoInspection, SelectedEngineerAction, SessionErrorReflection, VerificationReport,
-    analyze_objective,
+    AnalyzedAction, EngineerActionKind, EngineerLoopRun, ExecutedEngineerAction, ExecutionPlan,
+    PhaseOutcome, PhaseTrace, RepoInspection, SelectedEngineerAction, SessionErrorReflection,
+    SessionSummary, VerificationReport, analyze_objective,
 };
 
 // Phase-entry-point re-exports for the recipe-driven engineer loop (Phase 2 rebuild).
@@ -221,13 +221,22 @@ pub fn run_local_engineer_loop(
     };
 
     // --- SessionPhase::Planning ---
-    // Produce a bounded plan sized to the task.
+    // Produce a bounded plan sized to the task (spec step 3).
     session.advance(SessionPhase::Planning)?;
 
     let phase_start = Instant::now();
     let agent_prompt = agent_spawn::build_agent_prompt(objective, &inspection);
     phase_traces.push(PhaseTrace {
         name: "agent-prompt-build".to_string(),
+        duration: phase_start.elapsed(),
+        outcome: PhaseOutcome::Success,
+    });
+
+    // Form an auditable execution plan as a distinct orchestration primitive.
+    let phase_start = Instant::now();
+    let execution_plan = form_execution_plan(objective, &analyzed, &inspection);
+    phase_traces.push(PhaseTrace {
+        name: "plan".to_string(),
         duration: phase_start.elapsed(),
         outcome: PhaseOutcome::Success,
     });
@@ -341,6 +350,18 @@ pub fn run_local_engineer_loop(
         return Err(e);
     }
 
+    // --- SessionPhase::Summarize ---
+    // Produce a structured summary of results (spec step 6).
+    session.advance(SessionPhase::Summarize)?;
+
+    let phase_start = Instant::now();
+    let session_summary = summarize_results(objective, &action, &verification, &inspection);
+    phase_traces.push(PhaseTrace {
+        name: "summarize".to_string(),
+        duration: phase_start.elapsed(),
+        outcome: PhaseOutcome::Success,
+    });
+
     // --- SessionPhase::Persistence ---
     // Write session summary, memory updates, and benchmark records.
     session.advance(SessionPhase::Persistence)?;
@@ -392,13 +413,132 @@ pub fn run_local_engineer_loop(
         state_root,
         execution_scope: EXECUTION_SCOPE.to_string(),
         inspection,
+        plan: Some(execution_plan),
         action,
         verification,
+        summary: Some(session_summary),
         terminal_bridge_context,
         elapsed_duration: loop_start.elapsed(),
         phase_traces,
         session_record: Some(session),
     })
+}
+
+/// Form a structured execution plan from the objective and inspection data
+/// (spec step 3: "form a short execution plan"). The plan is a separable
+/// orchestration primitive that can be audited independently from execution.
+fn form_execution_plan(
+    objective: &str,
+    analyzed: &AnalyzedAction,
+    inspection: &RepoInspection,
+) -> ExecutionPlan {
+    let is_mutating = analyzed.is_mutating();
+
+    let steps = match analyzed {
+        AnalyzedAction::ReadOnlyScan => vec![
+            "Inspect repository state and gather context".to_string(),
+            "Analyze relevant files and code paths".to_string(),
+            "Report findings".to_string(),
+        ],
+        AnalyzedAction::StructuredTextReplace => vec![
+            "Identify target files for modification".to_string(),
+            "Apply structured text replacements".to_string(),
+            "Verify changes compile and pass checks".to_string(),
+            "Commit changes".to_string(),
+        ],
+        AnalyzedAction::CargoTest => vec![
+            "Run test suite".to_string(),
+            "Collect and report results".to_string(),
+        ],
+        AnalyzedAction::CreateFile => vec![
+            "Create new file with specified content".to_string(),
+            "Verify file was created correctly".to_string(),
+            "Commit changes".to_string(),
+        ],
+        AnalyzedAction::AppendToFile => vec![
+            "Append content to target file".to_string(),
+            "Verify modification".to_string(),
+            "Commit changes".to_string(),
+        ],
+        AnalyzedAction::RunShellCommand => vec![
+            "Execute shell command".to_string(),
+            "Capture and report output".to_string(),
+        ],
+        AnalyzedAction::GitCommit => vec![
+            "Stage changes".to_string(),
+            "Create commit with descriptive message".to_string(),
+        ],
+        AnalyzedAction::OpenIssue => vec![
+            "Compose issue title and body".to_string(),
+            "Create issue on repository".to_string(),
+        ],
+    };
+
+    let risk_level = if !is_mutating {
+        "low"
+    } else if inspection.worktree_dirty {
+        "high"
+    } else {
+        "medium"
+    }
+    .to_string();
+
+    ExecutionPlan {
+        objective: objective.to_string(),
+        steps,
+        expected_changed_files: inspection.changed_files.clone(),
+        risk_level,
+        is_mutating,
+    }
+}
+
+/// Produce a structured session summary from execution results
+/// (spec step 6: "summarize results"). The summary is a separable
+/// orchestration primitive that can be audited independently from persistence.
+fn summarize_results(
+    objective: &str,
+    action: &ExecutedEngineerAction,
+    verification: &VerificationReport,
+    inspection: &RepoInspection,
+) -> SessionSummary {
+    let outcome = if action.exit_code == 0 && verification.status != "failed" {
+        "success"
+    } else if action.exit_code == 0 {
+        "partial"
+    } else {
+        "failed"
+    }
+    .to_string();
+
+    let accomplishment = if action.stdout.len() > 200 {
+        format!("{}…", &action.stdout[..200])
+    } else if action.stdout.is_empty() {
+        format!("Completed objective: {objective}")
+    } else {
+        action.stdout.clone()
+    };
+
+    // Extract changed files: prefer the action's tracked changes, fall back
+    // to inspection's pre-existing dirty files.
+    let changed_files = if action.changed_files.is_empty() {
+        inspection.changed_files.clone()
+    } else {
+        action.changed_files.clone()
+    };
+
+    let mut key_decisions = Vec::new();
+    key_decisions.push(format!("Action type: {}", action.selected.label));
+    if !action.selected.rationale.is_empty() {
+        key_decisions.push(format!("Rationale: {}", action.selected.rationale));
+    }
+
+    SessionSummary {
+        objective: objective.to_string(),
+        outcome,
+        changed_files,
+        key_decisions,
+        accomplishment,
+    }
 }
 
 pub fn inspect_workspace(workspace_root: &Path, state_root: &Path) -> SimardResult<RepoInspection> {
