@@ -49,10 +49,6 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [Concept: truthful runtime metadata](./concepts/truthful-runtime-metadata.md) - Read the design rationale behind the stricter runtime contract.
 - [Concept: improvement context — denser execution evidence for the engineer loop](./concepts/improvement-context-execution-evidence-gap.md) - Captured improvement-curation context preserving the active "Capture denser execution evidence" goal and the observation that the legacy `simard_operator_probe` surface does not yet expose a terminal engineer-loop probe.
 - [Concept: automated disk health management](./concepts/automated-disk-health.md) - Design rationale for the per-cycle disk health check that prevents disk exhaustion (#2020).
-- [Disk health API reference](./reference/disk-health-api.md) - Full API surface for `simard::disk_health`, the recipe YAML contract, and daemon integration.
-- [How to configure the LLM provider](./howto/configure-llm-provider.md) - Set up `~/.simard/config.toml` so recipe-runner subprocesses use the correct agent binary (#2132).
-- [Concept: config-driven subprocess environment propagation](./concepts/config-driven-subprocess-env.md) - Design rationale for reading config.toml to set `AMPLIHACK_AGENT_BINARY` on subprocesses.
-- [Subprocess environment propagation API reference](./reference/subprocess-env-propagation.md) - `LlmProvider::agent_binary_value()` and the shim integration pattern.
 
 ## Canonical executable surface
 

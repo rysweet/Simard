@@ -9,7 +9,6 @@ related:
   - ../concepts/text-based-brain-protocol.md
   - ./ooda-brain-api.md
   - ./ooda-brain-decision-protocol.md
-  - ./disk-health-api.md
   - ./progress-evidence-api.md
 ---
 
@@ -520,5 +519,4 @@ for the full editing guide.
 - [Concept: text-based brain protocol](../concepts/text-based-brain-protocol.md) — design rationale
 - [Reference: OODA Brain API](./ooda-brain-api.md) — trait and type definitions
 - [Reference: OODA Brain Decision Protocol](./ooda-brain-decision-protocol.md) — engineer lifecycle specifics
-- [Reference: Disk Health API](./disk-health-api.md) — disk health module
 - [Reference: Progress-evidence API](./progress-evidence-api.md) — progress checking module

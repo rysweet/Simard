@@ -203,7 +203,10 @@ fn default_state_root() -> PathBuf {
     if let Ok(v) = std::env::var("SIMARD_STATE_ROOT") {
         return PathBuf::from(v);
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
+    let home = std::env::var("HOME").unwrap_or_else(|_| {
+        tracing::warn!("HOME env var not set, falling back to hardcoded /home/azureuser");
+        "/home/azureuser".to_string()
+    });
     PathBuf::from(home).join(".simard")
 }
 

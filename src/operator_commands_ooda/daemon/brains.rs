@@ -75,10 +75,14 @@ pub(super) fn build_act_brain(
     repo_root: &Path,
 ) -> Arc<dyn crate::ooda_brain::OodaBrain> {
     // Try recipe brain first (recipe-runner-rs backed)
-    if let Some(b) = crate::ooda_brain::RecipeEngineerLifecycleBrain::new(repo_root) {
+    if let Some(b) = crate::ooda_brain::RecipeBrain::new(
+        repo_root,
+        "ooda-engineer-lifecycle.yaml",
+        "recipe-engineer-lifecycle-brain",
+    ) {
         daemon_log(
             state_root,
-            "[simard] OODA daemon: brain = RecipeEngineerLifecycleBrain (recipe-runner-rs backed)",
+            "[simard] OODA daemon: brain = RecipeBrain (recipe-runner-rs backed, engineer-lifecycle)",
         );
         return Arc::new(b);
     }
@@ -105,11 +109,12 @@ pub(super) fn build_decide_brain(
     state_root: &Path,
     repo_root: &Path,
 ) -> Option<Arc<dyn crate::ooda_brain::OodaDecideBrain>> {
-    match crate::ooda_brain::RecipeDecideBrain::new(repo_root) {
+    match crate::ooda_brain::RecipeBrain::new(repo_root, "ooda-decide.yaml", "recipe-decide-brain")
+    {
         Some(b) => {
             daemon_log(
                 state_root,
-                "[simard] OODA daemon: decide_brain = RecipeDecideBrain (recipe-runner-rs backed)",
+                "[simard] OODA daemon: decide_brain = RecipeBrain (recipe-runner-rs backed, decide)",
             );
             Some(Arc::new(b))
         }
@@ -131,10 +136,12 @@ pub(super) fn build_orient_brain(
     repo_root: &Path,
 ) -> Option<Arc<dyn crate::ooda_brain::OodaOrientBrain>> {
     // Try recipe brain first (recipe-runner-rs backed)
-    if let Some(b) = crate::ooda_brain::RecipeOrientBrain::new(repo_root) {
+    if let Some(b) =
+        crate::ooda_brain::RecipeBrain::new(repo_root, "ooda-orient.yaml", "recipe-orient-brain")
+    {
         daemon_log(
             state_root,
-            "[simard] OODA daemon: orient_brain = RecipeOrientBrain (recipe-runner-rs backed)",
+            "[simard] OODA daemon: orient_brain = RecipeBrain (recipe-runner-rs backed, orient)",
         );
         return Some(Arc::new(b));
     }

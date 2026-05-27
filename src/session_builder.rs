@@ -61,7 +61,12 @@ impl LlmProvider {
     /// Convenience wrapper used by recipe-runner shim `new()` constructors
     /// that return `Option<Self>` and want config failure → `None`.
     pub fn resolve_agent_binary() -> Option<&'static str> {
-        Some(Self::resolve().ok()?.agent_binary_value())
+        Some(
+            Self::resolve()
+                .map_err(|e| tracing::warn!("resolve_agent_binary: config error: {e}"))
+                .ok()?
+                .agent_binary_value(),
+        )
     }
 }
 
