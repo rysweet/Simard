@@ -432,7 +432,11 @@ ACTION: cleaned shared-target dir
         std::fs::create_dir_all(&recipe_dir).unwrap();
         std::fs::write(recipe_dir.join(RECIPE_FILENAME), "name: test").unwrap();
 
+        // Ensure RuntimeConfig::load() succeeds (CI has no config.toml).
+        // SAFETY: test-only, single-threaded access to env var.
+        unsafe { std::env::set_var("SIMARD_LLM_PROVIDER", "copilot") };
         let result = run_disk_health_check(tmp.path(), tmp.path());
+        unsafe { std::env::remove_var("SIMARD_LLM_PROVIDER") };
         assert!(result.is_err());
         let err = result.unwrap_err();
         match &err {
