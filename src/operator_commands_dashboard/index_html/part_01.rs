@@ -117,6 +117,8 @@ pub(crate) const PART_01: &str = r#"      </div>
       const d=parseTs(ts);if(!d)return ts==null?'—':String(ts);
       try{return d.toLocaleString();}catch(_){return d.toISOString();}
     }
+    const ACTION_KIND_LABELS={spawn_engineer:'Launched sub-agent',progress_assessment:'Checked progress',merge_readiness_check:'Evaluated PR readiness',disk_health_check:'Checked disk health',goal_create:'Created a goal',goal_close:'Closed a goal'};
+    function humanizeActionKind(kind){if(!kind)return'';const label=ACTION_KIND_LABELS[kind];if(label)return label;return kind.replace(/_/g,' ').replace(/^./,c=>c.toUpperCase());}
     function copyLogContent(id){
       const el=document.getElementById(id);if(!el)return;
       navigator.clipboard.writeText(el.textContent||'').then(
@@ -310,7 +312,7 @@ pub(crate) const PART_01: &str = r#"      </div>
               ${latestActions.map(o=>`
                 <div style="padding:.2rem 0;display:flex;gap:.5rem;align-items:baseline">
                   <span>${o.success?'✅':'❌'}</span>
-                  <code style="color:var(--accent)">${esc(o.action_kind||'')}</code>
+                  <code style="color:var(--accent)">${humanizeActionKind(o.action_kind)}</code>
                   <span>${esc(o.action_description||'')}</span>
                   ${o.detail?'<span style="color:#8b949e;font-size:.8rem;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block">'+esc(o.detail.substring(0,120))+'</span>':''}
                 </div>`).join('')}
@@ -346,8 +348,8 @@ pub(crate) const PART_01: &str = r#"      </div>
             <div style="padding:.25rem 0;border-bottom:1px solid var(--border);font-size:.85rem;display:flex;gap:.5rem;align-items:baseline">
               <span style="color:var(--accent);min-width:2rem;font-weight:600">#${a.cycle}</span>
               <span>${a.success?'✅':'❌'}</span>
-              <code>${esc(a.action_kind||'')}</code>
-              <span style="flex:1">${renderActionDetail((function(){var arr=Array.from(a.detail||'');var d=arr.length>200?arr.slice(0,200).join('')+'…':arr.join('');return d||a.action_description||'';})())}</span>
+              <code>${humanizeActionKind(a.action_kind)}</code>
+              <span style="flex:1">${renderActionDetail((function(){var raw=a.detail||'';var kind=a.action_kind||'';if(kind&&raw.startsWith(kind+' dispatched:'))raw=humanizeActionKind(kind)+raw.substring(kind.length);var arr=Array.from(raw);var d=arr.length>200?arr.slice(0,200).join('')+'…':arr.join('');return d||a.action_description||'';})())}</span>
             </div>`).join('');
         }else{
           actEl.innerHTML='<span style="color:#8b949e">No structured action history yet. The agent daemon records actions each cycle.</span>';
