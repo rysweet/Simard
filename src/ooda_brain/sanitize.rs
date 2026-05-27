@@ -18,6 +18,7 @@
 ///    if truncation occurred.
 ///
 /// Returns an owned `String` that is safe to embed in `-c key=value` args.
+#[must_use]
 pub(super) fn sanitize_context_var(s: &str, max_len: usize) -> String {
     // Step 1+2: split_whitespace handles \n, \r, \t, and consecutive spaces.
     // Push directly into a pre-sized String — avoids intermediate Vec<&str>.
