@@ -118,6 +118,20 @@ pub(super) fn dispatch_advance_goal(
                 format!("goal '{goal_id}' is already completed"),
             );
         }
+        GoalProgress::Proposed => {
+            return make_outcome(
+                action,
+                false,
+                format!("goal '{goal_id}' is still proposed — accept it before advancing"),
+            );
+        }
+        GoalProgress::Paused => {
+            return make_outcome(
+                action,
+                false,
+                format!("goal '{goal_id}' is paused — resume it before advancing"),
+            );
+        }
         _ => {}
     }
 

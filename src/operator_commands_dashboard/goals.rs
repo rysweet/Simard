@@ -307,6 +307,7 @@ pub(crate) async fn update_goal_status(
     };
 
     let new_status = match status_str {
+        "proposed" => GoalProgress::Proposed,
         "not-started" => GoalProgress::NotStarted,
         "in-progress" => GoalProgress::InProgress { percent: 0 },
         "blocked" => {
@@ -317,6 +318,7 @@ pub(crate) async fn update_goal_status(
                 .to_string();
             GoalProgress::Blocked(reason)
         }
+        "paused" => GoalProgress::Paused,
         "completed" => GoalProgress::Completed,
         other => return Json(json!({"error": format!("unknown status: {other}")})),
     };

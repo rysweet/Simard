@@ -10,7 +10,7 @@
 //! | `slug`               | `goal_slug(active.id)` (or `active.id` if already a slug)   |
 //! | `title`              | `active.description` (first line, truncated to 120 chars)   |
 //! | `rationale`          | `active.current_activity.unwrap_or_default()`               |
-//! | `status`             | `Completed → GoalStatus::Completed`, else `GoalStatus::Active` |
+//! | `status`             | `Completed → GoalStatus::Completed`, `Proposed → GoalStatus::Proposed`, `Paused → GoalStatus::Paused`, else `GoalStatus::Active` |
 //! | `priority`           | `u8::try_from(active.priority).unwrap_or(u8::MAX)`          |
 //! | `owner_identity`     | `active.assigned_to.clone().unwrap_or_else(\|\| "unassigned".into())` |
 //! | `source_session_id`  | sentinel `00000000-0000-0000-0000-000000000000`             |
@@ -293,4 +293,34 @@ fn wip_refs_do_not_affect_record_construction() {
     assert_eq!(records.len(), 1);
     // WIP refs are not part of GoalRecord — adapter must not panic on them.
     assert_eq!(records[0].slug, "with-wip-goal-id");
+}
+
+#[test]
+fn status_proposed_maps_to_proposed() {
+    let mut board = GoalBoard::new();
+    let mut g = active("proposed-goal-id", "A proposed goal", 1);
+    g.status = GoalProgress::Proposed;
+    board.active.push(g);
+
+    let records = active_goals_as_records(&board);
+    assert_eq!(
+        records[0].status,
+        GoalStatus::Proposed,
+        "GoalProgress::Proposed must map to GoalStatus::Proposed (issue #2098)"
+    );
+}
+
+#[test]
+fn status_paused_maps_to_paused() {
+    let mut board = GoalBoard::new();
+    let mut g = active("paused-goal-id", "A paused goal", 2);
+    g.status = GoalProgress::Paused;
+    board.active.push(g);
+
+    let records = active_goals_as_records(&board);
+    assert_eq!(
+        records[0].status,
+        GoalStatus::Paused,
+        "GoalProgress::Paused must map to GoalStatus::Paused (issue #2098)"
+    );
 }

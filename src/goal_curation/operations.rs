@@ -690,9 +690,11 @@ pub fn update_goal_progress(
 /// not change progress numerically; callers pass `current` for that.
 fn progress_to_percent(p: &GoalProgress, current: u32) -> u32 {
     match p {
+        GoalProgress::Proposed => 0,
         GoalProgress::NotStarted => 0,
         GoalProgress::InProgress { percent } => *percent,
         GoalProgress::Blocked(_) => current,
+        GoalProgress::Paused => current,
         GoalProgress::Completed => 100,
     }
 }
@@ -700,9 +702,11 @@ fn progress_to_percent(p: &GoalProgress, current: u32) -> u32 {
 /// Variant label for bypass reason strings.
 fn variant_label(p: &GoalProgress) -> &'static str {
     match p {
+        GoalProgress::Proposed => "proposed",
         GoalProgress::NotStarted => "not-started",
         GoalProgress::InProgress { .. } => "in-progress",
         GoalProgress::Blocked(_) => "blocked",
+        GoalProgress::Paused => "paused",
         GoalProgress::Completed => "completed",
     }
 }
@@ -759,6 +763,8 @@ pub fn update_goal_progress_with_evidence(
     // ── Bypass set ────────────────────────────────────────────────────
     let is_bypass = matches!(proposed, GoalProgress::Blocked(_))
         || matches!(proposed, GoalProgress::NotStarted)
+        || matches!(proposed, GoalProgress::Proposed)
+        || matches!(proposed, GoalProgress::Paused)
         || new_percent <= old_percent;
 
     if is_bypass {
@@ -766,6 +772,10 @@ pub fn update_goal_progress_with_evidence(
             "bypass: blocked".to_string()
         } else if matches!(proposed, GoalProgress::NotStarted) {
             "bypass: not-started".to_string()
+        } else if matches!(proposed, GoalProgress::Proposed) {
+            "bypass: proposed".to_string()
+        } else if matches!(proposed, GoalProgress::Paused) {
+            "bypass: paused".to_string()
         } else if new_percent < old_percent {
             "bypass: non-increase (decrease)".to_string()
         } else {
@@ -974,7 +984,7 @@ static SENTINEL_SESSION_ID: LazyLock<crate::session::SessionId> = LazyLock::new(
 /// | `slug`               | `goal_slug(active.id)` (preserves slug-shaped ids unchanged)      |
 /// | `title`              | `active.description` (first line, truncated to 120 chars)         |
 /// | `rationale`          | `active.current_activity.unwrap_or_default()`                     |
-/// | `status`             | `Completed → GoalStatus::Completed`, all others → `GoalStatus::Active` |
+/// | `status`             | `Completed → GoalStatus::Completed`, `Proposed → GoalStatus::Proposed`, `Paused → GoalStatus::Paused`, others → `GoalStatus::Active` |
 /// | `priority`           | `u8::try_from(active.priority).unwrap_or(u8::MAX)`                |
 /// | `owner_identity`     | `active.assigned_to.clone().unwrap_or_else(\|\| "unassigned".into())` |
 /// | `source_session_id`  | sentinel `00000000-0000-0000-0000-000000000000`                   |
@@ -990,10 +1000,11 @@ pub fn active_goals_as_records(board: &GoalBoard) -> Vec<crate::goals::GoalRecor
             let title_first_line = active.description.lines().next().unwrap_or("");
             let title: String = title_first_line.chars().take(120).collect();
 
-            let status = if matches!(active.status, GoalProgress::Completed) {
-                crate::goals::GoalStatus::Completed
-            } else {
-                crate::goals::GoalStatus::Active
+            let status = match &active.status {
+                GoalProgress::Proposed => crate::goals::GoalStatus::Proposed,
+                GoalProgress::Paused => crate::goals::GoalStatus::Paused,
+                GoalProgress::Completed => crate::goals::GoalStatus::Completed,
+                _ => crate::goals::GoalStatus::Active,
             };
 
             let priority = u8::try_from(active.priority).unwrap_or(u8::MAX);

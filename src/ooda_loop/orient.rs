@@ -58,10 +58,12 @@ pub fn orient_with_brain(
             let (mut urgency, mut reason) = match &g.status {
                 GoalProgress::Blocked(r) => (1.0, format!("blocked: {r}")),
                 GoalProgress::NotStarted => (0.8, "not yet started".to_string()),
+                GoalProgress::Proposed => (0.5, "proposed — awaiting acceptance".to_string()),
                 GoalProgress::InProgress { percent } => (
                     0.6 * (1.0 - (*percent as f64 / 100.0)),
                     format!("{percent}% complete"),
                 ),
+                GoalProgress::Paused => (0.1, "paused".to_string()),
                 GoalProgress::Completed => (0.0, "completed".to_string()),
             };
 

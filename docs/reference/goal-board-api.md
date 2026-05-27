@@ -659,7 +659,7 @@ call site.
 | `slug` | `slugify(active.id)` or `active.id` | If the id is already slug-shaped (lowercase, dashes, no whitespace) it passes through unchanged |
 | `title` | `active.description` | Truncated to the first line, max 120 characters |
 | `rationale` | `active.current_activity.unwrap_or_default()` | Empty string when no current activity is set |
-| `status` | `Completed → GoalStatus::Completed`, all others → `GoalStatus::Active` | `NotStarted`, `InProgress`, and `Blocked` collapse to `Active` because the legacy `GoalRecord` has no equivalent variants |
+| `status` | `Completed → GoalStatus::Completed`, `Proposed → GoalStatus::Proposed`, `Paused → GoalStatus::Paused`, others → `GoalStatus::Active` | `NotStarted`, `InProgress`, and `Blocked` collapse to `Active`; `Proposed` and `Paused` map directly to their `GoalStatus` equivalents (issue #2098) |
 | `priority` | `u8::try_from(active.priority).unwrap_or(u8::MAX)` | Saturates rather than panicking on overflow |
 | `owner_identity` | `active.assigned_to.clone().unwrap_or_else(\|\| "unassigned".into())` | The literal string `"unassigned"` is used as a sentinel when no engineer is assigned |
 | `source_session_id` | Sentinel `SessionId::parse("00000000-0000-0000-0000-000000000000")?` | The all-zeros UUID indicates "synthesized from goal-board snapshot, no originating session" |

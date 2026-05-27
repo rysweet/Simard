@@ -315,10 +315,12 @@ fn daemon_runs_multiple_cycles_and_persists_state_across_them() {
     // (per PHILOSOPHY.md: no silent fallback). With a session, it progresses.
     // Either is valid; what matters is that state survives across cycles.
     match &test_goal.unwrap().status {
-        GoalProgress::InProgress { .. }
+        GoalProgress::Proposed
+        | GoalProgress::InProgress { .. }
         | GoalProgress::Completed
         | GoalProgress::NotStarted
-        | GoalProgress::Blocked(_) => {}
+        | GoalProgress::Blocked(_)
+        | GoalProgress::Paused => {}
     }
 }
 
