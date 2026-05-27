@@ -174,6 +174,7 @@ pub(super) fn persist_report(inputs: PersistReportInputs<'_>) -> SimardResult<Co
         SessionPhase::Planning,
         SessionPhase::Execution,
         SessionPhase::Reflection,
+        SessionPhase::Summarize,
         SessionPhase::Persistence,
         SessionPhase::Complete,
     ] {

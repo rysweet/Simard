@@ -34,6 +34,40 @@ pub struct RepoInspection {
     pub architecture_gap_summary: String,
 }
 
+/// Structured execution plan produced during the Planning phase (spec step 3).
+/// Exists as a separable orchestration primitive so plan formation can be
+/// audited independently from execution.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ExecutionPlan {
+    /// The original objective being addressed.
+    pub objective: String,
+    /// Ordered list of planned steps the agent should execute.
+    pub steps: Vec<String>,
+    /// Files expected to be modified or created.
+    pub expected_changed_files: Vec<String>,
+    /// Risk assessment: "low", "medium", or "high".
+    pub risk_level: String,
+    /// Whether the plan involves repository mutations.
+    pub is_mutating: bool,
+}
+
+/// Structured session summary produced during the Summarize phase (spec step 6).
+/// Exists as a separable orchestration primitive so result summarization can be
+/// audited independently from persistence.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SessionSummary {
+    /// The original objective that was pursued.
+    pub objective: String,
+    /// Overall outcome: "success", "partial", or "failed".
+    pub outcome: String,
+    /// Files that were actually changed during execution.
+    pub changed_files: Vec<String>,
+    /// Key decisions made during the session.
+    pub key_decisions: Vec<String>,
+    /// What was accomplished, in one sentence.
+    pub accomplishment: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StructuredEditRequest {
     pub relative_path: String,
@@ -138,9 +172,10 @@ impl PhaseTrace {
         match self.name.as_str() {
             "inspect" | "pre-mutation-guard" => SessionPhase::Intake,
             "load-bridge-context" => SessionPhase::Preparation,
-            "agent-prompt-build" => SessionPhase::Planning,
+            "agent-prompt-build" | "plan" => SessionPhase::Planning,
             "agent-spawn" | "agent-wait" => SessionPhase::Execution,
             "review" => SessionPhase::Reflection,
+            "summarize" => SessionPhase::Summarize,
             "persist" => SessionPhase::Persistence,
             _ => SessionPhase::Execution,
         }
@@ -152,8 +187,16 @@ pub struct EngineerLoopRun {
     pub state_root: PathBuf,
     pub execution_scope: String,
     pub inspection: RepoInspection,
+    /// Structured execution plan formed during the Planning phase (spec step 3).
+    /// `None` for runs deserialized from older formats that predate plan tracking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<ExecutionPlan>,
     pub action: ExecutedEngineerAction,
     pub verification: VerificationReport,
+    /// Structured session summary produced during the Summarize phase (spec step 6).
+    /// `None` for runs deserialized from older formats that predate summary tracking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<SessionSummary>,
     pub terminal_bridge_context: Option<TerminalBridgeContext>,
     #[serde(with = "duration_millis")]
     pub elapsed_duration: Duration,
