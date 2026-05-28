@@ -47,7 +47,7 @@ jobs:
       - name: Run coverage
         run: |
           mkdir -p target/ci-logs
-          cargo +nightly build --examples
+          cargo +nightly build --examples --target-dir target/llvm-cov-target
           cargo +nightly llvm-cov --workspace \
             --ignore-filename-regex 'tests?/' \
             --json \
