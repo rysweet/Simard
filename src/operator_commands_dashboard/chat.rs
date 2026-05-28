@@ -255,9 +255,13 @@ pub(crate) async fn handle_ws_chat(mut socket: WebSocket) {
                             ))
                             .await;
                     }
-                    MeetingCommand::Decision(text) => {
-                        backend.push_explicit_decision(&text);
-                        let content = format!("Decision recorded: {text}");
+                    MeetingCommand::Decision { text, rationale } => {
+                        backend.push_explicit_decision(&text, rationale.as_deref());
+                        let content = if let Some(ref r) = rationale {
+                            format!("Decision recorded: {text} (rationale: {r})")
+                        } else {
+                            format!("Decision recorded: {text}")
+                        };
                         let _ = socket
                             .send(Message::Text(
                                 json!({"role":"system","content": content})

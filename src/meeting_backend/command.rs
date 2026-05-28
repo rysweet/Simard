@@ -23,8 +23,13 @@ pub enum MeetingCommand {
     /// extracted from the live meeting transcript. Read-only — does not close.
     State,
     /// Operator marks a decision deterministically (e.g. `/decision Adopt TDD`).
+    /// Optional `--rationale <text>` flag supplies structured rationale.
     /// Bypasses post-hoc heuristic extraction so the item cannot be missed.
-    Decision(String),
+    /// Unified to store `MeetingDecision` in issue #2086.
+    Decision {
+        text: String,
+        rationale: Option<String>,
+    },
     /// Operator records an action item inline (e.g.
     /// `/action Bob will write tests by friday`). The text is parsed for
     /// assignee/deadline using the same extractors as the heuristic path.
@@ -82,7 +87,12 @@ pub fn parse_command(input: &str) -> MeetingCommand {
             if arg.is_empty() {
                 MeetingCommand::Conversation(trimmed.to_string())
             } else {
-                MeetingCommand::Decision(arg)
+                let (text, rationale) = parse_rationale_flag(&arg);
+                if text.is_empty() {
+                    MeetingCommand::Conversation(trimmed.to_string())
+                } else {
+                    MeetingCommand::Decision { text, rationale }
+                }
             }
         }
         _ if lower.starts_with("/action ") => {
@@ -118,6 +128,29 @@ pub fn parse_command(input: &str) -> MeetingCommand {
             }
         }
         _ => MeetingCommand::Conversation(trimmed.to_string()),
+    }
+}
+
+/// Parse an optional `--rationale <text>` flag from a `/decision` argument.
+///
+/// Splits the input on `--rationale` (case-insensitive). Everything before
+/// the flag is the decision text; everything after is the rationale.
+/// Returns `(decision_text, Option<rationale>)`. If `--rationale` is
+/// absent, the rationale is `None`. Added in issue #2086.
+fn parse_rationale_flag(input: &str) -> (String, Option<String>) {
+    let lower = input.to_lowercase();
+    if let Some(idx) = lower.find("--rationale") {
+        let text = input[..idx].trim().to_string();
+        let rationale_start = idx + "--rationale".len();
+        let rationale = input[rationale_start..].trim().to_string();
+        let rationale = if rationale.is_empty() {
+            None
+        } else {
+            Some(rationale)
+        };
+        (text, rationale)
+    } else {
+        (input.to_string(), None)
     }
 }
 
@@ -274,11 +307,17 @@ mod tests {
     fn parse_decision_with_arg() {
         assert_eq!(
             parse_command("/decision Adopt TDD for new modules"),
-            MeetingCommand::Decision("Adopt TDD for new modules".to_string()),
+            MeetingCommand::Decision {
+                text: "Adopt TDD for new modules".to_string(),
+                rationale: None,
+            },
         );
         assert_eq!(
             parse_command("  /Decision   Ship phase 8  "),
-            MeetingCommand::Decision("Ship phase 8".to_string()),
+            MeetingCommand::Decision {
+                text: "Ship phase 8".to_string(),
+                rationale: None,
+            },
         );
     }
 
@@ -413,5 +452,52 @@ mod tests {
             parse_command("/goal    "),
             MeetingCommand::Conversation("/goal".to_string()),
         );
+    }
+
+    // ── /decision --rationale flag (issue #2086) ─────────────────────
+
+    #[test]
+    fn parse_decision_with_rationale_flag() {
+        assert_eq!(
+            parse_command("/decision Adopt TDD --rationale Memory safety and correctness"),
+            MeetingCommand::Decision {
+                text: "Adopt TDD".to_string(),
+                rationale: Some("Memory safety and correctness".to_string()),
+            },
+        );
+    }
+
+    #[test]
+    fn parse_decision_rationale_flag_case_insensitive() {
+        assert_eq!(
+            parse_command("/decision Use Rust --RATIONALE Performance matters"),
+            MeetingCommand::Decision {
+                text: "Use Rust".to_string(),
+                rationale: Some("Performance matters".to_string()),
+            },
+        );
+    }
+
+    #[test]
+    fn parse_decision_rationale_flag_empty_rationale() {
+        // --rationale present but no text after it → rationale is None
+        assert_eq!(
+            parse_command("/decision Adopt TDD --rationale"),
+            MeetingCommand::Decision {
+                text: "Adopt TDD".to_string(),
+                rationale: None,
+            },
+        );
+    }
+
+    #[test]
+    fn parse_rationale_flag_helper() {
+        let (text, rationale) = parse_rationale_flag("Adopt TDD --rationale Good for quality");
+        assert_eq!(text, "Adopt TDD");
+        assert_eq!(rationale, Some("Good for quality".to_string()));
+
+        let (text, rationale) = parse_rationale_flag("No flag here");
+        assert_eq!(text, "No flag here");
+        assert_eq!(rationale, None);
     }
 }

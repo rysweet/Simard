@@ -178,8 +178,14 @@ impl MeetingBackend {
         // Prepend explicit decisions recorded inline via `/decision`.
         // Dedup against heuristic-extracted decisions by case-insensitive
         // string equality. Issue #1730 seam (b).
+        // Explicit decisions carry operator-supplied rationale (issue #2086)
+        // so they are preserved as-is in `structured_decisions` below.
         if !self.explicit_decisions.is_empty() {
-            let mut explicit_first: Vec<String> = self.explicit_decisions.clone();
+            let mut explicit_first: Vec<String> = self
+                .explicit_decisions
+                .iter()
+                .map(|d| d.description.clone())
+                .collect();
             for inferred in decisions.drain(..) {
                 let lower = inferred.to_lowercase();
                 if !explicit_first.iter().any(|d| d.to_lowercase() == lower) {
@@ -271,19 +277,50 @@ impl MeetingBackend {
             }
         }
 
-        // ── Build structured decisions once (issue #1954) ──
+        // ── Build structured decisions once (issue #1954, #2086) ──
         // Threaded through both the legacy handoff and the bundle so
         // rationale/participants extracted from the live conversation
         // aren't reduced to `String::new()` placeholders downstream.
+        // Explicit decisions carry operator-supplied rationale (issue #2086);
+        // non-empty rationale from the operator takes precedence over the
+        // heuristic extractor.
+        let explicit_map: std::collections::HashMap<
+            String,
+            &crate::meeting_facilitator::MeetingDecision,
+        > = self
+            .explicit_decisions
+            .iter()
+            .map(|d| (d.description.to_lowercase(), d))
+            .collect();
         let structured_decisions: Vec<crate::meeting_facilitator::MeetingDecision> = decisions
             .iter()
             .map(|d| {
-                let rationale = persist::extract_decision_rationale_pub(d, &self.history);
-                let participants = persist::extract_decision_participants_pub(d, &self.history);
-                crate::meeting_facilitator::MeetingDecision {
-                    description: d.clone(),
-                    rationale,
-                    participants,
+                if let Some(explicit) = explicit_map.get(&d.to_lowercase()) {
+                    // Use operator-supplied rationale if non-empty, otherwise
+                    // fall back to heuristic extraction from context.
+                    let rationale = if explicit.rationale.is_empty() {
+                        persist::extract_decision_rationale_pub(d, &self.history)
+                    } else {
+                        explicit.rationale.clone()
+                    };
+                    let participants = if explicit.participants.is_empty() {
+                        persist::extract_decision_participants_pub(d, &self.history)
+                    } else {
+                        explicit.participants.clone()
+                    };
+                    crate::meeting_facilitator::MeetingDecision {
+                        description: d.clone(),
+                        rationale,
+                        participants,
+                    }
+                } else {
+                    let rationale = persist::extract_decision_rationale_pub(d, &self.history);
+                    let participants = persist::extract_decision_participants_pub(d, &self.history);
+                    crate::meeting_facilitator::MeetingDecision {
+                        description: d.clone(),
+                        rationale,
+                        participants,
+                    }
                 }
             })
             .collect();
@@ -379,6 +416,17 @@ impl MeetingBackend {
         // meeting_handoff.md, transcript.json}. Independent of the legacy
         // OODA artifact above so existing downstream consumers keep working
         // while new consumers can rely on the canonical layout.
+        //
+        // Issue #2086: cap the conversation history in the bundle to
+        // MAX_HANDOFF_HISTORY recent turns. The full transcript is preserved
+        // in the standalone transcript.json written earlier; the bundle
+        // carries concise context, not the bloated transcript.
+        let handoff_history: &[super::types::ConversationMessage] =
+            if self.history.len() > super::MAX_HANDOFF_HISTORY {
+                &self.history[self.history.len() - super::MAX_HANDOFF_HISTORY..]
+            } else {
+                &self.history
+            };
         let bundle_open_questions: Vec<crate::meeting_facilitator::OpenQuestion> = open_questions
             .iter()
             .cloned()
@@ -394,7 +442,7 @@ impl MeetingBackend {
             &self.topic,
             &summary_text,
             Some(&self.started_at),
-            &self.history,
+            handoff_history,
             &action_items,
             &decisions,
             bundle_open_questions,
@@ -529,7 +577,11 @@ impl MeetingBackend {
         // `/decision` or `/action` before `/close` doesn't lose them
         // to the partial-fast-path.
         let action_items: Vec<super::types::HandoffActionItem> = self.explicit_action_items.clone();
-        let decisions: Vec<String> = self.explicit_decisions.clone();
+        let decisions: Vec<String> = self
+            .explicit_decisions
+            .iter()
+            .map(|d| d.description.clone())
+            .collect();
         let open_questions: Vec<String> = self.explicit_questions.clone();
         let themes: Vec<String> = self.themes.clone();
 
@@ -590,19 +642,45 @@ impl MeetingBackend {
             })
             .collect();
 
-        // Issue #1954: extract rationale/participants from the live
-        // history rather than emitting placeholder `String::new()`
-        // values. Same heuristics as the happy-path `close()` flow so
-        // partial closes stay informative.
+        // Issue #1954, #2086: extract rationale/participants from the live
+        // history rather than emitting placeholder `String::new()` values.
+        // Operator-supplied rationale from `/decision --rationale` takes
+        // precedence.
+        let explicit_map: std::collections::HashMap<
+            String,
+            &crate::meeting_facilitator::MeetingDecision,
+        > = self
+            .explicit_decisions
+            .iter()
+            .map(|d| (d.description.to_lowercase(), d))
+            .collect();
         let structured_decisions: Vec<crate::meeting_facilitator::MeetingDecision> = decisions
             .iter()
             .map(|d| {
-                let rationale = persist::extract_decision_rationale_pub(d, &self.history);
-                let participants = persist::extract_decision_participants_pub(d, &self.history);
-                crate::meeting_facilitator::MeetingDecision {
-                    description: d.clone(),
-                    rationale,
-                    participants,
+                if let Some(explicit) = explicit_map.get(&d.to_lowercase()) {
+                    let rationale = if explicit.rationale.is_empty() {
+                        persist::extract_decision_rationale_pub(d, &self.history)
+                    } else {
+                        explicit.rationale.clone()
+                    };
+                    let participants = if explicit.participants.is_empty() {
+                        persist::extract_decision_participants_pub(d, &self.history)
+                    } else {
+                        explicit.participants.clone()
+                    };
+                    crate::meeting_facilitator::MeetingDecision {
+                        description: d.clone(),
+                        rationale,
+                        participants,
+                    }
+                } else {
+                    let rationale = persist::extract_decision_rationale_pub(d, &self.history);
+                    let participants = persist::extract_decision_participants_pub(d, &self.history);
+                    crate::meeting_facilitator::MeetingDecision {
+                        description: d.clone(),
+                        rationale,
+                        participants,
+                    }
                 }
             })
             .collect();
@@ -672,11 +750,19 @@ impl MeetingBackend {
             partial_reason.get_or_insert(PartialReason::PersistenceError);
         }
 
+        // Issue #2086: cap bundle transcript to MAX_HANDOFF_HISTORY recent
+        // turns. Full transcript already written above.
+        let handoff_history: &[super::types::ConversationMessage] =
+            if self.history.len() > super::MAX_HANDOFF_HISTORY {
+                &self.history[self.history.len() - super::MAX_HANDOFF_HISTORY..]
+            } else {
+                &self.history
+            };
         let bundle_dir = match persist::write_handoff_bundle(
             &self.topic,
             &summary_text,
             Some(&self.started_at),
-            &self.history,
+            handoff_history,
             &action_items,
             &decisions,
             bundle_open_questions,
