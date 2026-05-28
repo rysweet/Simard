@@ -1,220 +1,156 @@
-# Reference: OODA Brain Decision Protocol (DECISION marker)
+# Reference: OODA Brain Decision Protocol (first-word match)
 
 Crate: `simard` · Module: `simard::ooda_brain::rustyclawd`
 Closes the design gap that Issue [#1711](https://github.com/rysweet/Simard/issues/1711) opened.
 
 This page is the normative definition of the **wire format** the OODA brain
-accepts from an LLM when emitting an `EngineerLifecycleDecision`. It replaces
-the legacy "must reply with a single JSON object, no prose, no fences" rule
-that previously lived in [`ooda-brain-prompt.md`](ooda-brain-prompt.md).
+accepts from an LLM when emitting an `EngineerLifecycleDecision`.
 
-> **TL;DR** — Models emit a leading `DECISION: <variant>` marker line.
-> Variants that need structured fields (`open_tracking_issue`,
-> `mark_goal_blocked`, `reclaim_and_redispatch`) follow the marker with
-> labeled lines (`TITLE:`, `BODY:`, `REASON:`, `REDISPATCH_CONTEXT:`).
-> The legacy JSON path and hybrid prose-plus-JSON form from #1711 have
-> been removed in #1980. Parse failures embed the **full raw response**
-> in the error so operators can diagnose 3-byte `"OK"` responses instead
-> of guessing.
+> **Changed in #2144:** The lifecycle brain no longer parses a `DECISION:`
+> marker, labeled lines, or JSON-shaped fallback bodies. It now lowercases the
+> **first whitespace-delimited token** and matches that token directly against
+> the `EngineerLifecycleDecision` whitelist. The rest of the response is kept
+> as rationale text; structured fields now use defaults.
 
-## Why a new protocol
+## Why this protocol changed
 
-Before this protocol, `parse_decision_from_response` required a strict
-JSON-extraction pass. In production this manifested as:
+The old lifecycle parser had multiple text-parsing layers:
 
-```
-WARN simard::ooda_brain: brain.decide_engineer_lifecycle failed; falling back
-    to continue_skipping
-    goal=improve-amplihack-test-coverage
-    error=base type "ooda-brain" failed during invocation:
-          no JSON object found in LLM response (got 3 bytes)
-```
+- `DECISION:` marker detection on the first line
+- labeled-field extraction (`TITLE:`, `BODY:`, `REASON:`,
+  `REDISPATCH_CONTEXT:`)
+- a HashMap builder and `serde_json::from_value` conversion step
 
-The 3-byte response was almost certainly a parseable prose token (`"OK"`,
-`"continue"`, etc.) the model emitted instead of a JSON document. The strict
-parser rejected it, the cycle fell back to `continue_skipping`, and the dead
-engineer was never reclaimed. Compounded over hours, the goal stalled
-indefinitely.
-
-The new protocol makes the wire format **prose-first** — the same direction
-the companion `goal_action` path already took (see journal entries tagged
-`LLM emitted prose for`).
+That stack was more complex than the actual routing requirement. The brain
+only needs a lifecycle variant plus human-readable rationale. Issue #2144
+reduced the contract to one rule: **put the lifecycle variant first**.
 
 ## The wire format
 
-A response is **valid** if:
+A response is **valid** if its first whitespace-delimited token matches one of
+these lifecycle variants after `to_ascii_lowercase()`:
 
-1. **Text marker form** — the first non-blank line matches the regex
-   `^\s*DECISION\s*:\s*<variant_token>\s*$` (case-insensitive on the literal
-   word `DECISION`; `<variant_token>` is matched exact-snake-case against the
-   `EngineerLifecycleDecision` whitelist). Remaining lines are scanned for
-   labeled fields and rationale text.
+- `continue_skipping`
+- `reclaim_and_redispatch`
+- `deprioritize`
+- `open_tracking_issue`
+- `mark_goal_blocked`
+- `consider_self_update`
 
-If the marker is not found, the parser returns
-`SimardError::BrainResponseUnparseable { raw, source }` with the **full raw
-response text** embedded.
+The parser shape is:
 
-> **Removed in [#1980](https://github.com/rysweet/Simard/issues/1980):**
-> The hybrid form (marker + JSON body) and legacy JSON form
-> (`find('{')..rfind('}')` extraction) have been removed. The DECISION
-> marker with labeled lines is the sole accepted format.
+```rust
+let first_word = text.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+match first_word.as_str() {
+    "continue_skipping" => ...,
+    "reclaim_and_redispatch" => ...,
+    "deprioritize" => ...,
+    "open_tracking_issue" => ...,
+    "mark_goal_blocked" => ...,
+    "consider_self_update" => ...,
+    _ => Err(SimardError::BrainResponseUnparseable { .. }),
+}
+```
 
-### Variant whitelist
+### Result construction
 
-The whitelist is the `EngineerLifecycleDecision` enum itself — there is no
-hand-maintained parallel list. The current 6 variants are:
+Once the first word matches a variant:
 
-| Variant token            | Required fields (besides `rationale`)               |
-|--------------------------|-----------------------------------------------------|
-| `continue_skipping`      | _(none)_                                            |
-| `reclaim_and_redispatch` | `redispatch_context: String`                        |
-| `deprioritize`           | _(none)_                                            |
-| `open_tracking_issue`    | `title: String`, `body: String`                     |
-| `mark_goal_blocked`      | `reason: String`                                    |
-| `consider_self_update`   | _(none)_                                            |
+- `rationale` = full response text when present, otherwise `"<no rationale provided>"`
+- `title` = `""`
+- `body` = `""`
+- `reason` = `""`
+- `redispatch_context` = `""`
+- `truncate()` still caps stored text fields
 
-`rationale` is required by every variant but defaults to a placeholder
-(`"<no rationale provided>"`) when no `RATIONALE:` label or free-form text
-follows the marker. The handler in
-`src/ooda_actions/advance_goal/lifecycle.rs::apply_lifecycle_decision` does
-not differentiate between a model-supplied rationale and the placeholder.
+> **Removed in #2144:** labeled-line field extraction and the
+> `serde_json::from_value` conversion step.
 
-### Marker grammar
+### Grammar
 
 ```
-<response>      ::= <marker-line> ("\n" <body>)?
-<marker-line>   ::= <ws>* "DECISION" <ws>* ":" <ws>* <variant-token> <ws>*
+<response>      ::= <ws>* <variant-token> (<ws> <free-text>)?
 <variant-token> ::= "continue_skipping"
                   | "reclaim_and_redispatch"
                   | "deprioritize"
                   | "open_tracking_issue"
                   | "mark_goal_blocked"
                   | "consider_self_update"
-<body>          ::= *(labeled-line / rationale-line)
-<labeled-line>  ::= label-token <ws>* ":" <ws>* value LF
-<rationale-line>::= <any line not matching labeled-line> LF
+<free-text>     ::= <any remaining text>
 ```
 
-The marker is matched **only on the first non-blank line of the response**.
-A `DECISION:` token that appears mid-response or inside JSON is ignored.
-This is a deliberate hardening choice (see [Security](#security) below).
-
-### Labeled-line field extraction
-
-After the DECISION marker, remaining lines are scanned for labeled fields:
-
-- `RATIONALE:` — all variants
-- `TITLE:` — `open_tracking_issue`
-- `BODY:` — `open_tracking_issue`
-- `REASON:` — `mark_goal_blocked`
-- `REDISPATCH_CONTEXT:` — `reclaim_and_redispatch`
-
-Labels are matched case-insensitively. Unknown labels are ignored (forward
-compatible). Non-labeled lines are collected as the fallback rationale if no
-`RATIONALE:` label is present.
-
-> **Removed in #1980:** The marker-wins precedence rule (where a JSON `choice`
-> field was overwritten by the DECISION marker) no longer applies — there is
-> no JSON body to conflict with.
+The match is case-insensitive because the parser lowercases the first token
+before the `match`.
 
 ## Behavior matrix
 
-The following table is the canonical specification. Every row is exercised
-by a test in `src/ooda_brain/tests.rs`.
+The following table is the canonical specification.
 
-| # | Input shape (illustrative)                                                | Result                                                                                  |
-|---|---------------------------------------------------------------------------|-----------------------------------------------------------------------------------------|
-| 1 | `DECISION: continue_skipping`                                             | `Ok(ContinueSkipping { rationale: "<no rationale provided>" })`                         |
-| 2 | `DECISION: continue_skipping\nengineer made progress 12s ago`             | `Ok(ContinueSkipping { rationale: "engineer made progress 12s ago" })`                  |
-| 3 | `decision: CONTINUE_SKIPPING` (case variations on `DECISION`)             | `Ok(ContinueSkipping { ... })` — case-insensitive on the keyword                        |
-| 4 | `DECISION: CONTINUE_SKIPPING` (uppercase variant)                         | `Err(BrainResponseUnparseable)` — variant matched exact-snake-case only                 |
-| 5 | `DECISION: open_tracking_issue\nTITLE: X\nBODY: Y\nRATIONALE: Z`         | `Ok(OpenTrackingIssue { title: "X", body: "Y", rationale: "Z" })`                       |
-| 6 | `DECISION: open_tracking_issue\nrationale only, no labeled fields`        | `Ok(OpenTrackingIssue { title: "", body: "", rationale: "rationale only, ..." })` — missing fields get defaults |
-| 7 | `` ```json\n{"choice":"continue_skipping","rationale":"x"}\n``` ``         | `Err(BrainResponseUnparseable)` — JSON no longer accepted (removed in #1980)            |
-| 8 | `Some prose\n{"choice":"reclaim_and_redispatch",...}\nMore prose`         | `Err(BrainResponseUnparseable)` — JSON extraction path removed in #1980                 |
-| 9 | `{"choice":"continue_skipping","rationale":"x"}` (pure JSON)              | `Err(BrainResponseUnparseable)` — JSON no longer accepted (removed in #1980)            |
-| 10| `OK` (3-byte non-JSON, no marker)                                         | `Err(BrainResponseUnparseable { raw: "OK", source })` — full text in error              |
-| 11| `` (empty)                                                                | `Err(BrainResponseUnparseable { raw: "", source })` — note "empty response"             |
-| 12| `DECISION: bogus_variant`                                                 | `Err(BrainResponseUnparseable)` — error lists all 6 valid tokens                        |
-| 13| `random prose ... DECISION: deprioritize ... more prose`                  | `Err(BrainResponseUnparseable)` — marker not on first non-blank line, ignored           |
-| 14| `DECISION: reclaim_and_redispatch\nREDISPATCH_CONTEXT: Try Y.`           | `Ok(ReclaimAndRedispatch { redispatch_context: "Try Y.", ... })`                        |
-| 15| `DECISION: 🚀continue_skipping` (multibyte garbage prefix on token)       | `Err(BrainResponseUnparseable)` — UTF-8-safe slicing, no panic                          |
+| # | Input shape (illustrative) | Result |
+|---|---|---|
+| T1 | `continue_skipping` | `Ok(ContinueSkipping { rationale: "continue_skipping" })` |
+| T2 | `continue_skipping rest of text` | `Ok(ContinueSkipping { rationale: "continue_skipping rest of text" })` |
+| T3 | `CONTINUE_SKIPPING` | `Ok(ContinueSkipping { ... })` — case-insensitive first-word match |
+| T5 | `open_tracking_issue rest` | `Ok(OpenTrackingIssue { title: "", body: "", rationale: "open_tracking_issue rest" })` |
+| T10 | `OK` | `Err(BrainResponseUnparseable)` |
+| T11 | `` (empty) | `Err(BrainResponseUnparseable)` |
+| T12 | `bogus_variant` | `Err(BrainResponseUnparseable)` |
+| T14 | `reclaim_and_redispatch rest` | `Ok(ReclaimAndRedispatch { redispatch_context: "", rationale: "reclaim_and_redispatch rest" })` |
+| T15 | `🚀continue_skipping` | `Err(BrainResponseUnparseable)` — first word does not match a whitelisted variant |
+
+> **Removed in #2144:**
+> - T4 (`DECISION: CONTINUE_SKIPPING` exact-snake-case marker parsing)
+> - T6–T9 (JSON and marker-body examples)
+> - T13 (mid-response `DECISION:` injection)
 
 ## Error format
 
-> **New in [#1711](https://github.com/rysweet/Simard/issues/1711).**
-> `BrainResponseUnparseable` is a new `SimardError` variant introduced by
-> this PR. Cross-check with
-> [Reference: `OodaBrain` API → Errors](ooda-brain-api.md#errors).
+`SimardError::BrainResponseUnparseable` still carries the full raw response so
+operators can diagnose bad model output.
 
 ```rust
 SimardError::BrainResponseUnparseable {
-    raw: String,            // full untruncated response (see "raw lifecycle" below)
+    raw: String,
     source: BrainParseSource,
-}
-
-/// Single wrapper so one error variant can carry the failure mode.
-pub enum BrainParseSource {
-    Marker(MarkerParseError),
 }
 ```
 
-> **Removed in #1980:** The `BrainParseSource::Json` variant has been removed
-> — there is no JSON parser to fail.
+Under the first-word protocol, parse failures now come from:
+
+- empty responses
+- an unrecognized first token
+- malformed leading bytes that change the first token
+
+> **Removed in #2144:** marker-not-found errors, labeled-field errors, and
+> marker/JSON conflict paths.
 
 ### `raw` lifecycle
 
-The `raw` field is stored **untruncated** in the struct so that
-`{:#?}` debug printing and any downstream tooling has access to the full
-text the model returned. Truncation to `MAX_RAW_LOG_BYTES = 8192` is
-applied **only at log-format time**, via the shared `truncate_for_log`
-helper at `src/util/log.rs::truncate_for_log` (hoisted from
-`src/ooda_actions/advance_goal/spawn.rs:318` as part of this PR — see
-[`OodaBrain` API → `truncate_for_log` reuse](ooda-brain-api.md#truncate_for_log-reuse)).
-The truncated rendition is suffixed with `…(truncated, total {n} bytes)`.
+The `raw` field remains **untruncated** in the error struct. Truncation to
+`MAX_RAW_LOG_BYTES = 8192` still happens only at log-format time.
 
-* `raw` is the **complete** model response. Previously the warn-level log
-  reported only `got N bytes`; this is fixed at all three lossy parser sites
-  (`rustyclawd.rs`, `decide.rs`, `orient.rs`).
-* `raw` is rendered using the `{:?}` Debug format wherever it appears in
-  log lines, so control characters and ANSI escapes are escaped (defends
-  against CRLF / log-injection in the model output).
+* `raw` is the complete model response.
+* `raw` is rendered with `{:?}` in logs, so control characters and ANSI escapes
+  are escaped.
 
-The companion log line at the call site looks like:
+A representative parse-failure log now looks like:
 
 ```
 WARN simard::ooda_brain: brain.decide_engineer_lifecycle parse failed
     goal=improve-amplihack-test-coverage
     raw="OK"
-    error=no DECISION: marker found and response is not valid JSON
-```
-
-Compare with the legacy log:
-
-```
-WARN simard::ooda_brain: brain.decide_engineer_lifecycle failed; falling
-    back to continue_skipping
-    goal=improve-amplihack-test-coverage
-    error=base type "ooda-brain" failed during invocation:
-          no JSON object found in LLM response (got 3 bytes)
+    error=unrecognized lifecycle variant in first token
 ```
 
 ## What did **not** change
 
 * The `OodaBrain` trait, `EngineerLifecycleCtx`, and
-  `EngineerLifecycleDecision` types are byte-identical to their pre-#1711
-  shapes. No caller changes are required.
-* `DeterministicFallbackBrain` still returns `ContinueSkipping` and is still
-  used when `build_rustyclawd_brain()` fails to construct.
-* The fallback to `ContinueSkipping` in `dispatch_spawn_engineer` on a
-  parser error is preserved — the parser is now strictly more lenient, so
-  fewer cycles take that fallback, but the safety net itself is unchanged.
-
-> **Updated in #1980:** `decide.rs` and `orient.rs` have been migrated to
-> text-based parsing (DECISION markers and labeled lines respectively). Their
-> JSON parsers have been removed. See
-> [text-parsing wire formats](text-parsing-wire-formats.md) for the full
-> grammar of all three OODA brain parse sites.
+  `EngineerLifecycleDecision` types are still the public contract.
+* `DeterministicFallbackBrain` still returns `ContinueSkipping` when the brain
+  cannot be constructed.
+* The fallback path on parse error is still `ContinueSkipping`.
+* `truncate()` still protects rationale and other text fields from unbounded
+  output.
 
 ## Examples
 
@@ -223,95 +159,81 @@ WARN simard::ooda_brain: brain.decide_engineer_lifecycle failed; falling
 Model output:
 
 ```
-DECISION: continue_skipping
-engineer touched worktree 8 seconds ago; let it cook
+continue_skipping engineer touched worktree 8 seconds ago; let it cook
 ```
 
 Parsed as:
 
 ```rust
 EngineerLifecycleDecision::ContinueSkipping {
-    rationale: "engineer touched worktree 8 seconds ago; let it cook".into(),
+    rationale: "continue_skipping engineer touched worktree 8 seconds ago; let it cook".into(),
 }
 ```
 
-### Structured: `open_tracking_issue`
+### `open_tracking_issue`
 
 Model output:
 
 ```
-DECISION: open_tracking_issue
-TITLE: Engineer panics on goal improve-amplihack-test-coverage
-BODY: Repro: spawn engineer, wait 30s, observe panic in tail. Log tail shows thread 'main' panicked at ...
-RATIONALE: engineer panic recurred across 3 spawns
+open_tracking_issue engineer panic recurred across 3 spawns
 ```
 
 Parsed as:
 
 ```rust
 EngineerLifecycleDecision::OpenTrackingIssue {
-    rationale: "engineer panic recurred across 3 spawns".into(),
-    title:     "Engineer panics on goal improve-amplihack-test-coverage".into(),
-    body:      "Repro: spawn engineer, ...".into(),
+    title: "".into(),
+    body: "".into(),
+    rationale: "open_tracking_issue engineer panic recurred across 3 spawns".into(),
 }
 ```
 
-### Structured: `reclaim_and_redispatch`
+### `reclaim_and_redispatch`
 
 Model output:
 
 ```
-DECISION: reclaim_and_redispatch
-REDISPATCH_CONTEXT: Previous engineer attempted X; please retry with Y.
-RATIONALE: worktree idle 7h, no log activity
+reclaim_and_redispatch worktree idle 7h, retry with a fresh engineer
 ```
 
 Parsed as:
 
 ```rust
 EngineerLifecycleDecision::ReclaimAndRedispatch {
-    rationale:          "worktree idle 7h, no log activity".into(),
-    redispatch_context: "Previous engineer attempted X; please retry with Y.".into(),
+    redispatch_context: "".into(),
+    rationale: "reclaim_and_redispatch worktree idle 7h, retry with a fresh engineer".into(),
 }
 ```
 
-> **Removed in #1980:** The "Hybrid" (marker + JSON body) and "Legacy JSON"
-> examples from the #1711 version of this document have been removed — those
-> parse paths no longer exist.
-
 ## Security
 
-The protocol is hardened against six classes of model misbehavior. All
-six are exercised by tests in `src/ooda_brain/tests.rs` and discussed in
-detail under Security Considerations in the PR.
+The first-word protocol is hardened against the classes of misbehavior that now
+matter.
 
-| ID    | Threat                                                  | Mitigation                                                                                |
-|-------|---------------------------------------------------------|-------------------------------------------------------------------------------------------|
-| SR-1  | Mid-response `DECISION:` token injection                | Marker is matched **only on the first non-blank line** (test T13).                        |
-| SR-2  | ~~Variant smuggling via diverging marker / JSON `choice`~~ | Removed in #1980 — no JSON path to conflict with. Marker is sole authority.             |
-| SR-3  | UTF-8 boundary panic on malformed model output          | All slicing uses `char_indices()` / `str::get()`; no raw byte indexing (test T15).        |
-| SR-4  | Log-flood DoS from a runaway 1 GB model response        | `truncate_for_log` caps raw text at `MAX_RAW_LOG_BYTES = 8192` at format time.            |
-| SR-5  | Log injection via CRLF / ANSI escapes in raw response   | All `raw` fields rendered via the `{:?}` Debug format, which escapes control chars.       |
-| SR-6  | Variant whitelist drift between parser and enum         | Whitelist **is** the `EngineerLifecycleDecision` enum; single source of truth (test T12). |
+| ID    | Threat | Mitigation |
+|-------|--------|------------|
+| SR-3  | UTF-8 boundary panic on malformed model output | Matching is done on Rust `&str`; unrecognized first tokens return an error instead of panicking. |
+| SR-4  | Log-flood DoS from a runaway model response | `truncate_for_log` still caps raw text at `MAX_RAW_LOG_BYTES = 8192` at format time. |
+| SR-5  | Log injection via CRLF / ANSI escapes in raw response | `raw` is still rendered via `{:?}`. |
+| SR-6  | Variant whitelist drift between parser and enum | The whitelist is still the `EngineerLifecycleDecision` enum vocabulary. |
+
+> **Removed in #2144:**
+> - SR-1 (mid-response `DECISION:` injection)
+> - SR-2 (marker/JSON conflict)
 
 The parser does **not** sandbox the LLM, validate model identity, or
-rate-limit responses — those concerns live one layer up at the
-`LlmSubmitter` boundary.
+rate-limit responses — those concerns still live one layer up.
 
 ## Compatibility
 
-| Caller                                          | Affected?                                                     |
-|-------------------------------------------------|---------------------------------------------------------------|
-| `RustyClawdBrain::decide_engineer_lifecycle`    | Yes — uses text-only parser (JSON removed in #1980).          |
-| `DeterministicFallbackBrain`                    | No — bypasses the parser entirely.                            |
-| Any test using `StubSubmitter` with pure-JSON   | **Yes** — must be updated to use DECISION marker format.      |
-| `decide::parse_judgment_from_response`          | Yes — migrated to text parser in #1980.                       |
-| `orient::parse_judgment_from_response`          | Yes — migrated to text parser in #1980.                       |
-| `ooda_brain.md` prompt                          | Updated to specify DECISION marker format; JSON removed.      |
+| Caller | Affected? |
+|--------|-----------|
+| `RustyClawdBrain::decide_engineer_lifecycle` | Yes — now uses first-word matching instead of marker parsing. |
+| `DeterministicFallbackBrain` | No — bypasses the parser entirely. |
+| Prompt examples in `ooda_brain.md` | Yes — must start with the lifecycle variant name. |
 
-A model that is still emitting pure JSON because its prompt has not been
-re-deployed will **fail parsing**. The prompt must be updated to use the
-DECISION marker format.
+A model that still emits `DECISION:` lines or labeled fields may fail parsing
+if the first token is not itself a valid lifecycle variant.
 
 ## See Also
 

@@ -49,14 +49,17 @@ fn resolve_recipe_path(repo_root: &std::path::Path) -> Option<PathBuf> {
 /// Recipe-runner-backed merge-readiness judge.
 pub struct RecipeMergeJudge {
     recipe_path: PathBuf,
+    agent_binary: &'static str,
 }
 
 impl RecipeMergeJudge {
     /// Construct if recipe file and recipe-runner-rs binary are both available.
     pub fn new(repo_root: &std::path::Path) -> Option<Self> {
         let recipe_path = resolve_recipe_path(repo_root)?;
+        let agent_binary = crate::session_builder::LlmProvider::resolve_agent_binary()?;
         if Command::new("recipe-runner-rs")
             .arg("--version")
+            .env("AMPLIHACK_AGENT_BINARY", agent_binary)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
@@ -64,7 +67,10 @@ impl RecipeMergeJudge {
         {
             return None;
         }
-        Some(Self { recipe_path })
+        Some(Self {
+            recipe_path,
+            agent_binary,
+        })
     }
 }
 
@@ -77,6 +83,7 @@ impl MergeJudge for RecipeMergeJudge {
     ) -> SimardResult<JudgeOutcome> {
         let output = Command::new("recipe-runner-rs")
             .arg(self.recipe_path.as_os_str())
+            .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
             .arg("-c")
             .arg(format!("pr_number={pr_number}"))
             .arg("-c")
@@ -183,6 +190,7 @@ mod tests {
     fn kind_returns_recipe() {
         let judge = RecipeMergeJudge {
             recipe_path: PathBuf::from("/nonexistent/recipe.yaml"),
+            agent_binary: "copilot",
         };
         assert_eq!(judge.kind(), MergeJudgeKind::Recipe);
         assert!(judge.kind().is_configured());

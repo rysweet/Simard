@@ -44,6 +44,30 @@ impl LlmProvider {
     pub fn resolve() -> SimardResult<Self> {
         Ok(crate::runtime_config::RuntimeConfig::load()?.llm_provider)
     }
+
+    /// The string value for `AMPLIHACK_AGENT_BINARY` env var on subprocesses.
+    ///
+    /// Each recipe-runner shim sets this on its `Command` so nested agents
+    /// use the correct binary (issue #2132).
+    pub fn agent_binary_value(&self) -> &'static str {
+        match self {
+            Self::Copilot => "copilot",
+            Self::RustyClawd => "rustyclawd",
+        }
+    }
+
+    /// Load config and return the agent binary name, or `None` if config is unavailable.
+    ///
+    /// Convenience wrapper used by recipe-runner shim `new()` constructors
+    /// that return `Option<Self>` and want config failure → `None`.
+    pub fn resolve_agent_binary() -> Option<&'static str> {
+        Some(
+            Self::resolve()
+                .map_err(|e| tracing::warn!("resolve_agent_binary: config error: {e}"))
+                .ok()?
+                .agent_binary_value(),
+        )
+    }
 }
 
 /// Builds and opens a `BaseTypeSession` for any operating mode.
@@ -262,5 +286,19 @@ mod tests {
 
         let request = builder.build_request();
         assert_eq!(request.topology, RuntimeTopology::SingleProcess);
+    }
+
+    // ------------------------------------------------------------------
+    // agent_binary_value (issue #2132)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn copilot_agent_binary_value_returns_copilot() {
+        assert_eq!(LlmProvider::Copilot.agent_binary_value(), "copilot");
+    }
+
+    #[test]
+    fn rustyclawd_agent_binary_value_returns_rustyclawd() {
+        assert_eq!(LlmProvider::RustyClawd.agent_binary_value(), "rustyclawd");
     }
 }

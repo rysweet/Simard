@@ -1,12 +1,11 @@
 use std::path::PathBuf;
 
 use crate::operator_commands::{
-    print_display, print_terminal_bridge_section, print_text, render_redacted_objective_metadata,
-    validated_engineer_read_artifacts,
+    render_redacted_objective_metadata, validated_engineer_read_artifacts,
 };
 use crate::terminal_engineer_bridge::{
     ENGINEER_HANDOFF_FILE_NAME, ENGINEER_MODE_BOUNDARY, SHARED_DEFAULT_STATE_ROOT_SOURCE,
-    TerminalBridgeContext, load_runtime_handoff_snapshot,
+    TERMINAL_MODE_BOUNDARY, TerminalBridgeContext, load_runtime_handoff_snapshot,
 };
 use crate::{FileBackedEvidenceStore, FileBackedMemoryStore};
 
@@ -172,52 +171,120 @@ impl EngineerReadView {
         })
     }
 
+    /// Render readback in the deterministic 8-section order defined by
+    /// `Specs/ProductArchitecture.md` line 293: runtime header, handoff
+    /// session summary, adapter details, shell or repo details,
+    /// action/checkpoint audit, transcript or continuity summary, explicit
+    /// next-step guidance, durable record counts.
     pub(super) fn print(&self) {
-        println!("Probe mode: engineer-read");
-        print_text("Engineer handoff source", &self.handoff_source);
-        print_text("Mode boundary", ENGINEER_MODE_BOUNDARY);
-        print_text("Identity", &self.identity);
-        print_text("Selected base type", &self.selected_base_type);
-        print_text("Topology", &self.topology);
-        print_display("State root", self.state_root.display());
-        print_text("Session phase", &self.session_phase);
-        print_text("Objective metadata", &self.objective_metadata);
-        print_display("Repo root", self.repo_root.display());
-        print_text("Repo branch", &self.repo_branch);
-        print_text("Repo head", &self.repo_head);
-        print_text("Worktree dirty", &self.worktree_dirty);
-        print_text("Changed files", &self.changed_files);
-        println!("Active goals count: {}", self.active_goals.len());
-        for (index, goal) in self.active_goals.iter().enumerate() {
-            print_text(&format!("Active goal {}", index + 1), goal);
+        for line in self.render_lines() {
+            println!("{line}");
         }
-        println!(
+    }
+
+    /// Build the readback output as a vec of lines in spec-defined section
+    /// order. Factored out of `print()` so tests can verify ordering without
+    /// capturing stdout.
+    fn render_lines(&self) -> Vec<String> {
+        use crate::sanitization::sanitize_terminal_text;
+
+        let s = |label: &str, value: &str| -> String {
+            format!("{label}: {}", sanitize_terminal_text(value))
+        };
+
+        let mut lines = Vec::new();
+
+        // --- Section 1: Runtime header ---
+        lines.push("Probe mode: engineer-read".to_string());
+        lines.push(s("Engineer handoff source", &self.handoff_source));
+        lines.push(s("Mode boundary", ENGINEER_MODE_BOUNDARY));
+        lines.push(s("Identity", &self.identity));
+        lines.push(s("State root", &self.state_root.display().to_string()));
+        lines.push(s("Session phase", &self.session_phase));
+
+        // --- Section 2: Handoff session summary ---
+        lines.push(s("Objective metadata", &self.objective_metadata));
+        lines.push(format!("Active goals count: {}", self.active_goals.len()));
+        for (index, goal) in self.active_goals.iter().enumerate() {
+            lines.push(s(&format!("Active goal {}", index + 1), goal));
+        }
+        lines.push(format!(
             "Carried meeting decisions: {}",
             self.carried_meeting_decisions.len()
-        );
+        ));
         for (index, decision) in self.carried_meeting_decisions.iter().enumerate() {
-            print_text(&format!("Carried meeting decision {}", index + 1), decision);
+            lines.push(s(
+                &format!("Carried meeting decision {}", index + 1),
+                decision,
+            ));
         }
-        print_terminal_bridge_section(
-            self.terminal_bridge_context.as_ref(),
-            self.terminal_bridge_context
-                .as_ref()
-                .map_or(SHARED_DEFAULT_STATE_ROOT_SOURCE, |context| {
-                    context.continuity_source.as_str()
-                }),
-        );
-        print_text("Selected action", &self.selected_action);
-        print_text("Action plan", &self.action_plan);
-        print_text("Verification steps", &self.verification_steps);
-        print_text("Action status", &self.action_status);
-        print_text(
+
+        // --- Section 3: Adapter details ---
+        lines.push(s("Selected base type", &self.selected_base_type));
+        lines.push(s("Topology", &self.topology));
+
+        // --- Section 4: Repo details ---
+        lines.push(s("Repo root", &self.repo_root.display().to_string()));
+        lines.push(s("Repo branch", &self.repo_branch));
+        lines.push(s("Repo head", &self.repo_head));
+        lines.push(s("Worktree dirty", &self.worktree_dirty));
+        lines.push(s("Changed files", &self.changed_files));
+
+        // --- Section 5: Action/checkpoint audit ---
+        lines.push(s("Selected action", &self.selected_action));
+        lines.push(s("Action plan", &self.action_plan));
+        lines.push(s("Verification steps", &self.verification_steps));
+        lines.push(s("Action status", &self.action_status));
+        lines.push(s(
             "Changed files after action",
             &self.changed_files_after_action,
-        );
-        print_text("Verification status", &self.verification_status);
-        print_text("Verification summary", &self.verification_summary);
-        println!("Memory records: {}", self.memory_record_count);
-        println!("Evidence records: {}", self.evidence_record_count);
+        ));
+        lines.push(s("Verification status", &self.verification_status));
+        lines.push(s("Verification summary", &self.verification_summary));
+
+        // --- Section 6: Transcript or continuity summary ---
+        match &self.terminal_bridge_context {
+            Some(context) => {
+                lines.push(s("Mode boundary", TERMINAL_MODE_BOUNDARY));
+                lines.push(s("Terminal continuity available", "yes"));
+                lines.push(s("Terminal continuity source", &context.continuity_source));
+                lines.push(s("Terminal continuity handoff", &context.handoff_file_name));
+                lines.push(s(
+                    "Terminal continuity working directory",
+                    &context.working_directory,
+                ));
+                lines.push(s(
+                    "Terminal continuity command count",
+                    &context.command_count,
+                ));
+                lines.push(s("Terminal continuity wait count", &context.wait_count));
+                if let Some(last_output_line) = &context.last_output_line {
+                    lines.push(s("Terminal continuity last output line", last_output_line));
+                } else {
+                    lines.push(s("Terminal continuity last output line", "<none>"));
+                }
+            }
+            None => {
+                lines.push(s("Terminal continuity available", "no"));
+                lines.push(s(
+                    "Terminal continuity source",
+                    SHARED_DEFAULT_STATE_ROOT_SOURCE,
+                ));
+            }
+        }
+
+        // --- Section 7: Explicit next-step guidance ---
+        lines.push("Next steps count: 1".to_string());
+        lines.push(format!(
+            "Next step 1: run 'simard engineer read {}' to re-read this session's state",
+            self.state_root.display()
+        ));
+
+        // --- Section 8: Durable record counts ---
+        lines.push(format!("Memory records: {}", self.memory_record_count));
+        lines.push(format!("Evidence records: {}", self.evidence_record_count));
+
+        lines
     }
 }
 
@@ -370,5 +437,165 @@ mod tests {
         let record = "agenda=Sprint review; updates=[Updated A]; decisions=[Use strategy X | Defer Y]; risks=[Risk 1]; next_steps=[Step 1]; open_questions=[Question 1]; goals=[p1:active:Goal title:Goal rationale]";
         let result = parse_carried_meeting_decisions(record).unwrap();
         assert_eq!(result, vec!["Use strategy X", "Defer Y"]);
+    }
+
+    /// Verify readback rendering follows the deterministic 8-section order
+    /// defined by `Specs/ProductArchitecture.md` line 293:
+    ///   1. runtime header
+    ///   2. handoff session summary
+    ///   3. adapter details
+    ///   4. repo details
+    ///   5. action/checkpoint audit
+    ///   6. transcript or continuity summary
+    ///   7. explicit next-step guidance
+    ///   8. durable record counts
+    #[test]
+    fn engineer_read_view_render_follows_spec_section_order() {
+        let view = EngineerReadView {
+            state_root: PathBuf::from("/test/state"),
+            handoff_source: "test-source.json".to_string(),
+            identity: "simard-engineer".to_string(),
+            selected_base_type: "terminal-shell".to_string(),
+            topology: "single-process".to_string(),
+            session_phase: "Complete".to_string(),
+            objective_metadata: "objective-metadata(chars=42, words=8, lines=2)".to_string(),
+            repo_root: PathBuf::from("/home/user/project"),
+            repo_branch: "main".to_string(),
+            repo_head: "abc123".to_string(),
+            worktree_dirty: "false".to_string(),
+            changed_files: "<none>".to_string(),
+            active_goals: vec!["goal-1".to_string()],
+            carried_meeting_decisions: vec!["decide-1".to_string()],
+            selected_action: "cargo-check".to_string(),
+            action_plan: "run cargo check".to_string(),
+            verification_steps: "verify clean build".to_string(),
+            action_status: "success".to_string(),
+            changed_files_after_action: "<none>".to_string(),
+            verification_status: "passed".to_string(),
+            verification_summary: "all checks passed".to_string(),
+            terminal_bridge_context: None,
+            memory_record_count: 3,
+            evidence_record_count: 5,
+        };
+
+        let lines = view.render_lines();
+        let output = lines.join("\n");
+
+        // Each section has a representative marker. Verify they appear in
+        // the correct relative order (section N marker before section N+1).
+        let section_markers = [
+            ("1:runtime_header", "Probe mode: engineer-read"),
+            ("2:handoff_session", "Objective metadata:"),
+            ("3:adapter_details", "Selected base type:"),
+            ("4:repo_details", "Repo root:"),
+            ("5:action_audit", "Selected action:"),
+            ("6:continuity", "Terminal continuity"),
+            ("7:next_step", "Next step"),
+            ("8:durable_counts", "Memory records:"),
+        ];
+
+        let mut last_pos = 0;
+        for (section_name, marker) in &section_markers {
+            let pos = output.find(marker).unwrap_or_else(|| {
+                panic!("section {section_name}: marker {marker:?} not found in output:\n{output}")
+            });
+            assert!(
+                pos >= last_pos,
+                "section {section_name} marker {marker:?} (pos {pos}) appears before previous section end (pos {last_pos})"
+            );
+            last_pos = pos;
+        }
+    }
+
+    /// Verify that adapter details (section 3) come AFTER session summary
+    /// (section 2) and BEFORE repo details (section 4). This was the primary
+    /// ordering bug: the old code rendered adapter details before session
+    /// summary.
+    #[test]
+    fn engineer_read_view_adapter_after_session_before_repo() {
+        let view = EngineerReadView {
+            state_root: PathBuf::from("/test/state"),
+            handoff_source: "test-source.json".to_string(),
+            identity: "simard-engineer".to_string(),
+            selected_base_type: "terminal-shell".to_string(),
+            topology: "single-process".to_string(),
+            session_phase: "Complete".to_string(),
+            objective_metadata: "objective-metadata(chars=42, words=8, lines=2)".to_string(),
+            repo_root: PathBuf::from("/home/user/project"),
+            repo_branch: "main".to_string(),
+            repo_head: "abc123".to_string(),
+            worktree_dirty: "false".to_string(),
+            changed_files: "<none>".to_string(),
+            active_goals: vec![],
+            carried_meeting_decisions: vec![],
+            selected_action: "cargo-check".to_string(),
+            action_plan: "run cargo check".to_string(),
+            verification_steps: "verify clean build".to_string(),
+            action_status: "success".to_string(),
+            changed_files_after_action: "<none>".to_string(),
+            verification_status: "passed".to_string(),
+            verification_summary: "all checks passed".to_string(),
+            terminal_bridge_context: None,
+            memory_record_count: 0,
+            evidence_record_count: 0,
+        };
+
+        let lines = view.render_lines();
+        let output = lines.join("\n");
+
+        let objective_pos = output.find("Objective metadata:").unwrap();
+        let base_type_pos = output.find("Selected base type:").unwrap();
+        let repo_root_pos = output.find("Repo root:").unwrap();
+
+        assert!(
+            objective_pos < base_type_pos,
+            "Objective metadata (section 2) must come before Selected base type (section 3)"
+        );
+        assert!(
+            base_type_pos < repo_root_pos,
+            "Selected base type (section 3) must come before Repo root (section 4)"
+        );
+    }
+
+    /// Verify next-step guidance (section 7) is present and appears before
+    /// durable record counts (section 8).
+    #[test]
+    fn engineer_read_view_next_step_guidance_present() {
+        let view = EngineerReadView {
+            state_root: PathBuf::from("/test/state"),
+            handoff_source: "s.json".to_string(),
+            identity: "id".to_string(),
+            selected_base_type: "bt".to_string(),
+            topology: "tp".to_string(),
+            session_phase: "Complete".to_string(),
+            objective_metadata: "om".to_string(),
+            repo_root: PathBuf::from("/repo"),
+            repo_branch: "main".to_string(),
+            repo_head: "abc".to_string(),
+            worktree_dirty: "false".to_string(),
+            changed_files: "<none>".to_string(),
+            active_goals: vec![],
+            carried_meeting_decisions: vec![],
+            selected_action: "a".to_string(),
+            action_plan: "p".to_string(),
+            verification_steps: "v".to_string(),
+            action_status: "s".to_string(),
+            changed_files_after_action: "<none>".to_string(),
+            verification_status: "p".to_string(),
+            verification_summary: "s".to_string(),
+            terminal_bridge_context: None,
+            memory_record_count: 0,
+            evidence_record_count: 0,
+        };
+
+        let lines = view.render_lines();
+        let output = lines.join("\n");
+
+        let next_step_pos = output.find("Next step").unwrap();
+        let memory_pos = output.find("Memory records:").unwrap();
+        assert!(
+            next_step_pos < memory_pos,
+            "Next-step guidance (section 7) must come before durable record counts (section 8)"
+        );
     }
 }

@@ -7,7 +7,7 @@ use crate::error::SimardResult;
 use crate::review_pipeline::{ReviewFinding, ReviewSession, review_diff, should_commit};
 
 use super::git_ops::{git_commit, git_diff, rollback};
-use super::types::{ApplyResult, ImprovementPatch};
+use super::types::{ApplyResult, ApprovalPolicy, ImprovementPatch};
 
 /// Philosophy guidelines passed to the LLM reviewer.
 const PHILOSOPHY_REVIEW: &str = "Ruthless simplicity. No unnecessary abstractions. \
@@ -99,7 +99,14 @@ pub fn apply_and_review(patch: &ImprovementPatch, workspace_path: &Path) -> Appl
     }
 }
 
-/// Process multiple improvement proposals sequentially.
+/// Process multiple improvement proposals sequentially, subject to an
+/// approval policy gate.
+///
+/// Per spec lines 695/700, the default [`ApprovalPolicy::RequireOperatorApproval`]
+/// blocks all autonomous execution, returning [`ApplyResult::ApprovalRequired`]
+/// for each proposal. Callers must supply an explicit
+/// [`ApprovalPolicy::AutoApproveWithAuditTrail`] to proceed, which logs every
+/// application for governance audit.
 ///
 /// Stops early on the first [`ApplyResult::ReviewBlocked`] or
 /// [`ApplyResult::CommitFailed`] that contains a [`Severity::Critical`]
@@ -108,16 +115,36 @@ pub fn run_autonomous_improvement(
     proposals: &[String],
     workspace: &Path,
     inspection: &RepoInspection,
+    policy: &ApprovalPolicy,
 ) -> Vec<ApplyResult> {
     let mut results = Vec::with_capacity(proposals.len());
 
     for (i, proposal) in proposals.iter().enumerate() {
-        eprintln!(
-            "[self-improve] proposal {}/{}: {}",
-            i + 1,
-            proposals.len(),
-            proposal
-        );
+        // ── Approval gate (spec lines 695/700) ──────────────────────
+        match policy {
+            ApprovalPolicy::RequireOperatorApproval => {
+                eprintln!(
+                    "[self-improve] proposal {}/{} blocked: operator approval required — \
+                     autonomous execution is not permitted under current policy",
+                    i + 1,
+                    proposals.len(),
+                );
+                results.push(ApplyResult::ApprovalRequired {
+                    proposal: proposal.clone(),
+                });
+                continue;
+            }
+            ApprovalPolicy::AutoApproveWithAuditTrail { justification } => {
+                eprintln!(
+                    "[self-improve] proposal {}/{}: auto-approved (justification: {}) — {}",
+                    i + 1,
+                    proposals.len(),
+                    justification,
+                    proposal,
+                );
+            }
+        }
+
         let patch = match generate_patch(proposal, inspection) {
             Ok(p) => p,
             Err(e) => {

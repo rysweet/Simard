@@ -5,7 +5,7 @@ Loaded at compile time via `include_str!` from `src/ooda_brain/orient.rs`.
 
 This is the single source of truth for the orient-phase failure-penalty
 demotion judgment. Edit this file to change how Simard demotes chronically
-failing goals; no Rust changes required (rebuild + daemon restart).
+failing goals; rebuild + daemon restart are still required.
 
 ## File Layout
 
@@ -24,15 +24,14 @@ The prompt is a markdown document with six top-level sections:
 …(demotion guidelines and reference scale)…
 
 ## OUTPUT_FORMAT
-…(JSON object: adjusted_urgency, demotion_applied, rationale, confidence)…
+…(first word must be a decimal number)…
 
 ## EXAMPLES
-…(JSON-format examples, one per demotion scenario)…
+…(bare-float-first-token examples)…
 ```
 
-Unlike the decide and engineer-lifecycle brains, the orient brain does **not**
-use a `DECISION:` marker. It uses **JSON object format** — the model returns
-a single JSON object on one line with the required fields.
+> **Changed in #2144:** The orient brain no longer accepts JSON. The model now
+> emits a **bare decimal as the first token**, followed by free-form rationale.
 
 ## Placeholders
 
@@ -51,53 +50,46 @@ this brain — they are not subject to failure-penalty demotion.
 
 ## Output Format
 
-The orient brain uses **JSON object format**. The wire format is documented
-normatively in
-[text-parsing wire formats § orient phase](text-parsing-wire-formats.md#1b-orient-phase-orientrs).
+The orient brain uses the **first-float protocol**. The wire format is
+documented normatively in
+[text-parsing wire formats § orient phase](text-parsing-wire-formats.md#1b-orient-phase-recipe_brainrs).
 
 ### Response format
 
-```json
-{"adjusted_urgency": <float in [0,1]>, "demotion_applied": <float ≥ 0>, "rationale": "<short reason>", "confidence": <float in [0,1]>}
+```
+<decimal> <optional rationale text>
 ```
 
-### JSON fields
+Example:
 
-| Field | Type | Required | Default | Validation |
-|---|---|---|---|---|
-| `adjusted_urgency` | `f64` | **Yes** | _(parse fails without it)_ | Must be in `[0.0, base_urgency]` |
-| `rationale` | `String` | **Yes** | _(parse fails without it)_ | None |
-| `confidence` | `f64` | No | `1.0` | Must be in `[0.0, 1.0]` |
-| `demotion_applied` | `f64` | No | `0.0` | Convenience; daemon recomputes |
+```
+0.6 Standard floor demotion applied
+```
 
-The parser extracts the first `{…}` substring from the response, so the
-model may optionally surround the JSON with prose (tolerated, not encouraged).
-Extra fields are silently ignored (forward compatible).
+### Parsed fields
+
+| Field | Source | Value |
+|---|---|---|
+| `adjusted_urgency` | first token | Parsed as `f64` |
+| `rationale` | full response text | Entire model response |
+| `confidence` | parser default | Always `1.0` |
+| `demotion_applied` | daemon/runtime logic | Recomputed outside the parser |
 
 ### Validation
 
-`OrientJudgment::validate()` enforces:
+`OrientJudgment::validate()` is retained and still enforces:
 
 - `adjusted_urgency` in `[0.0, 1.0]`
-- `adjusted_urgency ≤ base_urgency` (no escalation — escalation belongs to
-  the engineer-lifecycle brain)
+- `adjusted_urgency ≤ base_urgency` (no escalation)
 - `confidence` in `[0.0, 1.0]`
 
-If validation fails, the deterministic floor applies:
+If validation fails, the deterministic floor still applies:
 `urgency - 0.2 × failure_count`, clamped to `[0.0, 1.0]`.
-
-### JSON parsing notes
-
-The parser uses `serde_json::from_str` on the extracted `{…}` substring.
-Malformed JSON or a response with no `{` causes a parse failure, and the
-deterministic floor applies. The old labeled-line format
-(`ADJUSTED_URGENCY:`, `RATIONALE:`, `CONFIDENCE:`) is no longer accepted.
 
 ## DECISION Section
 
-The prompt includes a `## DECISION` section (note: this is a prompt section
-header, not the `DECISION:` wire format marker used by other brains). This
-section provides the demotion reference scale:
+The prompt still includes a `## DECISION` section (prompt prose, not a wire
+marker). It still provides the demotion reference scale:
 
 | `failure_count` | Expected demotion | Guidance |
 |---|---|---|
@@ -107,22 +99,21 @@ section provides the demotion reference scale:
 | ≥ 5 | Effectively zero | Goal falls below all unfailed work |
 
 The brain may deviate from this scale:
-- **More lenient** when `base_reason` indicates transient failures (CI flake,
-  recent spawn).
-- **More aggressive** when the goal_id pattern or reason suggests the goal is
-  malformed.
+- **More lenient** when `base_reason` indicates transient failures.
+- **More aggressive** when the goal ID or rationale suggests the goal is malformed.
 
 ## Examples
 
-The prompt's `EXAMPLES` section contains JSON-format examples matching the
-parser's expected wire format.
+The prompt's `EXAMPLES` section should use the new bare-float-first-token form.
 
-| Scenario | `failure_count` | Expected `ADJUSTED_URGENCY` | Key signal |
-|---|---|---|---|
-| Standard floor demotion | 1 | `base - 0.2` | Default case |
-| Chronic failures | 5 | `0.0` | Drive to zero |
-| Transient cause (leniency) | 2 | Slightly above floor | Dirty tree suggests active work |
-| Negative: escalation | 1 | _(rejected)_ | `adjusted > base` triggers fallback |
+| Scenario | Example output |
+|---|---|
+| Standard floor demotion | `0.6 Standard floor demotion applied` |
+| Chronic failures | `0.0 Five consecutive failures; drop to zero urgency` |
+| Transient cause (leniency) | `0.7 Recent worktree activity suggests a softer demotion` |
+| Negative: escalation | `1.2 Escalate urgency` → rejected by validation |
+
+> **Removed in #2144:** JSON object examples and JSON field tables.
 
 ## Compile-Time Embedding
 
@@ -131,19 +122,19 @@ must exist at build time and be valid UTF-8, and should stay under ~32 KB.
 
 ## Parser Rules
 
-`parse_judgment_from_response` (in `src/ooda_brain/orient.rs`) extracts and
-deserializes a JSON object from the brain response:
+`parse_judgment_from_response` in `src/ooda_brain/orient.rs` now uses the
+renamed helper `try_first_float()`:
 
-1. Trim whitespace; reject empty responses.
-2. Find the first `{` and last `}` in the response to locate the JSON object.
-3. Deserialize the substring via `serde_json::from_str::<OrientJudgment>`.
-4. `adjusted_urgency` and `rationale` are required fields; `confidence`
-   defaults to `1.0` and `demotion_applied` defaults to `0.0`.
-5. If no JSON object is found or deserialization fails, return error; caller
-   falls back to the deterministic floor formula.
+1. Split the response on whitespace.
+2. Take the first token.
+3. Parse that token as `f64`.
+4. If parsing succeeds, build `OrientJudgment` with `confidence = 1.0` and
+   `rationale = full response text`.
+5. Run `OrientJudgment::validate()`.
+6. If parsing or validation fails, fall back to the deterministic floor.
 
-The old labeled-line parser has been removed. Labeled-line responses
-(e.g. `ADJUSTED_URGENCY: 0.6`) will fail parsing because no `{` is found.
+The helper rename is purely descriptive: `try_bare_float()` →
+`try_first_float()`.
 
 ## Deterministic Fallback
 
@@ -155,23 +146,23 @@ adjusted_urgency = max(0.0, base_urgency - 0.2 * failure_count)
 
 This fallback fires when:
 - No LLM is configured.
-- The LLM response cannot be parsed (no JSON object found, or deserialization fails).
+- The LLM response's **first token** cannot be parsed as a float.
 - The parsed judgment fails validation (`adjusted_urgency > base_urgency`).
 
 The fallback is **not** a silent error handler — the parse failure is surfaced
-through all four visibility channels (structured log, metric, cycle report,
-GitHub issue escalation) before the fallback is applied.
+through the usual visibility channels before the fallback is applied.
 
 ## Versioning & Compatibility
 
-The orient brain has no enum variants to extend — it produces a single
-`OrientJudgment` struct. Adding new JSON fields to the prompt is safe:
-the `serde` deserializer ignores unknown fields (forward compatible), and
-new fields will not be parsed until the Rust struct is updated.
+The orient brain still produces a single `OrientJudgment` struct. Semantic
+changes to the prompt are safe when they preserve the first-token decimal rule.
 
-Changes to the demotion reference scale or guidance prose are safe to ship
-alone. Changes to the JSON field names require a coordinated Rust change
-to the `OrientJudgment` struct and parser in `orient.rs`.
+If you change the output examples or wording, keep this invariant:
+
+- the **first word must be a decimal number**
+
+A response that starts with prose, markdown fencing, or JSON punctuation will
+miss the parse fast path and drop to the deterministic floor.
 
 ## See Also
 

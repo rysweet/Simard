@@ -57,14 +57,17 @@ fn resolve_recipe_path(repo_root: &std::path::Path) -> Option<PathBuf> {
 /// Recipe-runner-backed progress evidence checker.
 pub struct RecipeProgressChecker {
     recipe_path: PathBuf,
+    agent_binary: &'static str,
 }
 
 impl RecipeProgressChecker {
     pub fn new(repo_root: &std::path::Path) -> Option<Self> {
         let recipe_path = resolve_recipe_path(repo_root)?;
+        let agent_binary = crate::session_builder::LlmProvider::resolve_agent_binary()?;
         // Verify recipe-runner-rs is available
         if Command::new("recipe-runner-rs")
             .arg("--version")
+            .env("AMPLIHACK_AGENT_BINARY", agent_binary)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
@@ -72,7 +75,10 @@ impl RecipeProgressChecker {
         {
             return None;
         }
-        Some(Self { recipe_path })
+        Some(Self {
+            recipe_path,
+            agent_binary,
+        })
     }
 }
 
@@ -103,6 +109,7 @@ impl ProgressEvidenceChecker for RecipeProgressChecker {
 
         let result = Command::new("recipe-runner-rs")
             .arg(self.recipe_path.as_os_str())
+            .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
             .arg("-c")
             .arg(format!("goal_id={}", goal.id))
             .arg("-c")
@@ -226,6 +233,7 @@ mod tests {
     fn downward_move_is_auto_accepted_without_recipe_call() {
         let checker = RecipeProgressChecker {
             recipe_path: PathBuf::from("/nonexistent/recipe.yaml"),
+            agent_binary: "copilot",
         };
         let g = goal_with_activity(None);
         match checker.check(&g, 80, 50, Utc::now()) {
@@ -240,6 +248,7 @@ mod tests {
     fn no_change_is_auto_accepted() {
         let checker = RecipeProgressChecker {
             recipe_path: PathBuf::from("/nonexistent/recipe.yaml"),
+            agent_binary: "copilot",
         };
         let g = goal_with_activity(None);
         assert!(matches!(
@@ -252,6 +261,7 @@ mod tests {
     fn upward_claim_with_missing_binary_falls_back_to_accept() {
         let checker = RecipeProgressChecker {
             recipe_path: PathBuf::from("/nonexistent/recipe.yaml"),
+            agent_binary: "copilot",
         };
         let g = goal_with_activity(Some("working on it"));
         match checker.check(&g, 10, 20, Utc::now()) {

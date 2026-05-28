@@ -9,7 +9,6 @@ related:
   - ../reference/text-parsing-wire-formats.md
   - ../reference/ooda-brain-api.md
   - ../reference/ooda-brain-decision-protocol.md
-  - ../reference/disk-health-api.md
   - ../reference/progress-evidence-api.md
   - ../howto/edit-the-ooda-brain-prompt.md
   - ../howto/diagnose-decide-orient-parse-failures.md
@@ -20,10 +19,10 @@ related:
 # Text-based brain protocol
 
 Simard never parses JSON from LLM or recipe output. Every brain, recipe shim,
-and progress checker uses text-based wire formats — keyword markers,
-labeled lines, or key=value pairs — that the Rust code parses with `str`
-methods. No `serde_json::from_str` on model output. No regex crate. No
-extraction heuristics like `find('{')..rfind('}')`.
+and progress checker uses text-based wire formats — first-word matching,
+first-float extraction, keyword scanning, or key=value pairs — that the Rust
+code parses with `str` methods. No `serde_json::from_str` on model output.
+No regex crate. No extraction heuristics like `find('{')..rfind('}')`.
 
 This document explains the problem that motivated the change, the design
 principles behind the text-based protocol, and the specific wire formats
@@ -77,38 +76,32 @@ extract between braces, handle whitespace. Each tolerance added complexity
 and new failure modes. The text-based protocol inverts the approach: the
 wire format is text from the start, and the parser looks for keywords.
 
-A model that responds with `"advance_goal"` or `"DECISION: advance_goal"`
-or `"I think we should advance_goal because..."` all parse correctly. The
-parser finds the keyword; the surrounding prose is the rationale.
+A model that responds with `"advance_goal"` or `"advance_goal drive the PR"`
+all parse correctly — the first word is the decision; everything after is
+rationale.
 
 ### `str` methods only, no regex
 
-All text parsers use `str::starts_with`, `str::contains`, `str::split_once`,
+All text parsers use `str::split_whitespace`, `eq_ignore_ascii_case`,
 `str::trim`, and `str::parse::<f64>`. No regex crate dependency. This
 eliminates ReDoS risk and keeps the parser auditable as a sequence of
 string operations.
 
-### Keyword scanning, not position-dependent
+### First-word matching for decisions
 
-Recipe shim parsers (progress checker, merge judge) scan the *entire*
-stdout for a verdict keyword — `"accept"`, `"reject"`, `"ready"`,
-`"not_ready"`. The keyword can appear anywhere in the text. The parser
-checks for the *negative* keyword first (`"not_ready"` before `"ready"`)
-to avoid false positives from substring matching.
+> **Changed in [#2144](https://github.com/rysweet/Simard/issues/2144):**
+> All three OODA brain parsers (decide, orient, lifecycle) now use
+> first-word/first-float extraction instead of keyword scanning or markers.
 
-### Labeled lines for structured data
+The OODA brain parsers extract the **first whitespace-delimited token** from
+the model response, lowercase it, and match against known variants. This is
+simpler than keyword scanning (which checked every token in the response) and
+simpler than the `DECISION:` marker protocol (which required a specific line
+format with labeled fields).
 
-OODA brain parsers (engineer-lifecycle `rustyclawd.rs`) use labeled-line
-formats where each field appears on its own line with a prefix:
-
-```
-DECISION: advance_goal
-RATIONALE: PR #2023 is open; engineer needed to drive it to completion
-```
-
-The parser iterates `.lines()`, checks `starts_with("PREFIX:")`, and
-extracts the value after the colon. Unknown lines are ignored (forward
-compatible). Missing required fields get sensible defaults.
+Recipe shim parsers (progress checker, merge judge) still use keyword scanning
+of the full response — their prompts are not under our control in the same
+way, and the keyword-anywhere pattern remains appropriate for them.
 
 ### Key=value for bash output
 
@@ -127,46 +120,49 @@ concerns, no escaping, no JSON `printf` fragility.
 
 ### Retained `serde_json` is never on LLM output
 
-The one remaining `serde_json::from_value` call in `rustyclawd.rs`
-deserializes a `serde_json::Value` that Rust code *constructed* from
-text-parsed fields — it is not parsing LLM output. A `// SAFETY:` comment
-marks this call and explains why it is not part of the anti-pattern.
+There are no remaining `serde_json` calls on LLM output. The `OrientJudgment`
+struct retains `Deserialize` for internal use, but the parser never calls
+`serde_json::from_str` on model text.
+
+> **Removed in #2144:** The `serde_json::from_value` call in the lifecycle
+> parser that deserialized text-parsed fields into `EngineerLifecycleDecision`.
 
 ## The three protocol families
 
-### 1. DECISION marker protocol (OODA brains)
+### 1. First-word match protocol (OODA brains)
 
-Used by: `rustyclawd.rs`
+Used by: `recipe_brain.rs` (all three phases)
 
-> **Note:** `decide.rs` has moved to the keyword verdict protocol (§ 2)
-> as of [#2111](https://github.com/rysweet/Simard/issues/2111).
-> `orient.rs` uses JSON format.
+> **Changed in [#2144](https://github.com/rysweet/Simard/issues/2144):**
+> All three OODA brain parsers now use the same first-word extraction pattern.
 
-The model emits a leading `DECISION: <variant>` line. For variants that
-need structured fields, labeled body lines follow:
+The model emits the decision word as its **first token**. For decide and
+lifecycle, this is a variant name. For orient, this is a bare decimal number.
+Everything after the first word is treated as rationale.
 
 ```
-DECISION: open_tracking_issue
-TITLE: Engineer stuck in compile-error loop for improve-test-coverage
-BODY: The engineer has been failing for 6 consecutive cycles with E0277 type errors.
-RATIONALE: Persistent failure pattern needs human attention.
+reclaim_and_redispatch Engineer stuck on type errors for 12 cycles.
 ```
 
 The parser:
-1. Finds the first non-blank line matching `DECISION:` (case-insensitive
-   on the literal word `DECISION`).
-2. Extracts the variant token and matches against the known enum variants.
-3. For structured variants, scans remaining lines for labeled fields
-   (`TITLE:`, `BODY:`, `REASON:`, `REDISPATCH_CONTEXT:`).
-4. Collects all non-labeled lines after the DECISION line as the rationale
-   (unless a `RATIONALE:` label is present, which takes precedence).
+1. Calls `split_whitespace().next()` to extract the first token.
+2. Lowercases it via `to_ascii_lowercase()`.
+3. Matches against the known variant whitelist.
+4. On match: constructs the variant with default extra fields and remaining
+   text as rationale.
+5. On no match: returns the safe default (e.g., `AdvanceGoal`, `ContinueSkipping`).
 
 See [Reference: text-parsing wire formats](../reference/text-parsing-wire-formats.md)
 for the full grammar and variant-specific field requirements.
 
 ### 2. Keyword verdict protocol (recipe shims)
 
-Used by: `recipe_progress_checker.rs`, `recipe_merge_judge.rs`, `recipe_decide.rs`
+Used by: `recipe_progress_checker.rs`, `recipe_merge_judge.rs`
+
+> **Changed in [#2144](https://github.com/rysweet/Simard/issues/2144):**
+> The decide brain has moved from this protocol to the first-word match
+> protocol (§ 1). The keyword verdict protocol is now used only by the
+> progress checker and merge judge.
 
 The recipe runs an agent step. The agent's stdout is scanned for a verdict
 keyword. Everything else is treated as rationale.
@@ -185,18 +181,8 @@ The parser:
    first — prevents `"not_ready"` matching as `"ready"`.
 3. Checks for `"ready"` or `"accept"`.
 4. If no keyword found, defaults to the safe option (`Accept` for progress
-   checker — fail-open; `NotReady` for merge judge — fail-closed;
-   `AdvanceGoal` for decide brain — fail-safe).
+   checker — fail-open; `NotReady` for merge judge — fail-closed).
 5. Extracts the full stdout (minus the keyword line) as rationale.
-
-> **New in [#2111](https://github.com/rysweet/Simard/issues/2111):**
-> The decide brain (`recipe_decide.rs`) now uses this protocol. It scans
-> for 10 action keywords (`advance_goal`, `consolidate_memory`,
-> `run_improvement`, etc.) in the agent's prose output. No keyword is a
-> substring of another, so no ordering-dependent disambiguation is needed.
-> If no keyword is found, `advance_goal` is the default — the same result
-> the `DeterministicFallbackDecideBrain` produces for real goal slugs.
-> This eliminated all decide-brain parse failures in production.
 
 ### 3. Key=value protocol (disk health)
 
@@ -226,24 +212,20 @@ Several modules were deleted or cleaned up as part of the text-migration changes
 
 - **`progress_reviewer.rs`** — `LlmReviewerProgressChecker` and
   `parse_reviewer_response`. Replaced by the keyword verdict parser in
-  `recipe_progress_checker.rs`. The `RecipeProgressChecker` now builds
-  `EvidenceDecision` directly without the intermediate `ReviewerResponse`
-  type.
+  `recipe_progress_checker.rs`.
 
 - **`merge_judge.rs` (partial)** — `LlmMergeJudge`, `parse_judge_response`,
   `extract_fenced_blocks`, `extract_balanced_objects`, `truncate_for_log`.
-  The merge judge fallback chain is now `RecipeMergeJudge` →
-  `RefusingMergeJudge`. There is no LLM tier. Types (`JudgeOutcome`,
-  `Verdict`, `Blocker`, `MergeJudgeKind`), traits (`MergeJudge`), and
-  `RefusingMergeJudge` / `build_merge_judge` are retained.
 
 - **`decide.rs` (partial, #2111)** — `RustyClawdDecideBrain`,
-  `parse_judgment_from_response`, `build_rustyclawd_decide_brain`. The
-  DECISION marker parser and LLM submitter-based brain are removed. The
-  decide brain now uses `RecipeDecideBrain` in `recipe_decide.rs`, which
-  invokes `recipe-runner-rs` and scans stdout for action keywords. The
-  `OodaDecideBrain` trait, `DecideContext`, `DecideJudgment`,
-  `DeterministicFallbackDecideBrain`, and `DECIDE_PROMPT_NAME` are retained.
+  `parse_judgment_from_response`, `build_rustyclawd_decide_brain`.
+
+- **`recipe_brain.rs` (partial, #2144)** — `ascii_contains_ignore_case()`,
+  `try_json_extraction()`, `try_bare_float()`, `parse_with_marker()`,
+  `extract_decision_marker()`, `try_keyword_scan()`, `build_keyword_decision()`,
+  `LIFECYCLE_KEYWORDS`. All three parse functions (`parse_action_from_text`,
+  `parse_orient_from_text`, `parse_lifecycle_from_text`) rewritten as trivial
+  first-word/first-float extractors.
 
 The daemon wiring in `operator_commands_ooda/daemon/mod.rs` was updated to
 match: the `LlmReviewerProgressChecker` fallback arm was removed. The chain
@@ -267,17 +249,16 @@ open PRs not getting engineers spawned. The flow:
    would have routed differently (e.g., `research_query`), the fallback
    silently overrides the model's judgment.
 
-With text parsing, step 3 succeeds directly. The model's response
-`"advance_goal"` is found by keyword scan. No fallback needed. Goals
-with open PRs flow to `dispatch_spawn_engineer` reliably.
+With first-word extraction (#2144), step 3 succeeds directly. The model's
+first word `"advance_goal"` is matched immediately. No keyword scanning,
+no fallback needed. Goals with open PRs flow to `dispatch_spawn_engineer`
+reliably.
 
-> **Completed in [#2111](https://github.com/rysweet/Simard/issues/2111):**
-> The decide brain now runs as a recipe step with keyword scanning via
-> `RecipeDecideBrain`. The `DECISION:` marker parser and
-> `RustyClawdDecideBrain` have been deleted. The agent's prose output is
-> scanned directly for action keywords — the same keyword verdict protocol
-> used by the progress checker and merge judge. Parse failures from the
-> decide phase are eliminated entirely.
+> **Completed in [#2111](https://github.com/rysweet/Simard/issues/2111) and
+> [#2144](https://github.com/rysweet/Simard/issues/2144):**
+> The decide brain now uses first-word extraction. The `DECISION:` marker
+> parser, keyword scanner, JSON extractor, and `RustyClawdDecideBrain` have
+> all been deleted. Parse failures from the OODA brains are eliminated.
 
 ## Security improvements
 
@@ -296,8 +277,7 @@ Removing the JSON extraction patterns is a net security improvement:
 
 - [Reference: text-parsing wire formats](../reference/text-parsing-wire-formats.md) — full grammar for each protocol
 - [Reference: OODA Brain API](../reference/ooda-brain-api.md) — trait and type definitions
-- [Reference: OODA Brain Decision Protocol](../reference/ooda-brain-decision-protocol.md) — DECISION marker for engineer lifecycle
-- [Reference: Disk Health API](../reference/disk-health-api.md) — key=value disk health contract
+- [Reference: OODA Brain Decision Protocol](../reference/ooda-brain-decision-protocol.md) — first-word match for engineer lifecycle
 - [Reference: Progress-evidence API](../reference/progress-evidence-api.md) — keyword verdict for progress checking
 - [How-to: edit the OODA brain prompt](../howto/edit-the-ooda-brain-prompt.md) — prompt editing after the text migration
 - [How-to: diagnose decide/orient parse failures](../howto/diagnose-decide-orient-parse-failures.md) — operator runbook

@@ -267,6 +267,28 @@ fn phase_trace_maps_persist_to_persistence() {
 }
 
 #[test]
+fn phase_trace_maps_summarize_to_summarize() {
+    use crate::session::SessionPhase;
+    let trace = PhaseTrace {
+        name: "summarize".to_string(),
+        duration: std::time::Duration::from_millis(10),
+        outcome: PhaseOutcome::Success,
+    };
+    assert_eq!(trace.session_phase(), SessionPhase::Summarize);
+}
+
+#[test]
+fn phase_trace_maps_plan_to_planning() {
+    use crate::session::SessionPhase;
+    let trace = PhaseTrace {
+        name: "plan".to_string(),
+        duration: std::time::Duration::from_millis(5),
+        outcome: PhaseOutcome::Success,
+    };
+    assert_eq!(trace.session_phase(), SessionPhase::Planning);
+}
+
+#[test]
 fn phase_trace_maps_unknown_to_execution_default() {
     use crate::session::SessionPhase;
     let trace = PhaseTrace {
@@ -338,6 +360,7 @@ fn engineer_loop_run_session_record_backward_compat() {
             carried_meeting_decisions: vec![],
             architecture_gap_summary: String::new(),
         },
+        plan: None,
         action: crate::engineer_loop::types::ExecutedEngineerAction {
             selected: crate::engineer_loop::types::SelectedEngineerAction {
                 label: "test".to_string(),
@@ -358,14 +381,60 @@ fn engineer_loop_run_session_record_backward_compat() {
             summary: "ok".to_string(),
             checks: vec![],
         },
+        summary: None,
         terminal_bridge_context: None,
         elapsed_duration: std::time::Duration::from_millis(100),
         phase_traces: vec![],
         session_record: None,
     };
-    // Round-trip serialization with session_record = None
+    // Round-trip serialization with optional fields = None
     let json = serde_json::to_string(&run).unwrap();
     assert!(!json.contains("session_record"), "None should be skipped");
+    assert!(!json.contains("\"plan\""), "None plan should be skipped");
+    // The top-level "summary" key is skipped; the nested verification.summary is fine.
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert!(
+        parsed.get("summary").is_none(),
+        "top-level summary should be absent"
+    );
     let restored: EngineerLoopRun = serde_json::from_str(&json).unwrap();
     assert_eq!(restored.session_record, None);
+    assert_eq!(restored.plan, None);
+    assert_eq!(restored.summary, None);
+}
+
+// ── ExecutionPlan and SessionSummary ─────────────────────────────
+
+#[test]
+fn execution_plan_serialization_round_trip() {
+    use crate::engineer_loop::types::ExecutionPlan;
+    let plan = ExecutionPlan {
+        objective: "fix the auth bug".to_string(),
+        steps: vec![
+            "Identify target files".to_string(),
+            "Apply fix".to_string(),
+            "Verify compilation".to_string(),
+        ],
+        expected_changed_files: vec!["src/auth.rs".to_string()],
+        risk_level: "medium".to_string(),
+        is_mutating: true,
+    };
+    let json = serde_json::to_string(&plan).expect("serialize");
+    let restored: ExecutionPlan = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(plan, restored);
+}
+
+#[test]
+fn session_summary_serialization_round_trip() {
+    use crate::engineer_loop::types::SessionSummary;
+    let summary = SessionSummary {
+        objective: "fix the auth bug".to_string(),
+        outcome: "success".to_string(),
+        changed_files: vec!["src/auth.rs".to_string()],
+        key_decisions: vec!["Used structured text replace".to_string()],
+        accomplishment: "Fixed authentication bypass in login handler".to_string(),
+    };
+    let json = serde_json::to_string(&summary).expect("serialize");
+    let restored: SessionSummary = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(summary, restored);
 }

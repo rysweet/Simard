@@ -15,4 +15,4 @@ mod tests_extra;
 
 // Re-export all public items so `crate::self_improve_executor::X` still works.
 pub use executor::{apply_and_review, generate_patch, run_autonomous_improvement};
-pub use types::{ApplyResult, ImprovementPatch};
+pub use types::{ApplyResult, ApprovalPolicy, ImprovementPatch};

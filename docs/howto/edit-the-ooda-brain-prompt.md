@@ -16,39 +16,40 @@ This guide shows how to iterate on that behavior **without touching Rust**.
 
 ## Prompt Structure
 
-The prompt has five fixed sections. The brain parser looks for `DECISION:`
-marker lines (not JSON) — the `OUTPUT_FORMAT` section instructs the model
-to emit text-based responses.
+All three OODA brain prompts use the same output contract: the model's
+**first word** must be the decision (variant name for decide/lifecycle, bare
+decimal for orient). Everything after the first word is rationale text.
+
+> **Changed in [#2144](https://github.com/rysweet/Simard/issues/2144):**
+> The `DECISION:` marker format, labeled-line fields, JSON object format,
+> and keyword-scanning protocol have all been removed. All three brains now
+> use first-word/first-float extraction.
 
 | Section | Purpose | Editable? |
 |---|---|---|
 | `# ROLE` | Identity & tone for the LLM | Yes |
-| `# CONTEXT` | Templated variables Simard substitutes per call | Yes (must keep `{{var}}` placeholders the brain populates — see below) |
-| `# OPTIONS` | The six `choice` values the brain may return | **Add/remove only with a Rust enum change**; renaming text guidance is fine |
-| `# OUTPUT_FORMAT` | Text format for the response (`DECISION: <variant>`) | **Do not change the marker format**; only edit prose and examples |
+| `# CONTEXT` | Templated variables Simard substitutes per call | Yes (must keep `{{var}}` placeholders — see below) |
+| `# OPTIONS` | The variant values the brain may return | **Add/remove only with a Rust enum change**; renaming text guidance is fine |
+| `# OUTPUT_FORMAT` | Instructs model to output variant as first word | **Keep the first-word instruction**; edit only the prose and examples |
 | `# EXAMPLES` | Few-shot input→output pairs | Yes — most useful knob for steering behavior |
 
 ### Output format
 
-The brain expects responses in the `DECISION:` marker format:
+All three brains expect the decision as the **first word** of the response:
 
 ```
-DECISION: continue_skipping
-RATIONALE: engineer is making progress, worktree modified 30s ago
+continue_skipping engineer is making progress, worktree modified 30s ago
 ```
 
-For structured variants, labeled fields follow the decision line:
+For the orient brain, the first token must be a bare decimal:
 
 ```
-DECISION: open_tracking_issue
-TITLE: Engineer stuck in compile-error loop
-BODY: The engineer has failed for 6 consecutive cycles with E0277 errors.
-RATIONALE: Persistent failure needs human attention.
+0.6 Standard floor demotion applied
 ```
 
-**Do not** instruct the model to emit JSON. The parser does not accept JSON —
-it looks for `DECISION:` markers and labeled lines only. See
-[text-parsing wire formats § engineer lifecycle](../reference/text-parsing-wire-formats.md#1c-engineer-lifecycle-rustyclawdrs)
+**Do not** instruct the model to emit JSON, `DECISION:` markers, or labeled
+lines. The parsers look for a single first word only. See
+[text-parsing wire formats](../reference/text-parsing-wire-formats.md)
 for the full grammar.
 
 ### Available context variables
@@ -79,9 +80,7 @@ Lower the idle threshold in your few-shot examples:
 +### Example: reclaim_and_redispatch
 +CONTEXT: skips=4, failures=0, worktree_idle=3600s, ...
  OUTPUT:
- DECISION: reclaim_and_redispatch
- REDISPATCH_CONTEXT: Previous engineer was idle for too long. Try fresh approach.
- RATIONALE: 4 skips with stale worktree suggests engineer is stuck.
+ reclaim_and_redispatch Previous engineer was idle for too long. Try fresh approach.
 ```
 
 LLMs imitate examples more reliably than they follow prose rules. Move the
@@ -96,9 +95,7 @@ phrase you want to treat as a block signal:
 ### Example: mark_goal_blocked (compile error loop)
 CONTEXT: skips=6, log_tail=...error[E0277]: the trait bound...
 OUTPUT:
-DECISION: mark_goal_blocked
-REASON: compile-error-loop
-RATIONALE: engineer is stuck in a type-error loop
+mark_goal_blocked engineer is stuck in a type-error loop
 ```
 
 ### Tune the rationale style
@@ -121,27 +118,25 @@ prefixes (`engineer alive — continue (brain): …`, `reclaimed pid …`, etc.)
 
 ## Constraints
 
-* The LLM **must** return a `DECISION: <variant>` marker line as the first
-  non-blank line (for the **engineer-lifecycle** brain only). The parser
-  scans for this marker and extracts the variant token. Responses without
-  a `DECISION:` line trigger `BrainResponseUnparseable` and the brain
-  falls back to `continue_skipping` for that cycle. The JSON format is
-  no longer accepted.
-* The **decide brain** does NOT require a `DECISION:` marker. It uses
-  keyword scanning — the agent can mention the action keyword anywhere in
-  its prose. If no keyword is found, `advance_goal` is used as the default.
-  The decide brain prompt has no `OUTPUT_FORMAT` section.
-* For structured variants (`open_tracking_issue`, `mark_goal_blocked`,
-  `reclaim_and_redispatch`), the model must emit labeled lines for the
-  required fields (`TITLE:`, `BODY:`, `REASON:`, `REDISPATCH_CONTEXT:`).
-  Missing required fields use default values.
+* The LLM **must** output the lifecycle variant name as the **first word** of
+  its response (for the **engineer-lifecycle** brain). The parser extracts this
+  first word and matches it case-insensitively. Responses where the first word
+  is not a valid variant default to `continue_skipping`.
+* The **decide brain** also uses first-word extraction. The first word must be
+  one of the 10 action keywords. If no keyword matches, `advance_goal` is used.
+* The **orient brain** uses first-float extraction. The first decimal number in
+  the response becomes `adjusted_urgency`. If no float is found, the
+  deterministic floor applies.
+* Structured extra fields (`title`, `body`, `reason`, `redispatch_context`) are
+  no longer extracted from the output. They use defaults. Do not instruct the
+  model to emit labeled lines — they will be treated as rationale text.
 * If you remove all examples for a given variant, the LLM may stop emitting
   it. Keep at least one example per variant you want reachable.
 * The engineer-lifecycle prompt file is loaded via `include_str!`; it must
   be valid UTF-8 and small enough to embed in the binary without bloat.
   Keep it under ~32 KB as a soft guideline.
-* The decide prompt is loaded at runtime from a recipe YAML and has no
-  compile-time embedding constraint.
+* The decide and orient prompts are loaded at runtime from recipe YAMLs and
+  have no compile-time embedding constraint.
 
 ## Editing the decide and orient prompts
 
@@ -171,11 +166,10 @@ steps:
 at runtime by `recipe-runner-rs`, edits take effect on the next OODA cycle
 automatically.
 
-The decide brain uses **keyword scanning** — the agent's prose output is
-scanned for action keywords (`advance_goal`, `consolidate_memory`, etc.).
-There is no `DECISION:` marker format, no `OUTPUT_FORMAT` section, and no
-structured output requirement. The agent simply mentions the action kind
-in its reasoning and the keyword scanner finds it.
+The decide brain uses **first-word extraction** — the first word of the
+agent's output is matched case-insensitively against the 10 action keywords.
+There is no keyword-scanning of the full response. The agent must output the
+action keyword as its first word.
 
 To steer the agent toward different routing:
 
@@ -183,19 +177,21 @@ To steer the agent toward different routing:
    Adding a keyword requires a coordinated Rust change to `DecideJudgment`
    and `parse_action_from_text()`.
 2. **Edit the `EXAMPLES` section** — the most effective knob. LLMs imitate
-   examples more reliably than they follow prose rules.
+   examples more reliably than they follow prose rules. Ensure every example
+   starts with the keyword as the first word.
 3. **Add negative examples** — critical for preventing substring
    pattern-matching (e.g., a goal named "memory-allocation" should route to
    `advance_goal`, not `consolidate_memory`).
 
-### Orient prompt (compiled in — rebuild required)
+### Orient prompt (recipe-based — rebuild required)
 
-**Orient** uses labeled lines (JSON format):
-```json
-{"adjusted_urgency": 0.60, "rationale": "1 failure: standard floor demotion", "confidence": 0.9}
+**Orient** uses first-float extraction — the first decimal number in the
+response becomes `adjusted_urgency`:
+```
+0.6 Standard floor demotion applied
 ```
 
-Edit `prompt_assets/simard/ooda_orient.md`, then rebuild:
+Edit `prompt_assets/simard/recipes/ooda-orient.yaml`, then rebuild:
 
 ```bash
 cargo build --release -p simard
@@ -212,5 +208,5 @@ for the full grammar of each format.
 * [Reference: text-parsing wire formats](../reference/text-parsing-wire-formats.md)
 * [Reference: `OodaBrain` API](../reference/ooda-brain-api.md)
 * [Reference: `ooda_brain.md` prompt schema](../reference/ooda-brain-prompt.md)
-* [Reference: `ooda_decide.md` prompt schema](../reference/ooda-decide-prompt.md) — decide recipe and keyword scanner
+* [Reference: `ooda_decide.md` prompt schema](../reference/ooda-decide-prompt.md) — decide recipe and first-word parser
 * [Reference: `ooda_orient.md` prompt schema](../reference/ooda-orient-prompt.md)

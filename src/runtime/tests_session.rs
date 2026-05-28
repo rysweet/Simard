@@ -28,6 +28,7 @@ fn session_advance_through_full_lifecycle() {
         SessionPhase::Planning,
         SessionPhase::Execution,
         SessionPhase::Reflection,
+        SessionPhase::Summarize,
         SessionPhase::Persistence,
         SessionPhase::Complete,
     ];

@@ -2,14 +2,11 @@
 # (engineer lifecycle decision).
 #
 # Replaces the direct LLM call + DECISION: marker parsing in RustyClawdBrain
-# (issue #2115). The prompt content is adapted from
-# prompt_assets/simard/ooda_brain.md (single-brace {var} → double-brace
-# {{var}} for recipe-runner substitution).
+# (issue #2115). Parsers eliminated in issue #2144.
 #
-# The Rust shim (recipe_engineer_lifecycle.rs) parses the output using:
-#   1. DECISION: marker on first non-blank line
-#   2. Keyword fallback scan (case-insensitive)
-#   3. Default → ContinueSkipping
+# The agent outputs the variant name as the FIRST WORD of its response.
+# The Rust shim (recipe_brain.rs) extracts the first whitespace-delimited
+# token and matches it case-insensitively to the 6 known lifecycle variants.
 #
 # Context vars (passed via -c):
 #   goal_id, goal_description, cycle_number, consecutive_skip_count,
@@ -17,7 +14,7 @@
 #   last_engineer_log_tail, commits_behind, in_flight_engineer_count,
 #   minutes_since_last_update_attempt
 #
-# Output: agent stdout — DECISION: marker with variant + labeled fields
+# Output: agent stdout — variant name as first word, followed by rationale
 
 name: "ooda-engineer-lifecycle"
 description: "OODA Act brain — engineer lifecycle decision"
@@ -36,7 +33,7 @@ steps:
 
       ## ROLE
 
-      You are the brain of Simard's OODA daemon. The Act phase is about to skip a goal because a live engineer worktree already exists for it. Before that skip happens, decide whether the engineer is genuinely making progress, is wedged, or warrants escalation. Output a single DECISION marker judgment the daemon will execute. Be conservative: prefer `continue_skipping` unless evidence clearly points elsewhere.
+      You are the brain of Simard's OODA daemon. The Act phase is about to skip a goal because a live engineer worktree already exists for it. Before that skip happens, decide whether the engineer is genuinely making progress, is wedged, or warrants escalation. Output the variant name as the very first word of your response, followed by your rationale. Be conservative: prefer `continue_skipping` unless evidence clearly points elsewhere.
 
       ## CONTEXT
 
@@ -74,55 +71,33 @@ steps:
 
       ## OUTPUT FORMAT
 
-      Begin your response with a `DECISION:` marker on the first line:
-
-      ```
-      DECISION: <variant>
-      ```
-
-      For variants without extra fields (`continue_skipping`, `deprioritize`, `consider_self_update`), follow with free-form rationale prose.
-
-      For variants with required fields (`reclaim_and_redispatch`, `open_tracking_issue`, `mark_goal_blocked`), follow with labeled lines:
-
-      - `reclaim_and_redispatch`: `REDISPATCH_CONTEXT: <text>`
-      - `open_tracking_issue`: `TITLE: <text>`, `BODY: <text>`
-      - `mark_goal_blocked`: `REASON: <text>`
-
-      Always include `RATIONALE: <text>` explaining your reasoning.
+      Output the variant name as the very first word of your response.
+      The daemon reads only the first whitespace-delimited token (case-insensitive).
+      Everything after the first word is treated as rationale text.
 
       ## EXAMPLES
 
       ```
-      DECISION: continue_skipping
-      RATIONALE: engineer committed 2 minutes ago, healthy progress
+      continue_skipping engineer committed 2 minutes ago, healthy progress
       ```
 
       ```
-      DECISION: reclaim_and_redispatch
-      RATIONALE: worktree idle 7h, log truncated mid-tool-call
-      REDISPATCH_CONTEXT: previous engineer hung during file edit; start fresh
+      reclaim_and_redispatch worktree idle 7h, log truncated mid-tool-call
       ```
 
       ```
-      DECISION: deprioritize
-      RATIONALE: 20 cycles of no-op skips while engineer churns on same file
+      deprioritize 20 cycles of no-op skips while engineer churns on same file
       ```
 
       ```
-      DECISION: open_tracking_issue
-      TITLE: Engineer OOM on cycle 12
-      BODY: Engineer process ran out of memory at 03:14 UTC
-      RATIONALE: Recurring OOM needs human investigation
+      open_tracking_issue Engineer OOM on cycle 12 at 03:14 UTC, recurring — needs investigation
       ```
 
       ```
-      DECISION: mark_goal_blocked
-      REASON: ANTHROPIC_API_KEY not set in daemon environment
-      RATIONALE: engineer cannot make API calls
+      mark_goal_blocked ANTHROPIC_API_KEY not set in daemon environment, engineer cannot make API calls
       ```
 
       ```
-      DECISION: consider_self_update
-      RATIONALE: binary is 12 commits behind, last update 4h ago, no other engineers in flight
+      consider_self_update binary is 12 commits behind, last update 4h ago, no other engineers in flight
       ```
     output: "lifecycle_result"
