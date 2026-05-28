@@ -49,6 +49,7 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [Concept: truthful runtime metadata](./concepts/truthful-runtime-metadata.md) - Read the design rationale behind the stricter runtime contract.
 - [Concept: improvement context — denser execution evidence for the engineer loop](./concepts/improvement-context-execution-evidence-gap.md) - Captured improvement-curation context preserving the active "Capture denser execution evidence" goal and the observation that the legacy `simard_operator_probe` surface does not yet expose a terminal engineer-loop probe.
 - [Concept: automated disk health management](./concepts/automated-disk-health.md) - Design rationale for the per-cycle disk health check that prevents disk exhaustion (#2020).
+- [Concept: prompt-driven TDD discipline](./concepts/prompt-driven-tdd-discipline.md) - Why TDD commit ordering is enforced through the engineer system prompt, not CI scripts or git history parsing.
 
 ## Canonical executable surface
 
