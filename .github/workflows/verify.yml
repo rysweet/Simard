@@ -145,6 +145,25 @@ jobs:
           CARGO_PROFILE_DEV_INCREMENTAL: "false"
         run: cargo test --test install_real -- --nocapture
 
+  tdd-ordering:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check TDD commit ordering (pilot paths)
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          bash scripts/check-tdd-ordering.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            "${{ github.event.pull_request.head.sha }}"
+
   e2e-dashboard:
     runs-on: ubuntu-latest
     timeout-minutes: 60
