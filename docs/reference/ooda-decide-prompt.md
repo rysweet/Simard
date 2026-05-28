@@ -57,7 +57,7 @@ steps:
 
 The recipe is a single `agent` step. The recipe-runner-rs subprocess handles
 prompt rendering, agent invocation, and stdout capture. The Rust shim
-(`RecipeDecideBrain`) parses the stdout.
+(`RecipeBrain`) parses the stdout.
 
 ### What changed from `ooda_decide.md`
 
@@ -76,7 +76,7 @@ awareness sections are preserved verbatim.
 ## Placeholders (Context Variables)
 
 The recipe-runner-rs performs Handlebars `{{name}}` substitution from the
-context variables passed by `RecipeDecideBrain`.
+context variables passed by `RecipeBrain`.
 
 | Variable | Type | Source |
 |---|---|---|
@@ -185,7 +185,7 @@ optional rollback). The section gates the action on:
 
 Unlike `ooda_brain.md` (which is embedded via `include_str!`), the decide
 recipe is loaded at runtime by the recipe-runner-rs subprocess.
-`RecipeDecideBrain` resolves the recipe path relative to `repo_root`:
+`RecipeBrain` resolves the recipe path relative to `repo_root`:
 
 ```
 {repo_root}/prompt_assets/simard/recipes/ooda-decide.yaml
@@ -221,7 +221,11 @@ ship alone — and take effect without a rebuild.
 ## Construction Pattern
 
 ```rust
-let brain: Box<dyn OodaDecideBrain> = match RecipeDecideBrain::new(repo_root) {
+let brain: Box<dyn OodaDecideBrain> = match RecipeBrain::new(
+    repo_root,
+    "ooda-decide.yaml",
+    "recipe-decide-brain",
+) {
     Some(b) => Box::new(b),
     None => {
         eprintln!("[ooda] recipe-runner-rs not found; using deterministic fallback");
@@ -230,7 +234,7 @@ let brain: Box<dyn OodaDecideBrain> = match RecipeDecideBrain::new(repo_root) {
 };
 ```
 
-`RecipeDecideBrain::new(repo_root)` returns `None` when:
+`RecipeBrain::new(repo_root, recipe_filename, adapter_tag)` returns `None` when:
 - The `recipe-runner-rs` binary is not on `$PATH`.
 - The recipe YAML file does not exist at the expected path.
 

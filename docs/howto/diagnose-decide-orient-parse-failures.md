@@ -33,9 +33,9 @@ The decide brain can still fail at the **infrastructure** level:
 |---------|--------------|--------|
 | `recipe-runner-rs` not found | `[ooda] recipe-runner-rs not found; using deterministic decide fallback` | Install `recipe-runner-rs` or verify `$PATH`. |
 | Recipe subprocess exits non-zero | `ERROR simard::ooda_brain: recipe_decide invocation failed` + stderr | Check the recipe YAML syntax and the agent's error output. |
-| Recipe YAML not found | `RecipeDecideBrain::new() returned None` | Verify `prompt_assets/simard/recipes/ooda-decide.yaml` exists. |
+| Recipe YAML not found | `RecipeBrain::new() returned None` | Verify `prompt_assets/simard/recipes/ooda-decide.yaml` exists. |
 
-When `RecipeDecideBrain` fails to construct or the subprocess fails, the
+When `RecipeBrain` fails to construct or the subprocess fails, the
 daemon falls back to `DeterministicFallbackDecideBrain`, which maps goal
 prefixes to action kinds (`__memory__` → `consolidate_memory`, etc.; real
 goals → `advance_goal`). This fallback is correct for most cases but does
