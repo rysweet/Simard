@@ -71,3 +71,63 @@ pub(crate) async fn set_budget(Json(body): Json<Value>) -> Json<Value> {
         Err(e) => Json(json!({"error": format!("{e}")})),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- budget_config_path -----------------------------------------------
+
+    #[test]
+    fn budget_config_path_ends_with_budget_json() {
+        let path = budget_config_path();
+        assert!(
+            path.ends_with("budget.json"),
+            "expected path ending in budget.json, got: {path:?}"
+        );
+    }
+
+    #[test]
+    fn budget_config_path_contains_simard_dir() {
+        let path = budget_config_path();
+        let path_str = path.to_string_lossy();
+        assert!(
+            path_str.contains(".simard"),
+            "expected .simard in path: {path_str}"
+        );
+    }
+
+    #[test]
+    fn budget_config_path_is_absolute() {
+        let path = budget_config_path();
+        assert!(path.is_absolute(), "expected absolute path: {path:?}");
+    }
+
+    // ---- get_budget defaults ----------------------------------------------
+
+    #[tokio::test]
+    async fn get_budget_returns_defaults_when_no_config_file() {
+        let result = get_budget().await;
+        let val = result.0;
+        assert!(
+            val.get("daily_budget_usd").is_some(),
+            "missing daily_budget_usd in: {val}"
+        );
+        assert!(
+            val.get("weekly_budget_usd").is_some(),
+            "missing weekly_budget_usd in: {val}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_budget_default_values() {
+        // When no env vars or config file override, defaults are 500/2500
+        let result = get_budget().await;
+        let val = result.0;
+        let daily = val["daily_budget_usd"].as_f64().unwrap_or(0.0);
+        let weekly = val["weekly_budget_usd"].as_f64().unwrap_or(0.0);
+        assert!(daily > 0.0, "daily budget should be > 0");
+        assert!(weekly > 0.0, "weekly budget should be > 0");
+        assert!(weekly > daily, "weekly should exceed daily");
+    }
+}

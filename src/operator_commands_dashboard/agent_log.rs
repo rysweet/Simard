@@ -212,3 +212,127 @@ pub(crate) async fn wait_for_file(path: &std::path::Path) -> Option<u64> {
         sleep(Duration::from_millis(AGENT_LOG_TICK_MS)).await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- sanitize_agent_name ----------------------------------------------
+
+    #[test]
+    fn accepts_alphanumeric() {
+        assert_eq!(sanitize_agent_name("agent01"), Some("agent01".to_string()));
+    }
+
+    #[test]
+    fn accepts_hyphens_and_underscores() {
+        assert_eq!(
+            sanitize_agent_name("my-agent_v2"),
+            Some("my-agent_v2".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_empty() {
+        assert_eq!(sanitize_agent_name(""), None);
+    }
+
+    #[test]
+    fn rejects_over_64_chars() {
+        let long = "a".repeat(65);
+        assert_eq!(sanitize_agent_name(&long), None);
+    }
+
+    #[test]
+    fn accepts_exactly_64_chars() {
+        let exact = "a".repeat(64);
+        assert!(sanitize_agent_name(&exact).is_some());
+    }
+
+    #[test]
+    fn rejects_path_traversal_dots() {
+        assert_eq!(sanitize_agent_name("../etc/passwd"), None);
+        assert_eq!(sanitize_agent_name(".."), None);
+    }
+
+    #[test]
+    fn rejects_slashes() {
+        assert_eq!(sanitize_agent_name("agent/name"), None);
+        assert_eq!(sanitize_agent_name("agent\\name"), None);
+    }
+
+    #[test]
+    fn rejects_spaces() {
+        assert_eq!(sanitize_agent_name("agent name"), None);
+    }
+
+    #[test]
+    fn rejects_null_bytes() {
+        assert_eq!(sanitize_agent_name("agent\0name"), None);
+    }
+
+    #[test]
+    fn rejects_non_ascii() {
+        assert_eq!(sanitize_agent_name("agënt"), None);
+        assert_eq!(sanitize_agent_name("日本語"), None);
+    }
+
+    #[test]
+    fn rejects_control_chars() {
+        assert_eq!(sanitize_agent_name("agent\nname"), None);
+        assert_eq!(sanitize_agent_name("agent\tname"), None);
+    }
+
+    // ---- agent_log_path ---------------------------------------------------
+
+    #[test]
+    fn agent_log_path_structure() {
+        let root = std::path::Path::new("/home/user/.simard/state");
+        let path = agent_log_path(root, "my-agent");
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/home/user/.simard/state/agent_logs/my-agent.log")
+        );
+    }
+
+    #[test]
+    fn agent_log_path_appends_log_extension() {
+        let root = std::path::Path::new("/tmp");
+        let path = agent_log_path(root, "test");
+        assert!(path.to_string_lossy().ends_with(".log"));
+    }
+
+    #[test]
+    fn agent_log_path_uses_agent_logs_dir() {
+        let root = std::path::Path::new("/state");
+        let path = agent_log_path(root, "x");
+        assert!(path.to_string_lossy().contains("agent_logs"));
+    }
+
+    // ---- Constants --------------------------------------------------------
+
+    #[test]
+    fn constants_have_sensible_values() {
+        assert!(AGENT_LOG_BACKFILL_LINES > 0);
+        assert!(AGENT_LOG_MAX_TICK_BYTES > 0);
+        assert!(AGENT_LOG_TICK_MS > 0);
+        assert!(AGENT_LOG_WAIT_TIMEOUT_MS > AGENT_LOG_TICK_MS);
+    }
+
+    #[test]
+    fn ws_route_contains_agent_name_param() {
+        assert!(WS_AGENT_LOG_ROUTE.contains("{agent_name}"));
+    }
+
+    // ---- wait_for_file (async) --------------------------------------------
+
+    #[tokio::test]
+    async fn wait_for_file_returns_immediately_if_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exists.log");
+        std::fs::write(&path, "data").unwrap();
+        let elapsed = wait_for_file(&path).await;
+        assert!(elapsed.is_some());
+        assert!(elapsed.unwrap() < 1000, "should return nearly immediately");
+    }
+}

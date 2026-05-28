@@ -272,3 +272,76 @@ pub(crate) async fn processes() -> Json<Value> {
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- read_tail --------------------------------------------------------
+
+    #[test]
+    fn read_tail_returns_last_n_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.log");
+        std::fs::write(&path, "line1\nline2\nline3\nline4\nline5\n").unwrap();
+
+        let lines = read_tail(&path.to_string_lossy(), 3).unwrap();
+        assert_eq!(lines, vec!["line3", "line4", "line5"]);
+    }
+
+    #[test]
+    fn read_tail_returns_all_when_fewer_than_max() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("short.log");
+        std::fs::write(&path, "a\nb\n").unwrap();
+
+        let lines = read_tail(&path.to_string_lossy(), 10).unwrap();
+        assert_eq!(lines, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn read_tail_returns_none_for_nonexistent_file() {
+        let result = read_tail("/tmp/nonexistent_log_file_xyz123", 10);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_tail_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.log");
+        std::fs::write(&path, "").unwrap();
+
+        let lines = read_tail(&path.to_string_lossy(), 10).unwrap();
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn read_tail_single_line_no_trailing_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("single.log");
+        std::fs::write(&path, "only line").unwrap();
+
+        let lines = read_tail(&path.to_string_lossy(), 5).unwrap();
+        assert_eq!(lines, vec!["only line"]);
+    }
+
+    #[test]
+    fn read_tail_max_zero_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.log");
+        std::fs::write(&path, "line1\nline2\n").unwrap();
+
+        let lines = read_tail(&path.to_string_lossy(), 0).unwrap();
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn read_tail_exact_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exact.log");
+        std::fs::write(&path, "a\nb\nc\n").unwrap();
+
+        let lines = read_tail(&path.to_string_lossy(), 3).unwrap();
+        assert_eq!(lines, vec!["a", "b", "c"]);
+    }
+}

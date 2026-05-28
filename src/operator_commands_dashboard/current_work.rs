@@ -295,3 +295,162 @@ pub(crate) fn read_recent_cycle_reports(state_root: &std::path::Path, n: usize) 
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- format_recent_actions_for_cycle -----------------------------------
+
+    #[test]
+    fn format_actions_from_outcomes() {
+        let report = json!({
+            "report": {
+                "timestamp": "2026-01-01T00:00:00Z",
+                "outcomes": [
+                    {
+                        "action_kind": "advance-goal",
+                        "detail": "opened PR #42",
+                        "action_description": "fallback desc"
+                    }
+                ]
+            }
+        });
+        let actions = format_recent_actions_for_cycle(5, &report);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0]["cycle"], 5);
+        assert_eq!(actions[0]["action"], "advance-goal");
+        assert!(actions[0]["result"].as_str().unwrap().contains("PR #42"));
+    }
+
+    #[test]
+    fn format_actions_prefers_detail_over_description() {
+        let report = json!({
+            "report": {
+                "timestamp": "2026-01-01T00:00:00Z",
+                "outcomes": [
+                    {
+                        "action_kind": "test",
+                        "detail": "specific detail",
+                        "action_description": "generic desc"
+                    }
+                ]
+            }
+        });
+        let actions = format_recent_actions_for_cycle(1, &report);
+        assert!(
+            actions[0]["result"]
+                .as_str()
+                .unwrap()
+                .contains("specific detail")
+        );
+    }
+
+    #[test]
+    fn format_actions_from_planned_when_no_outcomes() {
+        let report = json!({
+            "report": {
+                "timestamp": "2026-01-01T00:00:00Z",
+                "planned_actions": [
+                    {"kind": "advance-goal", "description": "plan to fix bug"}
+                ]
+            }
+        });
+        let actions = format_recent_actions_for_cycle(3, &report);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0]["action"], "advance-goal");
+        assert!(
+            actions[0]["result"]
+                .as_str()
+                .unwrap()
+                .contains("plan to fix bug")
+        );
+    }
+
+    #[test]
+    fn format_actions_from_summary_as_last_resort() {
+        let report = json!({
+            "summary": "Cycle completed with no actions"
+        });
+        let actions = format_recent_actions_for_cycle(7, &report);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0]["action"], "cycle-summary");
+    }
+
+    #[test]
+    fn format_actions_empty_when_no_data() {
+        let report = json!({});
+        let actions = format_recent_actions_for_cycle(1, &report);
+        assert!(actions.is_empty());
+    }
+
+    // ---- read_recent_cycle_reports ----------------------------------------
+
+    #[test]
+    fn reads_cycle_reports_sorted_newest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let cycle_dir = dir.path().join("cycle_reports");
+        std::fs::create_dir_all(&cycle_dir).unwrap();
+
+        std::fs::write(
+            cycle_dir.join("cycle_1.json"),
+            r#"{"cycle_number":1,"summary":"first"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            cycle_dir.join("cycle_3.json"),
+            r#"{"cycle_number":3,"summary":"third"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            cycle_dir.join("cycle_2.json"),
+            r#"{"cycle_number":2,"summary":"second"}"#,
+        )
+        .unwrap();
+
+        let reports = read_recent_cycle_reports(dir.path(), 10);
+        assert_eq!(reports.len(), 3);
+        assert_eq!(reports[0]["cycle_number"], 3);
+        assert_eq!(reports[1]["cycle_number"], 2);
+        assert_eq!(reports[2]["cycle_number"], 1);
+    }
+
+    #[test]
+    fn reads_cycle_reports_respects_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let cycle_dir = dir.path().join("cycle_reports");
+        std::fs::create_dir_all(&cycle_dir).unwrap();
+
+        for i in 1..=5 {
+            std::fs::write(
+                cycle_dir.join(format!("cycle_{i}.json")),
+                format!(r#"{{"cycle_number":{i}}}"#),
+            )
+            .unwrap();
+        }
+
+        let reports = read_recent_cycle_reports(dir.path(), 2);
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0]["cycle_number"], 5);
+        assert_eq!(reports[1]["cycle_number"], 4);
+    }
+
+    #[test]
+    fn reads_cycle_reports_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let reports = read_recent_cycle_reports(dir.path(), 10);
+        assert!(reports.is_empty());
+    }
+
+    #[test]
+    fn reads_plain_text_reports_as_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let cycle_dir = dir.path().join("cycle_reports");
+        std::fs::create_dir_all(&cycle_dir).unwrap();
+        std::fs::write(cycle_dir.join("cycle_1.json"), "Just plain text").unwrap();
+
+        let reports = read_recent_cycle_reports(dir.path(), 10);
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0].get("summary").is_some());
+    }
+}
