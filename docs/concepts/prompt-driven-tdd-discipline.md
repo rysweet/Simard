@@ -61,8 +61,10 @@ prompts, not code** (see [prompt-driven brain iteration](prompt-driven-brain-ite
 
 - **Prompt-first**: Behavioral rules live in prompt text, not in bash scripts
   or Rust code. Changing the TDD policy is a one-line edit to a markdown file.
-- **Hot-reloadable**: The engineer system prompt is loaded from disk. Editing
-  it changes behavior on the next engineer session — no rebuild required.
+- **Session-reloadable**: The engineer system prompt is loaded from disk at
+  session start. Editing it changes behavior on the next engineer session —
+  no rebuild required. (Unlike the OODA brain prompts, which hot-reload
+  mid-cycle via `PromptStore`, the engineer prompt reloads per session.)
 - **No false failures**: There is no CI gate to produce false positives.
   The discipline is intrinsic to how the agent works.
 - **Auditable**: Commit history naturally shows the test-first pattern. Code

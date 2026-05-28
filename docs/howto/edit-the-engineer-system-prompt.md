@@ -8,13 +8,13 @@ engineer behavior **without touching Rust**.
 ## TL;DR
 
 1. Edit `prompt_assets/simard/engineer_system.md`.
-2. Rebuild: `cargo build --release -p simard`.
-   (The prompt is compiled in via `include_str!`; a rebuild is required for
-   the embedded fallback. However, the deployed prompt is loaded from
-   `~/.simard/prompt_assets/simard/engineer_system.md` at runtime.)
-3. Redeploy: `scripts/redeploy-local.sh` syncs prompt assets to the runtime
-   directory.
-4. New engineer sessions will pick up the updated prompt automatically.
+2. Redeploy: `scripts/redeploy-local.sh` syncs prompt assets to the runtime
+   directory (`~/.simard/prompt_assets/simard/`).
+3. New engineer sessions will pick up the updated prompt automatically.
+
+No rebuild is required — unlike the OODA brain prompts (which use
+`include_str!` for compile-time fallbacks), the engineer system prompt is
+loaded purely at runtime via `FilePromptAssetStore`.
 
 ## File Location
 
@@ -22,7 +22,10 @@ The daemon resolves the engineer system prompt in this order:
 
 1. `$SIMARD_PROMPT_ASSETS_DIR/engineer_system.md` (override for dev worktrees)
 2. `$HOME/.simard/prompt_assets/simard/engineer_system.md` (default runtime)
-3. Compile-time embedded fallback via `include_str!`
+
+If neither path exists, the daemon returns `PromptAssetMissing` — there is no
+compile-time embedded fallback for this prompt. (The OODA brain prompts in
+`prompt_store.rs` do have `include_str!` fallbacks; the engineer prompt does not.)
 
 ## Prompt Structure
 
