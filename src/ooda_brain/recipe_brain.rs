@@ -1111,8 +1111,8 @@ mod tests {
             let j = parse_action_from_text(&long_text);
             assert_eq!(j.action_kind(), ActionKind::ConsolidateMemory);
             assert!(
-                j.rationale().chars().count() <= MAX_RATIONALE_CHARS + 10,
-                "rationale should be truncated to ~{} chars, got {}",
+                j.rationale().chars().count() <= MAX_RATIONALE_CHARS + 1,
+                "rationale should be truncated to ~{} chars (+1 for ellipsis), got {}",
                 MAX_RATIONALE_CHARS,
                 j.rationale().chars().count()
             );
@@ -1316,6 +1316,36 @@ mod tests {
             assert!((j.adjusted_urgency - floor).abs() < 1e-9);
         }
 
+        #[test]
+        fn dot_five_no_leading_digit_falls_to_floor() {
+            // ".5" has no leading digit — the scanner requires N.N format
+            let j = parse_orient_from_text(".5", 0.8, 1);
+            let floor = (0.8_f64 - 0.2).max(0.0);
+            assert!((j.adjusted_urgency - floor).abs() < 1e-9);
+        }
+
+        #[test]
+        fn one_dot_no_trailing_digit_falls_to_floor() {
+            // "1." has no trailing digit — the scanner requires digits after dot
+            let j = parse_orient_from_text("1.", 0.8, 1);
+            let floor = (0.8_f64 - 0.2).max(0.0);
+            assert!((j.adjusted_urgency - floor).abs() < 1e-9);
+        }
+
+        #[test]
+        fn multi_float_first_valid_wins() {
+            // "version 2.0 adjusted to 0.42" — 2.0 is out of range, scanner skips to 0.42
+            let j = parse_orient_from_text("version 2.0 adjusted to 0.42", 0.8, 1);
+            assert!((j.adjusted_urgency - 0.42).abs() < 1e-9);
+        }
+
+        #[test]
+        fn first_valid_float_in_range_wins() {
+            // Both 0.9 and 0.42 are valid, but 0.9 > base 0.5, so scanner skips to 0.42
+            let j = parse_orient_from_text("0.9 or 0.42", 0.5, 1);
+            assert!((j.adjusted_urgency - 0.42).abs() < 1e-9);
+        }
+
         // === Floor formula ===
 
         #[test]
@@ -1400,7 +1430,7 @@ mod tests {
         fn rationale_truncated_for_long_text() {
             let long_text = format!("0.42 because {}", "x".repeat(1000));
             let j = parse_orient_from_text(&long_text, 0.8, 1);
-            assert!(j.rationale.chars().count() <= 600);
+            assert!(j.rationale.chars().count() <= MAX_RATIONALE_CHARS + 1);
         }
 
         // === No JSON extraction (parser eliminated) ===
@@ -1700,7 +1730,7 @@ mod tests {
             let d = parse_lifecycle_from_text(&long_text);
             match &d {
                 EngineerLifecycleDecision::Deprioritize { rationale } => {
-                    assert!(rationale.chars().count() <= MAX_RATIONALE_CHARS + 10);
+                    assert!(rationale.chars().count() <= MAX_RATIONALE_CHARS + 1);
                 }
                 other => panic!("expected Deprioritize, got {other:?}"),
             }

@@ -77,7 +77,6 @@ and new failure modes. The text-based protocol inverts the approach: the
 wire format is text from the start, and the parser looks for keywords.
 
 A model that responds with `"advance_goal"` or `"advance_goal drive the PR"`
-A model that responds with `"advance_goal"` or `"advance_goal drive the PR"`
 all parse correctly — the first word is the decision; everything after is
 rationale.
 

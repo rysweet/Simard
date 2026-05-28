@@ -70,13 +70,13 @@ All three calls return `Option<RecipeBrain>`. The constructor:
 | Trait | Method | Recipe YAML | Output parser |
 |-------|--------|-------------|---------------|
 | `OodaDecideBrain` | `judge_decision()` | `ooda-decide.yaml` | `parse_action_from_text()` — first-word case-insensitive match for 10 action keywords |
-| `OodaOrientBrain` | `judge_orientation()` | `ooda-orient.yaml` | `parse_orient_from_text()` — 2-tier cascade (`try_first_float()` → deterministic floor) |
+| `OodaOrientBrain` | `judge_orientation()` | `ooda-orient.yaml` | `parse_orient_from_text()` — first decimal-float extraction with deterministic floor fallback |
 | `OodaBrain` | `decide_engineer_lifecycle()` | `ooda-engineer-lifecycle.yaml` | `parse_lifecycle_from_text()` — first-word case-insensitive match → variant with default fields |
 
 Each trait impl invokes `recipe-runner-rs` with the stored `recipe_path` and
 phase-specific `-c` context vars, then delegates to the corresponding parse
-function. The parse functions remain standalone public functions in their
-original per-phase files — they are pure `&str -> Judgment` transforms with no
+function. The parse functions are standalone public functions in
+`recipe_brain.rs` — they are pure `&str -> Judgment` transforms with no
 struct dependency.
 
 ## Shared helpers
@@ -89,7 +89,8 @@ These functions exist once in `recipe_brain.rs`:
   (in-tree).
 - **`truncate(s, max)`** — char-aware truncation with `…` suffix. Used in
   error messages and rationale fields to cap unbounded LLM output.
-- **`try_first_float(text)`** — first-token float parser used by orient.
+- **`deterministic_floor(base_urgency, failure_count)`** — fallback orient
+  judgment: `urgency − 0.2 × failure_count`, clamped to `[0, 1]`.
 
 > **Removed in #2144:** `ascii_contains_ignore_case()`, `try_json_extraction()`,
 > `extract_decision_marker()`, `parse_with_marker()`, `try_keyword_scan()`,
