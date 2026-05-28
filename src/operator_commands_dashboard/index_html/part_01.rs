@@ -265,7 +265,7 @@ pub(crate) const PART_01: &str = r#"      </div>
         const d=await apiFetch('/api/activity');
         const el=document.getElementById('agent-live-status');
         const daemon=d.daemon||{};
-        const isRunning=daemon.status==='healthy';
+        const isRunning=daemon.status==='healthy'||daemon.status==='running';
         const heartbeat=daemon.last_heartbeat?timeAgo(daemon.last_heartbeat):'never';
         const cycle=daemon.current_cycle||'?';
 
