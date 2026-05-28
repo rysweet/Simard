@@ -9,12 +9,29 @@ they are the same gates CI enforces.
 
 ## Table of Contents
 
-1. [Local Pre-Commit Workflow](#local-pre-commit-workflow)
-2. [Merge Policy: No `--admin` Merges](#merge-policy-no---admin-merges)
-3. [Cognitive Memory Durability (Per-Write Barrier + SIGTERM + Periodic Backups)](#cognitive-memory-durability-per-write-barrier--sigterm--periodic-backups)
-4. [Local Data Retention Disclosure](#local-data-retention-disclosure)
-5. [Pre-Existing Test Failure Disposition](#pre-existing-test-failure-disposition)
-6. [Real-Meeting & Dashboard E2E Verification](#real-meeting--dashboard-e2e-verification)
+1. [Rust-Only Policy](#rust-only-policy)
+2. [Local Pre-Commit Workflow](#local-pre-commit-workflow)
+3. [Merge Policy: No `--admin` Merges](#merge-policy-no---admin-merges)
+4. [Cognitive Memory Durability (Per-Write Barrier + SIGTERM + Periodic Backups)](#cognitive-memory-durability-per-write-barrier--sigterm--periodic-backups)
+5. [Local Data Retention Disclosure](#local-data-retention-disclosure)
+6. [Pre-Existing Test Failure Disposition](#pre-existing-test-failure-disposition)
+7. [Real-Meeting & Dashboard E2E Verification](#real-meeting--dashboard-e2e-verification)
+
+---
+
+## Rust-Only Policy
+
+Simard is migrating to a Rust-only codebase ([#2155](https://github.com/rysweet/Simard/issues/2155)).
+**New `.py` files under `src/` or `python/`, and new `.js`/`.ts` files outside
+`npm/` and `tests/e2e-dashboard/`, are not permitted.**
+
+A CI gate (`scripts/check-rust-only-gate.sh`) enforces this on every PR and
+as a pre-commit hook. A small set of pre-existing files is allow-listed until
+they are individually migrated — see the script for the current list.
+
+If you need to add a non-Rust file that falls outside the allow-list, open an
+issue explaining the need and add the file to the allow-list in
+`scripts/check-rust-only-gate.sh` with a comment referencing the issue.
 
 ---
 
