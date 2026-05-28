@@ -285,8 +285,9 @@ impl OodaBrain for RecipeBrain {
 pub fn parse_action_from_text(text: &str) -> DecideJudgment {
     let trimmed = text.trim();
     let first_word = trimmed.split_whitespace().next().unwrap_or("");
-    let rationale = truncate(trimmed, MAX_RATIONALE_CHARS);
 
+    // Rationale allocation is deferred into the match arm — avoids a
+    // wasted heap alloc on the (no-match) default path.
     type Ctor = fn(String) -> DecideJudgment;
     let pairs: &[(&str, Ctor)] = &[
         ("poll_developer_activity", |r| {
@@ -322,7 +323,7 @@ pub fn parse_action_from_text(text: &str) -> DecideJudgment {
     ];
     for (kw, ctor) in pairs {
         if first_word.eq_ignore_ascii_case(kw) {
-            return ctor(rationale);
+            return ctor(truncate(trimmed, MAX_RATIONALE_CHARS));
         }
     }
     DecideJudgment::AdvanceGoal {
@@ -339,6 +340,8 @@ pub fn parse_action_from_text(text: &str) -> DecideJudgment {
 /// Parse recipe output for the first decimal float (e.g. `0.42`).
 /// Falls to the deterministic floor when no valid float is found.
 pub fn parse_orient_from_text(text: &str, base_urgency: f64, failure_count: u32) -> OrientJudgment {
+    // Hoist trim above the scanner — avoids re-trimming on each candidate.
+    let trimmed = text.trim();
     let bytes = text.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -356,14 +359,14 @@ pub fn parse_orient_from_text(text: &str, base_urgency: f64, failure_count: u32)
                 if i > after_dot
                     && let Ok(val) = text[start..i].parse::<f64>()
                 {
-                    let j = OrientJudgment {
-                        adjusted_urgency: val,
-                        rationale: truncate(text.trim(), MAX_RATIONALE_CHARS),
-                        confidence: 1.0,
-                        demotion_applied: base_urgency - val,
-                    };
-                    if j.validate(base_urgency).is_ok() {
-                        return j;
+                    // Inline validation before allocating rationale string.
+                    if val.is_finite() && (0.0..=1.0).contains(&val) && val <= base_urgency + 1e-9 {
+                        return OrientJudgment {
+                            adjusted_urgency: val,
+                            rationale: truncate(trimmed, MAX_RATIONALE_CHARS),
+                            confidence: 1.0,
+                            demotion_applied: base_urgency - val,
+                        };
                     }
                 }
             }
@@ -401,26 +404,39 @@ pub fn parse_lifecycle_from_text(text: &str) -> EngineerLifecycleDecision {
         return default_continue_skipping();
     }
     let first_word = trimmed.split_whitespace().next().unwrap_or("");
-    let rest = truncate(trimmed[first_word.len()..].trim(), MAX_RATIONALE_CHARS);
 
-    match first_word.to_ascii_lowercase().as_str() {
-        "continue_skipping" => EngineerLifecycleDecision::ContinueSkipping { rationale: rest },
-        "deprioritize" => EngineerLifecycleDecision::Deprioritize { rationale: rest },
-        "consider_self_update" => EngineerLifecycleDecision::ConsiderSelfUpdate { rationale: rest },
-        "reclaim_and_redispatch" => EngineerLifecycleDecision::ReclaimAndRedispatch {
+    // Use eq_ignore_ascii_case instead of to_ascii_lowercase() — avoids a
+    // heap-allocated String on every call.
+    if first_word.eq_ignore_ascii_case("continue_skipping") {
+        let rest = truncate(trimmed[first_word.len()..].trim(), MAX_RATIONALE_CHARS);
+        EngineerLifecycleDecision::ContinueSkipping { rationale: rest }
+    } else if first_word.eq_ignore_ascii_case("deprioritize") {
+        let rest = truncate(trimmed[first_word.len()..].trim(), MAX_RATIONALE_CHARS);
+        EngineerLifecycleDecision::Deprioritize { rationale: rest }
+    } else if first_word.eq_ignore_ascii_case("consider_self_update") {
+        let rest = truncate(trimmed[first_word.len()..].trim(), MAX_RATIONALE_CHARS);
+        EngineerLifecycleDecision::ConsiderSelfUpdate { rationale: rest }
+    } else if first_word.eq_ignore_ascii_case("reclaim_and_redispatch") {
+        let rest = truncate(trimmed[first_word.len()..].trim(), MAX_RATIONALE_CHARS);
+        EngineerLifecycleDecision::ReclaimAndRedispatch {
             rationale: rest,
             redispatch_context: String::new(),
-        },
-        "open_tracking_issue" => EngineerLifecycleDecision::OpenTrackingIssue {
+        }
+    } else if first_word.eq_ignore_ascii_case("open_tracking_issue") {
+        let rest = truncate(trimmed[first_word.len()..].trim(), MAX_RATIONALE_CHARS);
+        EngineerLifecycleDecision::OpenTrackingIssue {
             title: "OODA stuck".to_string(),
             body: rest.clone(),
             rationale: rest,
-        },
-        "mark_goal_blocked" => EngineerLifecycleDecision::MarkGoalBlocked {
+        }
+    } else if first_word.eq_ignore_ascii_case("mark_goal_blocked") {
+        let rest = truncate(trimmed[first_word.len()..].trim(), MAX_RATIONALE_CHARS);
+        EngineerLifecycleDecision::MarkGoalBlocked {
             reason: rest.clone(),
             rationale: rest,
-        },
-        _ => default_continue_skipping(),
+        }
+    } else {
+        default_continue_skipping()
     }
 }
 
