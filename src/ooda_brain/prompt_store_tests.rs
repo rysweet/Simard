@@ -211,3 +211,141 @@ fn prompt_version_matches_known_sha256_prefix() {
     // sha256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
     assert_eq!(prompt_version(""), "e3b0c44298fc");
 }
+
+// --- goal_session_objective.md registration (TDD: issue #2152) -------------
+//
+// These tests specify the contract for making goal_session_objective.md
+// runtime-loadable via PromptStore, matching the pattern used by the 3
+// brain prompts (ooda_brain.md, ooda_decide.md, ooda_orient.md).
+
+#[test]
+fn goal_session_objective_has_embedded_fallback() {
+    // Change 2: prompt_store must register goal_session_objective.md in
+    // embedded_fallback() so it can be loaded at runtime with a compile-time
+    // baked-in default.
+    let fallback = embedded_fallback("goal_session_objective.md");
+    assert!(
+        fallback.is_some(),
+        "embedded_fallback must return Some for goal_session_objective.md"
+    );
+}
+
+#[test]
+fn goal_session_objective_fallback_is_nonempty() {
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    assert!(
+        !content.trim().is_empty(),
+        "embedded fallback for goal_session_objective.md must not be empty"
+    );
+}
+
+#[test]
+fn goal_session_objective_contains_priority_order_section() {
+    // Change 1: The prompt must contain a "Priority Order" section that
+    // tells Simard to triage existing PRs before creating new work.
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    assert!(
+        content.contains("Priority Order") || content.contains("priority order"),
+        "goal_session_objective.md must contain a Priority Order section, got:\n{content}"
+    );
+}
+
+#[test]
+fn goal_session_objective_priority_order_lists_merge_green_first() {
+    // Tier 1: Merge green PRs first via gh pr merge --squash --delete-branch
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    assert!(
+        content.contains("gh pr merge --squash --delete-branch"),
+        "Priority Order must instruct merge via `gh pr merge --squash --delete-branch`"
+    );
+}
+
+#[test]
+fn goal_session_objective_priority_order_lists_fix_failing_second() {
+    // Tier 2: Fix failing PRs (diagnose CI failure, fix, push)
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        lower.contains("fix") && lower.contains("failing"),
+        "Priority Order must include fixing failing PRs as tier 2"
+    );
+}
+
+#[test]
+fn goal_session_objective_priority_order_lists_close_duplicates() {
+    // Tier 3: Close duplicate PRs
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        lower.contains("close") && lower.contains("duplicate"),
+        "Priority Order must include closing duplicate PRs as tier 3"
+    );
+}
+
+#[test]
+fn goal_session_objective_priority_order_new_work_last() {
+    // Tier 4: New work only when no existing PRs need attention
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        lower.contains("new work") || lower.contains("new implementation"),
+        "Priority Order must list new work as the last tier"
+    );
+}
+
+#[test]
+fn goal_session_objective_priority_order_precedes_response_shapes() {
+    // The Priority Order section must appear BEFORE the "Two response shapes"
+    // section so the agent reads triage rules before action shapes.
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let priority_pos = content
+        .find("Priority Order")
+        .or_else(|| content.find("priority order"));
+    let shapes_pos = content.find("Two response shapes");
+    assert!(
+        priority_pos.is_some() && shapes_pos.is_some(),
+        "both Priority Order and Two response shapes sections must exist"
+    );
+    assert!(
+        priority_pos.unwrap() < shapes_pos.unwrap(),
+        "Priority Order must appear before Two response shapes"
+    );
+}
+
+#[test]
+fn goal_session_objective_loads_via_store_without_disk() {
+    // Change 2: PromptStore::new(None) must return the embedded fallback
+    // for goal_session_objective.md (pure embedded mode).
+    let store = PromptStore::new(None);
+    let content = store.load("goal_session_objective.md");
+    assert!(
+        !content.is_empty(),
+        "PromptStore.load('goal_session_objective.md') must return non-empty in embedded mode"
+    );
+    assert_eq!(
+        content,
+        embedded_fallback("goal_session_objective.md").unwrap(),
+        "store.load must return the same content as embedded_fallback"
+    );
+}
+
+#[test]
+fn goal_session_objective_disk_override_works() {
+    // Change 2: A file on disk must override the embedded fallback,
+    // matching the hot-reload pattern used by ooda_brain.md etc.
+    let dir = tmpdir("goal-obj-override");
+    let path = dir.join("goal_session_objective.md");
+    std::fs::write(&path, "# CUSTOM GOAL OBJECTIVE\n").unwrap();
+    let store = PromptStore::new(Some(dir));
+    assert_eq!(
+        store.load("goal_session_objective.md"),
+        "# CUSTOM GOAL OBJECTIVE\n"
+    );
+}

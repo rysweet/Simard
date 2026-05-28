@@ -132,9 +132,10 @@ pub(crate) fn advance_goal_with_session(
     // Gather fresh environment context so the agent sees current state.
     let env = crate::ooda_loop::gather_environment();
 
-    // Load the objective instructions from the external prompt asset at compile time.
-    const GOAL_SESSION_OBJECTIVE: &str =
-        include_str!("../../../prompt_assets/simard/goal_session_objective.md");
+    // Load the objective instructions from the prompt store (runtime-overridable,
+    // falls back to the compiled-in embed when no disk file exists).
+    let goal_session_objective =
+        crate::ooda_brain::prompt_store::global().load("goal_session_objective.md");
 
     // Build the objective in a single pre-sized buffer to avoid intermediate allocations.
     let mut objective = String::with_capacity(1024);
@@ -144,7 +145,7 @@ pub(crate) fn advance_goal_with_session(
         goal.id,
         percent,
         goal.description,
-        GOAL_SESSION_OBJECTIVE.trim(),
+        goal_session_objective.trim(),
     );
     if env.git_status.is_empty() {
         objective.push_str("clean");
