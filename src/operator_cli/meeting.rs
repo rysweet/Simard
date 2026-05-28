@@ -1,5 +1,6 @@
 use chrono::Local;
 
+use crate::meeting_facilitator::{default_handoff_dir, load_session_wip, remove_session_wip};
 use crate::operator_commands::{run_meeting_probe, run_meeting_read_probe};
 use crate::operator_commands_meeting::run_meeting_repl_command;
 
@@ -18,6 +19,8 @@ Commands:
   repl [topic]              Start an interactive meeting REPL on stdin.
   begin [topic]             Alias for `repl`.
   start [topic]             Alias for `repl`.
+  resume                    Resume an interrupted meeting from the last WIP checkpoint.
+  resume --discard          Discard the saved WIP checkpoint without resuming.
   help, -h, --help          Show this help message and exit.
 
 If no command is given, an interactive REPL is started with a timestamp topic.
@@ -25,6 +28,8 @@ If no command is given, an interactive REPL is started with a timestamp topic.
 Examples:
   simard meeting --help
   simard meeting repl \"weekly sync\"
+  simard meeting resume
+  simard meeting resume --discard
   simard meeting run local-harness single-process \"design review\"
   simard meeting read local-harness single-process /path/to/state-root
 ";
@@ -60,6 +65,21 @@ pub(super) fn dispatch_meeting_command(
             reject_extra_args(args)?;
             run_meeting_repl_command(&topic)
         }
+        "resume" => {
+            let first_arg = args.next();
+            match first_arg.as_deref() {
+                Some("--discard") => {
+                    reject_extra_args(args)?;
+                    dispatch_resume_discard()
+                }
+                None => {
+                    dispatch_resume()
+                }
+                Some(other) => Err(format!(
+                    "unknown flag '{other}' for `simard meeting resume` (expected --discard or no args)"
+                ).into()),
+            }
+        }
         // Reject unknown flag-shaped tokens visibly instead of silently
         // treating them as a meeting topic and blocking the REPL on stdin.
         // See issue #1746 (Pillar 11: honest degradation beats hidden silence).
@@ -78,6 +98,55 @@ pub(super) fn dispatch_meeting_command(
             run_meeting_repl_command(&full_topic)
         }
     }
+}
+
+/// Resume a meeting from the last WIP checkpoint. Loads the saved session,
+/// prints a summary of recovered state, and re-enters the REPL with the
+/// original topic. Issue #1984.
+fn dispatch_resume() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = default_handoff_dir();
+    let session =
+        load_session_wip(&dir).map_err(|e| format!("failed to read WIP checkpoint: {e}"))?;
+
+    let Some(session) = session else {
+        return Err("no WIP checkpoint found — nothing to resume (start a new meeting with `simard meeting repl`)".into());
+    };
+
+    let n_decisions = session.decisions.len();
+    let n_actions = session.action_items.len();
+    let n_questions = session.explicit_questions.len();
+    eprintln!(
+        "Resuming meeting \"{}\" (started {}, {} decision(s), {} action(s), {} question(s))",
+        session.topic, session.started_at, n_decisions, n_actions, n_questions
+    );
+
+    // Remove the WIP file before re-entering the REPL — the REPL's own
+    // checkpoint_wip calls will recreate it on the next slash command.
+    if let Err(e) = remove_session_wip(&dir) {
+        tracing::warn!(error = %e, "failed to remove stale WIP file before resume");
+    }
+
+    run_meeting_repl_command(&session.topic)
+}
+
+/// Discard the saved WIP checkpoint without resuming the meeting.
+/// Issue #1984.
+fn dispatch_resume_discard() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = default_handoff_dir();
+
+    // Check if a WIP file exists at all.
+    let session =
+        load_session_wip(&dir).map_err(|e| format!("failed to read WIP checkpoint: {e}"))?;
+
+    if session.is_none() {
+        println!("No WIP checkpoint found — nothing to discard.");
+        return Ok(());
+    }
+
+    remove_session_wip(&dir).map_err(|e| format!("failed to remove WIP checkpoint: {e}"))?;
+
+    println!("WIP checkpoint discarded.");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -262,6 +331,102 @@ mod tests {
         assert!(
             msg.contains("unknown flag") && msg.contains("-x"),
             "error must name the offending flag, got: {msg}"
+        );
+    }
+
+    // ── issue #1984: resume subcommand ──
+
+    #[test]
+    fn test_meeting_help_mentions_resume() {
+        let help = super::MEETING_HELP;
+        assert!(
+            help.contains("resume"),
+            "MEETING_HELP must mention the resume subcommand (issue #1984)"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_meeting_resume_no_wip_errors() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", dir.path()) };
+        let result = dispatch_operator_cli(vec!["meeting".to_string(), "resume".to_string()]);
+        unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR") };
+        assert!(result.is_err(), "resume with no WIP file should error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("no WIP checkpoint found"),
+            "error should mention no WIP found, got: {msg}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_meeting_resume_discard_no_wip_ok() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", dir.path()) };
+        let result = dispatch_operator_cli(vec![
+            "meeting".to_string(),
+            "resume".to_string(),
+            "--discard".to_string(),
+        ]);
+        unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR") };
+        assert!(
+            result.is_ok(),
+            "resume --discard with no WIP file should succeed, got: {result:?}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_meeting_resume_discard_removes_wip() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let wip_path = dir.path().join("meeting_session_wip.json");
+        let session = crate::meeting_facilitator::MeetingSession {
+            topic: "test-discard".to_string(),
+            decisions: Vec::new(),
+            action_items: Vec::new(),
+            notes: Vec::new(),
+            status: crate::meeting_facilitator::MeetingSessionStatus::Open,
+            started_at: "2025-01-01T00:00:00Z".to_string(),
+            participants: vec!["operator".to_string()],
+            explicit_questions: Vec::new(),
+            themes: Vec::new(),
+            next_owner: None,
+            goal: None,
+        };
+        crate::meeting_facilitator::save_session_wip(dir.path(), &session).expect("save WIP");
+        assert!(wip_path.is_file(), "WIP file should exist before discard");
+
+        unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", dir.path()) };
+        let result = dispatch_operator_cli(vec![
+            "meeting".to_string(),
+            "resume".to_string(),
+            "--discard".to_string(),
+        ]);
+        unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR") };
+        assert!(
+            result.is_ok(),
+            "resume --discard should succeed, got: {result:?}"
+        );
+        assert!(
+            !wip_path.is_file(),
+            "WIP file should be removed after discard"
+        );
+    }
+
+    #[test]
+    fn test_meeting_resume_unknown_flag_errors() {
+        let result = dispatch_operator_cli(vec![
+            "meeting".to_string(),
+            "resume".to_string(),
+            "--bogus".to_string(),
+        ]);
+        assert!(result.is_err(), "resume --bogus should error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("--bogus"),
+            "error should name the offending flag, got: {msg}"
         );
     }
 }

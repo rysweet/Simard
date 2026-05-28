@@ -505,3 +505,69 @@ fn close_summary_merges_explicit_action_items() {
     assert_eq!(first.priority, Some(1), "explicit items keep priority=1");
     assert_eq!(first.assignee.as_deref(), Some("Carol"));
 }
+
+// ── snapshot_session (issue #1984) ──
+
+#[test]
+fn snapshot_session_captures_topic_and_status() {
+    let agent = MockAgent::new("ok");
+    let backend =
+        MeetingBackend::new_session("Snapshot Test", Box::new(agent), None, String::new());
+    let snap = backend.snapshot_session();
+    assert_eq!(snap.topic, "Snapshot Test");
+    assert_eq!(
+        snap.status,
+        crate::meeting_facilitator::MeetingSessionStatus::Open
+    );
+    assert!(!snap.started_at.is_empty());
+}
+
+#[test]
+fn snapshot_session_captures_decisions_actions_questions() {
+    let agent = MockAgent::new("ok");
+    let mut backend =
+        MeetingBackend::new_session("Snap Items", Box::new(agent), None, String::new());
+    backend.push_explicit_decision("Use Rust");
+    backend.push_explicit_action_item("Alice will deploy by Friday");
+    backend.push_explicit_question("What about caching?");
+    backend.push_theme("performance".to_string());
+    backend.set_goal("Ship v2");
+
+    let snap = backend.snapshot_session();
+    assert_eq!(snap.decisions.len(), 1);
+    assert_eq!(snap.decisions[0].description, "Use Rust");
+    assert_eq!(snap.action_items.len(), 1);
+    assert_eq!(
+        snap.action_items[0].description,
+        "Alice will deploy by Friday"
+    );
+    assert_eq!(snap.explicit_questions, vec!["What about caching?"]);
+    assert_eq!(snap.themes, vec!["performance"]);
+    assert_eq!(snap.goal.as_deref(), Some("Ship v2"));
+}
+
+#[test]
+fn snapshot_session_round_trips_through_wip_persistence() {
+    let agent = MockAgent::new("ok");
+    let mut backend =
+        MeetingBackend::new_session("Round Trip", Box::new(agent), None, String::new());
+    backend.push_explicit_decision("Decided X");
+    backend.push_explicit_question("Open Q?");
+
+    let snap = backend.snapshot_session();
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    crate::meeting_facilitator::save_session_wip(dir.path(), &snap).expect("save WIP");
+
+    let loaded = crate::meeting_facilitator::load_session_wip(dir.path())
+        .expect("load WIP")
+        .expect("WIP file should exist");
+
+    assert_eq!(loaded.topic, "Round Trip");
+    assert_eq!(loaded.decisions.len(), 1);
+    assert_eq!(loaded.explicit_questions, vec!["Open Q?"]);
+
+    crate::meeting_facilitator::remove_session_wip(dir.path()).expect("remove WIP");
+    let gone = crate::meeting_facilitator::load_session_wip(dir.path()).expect("load after remove");
+    assert!(gone.is_none(), "WIP file should be gone after remove");
+}

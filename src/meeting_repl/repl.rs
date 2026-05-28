@@ -22,6 +22,17 @@ use super::transcript_format::format_turn_prefix_now;
 
 const PROMPT_TEXT: &str = "simard:meeting> ";
 
+/// Save a WIP checkpoint of the current session state. Best-effort: errors
+/// are logged but never surface to the operator (a failed checkpoint must
+/// not interrupt the meeting). Issue #1984.
+fn checkpoint_wip(backend: &MeetingBackend) {
+    let dir = crate::meeting_facilitator::default_handoff_dir();
+    let session = backend.snapshot_session();
+    if let Err(e) = crate::meeting_facilitator::save_session_wip(&dir, &session) {
+        tracing::warn!(error = %e, "failed to save WIP session checkpoint");
+    }
+}
+
 /// Build the live REPL prompt, optionally color-coded.
 ///
 /// The literal text is always `simard:meeting> ` so non-TTY callers and tests
@@ -244,26 +255,32 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
             MeetingCommand::Theme(text) => {
                 backend.push_theme(text.clone());
                 writeln!(output, "{}", green(&format!("Theme recorded: {text}"))).ok();
+                checkpoint_wip(&backend);
             }
             MeetingCommand::Decision(text) => {
                 backend.push_explicit_decision(&text);
                 writeln!(output, "{}", cyan(&format!("Decision recorded: {text}"))).ok();
+                checkpoint_wip(&backend);
             }
             MeetingCommand::Action(text) => {
                 backend.push_explicit_action_item(&text);
                 writeln!(output, "{}", green(&format!("Action recorded: {text}"))).ok();
+                checkpoint_wip(&backend);
             }
             MeetingCommand::Question(text) => {
                 backend.push_explicit_question(&text);
                 writeln!(output, "{}", yellow(&format!("Question recorded: {text}"))).ok();
+                checkpoint_wip(&backend);
             }
             MeetingCommand::Owner(text) => {
                 backend.push_next_owner(&text);
                 writeln!(output, "{}", cyan(&format!("Next owner recorded: {text}"))).ok();
+                checkpoint_wip(&backend);
             }
             MeetingCommand::Goal(text) => {
                 backend.set_goal(&text);
                 writeln!(output, "{}", cyan(&format!("Goal recorded: {text}"))).ok();
+                checkpoint_wip(&backend);
             }
             MeetingCommand::Recap => {
                 let status = backend.status();
@@ -546,6 +563,14 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
             )
             .ok();
         }
+    }
+
+    // Clean up the WIP checkpoint now that the meeting closed normally.
+    // Best-effort: a stale WIP file is harmless (resume will offer to
+    // discard it). Issue #1984.
+    let wip_dir = crate::meeting_facilitator::default_handoff_dir();
+    if let Err(e) = crate::meeting_facilitator::remove_session_wip(&wip_dir) {
+        tracing::warn!(error = %e, "failed to remove WIP session file after close");
     }
 
     // Return a compatible MeetingSession for callers that need it.

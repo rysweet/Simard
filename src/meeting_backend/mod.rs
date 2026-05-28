@@ -463,6 +463,55 @@ impl MeetingBackend {
         self.history_truncated_count
     }
 
+    /// Create a lightweight `MeetingSession` snapshot of the current state.
+    ///
+    /// Used by `save_session_wip` to checkpoint the session after each
+    /// slash command so a crash loses at most the last few seconds of work.
+    /// Issue #1984.
+    pub fn snapshot_session(&self) -> crate::meeting_facilitator::MeetingSession {
+        use crate::meeting_facilitator::{MeetingDecision, MeetingSessionStatus};
+
+        let decisions = self
+            .explicit_decisions
+            .iter()
+            .map(|d| MeetingDecision {
+                description: d.clone(),
+                rationale: String::new(),
+                participants: Vec::new(),
+            })
+            .collect();
+
+        let action_items = self
+            .explicit_action_items
+            .iter()
+            .map(|a| crate::meeting_facilitator::ActionItem {
+                description: a.description.clone(),
+                owner: a.assignee.clone().unwrap_or_default(),
+                priority: 1,
+                due_description: a.deadline.clone(),
+                linked_issue: None,
+            })
+            .collect();
+
+        crate::meeting_facilitator::MeetingSession {
+            topic: self.topic.clone(),
+            decisions,
+            action_items,
+            notes: Vec::new(),
+            status: if self.is_open {
+                MeetingSessionStatus::Open
+            } else {
+                MeetingSessionStatus::Closed
+            },
+            started_at: self.started_at.clone(),
+            participants: vec!["operator".to_string()],
+            explicit_questions: self.explicit_questions.clone(),
+            themes: self.themes.clone(),
+            next_owner: self.explicit_next_owner.clone(),
+            goal: self.explicit_goal.clone(),
+        }
+    }
+
     // --- Private helpers ---
 
     /// Load active goal (slug, title) pairs from the default file-backed store.
