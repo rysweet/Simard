@@ -21,6 +21,7 @@ use super::merge_judge::merge_judge_decisions;
 use super::merge_readiness::merge_readiness;
 use super::metrics::{memory_metrics, ooda_thinking};
 use super::monitoring::{costs, get_budget, metrics, set_budget};
+use super::ooda_cycles::ooda_cycles;
 use super::pr_readiness::pr_readiness;
 use super::registry::{
     agent_graph, build_lock_force_release, build_lock_status, registry_deregister, registry_list,
@@ -72,6 +73,7 @@ pub fn build_router() -> Router {
         .route("/api/workboard", get(workboard))
         .route("/api/current-work", get(current_work))
         .route("/api/ooda-thinking", get(ooda_thinking))
+        .route("/api/ooda-cycles", get(ooda_cycles))
         .route("/api/brain-failures", get(brain_failures))
         .route("/api/prs", get(pr_readiness))
         .route("/api/subagent-sessions", get(subagent_sessions))

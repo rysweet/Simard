@@ -189,7 +189,7 @@ const API_PROBES = [
   { path: "/api/pr/1880",        dims: ["per-pr"],      expectMissing: true },
   { path: "/api/brain-failures", dims: ["brain-failure"], expectMissing: true },
   { path: "/api/failures",       dims: ["brain-failure"], expectMissing: true },
-  { path: "/api/ooda-cycles",    dims: ["ooda"],        expectMissing: true },
+  { path: "/api/ooda-cycles",    dims: ["ooda"] },
 ];
 
 async function probeApis(api) {
@@ -406,17 +406,21 @@ function classifyCoverage(routes, apis) {
   // 2. OODA cycle health
   const oodaStatusKeys = apis["/api/status"]?.body?.keys || [];
   const oodaCycleEvidence = oodaStatusKeys.includes("daemon_health") || oodaStatusKeys.includes("ooda_daemon");
+  const oodaCyclesEndpoint = apiOk("/api/ooda-cycles");
   dims.push({
     name: "OODA cycle health",
-    classification: oodaCycleEvidence && tabBySlug["overview"] ? "PARTIAL"
+    classification: oodaCyclesEndpoint && oodaCycleEvidence && tabBySlug["thinking"] ? "PRESENT"
+                  : oodaCycleEvidence && tabBySlug["overview"] ? "PARTIAL"
                   : oodaCycleEvidence ? "PARTIAL"
                   : "MISSING",
-    detail: "Cycle number, phase, last summary, and timestamp are exposed via /api/status.daemon_health, but there is no dedicated OODA tab showing phase transitions over time, no /api/ooda-cycles endpoint, and no inline visualisation of the OODA loop.",
+    detail: oodaCyclesEndpoint
+      ? "Per-cycle history with duration trend is exposed via /api/ooda-cycles; current cycle state via /api/status.daemon_health; visualisation in the Thinking tab."
+      : "Cycle number, phase, last summary, and timestamp are exposed via /api/status.daemon_health, but there is no dedicated OODA tab showing phase transitions over time, no /api/ooda-cycles endpoint, and no inline visualisation of the OODA loop.",
     evidence: [
       apiOk("/api/status")        ? `API /api/status surfaces daemon_health.cycle_number, daemon_health.cycle_phase, daemon_health.actions_taken, daemon_health.cycle_duration_secs (keys: ${oodaStatusKeys.join(", ")})` : "API /api/status → not 200",
-      apis["/api/ooda-cycles"]    ? `API /api/ooda-cycles → ${apis["/api/ooda-cycles"].status} (no per-cycle history endpoint)` : null,
+      oodaCyclesEndpoint           ? `API /api/ooda-cycles → 200 (per-cycle history with duration trend)` : (apis["/api/ooda-cycles"] ? `API /api/ooda-cycles → ${apis["/api/ooda-cycles"].status}` : null),
       tabBySlug["overview"]       ? `Tab #tab-overview screenshot: ${tabBySlug["overview"].screenshot}` : "no #tab-overview discovered",
-      tabBySlug["thinking"]       ? `Tab #tab-thinking present — but classified separately from OODA cycle metrics: ${tabBySlug["thinking"].screenshot}` : null,
+      tabBySlug["thinking"]       ? `Tab #tab-thinking present with cycle history visualisation: ${tabBySlug["thinking"].screenshot}` : null,
     ].filter(Boolean),
   });
 
