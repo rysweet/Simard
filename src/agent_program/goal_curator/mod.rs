@@ -42,14 +42,21 @@ impl AgentProgram for GoalCuratorProgram {
         outcome: &BaseTypeOutcome,
     ) -> SimardResult<String> {
         let plan = StructuredGoalPlan::parse(&context.objective)?;
+        let top_goals = plan.concise_top_five();
+        let goal_list = if top_goals.is_empty() {
+            "<none>".to_string()
+        } else {
+            top_goals
+        };
         Ok(format!(
-            "Goal curator '{}' processed {} goal updates through '{}' on '{}' from '{}'. Active top goals after curation: {}. Outcome summary: {}.",
+            "Goal curator '{}' processed {} goal updates through '{}' on '{}' from '{}'. Active top goals after curation ({} active): [{}]. Outcome summary: {}.",
             self.descriptor.identity,
             plan.goals.len(),
             context.selected_base_type,
             context.topology,
             context.runtime_node,
             plan.active_goal_count(),
+            goal_list,
             outcome.execution_summary,
         ))
     }

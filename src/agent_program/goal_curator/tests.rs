@@ -84,6 +84,43 @@ fn goal_curator_reflection_summary_includes_goal_count() {
 }
 
 #[test]
+fn goal_curator_reflection_summary_surfaces_ranked_goal_titles() {
+    let program = GoalCuratorProgram::try_default().expect("create test program");
+    let context = test_context(
+        "goal: Ship v1 | priority=1 | status=active | rationale=deadline\ngoal: Add tests | priority=2 | status=active | rationale=quality",
+    );
+    let summary = program
+        .reflection_summary(&context, &test_outcome())
+        .expect("reflection_summary should succeed");
+    // Spec line 664: reflection must surface actual goal titles, not just a count
+    assert!(
+        summary.contains("Ship v1"),
+        "reflection must include actual goal title 'Ship v1', got: {summary}"
+    );
+    assert!(
+        summary.contains("Add tests"),
+        "reflection must include actual goal title 'Add tests', got: {summary}"
+    );
+    assert!(
+        summary.contains("p1:Ship v1"),
+        "reflection must include priority-prefixed goal, got: {summary}"
+    );
+}
+
+#[test]
+fn goal_curator_reflection_summary_shows_none_when_no_active_goals() {
+    let program = GoalCuratorProgram::try_default().expect("create test program");
+    let context = test_context("goal: Old task | priority=1 | status=completed");
+    let summary = program
+        .reflection_summary(&context, &test_outcome())
+        .expect("reflection_summary should succeed");
+    assert!(
+        summary.contains("<none>"),
+        "reflection with no active goals should show <none>, got: {summary}"
+    );
+}
+
+#[test]
 fn goal_curator_persistence_summary_includes_counts() {
     let program = GoalCuratorProgram::try_default().expect("create test program");
     let context = test_context(
