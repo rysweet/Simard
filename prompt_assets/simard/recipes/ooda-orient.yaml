@@ -1,19 +1,16 @@
 # ooda-orient.yaml — Recipe-runner recipe for the OODA Orient brain.
 #
 # Replaces the direct LLM call + JSON parsing in RustyClawdOrientBrain
-# (issue #2115). The prompt content is adapted from
-# prompt_assets/simard/ooda_orient.md (single-brace {var} → double-brace
-# {{var}} for recipe-runner substitution).
+# (issue #2115). Parsers eliminated in issue #2144.
 #
-# The Rust shim (recipe_orient.rs) applies a 3-tier parse cascade:
-#   1. JSON extraction — {"adjusted_urgency": f64, ...}
-#   2. Bare float — first [0-9]+\.[0-9]+ that validates
-#   3. Deterministic floor — base_urgency - 0.2 * failure_count
+# The Rust shim (recipe_brain.rs) applies a 2-tier parse:
+#   1. First decimal float in text (e.g. `0.42`) → adjusted_urgency
+#   2. Deterministic floor — base_urgency - 0.2 * failure_count
 #
 # Context vars (passed via -c):
 #   goal_id, base_urgency, base_reason, failure_count
 #
-# Output: agent stdout — JSON judgment or prose containing a float
+# Output: agent stdout — bare decimal float as first token, followed by rationale
 
 name: "ooda-orient"
 description: "OODA Orient brain — failure-penalty demotion judgment"
@@ -36,8 +33,8 @@ steps:
       phase has just computed a *base urgency* for one goal from its status
       (blocked / not-started / in-progress / completed) and any environmental
       boosts (open issues, dirty tree). You now judge how aggressively to demote
-      that urgency given the goal's recent failure history. Output a single JSON
-      judgment the daemon will apply.
+      that urgency given the goal's recent failure history. Output a bare decimal
+      number as the first token of your response.
 
       Be conservative. The deterministic floor — `urgency − 0.2 × failure_count`,
       clamped to `[0, 1]` — exists for a reason: it is well-tuned and never
@@ -72,10 +69,14 @@ steps:
 
       ## DECISION
 
-      Choose how strongly to demote `base_urgency`. Output a single
-      `adjusted_urgency` in `[0.0, 1.0]` that is **less than or equal to**
-      `base_urgency` (you may never escalate via this brain — escalation belongs to
-      the engineer-lifecycle brain).
+      Choose how strongly to demote `base_urgency`. Output the adjusted
+      urgency as a bare decimal number (e.g. `0.42`) as the very first
+      token of your response. Follow with your rationale.
+
+      The daemon reads only the first `N.N` pattern; everything after is
+      rationale text. The value must satisfy `0 ≤ adjusted_urgency ≤ base_urgency`.
+      If no valid decimal is found, the daemon falls back to the deterministic
+      floor (`urgency − 0.2 × failure_count`).
 
       Reference scale (deterministic floor — match this unless the situation
       clearly differs):
@@ -91,36 +92,15 @@ steps:
       spawn). You may be slightly *more aggressive* (closer to zero) when the
       goal_id pattern or reason suggests the goal itself is malformed.
 
-      Return a single JSON object. Schema:
-
-      ```json
-      {"adjusted_urgency": <float in [0,1]>, "demotion_applied": <float ≥ 0>, "rationale": "<short reason>", "confidence": <float in [0,1]>}
-      ```
-
-      - `adjusted_urgency` — final urgency after demotion. Must satisfy
-        `0 ≤ adjusted_urgency ≤ base_urgency`.
-      - `demotion_applied` — convenience field equal to
-        `base_urgency − adjusted_urgency`.
-      - `rationale` — short reason citing failure_count and any signals from
-        base_reason that influenced the demotion.
-      - `confidence` — your confidence in the demotion `[0, 1]`.
-
-      Malformed JSON or `adjusted_urgency > base_urgency` causes the daemon to
-      fall back to the deterministic floor (`urgency − 0.2 × failure_count`).
-
       ## EXAMPLES
 
-      Good — single recent failure, deterministic-floor demotion:
+      Good — single recent failure, standard floor demotion:
 
       Input: `{"goal_id": "ship-v1", "base_urgency": 0.80, "base_reason": "not yet started", "failure_count": 1}`
-      ```json
-      {"adjusted_urgency": 0.60, "demotion_applied": 0.20, "rationale": "1 failure: standard floor demotion", "confidence": 0.9}
-      ```
+      Response: `0.60 1 failure: standard floor demotion`
 
       Good — chronic failures, drive toward zero:
 
       Input: `{"goal_id": "stuck-task", "base_urgency": 0.80, "base_reason": "blocked: needs human input", "failure_count": 5}`
-      ```json
-      {"adjusted_urgency": 0.0, "demotion_applied": 0.80, "rationale": "5 consecutive failures: deprioritise below all unfailed work", "confidence": 0.95}
-      ```
+      Response: `0.0 5 consecutive failures: deprioritise below all unfailed work`
     output: "orient_result"

@@ -22,9 +22,9 @@ trait impl — you do **not** create a new struct.
 ### 1. Write the recipe YAML
 
 Create `prompt_assets/simard/recipes/ooda-<phase>.yaml`. The recipe receives
-context as `-c key=value` args and writes its decision to stdout. The OUTPUT
-FORMAT section should instruct the LLM to output the variant name as the
-very first word of its response, followed by rationale text.
+context as `-c key=value` args and writes its decision to stdout. The
+**first word** of stdout must be the decision variant name (see
+[text-parsing wire formats](../reference/text-parsing-wire-formats.md)).
 
 ### 2. Define the trait (if new)
 
@@ -41,15 +41,19 @@ pub trait OodaNewPhaseBrain: Send + Sync {
 Create `src/ooda_brain/recipe_<phase>.rs` with a public
 `parse_<phase>_from_text(text: &str) -> NewPhaseJudgment` function. This
 follows the existing pattern — each phase keeps its parse function and tests
-in its own file. Use first-word extraction with `eq_ignore_ascii_case()` for
-variant matching and `truncate()` for rationale capping (imported from
-`recipe_brain.rs`).
+in its own file. Use the first-word extraction pattern:
 
-The parse function should:
-1. Extract the first word via `text.split_whitespace().next()`.
-2. Match it case-insensitively against known variants.
-3. Return the matching variant with remaining text as rationale (truncated).
-4. Default to a safe variant if no match.
+```rust
+let first_word = text.split_whitespace().next()
+    .unwrap_or("").to_ascii_lowercase();
+match first_word.as_str() {
+    "variant_a" => ...,
+    "variant_b" => ...,
+    _ => /* safe default */,
+}
+```
+
+Use `truncate()` for rationale capping (imported from `recipe_brain.rs`).
 
 ### 4. Implement the trait on RecipeBrain
 
@@ -89,15 +93,16 @@ pub(super) fn build_new_phase_brain(
 Add tests for `parse_new_phase_from_text()` in the `#[cfg(test)] mod tests`
 block in `recipe_<phase>.rs` (the same file as the parse function). Test:
 
-- Each variant is recognized as the first word (case-insensitive).
-- No-match first word returns the safe default.
+- Each variant is recognized as first word (case-insensitive).
+- Unrecognized first word returns the safe default.
 - Rationale is truncated for long output.
 - Constructor returns `None` for missing recipe file.
 
 ## What you do NOT do
 
 - Do **not** create a new struct. `RecipeBrain` handles all phases.
-- Do **not** duplicate `resolve_recipe_path`, `truncate`, or
-  `try_first_float`. They are shared.
+- Do **not** duplicate `resolve_recipe_path` or `truncate`. They are shared.
+- Do **not** use `ascii_contains_ignore_case` or keyword scanning — those
+  patterns have been removed (#2144). Use first-word extraction only.
 - Do **not** add the recipe filename as a module-level `const`. Pass it to
   `RecipeBrain::new()` from `brains.rs`.
