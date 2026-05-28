@@ -259,6 +259,14 @@ pub enum SimardError {
     DirtyWorktree {
         changed_files: Vec<String>,
     },
+    /// The on-disk schema version is newer than this binary supports.
+    /// Callers should refuse to load rather than silently corrupt data.
+    SchemaTooNew {
+        store: String,
+        found_version: u32,
+        max_supported: u32,
+        path: PathBuf,
+    },
 }
 
 pub type SimardResult<T> = Result<T, SimardError>;

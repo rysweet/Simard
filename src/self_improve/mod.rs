@@ -34,7 +34,7 @@ mod tests_trend;
 pub use cycle::{
     apply_improvements, decide, find_weak_dimensions, run_improvement_cycle, summarize_cycle,
 };
-pub use history::ImprovementHistory;
+pub use history::{CURRENT_SCHEMA_VERSION, HistoryMeta, ImprovementHistory};
 pub use prioritization::{
     PrioritizedDimension, PriorityWeights, find_weak_dimensions_detailed, prioritize_dimensions,
     prioritize_dimensions_default,
