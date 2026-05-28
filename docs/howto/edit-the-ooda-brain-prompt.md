@@ -201,6 +201,34 @@ simard safe-update
 See [text-parsing wire formats](../reference/text-parsing-wire-formats.md)
 for the full grammar of each format.
 
+## Editing the goal-session objective prompt
+
+**Added in [#2152](https://github.com/rysweet/Simard/issues/2152).**
+
+The goal-session objective prompt (`goal_session_objective.md`) controls how
+Simard triages existing PRs before starting new work. It is loaded at runtime
+via `PromptStore`, the same mechanism as the OODA brain prompts.
+
+### Hot-reload (no rebuild required)
+
+```bash
+vim ~/.simard/prompt_assets/simard/goal_session_objective.md
+# Save — takes effect on the next goal-session advance call
+```
+
+### What you can change
+
+* **Priority Order section** — reorder, add, or remove triage tiers. The
+  default order is: merge green PRs → fix failing PRs → close duplicates →
+  new work.
+* **Response shapes** — the two valid outputs (spawn engineer / NO ACTION).
+  Changing these requires a coordinated Rust parser change.
+* **Progress marker** — the `PROGRESS: NN` format. Changing requires a
+  parser change.
+
+See [goal-session objective prompt reference](../reference/goal-session-objective-prompt.md)
+for the full schema and editing examples.
+
 ## See Also
 
 * [Concept: text-based brain protocol](../concepts/text-based-brain-protocol.md)
@@ -208,5 +236,6 @@ for the full grammar of each format.
 * [Reference: text-parsing wire formats](../reference/text-parsing-wire-formats.md)
 * [Reference: `OodaBrain` API](../reference/ooda-brain-api.md)
 * [Reference: `ooda_brain.md` prompt schema](../reference/ooda-brain-prompt.md)
+* [Reference: `goal_session_objective.md` prompt schema](../reference/goal-session-objective-prompt.md) — PR triage priority order
 * [Reference: `ooda_decide.md` prompt schema](../reference/ooda-decide-prompt.md) — decide recipe and first-word parser
 * [Reference: `ooda_orient.md` prompt schema](../reference/ooda-orient-prompt.md)

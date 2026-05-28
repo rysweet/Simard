@@ -1,10 +1,11 @@
 # Prompt-driven brain iteration (hot-reload)
 
-The three prompt-driven OODA brains — **act** (`RustyClawdBrain`, PR #1458),
+The prompt-driven OODA brains — **act** (`RustyClawdBrain`, PR #1458),
 **decide** (`RustyClawdDecideBrain`, PR #1469), and **orient**
-(`RustyClawdOrientBrain`, PR #1471), all wired in [#1474] — load their
-prompt text from disk on every OODA cycle. Editing a prompt takes effect on
-the **next cycle**; no rebuild, no daemon restart.
+(`RustyClawdOrientBrain`, PR #1471), all wired in [#1474] — plus the
+**goal-session objective** prompt ([#2152]) load their prompt text from disk
+on every OODA cycle. Editing a prompt takes effect on the **next cycle**; no
+rebuild, no daemon restart.
 
 This realises the standing project goal: *iterate on prompts, not code*.
 
@@ -22,16 +23,17 @@ The daemon resolves the prompt-asset directory in this order:
 The resolved path is logged at daemon startup, e.g.
 
 ```text
-[simard] OODA daemon: prompt_assets dir = /home/USER/.simard/prompt_assets/simard (3 prompts hot-reloadable)
+[simard] OODA daemon: prompt_assets dir = /home/USER/.simard/prompt_assets/simard (4 prompts hot-reloadable)
 ```
 
-## The three hot-reloadable prompts
+## Hot-reloadable prompts
 
-| File              | Brain                        | Decision site                                                      |
-| ----------------- | ---------------------------- | ------------------------------------------------------------------ |
-| `ooda_brain.md`   | `RustyClawdBrain` (act)      | Engineer-lifecycle skip branch — keep skipping, reclaim, deprioritise, open issue, or block. |
-| `ooda_decide.md`  | `RustyClawdDecideBrain`      | Map a prioritised goal to an `ActionKind` (advance, improve, consolidate, ...). |
-| `ooda_orient.md`  | `RustyClawdOrientBrain`      | Demote per-goal urgency in proportion to consecutive failures.     |
+| File                          | Consumer                     | Decision site                                                      |
+| ----------------------------- | ---------------------------- | ------------------------------------------------------------------ |
+| `ooda_brain.md`               | `RustyClawdBrain` (act)      | Engineer-lifecycle skip branch — keep skipping, reclaim, deprioritise, open issue, or block. |
+| `ooda_decide.md`              | `RustyClawdDecideBrain`      | Map a prioritised goal to an `ActionKind` (advance, improve, consolidate, ...). |
+| `ooda_orient.md`              | `RustyClawdOrientBrain`      | Demote per-goal urgency in proportion to consecutive failures.     |
+| `goal_session_objective.md`   | Goal-session advance ([#2152]) | PR triage priority order + response shapes for goal advancement.  |
 
 ## How hot-reload works
 
@@ -57,6 +59,7 @@ overwritten by the repository copy on redeploy. Commit prompt changes back
 to the repository to make them durable.
 
 [#1474]: https://github.com/rysweet/Simard/pull/1474
+[#2152]: https://github.com/rysweet/Simard/issues/2152
 
 ## Observability: `prompt_version` in cycle reports
 
