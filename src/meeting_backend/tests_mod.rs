@@ -388,16 +388,32 @@ fn close_summary_includes_applied_templates() {
 fn push_explicit_decision_appends_and_dedupes() {
     let agent = MockAgent::new("ok");
     let mut backend = MeetingBackend::new_session("Planning", Box::new(agent), None, String::new());
-    backend.push_explicit_decision("Adopt TDD");
-    backend.push_explicit_decision("  Adopt TDD  "); // duplicate (case-insensitive after trim)
-    backend.push_explicit_decision("ADOPT TDD"); // case-insensitive duplicate
-    backend.push_explicit_decision("Ship phase 8");
-    backend.push_explicit_decision("   "); // empty -> ignored
+    backend.push_explicit_decision("Adopt TDD", None);
+    backend.push_explicit_decision("  Adopt TDD  ", None); // duplicate (case-insensitive after trim)
+    backend.push_explicit_decision("ADOPT TDD", None); // case-insensitive duplicate
+    backend.push_explicit_decision("Ship phase 8", None);
+    backend.push_explicit_decision("   ", None); // empty -> ignored
     let decisions = backend.explicit_decisions();
-    assert_eq!(
-        decisions,
-        &["Adopt TDD".to_string(), "Ship phase 8".to_string()]
-    );
+    assert_eq!(decisions.len(), 2);
+    assert_eq!(decisions[0].description, "Adopt TDD");
+    assert_eq!(decisions[1].description, "Ship phase 8");
+    // No rationale supplied → stored as empty string
+    assert_eq!(decisions[0].rationale, "");
+    assert_eq!(decisions[1].rationale, "");
+}
+
+#[test]
+fn push_explicit_decision_with_rationale() {
+    let agent = MockAgent::new("ok");
+    let mut backend = MeetingBackend::new_session("Planning", Box::new(agent), None, String::new());
+    backend.push_explicit_decision("Adopt TDD", Some("Memory safety"));
+    backend.push_explicit_decision("Ship phase 8", None);
+    let decisions = backend.explicit_decisions();
+    assert_eq!(decisions.len(), 2);
+    assert_eq!(decisions[0].description, "Adopt TDD");
+    assert_eq!(decisions[0].rationale, "Memory safety");
+    assert_eq!(decisions[1].description, "Ship phase 8");
+    assert_eq!(decisions[1].rationale, "");
 }
 
 #[test]
@@ -464,8 +480,8 @@ fn close_summary_merges_explicit_decisions() {
     let agent = MockAgent::new("Summary text.");
     let mut backend =
         MeetingBackend::new_session("Decisions", Box::new(agent), None, String::new());
-    backend.push_explicit_decision("Adopt TDD");
-    backend.push_explicit_decision("Use Rust for CLI");
+    backend.push_explicit_decision("Adopt TDD", Some("Better quality"));
+    backend.push_explicit_decision("Use Rust for CLI", None);
     let summary = backend.close().unwrap();
     // Explicit decisions appear first, in registration order.
     assert!(summary.decisions.contains(&"Adopt TDD".to_string()));
@@ -527,7 +543,7 @@ fn snapshot_session_captures_decisions_actions_questions() {
     let agent = MockAgent::new("ok");
     let mut backend =
         MeetingBackend::new_session("Snap Items", Box::new(agent), None, String::new());
-    backend.push_explicit_decision("Use Rust");
+    backend.push_explicit_decision("Use Rust", None);
     backend.push_explicit_action_item("Alice will deploy by Friday");
     backend.push_explicit_question("What about caching?");
     backend.push_theme("performance".to_string());
@@ -551,7 +567,7 @@ fn snapshot_session_round_trips_through_wip_persistence() {
     let agent = MockAgent::new("ok");
     let mut backend =
         MeetingBackend::new_session("Round Trip", Box::new(agent), None, String::new());
-    backend.push_explicit_decision("Decided X");
+    backend.push_explicit_decision("Decided X", None);
     backend.push_explicit_question("Open Q?");
 
     let snap = backend.snapshot_session();

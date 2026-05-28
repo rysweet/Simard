@@ -141,7 +141,7 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
             MeetingCommand::Help => {
                 writeln!(
                     output,
-                    "Commands:\n  /status    — show session info\n  /state     — show current decisions, open questions, action items\n  /template  — list meeting templates\n  /template <name> — apply a template (standup, 1on1, retro, planning)\n  /theme <text>    — record a theme for this meeting\n  /decision <text> — record a decision deterministically (skips heuristic extraction)\n  /action <text>   — record an action item (assignee/deadline parsed inline)\n  /question <text> — record an open question deterministically\n  /owner <name>    — name the next agent/persona/human expected to action this handoff\n  /goal <text>     — set the meeting's overarching objective\n  /recap     — show color-coded session recap\n  /preview   — preview the handoff artifact\n  /export    — export meeting as markdown\n  /close     — end meeting and persist\n  /help      — this message\n\nEverything else is natural conversation with Simard."
+                    "Commands:\n  /status    — show session info\n  /state     — show current decisions, open questions, action items\n  /template  — list meeting templates\n  /template <name> — apply a template (standup, 1on1, retro, planning)\n  /theme <text>    — record a theme for this meeting\n  /decision <text> [--rationale <why>] — record a decision (optional rationale)\n  /action <text>   — record an action item (assignee/deadline parsed inline)\n  /question <text> — record an open question deterministically\n  /owner <name>    — name the next agent/persona/human expected to action this handoff\n  /goal <text>     — set the meeting's overarching objective\n  /recap     — show color-coded session recap\n  /preview   — preview the handoff artifact\n  /export    — export meeting as markdown\n  /close     — end meeting and persist\n  /help      — this message\n\nEverything else is natural conversation with Simard."
                 )
                 .ok();
             }
@@ -166,7 +166,11 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                 let inferred_questions = extract_open_questions(messages);
                 let inferred_actions = extract_action_items(messages);
 
-                let mut decisions: Vec<String> = backend.explicit_decisions().to_vec();
+                let mut decisions: Vec<String> = backend
+                    .explicit_decisions()
+                    .iter()
+                    .map(|d| d.description.clone())
+                    .collect();
                 for d in inferred_decisions {
                     let lower = d.to_lowercase();
                     if !decisions.iter().any(|e| e.to_lowercase() == lower) {
@@ -257,9 +261,14 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                 writeln!(output, "{}", green(&format!("Theme recorded: {text}"))).ok();
                 checkpoint_wip(&backend);
             }
-            MeetingCommand::Decision(text) => {
-                backend.push_explicit_decision(&text);
-                writeln!(output, "{}", cyan(&format!("Decision recorded: {text}"))).ok();
+            MeetingCommand::Decision { text, rationale } => {
+                backend.push_explicit_decision(&text, rationale.as_deref());
+                let msg = if let Some(ref r) = rationale {
+                    format!("Decision recorded: {text} (rationale: {r})")
+                } else {
+                    format!("Decision recorded: {text}")
+                };
+                writeln!(output, "{}", cyan(&msg)).ok();
                 checkpoint_wip(&backend);
             }
             MeetingCommand::Action(text) => {

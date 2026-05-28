@@ -38,6 +38,12 @@ pub use types::{
 /// Maximum messages kept in conversation history.
 pub(super) const MAX_HISTORY: usize = 500;
 
+/// Maximum recent messages included in the `meeting_handoff.json` artifact.
+/// Full transcript is preserved in `transcript.json`; the handoff carries
+/// only the most recent turns so downstream consumers get concise decision
+/// records instead of bloated transcripts (spec requirement, issue #2086).
+pub(super) const MAX_HANDOFF_HISTORY: usize = 50;
+
 /// Number of recent messages included verbatim in the LLM prompt.
 const RECENT_WINDOW: usize = 30;
 
@@ -149,9 +155,10 @@ pub struct MeetingBackend {
     /// handoff markdown report as the `## Agenda` section.
     applied_templates: Vec<AppliedTemplate>,
     /// Decisions recorded inline by the operator via `/decision <text>`.
-    /// Bypass post-hoc heuristic extraction so important items cannot be
-    /// missed or mangled. Issue #1730 seam (b).
-    explicit_decisions: Vec<String>,
+    /// Stores structured `MeetingDecision` with rationale so the REPL and
+    /// programmatic API share a single representation. Issue #1730 seam (b),
+    /// unified in issue #2086.
+    explicit_decisions: Vec<crate::meeting_facilitator::MeetingDecision>,
     /// Action items recorded inline by the operator via `/action <text>`.
     /// Description is taken verbatim; assignee/deadline are best-effort
     /// extracted using the same helpers as the heuristic path. Issue #1730
@@ -327,10 +334,13 @@ impl MeetingBackend {
     // ── Inline /decision /action /question (issue #1730 seam (b)) ─────
 
     /// Record a decision the operator marked deterministically with
-    /// `/decision <text>`. Trailing/leading whitespace is trimmed and empty
-    /// values are ignored. Duplicates (case-insensitive) are deduplicated so
-    /// re-typing `/decision Adopt TDD` is a no-op.
-    pub fn push_explicit_decision(&mut self, text: &str) {
+    /// `/decision <text>`. Accepts optional `rationale` — when `None`, the
+    /// rationale is stored as `""` and will be backfilled from the
+    /// conversation history at close time. Trailing/leading whitespace is
+    /// trimmed and empty values are ignored. Duplicates (case-insensitive on
+    /// description) are deduplicated so re-typing `/decision Adopt TDD` is a
+    /// no-op. Unified to store `MeetingDecision` in issue #2086.
+    pub fn push_explicit_decision(&mut self, text: &str, rationale: Option<&str>) {
         let trimmed = text.trim();
         if trimmed.is_empty() {
             return;
@@ -339,15 +349,20 @@ impl MeetingBackend {
         if self
             .explicit_decisions
             .iter()
-            .any(|d| d.to_lowercase() == lower)
+            .any(|d| d.description.to_lowercase() == lower)
         {
             return;
         }
-        self.explicit_decisions.push(trimmed.to_string());
+        self.explicit_decisions
+            .push(crate::meeting_facilitator::MeetingDecision {
+                description: trimmed.to_string(),
+                rationale: rationale.map(|r| r.trim().to_string()).unwrap_or_default(),
+                participants: Vec::new(),
+            });
     }
 
     /// Read the decisions the operator recorded inline so far.
-    pub fn explicit_decisions(&self) -> &[String] {
+    pub fn explicit_decisions(&self) -> &[crate::meeting_facilitator::MeetingDecision] {
         &self.explicit_decisions
     }
 
@@ -469,17 +484,9 @@ impl MeetingBackend {
     /// slash command so a crash loses at most the last few seconds of work.
     /// Issue #1984.
     pub fn snapshot_session(&self) -> crate::meeting_facilitator::MeetingSession {
-        use crate::meeting_facilitator::{MeetingDecision, MeetingSessionStatus};
+        use crate::meeting_facilitator::MeetingSessionStatus;
 
-        let decisions = self
-            .explicit_decisions
-            .iter()
-            .map(|d| MeetingDecision {
-                description: d.clone(),
-                rationale: String::new(),
-                participants: Vec::new(),
-            })
-            .collect();
+        let decisions = self.explicit_decisions.clone();
 
         let action_items = self
             .explicit_action_items

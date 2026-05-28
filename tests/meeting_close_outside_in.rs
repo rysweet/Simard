@@ -415,7 +415,7 @@ fn slow_but_successful_llm_close_produces_complete_handoff() {
          because the previous 15-second default was shorter than a \
          single LLM turn at p95.",
     );
-    backend.push_explicit_decision("Raise agent close timeout to 45s");
+    backend.push_explicit_decision("Raise agent close timeout to 45s", None);
     backend.push_explicit_action_item("Engineer will update the default and docs");
 
     let started = Instant::now();
@@ -521,7 +521,7 @@ fn close_writes_enrichment_payload_with_next_owner_and_artifacts() {
          losing rationale and participants — outside-in catches it.",
     );
 
-    backend.push_explicit_decision("Adopt outside-in tests for the close pipeline");
+    backend.push_explicit_decision("Adopt outside-in tests for the close pipeline", None);
     backend.push_explicit_action_item("Alice will write the regression test");
     backend.push_explicit_question("Should we also gate clippy on -D warnings?");
     backend.push_next_owner("engineer");
@@ -643,7 +643,7 @@ fn partial_close_preserves_structured_decisions_not_placeholders() {
         "We will adopt structured handoffs because the schema \
          downstream consumers need to link to artifacts.",
     );
-    backend.push_explicit_decision("Adopt structured handoffs");
+    backend.push_explicit_decision("Adopt structured handoffs", None);
     backend.push_explicit_action_item("Bob will write the schema migration");
     backend.push_next_owner("ooda-curate");
 
