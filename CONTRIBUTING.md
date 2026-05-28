@@ -11,10 +11,11 @@ they are the same gates CI enforces.
 
 1. [Local Pre-Commit Workflow](#local-pre-commit-workflow)
 2. [Merge Policy: No `--admin` Merges](#merge-policy-no---admin-merges)
-3. [Cognitive Memory Durability (Per-Write Barrier + SIGTERM + Periodic Backups)](#cognitive-memory-durability-per-write-barrier--sigterm--periodic-backups)
-4. [Local Data Retention Disclosure](#local-data-retention-disclosure)
-5. [Pre-Existing Test Failure Disposition](#pre-existing-test-failure-disposition)
-6. [Real-Meeting & Dashboard E2E Verification](#real-meeting--dashboard-e2e-verification)
+3. [TDD Discipline (Pilot)](#tdd-discipline-pilot)
+4. [Cognitive Memory Durability (Per-Write Barrier + SIGTERM + Periodic Backups)](#cognitive-memory-durability-per-write-barrier--sigterm--periodic-backups)
+5. [Local Data Retention Disclosure](#local-data-retention-disclosure)
+6. [Pre-Existing Test Failure Disposition](#pre-existing-test-failure-disposition)
+7. [Real-Meeting & Dashboard E2E Verification](#real-meeting--dashboard-e2e-verification)
 
 ---
 
@@ -191,6 +192,51 @@ Before requesting merge:
 - [ ] CI on the PR is green.
 - [ ] Pre-existing failures inherited from `main` are either fixed in this PR or tracked by a linked GitHub issue.
 - [ ] PR body contains evidence of any required E2E verification (see workstream-specific docs).
+
+---
+
+## TDD Discipline (Pilot)
+
+Simard follows a **test-first authoring order** for new behavior in the
+pilot-scope modules listed below. This is enforced by the `tdd-ordering`
+CI job (`scripts/check-tdd-ordering.sh`) on every PR targeting `main`.
+See [#1927](https://github.com/rysweet/Simard/issues/1927) for the full
+charter, rationale, and exception list.
+
+### Pilot Scope
+
+The following paths are currently in the TDD pilot:
+
+- `src/meeting_backend/`
+- `src/meeting_repl/`
+- `src/meeting_facilitator/`
+
+### What the Check Requires
+
+For each pilot path touched by a PR, **at least one test-adding commit
+must appear before any production-code commit** in `git log --reverse`.
+The script checks for `#[test]`, `#[tokio::test]`, `assert!` macros,
+and `#[cfg(test)]` annotations in the added lines.
+
+### Exemptions
+
+If the change falls into one of the explicit exception categories from
+the charter (one-line fixes, doc-only, generated code, pure refactors),
+add a `tdd-exempt:<reason>` trailer to any commit in the PR:
+
+```
+git commit --trailer "tdd-exempt:one-line fix - constant rename"
+```
+
+The reason must be non-empty. The CI job will accept the trailer and
+skip the ordering check for the entire PR.
+
+### Local Verification
+
+```bash
+# From the repo root, before pushing:
+bash scripts/check-tdd-ordering.sh $(git merge-base origin/main HEAD) HEAD
+```
 
 ---
 

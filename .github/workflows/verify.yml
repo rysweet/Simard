@@ -23,6 +23,23 @@ env:
   CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "false"
 
 jobs:
+  tdd-ordering:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository (full history for log traversal)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run TDD ordering check
+        run: |
+          bash scripts/check-tdd-ordering.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            "${{ github.event.pull_request.head.sha }}"
+
   pre-commit:
     runs-on: ubuntu-latest
     timeout-minutes: 120
