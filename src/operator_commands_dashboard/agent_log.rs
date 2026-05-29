@@ -313,10 +313,10 @@ mod tests {
 
     #[test]
     fn constants_have_sensible_values() {
-        assert!(AGENT_LOG_BACKFILL_LINES > 0);
-        assert!(AGENT_LOG_MAX_TICK_BYTES > 0);
-        assert!(AGENT_LOG_TICK_MS > 0);
-        assert!(AGENT_LOG_WAIT_TIMEOUT_MS > AGENT_LOG_TICK_MS);
+        const { assert!(AGENT_LOG_BACKFILL_LINES > 0) };
+        const { assert!(AGENT_LOG_MAX_TICK_BYTES > 0) };
+        const { assert!(AGENT_LOG_TICK_MS > 0) };
+        const { assert!(AGENT_LOG_WAIT_TIMEOUT_MS > AGENT_LOG_TICK_MS) };
     }
 
     #[test]
