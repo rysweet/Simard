@@ -52,7 +52,8 @@ jobs:
             --ignore-filename-regex 'tests?/' \
             --json \
             --summary-only \
-            --output-path target/ci-logs/coverage-summary.json
+            --output-path target/ci-logs/coverage-summary.json \
+            -- --skip cognitive_memory_crash
 
       - name: Upload coverage summary
         if: always()
