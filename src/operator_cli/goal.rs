@@ -278,3 +278,161 @@ fn is_id_placeholder(id: &str, desc: &str) -> bool {
     let expected = format!("Goal {id}");
     desc == expected
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- is_id_placeholder ------------------------------------------------
+
+    #[test]
+    fn placeholder_matches_exact_format() {
+        assert!(is_id_placeholder("abc-123", "Goal abc-123"));
+    }
+
+    #[test]
+    fn placeholder_rejects_different_id() {
+        assert!(!is_id_placeholder("abc-123", "Goal xyz-456"));
+    }
+
+    #[test]
+    fn placeholder_rejects_wrong_case() {
+        assert!(!is_id_placeholder("abc", "goal abc"));
+    }
+
+    #[test]
+    fn placeholder_rejects_substring_match() {
+        assert!(!is_id_placeholder("abc", "Goal abc extra text"));
+    }
+
+    #[test]
+    fn placeholder_rejects_empty_desc() {
+        assert!(!is_id_placeholder("abc", ""));
+    }
+
+    #[test]
+    fn placeholder_with_empty_id_matches_goal_space() {
+        // `format!("Goal {}", "")` produces `"Goal "`, so this matches.
+        assert!(is_id_placeholder("", "Goal "));
+    }
+
+    #[test]
+    fn placeholder_rejects_empty_desc_with_empty_id() {
+        assert!(!is_id_placeholder("", ""));
+    }
+
+    // ---- GOAL_HELP constant -----------------------------------------------
+
+    #[test]
+    fn goal_help_contains_all_subcommands() {
+        assert!(GOAL_HELP.contains("list"));
+        assert!(GOAL_HELP.contains("unblock"));
+        assert!(GOAL_HELP.contains("unblock-all"));
+        assert!(GOAL_HELP.contains("remove"));
+        assert!(GOAL_HELP.contains("cleanup --placeholders"));
+        assert!(GOAL_HELP.contains("help"));
+    }
+
+    // ---- dispatch_goal_command routing -------------------------------------
+
+    #[test]
+    fn dispatch_help_flag() {
+        let args = vec!["--help".to_string()];
+        let result = dispatch_goal_command(args.into_iter());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dispatch_help_word() {
+        let args = vec!["help".to_string()];
+        let result = dispatch_goal_command(args.into_iter());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dispatch_short_help() {
+        let args = vec!["-h".to_string()];
+        let result = dispatch_goal_command(args.into_iter());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dispatch_missing_subcommand() {
+        let args: Vec<String> = vec![];
+        let result = dispatch_goal_command(args.into_iter());
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("goal command"),
+            "expected 'goal command' in: {msg}"
+        );
+    }
+
+    #[test]
+    fn dispatch_unsupported_subcommand() {
+        let args = vec!["nonexistent".to_string()];
+        let result = dispatch_goal_command(args.into_iter());
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("unsupported command 'goal nonexistent'"));
+    }
+
+    #[test]
+    fn dispatch_list_rejects_extra_args() {
+        let args = vec!["list".to_string(), "extra".to_string()];
+        let result = dispatch_goal_command(args.into_iter());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn dispatch_unblock_all_rejects_extra_args() {
+        let args = vec!["unblock-all".to_string(), "extra".to_string()];
+        let result = dispatch_goal_command(args.into_iter());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn dispatch_unblock_requires_goal_id() {
+        let args = vec!["unblock".to_string()];
+        let result = dispatch_goal_command(args.into_iter());
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("goal id"), "expected 'goal id' in: {msg}");
+    }
+
+    // ---- handle_remove ----------------------------------------------------
+
+    #[test]
+    fn remove_empty_ids_returns_error() {
+        let result = handle_remove(&[]);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("at least one id is required"));
+    }
+
+    // ---- handle_cleanup ---------------------------------------------------
+
+    #[test]
+    fn cleanup_no_flags_returns_error() {
+        let result = handle_cleanup(&[]);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("at least one criteria flag is required"));
+    }
+
+    #[test]
+    fn cleanup_unknown_flag_returns_error() {
+        let flags = vec!["--unknown".to_string()];
+        let result = handle_cleanup(&flags);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("unsupported flag '--unknown'"));
+    }
+
+    #[test]
+    fn cleanup_rejects_partial_flag() {
+        let flags = vec!["--placeholder".to_string()];
+        let result = handle_cleanup(&flags);
+        assert!(result.is_err());
+    }
+}

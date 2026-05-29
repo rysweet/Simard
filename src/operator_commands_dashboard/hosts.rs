@@ -169,3 +169,129 @@ pub(crate) async fn remove_host(Json(body): Json<Value>) -> Json<Value> {
         Err(e) => Json(json!({"error": format!("{e}")})),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- is_local_host ----------------------------------------------------
+
+    #[test]
+    fn same_hostname_matches() {
+        assert!(is_local_host("myhost", "myhost"));
+    }
+
+    #[test]
+    fn case_insensitive_match() {
+        assert!(is_local_host("MyHost", "myhost"));
+        assert!(is_local_host("myhost", "MYHOST"));
+    }
+
+    #[test]
+    fn fqdn_stripped_before_compare() {
+        assert!(is_local_host("myhost.example.com", "myhost"));
+        assert!(is_local_host("myhost", "myhost.corp.net"));
+        assert!(is_local_host("MYHOST.DOMAIN.COM", "myhost.other.org"));
+    }
+
+    #[test]
+    fn empty_input_never_matches() {
+        assert!(!is_local_host("", "myhost"));
+        assert!(!is_local_host("myhost", ""));
+        assert!(!is_local_host("", ""));
+    }
+
+    #[test]
+    fn different_hostnames_do_not_match() {
+        assert!(!is_local_host("host-a", "host-b"));
+        assert!(!is_local_host("alpha.example.com", "beta.example.com"));
+    }
+
+    #[test]
+    fn dot_only_input_returns_false() {
+        assert!(!is_local_host(".", "myhost"));
+        assert!(!is_local_host("myhost", "."));
+    }
+
+    // ---- host_entry_name --------------------------------------------------
+
+    #[test]
+    fn extracts_lowercase_name() {
+        let entry = json!({"name": "worker-1", "resource_group": "rg"});
+        assert_eq!(host_entry_name(&entry), "worker-1");
+    }
+
+    #[test]
+    fn extracts_capitalized_name() {
+        let entry = json!({"Name": "Worker-2"});
+        assert_eq!(host_entry_name(&entry), "Worker-2");
+    }
+
+    #[test]
+    fn prefers_lowercase_over_capitalized() {
+        let entry = json!({"name": "lower", "Name": "Upper"});
+        assert_eq!(host_entry_name(&entry), "lower");
+    }
+
+    #[test]
+    fn returns_empty_when_no_name_field() {
+        let entry = json!({"host": "something"});
+        assert_eq!(host_entry_name(&entry), "");
+    }
+
+    #[test]
+    fn returns_empty_for_null_name() {
+        let entry = json!({"name": null});
+        assert_eq!(host_entry_name(&entry), "");
+    }
+
+    // ---- tag_local_membership ---------------------------------------------
+
+    #[test]
+    fn tags_local_host_as_joined_when_in_cluster() {
+        let mut hosts = vec![json!({"name": "myhost"})];
+        let cluster = vec!["myhost".to_string()];
+        tag_local_membership(&mut hosts, &cluster, "myhost");
+        assert_eq!(hosts[0]["is_local"], json!(true));
+    }
+
+    #[test]
+    fn tags_non_local_host_as_not_joined() {
+        let mut hosts = vec![json!({"name": "remote-vm"})];
+        let cluster = vec!["remote-vm".to_string()];
+        tag_local_membership(&mut hosts, &cluster, "myhost");
+        assert_eq!(hosts[0]["is_local"], json!(false));
+    }
+
+    #[test]
+    fn tags_local_host_not_in_cluster_as_not_joined() {
+        let mut hosts = vec![json!({"name": "myhost"})];
+        let cluster: Vec<String> = vec![];
+        tag_local_membership(&mut hosts, &cluster, "myhost");
+        assert_eq!(hosts[0]["is_local"], json!(false));
+    }
+
+    #[test]
+    fn tags_multiple_hosts_correctly() {
+        let mut hosts = vec![json!({"name": "local-vm"}), json!({"name": "remote-vm"})];
+        let cluster = vec!["local-vm".to_string(), "remote-vm".to_string()];
+        tag_local_membership(&mut hosts, &cluster, "local-vm");
+        assert_eq!(hosts[0]["is_local"], json!(true));
+        assert_eq!(hosts[1]["is_local"], json!(false));
+    }
+
+    #[test]
+    fn tag_works_with_fqdn_hostname() {
+        let mut hosts = vec![json!({"name": "myhost"})];
+        let cluster = vec!["myhost".to_string()];
+        tag_local_membership(&mut hosts, &cluster, "myhost.example.com");
+        assert_eq!(hosts[0]["is_local"], json!(true));
+    }
+
+    #[test]
+    fn empty_hosts_is_noop() {
+        let mut hosts: Vec<Value> = vec![];
+        tag_local_membership(&mut hosts, &["a".to_string()], "a");
+        assert!(hosts.is_empty());
+    }
+}

@@ -344,3 +344,95 @@ pub(crate) fn strip_ansi_codes(s: &str) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- remote_vms_from_hosts --------------------------------------------
+
+    #[test]
+    fn empty_hosts_yields_empty_vms() {
+        let result = remote_vms_from_hosts(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn maps_host_with_name_and_resource_group() {
+        let hosts = vec![json!({"name": "worker-1", "resource_group": "my-rg"})];
+        let vms = remote_vms_from_hosts(&hosts);
+        assert_eq!(vms.len(), 1);
+        assert_eq!(vms[0]["vm_name"], "worker-1");
+        assert_eq!(vms[0]["resource_group"], "my-rg");
+        assert_eq!(vms[0]["status"], "unknown");
+    }
+
+    #[test]
+    fn skips_entry_without_name() {
+        let hosts = vec![json!({"resource_group": "rg"})];
+        let vms = remote_vms_from_hosts(&hosts);
+        assert!(vms.is_empty());
+    }
+
+    #[test]
+    fn uses_capitalized_name_field() {
+        let hosts = vec![json!({"Name": "Worker-2"})];
+        let vms = remote_vms_from_hosts(&hosts);
+        assert_eq!(vms.len(), 1);
+        assert_eq!(vms[0]["vm_name"], "Worker-2");
+    }
+
+    #[test]
+    fn missing_resource_group_defaults_to_empty() {
+        let hosts = vec![json!({"name": "vm1"})];
+        let vms = remote_vms_from_hosts(&hosts);
+        assert_eq!(vms[0]["resource_group"], "");
+    }
+
+    #[test]
+    fn maps_multiple_hosts() {
+        let hosts = vec![
+            json!({"name": "a", "resource_group": "rg1"}),
+            json!({"name": "b", "resource_group": "rg2"}),
+        ];
+        let vms = remote_vms_from_hosts(&hosts);
+        assert_eq!(vms.len(), 2);
+        assert_eq!(vms[0]["vm_name"], "a");
+        assert_eq!(vms[1]["vm_name"], "b");
+    }
+
+    // ---- strip_ansi_codes -------------------------------------------------
+
+    #[test]
+    fn strips_csi_color_codes() {
+        let input = "\x1b[31mred text\x1b[0m";
+        assert_eq!(strip_ansi_codes(input), "red text");
+    }
+
+    #[test]
+    fn strips_bold_and_reset() {
+        let input = "\x1b[1mbold\x1b[22m normal";
+        assert_eq!(strip_ansi_codes(input), "bold normal");
+    }
+
+    #[test]
+    fn strips_carriage_returns() {
+        assert_eq!(strip_ansi_codes("hello\r\nworld"), "hello\nworld");
+    }
+
+    #[test]
+    fn passes_through_plain_text() {
+        assert_eq!(strip_ansi_codes("plain text"), "plain text");
+    }
+
+    #[test]
+    fn handles_empty_string() {
+        assert_eq!(strip_ansi_codes(""), "");
+    }
+
+    #[test]
+    fn strips_osc_sequence() {
+        let input = "\x1b]0;title\x07visible";
+        assert_eq!(strip_ansi_codes(input), "visible");
+    }
+}
