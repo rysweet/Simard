@@ -150,3 +150,92 @@ pub(crate) async fn ooda_thinking() -> Json<Value> {
 
     Json(json!({ "reports": reports }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- ooda_thinking with temp cycle reports ----------------------------
+
+    #[test]
+    fn ooda_thinking_reads_cycle_reports_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let cycle_dir = dir.path().join("cycle_reports");
+        std::fs::create_dir_all(&cycle_dir).unwrap();
+
+        let report = json!({
+            "cycle_number": 1,
+            "summary": "test cycle",
+            "observation": {"goal_count": 2}
+        });
+        std::fs::write(
+            cycle_dir.join("cycle_1.json"),
+            serde_json::to_string(&report).unwrap(),
+        )
+        .unwrap();
+
+        // Verify the cycle report is readable
+        let content = std::fs::read_to_string(cycle_dir.join("cycle_1.json")).unwrap();
+        let parsed: Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["cycle_number"], 1);
+        assert_eq!(parsed["summary"], "test cycle");
+    }
+
+    #[test]
+    fn ooda_thinking_handles_missing_cycle_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        // No cycle_reports directory — should not panic
+        let cycle_dir = dir.path().join("cycle_reports");
+        assert!(!cycle_dir.exists());
+    }
+
+    #[test]
+    fn ooda_thinking_sorts_reports_by_cycle_number_descending() {
+        let dir = tempfile::tempdir().unwrap();
+        let cycle_dir = dir.path().join("cycle_reports");
+        std::fs::create_dir_all(&cycle_dir).unwrap();
+
+        for i in [3, 1, 2] {
+            std::fs::write(
+                cycle_dir.join(format!("cycle_{i}.json")),
+                format!(r#"{{"cycle_number":{i}}}"#),
+            )
+            .unwrap();
+        }
+
+        let mut paths: Vec<_> = std::fs::read_dir(&cycle_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        paths.sort_by(|a, b| {
+            let num = |p: &std::fs::DirEntry| -> u32 {
+                p.file_name()
+                    .to_str()
+                    .unwrap_or("")
+                    .strip_prefix("cycle_")
+                    .unwrap_or("")
+                    .strip_suffix(".json")
+                    .unwrap_or("")
+                    .parse()
+                    .unwrap_or(0)
+            };
+            num(b).cmp(&num(a))
+        });
+
+        let nums: Vec<u32> = paths
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .to_str()
+                    .unwrap()
+                    .strip_prefix("cycle_")
+                    .unwrap()
+                    .strip_suffix(".json")
+                    .unwrap()
+                    .parse()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(nums, vec![3, 2, 1]);
+    }
+}

@@ -58,9 +58,8 @@ fn helper_binary() -> PathBuf {
     if candidate.exists() {
         return candidate;
     }
-    // In coverage / CI the example may not be built (llvm-cov instrumentation
-    // flags invalidate the non-instrumented example build). Return the path
-    // anyway — callers skip the test when it is missing.
+    // In coverage / CI environments the example binary may not be built.
+    // Return the path anyway — callers skip the test when it is missing.
     candidate
 }
 

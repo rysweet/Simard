@@ -13,6 +13,17 @@ repos:
   - repo: local
     hooks:
       # ── pre-commit (fast: < 30s incremental) ─────────────────────────
+      - id: rust-only-gate
+        name: Rust-only gate — no new .py / .js / .ts outside allow-list
+        entry: scripts/check-rust-only-gate.sh --staged
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages:
+          - pre-commit
+          - pre-push
+          - manual
+
       - id: cargo-fmt
         name: cargo fmt --all -- --check
         entry: cargo fmt --all -- --check

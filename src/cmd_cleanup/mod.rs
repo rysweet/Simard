@@ -56,6 +56,11 @@ pub fn handle_cleanup() -> Result<(), Box<dyn std::error::Error>> {
     // 3b. LRU-rotate /tmp/simard-*-target dirs over the cap (P4 / #1244).
     cap_simard_target_dirs(&mut report, 10 * 1024 * 1024 * 1024);
 
+    // 3c. LRU-rotate ~/.cargo-targets/ dirs over the cap.
+    // Each engineer worktree gets ~8-16 GB; cap at 30 GB total to prevent
+    // filling the home partition (incident 2026-05-29: 131 GB, 0 avail).
+    cap_home_cargo_targets(&mut report, 30 * 1024 * 1024 * 1024);
+
     // 4. Kill orphaned cargo processes (running > 30 min with no parent simard)
     kill_orphaned_cargo_processes(&mut report);
 
@@ -148,9 +153,9 @@ mod disk;
 // re-exported for cfg(test) consumers in cmd_cleanup/tests.rs (false-positive of clippy unused_imports on lib pass — see #1405)
 #[allow(unused_imports)]
 pub(crate) use disk::{
-    BINARY_BACKUPS_KEEP, CORRUPT_DB_MAX_AGE_DAYS, SNAPSHOTS_KEEP, cap_simard_target_dirs,
-    clean_simard_canaries, clean_stale_cargo_targets, dir_size, remove_old_corrupt_dbs,
-    rotate_simard_binary_backups, trim_simard_snapshots,
+    BINARY_BACKUPS_KEEP, CORRUPT_DB_MAX_AGE_DAYS, SNAPSHOTS_KEEP, cap_home_cargo_targets,
+    cap_simard_target_dirs, clean_simard_canaries, clean_stale_cargo_targets, dir_size,
+    remove_old_corrupt_dbs, rotate_simard_binary_backups, trim_simard_snapshots,
 };
 
 #[cfg(test)]

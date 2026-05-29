@@ -31,6 +31,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Rust-only gate (no new .py / .js / .ts)
+        run: scripts/check-rust-only-gate.sh
+
       - name: Prepare Rust runner (free disk, swap, mold, rust)
         uses: ./.github/actions/rust-runner-prep
         with:

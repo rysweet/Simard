@@ -61,3 +61,102 @@ pub(crate) async fn subagent_sessions() -> Json<Value> {
         "recently_ended": ended,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- file_metrics -----------------------------------------------------
+
+    #[test]
+    fn file_metrics_returns_size_and_modified_for_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "hello world").unwrap();
+
+        let (size, modified) = file_metrics(&path);
+        assert_eq!(size, 11);
+        assert!(modified.is_some(), "modified timestamp should be present");
+    }
+
+    #[test]
+    fn file_metrics_returns_zero_for_nonexistent_file() {
+        let path = std::path::Path::new("/tmp/nonexistent_file_abc123xyz");
+        let (size, modified) = file_metrics(path);
+        assert_eq!(size, 0);
+        assert!(modified.is_none());
+    }
+
+    #[test]
+    fn file_metrics_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.txt");
+        std::fs::write(&path, "").unwrap();
+
+        let (size, modified) = file_metrics(&path);
+        assert_eq!(size, 0);
+        assert!(modified.is_some());
+    }
+
+    // ---- count_json_records -----------------------------------------------
+
+    #[test]
+    fn count_json_array_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.json");
+        std::fs::write(&path, r#"[{"a":1},{"b":2},{"c":3}]"#).unwrap();
+
+        assert_eq!(count_json_records(&path), 3);
+    }
+
+    #[test]
+    fn count_json_object_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.json");
+        std::fs::write(&path, r#"{"key1":"v","key2":"v"}"#).unwrap();
+
+        assert_eq!(count_json_records(&path), 2);
+    }
+
+    #[test]
+    fn count_returns_zero_for_scalar() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scalar.json");
+        std::fs::write(&path, r#""just a string""#).unwrap();
+
+        assert_eq!(count_json_records(&path), 0);
+    }
+
+    #[test]
+    fn count_returns_zero_for_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.json");
+        std::fs::write(&path, "not json at all").unwrap();
+
+        assert_eq!(count_json_records(&path), 0);
+    }
+
+    #[test]
+    fn count_returns_zero_for_nonexistent_file() {
+        let path = std::path::Path::new("/tmp/nonexistent_json_abc123xyz");
+        assert_eq!(count_json_records(path), 0);
+    }
+
+    #[test]
+    fn count_empty_array() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.json");
+        std::fs::write(&path, "[]").unwrap();
+
+        assert_eq!(count_json_records(&path), 0);
+    }
+
+    #[test]
+    fn count_empty_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty_obj.json");
+        std::fs::write(&path, "{}").unwrap();
+
+        assert_eq!(count_json_records(&path), 0);
+    }
+}
