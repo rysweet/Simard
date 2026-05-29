@@ -28,6 +28,16 @@ path = "src/bin/simard_engineer_step.rs"
 name = "simard-engineer-loop-recipe"
 path = "src/bin/simard_engineer_loop_recipe.rs"
 
+[[bin]]
+name = "simard-audit-pass01"
+path = "src/bin/simard_audit_pass01.rs"
+required-features = ["dashboard-audit"]
+
+[[bin]]
+name = "simard-audit-dashboard"
+path = "src/bin/simard_audit_dashboard.rs"
+required-features = ["dashboard-audit"]
+
 [dependencies]
 # TODO: enable `ladybug` feature once amplihack-memory-lib publishes ladybug-graph-rs to crates.io
 # amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", features = ["ladybug"] }
@@ -55,12 +65,16 @@ opentelemetry-otlp = "0.27"
 tracing-opentelemetry = "0.28"
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
 tempfile = "3"
+headless_chrome = { version = "1", optional = true, default-features = false }
+regex = { version = "1", optional = true }
+url = { version = "2", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [features]
 slow-tests = []
+dashboard-audit = ["dep:headless_chrome", "dep:regex", "dep:url"]
 
 [dev-dependencies]
 assert_cmd = "2"
