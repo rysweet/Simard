@@ -1,5 +1,5 @@
-//! Structured dashboard audit + REPORT.md generator — Rust replacement for
-//! `audit_dashboard.py` (issue #2156, parent #1990).
+//! Structured dashboard audit + REPORT.md generator — Rust replacement
+//! for `audit_dashboard.py` (issue #2156, parent #1990).
 //!
 //! Like `simard-audit-pass01` but additionally:
 //! - Captures per-page HTTP errors (status ≥ 400) and console errors.
