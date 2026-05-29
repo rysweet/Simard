@@ -1,4 +1,4 @@
-//! Dashboard audit pass 01 — Rust replacement for `audit_pass_01.py` (issue #2156).
+//! Dashboard audit pass-01 — Rust replacement for `audit_pass_01.py` (issue #2156).
 //!
 //! One-shot headless-Chrome audit:
 //! 1. Reads dashkey from `~/.simard/.dashkey` and authenticates via `/api/login`.
