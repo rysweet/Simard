@@ -245,6 +245,74 @@ pub fn rotate_simard_binary_backups(report: &mut CleanupReport) {
     }
 }
 
+/// LRU-rotate `~/.cargo-targets/` subdirectories when total size exceeds
+/// `cap_bytes`. Each engineer worktree gets a per-worktree subdirectory here
+/// (set by `DEFAULT_CARGO_TARGETS_HOME_SUBDIR` in `agent_supervisor/tmux.rs`).
+/// Without capping, these accumulate at ~8-16 GB each and can fill the home
+/// partition entirely (observed 2026-05-29: 131 GB across 15 worktrees, 0
+/// bytes available on /home).
+pub fn cap_home_cargo_targets(report: &mut CleanupReport, cap_bytes: u64) {
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let targets_root = PathBuf::from(home).join(".cargo-targets");
+    let Ok(entries) = std::fs::read_dir(&targets_root) else {
+        return;
+    };
+    let current_target = std::env::var("CARGO_TARGET_DIR").ok();
+    let mut candidates: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        // Never delete the active CARGO_TARGET_DIR.
+        if let Some(ref current) = current_target
+            && Path::new(current) == path
+        {
+            continue;
+        }
+        let size = dir_size(&path).unwrap_or(0);
+        let mtime = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        candidates.push((path, size, mtime));
+    }
+    let total: u64 = candidates.iter().map(|(_, s, _)| s).sum();
+    if total <= cap_bytes {
+        return;
+    }
+    eprintln!(
+        "  ~/.cargo-targets/ total {} MB exceeds cap {} MB — rotating LRU",
+        total / (1024 * 1024),
+        cap_bytes / (1024 * 1024)
+    );
+    // Sort oldest-first; remove until under 80% of cap.
+    candidates.sort_by_key(|(_, _, mtime)| *mtime);
+    let target_after = cap_bytes * 8 / 10;
+    let mut current_total = total;
+    for (path, size, _mtime) in candidates {
+        if current_total <= target_after {
+            break;
+        }
+        eprintln!(
+            "  Rotating LRU home target {} ({} MB)",
+            path.display(),
+            size / (1024 * 1024)
+        );
+        if let Err(e) = std::fs::remove_dir_all(&path) {
+            report
+                .errors
+                .push(format!("failed to rotate {}: {e}", path.display()));
+        } else {
+            report.bytes_freed += size;
+            current_total = current_total.saturating_sub(size);
+            report.dirs_removed.push(path);
+        }
+    }
+}
+
 /// Maximum age (in days) of corrupted memory DB files before deletion.
 pub const CORRUPT_DB_MAX_AGE_DAYS: u64 = 7;
 
