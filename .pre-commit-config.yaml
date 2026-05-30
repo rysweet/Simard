@@ -12,6 +12,20 @@ default_install_hook_types:
 repos:
   - repo: local
     hooks:
+      # ── Rust-only policy gate (issue #2155 / #2158) ───────────────────
+      # Runs before the Rust toolchain hooks so violations fail fast
+      # without waiting for cargo fmt / clippy. Only fires when .py, .js,
+      # or .ts files are staged (or when pre-commit runs --all-files in CI).
+      - id: rust-only-policy
+        name: Rust-only policy gate (no new .py/.js/.ts — see #2155)
+        entry: scripts/check-rust-only-policy.sh
+        language: script
+        files: '\.(py|js|ts)$'
+        pass_filenames: true
+        stages:
+          - pre-commit
+          - manual
+
       # ── pre-commit (fast: < 30s incremental) ─────────────────────────
       - id: cargo-fmt
         name: cargo fmt --all -- --check
