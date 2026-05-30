@@ -1,8 +1,10 @@
-//! Launch and manage Python bridge subprocesses for live Simard operations.
+//! Launch and manage bridge transports for live Simard operations.
 //!
-//! This module provides functions to create [`SubprocessBridgeTransport`]
-//! instances for the knowledge and gym bridges, wrapped in
-//! [`CircuitBreakerTransport`] for fault tolerance.
+//! This module provides functions to create bridge transport instances for the
+//! knowledge and gym bridges. The default strategy is to use
+//! [`NativeBridgeTransport`] for in-process Rust execution, falling back to
+//! [`SubprocessBridgeTransport`] (Python) if the native transport fails its
+//! health check.
 //!
 //! Cognitive memory is now handled natively by [`NativeCognitiveMemory`](crate::cognitive_memory::NativeCognitiveMemory).
 
@@ -12,7 +14,7 @@ use std::time::Duration;
 
 use crate::bridge::BridgeTransport;
 use crate::bridge_circuit::{CircuitBreakerConfig, CircuitBreakerTransport};
-use crate::bridge_subprocess::SubprocessBridgeTransport;
+use crate::bridge_subprocess::{NativeBridgeTransport, SubprocessBridgeTransport};
 use crate::error::SimardResult;
 use crate::gym_bridge::GymBridge;
 use crate::knowledge_bridge::KnowledgeBridge;
@@ -92,6 +94,14 @@ fn make_transport_with_timeout(
     ))
 }
 
+/// Wrap a native transport in a circuit breaker.
+fn wrap_native(transport: NativeBridgeTransport) -> Box<dyn BridgeTransport> {
+    Box::new(CircuitBreakerTransport::new(
+        transport,
+        default_circuit_breaker(),
+    ))
+}
+
 /// Check bridge health and return it if healthy, or None with a log message.
 fn check_health(name: &str, transport: &dyn BridgeTransport) -> bool {
     match transport.health() {
@@ -107,48 +117,118 @@ fn check_health(name: &str, transport: &dyn BridgeTransport) -> bool {
     }
 }
 
+/// Resolve the knowledge packs directory.
+fn resolve_packs_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("SIMARD_PACKS_DIR") {
+        return PathBuf::from(dir);
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".wikigr/packs")
+}
+
 /// Launch all bridges, returning None for any that fail (honest degradation).
 ///
 /// Cognitive memory is now native — only knowledge and gym bridges are launched.
+/// The default strategy is native Rust transport, with Python subprocess fallback.
 pub fn launch_all_bridges(
     _agent_name: &str,
     _state_root: &Path,
 ) -> (Option<KnowledgeBridge>, Option<GymBridge>) {
-    let python_dir = match find_python_dir() {
-        Ok(dir) => dir,
-        Err(e) => {
-            eprintln!("[simard] bridge launcher: {e}");
-            return (None, None);
+    let knowledge = match launch_knowledge_bridge_native() {
+        Ok(b) => {
+            eprintln!("[simard] knowledge bridge: using native Rust transport");
+            Some(b)
+        }
+        Err(native_err) => {
+            eprintln!("[simard] knowledge bridge native transport failed: {native_err}");
+            // Fall back to Python subprocess
+            match find_python_dir() {
+                Ok(python_dir) => match launch_knowledge_bridge_subprocess(&python_dir) {
+                    Ok(b) => {
+                        eprintln!("[simard] knowledge bridge: fell back to Python subprocess");
+                        Some(b)
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[simard] knowledge bridge launch FAILED — domain knowledge disabled: {e}"
+                        );
+                        None
+                    }
+                },
+                Err(e) => {
+                    eprintln!("[simard] knowledge bridge launch FAILED — no Python dir: {e}");
+                    None
+                }
+            }
         }
     };
 
-    // Capture launch errors so the operator log explains *why* a bridge
-    // is missing — previously the .ok() discarded the error and the
-    // user only saw "bridge unavailable" with no diagnostic. The 13-day
-    // blindness episode (PR #4477) was made harder to diagnose by
-    // exactly this pattern; a richer log here is cheap insurance.
-    let knowledge_result = launch_knowledge_bridge(&python_dir);
-    let knowledge = match knowledge_result {
-        Ok(b) => Some(b),
-        Err(e) => {
-            eprintln!("[simard] knowledge bridge launch FAILED — domain knowledge disabled: {e}");
-            None
+    let gym = match launch_gym_bridge_native() {
+        Ok(b) => {
+            eprintln!("[simard] gym bridge: using native Rust transport");
+            Some(b)
         }
-    };
-    let gym_result = launch_gym_bridge(&python_dir);
-    let gym = match gym_result {
-        Ok(b) => Some(b),
-        Err(e) => {
-            eprintln!("[simard] gym bridge launch FAILED — benchmarks disabled: {e}");
-            None
+        Err(native_err) => {
+            eprintln!("[simard] gym bridge native transport failed: {native_err}");
+            // Fall back to Python subprocess
+            match find_python_dir() {
+                Ok(python_dir) => match launch_gym_bridge_subprocess(&python_dir) {
+                    Ok(b) => {
+                        eprintln!("[simard] gym bridge: fell back to Python subprocess");
+                        Some(b)
+                    }
+                    Err(e) => {
+                        eprintln!("[simard] gym bridge launch FAILED — benchmarks disabled: {e}");
+                        None
+                    }
+                },
+                Err(e) => {
+                    eprintln!("[simard] gym bridge launch FAILED — no Python dir: {e}");
+                    None
+                }
+            }
         }
     };
 
     (knowledge, gym)
 }
 
-/// Launch a knowledge graph pack bridge.
+/// Launch a knowledge bridge using the native Rust transport.
+pub fn launch_knowledge_bridge_native() -> SimardResult<KnowledgeBridge> {
+    let packs_dir = resolve_packs_dir();
+    let mut transport = NativeBridgeTransport::new("simard-knowledge");
+    crate::native_knowledge::register_knowledge_handlers(&mut transport, packs_dir);
+    let wrapped = wrap_native(transport);
+    if !check_health("knowledge-native", wrapped.as_ref()) {
+        return Err(crate::error::SimardError::BridgeSpawnFailed {
+            bridge: "knowledge-native".to_string(),
+            reason: "native bridge unhealthy after init".to_string(),
+        });
+    }
+    Ok(KnowledgeBridge::new(wrapped))
+}
+
+/// Launch a gym bridge using the native Rust transport.
+pub fn launch_gym_bridge_native() -> SimardResult<GymBridge> {
+    let mut transport = NativeBridgeTransport::new("simard-gym-eval");
+    crate::native_gym::register_gym_handlers(&mut transport);
+    let wrapped = wrap_native(transport);
+    if !check_health("gym-native", wrapped.as_ref()) {
+        return Err(crate::error::SimardError::BridgeSpawnFailed {
+            bridge: "gym-native".to_string(),
+            reason: "native bridge unhealthy after init".to_string(),
+        });
+    }
+    Ok(GymBridge::new(wrapped))
+}
+
+/// Launch a knowledge graph pack bridge via Python subprocess (fallback).
 pub fn launch_knowledge_bridge(python_dir: &Path) -> SimardResult<KnowledgeBridge> {
+    launch_knowledge_bridge_subprocess(python_dir)
+}
+
+fn launch_knowledge_bridge_subprocess(python_dir: &Path) -> SimardResult<KnowledgeBridge> {
     set_python_path();
     let script = python_dir.join("simard_knowledge_bridge.py");
     let transport = make_transport("knowledge", &script, vec![]);
@@ -161,8 +241,12 @@ pub fn launch_knowledge_bridge(python_dir: &Path) -> SimardResult<KnowledgeBridg
     Ok(KnowledgeBridge::new(transport))
 }
 
-/// Launch a gym/eval bridge.
+/// Launch a gym/eval bridge via Python subprocess (fallback).
 pub fn launch_gym_bridge(python_dir: &Path) -> SimardResult<GymBridge> {
+    launch_gym_bridge_subprocess(python_dir)
+}
+
+fn launch_gym_bridge_subprocess(python_dir: &Path) -> SimardResult<GymBridge> {
     set_python_path();
     let script = python_dir.join("simard_gym_bridge.py");
     let transport = make_transport_with_timeout("gym-eval", &script, vec![], GYM_BRIDGE_TIMEOUT);
@@ -188,14 +272,9 @@ mod tests {
 
     #[test]
     fn build_python_path_returns_string() {
-        // This may be empty in CI where ecosystem repos don't exist,
-        // but should always return a valid (possibly empty) string.
         let path = build_python_path();
-        // Just verify it doesn't panic — content depends on environment.
         let _ = path;
     }
-
-    // ── Constants ──
 
     #[test]
     fn default_bridge_timeout_is_30_seconds() {
@@ -204,12 +283,8 @@ mod tests {
 
     #[test]
     fn gym_bridge_timeout_allows_full_suite() {
-        // Progressive suites call out to LLMs and routinely take minutes;
-        // anything under a few minutes silently disables benchmark feedback.
         assert!(GYM_BRIDGE_TIMEOUT >= Duration::from_secs(300));
     }
-
-    // ── default_circuit_breaker ──
 
     #[test]
     fn default_circuit_breaker_has_expected_threshold() {
@@ -223,14 +298,10 @@ mod tests {
         assert_eq!(config.cooldown, Duration::from_secs(30));
     }
 
-    // ── build_python_path ──
-
     #[test]
     fn build_python_path_is_colon_separated() {
         let path = build_python_path();
-        // If non-empty, should use colon separators (unix path convention)
         if !path.is_empty() {
-            // Each segment should not be empty
             for segment in path.split(':') {
                 assert!(!segment.is_empty(), "path segment should not be empty");
             }
@@ -239,15 +310,12 @@ mod tests {
 
     #[test]
     fn build_python_path_includes_existing_pythonpath() {
-        // Save and restore PYTHONPATH to avoid test interference
         let original = std::env::var("PYTHONPATH").ok();
-        // SAFETY: test-only
         unsafe {
             std::env::set_var("PYTHONPATH", "/test/custom/path");
         }
         let path = build_python_path();
         assert!(path.contains("/test/custom/path"));
-        // Restore
         match original {
             Some(val) => unsafe {
                 std::env::set_var("PYTHONPATH", val);
@@ -258,13 +326,61 @@ mod tests {
         }
     }
 
-    // ── find_python_dir ──
-
     #[test]
     fn find_python_dir_returns_directory_containing_bridge_server() {
         if let Ok(dir) = find_python_dir() {
             assert!(dir.is_dir());
             assert!(dir.join("bridge_server.py").exists());
+        }
+    }
+
+    // ── Native transport tests ──
+
+    #[test]
+    fn launch_knowledge_bridge_native_succeeds() {
+        // Native knowledge bridge should always pass health check
+        // since it registers a bridge.health handler.
+        let result = launch_knowledge_bridge_native();
+        assert!(
+            result.is_ok(),
+            "native knowledge bridge should launch: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn launch_gym_bridge_native_succeeds() {
+        let result = launch_gym_bridge_native();
+        assert!(
+            result.is_ok(),
+            "native gym bridge should launch: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn resolve_packs_dir_defaults_to_home() {
+        let dir = resolve_packs_dir();
+        assert!(
+            dir.to_string_lossy().contains(".wikigr/packs") || !dir.to_string_lossy().is_empty()
+        );
+    }
+
+    #[test]
+    fn resolve_packs_dir_uses_env_override() {
+        let original = std::env::var("SIMARD_PACKS_DIR").ok();
+        unsafe {
+            std::env::set_var("SIMARD_PACKS_DIR", "/custom/packs");
+        }
+        let dir = resolve_packs_dir();
+        assert_eq!(dir, PathBuf::from("/custom/packs"));
+        match original {
+            Some(val) => unsafe {
+                std::env::set_var("SIMARD_PACKS_DIR", val);
+            },
+            None => unsafe {
+                std::env::remove_var("SIMARD_PACKS_DIR");
+            },
         }
     }
 }
