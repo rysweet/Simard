@@ -151,7 +151,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
             const isCurrent=a.action==='current';
             return`<div style="display:flex;gap:.5rem;padding:.35rem 0;border-bottom:1px solid var(--border);font-size:.85rem">
               <span style="color:var(--accent);min-width:2.5rem;font-weight:600">#${a.cycle}</span>
-              <span style="min-width:5rem;color:${isCurrent?'var(--green)':'#8b949e'}">${esc(a.action)}</span>
+              <span style="min-width:5rem;color:${isCurrent?'var(--green)':'#8b949e'}">${humanizeActionKind(a.action)}</span>
               <span style="flex:1">${renderActionDetail(a.result)}</span>
               ${a.at?'<span style="color:#8b949e;font-size:.75rem">'+timeAgo(a.at)+'</span>':''}
             </div>`;
@@ -260,7 +260,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
                   const linkIcon=hasArtifact?'<span style="color:#2ea043;margin-right:4px" title="produced artifact">🔗</span>':'';
                   const assessBadge=(!hasArtifact&&isAssessmentOnly)?' <span class="badge-assessment" style="background:#fb8500;color:#fff;padding:1px 6px;border-radius:3px;font-size:11px;margin-left:6px">assessment only</span>':'';
                   return `<div class="outcome ${o.success?'success':'failure'}">
-                    ${o.success?'✅':'❌'} <code>${esc(o.action_kind)}</code> — ${esc(o.action_description)}${assessBadge}
+                    ${o.success?'✅':'❌'} <code>${humanizeActionKind(o.action_kind)}</code> — ${esc(o.action_description)}${assessBadge}
                     <div class="outcome-detail">${linkIcon}${esc(det.substring(0,300))}${det.length>300?'…':''}</div>
                     ${seBlock}
                   </div>`;
