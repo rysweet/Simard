@@ -387,6 +387,18 @@ pub fn run_ooda_daemon(
     );
     // -------------------------------------------------------------------
 
+    // --- periodic engineer worktree sweep state (issue #2167) -----------
+    let worktree_sweep_interval_secs: u64 = std::env::var("SIMARD_WORKTREE_SWEEP_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1800); // every 30 minutes by default
+    let mut last_worktree_sweep = Instant::now(); // startup sweep just ran
+    daemon_log(
+        &state_root,
+        &format!("[simard] OODA daemon: worktree sweep interval = {worktree_sweep_interval_secs}s"),
+    );
+    // -------------------------------------------------------------------
+
     let mut cycles_run = 0u32;
 
     loop {
@@ -527,6 +539,49 @@ pub fn run_ooda_daemon(
                 }
             }
             last_disk_health = Instant::now();
+        }
+        // -------------------------------------------------------------------
+
+        // ── RSS health check (issue #2167) ──────────────────────────────
+        if let Some(report) = crate::rss_health::check_rss_health() {
+            let rss_str = crate::rss_health::format_rss(report.rss_bytes);
+            if report.critical {
+                daemon_log(
+                    &state_root,
+                    &format!("[simard] CRITICAL: RSS = {rss_str} — exceeds hard threshold"),
+                );
+            } else if report.warn {
+                daemon_log(
+                    &state_root,
+                    &format!("[simard] WARN: RSS = {rss_str} — exceeds warn threshold"),
+                );
+            } else {
+                daemon_log(&state_root, &format!("[simard] RSS health: {rss_str}"));
+            }
+        }
+        // ── Periodic engineer worktree sweep (issue #2167) ──────────────
+        if last_worktree_sweep.elapsed() >= Duration::from_secs(worktree_sweep_interval_secs) {
+            if let Ok(parent_repo) = std::env::current_dir() {
+                match crate::engineer_worktree::sweep_orphaned_worktrees(&parent_repo, &state_root)
+                {
+                    Ok(report) => {
+                        if !report.removed_orphan_dirs.is_empty() {
+                            daemon_log(
+                                &state_root,
+                                &format!(
+                                    "[simard] periodic sweep: removed {} orphan engineer worktree(s)",
+                                    report.removed_orphan_dirs.len()
+                                ),
+                            );
+                        }
+                    }
+                    Err(e) => daemon_log(
+                        &state_root,
+                        &format!("[simard] periodic worktree sweep failed: {e}"),
+                    ),
+                }
+            }
+            last_worktree_sweep = Instant::now();
         }
         // -------------------------------------------------------------------
 
