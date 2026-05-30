@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 "use strict";
 
+// RUST-ONLY EXEMPTION (issue #2159, epic #2155)
+// Tests for the npx wrapper. Same exemption rationale as bin.js:
+// distribution glue, not runtime code.
+
 // Unit tests for bin.js npx wrapper.
 // Validates gh release download approach for private repos.
 // Run: node bin.test.js
