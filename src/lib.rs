@@ -86,6 +86,7 @@ pub mod remote_transfer;
 pub mod research_tracker;
 pub mod review;
 pub mod review_pipeline;
+pub mod rss_health;
 pub mod runtime;
 pub mod runtime_config;
 pub mod runtime_ipc;
