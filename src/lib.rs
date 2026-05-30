@@ -63,6 +63,8 @@ pub mod memory_hive;
 pub mod memory_ipc;
 pub mod memory_snapshot;
 pub mod metadata;
+pub mod native_gym;
+pub mod native_knowledge;
 pub mod ooda_actions;
 pub mod ooda_brain;
 pub mod ooda_loop;
