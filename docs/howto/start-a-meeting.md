@@ -1,7 +1,7 @@
 ---
 title: How to start a meeting with Simard
 description: Start a conversational meeting with Simard from the CLI or dashboard. Simard maintains conversation context, remembers past meetings, and persists outcomes on close.
-last_updated: 2026-05-07
+last_updated: 2026-05-30
 review_schedule: as-needed
 owner: simard
 doc_type: howto
@@ -10,6 +10,7 @@ related:
   - ../reference/simard-cli.md
   - ../reference/meeting-backend-api.md
   - ../reference/lightweight-chat-session.md
+  - ../reference/copilot-meeting-mode.md
   - ../architecture/unified-meeting-backend.md
   - ./carry-meeting-decisions-into-engineer-sessions.md
   - ./use-meeting-templates.md
@@ -216,19 +217,24 @@ next daemon start.
 ## 8. LLM provider and session backend
 
 Simard resolves the LLM provider at startup via `SIMARD_LLM_PROVIDER` (or the
-`AMPLIHACK_LLM_PROVIDER` alias). When the provider is `copilot`, the meeting REPL uses
-`LightweightChatSession` — a direct piped subprocess that bypasses PTY infrastructure:
+`AMPLIHACK_LLM_PROVIDER` alias). When the provider is `copilot`, the meeting session
+uses the `CopilotSdkAdapter` in **meeting mode** — a direct subprocess invocation of the
+`copilot` binary that bypasses the PTY infrastructure and amplihack custom instructions:
 
-- No ~50 s amplihack startup overhead per turn
-- No transcript-idle timeout (the process-tree idle guard in `PtyTerminalSession` does
-  not apply)
+- **No custom instructions** — `--no-custom-instructions` prevents the dev-orchestrator
+  and auto-intent-router from treating meeting prompts as engineering tasks
+- **No PTY overhead** — direct `std::process::Command` invocation, ~2 s startup vs ~50 s
+- **Conversation continuity** — `--session-id UUID` maintains copilot-side state across
+  turns without keeping a persistent process alive
+- **Clean output** — `--silent` flag gives plain text on stdout, no TUI chrome or ANSI
+  escape codes to strip
 - stderr captured and logged separately (never mixed into Simard's response)
-- 900 s per-turn timeout matches the gym bridge bound
 
 For other providers (RustyClawd, etc.) the standard `SessionBuilder` PTY path is used.
 
-See [LightweightChatSession API reference](../reference/lightweight-chat-session.md)
-for implementation details.
+See [Copilot meeting mode](../reference/copilot-meeting-mode.md) for the full
+technical reference, or [LightweightChatSession API reference](../reference/lightweight-chat-session.md)
+for the alternative `SessionBuilder`-based path.
 
 ## 9. Carry meeting outcomes into engineer sessions
 
@@ -245,13 +251,24 @@ If you see the prompt cursor blinking with no response after 2–3 minutes, chec
 1. **Provider configured?** Run `gh auth status` for Copilot or verify `ANTHROPIC_API_KEY`
    for Claude. An unconfigured provider causes `open_meeting_agent_session()` to log
    `[simard] meeting agent: LLM provider not configured` and exit before the REPL starts.
-2. **`amplihack` on PATH?** The lightweight session invokes `amplihack copilot
-   --subprocess-safe`. If the binary is not found, the turn returns an
-   `AdapterInvocationFailed` error immediately.
+2. **`copilot` on PATH?** Meeting mode invokes the `copilot` binary directly (not
+   `amplihack copilot`). Run `which copilot` to verify. If the binary is not found,
+   the turn returns an `AdapterInvocationFailed` error immediately.
 3. **Long compute in progress?** LLM calls can take up to 15 minutes. The 900 s
    timeout is intentionally generous. If Simard responds eventually, no action needed.
    If the process exits with "timed out after 900s", the LLM invocation is hung — check
    network connectivity and provider status.
+
+### Simard responds with OODA action plans instead of conversation
+
+If Simard responds with structured workflow output (e.g., "OBSERVE → ORIENT → DECIDE →
+ACT" plans, "launching dev-orchestrator", or "auto-routed DEV"), the meeting session is
+using the wrong execution path. This means the `--no-custom-instructions` flag is not
+being passed — likely because the session was created with a non-meeting `OperatingMode`.
+
+Verify the meeting is started via `simard meeting` (which sets `OperatingMode::Meeting`)
+rather than a generic agent session. Check `SIMARD_LLM_PROVIDER=copilot` is set.
+See [Copilot meeting mode](../reference/copilot-meeting-mode.md) for technical details.
 
 ### Simard doesn't remember what we discussed earlier in the meeting
 
@@ -272,7 +289,8 @@ It shouldn't. Both use the same `MeetingBackend`. If you notice differences, fil
 
 - [Unified meeting backend architecture](../architecture/unified-meeting-backend.md) — How the backend is structured.
 - [Meeting backend API reference](../reference/meeting-backend-api.md) — Rust API for `MeetingBackend`.
-- [LightweightChatSession API reference](../reference/lightweight-chat-session.md) — The direct-subprocess session used for Copilot provider meetings.
+- [Copilot meeting mode](../reference/copilot-meeting-mode.md) — How the copilot adapter handles meeting sessions without custom instructions.
+- [LightweightChatSession API reference](../reference/lightweight-chat-session.md) — Alternative session backend using SessionBuilder directly.
 - [Terminal session idle detection](../reference/terminal-session-idle-detection.md) — How the PTY session avoids premature SIGTERM during long LLM calls.
 - [Simard CLI reference](../reference/simard-cli.md) — Full command tree.
 - [OODA meeting handoff integration](../architecture/ooda-meeting-handoff-integration.md) — How meeting outcomes feed into the OODA loop.

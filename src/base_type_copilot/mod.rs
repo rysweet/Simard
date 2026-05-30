@@ -9,6 +9,7 @@
 
 use std::io::Write;
 use std::path::Path;
+use std::process::Command;
 
 use tempfile::NamedTempFile;
 
@@ -20,14 +21,21 @@ use crate::base_types::{
 };
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
+use crate::identity::OperatingMode;
 use crate::knowledge_bridge::KnowledgeBridge;
 use crate::metadata::{BackendDescriptor, Freshness};
 use crate::runtime::RuntimeTopology;
 use crate::sanitization::objective_metadata;
 use crate::terminal_session::execute_terminal_turn;
 
-/// Default command used to launch the copilot subprocess.
+/// Default command used to launch the copilot subprocess (non-meeting mode).
 const DEFAULT_COPILOT_COMMAND: &str = "amplihack copilot";
+
+/// Direct copilot binary used for meeting mode.
+/// Meeting sessions invoke `copilot` directly to avoid `amplihack copilot`
+/// injecting custom instructions (dev-orchestrator, auto-intent-router) that
+/// cause the copilot to treat conversational prompts as engineering tasks.
+const MEETING_COPILOT_BINARY: &str = "copilot";
 
 /// Configuration for the copilot adapter.
 #[derive(Clone, Debug)]
@@ -121,12 +129,14 @@ impl BaseTypeFactory for CopilotSdkAdapter {
             is_open: false,
             is_closed: false,
             turn_count: 0,
+            session_uuid: None,
         }))
     }
 }
 
 /// A live copilot session that enriches objectives with memory and knowledge
-/// before dispatching them through the terminal PTY.
+/// before dispatching them through the terminal PTY (non-meeting mode) or
+/// a direct `copilot` subprocess (meeting mode).
 struct CopilotSdkSession {
     descriptor: BaseTypeDescriptor,
     config: CopilotAdapterConfig,
@@ -136,6 +146,11 @@ struct CopilotSdkSession {
     is_open: bool,
     is_closed: bool,
     turn_count: u32,
+    /// Persistent session UUID for meeting mode.
+    /// Generated on `open()` and passed as `--session-id` to every per-turn
+    /// `copilot` invocation so that copilot maintains conversation context
+    /// across turns without needing a persistent interactive process.
+    session_uuid: Option<String>,
 }
 
 impl std::fmt::Debug for CopilotSdkSession {
@@ -145,11 +160,50 @@ impl std::fmt::Debug for CopilotSdkSession {
             .field("is_open", &self.is_open)
             .field("is_closed", &self.is_closed)
             .field("turn_count", &self.turn_count)
+            .field("session_uuid", &self.session_uuid)
             .finish()
     }
 }
 
 impl CopilotSdkSession {
+    /// Whether this session is in meeting mode.
+    fn is_meeting_mode(&self) -> bool {
+        self.request.mode == OperatingMode::Meeting
+    }
+
+    /// Test-only constructor for direct field inspection.
+    #[cfg(test)]
+    fn new_for_test(request: BaseTypeSessionRequest) -> Self {
+        let id = BaseTypeId::new("copilot-test");
+        Self {
+            descriptor: BaseTypeDescriptor {
+                id,
+                backend: BackendDescriptor::for_runtime_type::<CopilotSdkAdapter>(
+                    "copilot-sdk::pty-session",
+                    "registered-base-type:copilot-sdk",
+                    Freshness::now().expect("Freshness::now"),
+                ),
+                capabilities: capability_set([
+                    BaseTypeCapability::PromptAssets,
+                    BaseTypeCapability::SessionLifecycle,
+                    BaseTypeCapability::Memory,
+                    BaseTypeCapability::Evidence,
+                    BaseTypeCapability::Reflection,
+                    BaseTypeCapability::TerminalSession,
+                ]),
+                supported_topologies: [RuntimeTopology::SingleProcess].into_iter().collect(),
+            },
+            config: CopilotAdapterConfig::default(),
+            request,
+            memory_bridge: None,
+            knowledge_bridge: None,
+            is_open: false,
+            is_closed: false,
+            turn_count: 0,
+            session_uuid: None,
+        }
+    }
+
     /// Build an enriched terminal objective from the turn input.
     ///
     /// The enriched objective includes a shell/command preamble that the
@@ -190,26 +244,136 @@ impl CopilotSdkSession {
         let objective = build_copilot_terminal_objective(&self.config, prompt_file.path());
         Ok((objective, prompt_file))
     }
-}
 
-impl BaseTypeSession for CopilotSdkSession {
-    fn descriptor(&self) -> &BaseTypeDescriptor {
-        &self.descriptor
+    /// Build an enriched prompt for meeting mode (no PTY command wrapping).
+    ///
+    /// Similar to `build_enriched_objective` but writes only the formatted
+    /// prompt content to a temp file — without the shell `command:` / PTY
+    /// preamble — since meeting mode invokes `copilot` directly via
+    /// `std::process::Command`.
+    fn build_meeting_prompt(&self, input: &BaseTypeTurnInput) -> SimardResult<NamedTempFile> {
+        let mut parts = Vec::new();
+        if !input.prompt_preamble.is_empty() {
+            parts.push(input.prompt_preamble.as_str());
+        }
+        if !input.identity_context.is_empty() {
+            parts.push(input.identity_context.as_str());
+        }
+        parts.push(&input.objective);
+
+        let combined_objective = parts.join("\n\n");
+        let context = prepare_turn_context(
+            &combined_objective,
+            self.memory_bridge.as_deref(),
+            self.knowledge_bridge.as_ref(),
+        )?;
+        let formatted = format_turn_input(&context);
+        write_prompt_to_tempfile(&formatted)
     }
 
-    fn open(&mut self) -> SimardResult<()> {
-        ensure_session_not_closed(&self.descriptor, self.is_closed, "open")?;
-        ensure_session_not_already_open(&self.descriptor, self.is_open)?;
-        self.is_open = true;
-        Ok(())
+    /// Run a single meeting-mode turn by invoking `copilot` directly as a
+    /// subprocess with `--no-custom-instructions --silent --session-id`.
+    ///
+    /// This avoids the PTY/`script` wrapper and `amplihack copilot` custom
+    /// instruction injection that caused meeting prompts to be misinterpreted
+    /// as engineering tasks (issue #2170).
+    fn run_meeting_turn(&mut self, input: BaseTypeTurnInput) -> SimardResult<BaseTypeOutcome> {
+        let session_id = self
+            .session_uuid
+            .get_or_insert_with(|| uuid::Uuid::new_v4().to_string())
+            .clone();
+
+        let prompt_file = self.build_meeting_prompt(&input)?;
+        let prompt_path = prompt_file.path().to_string_lossy().to_string();
+
+        // Use shell to expand $(cat ...) for reading the prompt file.
+        let shell_cmd = format!(
+            "{} --no-custom-instructions --silent --allow-all-tools --session-id '{}' -p \"$(cat '{}')\"",
+            MEETING_COPILOT_BINARY, session_id, prompt_path
+        );
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(&shell_cmd)
+            .current_dir(self.config.working_directory.as_deref().unwrap_or("."))
+            .output()
+            .map_err(|err| SimardError::AdapterInvocationFailed {
+                base_type: self.descriptor.id.to_string(),
+                reason: format!("failed to spawn copilot meeting subprocess: {err}"),
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(SimardError::AdapterInvocationFailed {
+                base_type: self.descriptor.id.to_string(),
+                reason: format!(
+                    "copilot meeting subprocess exited with {}: {}",
+                    output.status,
+                    stderr.trim()
+                ),
+            });
+        }
+
+        let response_text = String::from_utf8_lossy(&output.stdout).to_string();
+        tracing::info!(
+            response_len = response_text.len(),
+            turn = self.turn_count,
+            session_uuid = %session_id,
+            "Copilot adapter (meeting mode): received response"
+        );
+
+        if response_text.trim().is_empty() {
+            return Err(SimardError::AdapterInvocationFailed {
+                base_type: self.descriptor.id.to_string(),
+                reason: "copilot meeting subprocess returned no output (auth failure, rate limit, \
+                     or empty response). Run `gh auth status` to verify credentials."
+                    .to_string(),
+            });
+        }
+
+        // Record cost estimate.
+        let prompt_chars = input.objective.len();
+        let completion_chars = response_text.len();
+        if let Err(e) = crate::cost_tracking::record_cost(
+            self.request.session_id.as_str(),
+            "copilot-meeting",
+            prompt_chars,
+            completion_chars,
+            &format!(
+                "copilot meeting turn {} on {}",
+                self.turn_count, self.request.topology
+            ),
+        ) {
+            eprintln!("[simard] cost tracking write failed: {e}");
+        }
+
+        let objective_summary = objective_metadata(&input.objective);
+        let evidence = vec![
+            format!("copilot-adapter-mode=meeting"),
+            format!("copilot-meeting-session-id={session_id}"),
+            format!("copilot-adapter-command={MEETING_COPILOT_BINARY}"),
+            format!("copilot-adapter-turn={}", self.turn_count),
+        ];
+
+        Ok(BaseTypeOutcome {
+            plan: format!(
+                "Copilot meeting adapter dispatched {} via '{}' on '{}' (turn {}, session {}).",
+                objective_summary,
+                MEETING_COPILOT_BINARY,
+                self.request.topology,
+                self.turn_count,
+                session_id,
+            ),
+            execution_summary: response_text,
+            evidence,
+        })
     }
 
-    fn run_turn(&mut self, input: BaseTypeTurnInput) -> SimardResult<BaseTypeOutcome> {
-        ensure_session_not_closed(&self.descriptor, self.is_closed, "run_turn")?;
-        ensure_session_open(&self.descriptor, self.is_open, "run_turn")?;
-
-        self.turn_count += 1;
-
+    /// Run a single PTY-based turn (non-meeting mode).
+    ///
+    /// This is the original `run_turn` path: builds an enriched objective
+    /// with shell/command preamble and dispatches through
+    /// `execute_terminal_turn`.
+    fn run_pty_turn(&mut self, input: BaseTypeTurnInput) -> SimardResult<BaseTypeOutcome> {
         let (enriched_objective, _prompt_file) = self.build_enriched_objective(&input)?;
         let enriched_input = BaseTypeTurnInput::objective_only(enriched_objective);
 
@@ -222,22 +386,13 @@ impl BaseTypeSession for CopilotSdkSession {
                 },
             )?;
 
-        // Extract the actual LLM response from the transcript.  The transcript
-        // contains the command we sent, the copilot's response text, and then
-        // our sentinel marker.  We extract everything between the command echo
-        // and the sentinel as the meaningful response.
         let response_text = extract_copilot_response_from_evidence(&terminal_outcome.evidence);
         tracing::info!(
             response_len = response_text.len(),
             turn = self.turn_count,
             "Copilot adapter: received response"
         );
-        // No fallback: an empty response after stripping noise/footer lines
-        // means the Copilot CLI exited without producing a reply (auth
-        // failure, rate limit, transcript truncated, etc.). Surface that as
-        // an error rather than handing the caller an empty string or — worse
-        // — leaking the billing-summary footer as if it were the assistant's
-        // reply (issue #1062).
+
         if response_text.trim().is_empty() {
             return Err(SimardError::AdapterInvocationFailed {
                 base_type: self.descriptor.id.to_string(),
@@ -282,10 +437,42 @@ impl BaseTypeSession for CopilotSdkSession {
             evidence,
         })
     }
+}
+
+impl BaseTypeSession for CopilotSdkSession {
+    fn descriptor(&self) -> &BaseTypeDescriptor {
+        &self.descriptor
+    }
+
+    fn open(&mut self) -> SimardResult<()> {
+        ensure_session_not_closed(&self.descriptor, self.is_closed, "open")?;
+        ensure_session_not_already_open(&self.descriptor, self.is_open)?;
+        if self.is_meeting_mode() {
+            let uuid = uuid::Uuid::new_v4().to_string();
+            tracing::info!(session_uuid = %uuid, "Copilot adapter: meeting mode session opened");
+            self.session_uuid = Some(uuid);
+        }
+        self.is_open = true;
+        Ok(())
+    }
+
+    fn run_turn(&mut self, input: BaseTypeTurnInput) -> SimardResult<BaseTypeOutcome> {
+        ensure_session_not_closed(&self.descriptor, self.is_closed, "run_turn")?;
+        ensure_session_open(&self.descriptor, self.is_open, "run_turn")?;
+
+        self.turn_count += 1;
+
+        if self.is_meeting_mode() {
+            self.run_meeting_turn(input)
+        } else {
+            self.run_pty_turn(input)
+        }
+    }
 
     fn close(&mut self) -> SimardResult<()> {
         ensure_session_not_closed(&self.descriptor, self.is_closed, "close")?;
         ensure_session_open(&self.descriptor, self.is_open, "close")?;
+        self.session_uuid = None;
         self.is_closed = true;
         Ok(())
     }

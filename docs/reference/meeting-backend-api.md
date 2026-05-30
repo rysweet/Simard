@@ -526,3 +526,16 @@ while let Some(msg) = ws_stream.next().await {
 | Topic max length | 128 characters | Filesystem safety |
 | Transcript file permissions | `0o600` | Privacy — meeting content is sensitive |
 | WebSocket max message size | 64 KB | Prevent abuse |
+
+## Agent session backend (copilot provider)
+
+When the agent passed to `new_session()` is a `CopilotSdkSession` with
+`OperatingMode::Meeting`, each `send_message()` → `run_turn()` call uses
+the **meeting mode** execution path: direct `copilot` subprocess with
+`--no-custom-instructions --silent --session-id UUID`. This prevents the
+amplihack custom instructions from treating meeting prompts as engineering
+tasks. The `MeetingBackend` itself is agnostic to the execution path —
+it calls `BaseTypeSession::run_turn()` and the adapter handles the dispatch.
+
+See [Copilot meeting mode](./copilot-meeting-mode.md) for the full
+technical reference.
