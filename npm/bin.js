@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 "use strict";
 
+// RUST-ONLY EXEMPTION (issue #2159, epic #2155)
+// This file is distribution glue, not runtime code. It executes only during
+// `npm install` to download and install the correct prebuilt Rust binary.
+// The npm ecosystem requires JavaScript for package install scripts.
+// Rewriting this would mean abandoning npm as a distribution channel.
+
 const { existsSync, mkdirSync, chmodSync } = require("fs");
 const { execFileSync, execSync } = require("child_process");
 const { join } = require("path");

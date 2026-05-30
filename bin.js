@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 "use strict";
 
+// RUST-ONLY EXEMPTION (issue #2159, epic #2155)
+// npx entry point — distribution glue that downloads and runs the Rust binary.
+// Same exemption rationale as npm/bin.js: not runtime code, required by the
+// npm/npx distribution channel.
+
 const { existsSync, mkdirSync, chmodSync, unlinkSync, readFileSync, writeFileSync } = require("fs");
 const { execFileSync } = require("child_process");
 const { join } = require("path");

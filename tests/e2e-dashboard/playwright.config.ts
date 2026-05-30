@@ -1,3 +1,10 @@
+// RUST-ONLY EXEMPTION (issue #2159, epic #2155)
+// Playwright e2e tests are test tooling, not production code. Playwright is
+// the industry-standard browser automation framework with no Rust equivalent
+// of comparable maturity. These tests validate the dashboard UI (a web app
+// that inherently requires JS). Rewriting browser automation in Rust would
+// sacrifice test quality for language purity.
+
 import { defineConfig, devices } from '@playwright/test';
 
 const PORT = Number(process.env.SIMARD_DASHBOARD_PORT ?? 18787);
