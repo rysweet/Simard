@@ -458,3 +458,441 @@ fn assert_metachar_rejected(command: &str, expected_char: char) {
         other => panic!("expected InvalidConfigValue for {command:?}, got {other:?}"),
     }
 }
+
+// ===========================================================================
+// Meeting-mode tests (TDD: these define contracts BEFORE implementation)
+// ===========================================================================
+//
+// These tests verify the behavioral changes introduced by issue #2170:
+//   - Meeting sessions invoke `copilot` directly (not `amplihack copilot`)
+//   - Meeting sessions use `--no-custom-instructions --silent --session-id`
+//   - Meeting sessions do NOT go through the PTY `execute_terminal_turn` path
+//   - Non-meeting sessions remain on the existing PTY path unchanged
+//   - A persistent session UUID is generated at `open()` for meeting mode
+//   - The session UUID is cleared at `close()`
+//
+// Tests that inspect internal state (session_uuid) use the CopilotSdkSession
+// struct directly (not the trait object) since the struct is crate-private
+// but accessible within the same crate's test module.
+
+use crate::base_types::{BaseTypeFactory, BaseTypeSessionRequest, BaseTypeTurnInput};
+use crate::identity::OperatingMode;
+use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeTopology};
+use crate::session::SessionId;
+
+/// Helper: create a `BaseTypeSessionRequest` with the given `OperatingMode`.
+fn make_request(mode: OperatingMode) -> BaseTypeSessionRequest {
+    BaseTypeSessionRequest {
+        session_id: SessionId::parse("session-00000000-0000-0000-0000-000000000001").unwrap(),
+        mode,
+        topology: RuntimeTopology::SingleProcess,
+        prompt_assets: vec![],
+        runtime_node: RuntimeNodeId::new("test-node"),
+        mailbox_address: RuntimeAddress::new("test://addr"),
+    }
+}
+
+/// Helper: check if the `copilot` binary is available on PATH.
+fn copilot_on_path() -> bool {
+    std::process::Command::new("copilot")
+        .arg("--help")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
+}
+
+// ---------------------------------------------------------------------------
+// Session creation with all OperatingModes (regression + meeting)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn session_creation_succeeds_for_meeting_mode() {
+    let adapter = CopilotSdkAdapter::registered("copilot-meeting-test").unwrap();
+    let session = adapter
+        .open_session(make_request(OperatingMode::Meeting))
+        .unwrap();
+    drop(session);
+}
+
+#[test]
+fn session_creation_succeeds_for_engineer_mode() {
+    let adapter = CopilotSdkAdapter::registered("copilot-eng-test").unwrap();
+    let session = adapter
+        .open_session(make_request(OperatingMode::Engineer))
+        .unwrap();
+    drop(session);
+}
+
+#[test]
+fn session_creation_succeeds_for_curator_mode() {
+    let adapter = CopilotSdkAdapter::registered("copilot-cur-test").unwrap();
+    let session = adapter
+        .open_session(make_request(OperatingMode::Curator))
+        .unwrap();
+    drop(session);
+}
+
+#[test]
+fn session_creation_succeeds_for_improvement_mode() {
+    let adapter = CopilotSdkAdapter::registered("copilot-imp-test").unwrap();
+    let session = adapter
+        .open_session(make_request(OperatingMode::Improvement))
+        .unwrap();
+    drop(session);
+}
+
+#[test]
+fn session_creation_succeeds_for_gym_mode() {
+    let adapter = CopilotSdkAdapter::registered("copilot-gym-test").unwrap();
+    let session = adapter
+        .open_session(make_request(OperatingMode::Gym))
+        .unwrap();
+    drop(session);
+}
+
+#[test]
+fn session_creation_succeeds_for_orchestrator_mode() {
+    let adapter = CopilotSdkAdapter::registered("copilot-orch-test").unwrap();
+    let session = adapter
+        .open_session(make_request(OperatingMode::Orchestrator))
+        .unwrap();
+    drop(session);
+}
+
+// ---------------------------------------------------------------------------
+// session_uuid lifecycle (uses CopilotSdkSession directly)
+// ---------------------------------------------------------------------------
+//
+// CopilotSdkSession is crate-private but accessible in this test module.
+// These tests construct it directly to inspect the session_uuid field.
+
+#[test]
+fn meeting_session_has_no_uuid_before_open() {
+    use super::CopilotSdkSession;
+    let session = CopilotSdkSession::new_for_test(make_request(OperatingMode::Meeting));
+    assert!(
+        session.session_uuid.is_none(),
+        "session_uuid should be None before open()"
+    );
+}
+
+#[test]
+fn meeting_session_generates_uuid_on_open() {
+    use super::CopilotSdkSession;
+    use crate::base_types::BaseTypeSession;
+    let mut session = CopilotSdkSession::new_for_test(make_request(OperatingMode::Meeting));
+    session.open().unwrap();
+    assert!(
+        session.session_uuid.is_some(),
+        "session_uuid should be Some after open() in meeting mode"
+    );
+}
+
+#[test]
+fn non_meeting_session_has_no_uuid_after_open() {
+    use super::CopilotSdkSession;
+    use crate::base_types::BaseTypeSession;
+    let mut session = CopilotSdkSession::new_for_test(make_request(OperatingMode::Engineer));
+    session.open().unwrap();
+    assert!(
+        session.session_uuid.is_none(),
+        "session_uuid should remain None for non-meeting mode"
+    );
+}
+
+#[test]
+fn meeting_session_uuid_cleared_on_close() {
+    use super::CopilotSdkSession;
+    use crate::base_types::BaseTypeSession;
+    let mut session = CopilotSdkSession::new_for_test(make_request(OperatingMode::Meeting));
+    session.open().unwrap();
+    assert!(session.session_uuid.is_some());
+    session.close().unwrap();
+    assert!(
+        session.session_uuid.is_none(),
+        "session_uuid should be None after close()"
+    );
+}
+
+#[test]
+fn meeting_session_uuid_is_valid_uuid_v4_format() {
+    use super::CopilotSdkSession;
+    use crate::base_types::BaseTypeSession;
+    let mut session = CopilotSdkSession::new_for_test(make_request(OperatingMode::Meeting));
+    session.open().unwrap();
+    let uuid_str = session.session_uuid.as_ref().expect("UUID must be set");
+    let parsed = uuid::Uuid::parse_str(uuid_str);
+    assert!(
+        parsed.is_ok(),
+        "session_uuid should be a valid UUID, got: {uuid_str}"
+    );
+    let uuid = parsed.unwrap();
+    assert_eq!(uuid.get_version_num(), 4, "session_uuid should be UUID v4");
+}
+
+#[test]
+fn meeting_session_uuid_stable_across_reads() {
+    use super::CopilotSdkSession;
+    use crate::base_types::BaseTypeSession;
+    let mut session = CopilotSdkSession::new_for_test(make_request(OperatingMode::Meeting));
+    session.open().unwrap();
+    let uuid1 = session.session_uuid.clone();
+    let uuid2 = session.session_uuid.clone();
+    assert_eq!(uuid1, uuid2, "session_uuid must be stable across reads");
+}
+
+#[test]
+fn is_meeting_mode_returns_true_for_meeting() {
+    use super::CopilotSdkSession;
+    let session = CopilotSdkSession::new_for_test(make_request(OperatingMode::Meeting));
+    assert!(
+        session.is_meeting_mode(),
+        "is_meeting_mode() should return true for Meeting"
+    );
+}
+
+#[test]
+fn is_meeting_mode_returns_false_for_engineer() {
+    use super::CopilotSdkSession;
+    let session = CopilotSdkSession::new_for_test(make_request(OperatingMode::Engineer));
+    assert!(
+        !session.is_meeting_mode(),
+        "is_meeting_mode() should return false for Engineer"
+    );
+}
+
+#[test]
+fn is_meeting_mode_returns_false_for_curator() {
+    use super::CopilotSdkSession;
+    let session = CopilotSdkSession::new_for_test(make_request(OperatingMode::Curator));
+    assert!(
+        !session.is_meeting_mode(),
+        "is_meeting_mode() should return false for Curator"
+    );
+}
+
+#[test]
+fn is_meeting_mode_returns_false_for_improvement() {
+    use super::CopilotSdkSession;
+    let session = CopilotSdkSession::new_for_test(make_request(OperatingMode::Improvement));
+    assert!(
+        !session.is_meeting_mode(),
+        "is_meeting_mode() should return false for Improvement"
+    );
+}
+
+#[test]
+fn is_meeting_mode_returns_false_for_gym() {
+    use super::CopilotSdkSession;
+    let session = CopilotSdkSession::new_for_test(make_request(OperatingMode::Gym));
+    assert!(
+        !session.is_meeting_mode(),
+        "is_meeting_mode() should return false for Gym"
+    );
+}
+
+#[test]
+fn is_meeting_mode_returns_false_for_orchestrator() {
+    use super::CopilotSdkSession;
+    let session = CopilotSdkSession::new_for_test(make_request(OperatingMode::Orchestrator));
+    assert!(
+        !session.is_meeting_mode(),
+        "is_meeting_mode() should return false for Orchestrator"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Meeting-mode turn dispatch (behavioral, via run_turn)
+// ---------------------------------------------------------------------------
+//
+// These tests require the `copilot` binary on PATH. They skip gracefully
+// if it isn't available (CI environments).
+
+/// Meeting-mode plan should mention "meeting", not "amplihack copilot".
+#[test]
+fn meeting_turn_plan_mentions_meeting_mode() {
+    if !copilot_on_path() {
+        eprintln!("SKIP: copilot binary not on PATH");
+        return;
+    }
+    let adapter = CopilotSdkAdapter::registered("copilot-meeting-turn").unwrap();
+    let mut session = adapter
+        .open_session(make_request(OperatingMode::Meeting))
+        .unwrap();
+    session.open().unwrap();
+    let input = BaseTypeTurnInput::objective_only("Hello from meeting test");
+    let outcome = session.run_turn(input).unwrap();
+    assert!(
+        outcome.plan.to_lowercase().contains("meeting"),
+        "meeting-mode plan should mention 'meeting', got: {}",
+        outcome.plan
+    );
+}
+
+/// Meeting-mode evidence should include copilot-meeting-session-id.
+#[test]
+fn meeting_turn_evidence_includes_session_id() {
+    if !copilot_on_path() {
+        eprintln!("SKIP: copilot binary not on PATH");
+        return;
+    }
+    let adapter = CopilotSdkAdapter::registered("copilot-meeting-evidence").unwrap();
+    let mut session = adapter
+        .open_session(make_request(OperatingMode::Meeting))
+        .unwrap();
+    session.open().unwrap();
+    let input = BaseTypeTurnInput::objective_only("Evidence test");
+    let outcome = session.run_turn(input).unwrap();
+    let has_session_id = outcome
+        .evidence
+        .iter()
+        .any(|e| e.starts_with("copilot-meeting-session-id="));
+    assert!(
+        has_session_id,
+        "evidence should include copilot-meeting-session-id, got: {:?}",
+        outcome.evidence
+    );
+}
+
+/// Meeting-mode evidence should NOT contain PTY artifacts.
+#[test]
+fn meeting_turn_evidence_has_no_pty_artifacts() {
+    if !copilot_on_path() {
+        eprintln!("SKIP: copilot binary not on PATH");
+        return;
+    }
+    let adapter = CopilotSdkAdapter::registered("copilot-meeting-no-pty").unwrap();
+    let mut session = adapter
+        .open_session(make_request(OperatingMode::Meeting))
+        .unwrap();
+    session.open().unwrap();
+    let input = BaseTypeTurnInput::objective_only("No PTY test");
+    let outcome = session.run_turn(input).unwrap();
+    let has_transcript = outcome
+        .evidence
+        .iter()
+        .any(|e| e.starts_with("terminal-transcript-full="));
+    assert!(
+        !has_transcript,
+        "meeting mode should NOT produce terminal-transcript-full evidence"
+    );
+    let has_script = outcome
+        .evidence
+        .iter()
+        .any(|e| e.contains("Script started"));
+    assert!(
+        !has_script,
+        "meeting mode should NOT produce 'Script started' evidence"
+    );
+}
+
+/// Meeting-mode evidence should show `copilot` (direct), not `amplihack copilot`.
+#[test]
+fn meeting_turn_evidence_shows_direct_copilot_command() {
+    if !copilot_on_path() {
+        eprintln!("SKIP: copilot binary not on PATH");
+        return;
+    }
+    let adapter = CopilotSdkAdapter::registered("copilot-meeting-cmd").unwrap();
+    let mut session = adapter
+        .open_session(make_request(OperatingMode::Meeting))
+        .unwrap();
+    session.open().unwrap();
+    let input = BaseTypeTurnInput::objective_only("Command check");
+    let outcome = session.run_turn(input).unwrap();
+    let cmd_evidence = outcome
+        .evidence
+        .iter()
+        .find(|e| e.starts_with("copilot-adapter-command="));
+    assert!(
+        cmd_evidence.is_some(),
+        "evidence should include copilot-adapter-command"
+    );
+    let cmd = cmd_evidence.unwrap();
+    assert!(
+        cmd.contains("copilot-adapter-command=copilot"),
+        "meeting mode should use 'copilot' directly, got: {cmd}"
+    );
+    assert!(
+        !cmd.contains("amplihack"),
+        "meeting mode should NOT use 'amplihack copilot', got: {cmd}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Error handling for meeting-mode subprocess
+// ---------------------------------------------------------------------------
+
+/// Missing copilot binary → `AdapterInvocationFailed`, not panic.
+#[test]
+fn meeting_turn_with_missing_binary_returns_adapter_error() {
+    if copilot_on_path() {
+        eprintln!("SKIP: copilot binary IS on PATH; can't test missing-binary error");
+        return;
+    }
+    let adapter = CopilotSdkAdapter::registered("copilot-meeting-missing").unwrap();
+    let mut session = adapter
+        .open_session(make_request(OperatingMode::Meeting))
+        .unwrap();
+    session.open().unwrap();
+    let input = BaseTypeTurnInput::objective_only("This should fail gracefully");
+    let result = session.run_turn(input);
+    assert!(
+        result.is_err(),
+        "missing copilot binary should produce an error"
+    );
+    match result.unwrap_err() {
+        SimardError::AdapterInvocationFailed { base_type, reason } => {
+            assert!(
+                reason.to_lowercase().contains("copilot")
+                    || reason.to_lowercase().contains("failed"),
+                "error reason should mention copilot failure, got: {reason}"
+            );
+            assert!(!base_type.is_empty());
+        }
+        other => panic!("expected AdapterInvocationFailed, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// build_copilot_terminal_objective regression (PTY path unchanged)
+// ---------------------------------------------------------------------------
+
+/// PTY objective format must remain unchanged (regression).
+#[test]
+fn build_copilot_terminal_objective_format_unchanged() {
+    use super::build_copilot_terminal_objective;
+    let config = CopilotAdapterConfig::default();
+    let prompt_file = tempfile::NamedTempFile::with_prefix("test-prompt-").unwrap();
+    let objective = build_copilot_terminal_objective(&config, prompt_file.path());
+    assert!(objective.contains("amplihack copilot"), "got: {objective}");
+    assert!(objective.contains("--subprocess-safe"), "got: {objective}");
+    assert!(objective.contains("--allow-all-tools"), "got: {objective}");
+    assert!(objective.contains("cat"), "got: {objective}");
+    assert!(objective.contains("exit"), "got: {objective}");
+    assert!(
+        !objective.contains("--no-custom-instructions"),
+        "PTY path must not have meeting flags"
+    );
+    assert!(
+        !objective.contains("--session-id"),
+        "PTY path must not have meeting flags"
+    );
+}
+
+/// PTY objective with working directory prepends it.
+#[test]
+fn build_copilot_terminal_objective_with_working_dir() {
+    use super::build_copilot_terminal_objective;
+    let config = CopilotAdapterConfig {
+        command: "amplihack copilot".to_string(),
+        working_directory: Some("/home/user/repo".to_string()),
+    };
+    let prompt_file = tempfile::NamedTempFile::with_prefix("test-wd-").unwrap();
+    let objective = build_copilot_terminal_objective(&config, prompt_file.path());
+    assert!(
+        objective.contains("working-directory: /home/user/repo"),
+        "got: {objective}"
+    );
+}

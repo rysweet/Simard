@@ -16,7 +16,10 @@ related:
 `LightweightChatSession` is a `BaseTypeSession` implementation that delegates
 each meeting conversation turn to the configured LLM provider via
 `SessionBuilder`. It is used automatically when
-`simard meeting` is invoked, regardless of provider.
+`simard meeting` is invoked for non-copilot providers (RustyClawd, etc.).
+When `SIMARD_LLM_PROVIDER=copilot`, the meeting session uses the
+[copilot meeting-mode path](./copilot-meeting-mode.md) instead, which
+invokes the `copilot` binary directly via `std::process::Command`.
 
 **Location:** `src/meeting_backend/lightweight.rs`
 
@@ -124,5 +127,8 @@ The dashboard chat widget (`src/operator_commands_dashboard/chat.rs`) also uses
 
 - [Meeting backend API reference](./meeting-backend-api.md) — `MeetingBackend` struct and
   higher-level meeting types.
+- [Copilot meeting mode](./copilot-meeting-mode.md) — The `CopilotSdkAdapter` meeting-mode
+  path that invokes `copilot` directly with `--no-custom-instructions`. This is the
+  primary meeting backend when `SIMARD_LLM_PROVIDER=copilot`.
 - [Base type adapters](./base-type-adapters.md) — Full `BaseTypeSession` trait contract.
 - [How to start a meeting](../howto/start-a-meeting.md) — Operator-facing meeting guide.

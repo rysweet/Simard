@@ -131,6 +131,14 @@ Drives `amplihack copilot` through the PTY infrastructure with memory and knowle
 
 **Security:** The command field is validated to reject shell metacharacters (`;`, `|`, `&`, `` ` ``, `$`) for defense-in-depth.
 
+**Meeting mode:** When the session request has `mode == OperatingMode::Meeting`,
+the adapter bypasses the PTY path entirely. Instead, it invokes the `copilot`
+binary directly via `std::process::Command` with `--no-custom-instructions
+--silent --allow-all-tools --session-id UUID`. This prevents the amplihack
+custom instructions (dev-orchestrator, auto-intent-router) from treating
+meeting prompts as engineering tasks. See
+[Copilot meeting mode](./copilot-meeting-mode.md) for details.
+
 ## Turn Context Enrichment
 
 The `base_type_turn` module provides shared turn preparation for adapters that need memory and knowledge enrichment:
