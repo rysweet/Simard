@@ -71,6 +71,7 @@ serial_test = "3.4.0"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+incremental = false
 
 # Dev/test profiles: minimal debuginfo philosophy.
 #
