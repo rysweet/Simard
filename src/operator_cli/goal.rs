@@ -209,6 +209,11 @@ fn handle_remove(ids: &[String]) -> Result<(), Box<dyn Error>> {
     }
     let board = load_board()?;
     save_board_with_removals(&board, ids)?;
+    // Record tombstones so meeting handoffs don't re-ingest these goals.
+    let state_root = crate::state_root::simard_state_root();
+    if let Err(e) = crate::ooda_loop::tombstone_goals(&state_root, ids) {
+        eprintln!("[simard] warning: failed to record tombstones: {e}");
+    }
     eprintln!(
         "[simard] goal remove: requested removal of {} id(s): {}",
         ids.len(),

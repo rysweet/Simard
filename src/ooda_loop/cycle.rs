@@ -103,7 +103,11 @@ fn run_ooda_cycle_inner(
 
     // Ingest meeting handoff decisions as new goals.
     let handoff_dir = crate::meeting_facilitator::default_handoff_dir();
-    match check_meeting_handoffs(&mut state.active_goals, &handoff_dir) {
+    match check_meeting_handoffs(
+        &mut state.active_goals,
+        &handoff_dir,
+        &crate::goal_curation::simard_state_root(),
+    ) {
         Ok(n) if n > 0 => {
             eprintln!(
                 "[simard] OODA start: ingested {n} goal/backlog item(s) from meeting handoff"
