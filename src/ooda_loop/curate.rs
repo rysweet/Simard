@@ -1,7 +1,48 @@
 //! Post-cycle curation: promote backlog items and ingest meeting handoffs.
 
+use std::collections::HashSet;
+use std::path::Path;
+
 use crate::error::SimardResult;
 use crate::goal_curation::{ActiveGoal, BacklogItem, GoalBoard, GoalProgress};
+
+/// Path to the goal tombstone file relative to state root.
+const TOMBSTONE_FILENAME: &str = "goal_tombstones.json";
+
+/// Load the set of tombstoned goal IDs from disk.
+/// Returns an empty set if the file doesn't exist or can't be parsed.
+pub fn load_tombstones(state_root: &Path) -> HashSet<String> {
+    let path = state_root.join(TOMBSTONE_FILENAME);
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
+        Err(_) => HashSet::new(),
+    }
+}
+
+/// Save the tombstone set to disk.
+pub fn save_tombstones(state_root: &Path, tombstones: &HashSet<String>) -> SimardResult<()> {
+    let path = state_root.join(TOMBSTONE_FILENAME);
+    let json = serde_json::to_string_pretty(tombstones).map_err(|e| {
+        crate::error::SimardError::ArtifactIo {
+            path: path.clone(),
+            reason: format!("serializing tombstones: {e}"),
+        }
+    })?;
+    std::fs::write(&path, &json).map_err(|e| crate::error::SimardError::ArtifactIo {
+        path: path.clone(),
+        reason: format!("writing tombstones: {e}"),
+    })?;
+    Ok(())
+}
+
+/// Record goal IDs as tombstoned so they won't be re-ingested from meeting handoffs.
+pub fn tombstone_goals(state_root: &Path, ids: &[String]) -> SimardResult<()> {
+    let mut tombstones = load_tombstones(state_root);
+    for id in ids {
+        tombstones.insert(id.clone());
+    }
+    save_tombstones(state_root, &tombstones)
+}
 
 /// Promote the highest-scoring backlog items into free active slots.
 ///
@@ -44,8 +85,11 @@ pub fn promote_from_backlog(board: &mut GoalBoard) {
 pub fn check_meeting_handoffs(
     board: &mut GoalBoard,
     handoff_dir: &std::path::Path,
+    state_root: &Path,
 ) -> SimardResult<u32> {
     use crate::meeting_facilitator::find_oldest_unprocessed_handoff;
+
+    let tombstones = load_tombstones(state_root);
 
     let path = match find_oldest_unprocessed_handoff(handoff_dir)? {
         Some(p) => p,
@@ -103,9 +147,10 @@ pub fn check_meeting_handoffs(
         let goal_id = crate::goals::goal_slug(&decision.description);
         let description = format!("[meeting] {}", decision.description);
 
-        // Deduplicate against existing active goals and backlog.
+        // Deduplicate against existing active goals, backlog, and tombstones.
         if board.active.iter().any(|g| g.id == goal_id)
             || board.backlog.iter().any(|b| b.id == goal_id)
+            || tombstones.contains(&goal_id)
         {
             continue;
         }
@@ -151,6 +196,7 @@ pub fn check_meeting_handoffs(
         let item_id = crate::goals::goal_slug(&item.description);
         if board.backlog.iter().any(|b| b.id == item_id)
             || board.active.iter().any(|g| g.id == item_id)
+            || tombstones.contains(&item_id)
         {
             continue;
         }
@@ -283,7 +329,7 @@ mod tests {
         write_meeting_handoff(dir.path(), &handoff).expect("write test handoff");
 
         let mut board = GoalBoard::new();
-        let count = check_meeting_handoffs(&mut board, dir.path())
+        let count = check_meeting_handoffs(&mut board, dir.path(), dir.path())
             .expect("check_meeting_handoffs should succeed");
 
         assert_eq!(count, 2);
@@ -310,7 +356,7 @@ mod tests {
         write_meeting_handoff(dir.path(), &handoff).expect("write test handoff");
 
         let mut board = GoalBoard::new();
-        check_meeting_handoffs(&mut board, dir.path())
+        check_meeting_handoffs(&mut board, dir.path(), dir.path())
             .expect("check_meeting_handoffs should succeed");
 
         assert_eq!(board.active[0].priority, 1);
@@ -325,7 +371,7 @@ mod tests {
         write_meeting_handoff(dir.path(), &handoff).expect("write test handoff");
 
         let mut board = GoalBoard::new();
-        check_meeting_handoffs(&mut board, dir.path())
+        check_meeting_handoffs(&mut board, dir.path(), dir.path())
             .expect("check_meeting_handoffs should succeed");
 
         let reloaded = load_meeting_handoff(dir.path())
@@ -342,7 +388,7 @@ mod tests {
         write_meeting_handoff(dir.path(), &handoff).expect("write test handoff");
 
         let mut board = GoalBoard::new();
-        let count = check_meeting_handoffs(&mut board, dir.path())
+        let count = check_meeting_handoffs(&mut board, dir.path(), dir.path())
             .expect("check_meeting_handoffs should succeed");
 
         assert_eq!(count, 0);
@@ -353,7 +399,7 @@ mod tests {
     fn check_meeting_handoffs_no_file_returns_zero() {
         let dir = TempDir::new().expect("create temp dir");
         let mut board = GoalBoard::new();
-        let count = check_meeting_handoffs(&mut board, dir.path())
+        let count = check_meeting_handoffs(&mut board, dir.path(), dir.path())
             .expect("check_meeting_handoffs should succeed");
         assert_eq!(count, 0);
     }
@@ -368,7 +414,7 @@ mod tests {
         write_meeting_handoff(dir.path(), &sample_handoff(decisions)).expect("write test handoff");
 
         let mut board = GoalBoard::new();
-        let count = check_meeting_handoffs(&mut board, dir.path())
+        let count = check_meeting_handoffs(&mut board, dir.path(), dir.path())
             .expect("check_meeting_handoffs should succeed");
 
         assert_eq!(count, 7);
@@ -388,7 +434,7 @@ mod tests {
         write_meeting_handoff(dir.path(), &handoff).expect("write test handoff");
 
         let mut board = GoalBoard::new();
-        check_meeting_handoffs(&mut board, dir.path())
+        check_meeting_handoffs(&mut board, dir.path(), dir.path())
             .expect("check_meeting_handoffs should succeed");
 
         assert_eq!(board.active.len(), 1);
@@ -408,7 +454,7 @@ mod tests {
         write_meeting_handoff(dir.path(), &handoff).expect("write test handoff");
 
         let mut board = GoalBoard::new();
-        let count = check_meeting_handoffs(&mut board, dir.path())
+        let count = check_meeting_handoffs(&mut board, dir.path(), dir.path())
             .expect("check_meeting_handoffs should succeed");
 
         assert_eq!(count, 3); // 1 decision + 2 qualifying action items
@@ -534,7 +580,7 @@ mod tests {
         let mut board = GoalBoard::new();
 
         // First cycle: must process A (older, content-rich) — NOT B.
-        let count = check_meeting_handoffs(&mut board, dir.path())
+        let count = check_meeting_handoffs(&mut board, dir.path(), dir.path())
             .expect("check_meeting_handoffs cycle 1 should succeed");
         assert_eq!(count, 1, "first cycle should ingest A's single decision");
         assert_eq!(board.active.len(), 1);
@@ -560,7 +606,7 @@ mod tests {
         // Second cycle: B is now the oldest unprocessed → gets processed
         // (with zero items, since it's empty). Demonstrates B is no longer
         // permanently shadowing A.
-        let count2 = check_meeting_handoffs(&mut board, dir.path())
+        let count2 = check_meeting_handoffs(&mut board, dir.path(), dir.path())
             .expect("check_meeting_handoffs cycle 2 should succeed");
         assert_eq!(
             count2, 0,
@@ -574,7 +620,7 @@ mod tests {
         );
 
         // Third cycle: nothing left to process.
-        let count3 = check_meeting_handoffs(&mut board, dir.path())
+        let count3 = check_meeting_handoffs(&mut board, dir.path(), dir.path())
             .expect("check_meeting_handoffs cycle 3 should succeed");
         assert_eq!(count3, 0, "no unprocessed handoffs remain");
     }
