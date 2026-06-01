@@ -13,13 +13,30 @@ use super::types::{MemoryRecord, MemoryScope};
 pub struct InMemoryMemoryStore {
     records: Mutex<Vec<MemoryRecord>>,
     descriptor: BackendDescriptor,
+    /// Maximum number of records before oldest entries are evicted.
+    /// `0` means unlimited (legacy behavior).
+    max_capacity: usize,
 }
+
+/// Default max capacity for the in-memory store (issue #2167).
+/// Configurable via `SIMARD_MEMORY_STORE_MAX_CAPACITY` env var.
+const DEFAULT_MAX_CAPACITY: usize = 10_000;
 
 impl InMemoryMemoryStore {
     pub fn new(descriptor: BackendDescriptor) -> Self {
         Self {
             records: Mutex::new(Vec::new()),
             descriptor,
+            max_capacity: Self::capacity_from_env(),
+        }
+    }
+
+    /// Create a store with an explicit capacity limit.
+    pub fn with_max_capacity(descriptor: BackendDescriptor, max_capacity: usize) -> Self {
+        Self {
+            records: Mutex::new(Vec::new()),
+            descriptor,
+            max_capacity,
         }
     }
 
@@ -29,6 +46,22 @@ impl InMemoryMemoryStore {
             "runtime-port:memory-store",
             Freshness::now()?,
         )))
+    }
+
+    fn capacity_from_env() -> usize {
+        std::env::var("SIMARD_MEMORY_STORE_MAX_CAPACITY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_MAX_CAPACITY)
+    }
+
+    /// Evict the oldest records when the store exceeds `max_capacity`.
+    /// Called after each `put`. No-op when `max_capacity == 0`.
+    fn enforce_capacity(records: &mut Vec<MemoryRecord>, max_capacity: usize) {
+        if max_capacity > 0 && records.len() > max_capacity {
+            let excess = records.len() - max_capacity;
+            records.drain(..excess);
+        }
     }
 }
 
@@ -42,12 +75,14 @@ impl MemoryStore for InMemoryMemoryStore {
         if record.created_at.is_none() {
             record.created_at = Some(Utc::now());
         }
-        self.records
+        let mut records = self
+            .records
             .lock()
             .map_err(|_| SimardError::StoragePoisoned {
                 store: "memory".to_string(),
-            })?
-            .push(record);
+            })?;
+        records.push(record);
+        Self::enforce_capacity(&mut records, self.max_capacity);
         Ok(())
     }
 
@@ -234,5 +269,63 @@ mod tests {
         assert!(store.list_for_session(&sid).unwrap().is_empty());
         assert_eq!(store.count_for_session(&sid).unwrap(), 0);
         assert!(store.list_all().unwrap().is_empty());
+    }
+
+    // --- max capacity eviction (issue #2167) ---
+
+    #[test]
+    fn put_evicts_oldest_when_capacity_exceeded() {
+        let descriptor = BackendDescriptor::for_runtime_type::<InMemoryMemoryStore>(
+            "memory::in-memory",
+            "runtime-port:memory-store",
+            Freshness::now().unwrap(),
+        );
+        let store = InMemoryMemoryStore::with_max_capacity(descriptor, 3);
+        let sid = test_session_id();
+        for i in 0..5 {
+            store
+                .put(make_record(&format!("k{i}"), MemoryScope::Project, &sid))
+                .unwrap();
+        }
+        let all = store.list_all().unwrap();
+        assert_eq!(all.len(), 3, "store should cap at max_capacity");
+        // Oldest two (k0, k1) should have been evicted
+        assert_eq!(all[0].key, "k2");
+        assert_eq!(all[1].key, "k3");
+        assert_eq!(all[2].key, "k4");
+    }
+
+    #[test]
+    fn put_no_eviction_when_under_capacity() {
+        let descriptor = BackendDescriptor::for_runtime_type::<InMemoryMemoryStore>(
+            "memory::in-memory",
+            "runtime-port:memory-store",
+            Freshness::now().unwrap(),
+        );
+        let store = InMemoryMemoryStore::with_max_capacity(descriptor, 10);
+        let sid = test_session_id();
+        for i in 0..5 {
+            store
+                .put(make_record(&format!("k{i}"), MemoryScope::Project, &sid))
+                .unwrap();
+        }
+        assert_eq!(store.list_all().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn zero_capacity_means_unlimited() {
+        let descriptor = BackendDescriptor::for_runtime_type::<InMemoryMemoryStore>(
+            "memory::in-memory",
+            "runtime-port:memory-store",
+            Freshness::now().unwrap(),
+        );
+        let store = InMemoryMemoryStore::with_max_capacity(descriptor, 0);
+        let sid = test_session_id();
+        for i in 0..100 {
+            store
+                .put(make_record(&format!("k{i}"), MemoryScope::Project, &sid))
+                .unwrap();
+        }
+        assert_eq!(store.list_all().unwrap().len(), 100);
     }
 }

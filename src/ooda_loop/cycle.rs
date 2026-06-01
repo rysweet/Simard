@@ -447,6 +447,14 @@ fn run_ooda_cycle_inner(
     }
 
     state.cycle_count += 1;
+
+    // --- Post-cycle cleanup (issue #2167) ---
+    // Prune goal_failure_counts entries for goals no longer on the board.
+    state.prune_stale_failure_counts();
+    // Release prepared_context so the allocation doesn't persist until the
+    // next cycle replaces it.
+    state.prepared_context = None;
+
     let brain_judgments = crate::ooda_brain::take_brain_judgments();
     Ok(CycleReport {
         cycle_number: state.cycle_count,

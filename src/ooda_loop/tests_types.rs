@@ -263,3 +263,63 @@ fn action_outcome_construction() {
     assert!(outcome.success);
     assert_eq!(outcome.detail, "session launched");
 }
+
+// --- prune_stale_failure_counts (issue #2167) ---
+
+#[test]
+fn prune_stale_failure_counts_removes_absent_goals() {
+    let mut board = GoalBoard::new();
+    board.active.push(ActiveGoal {
+        id: "goal-keep".to_string(),
+        description: "Active goal".to_string(),
+        priority: 1,
+        status: GoalProgress::NotStarted,
+        assigned_to: None,
+        current_activity: None,
+        wip_refs: vec![],
+        last_progress_update_at: None,
+    });
+    let mut state = OodaState::new(board);
+    state.goal_failure_counts.insert("goal-keep".to_string(), 3);
+    state
+        .goal_failure_counts
+        .insert("goal-removed".to_string(), 5);
+    state
+        .goal_failure_counts
+        .insert("goal-also-gone".to_string(), 1);
+
+    state.prune_stale_failure_counts();
+
+    assert_eq!(state.goal_failure_counts.len(), 1);
+    assert_eq!(state.goal_failure_counts.get("goal-keep"), Some(&3));
+    assert!(!state.goal_failure_counts.contains_key("goal-removed"));
+    assert!(!state.goal_failure_counts.contains_key("goal-also-gone"));
+}
+
+#[test]
+fn prune_stale_failure_counts_noop_when_all_present() {
+    let mut board = GoalBoard::new();
+    board.active.push(ActiveGoal {
+        id: "g1".to_string(),
+        description: "g1".to_string(),
+        priority: 1,
+        status: GoalProgress::NotStarted,
+        assigned_to: None,
+        current_activity: None,
+        wip_refs: vec![],
+        last_progress_update_at: None,
+    });
+    let mut state = OodaState::new(board);
+    state.goal_failure_counts.insert("g1".to_string(), 2);
+    state.prune_stale_failure_counts();
+    assert_eq!(state.goal_failure_counts.len(), 1);
+}
+
+#[test]
+fn prune_stale_failure_counts_empty_board_clears_all() {
+    let mut state = OodaState::new(GoalBoard::new());
+    state.goal_failure_counts.insert("orphan-a".to_string(), 10);
+    state.goal_failure_counts.insert("orphan-b".to_string(), 20);
+    state.prune_stale_failure_counts();
+    assert!(state.goal_failure_counts.is_empty());
+}

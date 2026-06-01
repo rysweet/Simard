@@ -81,6 +81,20 @@ impl OodaState {
             engineer_worktrees: HashMap::new(),
         }
     }
+
+    /// Remove `goal_failure_counts` entries for goal IDs that are no longer
+    /// present on the active board. Prevents unbounded growth when goals are
+    /// archived or removed over many cycles (issue #2167).
+    pub fn prune_stale_failure_counts(&mut self) {
+        let active_ids: std::collections::HashSet<&str> = self
+            .active_goals
+            .active
+            .iter()
+            .map(|g| g.id.as_str())
+            .collect();
+        self.goal_failure_counts
+            .retain(|id, _| active_ids.contains(id.as_str()));
+    }
 }
 
 /// A single goal's status snapshot for observation.
