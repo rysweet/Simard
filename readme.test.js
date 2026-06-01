@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 "use strict";
 
+// RUST-ONLY EXEMPTION (issue #2159, epic #2155)
+// Documentation validation tool, not runtime code. Tests that README.md
+// contains required sections. No Rust equivalent needed for doc linting.
+
 // TDD tests for README.md documentation requirements.
 // Validates that README contains required sections for:
 //   - npx install method (at top of Install section)

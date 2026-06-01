@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 "use strict";
 
+// RUST-ONLY EXEMPTION (issue #2159, epic #2155)
+// Tests for the npm distribution shim. Same exemption rationale as npm/bin.js:
+// distribution glue, not runtime code.
+
 // Unit tests for bin.js helper functions.
 // Run: node npm/bin.test.js
 
