@@ -317,4 +317,77 @@ mod tests {
         assert!(debug.contains("floor: 1"), "Debug output: {debug}");
         assert!(debug.contains("ceiling: 8"), "Debug output: {debug}");
     }
+
+    // -----------------------------------------------------------------------
+    // Issue #2182: additional scaler wiring tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn report_error_tracks_rate_limit_phrase() {
+        let s = AdaptiveScaler::new(4, 1, 8);
+        let error = SimardError::AdapterInvocationFailed {
+            base_type: "copilot-sdk".to_string(),
+            reason: "rate limit exceeded — slow down".to_string(),
+        };
+        s.report_error(&error);
+        let new_max = s.adjust();
+        assert_eq!(
+            new_max, 2,
+            "\"rate limit\" phrase should trigger decrease: 4 → 2"
+        );
+    }
+
+    #[test]
+    fn consecutive_429s_reduce_to_floor() {
+        let s = AdaptiveScaler::new(8, 1, 16);
+        let error = SimardError::AdapterInvocationFailed {
+            base_type: "copilot-sdk".to_string(),
+            reason: "HTTP 429 Too Many Requests".to_string(),
+        };
+        // Each adjust-after-429 halves: 8 → 4 → 2 → 1
+        for _ in 0..5 {
+            s.report_error(&error);
+            s.adjust();
+        }
+        let final_val = s.current_max();
+        assert_eq!(
+            final_val, 1,
+            "repeated 429s must drive current_max to floor=1, got {final_val}"
+        );
+    }
+
+    #[test]
+    fn non_429_non_rate_limit_errors_ignored_by_report() {
+        let s = AdaptiveScaler::new(4, 1, 8);
+        let error = SimardError::AdapterInvocationFailed {
+            base_type: "copilot-sdk".to_string(),
+            reason: "connection timeout after 30s".to_string(),
+        };
+        s.report_error(&error);
+        // Without 429 or rate-limit, adjust should increase
+        let new_max = s.adjust();
+        assert_eq!(
+            new_max, 5,
+            "non-rate-limit errors must not trigger decrease, expected 5"
+        );
+    }
+
+    #[test]
+    fn report_error_only_matches_adapter_invocation_failed_variant() {
+        // Verify that other SimardError variants are silently ignored
+        let s = AdaptiveScaler::new(4, 1, 8);
+        // PersistentStoreIo is a different variant — should be a no-op
+        let error = SimardError::PersistentStoreIo {
+            store: "test".to_string(),
+            action: "read".to_string(),
+            path: std::path::PathBuf::from("/tmp/fake"),
+            reason: "429 in store path".to_string(),
+        };
+        s.report_error(&error);
+        let new_max = s.adjust();
+        assert_eq!(
+            new_max, 5,
+            "non-AdapterInvocationFailed errors must not affect scaler"
+        );
+    }
 }

@@ -372,3 +372,99 @@ pub struct OodaBridges {
     pub progress_evidence:
         std::sync::Arc<dyn crate::goal_curation::progress_evidence::ProgressEvidenceChecker>,
 }
+
+// ---------------------------------------------------------------------------
+// Issue #2182: OodaConfig env-var scaler wiring tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests_ooda_config {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn ooda_config_creates_scaler_when_scaling_auto() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::set_var("SIMARD_SCALING", "auto") };
+        let config = OodaConfig::default();
+        unsafe { std::env::remove_var("SIMARD_SCALING") };
+        assert!(
+            config.scaler.is_some(),
+            "SIMARD_SCALING=auto must populate config.scaler"
+        );
+    }
+
+    #[test]
+    fn ooda_config_no_scaler_when_scaling_fixed() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::set_var("SIMARD_SCALING", "fixed") };
+        let config = OodaConfig::default();
+        unsafe { std::env::remove_var("SIMARD_SCALING") };
+        assert!(
+            config.scaler.is_none(),
+            "SIMARD_SCALING=fixed must leave config.scaler as None"
+        );
+    }
+
+    #[test]
+    fn ooda_config_no_scaler_when_scaling_unset() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("SIMARD_SCALING") };
+        let config = OodaConfig::default();
+        assert!(
+            config.scaler.is_none(),
+            "no SIMARD_SCALING env must leave config.scaler as None"
+        );
+    }
+
+    #[test]
+    fn ooda_config_auto_scaler_ceiling_is_4x_max() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::set_var("SIMARD_SCALING", "auto") };
+        unsafe { std::env::set_var("SIMARD_MAX_CONCURRENT_ACTIONS", "3") };
+        let config = OodaConfig::default();
+        unsafe { std::env::remove_var("SIMARD_SCALING") };
+        unsafe { std::env::remove_var("SIMARD_MAX_CONCURRENT_ACTIONS") };
+        let scaler = config.scaler.expect("scaler must be Some under auto");
+        assert_eq!(
+            scaler.ceiling(),
+            12,
+            "ceiling must be 4 × max_concurrent_actions=3"
+        );
+    }
+
+    #[test]
+    fn ooda_config_auto_scaler_adjust_returns_within_bounds() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::set_var("SIMARD_SCALING", "auto") };
+        unsafe { std::env::set_var("SIMARD_MAX_CONCURRENT_ACTIONS", "5") };
+        let config = OodaConfig::default();
+        unsafe { std::env::remove_var("SIMARD_SCALING") };
+        unsafe { std::env::remove_var("SIMARD_MAX_CONCURRENT_ACTIONS") };
+        let scaler = config.scaler.expect("scaler must be Some");
+        let val = scaler.adjust();
+        assert!(
+            val >= scaler.floor() && val <= scaler.ceiling(),
+            "adjust()={val} must be in [{}, {}]",
+            scaler.floor(),
+            scaler.ceiling()
+        );
+    }
+
+    #[test]
+    fn ooda_config_scaler_skipped_on_serde_roundtrip() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::set_var("SIMARD_SCALING", "auto") };
+        let config = OodaConfig::default();
+        unsafe { std::env::remove_var("SIMARD_SCALING") };
+        assert!(config.scaler.is_some(), "precondition: scaler must be Some");
+
+        let json = serde_json::to_string(&config).expect("serialize");
+        let deserialized: OodaConfig = serde_json::from_str(&json).expect("deserialize");
+        assert!(
+            deserialized.scaler.is_none(),
+            "scaler must be None after serde round-trip (#[serde(skip)])"
+        );
+    }
+}

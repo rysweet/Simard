@@ -441,4 +441,74 @@ mod tests {
         let loaded = store.list().expect("list");
         assert!(loaded.is_empty(), "no legacy file → empty store");
     }
+
+    // -----------------------------------------------------------------------
+    // Issue #2182: additional migration coverage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn try_new_migration_preserves_multiple_records() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_root = tmp.path();
+
+        let legacy_path = state_root.join("goal_records.json");
+        let records = vec![
+            goal_record("First goal", GoalStatus::Active, 1),
+            goal_record("Second goal", GoalStatus::Active, 2),
+            goal_record("Third goal", GoalStatus::Proposed, 3),
+        ];
+        let json = serde_json::to_string(&records).expect("serialize");
+        std::fs::write(&legacy_path, &json).expect("write legacy");
+
+        let new_path = state_root.join("state").join("goal_store.json");
+        let store = FileBackedGoalStore::try_new(&new_path).expect("try_new");
+        let loaded = store.list().expect("list");
+        assert_eq!(loaded.len(), 3, "all 3 legacy records must be migrated");
+        assert_eq!(loaded[0].title, "First goal");
+        assert_eq!(loaded[1].title, "Second goal");
+        assert_eq!(loaded[2].title, "Third goal");
+    }
+
+    #[test]
+    fn try_new_migration_copy_does_not_alter_legacy_content() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_root = tmp.path();
+
+        let legacy_path = state_root.join("goal_records.json");
+        let records = vec![goal_record("Preserved", GoalStatus::Active, 1)];
+        let original_json = serde_json::to_string(&records).expect("serialize");
+        std::fs::write(&legacy_path, &original_json).expect("write legacy");
+
+        let new_path = state_root.join("state").join("goal_store.json");
+        let _store = FileBackedGoalStore::try_new(&new_path).expect("try_new");
+
+        let legacy_content = std::fs::read_to_string(&legacy_path).expect("read legacy");
+        assert_eq!(
+            legacy_content, original_json,
+            "legacy file content must be identical after migration"
+        );
+    }
+
+    #[test]
+    fn try_new_migration_creates_parent_directories() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_root = tmp.path();
+
+        let legacy_path = state_root.join("goal_records.json");
+        let records = vec![goal_record("Dir test", GoalStatus::Active, 1)];
+        std::fs::write(&legacy_path, serde_json::to_string(&records).unwrap())
+            .expect("write legacy");
+
+        // state/ dir does NOT exist yet — migration must create it
+        let nested_path = state_root.join("state").join("goal_store.json");
+        assert!(
+            !nested_path.parent().unwrap().exists(),
+            "precondition: state/ must not exist"
+        );
+
+        let store = FileBackedGoalStore::try_new(&nested_path).expect("try_new");
+        assert!(nested_path.exists(), "migration must create parent dirs");
+        let loaded = store.list().expect("list");
+        assert_eq!(loaded.len(), 1);
+    }
 }

@@ -1145,4 +1145,126 @@ mod tests {
         let result = fallback_goal_decisions(Some("  "), "goal review", &history);
         assert!(result.is_empty(), "blank explicit goal → no fallback");
     }
+
+    // -----------------------------------------------------------------------
+    // Issue #2182: additional fallback coverage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fallback_goal_decisions_case_insensitive_topic() {
+        let history = vec![msg(Role::User, "Let's discuss it")];
+        let result = fallback_goal_decisions(Some("Ship v2"), "GOAL Review Meeting", &history);
+        assert_eq!(
+            result.len(),
+            1,
+            "uppercase GOAL in topic should still trigger fallback"
+        );
+    }
+
+    #[test]
+    fn fallback_goal_decisions_case_insensitive_transcript_pattern() {
+        let history = vec![msg(Role::User, "Let's ACCEPT THIS GOAL now")];
+        let result = fallback_goal_decisions(Some("Deploy to prod"), "sprint planning", &history);
+        assert_eq!(
+            result.len(),
+            1,
+            "uppercase 'ACCEPT THIS GOAL' in transcript should match"
+        );
+    }
+
+    #[test]
+    fn fallback_goal_decisions_matches_goal_accepted_pattern() {
+        let history = vec![msg(Role::User, "That goal accepted by the team")];
+        let result = fallback_goal_decisions(Some("Improve latency"), "standup", &history);
+        assert_eq!(result.len(), 1, "'goal accepted' pattern should match");
+    }
+
+    #[test]
+    fn fallback_goal_decisions_matches_goal_assigned_pattern() {
+        let history = vec![msg(Role::User, "goal assigned to the backend team")];
+        let result = fallback_goal_decisions(Some("Refactor auth"), "planning", &history);
+        assert_eq!(result.len(), 1, "'goal assigned' pattern should match");
+    }
+
+    #[test]
+    fn fallback_goal_decisions_matches_assign_goal_pattern() {
+        let history = vec![msg(Role::User, "Let's assign goal to Ryan")];
+        let result = fallback_goal_decisions(Some("Ship API v2"), "backlog", &history);
+        assert_eq!(result.len(), 1, "'assign goal' pattern should match");
+    }
+
+    #[test]
+    fn fallback_goal_decisions_rationale_includes_topic() {
+        let history = vec![msg(Role::User, "discussing")];
+        let topic = "quarterly goal review";
+        let result = fallback_goal_decisions(Some("Hire 2 engineers"), topic, &history);
+        assert_eq!(result.len(), 1);
+        assert!(
+            result[0].rationale.contains(topic),
+            "rationale should include the topic: {}",
+            result[0].rationale,
+        );
+    }
+
+    #[test]
+    fn fallback_goal_decisions_produces_single_decision_not_duplicates() {
+        // Both topic and transcript match — should still produce only 1 decision.
+        let history = vec![msg(Role::User, "new goal for Q4")];
+        let result = fallback_goal_decisions(
+            Some("Improve test coverage"),
+            "goal planning session",
+            &history,
+        );
+        assert_eq!(
+            result.len(),
+            1,
+            "should produce exactly 1 decision even with multiple signal matches"
+        );
+    }
+
+    #[test]
+    fn fallback_goal_decisions_returns_empty_for_none_explicit_goal() {
+        // Even with goal patterns in transcript, None explicit_goal → empty.
+        let history = vec![
+            msg(Role::User, "new goal: do X"),
+            msg(Role::User, "accept this goal"),
+        ];
+        let result = fallback_goal_decisions(None, "goal review", &history);
+        assert!(
+            result.is_empty(),
+            "None explicit_goal must always return empty, even with matching signals"
+        );
+    }
+
+    #[test]
+    fn decisions_bypass_fallback_when_nonempty() {
+        // Models the selection logic at close() line 519-523:
+        //   if structured_decisions.is_empty() { fallback } else { decisions }
+        let structured_decisions = vec![crate::meeting_facilitator::MeetingDecision {
+            description: "Actual decision".to_string(),
+            rationale: "Voted on".to_string(),
+            participants: vec!["Alice".to_string()],
+        }];
+        // Even though conditions would trigger fallback...
+        let fallback = fallback_goal_decisions(
+            Some("Ship v2"),
+            "goal review",
+            &[msg(Role::User, "new goal for Q4")],
+        );
+        assert!(
+            !fallback.is_empty(),
+            "precondition: fallback would fire if called"
+        );
+        // ...structured_decisions should be preferred
+        let decisions_for_goals = if structured_decisions.is_empty() {
+            fallback
+        } else {
+            structured_decisions.clone()
+        };
+        assert_eq!(decisions_for_goals.len(), 1);
+        assert_eq!(
+            decisions_for_goals[0].description, "Actual decision",
+            "non-empty structured_decisions must bypass fallback"
+        );
+    }
 }
