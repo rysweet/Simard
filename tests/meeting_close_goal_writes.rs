@@ -62,7 +62,7 @@ fn meeting_close_goal_records_have_active_status() {
 #[test]
 fn meeting_close_goal_records_priority_from_position() {
     // Priority should be based on decision position: earlier = higher priority.
-    let decisions = vec![
+    let decisions = [
         "First priority decision",
         "Second priority decision",
         "Third priority decision",
@@ -280,7 +280,7 @@ fn meeting_close_writes_goal_records_to_file_store() {
     // Simulate what meeting close should do: write GoalRecords from decisions.
     // After implementation, the MeetingBackend::close() pipeline will do this.
     // For now, we directly construct what the implementation should produce.
-    let decisions = vec!["Adopt rate limiting", "Migrate to new API"];
+    let decisions = ["Adopt rate limiting", "Migrate to new API"];
 
     let store = FileBackedGoalStore::try_new(&canonical).unwrap();
     for (i, desc) in decisions.iter().enumerate() {

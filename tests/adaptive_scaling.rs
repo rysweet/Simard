@@ -326,10 +326,10 @@ fn scaler_current_max_can_override_config() {
 
 #[test]
 fn aimd_constants_are_sensible() {
-    assert!(
-        HIGH_PRESSURE_THRESHOLD > LOW_PRESSURE_THRESHOLD,
-        "high threshold should be above low threshold"
-    );
+    // Validate relationship between thresholds (const assertions).
+    const {
+        assert!(HIGH_PRESSURE_THRESHOLD > LOW_PRESSURE_THRESHOLD);
+    }
     assert!(
         (0.0..=1.0).contains(&HIGH_PRESSURE_THRESHOLD),
         "high threshold should be in [0, 1]"
@@ -359,7 +359,7 @@ fn scaler_is_safe_to_share_across_threads() {
         let s = Arc::clone(&scaler);
         handles.push(thread::spawn(move || {
             let m = s.current_max();
-            assert!(m >= 1 && m <= 8, "should be in bounds, got {m}");
+            assert!((1..=8).contains(&m), "should be in bounds, got {m}");
         }));
     }
 
@@ -368,7 +368,7 @@ fn scaler_is_safe_to_share_across_threads() {
         let s = Arc::clone(&scaler);
         handles.push(thread::spawn(move || {
             let m = s.adjust();
-            assert!(m >= 1 && m <= 8, "should be in bounds, got {m}");
+            assert!((1..=8).contains(&m), "should be in bounds, got {m}");
         }));
     }
 

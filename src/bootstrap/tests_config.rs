@@ -182,7 +182,7 @@ fn config_path_methods_use_state_root() {
         config
             .goal_store_path()
             .to_string_lossy()
-            .contains("goal_records.json")
+            .contains("goal_store.json")
     );
     assert!(
         config
