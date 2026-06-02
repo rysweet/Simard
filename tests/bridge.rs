@@ -8,17 +8,41 @@ use simard::bridge_circuit::{CircuitBreakerConfig, CircuitBreakerTransport, Circ
 use simard::bridge_subprocess::SubprocessBridgeTransport;
 use simard::error::SimardError;
 
-fn echo_bridge_script() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python/bridge_server.py")
+/// Create a minimal Python echo bridge script in a temp directory.
+/// The script implements the bridge JSON-line protocol: reads JSON from stdin,
+/// dispatches bridge.health and echo methods, returns JSON on stdout.
+fn echo_bridge_script() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::TempDir::new().expect("create temp dir for echo bridge");
+    let script = dir.path().join("echo_bridge.py");
+    std::fs::write(
+        &script,
+        r#"import json, sys
+def handle(req):
+    m = req.get("method","")
+    if m == "bridge.health":
+        return {"id": req["id"], "result": {"server_name":"echo","healthy":True,"version":"1.0.0"}}
+    if m == "echo":
+        return {"id": req["id"], "result": req.get("params",{})}
+    return {"id": req["id"], "error": {"code":-32601,"message":f"method {m} not registered"}}
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    resp = handle(req)
+    sys.stdout.write(json.dumps(resp) + "\n")
+    sys.stdout.flush()
+"#,
+    )
+    .expect("write echo bridge script");
+    (dir, script)
 }
 
-fn echo_transport() -> SubprocessBridgeTransport {
-    SubprocessBridgeTransport::new(
-        "echo-test",
-        echo_bridge_script(),
-        vec![],
-        Duration::from_secs(5),
-    )
+fn echo_transport() -> (tempfile::TempDir, SubprocessBridgeTransport) {
+    let (dir, script) = echo_bridge_script();
+    let transport =
+        SubprocessBridgeTransport::new("echo-test", &script, vec![], Duration::from_secs(5));
+    (dir, transport)
 }
 
 fn health_request() -> BridgeRequest {
@@ -33,7 +57,7 @@ fn health_request() -> BridgeRequest {
 
 #[test]
 fn subprocess_bridge_health_check_roundtrips() {
-    let transport = echo_transport();
+    let (_dir, transport) = echo_transport();
     let health = transport.health().expect("health check should succeed");
     assert_eq!(health.server_name, "echo");
     assert!(health.healthy);
@@ -43,7 +67,7 @@ fn subprocess_bridge_health_check_roundtrips() {
 
 #[test]
 fn subprocess_bridge_echo_roundtrips_params() {
-    let transport = echo_transport();
+    let (_dir, transport) = echo_transport();
     let request = BridgeRequest {
         id: new_request_id(),
         method: "echo".to_string(),
@@ -59,7 +83,7 @@ fn subprocess_bridge_echo_roundtrips_params() {
 
 #[test]
 fn subprocess_bridge_unknown_method_returns_error() {
-    let transport = echo_transport();
+    let (_dir, transport) = echo_transport();
     let request = BridgeRequest {
         id: new_request_id(),
         method: "nonexistent.method".to_string(),
@@ -77,7 +101,7 @@ fn subprocess_bridge_unknown_method_returns_error() {
 
 #[test]
 fn subprocess_bridge_reuses_child_across_calls() {
-    let transport = echo_transport();
+    let (_dir, transport) = echo_transport();
     for i in 0..5 {
         let request = BridgeRequest {
             id: new_request_id(),
@@ -96,7 +120,7 @@ fn subprocess_bridge_reuses_child_across_calls() {
 
 #[test]
 fn subprocess_bridge_unpack_typed_health_response() {
-    let transport = echo_transport();
+    let (_dir, transport) = echo_transport();
     let request = BridgeRequest {
         id: new_request_id(),
         method: "bridge.health".to_string(),
@@ -199,7 +223,7 @@ for line in sys.stdin:
 
 #[test]
 fn circuit_breaker_passes_through_on_healthy_bridge() {
-    let inner = echo_transport();
+    let (_dir, inner) = echo_transport();
     let cb = CircuitBreakerTransport::with_defaults(inner);
     let health = cb
         .health()
@@ -243,14 +267,14 @@ fn circuit_breaker_opens_on_repeated_transport_errors() {
 
 #[test]
 fn subprocess_bridge_descriptor_contains_bridge_name() {
-    let transport = echo_transport();
+    let (_dir, transport) = echo_transport();
     let desc = transport.descriptor();
     assert!(desc.identity.contains("echo-test"));
 }
 
 #[test]
 fn circuit_breaker_descriptor_wraps_inner() {
-    let inner = echo_transport();
+    let (_dir, inner) = echo_transport();
     let cb = CircuitBreakerTransport::with_defaults(inner);
     let desc = cb.descriptor();
     assert!(desc.provenance.locator.contains("circuit-breaker"));

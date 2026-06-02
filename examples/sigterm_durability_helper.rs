@@ -11,7 +11,7 @@
 //!   3. drop the strong Arc (Database::drop fires force_checkpoint_on_close)
 //!
 //! This mirrors what `shutdown_daemon` does in the real OODA daemon — without
-//! requiring an LLM provider, dashboard, or python bridges.
+//! requiring an LLM provider, dashboard, or bridge transports.
 //!
 //! Used only by the integration test; not built by default consumers.
 

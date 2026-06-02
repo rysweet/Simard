@@ -1,7 +1,7 @@
 ---
 title: Architecture Overview
-description: How Simard's components fit together — from the runtime kernel to the Python ecosystem bridges, cognitive memory, agent composition, OODA loop, and self-improvement.
-last_updated: 2026-03-31
+description: How Simard's components fit together — from the runtime kernel to the native Rust bridge transports, cognitive memory, agent composition, OODA loop, and self-improvement.
+last_updated: 2026-06-02
 owner: simard
 doc_type: concept
 ---
@@ -126,18 +126,17 @@ See [Base Type Adapters](../reference/base-type-adapters.md) for the full refere
 
 ### Bridge Infrastructure
 
-Simard communicates with the Python ecosystem through subprocess bridges using newline-delimited JSON on stdin/stdout:
+Simard uses native Rust transports (`NativeBridgeTransport`) for in-process bridge communication:
 
 ```
-Simard (Rust) ──stdin──→ Python subprocess ──→ amplihack-memory-lib (LadybugDB)
-              ←stdout──                    ──→ agent-kgpacks (LadybugDB)
-                                           ──→ amplihack-agent-eval
+Simard (Rust) ──→ NativeBridgeTransport ──→ native_knowledge (knowledge packs)
+                                        ──→ native_gym (agent eval)
 ```
 
 Each bridge has:
 - A Rust trait (`BridgeTransport`) with typed request/response methods
 - An `InMemoryBridgeTransport` for unit testing
-- A `SubprocessBridgeTransport` for production
+- A `NativeBridgeTransport` for production (in-process Rust)
 - A `CircuitBreakerTransport` wrapper for fault tolerance
 
 See [Bridge Pattern](bridge-pattern.md) for wire protocol details.
