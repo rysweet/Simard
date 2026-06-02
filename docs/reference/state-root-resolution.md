@@ -78,7 +78,9 @@ no validation on `name`; callers must use static strings.
 |---|---|---|
 | `<root>/meetings/` | Per-meeting bundle directories (transcript, handoff, markdown) | `~/.simard/meetings/` |
 | `<root>/meeting_handoffs/` | Flat handoff drop directory consumed by OODA + engineer-loop | `~/.simard/meeting_handoffs/` |
-| `<root>/goals/` | Durable goal board snapshots | `~/.simard/goals/` |
+| `<root>/state/` | Durable state files (goal store, scaling state) | `~/.simard/state/` |
+| `<root>/state/goal_store.json` | File-backed goal records (flock-protected) | `~/.simard/state/goal_store.json` |
+| `<root>/goals/` | Legacy durable goal board snapshots (superseded by cognitive memory) | `~/.simard/goals/` |
 
 > Setting `SIMARD_STATE_ROOT=/x` relocates **all** of the above
 > together; operators who want to relocate just one keep using the
