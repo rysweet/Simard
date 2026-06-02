@@ -162,7 +162,7 @@ impl BootstrapConfig {
     }
 
     pub fn goal_store_path(&self) -> PathBuf {
-        self.state_root.value.join("goal_records.json")
+        self.state_root.value.join("state").join("goal_store.json")
     }
 
     pub fn handoff_store_path(&self) -> PathBuf {
@@ -293,7 +293,7 @@ mod tests {
     fn test_goal_store_path() {
         let config = BootstrapConfig::resolve(builtin_defaults_inputs()).unwrap();
         let path = config.goal_store_path();
-        assert!(path.ends_with("goal_records.json"));
+        assert!(path.ends_with("state/goal_store.json"));
     }
 
     #[test]

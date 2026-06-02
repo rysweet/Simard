@@ -510,6 +510,82 @@ impl MeetingBackend {
             );
         }
 
+        // ── Direct goal writes (issue #2182) ──
+        // Write GoalRecords directly to the file-backed goal store so goals
+        // are available immediately after meeting close, without waiting for
+        // the OODA curate cycle to process the handoff artifact.
+        if !structured_decisions.is_empty() {
+            let goal_path = crate::state_root::goal_store_path();
+            if let Some(parent) = goal_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match crate::goals::FileBackedGoalStore::try_new(&goal_path) {
+                Ok(goal_store) => {
+                    use crate::goals::{GoalRecord as GR, GoalStatus as GS, GoalStore, GoalUpdate};
+                    let session_id = crate::session::SessionId::from_uuid(uuid::Uuid::now_v7());
+                    for (i, decision) in structured_decisions.iter().enumerate() {
+                        let priority = ((i as u8) + 1).min(5);
+                        let update = match GoalUpdate::new(
+                            &decision.description,
+                            format!("[meeting] {}", decision.rationale),
+                            GS::Active,
+                            priority,
+                        ) {
+                            Ok(u) => u,
+                            Err(e) => {
+                                warn!(
+                                    target: "simard::meeting_backend::closing",
+                                    phase = "goal_write",
+                                    error = %e,
+                                    "skipping invalid decision for goal store"
+                                );
+                                continue;
+                            }
+                        };
+                        let record = match GR::from_update(
+                            update,
+                            "simard-meeting-close",
+                            session_id.clone(),
+                            crate::session::SessionPhase::Persistence,
+                        ) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                warn!(
+                                    target: "simard::meeting_backend::closing",
+                                    phase = "goal_write",
+                                    error = %e,
+                                    "skipping invalid goal record"
+                                );
+                                continue;
+                            }
+                        };
+                        if let Err(e) = goal_store.put(record) {
+                            warn!(
+                                target: "simard::meeting_backend::closing",
+                                phase = "goal_write",
+                                error = %e,
+                                "failed to write goal record to store"
+                            );
+                        }
+                    }
+                    info!(
+                        target: "simard::meeting_backend::closing",
+                        phase = "goal_write",
+                        count = structured_decisions.len(),
+                        "meeting.close wrote goal records directly to store"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        target: "simard::meeting_backend::closing",
+                        phase = "goal_write",
+                        error = %e,
+                        "failed to open goal store for direct writes — goals will be created by OODA curate"
+                    );
+                }
+            }
+        }
+
         // ── Final partial-reason gate ──
         // If we have spent past the master budget by this point but
         // every phase still succeeded, that's still a partial close.

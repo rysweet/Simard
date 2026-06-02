@@ -10,6 +10,73 @@ use super::{GoalRecord, GoalStatus};
 
 const GOAL_STORE_NAME: &str = "goals";
 
+/// RAII guard that acquires an `flock` on construction and releases on drop.
+#[cfg(unix)]
+struct FlockGuard {
+    file: std::fs::File,
+}
+
+#[cfg(unix)]
+impl FlockGuard {
+    fn exclusive(path: &Path) -> SimardResult<Self> {
+        let file = Self::open_lockfile(path)?;
+        Self::flock_op(&file, path, libc::LOCK_EX)?;
+        Ok(Self { file })
+    }
+
+    fn shared(path: &Path) -> SimardResult<Self> {
+        let file = Self::open_lockfile(path)?;
+        Self::flock_op(&file, path, libc::LOCK_SH)?;
+        Ok(Self { file })
+    }
+
+    fn open_lockfile(store_path: &Path) -> SimardResult<std::fs::File> {
+        let lock_path = lockfile_path(store_path);
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| SimardError::PersistentStoreIo {
+                store: GOAL_STORE_NAME.to_string(),
+                action: "open-lockfile".to_string(),
+                path: lock_path,
+                reason: e.to_string(),
+            })
+    }
+
+    fn flock_op(file: &std::fs::File, store_path: &Path, op: libc::c_int) -> SimardResult<()> {
+        use std::os::unix::io::AsRawFd;
+        let ret = unsafe { libc::flock(file.as_raw_fd(), op) };
+        if ret != 0 {
+            return Err(SimardError::PersistentStoreIo {
+                store: GOAL_STORE_NAME.to_string(),
+                action: "flock".to_string(),
+                path: store_path.to_path_buf(),
+                reason: format!("flock failed: {}", std::io::Error::last_os_error()),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for FlockGuard {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+fn lockfile_path(store_path: &Path) -> PathBuf {
+    store_path.with_extension("json.lock")
+}
+
 pub trait GoalStore: Send + Sync {
     fn descriptor(&self) -> BackendDescriptor;
 
@@ -85,6 +152,10 @@ impl FileBackedGoalStore {
     fn persist(&self, records: &[GoalRecord]) -> SimardResult<()> {
         persist_json(GOAL_STORE_NAME, &self.path, &records.to_vec())
     }
+
+    fn reload_from_disk(&self) -> SimardResult<Vec<GoalRecord>> {
+        load_json_or_default(GOAL_STORE_NAME, &self.path)
+    }
 }
 
 impl GoalStore for InMemoryGoalStore {
@@ -137,24 +208,43 @@ impl GoalStore for FileBackedGoalStore {
     }
 
     fn put(&self, record: GoalRecord) -> SimardResult<()> {
-        let mut records = self
+        // Acquire exclusive flock for cross-process safety.
+        #[cfg(unix)]
+        let _lock = FlockGuard::exclusive(&self.path)?;
+
+        let mut cache = self
             .records
             .lock()
             .map_err(|_| SimardError::StoragePoisoned {
                 store: GOAL_STORE_NAME.to_string(),
             })?;
+
+        // Reload from disk to pick up writes from other processes.
+        let mut records = self.reload_from_disk()?;
         upsert_record(&mut records, record);
-        self.persist(&records)
+
+        // Persist first; only update cache on success.
+        self.persist(&records)?;
+        *cache = records;
+        Ok(())
     }
 
     fn list(&self) -> SimardResult<Vec<GoalRecord>> {
-        Ok(self
+        // Acquire shared flock for cross-process consistency.
+        #[cfg(unix)]
+        let _lock = FlockGuard::shared(&self.path)?;
+
+        let mut cache = self
             .records
             .lock()
             .map_err(|_| SimardError::StoragePoisoned {
                 store: GOAL_STORE_NAME.to_string(),
-            })?
-            .clone())
+            })?;
+
+        // Reload from disk to see writes from other processes.
+        let records = self.reload_from_disk()?;
+        *cache = records.clone();
+        Ok(records)
     }
 
     fn top_goals_by_status(
