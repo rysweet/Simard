@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Maximum number of concurrently active goals.
-pub const MAX_ACTIVE_GOALS: usize = 5;
+pub const MAX_ACTIVE_GOALS: usize = 7;
 
 /// Progress state for an active goal.
 ///
@@ -404,6 +404,6 @@ mod tests {
 
     #[test]
     fn max_active_goals_constant() {
-        assert_eq!(MAX_ACTIVE_GOALS, 5);
+        assert_eq!(MAX_ACTIVE_GOALS, 7);
     }
 }
