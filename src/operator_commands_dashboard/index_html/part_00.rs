@@ -361,12 +361,11 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
     <h1 class="page-h1">Chat</h1>
     <p class="page-lede">Talk to the running Simard agent in real time — anything you say here can become a new goal, and slash-commands like /close, /goals, and /status are available.</p>
     <div class="card" style="max-width:720px">
-      <h2>Meeting Chat</h2>
+      <h2>Chat</h2>
       <div style="background:#1a1a2e;border:1px solid #333;border-radius:6px;padding:.75rem;margin-bottom:1rem;font-size:.85rem;color:#8b949e">
-        <strong style="color:var(--accent)">💡 Meeting Help:</strong>
-        Use this chat or run <code>simard meeting &lt;topic&gt;</code> from the terminal.
+        <strong style="color:var(--accent)">💡 Chat Help:</strong>
+        Talk directly with Simard — ask about your goals, check system status, or start a conversation about anything on your mind.
         Commands: <code>/close</code> end session, <code>/goals</code> review goals, <code>/status</code> system status.
-        Meetings generate handoff documents that the agent daemon ingests as new goals.
       </div>
       <div class="ws-status disconnected" id="ws-status">● Disconnected <button class="btn" onclick="initChat()" style="font-size:.75rem;padding:.1rem .4rem;margin-left:.5rem">Reconnect</button></div>
       <div id="chat-messages"></div>
