@@ -58,7 +58,7 @@ impl AdaptiveScaler {
             current: AtomicU32::new(initial),
             floor,
             ceiling,
-            error_timestamps: Mutex::new(Vec::new()),
+            error_timestamps: Mutex::new(Vec::with_capacity(16)),
         }
     }
 
@@ -123,12 +123,20 @@ impl AdaptiveScaler {
     /// the next `adjust()` call.
     pub fn report_error(&self, error: &SimardError) {
         if let SimardError::AdapterInvocationFailed { reason, .. } = error {
-            let lower = reason.to_lowercase();
-            if lower.contains("429") || lower.contains("rate limit") {
-                let now = epoch_secs();
-                if let Ok(mut timestamps) = self.error_timestamps.lock() {
-                    timestamps.push(now);
-                }
+            self.report_reason(reason);
+        }
+    }
+
+    /// Records a pressure signal when `reason` contains "429" or "rate limit"
+    /// (case-insensitive). Avoids constructing a [`SimardError`] when the
+    /// caller already has the reason string (e.g. from `ActionOutcome.detail`).
+    pub fn report_reason(&self, reason: &str) {
+        if contains_ascii_case_insensitive(reason, b"429")
+            || contains_ascii_case_insensitive(reason, b"rate limit")
+        {
+            let now = epoch_secs();
+            if let Ok(mut timestamps) = self.error_timestamps.lock() {
+                timestamps.push(now);
             }
         }
     }
@@ -139,6 +147,14 @@ fn epoch_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Case-insensitive ASCII substring search without allocation.
+fn contains_ascii_case_insensitive(haystack: &str, needle: &[u8]) -> bool {
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|w| w.eq_ignore_ascii_case(needle))
 }
 
 /// Returns CPU pressure as `[0.0, 1.0]`, or `None` on non-Linux / parse failure.

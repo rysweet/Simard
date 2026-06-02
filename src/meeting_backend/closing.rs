@@ -516,12 +516,13 @@ impl MeetingBackend {
         // the OODA curate cycle to process the handoff artifact.
         // Fallback: when structured_decisions is empty but the meeting topic
         // is goal-related and an explicit /goal was set, synthesize a decision.
-        let decisions_for_goals = if structured_decisions.is_empty() {
-            fallback_goal_decisions(self.explicit_goal.as_deref(), &self.topic, &self.history)
+        if structured_decisions.is_empty() {
+            let fallback =
+                fallback_goal_decisions(self.explicit_goal.as_deref(), &self.topic, &self.history);
+            write_goals_from_decisions(&fallback);
         } else {
-            structured_decisions.clone()
-        };
-        write_goals_from_decisions(&decisions_for_goals);
+            write_goals_from_decisions(&structured_decisions);
+        }
 
         // ── Final partial-reason gate ──
         // If we have spent past the master budget by this point but
@@ -701,12 +702,13 @@ impl MeetingBackend {
         // ── Direct goal writes — same as close() happy path (issue #2182) ──
         // finalize_partial must also write goals so a summary timeout doesn't
         // silently drop goal-related decisions.
-        let decisions_for_goals = if structured_decisions.is_empty() {
-            fallback_goal_decisions(self.explicit_goal.as_deref(), &self.topic, &self.history)
+        if structured_decisions.is_empty() {
+            let fallback =
+                fallback_goal_decisions(self.explicit_goal.as_deref(), &self.topic, &self.history);
+            write_goals_from_decisions(&fallback);
         } else {
-            structured_decisions.clone()
-        };
-        write_goals_from_decisions(&decisions_for_goals);
+            write_goals_from_decisions(&structured_decisions);
+        }
 
         // Write the markdown report first so its path can flow into
         // the artifacts list of the handoff JSON (issue #1954).
@@ -996,8 +998,9 @@ fn fallback_goal_decisions(
     let has_goal_topic = topic_lower.contains("goal");
 
     let has_goal_transcript = history.iter().any(|m| {
-        let lower = m.content.to_lowercase();
-        GOAL_PATTERNS.iter().any(|p| lower.contains(p))
+        GOAL_PATTERNS
+            .iter()
+            .any(|p| contains_ignore_ascii_case(&m.content, p))
     });
 
     if has_goal_topic || has_goal_transcript {
@@ -1009,6 +1012,14 @@ fn fallback_goal_decisions(
     } else {
         Vec::new()
     }
+}
+
+/// Case-insensitive ASCII substring search without allocation.
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 /// Write `MeetingDecision` items directly to the goal store (issue #2182).

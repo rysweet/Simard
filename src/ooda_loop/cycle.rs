@@ -259,11 +259,7 @@ fn run_ooda_cycle_inner(
         if !outcome.success
             && let Some(ref scaler) = config.scaler
         {
-            let err = SimardError::AdapterInvocationFailed {
-                base_type: "unknown".into(),
-                reason: outcome.detail.clone(),
-            };
-            scaler.report_error(&err);
+            scaler.report_reason(&outcome.detail);
         }
 
         if let Some(goal_id) = &outcome.action.goal_id {

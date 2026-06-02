@@ -173,7 +173,7 @@ impl FileBackedGoalStore {
     }
 
     fn persist(&self, records: &[GoalRecord]) -> SimardResult<()> {
-        persist_json(GOAL_STORE_NAME, &self.path, &records.to_vec())
+        persist_json(GOAL_STORE_NAME, &self.path, &records)
     }
 
     fn reload_from_disk(&self) -> SimardResult<Vec<GoalRecord>> {
