@@ -5,6 +5,7 @@
 //! dispatches them. If any bridge is unavailable, the cycle degrades honestly
 //! (Pillar 11): the observation records `None` for that subsystem.
 
+pub mod adaptive_scaling;
 mod bridge_factory;
 mod curate;
 mod decide;
