@@ -7,7 +7,9 @@
 //! Controlled by `SIMARD_SCALING` env var: `auto` enables AIMD, `fixed`
 //! (or unset) disables it. See `docs/reference/adaptive-scaling-api.md`.
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::SimardError;
 
@@ -29,6 +31,8 @@ pub struct AdaptiveScaler {
     current: AtomicU32,
     floor: u32,
     ceiling: u32,
+    /// Timestamps (unix epoch secs) of recent 429/rate-limit errors.
+    error_timestamps: Mutex<Vec<u64>>,
 }
 
 impl AdaptiveScaler {
@@ -44,6 +48,7 @@ impl AdaptiveScaler {
             current: AtomicU32::new(initial),
             floor,
             ceiling,
+            error_timestamps: Mutex::new(Vec::new()),
         }
     }
 
@@ -67,34 +72,88 @@ impl AdaptiveScaler {
     ///
     /// Returns the new max value after adjustment.
     pub fn adjust(&self) -> u32 {
-        // TODO(#2182): Implement AIMD algorithm:
-        // 1. Sample CPU pressure from /proc/stat
-        // 2. Sample memory pressure from /proc/meminfo
-        // 3. Count 429 errors in sliding window
-        // 4. Compute aggregate pressure (max of signals)
-        // 5. Apply AIMD rule:
-        //    - high pressure or 429s → multiplicative decrease
-        //    - low pressure → additive increase
-        //    - moderate → hold steady
-        self.current.load(Ordering::Relaxed)
+        let now_epoch = epoch_secs();
+        let current = self.current.load(Ordering::Relaxed);
+
+        // Count recent 429 errors in the sliding window.
+        let has_recent_429 = {
+            let mut timestamps = self
+                .error_timestamps
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let cutoff = now_epoch.saturating_sub(ERROR_WINDOW_SECS);
+            timestamps.retain(|&t| t >= cutoff);
+            !timestamps.is_empty()
+        };
+
+        // Sample system pressure signals.
+        let cpu = sample_cpu_pressure().unwrap_or(0.0);
+        let mem = sample_memory_pressure().unwrap_or(0.0);
+        let system_pressure = cpu.max(mem);
+
+        // AIMD rule:
+        // - 429 errors or high system pressure → multiplicative decrease
+        // - low pressure and no 429s → additive increase
+        // - moderate → hold steady
+        let new = if has_recent_429 || system_pressure > HIGH_PRESSURE_THRESHOLD {
+            let decreased = (current as f64 * DECREASE_FACTOR) as u32;
+            decreased.max(self.floor)
+        } else if system_pressure < LOW_PRESSURE_THRESHOLD {
+            (current + 1).min(self.ceiling)
+        } else {
+            current
+        };
+
+        self.current.store(new, Ordering::Relaxed);
+        new
     }
 
     /// Reports an action error. When the error carries an HTTP 429
-    /// status (via `AdapterInvocationFailed` with "429" in the reason),
-    /// records a pressure signal for the next `adjust()` call.
-    pub fn report_error(&self, _error: &SimardError) {
-        // TODO(#2182): Detect 429 errors and record timestamp
-        // in sliding window. Pattern-match on:
-        //   SimardError::AdapterInvocationFailed { reason, .. }
-        //   where reason contains "429"
+    /// status or rate-limit indication, records a pressure signal for
+    /// the next `adjust()` call.
+    pub fn report_error(&self, error: &SimardError) {
+        if let SimardError::AdapterInvocationFailed { reason, .. } = error {
+            let lower = reason.to_lowercase();
+            if lower.contains("429") || lower.contains("rate limit") {
+                let now = epoch_secs();
+                if let Ok(mut timestamps) = self.error_timestamps.lock() {
+                    timestamps.push(now);
+                }
+            }
+        }
     }
 }
 
+fn epoch_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Returns CPU pressure as `[0.0, 1.0]`, or `None` on non-Linux / parse failure.
+///
+/// Reads `/proc/stat` and computes `1.0 - idle_ratio` from the cumulative
+/// CPU counters (user, nice, system, idle, iowait, irq, softirq, steal).
 #[cfg(target_os = "linux")]
 pub fn sample_cpu_pressure() -> Option<f64> {
-    // TODO(#2182): Read /proc/stat, compute 1 - idle_ratio
-    None
+    let content = std::fs::read_to_string("/proc/stat").ok()?;
+    let cpu_line = content.lines().find(|l| l.starts_with("cpu "))?;
+    let fields: Vec<u64> = cpu_line
+        .split_whitespace()
+        .skip(1) // skip "cpu" label
+        .filter_map(|f| f.parse().ok())
+        .collect();
+    if fields.len() < 4 {
+        return None;
+    }
+    let total: u64 = fields.iter().sum();
+    if total == 0 {
+        return None;
+    }
+    // idle is the 4th field (index 3); iowait is the 5th (index 4) if present
+    let idle = fields[3] + fields.get(4).copied().unwrap_or(0);
+    Some(1.0 - (idle as f64 / total as f64))
 }
 
 /// Fallback: always `None` on non-Linux platforms.
@@ -104,10 +163,32 @@ pub fn sample_cpu_pressure() -> Option<f64> {
 }
 
 /// Returns memory pressure as `[0.0, 1.0]`, or `None` on non-Linux / parse failure.
+///
+/// Reads `/proc/meminfo` and computes `1.0 - MemAvailable / MemTotal`.
 #[cfg(target_os = "linux")]
 pub fn sample_memory_pressure() -> Option<f64> {
-    // TODO(#2182): Read /proc/meminfo, compute 1 - available/total
-    None
+    let content = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let mut total: Option<u64> = None;
+    let mut available: Option<u64> = None;
+    for line in content.lines() {
+        if line.starts_with("MemTotal:") {
+            total = parse_meminfo_kb(line);
+        } else if line.starts_with("MemAvailable:") {
+            available = parse_meminfo_kb(line);
+        }
+        if total.is_some() && available.is_some() {
+            break;
+        }
+    }
+    let total = total.filter(|&t| t > 0)?;
+    let available = available?;
+    Some(1.0 - (available as f64 / total as f64))
+}
+
+/// Parse a `/proc/meminfo` line like `MemTotal:       16384 kB` into kB value.
+#[cfg(target_os = "linux")]
+fn parse_meminfo_kb(line: &str) -> Option<u64> {
+    line.split_whitespace().nth(1)?.parse().ok()
 }
 
 /// Fallback: always `None` on non-Linux platforms.
