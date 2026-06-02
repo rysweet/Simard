@@ -1,7 +1,7 @@
 ---
 title: Meeting close lifecycle
 description: The contract enforced when an operator runs `/close` in `simard meeting` — bounded timeouts, partial-handoff fallback, and the structured tracing emitted at each phase.
-last_updated: 2026-05-19
+last_updated: 2026-06-02
 review_schedule: as-needed
 owner: simard
 doc_type: reference
