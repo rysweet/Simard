@@ -30,25 +30,23 @@ Each site is classified as:
 
 ## Highest-leverage sites
 
-### `src/bridge_launcher.rs:125-126` — FIXED in this PR
+### `src/bridge_launcher.rs` — FIXED (originally in fail-open audit PR, updated in #2181)
 
-**Before**:
+**Before** (original fail-open):
 ```rust
 let knowledge = launch_knowledge_bridge(&python_dir).ok();
 let gym = launch_gym_bridge(&python_dir).ok();
 ```
 
-The `.ok()` discarded the error type. Operators saw "bridge unavailable" with no clue *why*. This is the most dangerous fail-open in the codebase — gym bridge failure produced exactly the silent-zero-score behavior that took 13 days to detect.
-
-**After**:
+**After** (native Rust transport, #2181):
 ```rust
-let knowledge = match launch_knowledge_bridge(&python_dir) {
+let knowledge = match launch_knowledge_bridge_native() {
     Ok(b) => Some(b),
     Err(e) => { eprintln!("... FAILED: {e}"); None }
 };
 ```
 
-Same control flow, but the error message is preserved in the log.
+The Python subprocess fallback has been removed entirely. Native Rust transports are the only production path. Error messages are preserved in the log.
 
 ### `src/cost_tracking.rs:280` — TODO in next round
 

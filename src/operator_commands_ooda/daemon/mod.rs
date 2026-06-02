@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::bridge_launcher::{find_python_dir, launch_gym_bridge, launch_knowledge_bridge};
+use crate::bridge_launcher::{launch_gym_bridge_native, launch_knowledge_bridge_native};
 use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::goal_curation::{load_goal_board, persist_board};
 use crate::identity::OperatingMode;
@@ -70,8 +70,6 @@ pub fn run_ooda_daemon(
 
     std::fs::create_dir_all(&state_root)?;
 
-    let python_dir = find_python_dir()?;
-
     // Reap any stale lock file from a prior crashed daemon before we open.
     if let Err(e) = memory_ipc::reap_stale_open_lock(&state_root) {
         eprintln!("[simard] OODA daemon: stale-lock reap failed: {e}");
@@ -122,8 +120,8 @@ pub fn run_ooda_daemon(
 
     let memory: Box<dyn CognitiveMemoryOps> =
         Box::new(memory_ipc::SharedMemory(Arc::clone(&shared_mem)));
-    let knowledge = launch_knowledge_bridge(&python_dir)?;
-    let gym = launch_gym_bridge(&python_dir)?;
+    let knowledge = launch_knowledge_bridge_native()?;
+    let gym = launch_gym_bridge_native()?;
 
     // One-time bootstrap: snapshot SIMARD_LLM_PROVIDER (if set in env)
     // to <state_root>/config.toml so child processes (engineer subprocesses

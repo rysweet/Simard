@@ -9,7 +9,7 @@ use simard::bridge_subprocess::SubprocessBridgeTransport;
 use simard::error::SimardError;
 
 fn echo_bridge_script() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python/bridge_server.py")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/echo_bridge.py")
 }
 
 fn echo_transport() -> SubprocessBridgeTransport {
