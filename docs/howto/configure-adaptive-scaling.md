@@ -84,8 +84,9 @@ The scaler uses AIMD (Additive Increase / Multiplicative Decrease):
 - **Medium pressure** (0.3–0.8, no 429s): hold steady.
 
 The concurrency is bounded by a floor (default: 1) and ceiling
-(default: 8). The floor guarantees at least one engineer dispatch per
-cycle even under maximum pressure.
+(default: `max_concurrent_actions × 4`, e.g. 20 when the base is 5).
+The floor guarantees at least one engineer dispatch per cycle even
+under maximum pressure.
 
 ---
 
@@ -155,11 +156,17 @@ set a static value.
 
 ### Want to change the floor or ceiling
 
-The floor (1) and ceiling (8) are currently compile-time constants. If
-your host can support more than 8 concurrent engineers, or you want a
-higher floor, this requires a code change in
-`src/ooda_loop/adaptive_scaling.rs`. Environment-variable overrides for
-floor and ceiling are a candidate for a follow-up issue.
+The floor is always 1. The ceiling defaults to `max_concurrent_actions × 4`
+(computed from `OodaConfig`). To change the effective ceiling, adjust
+`SIMARD_MAX_CONCURRENT_ACTIONS`:
+
+```bash
+# Base=3 → ceiling=12, base=10 → ceiling=40
+SIMARD_MAX_CONCURRENT_ACTIONS=10 SIMARD_SCALING=auto simard ooda run
+```
+
+Environment-variable overrides for independent floor and ceiling values
+are a candidate for a follow-up issue.
 
 ---
 

@@ -145,6 +145,7 @@ hang in one phase cannot consume the others' budgets.
                                      ▼
                   ┌─────────────────────────────────────┐
                   │   write_goal_records(decisions)     │
+                  │   + fallback_goal_decisions()       │
                   │   FileBackedGoalStore → goal_store  │
                   │   .json (best-effort, non-fatal)    │
                   └──────────────────┬──────────────────┘
@@ -170,27 +171,36 @@ handoff artifact.
 **Implementation:**
 
 ```rust
-// In closing.rs, after structured_decisions is built:
-if !structured_decisions.is_empty() {
-    let store = FileBackedGoalStore::try_new(
-        crate::state_root::goal_store_path(),
-    );
-    if let Ok(store) = store {
-        for (i, decision) in structured_decisions.iter().enumerate() {
-            let record = GoalRecord {
-                id: goal_slug(&decision.description),
-                title: decision.description.clone(),
-                status: GoalStatus::Active,
-                priority: (i + 1) as u32,
-                // ... other fields
-            };
-            if let Err(e) = store.put(record) {
-                eprintln!("[meeting] failed to write goal record: {e}");
-            }
-        }
-    }
-}
+// In closing.rs — shared by close() and finalize_partial():
+let decisions_for_goals = if structured_decisions.is_empty() {
+    fallback_goal_decisions(
+        self.explicit_goal.as_deref(),
+        &self.topic,
+        &self.history,
+    )
+} else {
+    structured_decisions.clone()
+};
+write_goals_from_decisions(&decisions_for_goals);
 ```
+
+**Fallback goal synthesis (issue #2182):**
+
+When `structured_decisions` is empty (e.g., the summarizer timed out),
+the `fallback_goal_decisions()` function synthesizes decisions from:
+
+1. **Topic + explicit goal:** If the meeting topic contains "goal"
+   (case-insensitive) and the operator set `/goal` during the meeting,
+   the goal text becomes a `MeetingDecision`.
+2. **Transcript patterns:** If the transcript contains goal-assignment
+   phrases ("new goal", "assign goal", "accept this goal", etc.) and
+   `/goal` was set, the goal text becomes a decision.
+3. **Guard:** If no explicit `/goal` was recorded, no fallback fires.
+   This prevents accidentally promoting the first user message into an
+   active goal.
+
+The fallback runs in **both** `close()` and `finalize_partial()`, so
+goal writes happen even when the summary phase times out.
 
 **Semantics:**
 
@@ -260,7 +270,7 @@ complete list and parsing notes.
 | `topic` | as set | as set |
 | `started_at` | exact | exact |
 | `closed_at` | exact | exact (wall-clock at timeout fire) |
-| `decisions` | extracted by summarizer | `[]` if summarizer timed out before any output; otherwise whatever the summarizer emitted |
+| `decisions` | extracted by summarizer | `[]` if summarizer timed out and no fallback applies; otherwise whatever the summarizer emitted. **Note:** since issue #2182, goal records may still be written to `goal_store.json` via fallback synthesis even when this field is empty — check the goal store. |
 | `action_items` | extracted by summarizer | `[]` if summarizer timed out; otherwise whatever was emitted |
 | `open_questions` | extracted by summarizer | `[]` on summarizer timeout; otherwise emitted set |
 | `transcript` | full live buffer | full live buffer (the live buffer is in-memory and unaffected by agent timeouts) |

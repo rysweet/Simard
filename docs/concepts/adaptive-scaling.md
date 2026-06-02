@@ -74,7 +74,7 @@ value on the Linux hosts where Simard typically runs.
 | Low pressure threshold | 0.3 | Below this, there is ample headroom to grow |
 | Error window | 300s (5 min) | Matches typical Copilot rate-limit reset periods |
 | Floor | 1 | Always dispatch at least one action |
-| Ceiling | 8 | Default; operators can override |
+| Ceiling | `initial × 4` | Proportional to configured base; prevents runaway |
 
 ### Decision flow
 
@@ -113,11 +113,13 @@ atomic with a CAS loop is lock-free and cheaper than a mutex for this
 use case. `Relaxed` ordering is sufficient because no other shared state
 depends on the visibility of this value.
 
-**Why `Option<Arc<AdaptiveScaler>>` on `OodaState`?** `Option` because
+**Why `Option<Arc<AdaptiveScaler>>` on `OodaConfig`?** `Option` because
 the scaler is only present when `SIMARD_SCALING=auto`. `Arc` because the
 scaler contains internal synchronization (`AtomicU32`, `Mutex` for the
 error window) and may be referenced from multiple action-dispatcher
-threads.
+threads. The field uses `#[serde(skip)]` because the scaler is
+runtime-only — it is reconstructed from the `SIMARD_SCALING` env var
+on boot via `OodaConfig::with_env_scaler()`, not persisted.
 
 **Why not mutate `OodaConfig` directly?** `OodaConfig` is immutable
 after construction and may be shared. Cloning it into an

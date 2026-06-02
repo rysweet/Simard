@@ -76,7 +76,7 @@ impl AdaptiveScaler {
 |-----------|---------|-------------|
 | `initial` | Value of `OodaConfig.max_concurrent_actions` | Starting concurrency level |
 | `floor` | `1` | Minimum concurrency (never scales below this) |
-| `ceiling` | `8` | Maximum concurrency (never scales above this) |
+| `ceiling` | `initial × 4` | Maximum concurrency (scales proportionally to config) |
 
 Bounds are validated on construction:
 
@@ -217,52 +217,86 @@ scaler holds steady at its current value.
 
 ## Integration with the OODA cycle
 
-The scaler is stored as `Option<Arc<AdaptiveScaler>>` on `OodaState`:
+The scaler is stored as `Option<Arc<AdaptiveScaler>>` on `OodaConfig`:
 
 ```rust
-pub struct OodaState {
+pub struct OodaConfig {
     // ... existing fields ...
+    #[serde(skip)]
     pub scaler: Option<Arc<AdaptiveScaler>>,
 }
 ```
 
 `Option` because the scaler is `None` when `SIMARD_SCALING=fixed` or
 unset. `Arc` because the scaler contains atomics and a mutex and may be
-shared across the action dispatcher threads.
+shared across the action dispatcher threads. `#[serde(skip)]` because
+the scaler is runtime-only — it is reconstructed from the
+`SIMARD_SCALING` env var on boot, not persisted to JSON.
+
+When `OodaConfig` is deserialized from a snapshot, the `scaler` field
+defaults to `None`. Call `config.with_env_scaler()` after
+deserialization to reconstruct the scaler from the current environment.
+
+### Construction
+
+The scaler is constructed during `OodaConfig::default()` when
+`SIMARD_SCALING=auto`:
+
+```rust
+let ceiling = max_concurrent_actions.saturating_mul(4).max(1);
+let scaler = Some(Arc::new(AdaptiveScaler::new(
+    max_concurrent_actions, 1, ceiling,
+)));
+```
+
+The ceiling is dynamic: `initial × 4` (e.g., if
+`SIMARD_MAX_CONCURRENT_ACTIONS=5`, ceiling is 20). This scales
+proportionally to the operator's configured baseline rather than
+using a fixed cap.
+
+The same formula is used in `with_env_scaler()` for deserialized
+configs.
 
 ### Per-cycle integration point
 
-In `src/ooda_loop/cycle.rs`, before the Decide phase:
+In `src/ooda_loop/decide.rs`, at the start of `decide_with_brain()`:
 
 ```rust
-// Adjust scaling and build effective config
-let mut effective_config = config.clone();
-if let Some(ref scaler) = state.scaler {
-    effective_config.max_concurrent_actions = scaler.adjust();
-}
-
-// Pass effective config to decide
-let actions = decide_with_brain(&effective_config, &priorities, brain)?;
+let base_limit = config.max_concurrent_actions as usize;
+let limit = if let Some(ref scaler) = config.scaler {
+    scaler.adjust() as usize
+} else {
+    base_limit
+};
 ```
 
-The original `OodaConfig` is never mutated. Each cycle clones the
-config, overrides `max_concurrent_actions` with the scaler's current
-value, and passes the effective config to `decide` / `decide_with_brain`.
+The original `OodaConfig` is never mutated. The scaler's `adjust()`
+return value is used directly as the action limit for the current
+cycle's decide phase.
 
 ### Error reporting
 
-In the action dispatch loop, after an action fails:
+In the action dispatch loop (`cycle.rs`), after an action fails:
 
 ```rust
-if let Err(ref e) = outcome.result {
-    if let Some(ref scaler) = state.scaler {
-        scaler.report_error(e);
+for outcome in &outcomes {
+    if !outcome.success {
+        if let Some(ref scaler) = config.scaler {
+            let err = SimardError::AdapterInvocationFailed {
+                base_type: "unknown".into(),
+                reason: outcome.detail.clone(),
+            };
+            scaler.report_error(&err);
+        }
     }
+    // ... goal tracking, failure counts ...
 }
 ```
 
-This feeds 429 errors back to the scaler for the next cycle's
-`adjust()` call.
+A synthetic `AdapterInvocationFailed` error is constructed from the
+outcome detail. The scaler's `report_error` only acts on errors
+containing 429/rate-limit signals, so the synthetic error is safe for
+all failure types — non-429 errors are silently ignored by the scaler.
 
 ---
 
@@ -296,8 +330,9 @@ Fields:
 src/ooda_loop/
 ├── adaptive_scaling.rs   # AdaptiveScaler, signal parsers, AIMD logic  (~250 LOC)
 ├── mod.rs                # pub mod adaptive_scaling;
-├── cycle.rs              # Integration: scaler.adjust() before decide
-└── types.rs              # OodaState.scaler field
+├── decide.rs             # Integration: scaler.adjust() in decide_with_brain()
+├── cycle.rs              # Integration: scaler.report_error() on failed outcomes
+└── types.rs              # OodaConfig.scaler field (#[serde(skip)])
 ```
 
 ---

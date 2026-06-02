@@ -36,13 +36,20 @@ created on the first `put()` call (e.g., the first meeting close that
 writes goal records, or the first goal-curation run).
 
 If you see the file at a different path (e.g.,
-`$STATE_ROOT/goal_records.json`), this is the legacy location. Rename
-it:
+`$STATE_ROOT/goal_records.json`), this is the legacy location.
+**Automatic migration** handles this: when `FileBackedGoalStore::try_new()`
+opens a path that does not yet exist, it checks for the legacy file and
+copies it to the new location automatically. The migration runs once on
+first boot after the path change. If automatic migration did not run
+(e.g., the `state/` directory already existed but was empty), you can
+migrate manually:
 
 ```bash
 mkdir -p "$STATE_ROOT/state"
-mv "$STATE_ROOT/goal_records.json" "$STATE_ROOT/state/goal_store.json"
+cp "$STATE_ROOT/goal_records.json" "$STATE_ROOT/state/goal_store.json"
 ```
+
+The legacy file is left in place after copying.
 
 ---
 
@@ -105,8 +112,24 @@ echo '[]' > "$STATE_ROOT/state/goal_store.json"
 
 ## 4. Meeting close did not write goals
 
-Check that the meeting produced decisions. The meeting close pipeline
-only writes goal records when `structured_decisions` is non-empty:
+The meeting close pipeline writes goal records directly to the
+file-backed goal store when `structured_decisions` is non-empty. When
+decisions are empty (e.g., the summarizer timed out), a **fallback
+goal synthesis** kicks in:
+
+- If the meeting topic contains "goal" (case-insensitive) **and** an
+  explicit `/goal` was set during the meeting, the goal text becomes a
+  decision.
+- If the transcript contains goal-assignment phrases ("new goal",
+  "assign goal", "accept this goal", etc.) **and** an explicit `/goal`
+  was set, the goal text becomes a decision.
+- The fallback requires an explicit `/goal` to prevent accidentally
+  promoting the first user message into an active goal.
+
+This fallback runs in both the normal `close()` path and the
+`finalize_partial()` timeout path.
+
+To verify what happened:
 
 ```bash
 cat "$STATE_ROOT/meeting_handoffs/meeting_handoff.json" | python3 -c "
@@ -117,14 +140,15 @@ print(f'action_items: {len(h.get(\"action_items\", []))}')
 "
 ```
 
-If `decisions: 0`, the meeting LLM did not extract any decisions. This
-is not a goal store issue — it's a meeting content issue.
+If `decisions: 0` **and** you did not set `/goal` during the meeting,
+no fallback fires. The goal store is updated only when there is
+something to write.
 
-If decisions exist but the goal store was not updated, check for errors
-in the meeting close output:
+If decisions or `/goal` exist but the goal store was not updated,
+check for errors in the meeting close output:
 
 ```bash
-journalctl -u simard --since "10 min ago" | grep -E 'goal_store|GoalStore|goal.write'
+journalctl -u simard --since "10 min ago" | grep -E 'goal_store|GoalStore|goal.write|goal_write'
 ```
 
 ---

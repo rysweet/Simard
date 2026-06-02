@@ -56,13 +56,21 @@ documented in [State-root resolution](./state-root-resolution.md):
 2. ~/.simard/state/goal_store.json            (default)
 ```
 
-> **Migration note.** The previous path was
-> `<state_root>/goal_records.json` (returned by
-> `BootstrapConfig::goal_store_path()`). The config accessor now returns
-> the new canonical path. Operators with existing `goal_records.json`
-> files should rename them to `goal_store.json` under the `state/`
-> subdirectory, or let the first `put()` call create the new file
-> (previous records in the old location are not auto-migrated).
+> **Automatic migration.** The previous path was
+> `<state_root>/goal_records.json`. When `FileBackedGoalStore::try_new()`
+> opens a path that does not yet exist, it checks for the legacy file at
+> `<state_root>/goal_records.json` (computed via
+> `path.parent().parent().join("goal_records.json")`). If the legacy
+> file exists, it is **copied** (not renamed) to the new location and
+> the parent `state/` directory is created if absent. This preserves
+> existing goals on deploy without operator intervention. The copy is
+> idempotent — if the new file already exists, the migration is skipped.
+> A copy failure returns `SimardError::PersistentStoreIo` so the
+> operator sees the error immediately rather than silently starting with
+> an empty store.
+>
+> The legacy file is intentionally left in place after copying so that
+> other code that may still read the old path is not broken.
 
 ---
 
@@ -171,6 +179,13 @@ itself — an empty file is treated as an empty store (`Vec::new()`), and
 a missing file is also treated as empty. The first `put()` call creates
 the file.
 
+Before opening, `try_new()` runs the one-time legacy migration
+described in [Canonical path § Automatic migration](#canonical-path).
+If the new file does not exist but
+`<state_root>/goal_records.json` does, the legacy file is copied to
+the new path. This ensures a seamless upgrade on first boot after the
+path change.
+
 ---
 
 ## Error handling
@@ -182,6 +197,7 @@ the file.
 | Lockfile cannot be created | Returns `SimardError::GoalStoreLockFailed` |
 | Write fails (ENOSPC, EACCES) | Returns `SimardError::GoalStorePersistFailed`; in-memory cache is **not** updated |
 | Rename fails after temp write | Returns error; temp file is cleaned up |
+| Legacy migration copy fails | Returns `SimardError::PersistentStoreIo` with `action: "migrate-legacy-goals"` — the store does not open |
 
 No error is silently swallowed. All errors propagate to callers.
 
