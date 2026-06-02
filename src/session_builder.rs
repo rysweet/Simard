@@ -180,10 +180,25 @@ impl SessionBuilder {
 
     /// Open a session using the configured LLM provider.
     ///
+    /// For [`OperatingMode::Meeting`], uses [`PersistentAgentProxy`] which
+    /// spawns a persistent interactive agent session (issue #2179). For all
+    /// other modes, uses the per-turn adapter (CopilotSdkAdapter or
+    /// RustyClawdAdapter).
+    ///
     /// Returns `Ok(session)` on success, `Err` with a diagnostic message
     /// describing exactly which step failed.
     #[tracing::instrument(skip(self), fields(provider = ?self.provider, tag = %self.adapter_tag))]
     pub fn open(self) -> Result<Box<dyn BaseTypeSession>, String> {
+        // Meeting mode: use persistent interactive proxy (issue #2179)
+        if self.mode == OperatingMode::Meeting {
+            let mut proxy = crate::meeting_backend::agent_proxy::PersistentAgentProxy::new()
+                .map_err(|e| format!("PersistentAgentProxy::new: {e}"))?;
+            proxy
+                .open()
+                .map_err(|e| format!("PersistentAgentProxy::open: {e}"))?;
+            return Ok(Box::new(proxy));
+        }
+
         // Inline request construction to move prompt_assets instead of cloning.
         let request = BaseTypeSessionRequest {
             session_id: SessionId::from_uuid(uuid::Uuid::now_v7()),

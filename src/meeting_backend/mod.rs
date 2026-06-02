@@ -4,6 +4,7 @@
 //! delegation (via `BaseTypeSession::run_turn()`), and persistence. The CLI
 //! REPL and dashboard WebSocket are thin adapters around this struct.
 
+pub mod agent_proxy;
 pub mod close_guard;
 pub mod command;
 pub mod lightweight;
