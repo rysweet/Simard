@@ -38,7 +38,12 @@ pub fn decide_with_brain(
     config: &OodaConfig,
     brain: &dyn OodaDecideBrain,
 ) -> SimardResult<Vec<PlannedAction>> {
-    let limit = config.max_concurrent_actions as usize;
+    let base_limit = config.max_concurrent_actions as usize;
+    let limit = if let Some(ref scaler) = config.scaler {
+        scaler.adjust() as usize
+    } else {
+        base_limit
+    };
     let fallback = DeterministicFallbackDecideBrain;
     let mut actions = Vec::with_capacity(limit);
     for priority in priorities {
@@ -480,5 +485,73 @@ mod tests {
         );
 
         reset_consecutive_count_for_tests(BrainPhase::Decide, goal_id);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #2182: AIMD scaler wire-in tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn decide_uses_scaler_adjusted_limit_when_scaler_is_present() {
+        use crate::ooda_loop::adaptive_scaling::AdaptiveScaler;
+        use std::sync::Arc;
+
+        // Create a scaler with floor=ceiling=2 so adjust() always returns 2.
+        let scaler = Arc::new(AdaptiveScaler::new(2, 2, 2));
+        let priorities = vec![
+            Priority {
+                goal_id: "g1".to_string(),
+                urgency: 0.9,
+                reason: "a".to_string(),
+            },
+            Priority {
+                goal_id: "g2".to_string(),
+                urgency: 0.8,
+                reason: "b".to_string(),
+            },
+            Priority {
+                goal_id: "g3".to_string(),
+                urgency: 0.7,
+                reason: "c".to_string(),
+            },
+        ];
+        let config = OodaConfig {
+            max_concurrent_actions: 10, // would allow all 3 without scaler
+            scaler: Some(scaler),
+            ..Default::default()
+        };
+        let actions = decide(&priorities, &config).unwrap();
+        assert_eq!(
+            actions.len(),
+            2,
+            "scaler capped at 2 should override max_concurrent_actions=10"
+        );
+    }
+
+    #[test]
+    fn decide_ignores_scaler_when_none() {
+        let priorities = vec![
+            Priority {
+                goal_id: "g1".to_string(),
+                urgency: 0.9,
+                reason: "a".to_string(),
+            },
+            Priority {
+                goal_id: "g2".to_string(),
+                urgency: 0.8,
+                reason: "b".to_string(),
+            },
+        ];
+        let config = OodaConfig {
+            max_concurrent_actions: 1,
+            scaler: None,
+            ..Default::default()
+        };
+        let actions = decide(&priorities, &config).unwrap();
+        assert_eq!(
+            actions.len(),
+            1,
+            "without scaler, max_concurrent_actions=1 should cap to 1"
+        );
     }
 }

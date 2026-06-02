@@ -228,16 +228,35 @@ pub struct OodaConfig {
     pub daily_budget_usd: f64,
     /// Weekly budget in USD (from SIMARD_WEEKLY_BUDGET_USD env or dashboard).
     pub weekly_budget_usd: f64,
+    /// AIMD adaptive scaler. Populated when `SIMARD_SCALING=auto`.
+    /// Skipped during (de)serialization — reconstructed from env on boot.
+    #[serde(skip)]
+    pub scaler: Option<std::sync::Arc<super::adaptive_scaling::AdaptiveScaler>>,
 }
 
 impl Default for OodaConfig {
     fn default() -> Self {
+        let max_concurrent_actions = env_u32("SIMARD_MAX_CONCURRENT_ACTIONS", 5);
+        let scaler = match std::env::var("SIMARD_SCALING").as_deref() {
+            Ok("auto") => {
+                let ceiling = max_concurrent_actions.saturating_mul(4).max(1);
+                Some(std::sync::Arc::new(
+                    super::adaptive_scaling::AdaptiveScaler::new(
+                        max_concurrent_actions,
+                        1,
+                        ceiling,
+                    ),
+                ))
+            }
+            _ => None,
+        };
         Self {
-            max_concurrent_actions: env_u32("SIMARD_MAX_CONCURRENT_ACTIONS", 5),
+            max_concurrent_actions,
             improvement_threshold: 0.02,
             gym_suite_id: "progressive".to_string(),
             daily_budget_usd: env_f64("SIMARD_DAILY_BUDGET_USD", 500.0),
             weekly_budget_usd: env_f64("SIMARD_WEEKLY_BUDGET_USD", 2500.0),
+            scaler,
         }
     }
 }

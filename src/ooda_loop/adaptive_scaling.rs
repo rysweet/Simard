@@ -35,6 +35,16 @@ pub struct AdaptiveScaler {
     error_timestamps: Mutex<Vec<u64>>,
 }
 
+impl std::fmt::Debug for AdaptiveScaler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdaptiveScaler")
+            .field("current", &self.current.load(Ordering::Relaxed))
+            .field("floor", &self.floor)
+            .field("ceiling", &self.ceiling)
+            .finish()
+    }
+}
+
 impl AdaptiveScaler {
     /// Creates a new scaler with clamped bounds:
     /// - `floor` is raised to at least 1 (zero would disable dispatch).
@@ -296,5 +306,15 @@ mod tests {
             let m = s.adjust();
             assert!(m >= 1, "should never go below floor of 1, got {m}");
         }
+    }
+
+    #[test]
+    fn debug_impl_shows_current_floor_ceiling() {
+        let s = AdaptiveScaler::new(4, 1, 8);
+        let debug = format!("{s:?}");
+        assert!(debug.contains("AdaptiveScaler"), "Debug output: {debug}");
+        assert!(debug.contains("current: 4"), "Debug output: {debug}");
+        assert!(debug.contains("floor: 1"), "Debug output: {debug}");
+        assert!(debug.contains("ceiling: 8"), "Debug output: {debug}");
     }
 }

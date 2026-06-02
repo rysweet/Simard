@@ -514,77 +514,14 @@ impl MeetingBackend {
         // Write GoalRecords directly to the file-backed goal store so goals
         // are available immediately after meeting close, without waiting for
         // the OODA curate cycle to process the handoff artifact.
-        if !structured_decisions.is_empty() {
-            let goal_path = crate::state_root::goal_store_path();
-            if let Some(parent) = goal_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            match crate::goals::FileBackedGoalStore::try_new(&goal_path) {
-                Ok(goal_store) => {
-                    use crate::goals::{GoalRecord as GR, GoalStatus as GS, GoalStore, GoalUpdate};
-                    let session_id = crate::session::SessionId::from_uuid(uuid::Uuid::now_v7());
-                    for (i, decision) in structured_decisions.iter().enumerate() {
-                        let priority = ((i as u8) + 1).min(5);
-                        let update = match GoalUpdate::new(
-                            &decision.description,
-                            format!("[meeting] {}", decision.rationale),
-                            GS::Active,
-                            priority,
-                        ) {
-                            Ok(u) => u,
-                            Err(e) => {
-                                warn!(
-                                    target: "simard::meeting_backend::closing",
-                                    phase = "goal_write",
-                                    error = %e,
-                                    "skipping invalid decision for goal store"
-                                );
-                                continue;
-                            }
-                        };
-                        let record = match GR::from_update(
-                            update,
-                            "simard-meeting-close",
-                            session_id.clone(),
-                            crate::session::SessionPhase::Persistence,
-                        ) {
-                            Ok(r) => r,
-                            Err(e) => {
-                                warn!(
-                                    target: "simard::meeting_backend::closing",
-                                    phase = "goal_write",
-                                    error = %e,
-                                    "skipping invalid goal record"
-                                );
-                                continue;
-                            }
-                        };
-                        if let Err(e) = goal_store.put(record) {
-                            warn!(
-                                target: "simard::meeting_backend::closing",
-                                phase = "goal_write",
-                                error = %e,
-                                "failed to write goal record to store"
-                            );
-                        }
-                    }
-                    info!(
-                        target: "simard::meeting_backend::closing",
-                        phase = "goal_write",
-                        count = structured_decisions.len(),
-                        "meeting.close wrote goal records directly to store"
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        target: "simard::meeting_backend::closing",
-                        phase = "goal_write",
-                        error = %e,
-                        "failed to open goal store for direct writes — goals will be created by OODA curate"
-                    );
-                }
-            }
-        }
+        // Fallback: when structured_decisions is empty but the meeting topic
+        // is goal-related and an explicit /goal was set, synthesize a decision.
+        let decisions_for_goals = if structured_decisions.is_empty() {
+            fallback_goal_decisions(self.explicit_goal.as_deref(), &self.topic, &self.history)
+        } else {
+            structured_decisions.clone()
+        };
+        write_goals_from_decisions(&decisions_for_goals);
 
         // ── Final partial-reason gate ──
         // If we have spent past the master budget by this point but
@@ -760,6 +697,16 @@ impl MeetingBackend {
                 }
             })
             .collect();
+
+        // ── Direct goal writes — same as close() happy path (issue #2182) ──
+        // finalize_partial must also write goals so a summary timeout doesn't
+        // silently drop goal-related decisions.
+        let decisions_for_goals = if structured_decisions.is_empty() {
+            fallback_goal_decisions(self.explicit_goal.as_deref(), &self.topic, &self.history)
+        } else {
+            structured_decisions.clone()
+        };
+        write_goals_from_decisions(&decisions_for_goals);
 
         // Write the markdown report first so its path can flow into
         // the artifacts list of the handoff JSON (issue #1954).
@@ -1011,4 +958,191 @@ fn build_handoff_artifacts(
         });
     }
     out
+}
+
+/// Goal-assignment patterns in transcript text that indicate the meeting
+/// established or accepted a goal even when no `/decision` was recorded.
+const GOAL_PATTERNS: &[&str] = &[
+    "new goal",
+    "assign goal",
+    "accept this goal",
+    "accept that goal",
+    "goal accepted",
+    "goal assigned",
+];
+
+/// Synthesize a fallback `MeetingDecision` when `structured_decisions` is
+/// empty but the meeting was clearly goal-related (issue #2182).
+///
+/// Fires when either:
+/// - the topic contains "goal" (case-insensitive) and an explicit `/goal`
+///   was recorded, OR
+/// - the transcript contains goal-assignment patterns and an explicit `/goal`
+///   was recorded.
+///
+/// Uses `explicit_goal` (not `effective_goal`) to avoid accidentally
+/// promoting the first user message into an active goal.
+fn fallback_goal_decisions(
+    explicit_goal: Option<&str>,
+    topic: &str,
+    history: &[super::types::ConversationMessage],
+) -> Vec<crate::meeting_facilitator::MeetingDecision> {
+    let goal_text = match explicit_goal {
+        Some(g) if !g.trim().is_empty() => g,
+        _ => return Vec::new(),
+    };
+
+    let topic_lower = topic.to_lowercase();
+    let has_goal_topic = topic_lower.contains("goal");
+
+    let has_goal_transcript = history.iter().any(|m| {
+        let lower = m.content.to_lowercase();
+        GOAL_PATTERNS.iter().any(|p| lower.contains(p))
+    });
+
+    if has_goal_topic || has_goal_transcript {
+        vec![crate::meeting_facilitator::MeetingDecision {
+            description: goal_text.to_string(),
+            rationale: format!("[meeting-fallback] inferred from topic '{topic}'"),
+            participants: Vec::new(),
+        }]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Write `MeetingDecision` items directly to the goal store (issue #2182).
+///
+/// Shared by `close()` and `finalize_partial()` so goals are always
+/// persisted regardless of whether the summary phase timed out.
+fn write_goals_from_decisions(decisions: &[crate::meeting_facilitator::MeetingDecision]) {
+    if decisions.is_empty() {
+        return;
+    }
+    let goal_path = crate::state_root::goal_store_path();
+    if let Some(parent) = goal_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match crate::goals::FileBackedGoalStore::try_new(&goal_path) {
+        Ok(goal_store) => {
+            use crate::goals::{GoalRecord as GR, GoalStatus as GS, GoalStore, GoalUpdate};
+            let session_id = crate::session::SessionId::from_uuid(uuid::Uuid::now_v7());
+            for (i, decision) in decisions.iter().enumerate() {
+                let priority = ((i as u8) + 1).min(5);
+                let update = match GoalUpdate::new(
+                    &decision.description,
+                    format!("[meeting] {}", decision.rationale),
+                    GS::Active,
+                    priority,
+                ) {
+                    Ok(u) => u,
+                    Err(e) => {
+                        warn!(
+                            target: "simard::meeting_backend::closing",
+                            phase = "goal_write",
+                            error = %e,
+                            "skipping invalid decision for goal store"
+                        );
+                        continue;
+                    }
+                };
+                let record = match GR::from_update(
+                    update,
+                    "simard-meeting-close",
+                    session_id.clone(),
+                    crate::session::SessionPhase::Persistence,
+                ) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        warn!(
+                            target: "simard::meeting_backend::closing",
+                            phase = "goal_write",
+                            error = %e,
+                            "skipping invalid goal record"
+                        );
+                        continue;
+                    }
+                };
+                if let Err(e) = goal_store.put(record) {
+                    warn!(
+                        target: "simard::meeting_backend::closing",
+                        phase = "goal_write",
+                        error = %e,
+                        "failed to write goal record to store"
+                    );
+                }
+            }
+            info!(
+                target: "simard::meeting_backend::closing",
+                phase = "goal_write",
+                count = decisions.len(),
+                "meeting.close wrote goal records directly to store"
+            );
+        }
+        Err(e) => {
+            warn!(
+                target: "simard::meeting_backend::closing",
+                phase = "goal_write",
+                error = %e,
+                "failed to open goal store for direct writes — goals will be created by OODA curate"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::meeting_backend::types::{ConversationMessage, Role};
+
+    fn msg(role: Role, content: &str) -> ConversationMessage {
+        ConversationMessage {
+            role,
+            content: content.to_string(),
+            timestamp: String::new(),
+        }
+    }
+
+    #[test]
+    fn fallback_goal_decisions_returns_decision_when_topic_contains_goal() {
+        let history = vec![msg(Role::User, "Let's discuss goals")];
+        let result =
+            fallback_goal_decisions(Some("Ship v2 by Friday"), "goal review meeting", &history);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].description, "Ship v2 by Friday");
+        assert!(result[0].rationale.contains("meeting-fallback"));
+    }
+
+    #[test]
+    fn fallback_goal_decisions_returns_decision_when_transcript_mentions_goal_pattern() {
+        let history = vec![msg(Role::User, "Let's accept this goal for the sprint")];
+        let result =
+            fallback_goal_decisions(Some("Improve test coverage"), "sprint planning", &history);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].description, "Improve test coverage");
+    }
+
+    #[test]
+    fn fallback_goal_decisions_returns_empty_without_explicit_goal() {
+        let history = vec![msg(Role::User, "new goal: do stuff")];
+        let result = fallback_goal_decisions(None, "goal review", &history);
+        assert!(result.is_empty(), "no explicit goal → no fallback");
+    }
+
+    #[test]
+    fn fallback_goal_decisions_returns_empty_when_topic_unrelated() {
+        let history = vec![msg(Role::User, "Let's discuss the roadmap")];
+        let result = fallback_goal_decisions(Some("Ship v2"), "roadmap review", &history);
+        assert!(
+            result.is_empty(),
+            "unrelated topic + no patterns → no fallback"
+        );
+    }
+
+    #[test]
+    fn fallback_goal_decisions_returns_empty_for_blank_explicit_goal() {
+        let history = vec![msg(Role::User, "new goal: do stuff")];
+        let result = fallback_goal_decisions(Some("  "), "goal review", &history);
+        assert!(result.is_empty(), "blank explicit goal → no fallback");
+    }
 }

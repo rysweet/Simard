@@ -135,6 +135,29 @@ impl FileBackedGoalStore {
 
     pub fn try_new(path: impl Into<PathBuf>) -> SimardResult<Self> {
         let path = path.into();
+        // One-time migration: goal_records.json → state/goal_store.json (issue #2182).
+        if !path.exists()
+            && let Some(legacy) = path
+                .parent()
+                .and_then(|p| p.parent())
+                .map(|p| p.join("goal_records.json"))
+            && legacy.exists()
+        {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match std::fs::copy(&legacy, &path) {
+                Ok(_) => {
+                    eprintln!("[simard] goal migration: copied {:?} → {:?}", legacy, path);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[simard] goal migration: failed to copy {:?} → {:?}: {e}",
+                        legacy, path
+                    );
+                }
+            }
+        }
         Self::new(
             path,
             BackendDescriptor::for_runtime_type::<Self>(
@@ -344,5 +367,78 @@ mod tests {
         assert_eq!(active.len(), 2);
         assert_eq!(active[0].title, "Keep backlog curated");
         assert_eq!(active[1].title, "Improve meeting handoff");
+    }
+
+    #[test]
+    fn try_new_migrates_legacy_goal_records_json() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_root = tmp.path();
+
+        // Legacy file lives at state_root/goal_records.json
+        let legacy_path = state_root.join("goal_records.json");
+        let records = vec![goal_record("Migrate me", GoalStatus::Active, 1)];
+        let json = serde_json::to_string(&records).expect("serialize");
+        std::fs::write(&legacy_path, &json).expect("write legacy");
+
+        // New path: state_root/state/goal_store.json
+        let new_path = state_root.join("state").join("goal_store.json");
+        assert!(
+            !new_path.exists(),
+            "new path should not exist before migration"
+        );
+
+        let store = FileBackedGoalStore::try_new(&new_path).expect("try_new should succeed");
+        let loaded = store.list().expect("list should succeed");
+        assert_eq!(
+            loaded.len(),
+            1,
+            "migration should have copied the legacy records"
+        );
+        assert_eq!(loaded[0].title, "Migrate me");
+
+        // Legacy file should still exist (copy, not rename)
+        assert!(
+            legacy_path.exists(),
+            "legacy file should still exist after migration"
+        );
+    }
+
+    #[test]
+    fn try_new_does_not_migrate_when_new_path_exists() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_root = tmp.path();
+
+        // Create both files with different content
+        let legacy_path = state_root.join("goal_records.json");
+        let legacy_records = vec![goal_record("Legacy", GoalStatus::Active, 1)];
+        std::fs::write(
+            &legacy_path,
+            serde_json::to_string(&legacy_records).unwrap(),
+        )
+        .expect("write legacy");
+
+        let new_dir = state_root.join("state");
+        std::fs::create_dir_all(&new_dir).expect("create dir");
+        let new_path = new_dir.join("goal_store.json");
+        let new_records = vec![goal_record("Current", GoalStatus::Active, 1)];
+        std::fs::write(&new_path, serde_json::to_string(&new_records).unwrap()).expect("write new");
+
+        let store = FileBackedGoalStore::try_new(&new_path).expect("try_new should succeed");
+        let loaded = store.list().expect("list");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].title, "Current",
+            "should load new file, not migrate"
+        );
+    }
+
+    #[test]
+    fn try_new_no_legacy_file_creates_empty_store() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let new_path = tmp.path().join("state").join("goal_store.json");
+
+        let store = FileBackedGoalStore::try_new(&new_path).expect("try_new should succeed");
+        let loaded = store.list().expect("list");
+        assert!(loaded.is_empty(), "no legacy file → empty store");
     }
 }
