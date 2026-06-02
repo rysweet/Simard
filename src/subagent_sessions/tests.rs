@@ -249,3 +249,121 @@ fn sanitize_id_output_matches_safe_charset() {
     );
     assert!(!out.is_empty());
 }
+
+// -----------------------------------------------------------------------
+// Hard cap on MAX_SESSIONS (issue #2183)
+// -----------------------------------------------------------------------
+
+#[test]
+#[serial_test::serial]
+fn record_spawn_enforces_max_sessions_cap() {
+    with_state_root("cap", |_root| {
+        // Pre-populate with MAX_SESSIONS ended sessions.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let mut reg = Registry {
+            sessions: Vec::new(),
+        };
+        for i in 0..MAX_SESSIONS {
+            reg.sessions.push(SubagentSession {
+                ended_at: Some(now - (i as i64)),
+                ..sample(&format!("old-{i}"), Some(now - (i as i64)))
+            });
+        }
+        save_atomic(&reg).unwrap();
+
+        // Adding one more should prune oldest ended entries.
+        record_spawn(sample("new-one", None)).unwrap();
+
+        let loaded = load();
+        assert!(
+            loaded.sessions.len() <= MAX_SESSIONS,
+            "registry must not exceed MAX_SESSIONS ({}), got {}",
+            MAX_SESSIONS,
+            loaded.sessions.len(),
+        );
+        // The new active session must be present.
+        assert!(
+            loaded.sessions.iter().any(|s| s.agent_id == "new-one"),
+            "new active session must not be evicted by cap"
+        );
+    });
+}
+
+#[test]
+#[serial_test::serial]
+fn cap_preserves_active_sessions() {
+    with_state_root("cap-active", |_root| {
+        // Fill with active (ended_at=None) sessions at the cap.
+        let mut reg = Registry {
+            sessions: Vec::new(),
+        };
+        for i in 0..MAX_SESSIONS {
+            reg.sessions.push(sample(&format!("active-{i}"), None));
+        }
+        save_atomic(&reg).unwrap();
+
+        // Adding another active session — cap enforcement can't evict
+        // active sessions, so we tolerate exceeding the cap temporarily.
+        record_spawn(sample("new-active", None)).unwrap();
+
+        let loaded = load();
+        assert_eq!(
+            loaded.sessions.len(),
+            MAX_SESSIONS + 1,
+            "all active sessions must be preserved even over the cap"
+        );
+    });
+}
+
+// -----------------------------------------------------------------------
+// gc_with_retention (issue #2183)
+// -----------------------------------------------------------------------
+
+#[test]
+#[serial_test::serial]
+fn gc_with_retention_uses_tight_threshold() {
+    with_state_root("gc-tight", |_root| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // One session ended 2 hours ago, another ended 30 minutes ago.
+        let old = SubagentSession {
+            ended_at: Some(now - 7200),
+            ..sample("ended-2h", Some(now - 7200))
+        };
+        let recent = SubagentSession {
+            ended_at: Some(now - 1800),
+            ..sample("ended-30m", Some(now - 1800))
+        };
+        save_atomic(&Registry {
+            sessions: vec![old, recent],
+        })
+        .unwrap();
+
+        // With 1-hour tight retention, the 2h-old entry should be pruned.
+        let probe = StubProbe {
+            alive_set: HashSet::new(),
+            queries: RefCell::new(Vec::new()),
+        };
+        let pruned = gc_with_retention(&probe, TIGHT_RETENTION_SECONDS).unwrap();
+        assert_eq!(
+            pruned, 1,
+            "entry ended >1h ago should be pruned with tight retention"
+        );
+
+        let reg = load();
+        assert!(
+            reg.sessions.iter().any(|s| s.agent_id == "ended-30m"),
+            "entry ended <1h ago must be retained"
+        );
+        assert!(
+            !reg.sessions.iter().any(|s| s.agent_id == "ended-2h"),
+            "entry ended >1h ago must be pruned"
+        );
+    });
+}

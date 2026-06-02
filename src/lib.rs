@@ -59,6 +59,7 @@ pub mod memory_bridge;
 pub mod memory_bridge_adapter;
 pub mod memory_cognitive;
 pub mod memory_consolidation;
+pub mod memory_health;
 pub mod memory_hive;
 pub mod memory_ipc;
 pub mod memory_snapshot;

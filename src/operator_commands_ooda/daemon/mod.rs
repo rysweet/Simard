@@ -542,7 +542,7 @@ pub fn run_ooda_daemon(
         }
         // -------------------------------------------------------------------
 
-        // ── RSS health check (issue #2167) ──────────────────────────────
+        // ── RSS health check (issue #2167) / memory shedding (issue #2183) ─
         if let Some(report) = crate::rss_health::check_rss_health() {
             let rss_str = crate::rss_health::format_rss(report.rss_bytes);
             if report.critical {
@@ -557,6 +557,21 @@ pub fn run_ooda_daemon(
                 );
             } else {
                 daemon_log(&state_root, &format!("[simard] RSS health: {rss_str}"));
+            }
+
+            // Emergency memory shedding when RSS exceeds the elevated
+            // threshold (default 8 GiB, env SIMARD_RSS_ELEVATED_BYTES).
+            if report.rss_bytes >= crate::memory_health::elevated_threshold_bytes() {
+                daemon_log(
+                    &state_root,
+                    &format!(
+                        "[simard] RSS {} exceeds elevated threshold — running emergency shed",
+                        rss_str
+                    ),
+                );
+                let shed =
+                    crate::memory_health::run_emergency_shed(shared_mem.as_ref(), &state_root);
+                daemon_log(&state_root, &format!("[simard] {}", shed.summary()));
             }
         }
         // ── Periodic engineer worktree sweep (issue #2167) ──────────────

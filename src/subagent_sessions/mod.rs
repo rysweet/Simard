@@ -12,8 +12,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-/// Sessions ended more than this many seconds ago are GC'd.
+/// Sessions ended more than this many seconds ago are GC'd (default).
+/// Configurable via `SIMARD_SUBAGENT_RETENTION_SECONDS`.
 pub const RETENTION_SECONDS: i64 = 86_400;
+
+/// Tight retention used during emergency memory shedding (1 hour).
+pub const TIGHT_RETENTION_SECONDS: i64 = 3_600;
+
+/// Hard cap on the number of registry entries. When exceeded during
+/// `record_spawn`, ended sessions are pruned oldest-first until the
+/// count is within the cap.
+pub const MAX_SESSIONS: usize = 500;
 
 /// One row in the registry.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,14 +153,69 @@ pub fn save_atomic(reg: &Registry) -> io::Result<()> {
 }
 
 /// Append a new session record (load → push → save_atomic).
+///
+/// If the registry exceeds [`MAX_SESSIONS`] after the push, ended
+/// sessions are pruned oldest-first until the count is within the cap.
+/// Active (non-ended) sessions are never dropped by the cap.
 pub fn record_spawn(session: SubagentSession) -> io::Result<()> {
     let mut reg = load();
     reg.sessions.push(session);
+    enforce_cap(&mut reg);
     save_atomic(&reg)
 }
 
-/// Mark dead sessions as ended; GC entries ended >24h ago.
+/// Enforce [`MAX_SESSIONS`] by dropping the oldest ended sessions.
+fn enforce_cap(reg: &mut Registry) {
+    if reg.sessions.len() <= MAX_SESSIONS {
+        return;
+    }
+    // Sort ended sessions by ended_at ascending (oldest first) and drop
+    // enough to get under the cap. Active sessions are never touched.
+    let excess = reg.sessions.len() - MAX_SESSIONS;
+    let mut ended_indices: Vec<usize> = reg
+        .sessions
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| s.ended_at.map(|ts| (i, ts)))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|(i, _ts)| i)
+        .collect();
+
+    // Sort by ended_at ascending (oldest first).
+    ended_indices.sort_by_key(|&i| reg.sessions[i].ended_at.unwrap_or(i64::MAX));
+
+    let to_remove: std::collections::HashSet<usize> =
+        ended_indices.into_iter().take(excess).collect();
+    if !to_remove.is_empty() {
+        let mut idx = 0;
+        reg.sessions.retain(|_| {
+            let keep = !to_remove.contains(&idx);
+            idx += 1;
+            keep
+        });
+        tracing::info!(
+            target: "simard::subagent_sessions",
+            removed = to_remove.len(),
+            remaining = reg.sessions.len(),
+            "enforced MAX_SESSIONS cap",
+        );
+    }
+}
+
+/// Mark dead sessions as ended; GC entries ended longer ago than
+/// [`RETENTION_SECONDS`].
+///
+/// Retention is read from `SIMARD_SUBAGENT_RETENTION_SECONDS` env var at
+/// call time, falling back to the compiled-in [`RETENTION_SECONDS`].
 pub fn poll_and_gc<R: SessionProbe>(probe: &R) -> io::Result<()> {
+    let retention = configured_retention();
+    gc_with_retention(probe, retention).map(|_| ())
+}
+
+/// Like [`poll_and_gc`] but with an explicit retention threshold. Returns
+/// the number of entries pruned.
+pub fn gc_with_retention<R: SessionProbe>(probe: &R, retention_secs: i64) -> io::Result<usize> {
     let mut reg = load();
     let now = now_epoch_seconds();
 
@@ -172,7 +236,7 @@ pub fn poll_and_gc<R: SessionProbe>(probe: &R) -> io::Result<()> {
 
     let before = reg.sessions.len();
     reg.sessions.retain(|s| match s.ended_at {
-        Some(end) => now - end <= RETENTION_SECONDS,
+        Some(end) => now - end <= retention_secs,
         None => true,
     });
     let pruned = before - reg.sessions.len();
@@ -180,11 +244,21 @@ pub fn poll_and_gc<R: SessionProbe>(probe: &R) -> io::Result<()> {
         tracing::info!(
             target: "simard::subagent_sessions",
             pruned,
-            "GC'd subagent sessions ended >24h ago",
+            retention_secs,
+            "GC'd subagent sessions older than retention threshold",
         );
     }
 
-    save_atomic(&reg)
+    save_atomic(&reg)?;
+    Ok(pruned)
+}
+
+/// Read retention from env or return the compiled-in default.
+fn configured_retention() -> i64 {
+    std::env::var("SIMARD_SUBAGENT_RETENTION_SECONDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(RETENTION_SECONDS)
 }
 
 /// Sanitize an agent_id for use in a tmux session name.
