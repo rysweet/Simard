@@ -1,14 +1,14 @@
 //! Integration tests for the knowledge bridge and planning context enrichment.
 //!
 //! These tests use an in-memory bridge transport to verify the full contract
-//! without requiring a running Python bridge server or installed knowledge packs.
+//! without requiring installed knowledge packs.
 
 use simard::bridge::{BRIDGE_ERROR_METHOD_NOT_FOUND, BridgeErrorPayload};
 use simard::bridge_subprocess::InMemoryBridgeTransport;
 use simard::knowledge_bridge::{KnowledgeBridge, KnowledgePackInfo};
 use simard::knowledge_context::{PlanningContext, enrich_planning_context};
 
-/// Build a mock transport that simulates the Python knowledge bridge server.
+/// Build a mock transport that simulates the knowledge bridge.
 fn mock_knowledge_transport() -> InMemoryBridgeTransport {
     InMemoryBridgeTransport::new("knowledge-integration", |method, params| match method {
         "bridge.health" => Ok(serde_json::json!({

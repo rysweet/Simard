@@ -126,21 +126,21 @@ See [Base Type Adapters](../reference/base-type-adapters.md) for the full refere
 
 ### Bridge Infrastructure
 
-Simard communicates with the Python ecosystem through subprocess bridges using newline-delimited JSON on stdin/stdout:
+Simard's bridge abstraction provides typed RPC for knowledge and gym operations, now using native in-process Rust transports:
 
 ```
-Simard (Rust) ──stdin──→ Python subprocess ──→ amplihack-memory-lib (LadybugDB)
-              ←stdout──                    ──→ agent-kgpacks (LadybugDB)
-                                           ──→ amplihack-agent-eval
+Simard (Rust) ──NativeBridgeTransport──→ In-process knowledge handlers (LadybugDB)
+              ──NativeBridgeTransport──→ In-process gym/eval handlers
 ```
 
 Each bridge has:
 - A Rust trait (`BridgeTransport`) with typed request/response methods
 - An `InMemoryBridgeTransport` for unit testing
-- A `SubprocessBridgeTransport` for production
+- A `NativeBridgeTransport` for production (in-process Rust)
+- A `SubprocessBridgeTransport` for generic subprocess needs
 - A `CircuitBreakerTransport` wrapper for fault tolerance
 
-See [Bridge Pattern](bridge-pattern.md) for wire protocol details.
+See [Bridge Pattern](bridge-pattern.md) for protocol details.
 
 ### Cognitive Memory
 

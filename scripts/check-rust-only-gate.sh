@@ -16,9 +16,6 @@ set -euo pipefail
 # Each entry is tracked by the Rust-only epic (#2155). Remove entries as the
 # corresponding rewrite issues (#2156, #2157) are completed.
 ALLOWED_PY_FILES=(
-  "python/bridge_server.py"
-  "python/simard_gym_bridge.py"
-  "python/simard_knowledge_bridge.py"
 )
 
 ALLOWED_JS_TS_FILES=(

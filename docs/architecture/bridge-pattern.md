@@ -1,14 +1,14 @@
 ---
 title: Bridge Pattern
-description: How Simard communicates with the Python ecosystem through subprocess bridges with JSON-line protocol and circuit breaker fault tolerance.
-last_updated: 2026-04-13
+description: How Simard's bridge abstraction provides typed RPC interfaces with circuit breaker fault tolerance, now implemented as native Rust transports.
+last_updated: 2026-06-02
 owner: simard
 doc_type: concept
 ---
 
 # Bridge Pattern
 
-Simard is Rust. The amplihack ecosystem (memory-lib, kg-packs, agent-eval) is Python. Rather than rewrite the ecosystem in Rust or use FFI, Simard communicates through **subprocess bridges** — Python processes that speak a simple JSON-line protocol on stdin/stdout.
+Simard uses a **bridge abstraction** for typed RPC to knowledge packs and gym evaluations. The bridges were originally implemented as Python subprocess processes speaking a JSON-line protocol on stdin/stdout, but have been fully replaced by native Rust transports (`NativeBridgeTransport`). The `SubprocessBridgeTransport` still exists as a generic mechanism for any future subprocess needs, but all production bridges now run in-process.
 
 ## Why Bridges?
 
@@ -16,14 +16,11 @@ Simard is Rust. The amplihack ecosystem (memory-lib, kg-packs, agent-eval) is Py
 |----------|------|------|
 | **PyO3 FFI** | Zero-copy, native speed | Tight coupling, GIL contention, complex build |
 | **HTTP/gRPC** | Standard, debuggable | Server lifecycle, port management, overhead |
-| **Subprocess bridges** | Simple, isolated, no dependencies | Serialization overhead, process lifecycle |
+| **Native in-process** | Zero serialization, no process lifecycle | All code must be Rust |
 
-Bridges win because:
-- The Python ecosystem already works — we don't want to port 3,000+ LOC of production Python code
-- Process isolation means a Python crash can't take down Simard
-- The circuit breaker pattern handles intermittent failures gracefully
+Native in-process bridges are the current implementation. All knowledge and gym operations run directly in the Simard process via `NativeBridgeTransport`.
 
-> **Note**: The memory bridge has been replaced by a native Rust implementation (`NativeCognitiveMemory`) that talks directly to LadybugDB via the `lbug` crate. See [Cognitive Memory Architecture](cognitive-memory.md). The bridge pattern remains in use for knowledge and gym bridges.
+> **History**: The memory bridge was replaced by `NativeCognitiveMemory` (issue #512). Knowledge and gym bridges were replaced by `NativeBridgeTransport` (PR #2172, issue #2181). See [Cognitive Memory Architecture](cognitive-memory.md).
 
 ## Wire Protocol
 
@@ -144,13 +141,13 @@ The built-in `bridge.health` method is always registered and returns `{"server_n
 ### Data Loss Prevention
 
 - Memory writes are idempotent (LadybugDB `node_id` is primary key)
-- Python bridge wraps each write in a LadybugDB transaction
-- If bridge dies mid-write, the transaction rolls back
-- On reconnect, Simard re-issues the last failed write
+- Native memory wraps each write in a LadybugDB transaction
+- On failure, the transaction rolls back
+- Simard re-issues the last failed write on retry
 
 ## Testing
 
-### Unit Tests (no Python needed)
+### Unit Tests (no subprocess needed)
 
 ```rust
 let transport = InMemoryBridgeTransport::echo("test");
@@ -158,12 +155,13 @@ let response = transport.call(health_request()).unwrap();
 assert!(response.result.is_some());
 ```
 
-### Integration Tests (real Python subprocess)
+### Integration Tests (SubprocessBridgeTransport)
 
 ```rust
+// Uses tests/fixtures/echo_bridge.py as a test fixture
 let transport = SubprocessBridgeTransport::new(
     "echo-test",
-    "python/bridge_server.py",
+    "tests/fixtures/echo_bridge.py",
     vec![],
     Duration::from_secs(5),
 );

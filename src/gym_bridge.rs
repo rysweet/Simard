@@ -85,7 +85,7 @@ pub struct GymSuiteResult {
 
 /// Bridge client for gym evaluations.
 ///
-/// Wraps a [`BridgeTransport`] to call the Python gym bridge server.
+/// Wraps a [`BridgeTransport`] to call the native Rust gym transport.
 /// Each method maps to a single bridge RPC call.
 pub struct GymBridge {
     transport: Box<dyn BridgeTransport>,

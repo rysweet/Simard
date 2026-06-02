@@ -2,8 +2,8 @@
 //!
 //! This module wraps a [`BridgeTransport`] to provide a typed interface for
 //! querying knowledge graph packs, listing available packs, and retrieving
-//! pack metadata. The Python side (`simard_knowledge_bridge.py`) handles the
-//! actual KnowledgeGraphAgent and PackRegistry interactions.
+//! pack metadata. The native Rust transport (`native_knowledge.rs`) handles
+//! the KnowledgeGraphAgent and PackRegistry interactions in-process.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -61,8 +61,8 @@ pub struct KnowledgePackInfo {
 /// Typed client for the knowledge graph pack bridge.
 ///
 /// All methods delegate to the underlying [`BridgeTransport`] using the
-/// bridge JSON-line protocol. The Python bridge server maps these to
-/// KnowledgeGraphAgent and PackRegistry calls.
+/// bridge JSON-line protocol. The native Rust transport maps these to
+/// KnowledgeGraphAgent and PackRegistry calls in-process.
 pub struct KnowledgeBridge {
     transport: Box<dyn BridgeTransport>,
 }
