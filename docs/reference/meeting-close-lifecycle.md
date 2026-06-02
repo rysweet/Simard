@@ -144,12 +144,79 @@ hang in one phase cannot consume the others' budgets.
                                      │
                                      ▼
                   ┌─────────────────────────────────────┐
+                  │   write_goal_records(decisions)     │
+                  │   FileBackedGoalStore → goal_store  │
+                  │   .json (best-effort, non-fatal)    │
+                  └──────────────────┬──────────────────┘
+                                     │
+                                     ▼
+                  ┌─────────────────────────────────────┐
                   │   persist_handoff(state_root)       │
                   │   single-shot fs::write per file    │
                   │   (atomic-rename hardening tracked  │
                   │    separately — see follow-up)      │
                   └─────────────────────────────────────┘
 ```
+
+### Direct goal record writes (issue #2182)
+
+After structured decisions are built and before the handoff is persisted,
+the close pipeline writes goal records directly to the file-backed goal
+store. This gives immediate query visibility — consumers that read
+`goal_store.json` (meeting backend, engineer loop, dashboard probes) see
+the new goals without waiting for the OODA curate phase to process the
+handoff artifact.
+
+**Implementation:**
+
+```rust
+// In closing.rs, after structured_decisions is built:
+if !structured_decisions.is_empty() {
+    let store = FileBackedGoalStore::try_new(
+        crate::state_root::goal_store_path(),
+    );
+    if let Ok(store) = store {
+        for (i, decision) in structured_decisions.iter().enumerate() {
+            let record = GoalRecord {
+                id: goal_slug(&decision.description),
+                title: decision.description.clone(),
+                status: GoalStatus::Active,
+                priority: (i + 1) as u32,
+                // ... other fields
+            };
+            if let Err(e) = store.put(record) {
+                eprintln!("[meeting] failed to write goal record: {e}");
+            }
+        }
+    }
+}
+```
+
+**Semantics:**
+
+- The write uses the same `FileBackedGoalStore` with flock locking that
+  `bootstrap::assembly` constructs, ensuring no races with the daemon.
+- This is **best-effort and non-fatal** — a failure to write goal
+  records does not abort the close pipeline. The handoff artifact is
+  still written and the OODA curate phase will create the goals on
+  its next cycle.
+- `goal_slug()` generates the same slug that `check_meeting_handoffs()`
+  in `curate.rs` uses, so when the curate phase processes the handoff
+  later, it deduplicates against the already-existing record.
+- Only `MeetingDecision`s are written as goal records. `ActionItem`s
+  continue to flow exclusively through the handoff→curate→backlog path.
+
+**Dual-write divergence:** After meeting close, a new goal exists in
+both the file-backed goal store and the handoff artifact. The OODA
+curate phase independently processes the handoff and adds goals to the
+in-memory `GoalBoard`. Because both paths use the same `goal_slug()`,
+the curate phase's deduplication prevents double-creation. The file
+store and cognitive-memory `GoalBoard` converge after one OODA cycle.
+
+See [File-backed goal store reference](./file-backed-goal-store.md) for
+the locking protocol and
+[operations/meeting-handoffs.md](../operations/meeting-handoffs.md) for
+the full handoff ingestion flow.
 
 Each phase has three outcomes:
 

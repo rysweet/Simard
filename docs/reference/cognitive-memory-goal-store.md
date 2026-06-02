@@ -1,28 +1,31 @@
 ---
-title: Cognitive-memory goal store adapter
-description: Design reference for CognitiveMemoryGoalStore — the planned GoalStore-trait implementation backed by cognitive memory through the bridge helpers, used by RuntimePorts in bootstrap/assembly.
-last_updated: 2026-05-09
+title: Cognitive-memory goal store adapter (superseded)
+description: Design reference for the CognitiveMemoryGoalStore adapter — superseded by the file-backed GoalStore with flock (issue #2182). Retained for historical context.
+last_updated: 2026-06-02
 owner: simard
 doc_type: reference
 related:
+  - ./file-backed-goal-store.md
   - ./cognitive-memory-bridge-helpers.md
   - ./goal-board-api.md
   - ../concepts/goal-board-persistence.md
+  - ../concepts/file-backed-goal-store-simplification.md
 ---
 
-# Cognitive-memory goal store adapter
+# Cognitive-memory goal store adapter (superseded)
 
-> **Status: design — not yet implemented.** This document describes the
-> `CognitiveMemoryGoalStore` adapter and the
-> `bootstrap::assembly`-level wiring that the issue
-> [#1590](https://github.com/rysweet/Simard/issues/1590) follow-up
-> regression-fix work will introduce. On `main` today,
-> `bootstrap::assembly` constructs an
-> `Arc<FileBackedGoalStore>` for `RuntimePorts.goal_store`, and the
-> ignored `improvement_curation_read_probe_…` test in
-> `tests/improvement_curation.rs` documents this gap. Update this document
-> to drop the "design" banner and the "planned" qualifiers when the
-> adapter lands.
+> **Status: superseded by issue
+> [#2182](https://github.com/rysweet/Simard/issues/2182).** The
+> `CognitiveMemoryGoalStore` design described below was replaced by
+> `FileBackedGoalStore` with advisory flock locking. See
+> [File-backed goal store reference](./file-backed-goal-store.md) for
+> the current production implementation and
+> [File-backed goal store simplification](../concepts/file-backed-goal-store-simplification.md)
+> for the rationale.
+>
+> This document is retained for historical context. The code in
+> `src/goals/cognitive_memory_store.rs` remains in the codebase for
+> test use but is no longer wired into `bootstrap::assembly`.
 
 `CognitiveMemoryGoalStore` will implement the `GoalStore` trait against
 the goal-board snapshot in cognitive memory. It is the production

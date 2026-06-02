@@ -30,6 +30,8 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [How to inspect improvement-curation state](./howto/inspect-improvement-curation-state.md) - Read back the latest approved, deferred, and promoted improvement state without mutation.
 - [How to inspect the durable goal register](./howto/inspect-durable-goal-register.md) - Read back the active top-5 goals and backlog without mutation.
 - [How to recover a corrupted or missing goal board](./howto/recover-goal-board.md) — cognitive-memory-only recovery commands.
+- [How to troubleshoot the file-backed goal store](./howto/troubleshoot-goal-store.md) — operator playbook for goal_store.json issues.
+- [How to configure adaptive scaling](./howto/configure-adaptive-scaling.md) — enable and tune AIMD concurrency scaling.
 
 - [How to run the OODA daemon](./howto/run-ooda-daemon.md) - Start the continuous OODA loop for autonomous goal-driven operation and act on meeting decisions.
 - [How to diagnose OODA decide/orient brain parse failures](./howto/diagnose-decide-orient-parse-failures.md) - Runbook for the silent-fallback fix (#1890): find the ERROR log, read the `parse_failure` cycle-report block, and remediate.
@@ -44,7 +46,8 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [LightweightChatSession reference](./reference/lightweight-chat-session.md) - Direct-subprocess session used for Copilot-provider meeting turns (no PTY overhead).
 - [Terminal session idle detection](./reference/terminal-session-idle-detection.md) - How Simard determines when a PTY session is genuinely idle vs. silently computing.
 - [Cognitive memory bridge helpers](./reference/cognitive-memory-bridge-helpers.md) - `launch_writer_bridge` / `open_reader_bridge` resolution ladder; design notes for the planned in-process Arc shortcut and strict no-silent-degradation contract (issue #1590 follow-up).
-- [Cognitive-memory goal store adapter](./reference/cognitive-memory-goal-store.md) - Design for the planned `GoalStore` implementation that will back `RuntimePorts.goal_store` with cognitive memory (issue #1590 follow-up).
+- [Cognitive-memory goal store adapter](./reference/cognitive-memory-goal-store.md) - Superseded design for the planned `GoalStore` implementation that was replaced by the file-backed store (issue #2182).
+- [File-backed goal store reference](./reference/file-backed-goal-store.md) - Production GoalStore with flock locking at goal_store.json (issue #2182).
 - [String truncation helpers](./reference/string-truncation-helpers.md) - Design for the planned `truncate_to_char_boundary` UTF-8-safe byte-budget helper (issue #1590 follow-up).
 - [Concept: truthful runtime metadata](./concepts/truthful-runtime-metadata.md) - Read the design rationale behind the stricter runtime contract.
 - [Concept: improvement context — denser execution evidence for the engineer loop](./concepts/improvement-context-execution-evidence-gap.md) - Captured improvement-curation context preserving the active "Capture denser execution evidence" goal and the observation that the legacy `simard_operator_probe` surface does not yet expose a terminal engineer-loop probe.
@@ -112,7 +115,10 @@ If you are changing architecture, start with the [architecture overview](./archi
 
 - [Architecture overview](./architecture/overview.md) - System diagram, core principles, component descriptions, and module map.
 - [Goal board persistence](./concepts/goal-board-persistence.md) — cognitive-memory single source of truth.
+- [File-backed goal store simplification](./concepts/file-backed-goal-store-simplification.md) — why GoalStore uses a plain JSON file instead of IPC.
+- [Adaptive scaling](./concepts/adaptive-scaling.md) — AIMD concurrency control for the OODA cycle.
 - [Goal board API reference](./reference/goal-board-api.md) — `active_goals_as_records` adapter and load/save semantics.
+- [Adaptive scaling API reference](./reference/adaptive-scaling-api.md) — AdaptiveScaler Rust API and integration.
 
 - [Agent composition](./architecture/agent-composition.md) - How Simard composes subordinate agents with goal assignment, supervision, and crash recovery.
 - [Cognitive memory](./architecture/cognitive-memory.md) - Six-type memory model, session lifecycle mapping, and hive mind integration.

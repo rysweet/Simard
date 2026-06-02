@@ -50,6 +50,15 @@ The daemon dispatches one action per cycle. Action kinds include:
 | `research` | Issue a focused research query and persist findings. |
 | `assess-only` | When a goal cannot be safely dispatched (e.g. ambiguous scope), record the assessment and defer. |
 
+The maximum number of concurrent actions dispatched per cycle is
+controlled by `max_concurrent_actions`. When `SIMARD_SCALING=auto` is
+set, this value is dynamically adjusted each cycle by the
+[adaptive scaler](concepts/adaptive-scaling.md) using AIMD (Additive
+Increase / Multiplicative Decrease) based on CPU load, memory pressure,
+and API 429 errors. When `SIMARD_SCALING=fixed` or unset, the static
+config value is used. See
+[How to configure adaptive scaling](howto/configure-adaptive-scaling.md).
+
 Before dispatching any action, the daemon runs the
 [disk health check](howto/configure-disk-health-check.md) once per cycle to
 proactively free disk when `/home` exceeds 80% usage. This prevents `ENOSPC`
