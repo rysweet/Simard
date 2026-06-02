@@ -121,6 +121,11 @@ const MOCK_ACTIVITY = {
             action_kind: 'edit',
             action_description: 'Fixed bug in parser',
           },
+          {
+            success: true,
+            action_kind: 'spawn_engineer',
+            action_description: 'Dispatched engineer for task',
+          },
         ],
         priorities: [
           { goal_id: 'g1', reason: 'top-priority', urgency: 0.8 },
@@ -210,7 +215,8 @@ test.describe('Dashboard Overview - live activity surfaces @structural', () => {
     await expect(overview.recentActionsList).toBeVisible();
     const text = await overview.recentActionsList.textContent();
     expect(text).toContain('Fixed bug in parser');
-    expect(text).toContain('edit');
+    expect(text).toContain('Edit');
+    expect(text).toContain('Launched sub-agent');
     expect(text).toContain('#42');
   });
 
