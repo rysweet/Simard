@@ -7,7 +7,7 @@ use crate::{CognitiveStatistics, GoalProgress};
 #[test]
 fn ooda_config_default_values() {
     let config = OodaConfig::default();
-    assert_eq!(config.max_concurrent_actions, 3);
+    assert_eq!(config.max_concurrent_actions, 5);
     assert!(
         (config.improvement_threshold - 0.02).abs() < f64::EPSILON,
         "improvement_threshold should be 0.02"
@@ -165,7 +165,7 @@ fn ooda_config_gym_suite_id_is_progressive() {
 #[test]
 fn ooda_config_max_concurrent_is_three() {
     let config = OodaConfig::default();
-    assert_eq!(config.max_concurrent_actions, 3);
+    assert_eq!(config.max_concurrent_actions, 5);
 }
 
 // --- report field accessors ---

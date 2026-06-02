@@ -233,7 +233,7 @@ pub struct OodaConfig {
 impl Default for OodaConfig {
     fn default() -> Self {
         Self {
-            max_concurrent_actions: 3,
+            max_concurrent_actions: env_u32("SIMARD_MAX_CONCURRENT_ACTIONS", 5),
             improvement_threshold: 0.02,
             gym_suite_id: "progressive".to_string(),
             daily_budget_usd: env_f64("SIMARD_DAILY_BUDGET_USD", 500.0),
@@ -243,6 +243,13 @@ impl Default for OodaConfig {
 }
 
 fn env_f64(key: &str, default: f64) -> f64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_u32(key: &str, default: u32) -> u32 {
     std::env::var(key)
         .ok()
         .and_then(|v| v.parse().ok())

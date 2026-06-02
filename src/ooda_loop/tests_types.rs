@@ -231,7 +231,7 @@ fn action_kind_equality() {
 #[test]
 fn ooda_config_default_values() {
     let config = OodaConfig::default();
-    assert_eq!(config.max_concurrent_actions, 3);
+    assert_eq!(config.max_concurrent_actions, 5);
     assert!((config.improvement_threshold - 0.02).abs() < f64::EPSILON);
     assert_eq!(config.gym_suite_id, "progressive");
 }
