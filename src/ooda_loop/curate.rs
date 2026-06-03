@@ -407,8 +407,8 @@ mod tests {
     #[test]
     fn check_meeting_handoffs_overflow_goes_to_backlog() {
         let dir = TempDir::new().expect("create temp dir");
-        // 7 decisions: 5 fit active, 2 overflow to backlog.
-        let decisions: Vec<MeetingDecision> = (1..=7)
+        // MAX+2 decisions: MAX fit active, 2 overflow to backlog.
+        let decisions: Vec<MeetingDecision> = (1..=(crate::goal_curation::MAX_ACTIVE_GOALS + 2))
             .map(|i| sample_decision(&format!("Goal {i}")))
             .collect();
         write_meeting_handoff(dir.path(), &sample_handoff(decisions)).expect("write test handoff");
@@ -417,7 +417,7 @@ mod tests {
         let count = check_meeting_handoffs(&mut board, dir.path(), dir.path())
             .expect("check_meeting_handoffs should succeed");
 
-        assert_eq!(count, 7);
+        assert_eq!(count, (crate::goal_curation::MAX_ACTIVE_GOALS + 2) as u32);
         assert_eq!(board.active.len(), crate::goal_curation::MAX_ACTIVE_GOALS);
         assert_eq!(board.backlog.len(), 2);
         assert!(board.backlog[0].description.starts_with("[meeting]"));
