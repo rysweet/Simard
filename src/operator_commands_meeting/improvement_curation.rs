@@ -120,13 +120,13 @@ pub fn run_improvement_curation_read_probe(
     let parsed_record = PersistedImprovementRecord::parse(&latest_record.value)
         .map_err(|error| format!("{error}"))?;
     let goal_records = {
-        // Issue #1590 follow-up: read goals through the
-        // `CognitiveMemoryGoalStore` so the read probe surfaces the
-        // same records the curator persisted via the `GoalStore`
-        // trait (the previous `load_goal_board` path read a different
-        // fact concept and never saw curator writes).
+        // Read goals through `FileBackedGoalStore` to match the write
+        // path in `assembly.rs` which persists via the same store to
+        // `state/goal_store.json`.
         use crate::goals::GoalStore as _;
-        let store = crate::goals::CognitiveMemoryGoalStore::new(state_root.clone())?;
+        let store = crate::goals::FileBackedGoalStore::try_new(
+            state_root.join("state").join("goal_store.json"),
+        )?;
         store.list()?
     };
 
