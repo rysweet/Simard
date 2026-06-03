@@ -256,36 +256,73 @@ quits the TUI normally.
 Displays aggregate metrics as a key-value list:
 
 ```
-┌ Statistics ───────────────────────────────────┐
+┌ Stats ────────────────────────────────────────┐
 │ State files:     142                          │
 │ Session dirs:    7                            │
 │ Open issues:     23                           │
 │ Open PRs:        4                            │
 │ Active goals:    5                            │
-│ Backlog items:   12                           │
 │ Daemon uptime:   2h 14m 33s                   │
 └───────────────────────────────────────────────┘
 ```
 
 | Metric | Source | Notes |
 |---|---|---|
-| State files | Recursive file count in `<state-root>/state/` | Total memory/state files on disk |
-| Session dirs | Directory count in `<state-root>/engineer-worktrees/` | One per engineer session |
-| Open issues | `gh issue list --state open --limit 1000 --json number` | Parsed with `serde_json`, count of items. Shows `–` if `gh` unavailable |
-| Open PRs | `gh pr list --state open --limit 1000 --json number` | Same approach. Shows `–` if `gh` unavailable |
+| State files | Recursive file count in `<state-root>/state/` | Total memory/state files on disk. Counted synchronously (fast local I/O) |
+| Session dirs | Directory count in `<state-root>/sessions/` | One per engineer session. Counted synchronously |
+| Open issues | `gh issue list --state open --limit 1000 --json number` | Parsed with `serde_json`, count of items. Shows `–` if `gh` unavailable or result pending |
+| Open PRs | `gh pr list --state open --limit 1000 --json number` | Same approach. Shows `–` if `gh` unavailable or result pending |
 | Active goals | Goal board `active` vector length | From the same cached `GoalBoard` used by Tab 2 |
-| Backlog items | Goal board `backlog` vector length | From the same cached `GoalBoard` used by Tab 2 |
 | Daemon uptime | `DaemonInfo.uptime_secs` | Same value as Overview tab; human-formatted |
 
-**GitHub CLI interaction.** The `gh` commands are run as subprocesses
-with `Command::new("gh").arg(...)`. Output is parsed as
-`Vec<serde_json::Value>` and counted with `.len()`. No `jq`
-dependency. If `gh` is not installed, not authenticated, or the
-command fails, the metric shows `–` rather than an error.
+**Two-tier refresh strategy.** The Stats tab splits data collection
+into a synchronous path and an asynchronous path to avoid blocking
+the TUI render loop:
 
-**Refresh rate:** Every 10 seconds (gated by `tick_count % 5 == 0`
-on the 2-second refresh cycle). This avoids frequent `gh` API calls
-and directory scans.
+1. **Synchronous (local filesystem).** State file count and session
+   directory count are computed inline during `refresh_stats()`. These
+   are fast local I/O operations (typically <1 ms) and pose no
+   blocking risk.
+
+2. **Asynchronous (GitHub CLI).** Open issue and PR counts are fetched
+   via `gh` CLI in a background thread using `std::thread::spawn` and
+   `std::sync::mpsc::channel`. The thread runs both `gh issue list`
+   and `gh pr list` commands, then sends the results (as
+   `(Option<usize>, Option<usize>)`) back through the channel. The
+   main event loop drains results via `try_recv()` on every tick, so
+   values appear as soon as the background thread completes without
+   ever blocking the UI.
+
+**Duplicate fetch guard.** A boolean `gh_in_flight` flag prevents
+overlapping background threads. When a `gh` fetch thread is already
+running, `refresh_stats()` skips spawning another one. The flag is
+cleared when the receiver channel disconnects (thread completed) or
+when a result is successfully received.
+
+**GitHub CLI interaction.** The `gh` commands are run as subprocesses
+in the background thread with `Command::new("gh").arg(...)`. Output
+is parsed as `Vec<serde_json::Value>` and counted with `.len()`. No
+`jq` dependency. If `gh` is not installed, not authenticated, or the
+command fails, the thread sends `None` for that metric and the UI
+shows `–`. The `gh` commands inherit the process environment (for
+`GH_TOKEN`, `GITHUB_TOKEN`, etc.) but no credentials are handled
+directly by the TUI.
+
+**Refresh rate:** Local filesystem stats refresh every 10 seconds
+(gated by `tick_count % 5 == 0` on the 2-second refresh cycle). The
+background `gh` thread is spawned on the same 10-second cycle. Results
+from the background thread are drained on every tick (every 2 seconds),
+so `gh` values appear as soon as the commands complete — typically
+1–3 seconds after the fetch is initiated.
+
+**Graceful degradation.** When `gh` is unavailable:
+
+- The background thread sends `(None, None)`.
+- The channel disconnects normally when the thread exits.
+- `gh_in_flight` is cleared on the next drain cycle.
+- The UI shows `–` for Open issues and Open PRs.
+- No error is displayed — this is the expected state on machines
+  without `gh` installed or authenticated.
 
 ---
 
@@ -321,13 +358,17 @@ The TUI uses a tiered refresh strategy:
 | `journalctl` (activity logs) | 2 s | Keeps log view current |
 | Child process scan (engineers) | 2 s | `/proc` walk or `pgrep` |
 | Meeting process stdout drain | Every key event + every tick | Non-blocking read; latency-sensitive |
-| `gh` commands, file counts (stats) | 10 s | Expensive external commands; gated by tick counter |
+| Local fs stats (state files, session dirs) | 10 s | Directory scans; gated by tick counter |
+| `gh` commands (issues, PRs) — background thread | 10 s spawn, 2 s drain | Spawned on slow cycle; results drained via `try_recv()` every tick |
 
 The event loop polls for keyboard input with a 200 ms timeout, then
 checks whether the next refresh tick has elapsed. A `tick_count: u32`
 field on `App` increments each refresh. Stats-tab data sources gate
-on `tick_count % 5 == 0`. This keeps input responsive without
-busy-waiting or excessive subprocess spawning.
+on `tick_count % 5 == 0`. The `gh` commands run in a background
+thread via `std::thread::spawn` + `std::sync::mpsc::channel`, so
+they never block the render loop. Results are picked up on the next
+tick via `try_recv()`. A `gh_in_flight` guard prevents overlapping
+thread spawns when the previous fetch has not yet completed.
 
 ---
 
@@ -365,7 +406,7 @@ matching the daemon's behavior documented in
 |---|---|---|
 | `<state-root>/cognitive_memory.ladybug` | LadybugDB (SQLite) | `goal-board:snapshot` fact → `GoalBoard` JSON |
 | `<state-root>/state/` | Directory tree | Recursive file count for stats |
-| `<state-root>/engineer-worktrees/` | Directory listing | Session directory count for stats |
+| `<state-root>/sessions/` | Directory listing | Session directory count for stats |
 | `<state-root>/bin/simard` | Executable | Meeting process binary (spawned, not read) |
 | `/proc/<PID>/stat` | Kernel pseudo-file | CPU time fields (utime, stime, starttime) |
 | `/proc/<PID>/status` | Kernel pseudo-file | `VmRSS:` line for memory |
@@ -374,7 +415,7 @@ matching the daemon's behavior documented in
 | `systemctl show` | CLI output | Service state, PID, timestamps |
 | `journalctl --user` | CLI output | Recent log entries |
 | `pgrep --parent` | CLI output | Child PID enumeration |
-| `gh issue list` / `gh pr list` | CLI + JSON output | Open issue/PR counts |
+| `gh issue list` / `gh pr list` | CLI + JSON output | Open issue/PR counts (run in background thread) |
 
 The TUI defines its own serde DTOs (`GoalBoard`, `ActiveGoal`,
 `GoalProgress`). Required fields (`id`, `description`, `priority`,
@@ -510,6 +551,9 @@ restoration on any exit path:
   against `^[a-zA-Z0-9@._-]+\.service$` at startup. Invalid values
   cause an immediate exit with an error message.
 
+- **Bounded `gh` output.** `--limit 1000` caps issue/PR list queries
+  to prevent unbounded memory from large repositories.
+
 - **Bounded reads.** Goal board payload reads are capped at 10 MB;
   `/proc` reads at 4 KB. Meeting output is capped at 1000 lines.
   Meeting input is capped at 4096 bytes. Log lines are truncated to
@@ -534,7 +578,10 @@ restoration on any exit path:
 
 - **Sanitized external output.** `gh` stderr is not shown to the user
   — failures display a generic `–` placeholder. `journalctl` errors
-  retain the previous log buffer.
+  retain the previous log buffer. The background `gh` thread
+  communicates only via `mpsc::channel` with typed
+  `(Option<usize>, Option<usize>)` values — no raw strings cross
+  the thread boundary.
 
 - **Meeting output is memory-only.** Meeting session text is not
   persisted to disk by the TUI.
@@ -571,10 +618,12 @@ restoration on any exit path:
   `<state-root>/bin/simard` to exist. If it is missing (e.g., the
   binary was not installed), the Meeting tab shows an error.
 
-- **Single-threaded.** The TUI runs in a single thread. All subprocess
-  calls are synchronous (with short timeouts or non-blocking I/O).
-  A very slow `gh` call (network timeout) may cause a brief UI
-  freeze on the stats refresh cycle.
+- **Single-threaded render loop.** The TUI render loop runs in a
+  single thread. Local subprocess calls (`systemctl`, `journalctl`,
+  `pgrep`) are synchronous but fast. The `gh` CLI calls are the
+  exception — they run in a background thread via
+  `std::thread::spawn` to avoid blocking the UI during network I/O
+  (typically 1–3 seconds).
 
 ---
 
@@ -640,8 +689,10 @@ or verify `SIMARD_STATE_ROOT` points to the correct location.
 ### Stats show "–" for issues/PRs
 
 The `gh` CLI is either not installed, not authenticated, or the
-repository is not accessible. Run `gh auth status` and `gh issue list`
-manually to diagnose.
+repository is not accessible. It is also normal to see `–` briefly
+(1–3 seconds) after launch while the background fetch thread is
+running. If the values remain `–` after 10 seconds, run
+`gh auth status` and `gh issue list` manually to diagnose.
 
 ---
 

@@ -5,6 +5,7 @@
 //! 10s for systemctl (to avoid hammering D-Bus).
 
 use std::collections::HashMap;
+use std::sync::mpsc;
 
 use crossterm::event::{KeyCode, KeyEvent};
 
@@ -122,6 +123,8 @@ pub struct App {
     meeting_stdout: Option<std::io::BufReader<std::process::ChildStdout>>,
     // Stats tab
     pub stats_cache: StatsCache,
+    pub gh_receiver: Option<mpsc::Receiver<(Option<usize>, Option<usize>)>>,
+    pub gh_in_flight: bool,
     pub tick_count: u32,
 }
 
@@ -149,6 +152,8 @@ impl App {
             meeting_stdin: None,
             meeting_stdout: None,
             stats_cache: StatsCache::default(),
+            gh_receiver: None,
+            gh_in_flight: false,
             tick_count: 0,
         }
     }
@@ -450,14 +455,18 @@ impl App {
     }
 
     /// Refresh stats cache (runs on slow cycle).
+    ///
+    /// Local filesystem counts are synchronous (fast, <1ms).
+    /// GitHub CLI calls are spawned in a background thread to avoid
+    /// blocking the TUI render loop (2-6s per call). Results arrive
+    /// via `gh_receiver` and are drained by `drain_gh_results()`.
     fn refresh_stats(&mut self) {
-        // Count state files recursively
+        // ── Sync: local filesystem counts ──────────────────────────
         let state_dir = self.state_root.join("state");
         if state_dir.exists() {
             self.stats_cache.state_files = Some(count_files_recursive(&state_dir));
         }
 
-        // Count session directories
         let sessions_dir = self.state_root.join("sessions");
         if sessions_dir.exists() {
             self.stats_cache.session_dirs = std::fs::read_dir(&sessions_dir).ok().map(|entries| {
@@ -468,29 +477,68 @@ impl App {
             });
         }
 
-        // Open issues via gh CLI
-        self.stats_cache.open_issues = std::process::Command::new("gh")
-            .args([
-                "issue", "list", "--state", "open", "--limit", "1000", "--json", "number",
-            ])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .and_then(|s| serde_json::from_str::<Vec<serde_json::Value>>(&s).ok())
-            .map(|v| v.len());
+        // ── Async: gh CLI in background thread ─────────────────────
+        if self.gh_in_flight {
+            return;
+        }
 
-        // Open PRs via gh CLI
-        self.stats_cache.open_prs = std::process::Command::new("gh")
-            .args([
-                "pr", "list", "--state", "open", "--limit", "1000", "--json", "number",
-            ])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .and_then(|s| serde_json::from_str::<Vec<serde_json::Value>>(&s).ok())
-            .map(|v| v.len());
+        let (tx, rx) = mpsc::channel();
+        self.gh_receiver = Some(rx);
+        self.gh_in_flight = true;
+
+        std::thread::spawn(move || {
+            let issues = std::process::Command::new("gh")
+                .args([
+                    "issue", "list", "--state", "open", "--limit", "1000", "--json", "number",
+                ])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .and_then(|s| serde_json::from_str::<Vec<serde_json::Value>>(&s).ok())
+                .map(|v| v.len());
+
+            let prs = std::process::Command::new("gh")
+                .args([
+                    "pr", "list", "--state", "open", "--limit", "1000", "--json", "number",
+                ])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .and_then(|s| serde_json::from_str::<Vec<serde_json::Value>>(&s).ok())
+                .map(|v| v.len());
+
+            // Send result; ignore error if receiver was dropped (app quit)
+            let _ = tx.send((issues, prs));
+        });
+    }
+
+    /// Drain any completed gh CLI results from the background thread.
+    ///
+    /// Called every tick from `refresh()`. Uses `try_recv()` so it never
+    /// blocks. Clears `gh_in_flight` and `gh_receiver` once the sender
+    /// disconnects (thread finished).
+    pub fn drain_gh_results(&mut self) {
+        let receiver = match self.gh_receiver.as_ref() {
+            Some(rx) => rx,
+            None => return,
+        };
+
+        loop {
+            match receiver.try_recv() {
+                Ok((issues, prs)) => {
+                    self.stats_cache.open_issues = issues;
+                    self.stats_cache.open_prs = prs;
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.gh_in_flight = false;
+                    self.gh_receiver = None;
+                    break;
+                }
+            }
+        }
     }
 
     /// Clean up resources (meeting process) before exit.
@@ -579,6 +627,9 @@ impl App {
 
         // Activity tab: refresh log lines
         self.refresh_logs();
+
+        // Stats tab: drain background gh CLI results every tick
+        self.drain_gh_results();
 
         // Stats tab: slow cycle (every 5 ticks ≈ 10s)
         if self.tick_count.is_multiple_of(5) {
@@ -1012,6 +1063,291 @@ mod tests {
                 MeetingStatus::Error(_)
             ),
             "MeetingStatus::Error should exist"
+        );
+    }
+
+    // ── Background gh CLI: field initialization ────────────────────
+
+    #[test]
+    fn app_new_gh_not_in_flight() {
+        let app = App::new("simard-ooda.service".to_string());
+        assert!(
+            !app.gh_in_flight,
+            "gh_in_flight should be false on construction"
+        );
+    }
+
+    #[test]
+    fn app_new_gh_receiver_is_none() {
+        let app = App::new("simard-ooda.service".to_string());
+        assert!(
+            app.gh_receiver.is_none(),
+            "gh_receiver should be None on construction"
+        );
+    }
+
+    // ── drain_gh_results: channel → stats_cache ────────────────────
+
+    #[test]
+    fn drain_gh_results_updates_stats_from_channel() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.gh_receiver = Some(rx);
+        app.gh_in_flight = true;
+
+        tx.send((Some(42), Some(7))).unwrap();
+        app.drain_gh_results();
+
+        assert_eq!(app.stats_cache.open_issues, Some(42));
+        assert_eq!(app.stats_cache.open_prs, Some(7));
+    }
+
+    #[test]
+    fn drain_gh_results_handles_none_values() {
+        // gh CLI failure sends (None, None) — stats stay as dashes
+        let mut app = App::new("simard-ooda.service".to_string());
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.gh_receiver = Some(rx);
+        app.gh_in_flight = true;
+
+        tx.send((None, None)).unwrap();
+        app.drain_gh_results();
+
+        assert!(app.stats_cache.open_issues.is_none());
+        assert!(app.stats_cache.open_prs.is_none());
+    }
+
+    #[test]
+    fn drain_gh_results_clears_in_flight_on_disconnect() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        let (tx, rx) = std::sync::mpsc::channel::<(Option<usize>, Option<usize>)>();
+        app.gh_receiver = Some(rx);
+        app.gh_in_flight = true;
+
+        // Drop sender to simulate thread completion
+        drop(tx);
+        app.drain_gh_results();
+
+        assert!(!app.gh_in_flight, "gh_in_flight should clear on disconnect");
+        assert!(
+            app.gh_receiver.is_none(),
+            "gh_receiver should be set to None on disconnect"
+        );
+    }
+
+    #[test]
+    fn drain_gh_results_noop_when_no_receiver() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        assert!(app.gh_receiver.is_none());
+
+        // Should not panic or change anything
+        app.drain_gh_results();
+
+        assert!(app.stats_cache.open_issues.is_none());
+        assert!(app.stats_cache.open_prs.is_none());
+        assert!(!app.gh_in_flight);
+    }
+
+    #[test]
+    fn drain_gh_results_keeps_in_flight_while_channel_open() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        let (_tx, rx) = std::sync::mpsc::channel::<(Option<usize>, Option<usize>)>();
+        app.gh_receiver = Some(rx);
+        app.gh_in_flight = true;
+
+        // Channel open but empty — try_recv returns Empty, not Disconnected
+        app.drain_gh_results();
+
+        assert!(
+            app.gh_in_flight,
+            "gh_in_flight should remain true while channel is open"
+        );
+        assert!(
+            app.gh_receiver.is_some(),
+            "gh_receiver should remain while channel is open"
+        );
+    }
+
+    #[test]
+    fn drain_gh_results_takes_last_value_when_multiple_sent() {
+        // If the thread sends multiple times (unlikely but possible),
+        // drain should process all and keep the last value.
+        let mut app = App::new("simard-ooda.service".to_string());
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.gh_receiver = Some(rx);
+        app.gh_in_flight = true;
+
+        tx.send((Some(10), Some(2))).unwrap();
+        tx.send((Some(15), Some(5))).unwrap();
+        drop(tx);
+
+        app.drain_gh_results();
+
+        assert_eq!(
+            app.stats_cache.open_issues,
+            Some(15),
+            "should have last value"
+        );
+        assert_eq!(app.stats_cache.open_prs, Some(5), "should have last value");
+        assert!(!app.gh_in_flight, "should clear after disconnect");
+    }
+
+    // ── refresh_stats: local fs counts with tempdir ────────────────
+
+    #[test]
+    fn refresh_stats_counts_state_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        // Create some files
+        std::fs::write(state_dir.join("goal_board.json"), "{}").unwrap();
+        std::fs::write(state_dir.join("cycle_report.json"), "{}").unwrap();
+        std::fs::write(state_dir.join("memory.json"), "{}").unwrap();
+
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.state_root = tmp.path().to_path_buf();
+        app.refresh_stats();
+
+        assert_eq!(
+            app.stats_cache.state_files,
+            Some(3),
+            "should count 3 state files"
+        );
+    }
+
+    #[test]
+    fn refresh_stats_counts_session_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions_dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        // Create some session subdirectories
+        std::fs::create_dir(sessions_dir.join("session-001")).unwrap();
+        std::fs::create_dir(sessions_dir.join("session-002")).unwrap();
+        // A regular file should NOT be counted
+        std::fs::write(sessions_dir.join("index.json"), "[]").unwrap();
+
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.state_root = tmp.path().to_path_buf();
+        app.refresh_stats();
+
+        assert_eq!(
+            app.stats_cache.session_dirs,
+            Some(2),
+            "should count 2 session dirs (not the file)"
+        );
+    }
+
+    #[test]
+    fn refresh_stats_state_files_none_when_dir_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Don't create state/ dir — it doesn't exist
+
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.state_root = tmp.path().to_path_buf();
+        app.refresh_stats();
+
+        assert!(
+            app.stats_cache.state_files.is_none(),
+            "should be None when state dir doesn't exist"
+        );
+    }
+
+    #[test]
+    fn refresh_stats_session_dirs_none_when_dir_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.state_root = tmp.path().to_path_buf();
+        app.refresh_stats();
+
+        assert!(
+            app.stats_cache.session_dirs.is_none(),
+            "should be None when sessions dir doesn't exist"
+        );
+    }
+
+    #[test]
+    fn refresh_stats_empty_dirs_return_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("state")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("sessions")).unwrap();
+
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.state_root = tmp.path().to_path_buf();
+        app.refresh_stats();
+
+        assert_eq!(app.stats_cache.state_files, Some(0));
+        assert_eq!(app.stats_cache.session_dirs, Some(0));
+    }
+
+    #[test]
+    fn refresh_stats_counts_nested_state_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().join("state");
+        let sub_dir = state_dir.join("cycles");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+
+        std::fs::write(state_dir.join("top.json"), "{}").unwrap();
+        std::fs::write(sub_dir.join("cycle1.json"), "{}").unwrap();
+        std::fs::write(sub_dir.join("cycle2.json"), "{}").unwrap();
+
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.state_root = tmp.path().to_path_buf();
+        app.refresh_stats();
+
+        assert_eq!(
+            app.stats_cache.state_files,
+            Some(3),
+            "should count files recursively"
+        );
+    }
+
+    // ── refresh_stats: gh_in_flight guard ──────────────────────────
+
+    #[test]
+    fn refresh_stats_does_not_spawn_when_gh_in_flight() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("state")).unwrap();
+
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.state_root = tmp.path().to_path_buf();
+        app.gh_in_flight = true;
+
+        // Set up an existing receiver to prove it's not replaced
+        let (_tx, rx) = std::sync::mpsc::channel::<(Option<usize>, Option<usize>)>();
+        app.gh_receiver = Some(rx);
+
+        app.refresh_stats();
+
+        // Local fs stats should still be updated
+        assert_eq!(app.stats_cache.state_files, Some(0));
+        // gh_in_flight should remain true (no new spawn)
+        assert!(app.gh_in_flight);
+        // The receiver should be the same one we set (not replaced)
+        assert!(app.gh_receiver.is_some());
+    }
+
+    #[test]
+    fn refresh_stats_sets_gh_in_flight_when_spawning() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("state")).unwrap();
+
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.state_root = tmp.path().to_path_buf();
+        assert!(!app.gh_in_flight);
+
+        app.refresh_stats();
+
+        // After refresh_stats, gh_in_flight should be true (thread spawned)
+        assert!(
+            app.gh_in_flight,
+            "should set gh_in_flight after spawning thread"
+        );
+        assert!(
+            app.gh_receiver.is_some(),
+            "should have a receiver after spawning thread"
         );
     }
 }
