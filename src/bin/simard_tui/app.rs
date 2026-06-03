@@ -207,9 +207,13 @@ impl App {
         // Write to child process stdin if available
         if let Some(ref mut stdin) = self.meeting_stdin {
             use std::io::Write;
-            let _ = stdin.write_all(self.meeting_input.as_bytes());
-            let _ = stdin.write_all(b"\n");
-            let _ = stdin.flush();
+            if stdin.write_all(self.meeting_input.as_bytes()).is_err()
+                || stdin.write_all(b"\n").is_err()
+                || stdin.flush().is_err()
+            {
+                self.meeting_status = MeetingStatus::Error("broken pipe".to_string());
+                self.meeting_stdin = None;
+            }
         }
         self.meeting_input.clear();
     }
@@ -250,7 +254,9 @@ impl App {
                         let fd = stdout.as_raw_fd();
                         unsafe {
                             let flags = libc::fcntl(fd, libc::F_GETFL);
-                            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+                            if flags != -1 {
+                                libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+                            }
                         }
                     }
                 }
@@ -333,7 +339,9 @@ impl App {
         let boot_uptime = std::fs::read_to_string("/proc/uptime")
             .ok()
             .and_then(|s| s.split_whitespace().next()?.parse::<f64>().ok());
-        let clk_tck: u64 = 100; // typical Linux _SC_CLK_TCK
+        let clk_tck: u64 = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }
+            .try_into()
+            .unwrap_or(100);
 
         let mut new_processes = Vec::new();
         let mut new_samples = HashMap::new();
@@ -381,8 +389,9 @@ impl App {
                     })
                     .unwrap_or((None, None));
 
-            let truncated_cmd = if command.len() > 80 {
-                format!("{}…", &command[..79])
+            let truncated_cmd = if command.chars().count() > 80 {
+                let s: String = command.chars().take(79).collect();
+                format!("{s}…")
             } else {
                 command
             };
@@ -424,7 +433,7 @@ impl App {
             .args([
                 "--user",
                 "-u",
-                "simard-ooda.service",
+                &self.daemon_info.service_name,
                 "--no-pager",
                 "-n",
                 "50",
@@ -601,13 +610,23 @@ fn compute_uptime_from_timestamp(ts: &str) -> Option<u64> {
 }
 
 fn count_files_recursive(path: &std::path::Path) -> usize {
+    count_files_with_depth(path, 10)
+}
+
+fn count_files_with_depth(path: &std::path::Path, max_depth: u32) -> usize {
+    if max_depth == 0 {
+        return 0;
+    }
     let mut count = 0;
     if let Ok(entries) = std::fs::read_dir(path) {
         for entry in entries.flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                count += count_files_recursive(&p);
-            } else {
+            let ft = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            if ft.is_dir() {
+                count += count_files_with_depth(&entry.path(), max_depth - 1);
+            } else if ft.is_file() {
                 count += 1;
             }
         }
