@@ -511,4 +511,86 @@ mod tests {
         let loaded = store.list().expect("list");
         assert_eq!(loaded.len(), 1);
     }
+
+    // -----------------------------------------------------------------------
+    // Issue #2182: cross-instance read/write alignment
+    //
+    // The improvement-curation read probe must read goals from the same
+    // `state/goal_store.json` that assembly.rs writes to.  These tests
+    // verify that a second `FileBackedGoalStore` instance at the same path
+    // sees the goals written by the first instance — the exact scenario
+    // that broke when the read probe used `CognitiveMemoryGoalStore`.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cross_instance_write_then_read_at_config_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let goal_path = tmp.path().join("state").join("goal_store.json");
+
+        // Simulate assembly.rs writing a goal via FileBackedGoalStore.
+        let writer = FileBackedGoalStore::try_new(&goal_path).expect("writer store");
+        writer
+            .put(goal_record(
+                "Capture denser execution evidence",
+                GoalStatus::Active,
+                1,
+            ))
+            .expect("put should persist");
+        drop(writer);
+
+        // Simulate the read probe opening a new instance at the same path.
+        let reader = FileBackedGoalStore::try_new(&goal_path).expect("reader store");
+        let loaded = reader.list().expect("list");
+        assert_eq!(
+            loaded.len(),
+            1,
+            "reader must see the goal written by a separate writer instance"
+        );
+        assert_eq!(loaded[0].title, "Capture denser execution evidence");
+        assert_eq!(loaded[0].status, GoalStatus::Active);
+        assert_eq!(loaded[0].priority, 1);
+    }
+
+    #[test]
+    fn cross_instance_read_at_config_path_with_multiple_statuses() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let goal_path = tmp.path().join("state").join("goal_store.json");
+
+        let writer = FileBackedGoalStore::try_new(&goal_path).expect("writer");
+        writer
+            .put(goal_record("Active goal", GoalStatus::Active, 1))
+            .expect("put active");
+        writer
+            .put(goal_record("Proposed goal", GoalStatus::Proposed, 2))
+            .expect("put proposed");
+        drop(writer);
+
+        let reader = FileBackedGoalStore::try_new(&goal_path).expect("reader");
+        let all = reader.list().expect("list");
+        assert_eq!(all.len(), 2, "reader must see both goals");
+
+        let active = reader.active_top_goals(10).expect("active_top_goals");
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].title, "Active goal");
+
+        let proposed = reader
+            .top_goals_by_status(GoalStatus::Proposed, 10)
+            .expect("top_goals_by_status");
+        assert_eq!(proposed.len(), 1);
+        assert_eq!(proposed[0].title, "Proposed goal");
+    }
+
+    #[test]
+    fn cross_instance_read_empty_store_returns_no_goals() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let goal_path = tmp.path().join("state").join("goal_store.json");
+
+        // No writer ever creates goals — simulates missing goal store file.
+        let reader = FileBackedGoalStore::try_new(&goal_path).expect("reader");
+        let loaded = reader.list().expect("list");
+        assert!(
+            loaded.is_empty(),
+            "empty store must return zero goals, not error"
+        );
+    }
 }

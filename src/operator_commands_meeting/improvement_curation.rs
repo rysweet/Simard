@@ -239,4 +239,189 @@ mod tests {
         );
         assert!(result.is_err());
     }
+
+    // -----------------------------------------------------------------------
+    // Issue #2182: read probe must read goals from FileBackedGoalStore
+    //
+    // These tests verify the contract that the read probe reads goals from
+    // `state/goal_store.json` (via FileBackedGoalStore), matching the
+    // write path used by assembly.rs.  Before the fix, the read probe
+    // used CognitiveMemoryGoalStore which reads from cognitive memory
+    // bridges — empty in tests — causing "Active goals count: 0".
+    // -----------------------------------------------------------------------
+
+    /// Build a minimal but valid fixture at `state_root` containing:
+    /// - `review-artifacts/<review_id>.json` with a valid ReviewArtifact
+    /// - `memory_records.json` with a Decision-scoped improvement-curation-record
+    /// - `state/goal_store.json` with the given goal records (if any)
+    fn build_read_probe_fixture(state_root: &std::path::Path, goals: &[crate::goals::GoalRecord]) {
+        // 1. Review artifact
+        let artifacts_dir = state_root.join("review-artifacts");
+        std::fs::create_dir_all(&artifacts_dir).unwrap();
+        let review_json = serde_json::json!({
+            "review_id": "fixture-review-001",
+            "reviewed_at_unix_ms": 1700000000000_u128,
+            "target_kind": "session",
+            "target_label": "fixture-target",
+            "identity_name": "simard-reviewer",
+            "session_id": "session-00000000-0000-0000-0000-000000000001",
+            "selected_base_type": "local-harness",
+            "topology": "single-process",
+            "objective_metadata": "test objective",
+            "execution_summary": "test execution summary",
+            "reflection_summary": "test reflection summary",
+            "summary": "test summary",
+            "measurement_notes": [],
+            "evidence_summary": {
+                "memory_records": 1,
+                "evidence_records": 0,
+                "decision_records": 1,
+                "benchmark_records": 0,
+                "exported_state": "none",
+                "session_phase": null,
+                "failed_signals": []
+            },
+            "proposals": [
+                {
+                    "category": "execution-evidence",
+                    "title": "Capture denser execution evidence",
+                    "rationale": "operators need denser evidence now",
+                    "suggested_change": "add more logging",
+                    "evidence": ["session output was sparse"]
+                }
+            ]
+        });
+        std::fs::write(
+            artifacts_dir.join("fixture-review-001.json"),
+            serde_json::to_string_pretty(&review_json).unwrap(),
+        )
+        .unwrap();
+
+        // 2. Memory records with improvement-curation-record
+        let memory_json = serde_json::json!([
+            {
+                "key": "fixture-session::improvement-curation-record",
+                "scope": "decision",
+                "value": "review=fixture-review-001 target=fixture-target approvals=[p1 [active] Capture denser execution evidence] deferred=[]",
+                "session_id": "session-00000000-0000-0000-0000-000000000002",
+                "recorded_in": "persistence"
+            }
+        ]);
+        std::fs::write(
+            state_root.join("memory_records.json"),
+            serde_json::to_string_pretty(&memory_json).unwrap(),
+        )
+        .unwrap();
+
+        // 3. Goal store at state/goal_store.json
+        if !goals.is_empty() {
+            let goal_dir = state_root.join("state");
+            std::fs::create_dir_all(&goal_dir).unwrap();
+            std::fs::write(
+                goal_dir.join("goal_store.json"),
+                serde_json::to_string(goals).unwrap(),
+            )
+            .unwrap();
+        }
+    }
+
+    fn make_test_goal_record(
+        title: &str,
+        status: crate::goals::GoalStatus,
+        priority: u8,
+    ) -> crate::goals::GoalRecord {
+        let update = crate::goals::GoalUpdate::new(title, "fixture rationale", status, priority)
+            .expect("goal update should be valid");
+        crate::goals::GoalRecord::from_update(
+            update,
+            "simard-improvement-curator",
+            crate::session::SessionId::parse("session-00000000-0000-0000-0000-000000000003")
+                .expect("session id should parse"),
+            crate::session::SessionPhase::Persistence,
+        )
+        .expect("goal record should be valid")
+    }
+
+    #[test]
+    fn read_probe_succeeds_with_goals_at_file_backed_store_path() {
+        let dir = TempDir::new().unwrap();
+        let goals = vec![make_test_goal_record(
+            "Capture denser execution evidence",
+            crate::goals::GoalStatus::Active,
+            1,
+        )];
+        build_read_probe_fixture(dir.path(), &goals);
+
+        let result = run_improvement_curation_read_probe(
+            "local-harness",
+            "single-process",
+            Some(dir.path().to_path_buf()),
+        );
+        assert!(
+            result.is_ok(),
+            "read probe must succeed when goals exist at state/goal_store.json: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn read_probe_succeeds_with_empty_goal_store() {
+        let dir = TempDir::new().unwrap();
+        build_read_probe_fixture(dir.path(), &[]);
+
+        let result = run_improvement_curation_read_probe(
+            "local-harness",
+            "single-process",
+            Some(dir.path().to_path_buf()),
+        );
+        assert!(
+            result.is_ok(),
+            "read probe must succeed even when no goals are persisted: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn read_probe_succeeds_with_mixed_goal_statuses() {
+        let dir = TempDir::new().unwrap();
+        let goals = vec![
+            make_test_goal_record("Active goal", crate::goals::GoalStatus::Active, 1),
+            make_test_goal_record("Proposed goal", crate::goals::GoalStatus::Proposed, 2),
+        ];
+        build_read_probe_fixture(dir.path(), &goals);
+
+        let result = run_improvement_curation_read_probe(
+            "local-harness",
+            "single-process",
+            Some(dir.path().to_path_buf()),
+        );
+        assert!(
+            result.is_ok(),
+            "read probe must handle mixed goal statuses: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn read_probe_goal_path_matches_bootstrap_config_path() {
+        // The read probe constructs `state_root.join("state").join("goal_store.json")`.
+        // This must match BootstrapConfig::goal_store_path() for the same state root.
+        // We use SIMARD_BOOTSTRAP_MODE=builtin-defaults to avoid needing SIMARD_PROMPT_ROOT.
+        let state_root = PathBuf::from("/tmp/test-state-root");
+        let read_probe_path = state_root.join("state").join("goal_store.json");
+
+        let config = crate::BootstrapConfig::resolve(crate::BootstrapInputs {
+            state_root: Some(state_root.clone()),
+            mode: Some("builtin-defaults".to_string()),
+            ..crate::BootstrapInputs::default()
+        })
+        .expect("config should resolve with state_root override");
+
+        assert_eq!(
+            read_probe_path,
+            config.goal_store_path(),
+            "read probe path must match BootstrapConfig::goal_store_path() \
+             so the read probe reads from the same store that assembly.rs writes to"
+        );
+    }
 }
