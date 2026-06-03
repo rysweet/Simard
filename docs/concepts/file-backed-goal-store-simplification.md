@@ -1,7 +1,7 @@
 ---
 title: File-backed goal store simplification
 description: Why Simard replaced the CognitiveMemoryGoalStore IPC adapter with a plain JSON file and flock locking for the GoalStore trait.
-last_updated: 2026-06-02
+last_updated: 2026-06-03
 owner: simard
 doc_type: concept
 related:
@@ -92,6 +92,12 @@ divergence is expected and bounded (resolved on the next OODA cycle).
 - `BootstrapConfig::goal_store_path()` now returns
   `<state_root>/state/goal_store.json` instead of
   `<state_root>/goal_records.json`.
+- The `improvement-curation read` probe reads goals through
+  `FileBackedGoalStore` (at `state_root/state/goal_store.json`) instead
+  of `CognitiveMemoryGoalStore`. This aligns the read probe with the
+  write path in `bootstrap::assembly`, so that goals written during
+  `improvement-curation run` are visible to `improvement-curation read`
+  without requiring the cognitive-memory bridge stack.
 
 ## Trade-offs
 

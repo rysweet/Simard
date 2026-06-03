@@ -1,7 +1,7 @@
 ---
 title: How to inspect improvement-curation state
 description: Use `simard improvement-curation read` to inspect the latest review-driven priority decisions without mutating stored state.
-last_updated: 2026-03-30
+last_updated: 2026-06-03
 review_schedule: as-needed
 owner: simard
 doc_type: howto
@@ -11,6 +11,8 @@ related:
   - ../reference/runtime-contracts.md
   - ../tutorials/run-your-first-local-session.md
   - ./inspect-durable-goal-register.md
+  - ../reference/file-backed-goal-store.md
+  - ../concepts/file-backed-goal-store-simplification.md
 ---
 
 # How to inspect improvement-curation state
@@ -119,7 +121,35 @@ The important contract is structural:
 - persisted proposal titles, rationales, goal text, and decision records are sanitized before printing so stored terminal control sequences are not replayed
 - the `<state-root>` positional is required; omitting it (or relying on `SIMARD_STATE_ROOT`) hard-fails with a stable, actionable error at state-root resolution time, before any storage I/O for the durable record
 
-## 5. Configuration rules that matter
+## 5. How goal reads are aligned with goal writes
+
+The `improvement-curation read` probe reads goals through
+`FileBackedGoalStore` — the same store implementation that
+`bootstrap::assembly` wires into `RuntimePorts.goal_store` for the
+`improvement-curation run` path. Both resolve to the same file:
+
+```
+<state-root>/state/goal_store.json
+```
+
+This means goals promoted during `improvement-curation run` (step 3
+above) are immediately visible to the read probe without requiring the
+cognitive-memory bridge stack, a running daemon, or IPC socket
+availability. The read probe constructs its own `FileBackedGoalStore`
+instance pointing at `state_root.join("state").join("goal_store.json")`,
+takes a shared `flock` for the read, and returns the `GoalRecord` list.
+
+> **Why not CognitiveMemoryGoalStore?** The previous implementation
+> routed goal reads through `CognitiveMemoryGoalStore`, which required
+> cognitive-memory bridge resolution. In test environments (and any
+> environment without a running daemon), the bridge stack returned an
+> empty result set — producing `Active goals count: 0` even when goals
+> were correctly persisted to `goal_store.json`. Switching to
+> `FileBackedGoalStore` eliminates this mismatch. See
+> [File-backed goal store simplification](../concepts/file-backed-goal-store-simplification.md)
+> for the full rationale.
+
+## 6. Configuration rules that matter
 
 For predictable future improvement-state inspection, keep these rules in mind:
 
@@ -130,7 +160,7 @@ For predictable future improvement-state inspection, keep these rules in mind:
 - use `improvement-curation read` when you want a read-only operator summary of the latest decisions and promoted goals
 - expect invalid `state-root` values, missing review artifacts, missing improvement records, unreadable storage, and malformed decision data to fail explicitly rather than silently rendering a partial report
 
-## 6. Troubleshoot the common failure shapes
+## 7. Troubleshoot the common failure shapes
 
 ### The command fails because no persisted review artifact exists
 

@@ -1,7 +1,7 @@
 ---
 title: File-backed goal store with flock
 description: Reference for FileBackedGoalStore — the production GoalStore implementation that persists GoalRecords to ~/.simard/state/goal_store.json with advisory flock locking for cross-process safety.
-last_updated: 2026-06-02
+last_updated: 2026-06-03
 owner: simard
 doc_type: reference
 related:
@@ -47,6 +47,9 @@ This helper is re-exported from `crate::state_root` and used by
   for direct goal writes on meeting close
 - `meeting_backend::mod` — `load_active_goal_titles()` reads from
   `goal_store_path()` (no longer hardcoded)
+- `improvement_curation::run_improvement_curation_read_probe` — reads
+  persisted goals via `FileBackedGoalStore::try_new(state_root.join("state").join("goal_store.json"))`
+  to match the write path in `assembly.rs`
 
 The resolved path follows the standard state-root resolution ladder
 documented in [State-root resolution](./state-root-resolution.md):
@@ -219,6 +222,8 @@ cognitive memory via `save_goal_board()` as before. The file-backed
 - Meeting backend (`load_active_goal_titles()`)
 - Bootstrap-assembled `RuntimePorts` consumers
 - Engineer loop (reads top-5 goals)
+- Improvement-curation read probe (reads persisted goals for the
+  audit-only `improvement-curation read` command)
 
 The two stores may diverge briefly (a goal record written by meeting
 close has not yet been ingested into the `GoalBoard` by the curate
