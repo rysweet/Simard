@@ -496,6 +496,7 @@ impl App {
         let service = &self.daemon_info.service_name;
 
         let systemctl_output = std::process::Command::new("systemctl")
+            .arg("--user")
             .arg("show")
             .arg("-p")
             .arg("ActiveState,MainPID,ActiveEnterTimestamp,LoadState")
