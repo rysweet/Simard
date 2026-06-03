@@ -274,6 +274,7 @@ pub fn register_gym_handlers(transport: &mut NativeBridgeTransport) {
 mod tests {
     use super::*;
     use crate::bridge::{BridgeRequest, BridgeTransport, new_request_id};
+    use serial_test::serial;
 
     fn make_gym_transport() -> NativeBridgeTransport {
         let mut transport = NativeBridgeTransport::new("simard-gym-eval");
@@ -306,6 +307,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn run_scenario_returns_degraded_result() {
         let orig = std::env::var("SIMARD_SKIP_GYM").ok();
         unsafe {
@@ -349,6 +351,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn run_scenario_unknown_returns_not_found() {
         // Clear SIMARD_SKIP_GYM so the handler reaches the not-found check.
         let orig = std::env::var("SIMARD_SKIP_GYM").ok();
@@ -376,6 +379,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn run_suite_returns_degraded_result() {
         let orig = std::env::var("SIMARD_SKIP_GYM").ok();
         unsafe {
@@ -402,6 +406,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn run_scenario_skip_gym_returns_synthetic_success() {
         // SAFETY: test-only
         unsafe {
@@ -428,6 +433,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn run_suite_skip_gym_returns_synthetic_success() {
         // SAFETY: test-only
         unsafe {

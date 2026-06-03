@@ -132,8 +132,6 @@ impl PersistentAgentProxy {
             .map(Duration::from_secs)
             .unwrap_or(TURN_TIMEOUT);
 
-        let (cmd, args) = resolve_agent_command()?;
-
         Ok(Self {
             descriptor: BaseTypeDescriptor {
                 id: BaseTypeId::new("persistent-agent-proxy"),
@@ -152,8 +150,8 @@ impl PersistentAgentProxy {
             is_closed: false,
             turn_count: 0,
             turn_timeout,
-            agent_cmd: cmd,
-            agent_base_args: args,
+            agent_cmd: String::new(),
+            agent_base_args: Vec::new(),
         })
     }
 
@@ -288,6 +286,9 @@ impl BaseTypeSession for PersistentAgentProxy {
     fn open(&mut self) -> SimardResult<()> {
         ensure_session_not_closed(&self.descriptor, self.is_closed, "open")?;
         ensure_session_not_already_open(&self.descriptor, self.is_open)?;
+        let (cmd, args) = resolve_agent_command()?;
+        self.agent_cmd = cmd;
+        self.agent_base_args = args;
         self.validate_agent()?;
         self.is_open = true;
         info!(cmd = %self.agent_cmd, "Agent proxy opened (direct-invoke mode)");
