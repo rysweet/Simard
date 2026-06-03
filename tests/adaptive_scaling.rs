@@ -19,6 +19,10 @@ use simard::ooda_loop::adaptive_scaling::{
     AdaptiveScaler, DECREASE_FACTOR, HIGH_PRESSURE_THRESHOLD, LOW_PRESSURE_THRESHOLD,
 };
 
+fn adjust_without_system_pressure(s: &AdaptiveScaler) -> u32 {
+    s.adjust_with_samples(None, None)
+}
+
 // ── Construction ──
 
 #[test]
@@ -70,7 +74,7 @@ fn adjust_additive_increase_on_no_pressure() {
     let s = AdaptiveScaler::new(4, 1, 8);
     // With no pressure signals (no 429s, no /proc pressure), adjust
     // should increase by 1.
-    let new_max = s.adjust();
+    let new_max = adjust_without_system_pressure(&s);
     assert_eq!(
         new_max, 5,
         "adjust() with no pressure should additive-increase from 4 to 5"
@@ -85,7 +89,7 @@ fn adjust_multiplicative_decrease_after_429() {
         reason: "HTTP 429 Too Many Requests".to_string(),
     };
     s.report_error(&error);
-    let new_max = s.adjust();
+    let new_max = adjust_without_system_pressure(&s);
     assert_eq!(new_max, 2, "adjust() after 429 should halve from 4 to 2");
 }
 
@@ -98,7 +102,7 @@ fn adjust_decrease_rounds_down_odd_values() {
         reason: "HTTP 429 Too Many Requests".to_string(),
     };
     s.report_error(&error);
-    let new_max = s.adjust();
+    let new_max = adjust_without_system_pressure(&s);
     assert_eq!(new_max, 2, "5 * 0.5 = 2.5 should round down to 2");
 }
 
@@ -111,7 +115,7 @@ fn adjust_decrease_from_3_goes_to_1() {
         reason: "HTTP 429 Too Many Requests".to_string(),
     };
     s.report_error(&error);
-    let new_max = s.adjust();
+    let new_max = adjust_without_system_pressure(&s);
     assert!(
         new_max >= 1,
         "3 * 0.5 = 1.5 → should round to at least floor=1, got {new_max}"
@@ -129,7 +133,7 @@ fn adjust_never_exceeds_ceiling() {
     let s = AdaptiveScaler::new(7, 1, 8);
     // Multiple no-pressure adjusts should cap at ceiling.
     for _ in 0..5 {
-        let m = s.adjust();
+        let m = adjust_without_system_pressure(&s);
         assert!(m <= 8, "should never exceed ceiling of 8, got {m}");
     }
 }
@@ -137,11 +141,11 @@ fn adjust_never_exceeds_ceiling() {
 #[test]
 fn adjust_reaches_ceiling_from_below() {
     let s = AdaptiveScaler::new(6, 1, 8);
-    let m1 = s.adjust(); // 6 → 7
+    let m1 = adjust_without_system_pressure(&s); // 6 → 7
     assert_eq!(m1, 7, "should increase from 6 to 7");
-    let m2 = s.adjust(); // 7 → 8
+    let m2 = adjust_without_system_pressure(&s); // 7 → 8
     assert_eq!(m2, 8, "should increase from 7 to 8");
-    let m3 = s.adjust(); // 8 → 8 (capped)
+    let m3 = adjust_without_system_pressure(&s); // 8 → 8 (capped)
     assert_eq!(m3, 8, "should stay at ceiling 8");
 }
 
@@ -155,7 +159,7 @@ fn adjust_never_goes_below_floor() {
     // Repeated 429s + adjusts should never go below floor.
     for _ in 0..10 {
         s.report_error(&error);
-        let m = s.adjust();
+        let m = adjust_without_system_pressure(&s);
         assert!(m >= 1, "should never go below floor of 1, got {m}");
     }
 }
@@ -169,7 +173,7 @@ fn adjust_respects_custom_floor() {
     };
     for _ in 0..10 {
         s.report_error(&error);
-        let m = s.adjust();
+        let m = adjust_without_system_pressure(&s);
         assert!(m >= 3, "should never go below custom floor of 3, got {m}");
     }
 }
@@ -186,7 +190,7 @@ fn report_error_detects_429_in_adapter_invocation() {
         reason: "HTTP 429 Too Many Requests".to_string(),
     };
     s.report_error(&error);
-    let m = s.adjust();
+    let m = adjust_without_system_pressure(&s);
     assert!(
         m < 4,
         "429 error should trigger decrease; expected < 4, got {m}"
@@ -203,7 +207,7 @@ fn report_error_detects_rate_limit_phrasing() {
         reason: "rate limit exceeded".to_string(),
     };
     s.report_error(&error);
-    let m = s.adjust();
+    let m = adjust_without_system_pressure(&s);
     assert!(
         m < 4,
         "rate-limit error should trigger decrease; expected < 4, got {m}"
@@ -220,7 +224,7 @@ fn report_error_ignores_non_429_errors() {
         reason: "internal server error 500".to_string(),
     };
     s.report_error(&error);
-    let m = s.adjust();
+    let m = adjust_without_system_pressure(&s);
     assert!(
         m >= 4,
         "non-429 errors should not trigger decrease; expected >= 4, got {m}"
@@ -236,7 +240,7 @@ fn report_error_ignores_unrelated_error_variants() {
         store: "test".to_string(),
     };
     s.report_error(&error);
-    let m = s.adjust();
+    let m = adjust_without_system_pressure(&s);
     assert!(
         m >= 4,
         "unrelated error variants should not trigger decrease; expected >= 4, got {m}"
@@ -367,7 +371,7 @@ fn scaler_is_safe_to_share_across_threads() {
     for _ in 0..4 {
         let s = Arc::clone(&scaler);
         handles.push(thread::spawn(move || {
-            let m = s.adjust();
+            let m = adjust_without_system_pressure(&s);
             assert!((1..=8).contains(&m), "should be in bounds, got {m}");
         }));
     }

@@ -82,6 +82,11 @@ impl AdaptiveScaler {
     ///
     /// Returns the new max value after adjustment.
     pub fn adjust(&self) -> u32 {
+        self.adjust_with_samples(sample_cpu_pressure(), sample_memory_pressure())
+    }
+
+    #[doc(hidden)]
+    pub fn adjust_with_samples(&self, cpu_pressure: Option<f64>, mem_pressure: Option<f64>) -> u32 {
         let now_epoch = epoch_secs();
         let current = self.current.load(Ordering::Relaxed);
 
@@ -96,10 +101,7 @@ impl AdaptiveScaler {
             !timestamps.is_empty()
         };
 
-        // Sample system pressure signals.
-        let cpu = sample_cpu_pressure().unwrap_or(0.0);
-        let mem = sample_memory_pressure().unwrap_or(0.0);
-        let system_pressure = cpu.max(mem);
+        let system_pressure = cpu_pressure.unwrap_or(0.0).max(mem_pressure.unwrap_or(0.0));
 
         // AIMD rule:
         // - 429 errors or high system pressure → multiplicative decrease
@@ -227,6 +229,10 @@ pub fn sample_memory_pressure() -> Option<f64> {
 mod tests {
     use super::*;
 
+    fn adjust_without_system_pressure(s: &AdaptiveScaler) -> u32 {
+        s.adjust_with_samples(None, None)
+    }
+
     #[test]
     fn construction_clamps_zero_floor_to_one() {
         let s = AdaptiveScaler::new(5, 0, 10);
@@ -264,7 +270,7 @@ mod tests {
     fn adjust_additive_increase_on_no_pressure() {
         let s = AdaptiveScaler::new(4, 1, 8);
         // With no pressure signals, adjust should increase by 1.
-        let new_max = s.adjust();
+        let new_max = adjust_without_system_pressure(&s);
         assert_eq!(
             new_max, 5,
             "adjust() with no pressure should additive-increase from 4 to 5"
@@ -279,7 +285,7 @@ mod tests {
             reason: "HTTP 429 Too Many Requests".to_string(),
         };
         s.report_error(&error);
-        let new_max = s.adjust();
+        let new_max = adjust_without_system_pressure(&s);
         assert_eq!(new_max, 2, "adjust() after 429 should halve from 4 to 2");
     }
 
@@ -293,7 +299,7 @@ mod tests {
         s.report_error(&error);
         // Non-429 errors should not affect the scaler.
         // adjust() without pressure should still increase.
-        let new_max = s.adjust();
+        let new_max = adjust_without_system_pressure(&s);
         assert_eq!(
             new_max, 5,
             "non-429 errors should not trigger decrease; expected increase to 5"
@@ -303,9 +309,9 @@ mod tests {
     #[test]
     fn adjust_never_exceeds_ceiling() {
         let s = AdaptiveScaler::new(7, 1, 8);
-        let m1 = s.adjust();
+        let m1 = adjust_without_system_pressure(&s);
         assert!(m1 <= 8, "should not exceed ceiling of 8, got {m1}");
-        let m2 = s.adjust();
+        let m2 = adjust_without_system_pressure(&s);
         assert!(m2 <= 8, "should not exceed ceiling of 8, got {m2}");
     }
 
@@ -319,7 +325,7 @@ mod tests {
         // Report many 429s and adjust — should never go below 1.
         for _ in 0..10 {
             s.report_error(&error);
-            let m = s.adjust();
+            let m = adjust_without_system_pressure(&s);
             assert!(m >= 1, "should never go below floor of 1, got {m}");
         }
     }
@@ -346,7 +352,7 @@ mod tests {
             reason: "rate limit exceeded — slow down".to_string(),
         };
         s.report_error(&error);
-        let new_max = s.adjust();
+        let new_max = adjust_without_system_pressure(&s);
         assert_eq!(
             new_max, 2,
             "\"rate limit\" phrase should trigger decrease: 4 → 2"
@@ -363,7 +369,7 @@ mod tests {
         // Each adjust-after-429 halves: 8 → 4 → 2 → 1
         for _ in 0..5 {
             s.report_error(&error);
-            s.adjust();
+            adjust_without_system_pressure(&s);
         }
         let final_val = s.current_max();
         assert_eq!(
@@ -381,7 +387,7 @@ mod tests {
         };
         s.report_error(&error);
         // Without 429 or rate-limit, adjust should increase
-        let new_max = s.adjust();
+        let new_max = adjust_without_system_pressure(&s);
         assert_eq!(
             new_max, 5,
             "non-rate-limit errors must not trigger decrease, expected 5"
@@ -400,7 +406,7 @@ mod tests {
             reason: "429 in store path".to_string(),
         };
         s.report_error(&error);
-        let new_max = s.adjust();
+        let new_max = adjust_without_system_pressure(&s);
         assert_eq!(
             new_max, 5,
             "non-AdapterInvocationFailed errors must not affect scaler"
