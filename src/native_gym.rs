@@ -224,7 +224,7 @@ pub fn register_gym_handlers(transport: &mut NativeBridgeTransport) {
             // progressive test suite which is not yet ported to Rust.
             Ok(fail_result(
                 sid,
-                "native Rust evaluator: scenario execution not yet implemented; use Python fallback bridge for full evaluation",
+                "native Rust evaluator: scenario execution not yet implemented; full progressive test suite evaluation is a planned enhancement",
                 "native_gym_bridge",
             ))
         }),
@@ -263,7 +263,7 @@ pub fn register_gym_handlers(transport: &mut NativeBridgeTransport) {
                 "scenario_results": [],
                 "scenarios_passed": 0,
                 "scenarios_total": 0,
-                "error_message": "native Rust evaluator: suite execution not yet implemented; use Python fallback bridge for full evaluation",
+                "error_message": "native Rust evaluator: suite execution not yet implemented; full progressive test suite evaluation is a planned enhancement",
                 "degraded_sources": ["native_gym_bridge"],
             }))
         }),

@@ -10,10 +10,9 @@
 //!    [`NativeCognitiveMemory::open`] on `state_root`. The fallback is the
 //!    correct behaviour for one-shot recipe runs (parity tests, ad-hoc
 //!    `amplihack recipe run`) when no daemon is up.
-//! 2. Knowledge / gym: launch a fresh subprocess pair via
-//!    [`crate::bridge_launcher`]. These are owned by the helper-bin process
-//!    and torn down when it exits; the cost (~hundreds of milliseconds for
-//!    Python startup) is acceptable for recipe-step granularity.
+//! 2. Knowledge / gym: launch native Rust transports via
+//!    [`crate::bridge_launcher`]. These are in-process and incur negligible
+//!    startup cost compared to the former Python subprocess approach.
 //! 3. Session: not constructed here. LLM sessions are heavyweight and only
 //!    the long-running daemon needs one. Recipe steps that need agent
 //!    delegation should use `type: recipe` to dispatch to the
@@ -21,14 +20,14 @@
 //!
 //! This module is the bridge between the daemon's bespoke wiring (in
 //! `operator_commands_ooda::daemon`) and the recipe-runner's stateless
-//! helper-bin model. Both paths now share `bridge_launcher` for the
-//! Python subprocesses; they differ only in how memory and the LLM
-//! session are obtained.
+//! helper-bin model. Both paths share `bridge_launcher` for the native
+//! Rust transports; they differ only in how memory and the LLM session
+//! are obtained.
 
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::bridge_launcher::{find_python_dir, launch_gym_bridge, launch_knowledge_bridge};
+use crate::bridge_launcher::{launch_gym_bridge_native, launch_knowledge_bridge_native};
 use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::error::SimardResult;
 use crate::memory_ipc::{self, RemoteCognitiveMemory, SharedMemory};
@@ -61,9 +60,8 @@ pub fn connect_memory(state_root: &Path) -> SimardResult<Box<dyn CognitiveMemory
 /// session).
 pub fn bridges_from_state_root(state_root: &Path) -> SimardResult<OodaBridges> {
     let memory = connect_memory(state_root)?;
-    let python_dir = find_python_dir()?;
-    let knowledge = launch_knowledge_bridge(&python_dir)?;
-    let gym = launch_gym_bridge(&python_dir)?;
+    let knowledge = launch_knowledge_bridge_native()?;
+    let gym = launch_gym_bridge_native()?;
     Ok(OodaBridges {
         memory,
         knowledge,

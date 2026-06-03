@@ -1,7 +1,7 @@
 //! Gym evaluation bridge connecting Simard to the amplihack-agent-eval suite.
 //!
-//! [`GymBridge`] wraps a [`BridgeTransport`] to communicate with a Python
-//! bridge server that runs progressive test levels (L1-L12) and long-horizon
+//! [`GymBridge`] wraps a [`BridgeTransport`] to communicate with the native
+//! Rust transport that runs progressive test levels (L1-L12) and long-horizon
 //! memory evaluations. All results are typed and serializable so they can
 //! feed the scoring pipeline in [`crate::gym_scoring`].
 //!
@@ -85,7 +85,7 @@ pub struct GymSuiteResult {
 
 /// Bridge client for gym evaluations.
 ///
-/// Wraps a [`BridgeTransport`] to call the Python gym bridge server.
+/// Wraps a [`BridgeTransport`] to call the native gym evaluation transport.
 /// Each method maps to a single bridge RPC call.
 pub struct GymBridge {
     transport: Box<dyn BridgeTransport>,
