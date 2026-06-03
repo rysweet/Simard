@@ -69,6 +69,11 @@ Simard guarantees these operator-visible namespaces on the primary binary:
 
 Bare `simard` prints the unified help text instead of attempting a hidden environment-only bootstrap.
 
+## TUI monitoring dashboard
+
+- [How to monitor Simard with the TUI](./howto/monitor-simard-with-tui.md) - Launch `simard-tui` and read daemon health, goals, and system stats from a single terminal pane.
+- [simard-tui reference](./reference/simard-tui.md) - Full specification of tabs, data sources, refresh behaviour, environment variables, and security model.
+
 ## Compatibility binaries
 
 The compatibility binaries remain shipped, but they are no longer the canonical entrypoint:
