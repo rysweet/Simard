@@ -48,6 +48,84 @@ test.describe('Chat Lifecycle @structural', () => {
   });
 });
 
+test.describe('Chat Tab Description @structural', () => {
+  test.beforeEach(async ({ chatPage, authenticatedPage }) => {
+    await authenticatedPage.goto('/');
+    await chatPage.openChatTab();
+  });
+
+  test('chat help box describes direct conversation, not meeting handoffs', async ({
+    authenticatedPage,
+  }) => {
+    const helpBox = authenticatedPage.locator('#tab-chat .card div').first();
+    const helpText = await helpBox.textContent();
+    expect(helpText).toContain('Talk directly with Simard');
+    expect(helpText).not.toContain('Meetings generate handoff documents');
+  });
+
+  test('chat heading says Chat, not Meeting Chat', async ({ authenticatedPage }) => {
+    const heading = authenticatedPage.locator('#tab-chat .card h2');
+    await expect(heading).toHaveText('Chat');
+  });
+});
+
+test.describe('Chat Response Content @structural', () => {
+  test.beforeEach(async ({ chatPage, authenticatedPage }) => {
+    await authenticatedPage.routeWebSocket('**/ws/chat', (ws) => {
+      ws.send(
+        JSON.stringify({
+          role: 'system',
+          content: 'Connected to Simard. Speak naturally — /help for commands, /close to end.',
+        }),
+      );
+      ws.onMessage((msg) => {
+        const text = typeof msg === 'string' ? msg : msg.toString();
+        ws.send(
+          JSON.stringify({
+            role: 'assistant',
+            content:
+              'Based on your current goals, the dashboard is tracking five open issues. ' +
+              'The highest-priority item is improving test coverage for the chat interface.',
+          }),
+        );
+      });
+    });
+
+    await authenticatedPage.goto('/');
+    await chatPage.openChatTab();
+    await chatPage.clickReconnect();
+    await chatPage.waitForConnected();
+  });
+
+  test('chat response contains substantive content, not tool-call metadata', async ({
+    chatPage,
+  }) => {
+    // Wait for greeting
+    await chatPage.waitForResponse(5_000);
+
+    await chatPage.sendMessage('What are you working on?');
+    const resp = await chatPage.waitForResponse(10_000);
+    expect(resp.role).toBe('assistant');
+
+    // Must contain real conversational content
+    expect(resp.content.length).toBeGreaterThan(20);
+
+    // Must NOT contain tool-call artifacts
+    const toolCallPatterns = [
+      '[tool_call:',
+      '<tool_call',
+      'Running tool:',
+      'Tool output:',
+      '[Tool ',
+      '<function_call',
+      '<invoke',
+    ];
+    for (const pattern of toolCallPatterns) {
+      expect(resp.content).not.toContain(pattern);
+    }
+  });
+});
+
 test.describe('Chat Commands with Mock WS @structural', () => {
   test.beforeEach(async ({ chatPage, authenticatedPage }) => {
     await authenticatedPage.routeWebSocket('**/ws/chat', (ws) => {
