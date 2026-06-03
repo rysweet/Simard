@@ -222,13 +222,13 @@ mod tests {
 
     #[test]
     fn daemon_info_unavailable_constructor() {
-        let info = DaemonInfo::unavailable("simard.service".to_string());
+        let info = DaemonInfo::unavailable("simard-ooda.service".to_string());
         assert_eq!(info.state, DaemonState::Unavailable);
         assert_eq!(info.pid, None);
         assert_eq!(info.uptime_secs, None);
         assert_eq!(info.cpu_percent, None);
         assert_eq!(info.memory_rss_kb, None);
-        assert_eq!(info.service_name, "simard.service");
+        assert_eq!(info.service_name, "simard-ooda.service");
     }
 
     // ── parse_daemon_state ──────────────────────────────────────────

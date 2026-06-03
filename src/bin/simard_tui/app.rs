@@ -264,14 +264,14 @@ mod tests {
 
     #[test]
     fn app_new_starts_on_overview() {
-        let app = App::new("simard.service".to_string());
+        let app = App::new("simard-ooda.service".to_string());
         assert_eq!(app.active_tab, Tab::Overview);
         assert!(!app.should_quit);
     }
 
     #[test]
     fn app_new_starts_with_empty_goals() {
-        let app = App::new("simard.service".to_string());
+        let app = App::new("simard-ooda.service".to_string());
         assert!(app.goal_board.active.is_empty());
         assert!(app.goal_board.backlog.is_empty());
     }
@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn handle_key_quit() {
-        let mut app = App::new("simard.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string());
         assert!(!app.should_quit);
         app.handle_key('q');
         assert!(app.should_quit);
@@ -288,7 +288,7 @@ mod tests {
 
     #[test]
     fn handle_key_tab_switch() {
-        let mut app = App::new("simard.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string());
         assert_eq!(app.active_tab, Tab::Overview);
 
         app.handle_key('2');
@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn handle_key_unknown_is_noop() {
-        let mut app = App::new("simard.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string());
         let tab_before = app.active_tab;
         let quit_before = app.should_quit;
         app.handle_key('z');

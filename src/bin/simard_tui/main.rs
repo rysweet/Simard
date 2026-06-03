@@ -52,7 +52,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let service_name = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "simard.service".to_string());
+        .unwrap_or_else(|| "simard-ooda.service".to_string());
 
     let mut terminal = setup_terminal()?;
     let _guard = TerminalGuard;
