@@ -54,6 +54,15 @@ pub fn resolve_subdir(name: &str) -> PathBuf {
     simard_state_root().join(name)
 }
 
+/// Canonical path for the file-backed goal store.
+///
+/// Resolves to `<state_root>/state/goal_store.json`. All consumers
+/// (bootstrap assembly, meeting close, OODA curate) should use this
+/// single helper to avoid path inconsistencies.
+pub fn goal_store_path() -> PathBuf {
+    simard_state_root().join("state").join("goal_store.json")
+}
+
 /// Look up `SIMARD_STATE_ROOT` and return `Some(path)` only if it passes the
 /// validation rules (non-empty, absolute, NUL-free). Emits a one-shot WARN
 /// the first time a malformed value is observed so operators can fix it.

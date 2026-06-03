@@ -528,26 +528,14 @@ impl MeetingBackend {
     /// This is best-effort — goal linkage is optional enrichment.
     fn load_active_goal_titles(&self) -> Vec<(String, String)> {
         use crate::goals::{FileBackedGoalStore, GoalStore};
-        use crate::metadata::{BackendDescriptor, Freshness};
 
-        let goals_path = dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".simard/goals.json");
+        let goals_path = crate::state_root::goal_store_path();
 
         if !goals_path.exists() {
             return Vec::new();
         }
 
-        let descriptor = match Freshness::now() {
-            Ok(f) => BackendDescriptor::for_runtime_type::<MeetingBackend>(
-                "goals::file-backed",
-                "meeting-goal-linkage",
-                f,
-            ),
-            Err(_) => return Vec::new(),
-        };
-
-        match FileBackedGoalStore::new(&goals_path, descriptor) {
+        match FileBackedGoalStore::try_new(&goals_path) {
             Ok(store) => match store.active_top_goals(50) {
                 Ok(goals) => goals.into_iter().map(|g| (g.slug, g.title)).collect(),
                 Err(e) => {

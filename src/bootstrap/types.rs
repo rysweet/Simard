@@ -254,6 +254,12 @@ mod tests {
     #[test]
     fn bootstrap_inputs_default_all_none() {
         use super::BootstrapInputs;
+        // `Default::default()` reads `SIMARD_BOOTSTRAP_MODE` from the env
+        // (see the doc comment on the impl). Remove it for this assertion
+        // so the test is hermetic regardless of the runner environment.
+        // SAFETY: this test runs with `--test-threads=1` semantics for
+        // env-touching tests; no other thread reads this var concurrently.
+        unsafe { std::env::remove_var("SIMARD_BOOTSTRAP_MODE") };
         let inputs = BootstrapInputs::default();
         assert!(inputs.prompt_root.is_none());
         assert!(inputs.objective.is_none());

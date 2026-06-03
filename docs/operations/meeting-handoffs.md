@@ -25,6 +25,14 @@ Two consumers ingest the handoff:
    (`src/engineer_loop/meeting_decisions.rs`) so an operator can drive
    intent into in-flight engineer work without restarting the daemon.
 
+Additionally, the meeting close pipeline now **writes goal records
+directly** to `goal_store.json` before writing the handoff artifact
+(issue #2182). This gives immediate query visibility to consumers that
+read the file-backed goal store (meeting backend, engineer loop,
+dashboard probes) without waiting for the OODA curate phase. See
+[Meeting close lifecycle](../reference/meeting-close-lifecycle.md#direct-goal-record-writes-issue-2182)
+for details.
+
 This is the canonical mechanism for moving operator intent into
 Simard's autonomous workstream.
 

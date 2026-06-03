@@ -1,7 +1,7 @@
 ---
 title: State-root resolution
 description: How `simard` resolves the durable state root and its subdirectories — the single helper shared by `simard meeting`, `simard goal-curation`, and the OODA daemon.
-last_updated: 2026-05-19
+last_updated: 2026-06-02
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -35,12 +35,14 @@ guarantees the helper makes.
 pub fn simard_state_root() -> PathBuf;
 
 pub fn resolve_subdir(name: &str) -> PathBuf;
+
+pub fn goal_store_path() -> PathBuf;
 ```
 
-The crate root re-exports both functions:
+The crate root re-exports all three functions:
 
 ```rust
-use simard::state_root::{simard_state_root, resolve_subdir};
+use simard::state_root::{simard_state_root, resolve_subdir, goal_store_path};
 ```
 
 `goal_curation::operations::simard_state_root` is preserved as a
@@ -70,6 +72,17 @@ single configurable parent.
 (`"meetings"`, `"meeting_handoffs"`, `"goals"`, ...). The helper does
 no validation on `name`; callers must use static strings.
 
+### `goal_store_path() -> PathBuf`
+
+Returns `simard_state_root().join("state").join("goal_store.json")` —
+the canonical path to the file-backed goal store. Used by
+`bootstrap::assembly`, `meeting_backend::closing`, and
+`meeting_backend::mod` so that every consumer resolves the same path
+regardless of `$SIMARD_STATE_ROOT`.
+
+See [File-backed goal store](./file-backed-goal-store.md) for the full
+locking protocol and wiring.
+
 ---
 
 ## Subdirectory layout
@@ -78,7 +91,9 @@ no validation on `name`; callers must use static strings.
 |---|---|---|
 | `<root>/meetings/` | Per-meeting bundle directories (transcript, handoff, markdown) | `~/.simard/meetings/` |
 | `<root>/meeting_handoffs/` | Flat handoff drop directory consumed by OODA + engineer-loop | `~/.simard/meeting_handoffs/` |
-| `<root>/goals/` | Durable goal board snapshots | `~/.simard/goals/` |
+| `<root>/state/` | Durable state files (goal store, scaling state) | `~/.simard/state/` |
+| `<root>/state/goal_store.json` | File-backed goal records (flock-protected) | `~/.simard/state/goal_store.json` |
+| `<root>/goals/` | Legacy durable goal board snapshots (superseded by cognitive memory) | `~/.simard/goals/` |
 
 > Setting `SIMARD_STATE_ROOT=/x` relocates **all** of the above
 > together; operators who want to relocate just one keep using the

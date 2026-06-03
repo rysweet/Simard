@@ -255,6 +255,13 @@ fn run_ooda_cycle_inner(
 
     // --- Update goal current_activity from outcomes ---
     for outcome in &outcomes {
+        // Report errors to AIMD scaler for rate-limit backoff (issue #2182).
+        if !outcome.success
+            && let Some(ref scaler) = config.scaler
+        {
+            scaler.report_reason(&outcome.detail);
+        }
+
         if let Some(goal_id) = &outcome.action.goal_id {
             // Update per-goal failure cooldown counter.
             if outcome.success {

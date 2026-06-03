@@ -1,7 +1,7 @@
 ---
 title: Recover from a meeting close timeout
 description: What to do when `simard meeting`'s `/close` writes a partial handoff because an agent or bridge exceeded its budget — how to detect, inspect, complete, and re-ingest the bundle.
-last_updated: 2026-05-19
+last_updated: 2026-06-02
 review_schedule: as-needed
 owner: simard
 doc_type: howto
@@ -41,6 +41,14 @@ You ran `/close` and:
   `handoff_partial=true`, **and/or**
 - The handoff JSON has empty `decisions`/`action_items` despite a
   productive conversation.
+
+> **Goal writes survive timeouts.** Since issue #2182, the close
+> pipeline writes goal records to the file-backed goal store in both
+> the normal `close()` path and the `finalize_partial()` timeout path.
+> If the meeting had a `/goal` set and the topic or transcript was
+> goal-related, goals are persisted even when the summarizer times out
+> and `decisions` is empty. Check `goal_store.json` — the goals may
+> already be there.
 
 If `/close` took longer than 90 seconds, that is a bug — please
 file an issue and attach
@@ -108,7 +116,13 @@ jq '{decisions: (.decisions|length), actions: (.action_items|length), questions:
 
 A reading of `{decisions: 0, actions: 0, questions: 0}` from a
 conversation that clearly produced decisions is the disk-only
-heuristic.
+heuristic. However, check the goal store — if `/goal` was set during
+the meeting, the fallback synthesis may have already written goals:
+
+```bash
+STATE_ROOT="${SIMARD_STATE_ROOT:-$HOME/.simard}"
+cat "$STATE_ROOT/state/goal_store.json" | python3 -m json.tool | tail -20
+```
 
 > The same `SIMARD_HANDOFF_DIR > SIMARD_STATE_ROOT > $HOME/.simard`
 > ladder is documented in

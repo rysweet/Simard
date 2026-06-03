@@ -92,6 +92,9 @@ fn no_legacy_goal_records_json_references_outside_migration_files() {
             // legacy artefact is no longer produced, and (b) a `#[cfg(test)]`
             // assertion that the file is NOT created. Both are intentional.
             "cognitive_memory_store.rs",
+            // The flock-based store has migration code that renames the
+            // legacy file to the new canonical path (#2182).
+            "store.rs",
         ],
     );
 

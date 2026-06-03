@@ -1,7 +1,7 @@
 ---
 title: Meeting close lifecycle
 description: The contract enforced when an operator runs `/close` in `simard meeting` — bounded timeouts, partial-handoff fallback, and the structured tracing emitted at each phase.
-last_updated: 2026-05-19
+last_updated: 2026-06-02
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -144,12 +144,89 @@ hang in one phase cannot consume the others' budgets.
                                      │
                                      ▼
                   ┌─────────────────────────────────────┐
+                  │   write_goal_records(decisions)     │
+                  │   + fallback_goal_decisions()       │
+                  │   FileBackedGoalStore → goal_store  │
+                  │   .json (best-effort, non-fatal)    │
+                  └──────────────────┬──────────────────┘
+                                     │
+                                     ▼
+                  ┌─────────────────────────────────────┐
                   │   persist_handoff(state_root)       │
                   │   single-shot fs::write per file    │
                   │   (atomic-rename hardening tracked  │
                   │    separately — see follow-up)      │
                   └─────────────────────────────────────┘
 ```
+
+### Direct goal record writes (issue #2182)
+
+After structured decisions are built and before the handoff is persisted,
+the close pipeline writes goal records directly to the file-backed goal
+store. This gives immediate query visibility — consumers that read
+`goal_store.json` (meeting backend, engineer loop, dashboard probes) see
+the new goals without waiting for the OODA curate phase to process the
+handoff artifact.
+
+**Implementation:**
+
+```rust
+// In closing.rs — shared by close() and finalize_partial():
+let decisions_for_goals = if structured_decisions.is_empty() {
+    fallback_goal_decisions(
+        self.explicit_goal.as_deref(),
+        &self.topic,
+        &self.history,
+    )
+} else {
+    structured_decisions.clone()
+};
+write_goals_from_decisions(&decisions_for_goals);
+```
+
+**Fallback goal synthesis (issue #2182):**
+
+When `structured_decisions` is empty (e.g., the summarizer timed out),
+the `fallback_goal_decisions()` function synthesizes decisions from:
+
+1. **Topic + explicit goal:** If the meeting topic contains "goal"
+   (case-insensitive) and the operator set `/goal` during the meeting,
+   the goal text becomes a `MeetingDecision`.
+2. **Transcript patterns:** If the transcript contains goal-assignment
+   phrases ("new goal", "assign goal", "accept this goal", etc.) and
+   `/goal` was set, the goal text becomes a decision.
+3. **Guard:** If no explicit `/goal` was recorded, no fallback fires.
+   This prevents accidentally promoting the first user message into an
+   active goal.
+
+The fallback runs in **both** `close()` and `finalize_partial()`, so
+goal writes happen even when the summary phase times out.
+
+**Semantics:**
+
+- The write uses the same `FileBackedGoalStore` with flock locking that
+  `bootstrap::assembly` constructs, ensuring no races with the daemon.
+- This is **best-effort and non-fatal** — a failure to write goal
+  records does not abort the close pipeline. The handoff artifact is
+  still written and the OODA curate phase will create the goals on
+  its next cycle.
+- `goal_slug()` generates the same slug that `check_meeting_handoffs()`
+  in `curate.rs` uses, so when the curate phase processes the handoff
+  later, it deduplicates against the already-existing record.
+- Only `MeetingDecision`s are written as goal records. `ActionItem`s
+  continue to flow exclusively through the handoff→curate→backlog path.
+
+**Dual-write divergence:** After meeting close, a new goal exists in
+both the file-backed goal store and the handoff artifact. The OODA
+curate phase independently processes the handoff and adds goals to the
+in-memory `GoalBoard`. Because both paths use the same `goal_slug()`,
+the curate phase's deduplication prevents double-creation. The file
+store and cognitive-memory `GoalBoard` converge after one OODA cycle.
+
+See [File-backed goal store reference](./file-backed-goal-store.md) for
+the locking protocol and
+[operations/meeting-handoffs.md](../operations/meeting-handoffs.md) for
+the full handoff ingestion flow.
 
 Each phase has three outcomes:
 
@@ -193,7 +270,7 @@ complete list and parsing notes.
 | `topic` | as set | as set |
 | `started_at` | exact | exact |
 | `closed_at` | exact | exact (wall-clock at timeout fire) |
-| `decisions` | extracted by summarizer | `[]` if summarizer timed out before any output; otherwise whatever the summarizer emitted |
+| `decisions` | extracted by summarizer | `[]` if summarizer timed out and no fallback applies; otherwise whatever the summarizer emitted. **Note:** since issue #2182, goal records may still be written to `goal_store.json` via fallback synthesis even when this field is empty — check the goal store. |
 | `action_items` | extracted by summarizer | `[]` if summarizer timed out; otherwise whatever was emitted |
 | `open_questions` | extracted by summarizer | `[]` on summarizer timeout; otherwise emitted set |
 | `transcript` | full live buffer | full live buffer (the live buffer is in-memory and unaffected by agent timeouts) |
