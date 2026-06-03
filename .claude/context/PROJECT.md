@@ -10,7 +10,7 @@ Replace the sections below with information about your project.
 
 ---
 
-## Project: issue-2195-implement-all-4-placeholder-tabs-in-the-simard-tui
+## Project: issue-2201-fix-tui-stats-tab-to-show-real-data-the-simard-tui
 
 ## Overview
 

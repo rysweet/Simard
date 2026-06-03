@@ -209,13 +209,12 @@ all tabs.
 Press `6` to switch to the Stats tab:
 
 ```
-┌ Statistics ───────────────────────────────────────────────────────┐
+┌ Stats ────────────────────────────────────────────────────────────┐
 │ State files:     142                                              │
 │ Session dirs:    7                                                │
 │ Open issues:     23                                               │
 │ Open PRs:        4                                                │
 │ Active goals:    5                                                │
-│ Backlog items:   12                                               │
 │ Daemon uptime:   2h 14m 33s                                      │
 └───────────────────────────────────────────────────────────────────┘
 ```
@@ -225,17 +224,22 @@ Press `6` to switch to the Stats tab:
 - **State files** — total files in `<state-root>/state/` (recursive
   count). Indicates how much state the daemon has accumulated.
 - **Session dirs** — engineer session directories in
-  `<state-root>/engineer-worktrees/`. One per past or active session.
+  `<state-root>/sessions/`. One per past or active session.
 - **Open issues** — open GitHub issues in the repo. Requires `gh`
-  CLI. Shows `–` if unavailable.
+  CLI. Shows `–` if unavailable or still loading.
 - **Open PRs** — open pull requests. Same requirements as issues.
 - **Active goals** — count from the cached goal board (same data as
   Tab 2).
-- **Backlog items** — scored backlog item count from the goal board.
 - **Daemon uptime** — same value as the Overview tab.
 
-The stats refresh every 10 seconds to avoid frequent `gh` API calls.
-Goal counts update every 2 seconds (from the shared goal board cache).
+**How refresh works:**
+
+Local metrics (state files, session dirs) update synchronously every
+10 seconds. GitHub metrics (issues, PRs) are fetched in a background
+thread so they never freeze the TUI. On first launch, issues/PRs show
+`–` for 1–3 seconds until the background fetch completes, then
+populate automatically. Goal counts update every 2 seconds (from the
+shared goal board cache).
 
 ## 8. Custom state root
 
@@ -296,7 +300,7 @@ not recommended (two meeting processes would compete for state).
 | Engineers tab: "No child processes" | Daemon idle between OODA cycles | Normal — wait for next cycle |
 | Activity tab: "No log entries" | No journald or no entries for the unit | Check: `journalctl --user -u simard.service -n 5` (or use `SIMARD_TUI_SERVICE` if your unit has a different name) |
 | Meeting tab: "simard binary not found" | Binary missing at state-root/bin/simard | Install Simard or check `SIMARD_STATE_ROOT` |
-| Stats show `–` for issues/PRs | `gh` not installed or not authenticated | Run `gh auth status` to diagnose |
+| Stats show `–` for issues/PRs | `gh` not installed or not authenticated, or still loading | Run `gh auth status` to diagnose; wait 3s for background fetch |
 
 ## See also
 
