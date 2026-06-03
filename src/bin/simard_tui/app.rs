@@ -120,6 +120,7 @@ impl App {
             .arg("-p")
             .arg("ActiveState,MainPID,ActiveEnterTimestamp,LoadState")
             .arg(service)
+            .env("TZ", "UTC") // Force UTC so timestamp parsing is unambiguous
             .output()
             .ok()
             .filter(|o| o.status.success())
