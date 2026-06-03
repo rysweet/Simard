@@ -564,13 +564,8 @@ pub fn inspect_workspace(workspace_root: &Path, state_root: &Path) -> SimardResu
     let changed_files = parse_status_paths(&status_output.stdout);
     let worktree_dirty = !changed_files.is_empty();
     let active_goals = {
-        // Read goals through the `FileBackedGoalStore` so this probe sees
-        // the same records the runtime persists via `assembly.rs`
-        // (which uses `FileBackedGoalStore` at `config.goal_store_path()`).
         use crate::goals::GoalStore as _;
-        let store = crate::goals::FileBackedGoalStore::try_new(
-            state_root.join("state").join("goal_store.json"),
-        )?;
+        let store = crate::goals::CognitiveMemoryGoalStore::new(state_root.to_path_buf())?;
         store.active_top_goals(5)?
     };
     let carried_meeting_decisions = load_carried_meeting_decisions(state_root)?;

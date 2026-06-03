@@ -13,7 +13,7 @@ use crate::base_types::BaseTypeId;
 use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::error::{SimardError, SimardResult};
 use crate::evidence::{EvidenceStore, FileBackedEvidenceStore};
-use crate::goals::{FileBackedGoalStore, GoalStore};
+use crate::goals::{CognitiveMemoryGoalStore, GoalStore};
 use crate::handoff::{FileBackedHandoffStore, RuntimeHandoffSnapshot, RuntimeHandoffStore};
 use crate::identity::{
     BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader, IdentityManifest, ManifestContract,
@@ -115,7 +115,9 @@ fn assemble_parts(config: &BootstrapConfig) -> SimardResult<AssembledParts> {
     let evidence_store = Arc::new(FileBackedEvidenceStore::try_new(
         config.evidence_store_path(),
     )?);
-    let goal_store = Arc::new(FileBackedGoalStore::try_new(config.goal_store_path())?);
+    let goal_store = Arc::new(CognitiveMemoryGoalStore::new(
+        config.state_root_path().to_path_buf(),
+    )?);
     let handoff_store = Arc::new(FileBackedHandoffStore::try_new(
         config.handoff_store_path(),
     )?);

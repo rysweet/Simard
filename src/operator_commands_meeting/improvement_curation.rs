@@ -120,13 +120,8 @@ pub fn run_improvement_curation_read_probe(
     let parsed_record = PersistedImprovementRecord::parse(&latest_record.value)
         .map_err(|error| format!("{error}"))?;
     let goal_records = {
-        // Read goals through the `FileBackedGoalStore` so the read probe
-        // surfaces the same records the runtime persists via `assembly.rs`
-        // (which uses `FileBackedGoalStore` at `config.goal_store_path()`).
         use crate::goals::GoalStore as _;
-        let store = crate::goals::FileBackedGoalStore::try_new(
-            state_root.join("state").join("goal_store.json"),
-        )?;
+        let store = crate::goals::CognitiveMemoryGoalStore::new(state_root.clone())?;
         store.list()?
     };
 
