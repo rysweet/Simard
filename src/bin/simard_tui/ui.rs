@@ -41,6 +41,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     match app.active_tab {
         Tab::Overview => tabs::overview::draw(f, app, chunks[1]),
         Tab::Goals => tabs::goals::draw(f, app, chunks[1]),
-        _ => tabs::placeholder::draw(f, app.active_tab, chunks[1]),
+        Tab::Engineers => tabs::engineers::draw(f, app, chunks[1]),
+        Tab::Activity => tabs::activity::draw(f, app, chunks[1]),
+        Tab::Meeting => tabs::meeting::draw(f, app, chunks[1]),
+        Tab::Stats => tabs::stats::draw(f, app, chunks[1]),
     }
 }

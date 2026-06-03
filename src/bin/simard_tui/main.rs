@@ -13,7 +13,7 @@ mod ui;
 use std::io::{self, Stdout};
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -64,15 +64,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         terminal.draw(|f| ui::draw(f, &app))?;
 
         if app.should_quit {
+            app.cleanup();
             break;
         }
 
         if event::poll(Duration::from_secs(2))? {
             if let Event::Key(key) = event::read()?
                 && key.kind == KeyEventKind::Press
-                && let KeyCode::Char(c) = key.code
             {
-                app.handle_key(c);
+                app.handle_key(key);
             }
         } else {
             // Timeout — auto-refresh

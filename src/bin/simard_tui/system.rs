@@ -175,6 +175,33 @@ pub fn parse_vmrss_kb(content: &str) -> Option<u64> {
     None
 }
 
+/// Parse the PPID (parent process ID) from `/proc/<PID>/stat` content.
+///
+/// PPID is field index 1 after the comm field (the 4th field overall in stat).
+/// Handles comm fields that contain spaces or parentheses (same approach as `parse_proc_stat`).
+pub fn parse_proc_ppid(content: &str) -> Option<u32> {
+    let close_paren = content.rfind(')')?;
+    let after_comm = &content[close_paren + 1..];
+    let fields: Vec<&str> = after_comm.split_whitespace().collect();
+    // After comm (0-indexed): state(0) ppid(1) ...
+    if fields.len() < 2 {
+        return None;
+    }
+    fields[1].parse().ok()
+}
+
+/// Convert raw `/proc/<PID>/cmdline` bytes to a human-readable string.
+///
+/// The kernel separates arguments with NUL bytes. This function joins
+/// non-empty segments with spaces and trims trailing NUL characters.
+pub fn read_proc_cmdline(raw: &[u8]) -> String {
+    raw.split(|b| *b == 0)
+        .filter(|part| !part.is_empty())
+        .map(|part| String::from_utf8_lossy(part))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Compute CPU usage percentage from tick deltas and wall clock elapsed time.
 ///
 /// Returns 0.0 if elapsed_secs is zero or negative (prevents division by zero).
@@ -488,5 +515,107 @@ VmData:\t  10000 kB
         assert_eq!(state, DaemonState::Stopped);
         assert_eq!(pid, None);
         assert_eq!(ts, None);
+    }
+
+    // ── parse_proc_ppid ─────────────────────────────────────────────
+
+    #[test]
+    fn parse_proc_ppid_valid() {
+        // PPID is field index 1 after comm (the 4th field in stat overall).
+        let content = "1234 (simard) S 5678 1234 1234 0 -1 4194304 \
+                        5000 0 100 0 1500 500 0 0 20 0 8 0 987654 \
+                        536870912 6400 18446744073709551615";
+        assert_eq!(parse_proc_ppid(content), Some(5678));
+    }
+
+    #[test]
+    fn parse_proc_ppid_comm_with_spaces() {
+        let content = "1234 (simard daemon) S 999 1234 1234 0 -1 4194304 \
+                        5000 0 100 0 2000 800 0 0 20 0 8 0 100000 \
+                        536870912 6400 18446744073709551615";
+        assert_eq!(parse_proc_ppid(content), Some(999));
+    }
+
+    #[test]
+    fn parse_proc_ppid_comm_with_parens() {
+        let content = "1234 (simard (v2)) S 42 1234 1234 0 -1 4194304 \
+                        5000 0 100 0 3000 1000 0 0 20 0 8 0 200000 \
+                        536870912 6400 18446744073709551615";
+        assert_eq!(parse_proc_ppid(content), Some(42));
+    }
+
+    #[test]
+    fn parse_proc_ppid_empty() {
+        assert_eq!(parse_proc_ppid(""), None);
+    }
+
+    #[test]
+    fn parse_proc_ppid_truncated_no_fields_after_comm() {
+        let content = "1234 (simard)";
+        assert_eq!(parse_proc_ppid(content), None);
+    }
+
+    #[test]
+    fn parse_proc_ppid_only_state_field() {
+        // state present but ppid field missing
+        let content = "1234 (simard) S";
+        assert_eq!(parse_proc_ppid(content), None);
+    }
+
+    #[test]
+    fn parse_proc_ppid_init_process() {
+        // PID 1 has PPID 0
+        let content = "1 (init) S 0 1 1 0 -1 4194304 \
+                        5000 0 100 0 1500 500 0 0 20 0 8 0 1 \
+                        536870912 6400 18446744073709551615";
+        assert_eq!(parse_proc_ppid(content), Some(0));
+    }
+
+    #[test]
+    fn parse_proc_ppid_non_numeric() {
+        let content = "1234 (simard) S abc 1234 1234 0 -1 4194304";
+        assert_eq!(parse_proc_ppid(content), None);
+    }
+
+    // ── read_proc_cmdline ───────────────────────────────────────────
+
+    #[test]
+    fn read_proc_cmdline_normal() {
+        // /proc/PID/cmdline uses NUL as argument separator
+        let raw = b"/usr/bin/simard\0meeting\0start\0";
+        assert_eq!(read_proc_cmdline(raw), "/usr/bin/simard meeting start");
+    }
+
+    #[test]
+    fn read_proc_cmdline_single_arg() {
+        let raw = b"/usr/bin/simard\0";
+        assert_eq!(read_proc_cmdline(raw), "/usr/bin/simard");
+    }
+
+    #[test]
+    fn read_proc_cmdline_empty() {
+        assert_eq!(read_proc_cmdline(b""), "");
+    }
+
+    #[test]
+    fn read_proc_cmdline_no_trailing_nul() {
+        // Some /proc/PID/cmdline entries don't end with NUL
+        let raw = b"/usr/bin/simard\0meeting";
+        assert_eq!(read_proc_cmdline(raw), "/usr/bin/simard meeting");
+    }
+
+    #[test]
+    fn read_proc_cmdline_kernel_thread() {
+        // Kernel threads have empty or NUL-only cmdline
+        assert_eq!(read_proc_cmdline(b"\0"), "");
+    }
+
+    #[test]
+    fn read_proc_cmdline_with_flags() {
+        let raw = b"/usr/bin/simard\0--config=/etc/simard.toml\0--verbose\0";
+        assert_eq!(
+            read_proc_cmdline(raw),
+            "/usr/bin/simard --config=/etc/simard.toml --verbose"
+        );
     }
 }

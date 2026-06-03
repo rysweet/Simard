@@ -10,7 +10,7 @@ Replace the sections below with information about your project.
 
 ---
 
-## Project: issue-2193-build-a-cli-tui-monitoring-client-for-simard-calle
+## Project: issue-2195-implement-all-4-placeholder-tabs-in-the-simard-tui
 
 ## Overview
 
