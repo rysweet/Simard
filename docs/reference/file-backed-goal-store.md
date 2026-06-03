@@ -40,7 +40,7 @@ pub fn goal_store_path() -> PathBuf {
 ```
 
 This helper is re-exported from `crate::state_root` and used by
-**every** consumer that needs the goal store path:
+consumers that resolve the default goal store path:
 
 - `bootstrap::assembly` — constructs `FileBackedGoalStore::try_new(goal_store_path())`
 - `meeting_backend::closing` — constructs an ad-hoc `FileBackedGoalStore`
@@ -49,7 +49,9 @@ This helper is re-exported from `crate::state_root` and used by
   `goal_store_path()` (no longer hardcoded)
 - `improvement_curation::run_improvement_curation_read_probe` — reads
   persisted goals via `FileBackedGoalStore::try_new(state_root.join("state").join("goal_store.json"))`
-  to match the write path in `assembly.rs`
+  using the operator-supplied `state_root` override (same relative path
+  as `goal_store_path()` but rooted at the explicit state root, not the
+  default `simard_state_root()`)
 
 The resolved path follows the standard state-root resolution ladder
 documented in [State-root resolution](./state-root-resolution.md):
